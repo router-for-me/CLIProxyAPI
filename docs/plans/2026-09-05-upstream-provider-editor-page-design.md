@@ -20,8 +20,7 @@ web/dashboard/src/pages/upstream-provider-editor/
   schemas.js       → buildSchemas() + constants (OAUTH_TYPES, API_KEY_TYPES, URL_RE, ROUTING_STRATEGY_OPTIONS, hints)
   form.js          → buildForm/buildPayload/validateAPIKeyEntries/hydrateEntries/idHintForIdentity (pure functions)
   OAuthConnect.jsx → OAuth connect flow (auth URL → callback paste) + its helpers
-  entries.jsx      → APIKeyEntriesEditor + list sub-editors (ModelListEditor, ChipListEditor, KeyValueEditor)
-  Field.jsx        → the schema-driven field rendering engine (Field/renderField, PasswordInput)
+  EntriesEditor.jsx → APIKeyEntriesEditor (the field engine + list sub-editors stay in manage-cpa/FormPrimitives.jsx)
 ```
 
 `UpstreamProvidersPage.jsx` keeps: fetch/reload, filters, bulk actions, Delete + BulkDelete confirm modals, sync status, per-row Edit button → `navigate(/upstream-providers/:id)`, `+ New Provider` → `navigate('/upstream-providers/new')`.
