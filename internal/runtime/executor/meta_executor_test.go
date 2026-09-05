@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -272,6 +273,10 @@ func TestMetaExecutor_Refresh_DCA_MintAndPersist(t *testing.T) {
 func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 	var count1, count2 int64
 
+	serverStarted := make(chan struct{})
+	releaseServer := make(chan struct{})
+	var startOnce sync.Once
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/key" {
 			var req map[string]string
@@ -280,7 +285,8 @@ func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			if dca == "dca:acct1" {
 				atomic.AddInt64(&count1, 1)
-				time.Sleep(50 * time.Millisecond) // artificial delay to allow concurrent calls to coalesce
+				startOnce.Do(func() { close(serverStarted) })
+				<-releaseServer
 				_ = json.NewEncoder(w).Encode(map[string]string{
 					"api_key":    "LLM|key-acct1",
 					"user_email": "acct1@meta.com",
@@ -310,10 +316,20 @@ func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 		Metadata: map[string]any{"dca_token": "dca:acct1"},
 	}
 
-	for i := 0; i < 10; i++ {
+	const goroutines = 10
+	var entryWg sync.WaitGroup
+	entryWg.Add(goroutines)
+	ready := make(chan struct{})
+	var inFlight sync.WaitGroup
+	inFlight.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			entryWg.Done()
+			<-ready
+			inFlight.Done()
 			res, err := exec.Refresh(context.Background(), auth1.Clone())
 			if err != nil {
 				t.Errorf("Refresh acct1 error: %v", err)
@@ -323,6 +339,22 @@ func TestMetaExecutor_Refresh_SingleflightAndMultiAccount(t *testing.T) {
 			}
 		}()
 	}
+
+	// Release all goroutines simultaneously.
+	entryWg.Wait()
+	close(ready)
+
+	// Wait until the singleflight mint request has arrived at the server.
+	<-serverStarted
+	inFlight.Wait()
+
+	// Allow pending goroutines to enter singleflight.Do while the server holds the in-flight request.
+	for i := 0; i < 50; i++ {
+		runtime.Gosched()
+	}
+
+	// Release the HTTP server handler to complete the single in-flight mint.
+	close(releaseServer)
 	wg.Wait()
 
 	if totalMint1 := atomic.LoadInt64(&count1); totalMint1 != 1 {

@@ -6,7 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -472,5 +475,84 @@ func TestResolveMetaTokenPropagatesStoreFailure(t *testing.T) {
 	}
 	if h.authByIndex(auth.Index).Metadata["api_key"] != nil {
 		t.Error("failed save installed a token in the manager")
+	}
+}
+
+func TestResolveMetaToken_ConcurrentSingleflight(t *testing.T) {
+	var mints int64
+	serverStarted := make(chan struct{})
+	releaseServer := make(chan struct{})
+	var startOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&mints, 1)
+		startOnce.Do(func() { close(serverStarted) })
+		<-releaseServer
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"api_key":  "LLM|minted-concurrent",
+			"base_url": "https://regional.meta.example/v1",
+		})
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL)
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{
+		ID:       "meta-mgmt-concurrent",
+		Provider: "meta",
+		Metadata: map[string]any{"dca_token": "dca:concurrent-test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := &Handler{cfg: &config.Config{}, authManager: manager, tokenStore: store}
+
+	const callers = 5
+	var entryWg sync.WaitGroup
+	entryWg.Add(callers)
+	ready := make(chan struct{})
+	var inFlight sync.WaitGroup
+	inFlight.Add(callers)
+	var doneWg sync.WaitGroup
+	doneWg.Add(callers)
+
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer doneWg.Done()
+			entryWg.Done()
+			<-ready
+			inFlight.Done()
+			token, errToken := h.resolveTokenForAuth(context.Background(), h.authByIndex(auth.Index), "")
+			if errToken != nil {
+				t.Errorf("resolveTokenForAuth error: %v", errToken)
+			}
+			if token != "LLM|minted-concurrent" {
+				t.Errorf("expected LLM|minted-concurrent, got %q", token)
+			}
+		}()
+	}
+
+	entryWg.Wait()
+	close(ready)
+
+	<-serverStarted
+	inFlight.Wait()
+	for i := 0; i < 50; i++ {
+		runtime.Gosched()
+	}
+	close(releaseServer)
+	doneWg.Wait()
+
+	if totalMints := atomic.LoadInt64(&mints); totalMints != 1 {
+		t.Errorf("expected 1 mint request, got %d", totalMints)
+	}
+	live := h.authByIndex(auth.Index)
+	if live.Metadata["api_key"] != "LLM|minted-concurrent" {
+		t.Error("live manager did not retain minted key")
+	}
+	if live.Attributes["api_key"] != "LLM|minted-concurrent" {
+		t.Error("live manager did not retain minted key in attributes")
 	}
 }
