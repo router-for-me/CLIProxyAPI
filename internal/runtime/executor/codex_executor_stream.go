@@ -161,6 +161,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if len(bytes.TrimSpace(line)) == 0 {
+				continue
+			}
+			// Skip the SSE event-name line as well as its heartbeat data below.
+			// Grok clients retain their existing keepalive-to-comment conversion.
+			if !isGrokClient && bytes.HasPrefix(line, []byte("event:")) &&
+				string(bytes.TrimSpace(line[len("event:"):])) == "keepalive" {
+				continue
+			}
 			translatedLine := bytes.Clone(line)
 			isHandshake := false
 			terminalSuccess := false
@@ -174,6 +183,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
+				// Heartbeats carry no generated output. Do not commit the stream or
+				// consume the bounded handshake buffer while waiting for admission.
+				if eventType == "keepalive" {
+					continue
+				}
 				if streamErr, terminalBody, ok := codexTerminalFailureErr(data); ok {
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {

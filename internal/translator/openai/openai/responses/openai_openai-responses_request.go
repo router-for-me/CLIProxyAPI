@@ -45,6 +45,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// Set stream configuration
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
+	// Both APIs accept service_tier. Preserve the client's choice so provider
+	// payload rules can select a priority route after translation.
+	if serviceTier := root.Get("service_tier"); serviceTier.Type == gjson.String {
+		out, _ = sjson.SetBytes(out, "service_tier", serviceTier.String())
+	}
+
 	// Map Responses text format to Chat Completions response format.
 	if textFormat := root.Get("text.format"); textFormat.Exists() {
 		if responseFormat := convertResponsesTextFormatToChatResponseFormat(textFormat); len(responseFormat) > 0 {
