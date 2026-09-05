@@ -16,8 +16,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { buildSchemas } from './upstream-provider-editor/schemas.js';
 import {
-  buildSchemas,
   buildForm,
   buildPayload,
   validate,
