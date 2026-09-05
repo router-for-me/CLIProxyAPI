@@ -316,6 +316,49 @@ func TestClaudeCAISSignature_DetectSignatureProvider(t *testing.T) {
 	}
 }
 
+func TestIsClaudeCAISContextID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"1047401152336", true},
+		{observedContextID, true},
+		{"D9743975-4BB0-4936-9E28-D5B0D21BDC48", true},
+		{"1", true},
+		{"18446744073709551615", true},
+		{"", false},
+		{"0", false},
+		{"01", false},
+		{"-1", false},
+		{"+1", false},
+		{"not-a-canonical-uuid-value-000000000", false},
+		{"18446744073709551616", false},
+	}
+	for _, tc := range cases {
+		if got := isClaudeCAISContextID(tc.in); got != tc.want {
+			t.Errorf("isClaudeCAISContextID(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestClaudeCAISSignature_AcceptsDecimalContextID(t *testing.T) {
+	const decimalContextID = "1047401152336"
+	p := defaultClaudeCAISParts("claude-opus-5")
+	p.contextID = decimalContextID
+	sig := p.encode()
+
+	info, err := InspectClaudeCAISSignature(sig)
+	if err != nil {
+		t.Fatalf("InspectClaudeCAISSignature failed: %v", err)
+	}
+	if info.ContextID != decimalContextID {
+		t.Fatalf("ContextID = %q, want %q", info.ContextID, decimalContextID)
+	}
+	if !IsValidClaudeCAISSignature(sig) {
+		t.Fatal("IsValidClaudeCAISSignature = false, want true")
+	}
+}
+
 func TestClaudeCAISSignature_ObservedOpus5Layout(t *testing.T) {
 	signature := testClaudeCAISSignature("claude-opus-5")
 	info, err := InspectClaudeCAISSignature(signature)
@@ -567,9 +610,24 @@ func TestClaudeCAISSignature_RejectsMalformedPayloads(t *testing.T) {
 			p.modelText = []byte{'c', 'l', 'a', 'u', 'd', 'e', '-', 0xff, 0xfe}
 			return p.encode()
 		}()},
-		{"non-uuid context id", func() string {
+		{"garbage context id", func() string {
 			p := defaultClaudeCAISParts("claude-opus-5")
 			p.contextID = "not-a-canonical-uuid-value-000000000"
+			return p.encode()
+		}()},
+		{"signed decimal context id", func() string {
+			p := defaultClaudeCAISParts("claude-opus-5")
+			p.contextID = "-1047401152336"
+			return p.encode()
+		}()},
+		{"leading-zero decimal context id", func() string {
+			p := defaultClaudeCAISParts("claude-opus-5")
+			p.contextID = "01047401152336"
+			return p.encode()
+		}()},
+		{"overflow decimal context id", func() string {
+			p := defaultClaudeCAISParts("claude-opus-5")
+			p.contextID = "18446744073709551616"
 			return p.encode()
 		}()},
 	}
