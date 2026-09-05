@@ -150,12 +150,13 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			}
 		}
 
+		hasEncounteredConversation := false
 		for i := 0; i < len(arr); i++ {
 			m := arr[i]
 			role := m.Get("role").String()
 			content := m.Get("content")
 
-			if (role == "system" || role == "developer") && len(arr) > 1 {
+			if (role == "system" || role == "developer") && len(arr) > 1 && !hasEncounteredConversation {
 				// system -> systemInstruction as a user message style
 				if content.Type == gjson.String {
 					systemParts = append(systemParts, geminiTextPart(content.String()))
@@ -167,11 +168,14 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						systemParts = append(systemParts, geminiTextPart(contents[j].Get("text").String()))
 					}
 				}
-			} else if role == "user" || ((role == "system" || role == "developer") && len(arr) == 1) {
+			} else if role == "user" || role == "system" || role == "developer" {
+				hasEncounteredConversation = true
 				// Build single user content node to avoid splitting into multiple contents.
 				partItems := make([][]byte, 0, 4)
 				if content.Type == gjson.String {
 					partItems = append(partItems, geminiTextPart(content.String()))
+				} else if content.IsObject() && content.Get("type").String() == "text" {
+					partItems = append(partItems, geminiTextPart(content.Get("text").String()))
 				} else if content.IsArray() {
 					for _, item := range content.Array() {
 						switch item.Get("type").String() {
@@ -212,8 +216,11 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						}
 					}
 				}
-				contentItems = append(contentItems, geminiContentNode("user", partItems))
+				if len(partItems) > 0 {
+					contentItems = append(contentItems, geminiContentNode("user", partItems))
+				}
 			} else if role == "assistant" {
+				hasEncounteredConversation = true
 				partItems := make([][]byte, 0, 4)
 				if reasoningContent := m.Get("reasoning_content"); reasoningContent.Type == gjson.String && reasoningContent.String() != "" {
 					part := geminiTextPart(reasoningContent.String())

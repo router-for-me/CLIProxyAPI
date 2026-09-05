@@ -32,13 +32,23 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 
 // ApplyPayloadConfigWithRequestTracked applies payload config and reports whether
 // an applied rule targeted trackedPath or one of its descendants.
-func ApplyPayloadConfigWithRequestTracked(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPath string) ([]byte, bool) {
+// ApplyPayloadConfigWithTrackedPaths applies payload config and reports which
+// tracked paths (or their descendants) were targeted by an applied rule.
+func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPaths ...string) ([]byte, map[string]bool) {
+	touched := make(map[string]bool)
 	if cfg == nil || len(payload) == 0 {
-		return payload, false
+		return payload, touched
 	}
 	out := payload
-	trackedPath = strings.TrimSpace(trackedPath)
-	trackedPathTouched := false
+
+	markTouched := func(resolvedPath string) {
+		for _, tp := range trackedPaths {
+			tp = strings.TrimSpace(tp)
+			if tp != "" && payloadRuleTargetsPath(resolvedPath, tp) {
+				touched[tp] = true
+			}
+		}
+	}
 
 	// Apply disable-image-generation filtering before payload rules so config payload
 	// overrides can explicitly re-enable image_generation when desired.
@@ -83,7 +93,7 @@ func ApplyPayloadConfigWithRequestTracked(cfg *config.Config, model, protocol, f
 						}
 						out = updated
 						appliedDefaults[resolvedPath] = struct{}{}
-						trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+						markTouched(resolvedPath)
 					}
 				}
 			}
@@ -115,7 +125,7 @@ func ApplyPayloadConfigWithRequestTracked(cfg *config.Config, model, protocol, f
 						}
 						out = updated
 						appliedDefaults[resolvedPath] = struct{}{}
-						trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+						markTouched(resolvedPath)
 					}
 				}
 			}
@@ -134,7 +144,7 @@ func ApplyPayloadConfigWithRequestTracked(cfg *config.Config, model, protocol, f
 						var applied bool
 						out, applied = setPayloadValueIfDifferentTracked(out, resolvedPath, value)
 						if applied {
-							trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+							markTouched(resolvedPath)
 						}
 					}
 				}
@@ -158,7 +168,7 @@ func ApplyPayloadConfigWithRequestTracked(cfg *config.Config, model, protocol, f
 						var applied bool
 						out, applied = setPayloadRawValueIfDifferentTracked(out, resolvedPath, rawValue)
 						if applied {
-							trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+							markTouched(resolvedPath)
 						}
 					}
 				}
@@ -182,13 +192,20 @@ func ApplyPayloadConfigWithRequestTracked(cfg *config.Config, model, protocol, f
 							continue
 						}
 						out = updated
-						trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+						markTouched(resolvedPath)
 					}
 				}
 			}
 		}
 	}
-	return out, trackedPathTouched
+	return out, touched
+}
+
+// ApplyPayloadConfigWithRequestTracked applies payload config and reports whether
+// an applied rule targeted trackedPath or one of its descendants.
+func ApplyPayloadConfigWithRequestTracked(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPath string) ([]byte, bool) {
+	out, touched := ApplyPayloadConfigWithTrackedPaths(cfg, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers, trackedPath)
+	return out, touched[trackedPath]
 }
 
 func isImagesEndpointRequestPath(path string) bool {
@@ -510,10 +527,10 @@ func buildPayloadPath(root, path string) string {
 }
 
 func payloadRuleTargetsPath(path, trackedPath string) bool {
-	if trackedPath == "" {
+	if trackedPath == "" || path == "" {
 		return false
 	}
-	return path == trackedPath || strings.HasPrefix(path, trackedPath+".")
+	return path == trackedPath || strings.HasPrefix(path, trackedPath+".") || strings.HasPrefix(trackedPath, path+".")
 }
 
 func resolvePayloadRulePaths(payload []byte, path string) []string {

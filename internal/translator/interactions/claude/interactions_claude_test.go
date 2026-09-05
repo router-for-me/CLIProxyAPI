@@ -51,6 +51,68 @@ func TestConvertClaudeRequestToInteractionsMapsToolUseAndResult(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToInteractions_PreservesToolAdjacencyWithInterveningSystemMessage(t *testing.T) {
+	raw := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Execute tools"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "tool_one", "input": {"a": 1}},
+					{"type": "tool_use", "id": "call_2", "name": "tool_two", "input": {"b": 2}}
+				]
+			},
+			{"role": "system", "content": "Context reminder between tool_use and tool_result"},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_2", "content": "result 2"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "result 1"},
+					{"type": "text", "text": "Now summarize"}
+				]
+			}
+		]
+	}`)
+	out := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	inputs := gjson.GetBytes(out, "input").Array()
+
+	// Expected types:
+	// 0: user_input ("Execute tools")
+	// 1: function_call (call_1)
+	// 2: function_call (call_2)
+	// 3: function_result (call_1)
+	// 4: function_result (call_2)
+	// 5: user_input (<system-reminder>...)
+	// 6: user_input ("Now summarize")
+	types := make([]string, 0, len(inputs))
+	for _, item := range inputs {
+		types = append(types, item.Get("type").String())
+	}
+	wantTypes := []string{"user_input", "function_call", "function_call", "function_result", "function_result", "user_input", "user_input"}
+	if len(types) != len(wantTypes) {
+		t.Fatalf("unexpected step count %d: got %v, want %v. Output: %s", len(types), types, wantTypes, string(out))
+	}
+	for i, wt := range wantTypes {
+		if types[i] != wt {
+			t.Fatalf("step %d type = %q, want %q", i, types[i], wt)
+		}
+	}
+
+	if inputs[3].Get("call_id").String() != "call_1" {
+		t.Fatalf("expected result 0 to respond to call_1, got %q", inputs[3].Get("call_id").String())
+	}
+	if inputs[4].Get("call_id").String() != "call_2" {
+		t.Fatalf("expected result 1 to respond to call_2, got %q", inputs[4].Get("call_id").String())
+	}
+	if inputs[5].Get("content.0.text").String() != "<system-reminder>\nContext reminder between tool_use and tool_result\n</system-reminder>" {
+		t.Fatalf("unexpected system reminder content: %q", inputs[5].Get("content.0.text").String())
+	}
+	if inputs[6].Get("content.0.text").String() != "Now summarize" {
+		t.Fatalf("unexpected user text: %q", inputs[6].Get("content.0.text").String())
+	}
+}
+
 func TestConvertInteractionsResponseToClaudeStream(t *testing.T) {
 	var param any
 	var out [][]byte

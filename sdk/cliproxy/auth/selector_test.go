@@ -1187,6 +1187,73 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_NestedRequestSubagent(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nested request with sessionId and metadata.agent_id
+	payloadAgent := []byte(`{
+		"request": {
+			"sessionId": "root",
+			"metadata": {
+				"agent_id": "worker"
+			}
+		}
+	}`)
+	if got := ExtractSessionID(nil, payloadAgent, nil); got != "session:root:agent:worker" {
+		t.Fatalf("ExtractSessionID() = %q, want session:root:agent:worker", got)
+	}
+	primary, fallback := extractExplicitSessionIDs(nil, payloadAgent, nil)
+	if primary != "session:root:agent:worker" || fallback != "session:root" {
+		t.Fatalf("extractExplicitSessionIDs() = (%q, %q), want (session:root:agent:worker, session:root)", primary, fallback)
+	}
+
+	// 2. Nested request with sessionId and metadata.subagent_id
+	payloadSubagent := []byte(`{
+		"request": {
+			"sessionId": "root",
+			"metadata": {
+				"subagent_id": "worker"
+			}
+		}
+	}`)
+	if got := ExtractSessionID(nil, payloadSubagent, nil); got != "session:root:agent:worker" {
+		t.Fatalf("ExtractSessionID() = %q, want session:root:agent:worker", got)
+	}
+	primary, fallback = extractExplicitSessionIDs(nil, payloadSubagent, nil)
+	if primary != "session:root:agent:worker" || fallback != "session:root" {
+		t.Fatalf("extractExplicitSessionIDs() = (%q, %q), want (session:root:agent:worker, session:root)", primary, fallback)
+	}
+
+	// 3. Nested request with sessionId and parentSessionId
+	payloadParent := []byte(`{
+		"request": {
+			"sessionId": "root",
+			"parentSessionId": "parent-root",
+			"metadata": {
+				"agent_id": "worker"
+			}
+		}
+	}`)
+	if got := ExtractSessionID(nil, payloadParent, nil); got != "session:root:agent:worker" {
+		t.Fatalf("ExtractSessionID() = %q, want session:root:agent:worker", got)
+	}
+	primary, fallback = extractExplicitSessionIDs(nil, payloadParent, nil)
+	if primary != "session:root:agent:worker" || fallback != "session:parent-root" {
+		t.Fatalf("extractExplicitSessionIDs() = (%q, %q), want (session:root:agent:worker, session:parent-root)", primary, fallback)
+	}
+
+	// 4. Nested promptCacheKey when top-level prompt_cache_key is empty string
+	payloadPCKShadow := []byte(`{
+		"prompt_cache_key": "",
+		"request": {
+			"promptCacheKey": "nested-pck-valid"
+		}
+	}`)
+	if got := ExtractSessionID(nil, payloadPCKShadow, nil); got != "pck:nested-pck-valid" {
+		t.Fatalf("ExtractSessionID() with shadowed empty top-level pck = %q, want pck:nested-pck-valid", got)
+	}
+}
+
 func TestExtractSessionID_ClaudeCodePriorityOverHeader(t *testing.T) {
 	t.Parallel()
 

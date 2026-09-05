@@ -6142,3 +6142,177 @@ func TestXAIPatchCompletedOutput_EnsuresUsageDetails(t *testing.T) {
 		t.Fatalf("expected cached_tokens == 0, got %d", gjson.GetBytes(got, "response.usage.input_tokens_details.cached_tokens").Int())
 	}
 }
+
+func TestXAIExecutorExecuteImagesOAuthBaseURLResolution(t *testing.T) {
+	tests := []struct {
+		name    string
+		auth    *cliproxyauth.Auth
+		wantURL string
+	}{
+		{
+			name: "oauth credential defaults to cli-chat-proxy",
+			auth: &cliproxyauth.Auth{
+				Provider: "xai",
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
+				Metadata: map[string]any{"access_token": "xai-oauth-token"},
+			},
+			wantURL: xaiauth.CLIChatProxyBaseURL + "/images/generations",
+		},
+		{
+			name: "oauth credential with empty base_url defaults to cli-chat-proxy",
+			auth: &cliproxyauth.Auth{
+				Provider: "xai",
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+				},
+				Metadata: map[string]any{"access_token": "xai-oauth-token"},
+			},
+			wantURL: xaiauth.CLIChatProxyBaseURL + "/images/generations",
+		},
+		{
+			name: "api key credential defaults to official api",
+			auth: &cliproxyauth.Auth{
+				Provider: "xai",
+				Attributes: map[string]string{
+					"api_key": "xai-api-key",
+				},
+			},
+			wantURL: xaiauth.DefaultAPIBaseURL + "/images/generations",
+		},
+		{
+			name: "oauth credential with custom base_url honors custom base_url",
+			auth: &cliproxyauth.Auth{
+				Provider: "xai",
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  "https://custom-gateway.example.com/v1",
+				},
+				Metadata: map[string]any{"access_token": "xai-oauth-token"},
+			},
+			wantURL: "https://custom-gateway.example.com/v1/images/generations",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var recordedURL string
+			rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				recordedURL = req.URL.String()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"created":123,"data":[{"b64_json":"AA=="}]}`)),
+				}, nil
+			})
+
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", rt)
+			exec := NewXAIExecutor(&config.Config{})
+
+			_, err := exec.Execute(ctx, tt.auth, cliproxyexecutor.Request{
+				Model:   "grok-imagine-image",
+				Payload: []byte(`{"model":"grok-imagine-image","prompt":"a red apple"}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai-image"),
+				Metadata: map[string]any{
+					cliproxyexecutor.RequestPathMetadataKey: "/v1/images/generations",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Execute() unexpected error: %v", err)
+			}
+			if recordedURL != tt.wantURL {
+				t.Fatalf("recorded URL = %q, want %q", recordedURL, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestXAIExecutorExecuteVideosOAuthBaseURLResolution(t *testing.T) {
+	tests := []struct {
+		name    string
+		auth    *cliproxyauth.Auth
+		wantURL string
+	}{
+		{
+			name: "oauth credential defaults to cli-chat-proxy",
+			auth: &cliproxyauth.Auth{
+				Provider: "xai",
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
+				Metadata: map[string]any{"access_token": "xai-oauth-token"},
+			},
+			wantURL: xaiauth.CLIChatProxyBaseURL + "/videos/generations",
+		},
+		{
+			name: "oauth credential with empty base_url defaults to cli-chat-proxy",
+			auth: &cliproxyauth.Auth{
+				Provider: "xai",
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+				},
+				Metadata: map[string]any{"access_token": "xai-oauth-token"},
+			},
+			wantURL: xaiauth.CLIChatProxyBaseURL + "/videos/generations",
+		},
+		{
+			name: "api key credential defaults to official api",
+			auth: &cliproxyauth.Auth{
+				Provider: "xai",
+				Attributes: map[string]string{
+					"api_key": "xai-api-key",
+				},
+			},
+			wantURL: xaiauth.DefaultAPIBaseURL + "/videos/generations",
+		},
+		{
+			name: "oauth credential with custom base_url honors custom base_url",
+			auth: &cliproxyauth.Auth{
+				Provider: "xai",
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  "https://custom-gateway.example.com/v1",
+				},
+				Metadata: map[string]any{"access_token": "xai-oauth-token"},
+			},
+			wantURL: "https://custom-gateway.example.com/v1/videos/generations",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var recordedURL string
+			rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				recordedURL = req.URL.String()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"request_id":"vid-123"}`)),
+				}, nil
+			})
+
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", rt)
+			exec := NewXAIExecutor(&config.Config{})
+
+			_, err := exec.Execute(ctx, tt.auth, cliproxyexecutor.Request{
+				Model:   "grok-imagine-video",
+				Payload: []byte(`{"model":"grok-imagine-video","prompt":"a flying bird"}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai-video"),
+				Metadata: map[string]any{
+					cliproxyexecutor.RequestPathMetadataKey: "/v1/videos/generations",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Execute() unexpected error: %v", err)
+			}
+			if recordedURL != tt.wantURL {
+				t.Fatalf("recorded URL = %q, want %q", recordedURL, tt.wantURL)
+			}
+		})
+	}
+}

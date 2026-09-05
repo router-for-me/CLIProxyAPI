@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1327,4 +1328,197 @@ func firstClaudeStreamPayloadForEvent(output, event string) (gjson.Result, bool)
 		return gjson.Parse(strings.TrimPrefix(line, "data: ")), true
 	}
 	return gjson.Result{}, false
+}
+
+func TestConvertCodexResponseToClaude_StreamPreservesCacheWriteUsage(t *testing.T) {
+	tests := []struct {
+		name                 string
+		terminalUsageJSON    string
+		wantInputTokens      int64
+		wantOutputTokens     int64
+		wantCacheReadTokens  int64
+		wantCacheWriteTokens int64
+	}{
+		{
+			name:                 "cache_write_tokens field",
+			terminalUsageJSON:    `{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":150}}`,
+			wantInputTokens:      200,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 150,
+		},
+		{
+			name:                 "cache_creation_tokens field alias",
+			terminalUsageJSON:    `{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_creation_tokens":150}}`,
+			wantInputTokens:      200,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 150,
+		},
+		{
+			name:                 "cached_tokens greater than input_tokens clamps input_tokens to zero",
+			terminalUsageJSON:    `{"input_tokens":500,"output_tokens":100,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":50}}`,
+			wantInputTokens:      0,
+			wantOutputTokens:     100,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 50,
+		},
+		{
+			name:                 "zero cache_write_tokens does not emit cache_creation_input_tokens",
+			terminalUsageJSON:    `{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":0}}`,
+			wantInputTokens:      200,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"messages":[]}`)
+			var param any
+
+			chunks := [][]byte{
+				[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+				[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`),
+				[]byte(fmt.Sprintf(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":%s}}`, tt.terminalUsageJSON)),
+			}
+
+			var outputs [][]byte
+			for _, chunk := range chunks {
+				outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+			}
+
+			delta, ok := findClaudeStreamMessageDelta(outputs)
+			if !ok {
+				t.Fatalf("missing message_delta event; outputs=%q", outputs)
+			}
+
+			usage := delta.Get("usage")
+			if got := usage.Get("input_tokens").Int(); got != tt.wantInputTokens {
+				t.Fatalf("input_tokens = %d, want %d", got, tt.wantInputTokens)
+			}
+			if got := usage.Get("output_tokens").Int(); got != tt.wantOutputTokens {
+				t.Fatalf("output_tokens = %d, want %d", got, tt.wantOutputTokens)
+			}
+			if got := usage.Get("cache_read_input_tokens").Int(); got != tt.wantCacheReadTokens {
+				t.Fatalf("cache_read_input_tokens = %d, want %d", got, tt.wantCacheReadTokens)
+			}
+			if tt.wantCacheWriteTokens == 0 {
+				if usage.Get("cache_creation_input_tokens").Exists() {
+					t.Fatalf("cache_creation_input_tokens should not be emitted when zero; got %v", usage.Get("cache_creation_input_tokens").Raw)
+				}
+			} else if got := usage.Get("cache_creation_input_tokens").Int(); got != tt.wantCacheWriteTokens {
+				t.Fatalf("cache_creation_input_tokens = %d, want %d", got, tt.wantCacheWriteTokens)
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_PreservesCacheWriteUsage(t *testing.T) {
+	tests := []struct {
+		name                 string
+		responseJSON         string
+		wantInputTokens      int64
+		wantOutputTokens     int64
+		wantCacheReadTokens  int64
+		wantCacheWriteTokens int64
+	}{
+		{
+			name: "cache_write_tokens field",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":150}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      200,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 150,
+		},
+		{
+			name: "cache_creation_tokens alias",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_creation_tokens":150}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      200,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 150,
+		},
+		{
+			name: "cached_tokens greater than input_tokens clamps input_tokens to zero",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":500,"output_tokens":100,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":50}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      0,
+			wantOutputTokens:     100,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 50,
+		},
+		{
+			name: "zero cache_write_tokens does not emit cache_creation_input_tokens",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":0}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      200,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"messages":[]}`)
+			out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, []byte(tt.responseJSON), nil)
+			parsed := gjson.ParseBytes(out)
+
+			usage := parsed.Get("usage")
+			if got := usage.Get("input_tokens").Int(); got != tt.wantInputTokens {
+				t.Fatalf("input_tokens = %d, want %d", got, tt.wantInputTokens)
+			}
+			if got := usage.Get("output_tokens").Int(); got != tt.wantOutputTokens {
+				t.Fatalf("output_tokens = %d, want %d", got, tt.wantOutputTokens)
+			}
+			if got := usage.Get("cache_read_input_tokens").Int(); got != tt.wantCacheReadTokens {
+				t.Fatalf("cache_read_input_tokens = %d, want %d", got, tt.wantCacheReadTokens)
+			}
+			if tt.wantCacheWriteTokens == 0 {
+				if usage.Get("cache_creation_input_tokens").Exists() {
+					t.Fatalf("cache_creation_input_tokens should not be emitted when zero; got %v", usage.Get("cache_creation_input_tokens").Raw)
+				}
+			} else if got := usage.Get("cache_creation_input_tokens").Int(); got != tt.wantCacheWriteTokens {
+				t.Fatalf("cache_creation_input_tokens = %d, want %d", got, tt.wantCacheWriteTokens)
+			}
+		})
+	}
 }

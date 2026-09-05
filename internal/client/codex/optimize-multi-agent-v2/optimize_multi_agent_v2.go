@@ -71,11 +71,23 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 	return rewriteCodexAgentMessageInput(payload)
 }
 
+// RewriteCodexOrphanDelegationInputForConfig applies RewriteCodexOrphanDelegationInput
+// based on cfg.Codex.OrphanDelegationCompatibility and the X-Openai-Subagent header.
+func RewriteCodexOrphanDelegationInputForConfig(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) []byte {
+	if cfg == nil || !cfg.Codex.OrphanDelegationCompatibility {
+		return payload
+	}
+	return RewriteCodexOrphanDelegationInput(ctx, headers, payload, true)
+}
+
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
 // input before translating it to a non-Codex target protocol.
 func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
-	if from == sdktranslator.FormatOpenAIResponse && to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
-		payload = RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+	if from == sdktranslator.FormatOpenAIResponse {
+		payload = RewriteCodexOrphanDelegationInputForConfig(ctx, headers, payload, cfg)
+		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
+			payload = RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+		}
 	}
 	return sdktranslator.TranslateRequest(from, to, model, payload, stream)
 }

@@ -27,6 +27,9 @@ type claudeToResponsesState struct {
 	ContentPartOpen    bool
 	MessageOutputIndex int
 	FuncArgsBuf        map[int]*strings.Builder // index -> args
+	FuncArgsDone       map[int]bool
+	FuncItemDone       map[int]bool
+	FuncItemStatus     map[int]string
 	// function call bookkeeping for output aggregation
 	FuncNames         map[int]string // Claude block index -> function name
 	FuncCallIDs       map[int]string // Claude block index -> call id
@@ -38,17 +41,19 @@ type claudeToResponsesState struct {
 	MessageAnnotations []any
 	MessageItems       []claudeResponsesMessageItem
 	// reasoning state
-	ReasoningActive    bool
-	ReasoningItemID    string
-	ReasoningBuf       strings.Builder
-	ReasoningSignature string
-	ReasoningIndex     int
-	ReasoningItems     []claudeResponsesReasoningItem
+	ReasoningActive     bool
+	ReasoningDeltasDone bool
+	ReasoningItemID     string
+	ReasoningBuf        strings.Builder
+	ReasoningSignature  string
+	ReasoningIndex      int
+	ReasoningItems      []claudeResponsesReasoningItem
 	// server-side web search state: a Claude server_tool_use block and its
 	// web_search_tool_result block fold into one Responses web_search_call item.
 	WebSearchByBlock  map[int]*claudeResponsesWebSearchItem
 	WebSearchByToolID map[string]*claudeResponsesWebSearchItem
 	WebSearchItems    []*claudeResponsesWebSearchItem
+	StopReason        string
 	// usage aggregation
 	Usage claudeResponsesUsageTokens
 }
@@ -59,6 +64,7 @@ type claudeResponsesWebSearchItem struct {
 	InputBuf    strings.Builder
 	Results     []byte
 	Emitted     bool
+	Status      string
 }
 
 func (item *claudeResponsesWebSearchItem) render() []byte {
@@ -70,6 +76,7 @@ type claudeResponsesMessageItem struct {
 	OutputIndex int
 	Text        string
 	Annotations []any
+	Status      string
 }
 
 type claudeResponsesReasoningItem struct {
@@ -77,6 +84,7 @@ type claudeResponsesReasoningItem struct {
 	OutputIndex int
 	Text        string
 	Signature   string
+	Status      string
 }
 
 type claudeResponsesUsageTokens struct {
@@ -141,6 +149,28 @@ func (u claudeResponsesUsageTokens) OpenAIResponsesUsage() (inputTokens, outputT
 	outputTokens = u.OutputTokens
 	totalTokens = inputTokens + outputTokens
 	return inputTokens, outputTokens, totalTokens, cachedTokens
+}
+
+func claudeResponsesIncompleteDetails(stopReason string) ([]byte, bool) {
+	if strings.EqualFold(strings.TrimSpace(stopReason), "max_tokens") {
+		return []byte(`{"reason":"max_output_tokens"}`), true
+	}
+	return nil, false
+}
+
+func claudeResponsesOutputStatus(stopReason string) string {
+	if _, incomplete := claudeResponsesIncompleteDetails(stopReason); incomplete {
+		return "incomplete"
+	}
+	return "completed"
+}
+
+func claudeResponsesTerminalState(stopReason string) (eventType, status string, incompleteDetails []byte) {
+	incompleteDetails, incomplete := claudeResponsesIncompleteDetails(stopReason)
+	if incomplete {
+		return "response.incomplete", "incomplete", incompleteDetails
+	}
+	return "response.completed", "completed", nil
 }
 
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
@@ -208,18 +238,158 @@ func (st *claudeToResponsesState) startWebSearch(blockIndex int, toolUseID strin
 	return item
 }
 
-// finalizeWebSearch emits output_item.done once the result block has been seen,
+// finalizeWebSearchWithStatus emits output_item.done once the result block has been seen,
 // or at message_stop when the turn ended without one.
-func (st *claudeToResponsesState) finalizeWebSearch(item *claudeResponsesWebSearchItem, nextSeq func() int) [][]byte {
+func (st *claudeToResponsesState) finalizeWebSearchWithStatus(item *claudeResponsesWebSearchItem, status string, nextSeq func() int) [][]byte {
 	if item == nil || item.Emitted {
 		return nil
 	}
 	item.Emitted = true
+	item.Status = status
 	done := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
 	done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
 	done, _ = sjson.SetBytes(done, "output_index", item.OutputIndex)
-	done, _ = sjson.SetRawBytes(done, "item", item.render())
+	rendered := item.render()
+	rendered, _ = sjson.SetBytes(rendered, "status", status)
+	done, _ = sjson.SetRawBytes(done, "item", rendered)
 	return [][]byte{emitEvent("response.output_item.done", done)}
+}
+
+func (st *claudeToResponsesState) finalizeFuncItem(idx int, requestForToolMetadata []byte, status string, nextSeq func() int) [][]byte {
+	if st.FuncItemDone[idx] {
+		return nil
+	}
+	if st.FuncItemDone == nil {
+		st.FuncItemDone = make(map[int]bool)
+	}
+	st.FuncItemDone[idx] = true
+	if st.FuncItemStatus == nil {
+		st.FuncItemStatus = make(map[int]string)
+	}
+	st.FuncItemStatus[idx] = status
+
+	outputIndex := st.functionOutputIndex(idx)
+	args := ""
+	if buf := st.FuncArgsBuf[idx]; buf != nil {
+		if buf.Len() > 0 {
+			args = buf.String()
+		}
+	}
+	if !st.FuncCustom[idx] && args == "" && status == "completed" {
+		args = "{}"
+	}
+	callID := st.FuncCallIDs[idx]
+	if callID == "" {
+		callID = st.CurrentFCID
+	}
+	name := st.FuncNames[idx]
+
+	var out [][]byte
+	if st.FuncCustom[idx] {
+		input := unwrapCustomToolInput(args)
+		if !st.FuncArgsDone[idx] {
+			if st.FuncArgsDone == nil {
+				st.FuncArgsDone = make(map[int]bool)
+			}
+			st.FuncArgsDone[idx] = true
+			inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
+			inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
+			inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("ctc_%s", callID))
+			inputDone, _ = sjson.SetBytes(inputDone, "output_index", outputIndex)
+			inputDone, _ = sjson.SetBytes(inputDone, "input", input)
+			out = append(out, emitEvent("response.custom_tool_call_input.done", inputDone))
+		}
+
+		itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}}`)
+		itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+		itemDone, _ = sjson.SetBytes(itemDone, "output_index", outputIndex)
+		itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("ctc_%s", callID))
+		itemDone, _ = sjson.SetBytes(itemDone, "item.status", status)
+		itemDone, _ = sjson.SetBytes(itemDone, "item.input", input)
+		itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", callID)
+		itemDone = applyResponsesFunctionCallNamespaceFields(itemDone, requestForToolMetadata, name, "item")
+		out = append(out, emitEvent("response.output_item.done", itemDone))
+	} else {
+		if !st.FuncArgsDone[idx] {
+			if st.FuncArgsDone == nil {
+				st.FuncArgsDone = make(map[int]bool)
+			}
+			st.FuncArgsDone[idx] = true
+			fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
+			fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
+			fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", callID))
+			fcDone, _ = sjson.SetBytes(fcDone, "output_index", outputIndex)
+			fcDone, _ = sjson.SetBytes(fcDone, "arguments", args)
+			out = append(out, emitEvent("response.function_call_arguments.done", fcDone))
+		}
+
+		itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
+		itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+		itemDone, _ = sjson.SetBytes(itemDone, "output_index", outputIndex)
+		itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", callID))
+		itemDone, _ = sjson.SetBytes(itemDone, "item.status", status)
+		itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
+		itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", callID)
+		itemDone = applyResponsesFunctionCallNamespaceFields(itemDone, requestForToolMetadata, name, "item")
+		out = append(out, emitEvent("response.output_item.done", itemDone))
+	}
+	st.InFuncBlock = false
+	return out
+}
+
+func (st *claudeToResponsesState) finalizeReasoningDeltas(nextSeq func() int) [][]byte {
+	if !st.ReasoningActive || st.ReasoningDeltasDone {
+		return nil
+	}
+	st.ReasoningDeltasDone = true
+	full := st.ReasoningBuf.String()
+	var out [][]byte
+	textDone := []byte(`{"type":"response.reasoning_summary_text.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`)
+	textDone, _ = sjson.SetBytes(textDone, "sequence_number", nextSeq())
+	textDone, _ = sjson.SetBytes(textDone, "item_id", st.ReasoningItemID)
+	textDone, _ = sjson.SetBytes(textDone, "output_index", st.ReasoningIndex)
+	textDone, _ = sjson.SetBytes(textDone, "text", full)
+	out = append(out, emitEvent("response.reasoning_summary_text.done", textDone))
+	partDone := []byte(`{"type":"response.reasoning_summary_part.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
+	partDone, _ = sjson.SetBytes(partDone, "sequence_number", nextSeq())
+	partDone, _ = sjson.SetBytes(partDone, "item_id", st.ReasoningItemID)
+	partDone, _ = sjson.SetBytes(partDone, "output_index", st.ReasoningIndex)
+	partDone, _ = sjson.SetBytes(partDone, "part.text", full)
+	out = append(out, emitEvent("response.reasoning_summary_part.done", partDone))
+	return out
+}
+
+func (st *claudeToResponsesState) finalizeReasoningItem(status string, nextSeq func() int) [][]byte {
+	if !st.ReasoningActive && st.ReasoningItemID == "" {
+		return nil
+	}
+	var out [][]byte
+	out = append(out, st.finalizeReasoningDeltas(nextSeq)...)
+
+	full := st.ReasoningBuf.String()
+	itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"completed","encrypted_content":"","summary":[]}}`)
+	itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
+	itemDone, _ = sjson.SetBytes(itemDone, "output_index", st.ReasoningIndex)
+	itemDone, _ = sjson.SetBytes(itemDone, "item.id", st.ReasoningItemID)
+	itemDone, _ = sjson.SetBytes(itemDone, "item.status", status)
+	itemDone, _ = sjson.SetBytes(itemDone, "item.encrypted_content", st.ReasoningSignature)
+	summary := []byte(`{"type":"summary_text","text":""}`)
+	summary, _ = sjson.SetBytes(summary, "text", full)
+	itemDone = translatorcommon.SetRawArrayItems(itemDone, "item.summary", [][]byte{summary})
+	out = append(out, emitEvent("response.output_item.done", itemDone))
+	st.ReasoningItems = append(st.ReasoningItems, claudeResponsesReasoningItem{
+		ID:          st.ReasoningItemID,
+		OutputIndex: st.ReasoningIndex,
+		Text:        full,
+		Signature:   st.ReasoningSignature,
+		Status:      status,
+	})
+	st.ReasoningActive = false
+	st.ReasoningItemID = ""
+	st.ReasoningBuf.Reset()
+	st.ReasoningSignature = ""
+	st.ReasoningIndex = -1
+	return out
 }
 
 func (st *claudeToResponsesState) finalizeAssistantMessage(nextSeq func() int) [][]byte {
@@ -228,6 +398,7 @@ func (st *claudeToResponsesState) finalizeAssistantMessage(nextSeq func() int) [
 	}
 	fullText := st.TextBuf.String()
 	outputIndex := st.messageOutputIndex()
+	status := claudeResponsesOutputStatus(st.StopReason)
 	var out [][]byte
 	done := []byte(`{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`)
 	done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
@@ -250,6 +421,7 @@ func (st *claudeToResponsesState) finalizeAssistantMessage(nextSeq func() int) [
 	final, _ = sjson.SetBytes(final, "sequence_number", nextSeq())
 	final, _ = sjson.SetBytes(final, "output_index", outputIndex)
 	final, _ = sjson.SetBytes(final, "item.id", st.CurrentMsgID)
+	final, _ = sjson.SetBytes(final, "item.status", status)
 	final, _ = sjson.SetBytes(final, "item.content.0.text", fullText)
 	if len(st.MessageAnnotations) > 0 {
 		final, _ = sjson.SetBytes(final, "item.content.0.annotations", st.MessageAnnotations)
@@ -261,6 +433,7 @@ func (st *claudeToResponsesState) finalizeAssistantMessage(nextSeq func() int) [
 		OutputIndex: outputIndex,
 		Text:        fullText,
 		Annotations: append([]any(nil), st.MessageAnnotations...),
+		Status:      status,
 	})
 	st.InTextBlock = false
 	st.MessageOpen = false
@@ -315,6 +488,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.MessageItems = nil
 			st.ReasoningBuf.Reset()
 			st.ReasoningActive = false
+			st.ReasoningDeltasDone = false
 			st.NextOutputIndex = 0
 			st.InTextBlock = false
 			st.InFuncBlock = false
@@ -327,7 +501,11 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.ReasoningSignature = ""
 			st.ReasoningIndex = -1
 			st.ReasoningItems = nil
+			st.StopReason = ""
 			st.FuncArgsBuf = make(map[int]*strings.Builder)
+			st.FuncArgsDone = make(map[int]bool)
+			st.FuncItemDone = make(map[int]bool)
+			st.FuncItemStatus = make(map[int]string)
 			st.FuncNames = make(map[int]string)
 			st.FuncCallIDs = make(map[int]string)
 			st.FuncCustom = make(map[int]bool)
@@ -364,6 +542,26 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		}
 		idx := int(root.Get("index").Int())
 		typ := cb.Get("type").String()
+
+		// Finalize any previous assistant message
+		out = append(out, st.finalizeAssistantMessage(nextSeq)...)
+		// Finalize previous reasoning item
+		if st.ReasoningActive || st.ReasoningItemID != "" {
+			out = append(out, st.finalizeReasoningItem("completed", nextSeq)...)
+		}
+		// Finalize any previous completed function calls
+		for prevIdx := range st.FuncCallIDs {
+			if !st.FuncItemDone[prevIdx] && prevIdx != idx {
+				out = append(out, st.finalizeFuncItem(prevIdx, requestForToolMetadata, "completed", nextSeq)...)
+			}
+		}
+		// Finalize any previous web search items
+		for _, item := range st.WebSearchItems {
+			if !item.Emitted && item.Results != nil {
+				out = append(out, st.finalizeWebSearchWithStatus(item, "completed", nextSeq)...)
+			}
+		}
+
 		if typ == "text" {
 			st.InTextBlock = true
 			outputIndex := st.messageOutputIndex()
@@ -387,7 +585,6 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				st.ContentPartOpen = true
 			}
 		} else if typ == "tool_use" {
-			out = append(out, st.finalizeAssistantMessage(nextSeq)...)
 			st.InFuncBlock = true
 			st.CurrentFCID = cb.Get("id").String()
 			name := cb.Get("name").String()
@@ -419,7 +616,6 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.FuncCallIDs[idx] = st.CurrentFCID
 			st.FuncNames[idx] = name
 		} else if typ == "server_tool_use" {
-			out = append(out, st.finalizeAssistantMessage(nextSeq)...)
 			if name := cb.Get("name").String(); name != claudeWebSearchToolName {
 				// Reachability guard: only web_search can be enabled on Claude by
 				// this translator, so anything else means a new upstream tool.
@@ -433,19 +629,18 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				out = append(out, emitEvent("response.output_item.added", added))
 			}
 		} else if typ == "web_search_tool_result" {
-			// Unlike text or tool_use blocks, a result block carries its full
-			// content up front and has no deltas, so the item is closed here
-			// rather than at content_block_stop.
+			// A result block carries its full content up front and has no deltas.
+			// Results are stored here and the item is closed when the next block
+			// starts or at message_stop so the final stop_reason is respected.
 			if item := st.WebSearchByToolID[cb.Get("tool_use_id").String()]; item != nil {
 				item.Results = claudeWebSearchResultsToResponses(cb.Get("content"))
-				out = append(out, st.finalizeWebSearch(item, nextSeq)...)
 			} else {
 				log.Debugf("claude->responses: web_search_tool_result without matching server_tool_use at block %d", idx)
 			}
 		} else if typ == "thinking" || typ == "redacted_thinking" {
-			out = append(out, st.finalizeAssistantMessage(nextSeq)...)
 			// start reasoning item
 			st.ReasoningActive = true
+			st.ReasoningDeltasDone = false
 			st.ReasoningIndex = st.allocateOutputIndex()
 			st.ReasoningBuf.Reset()
 			st.ReasoningSignature = claudeReasoningCarrier(cb)
@@ -534,103 +729,47 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			return [][]byte{}
 		}
 	case "content_block_stop":
-		idx := int(root.Get("index").Int())
 		if st.InTextBlock {
 			st.InTextBlock = false
 		} else if st.InFuncBlock {
-			outputIndex := st.functionOutputIndex(idx)
-			args := "{}"
-			if st.FuncCustom[idx] {
-				args = ""
-			}
-			if buf := st.FuncArgsBuf[idx]; buf != nil {
-				if buf.Len() > 0 {
-					args = buf.String()
-				}
-			}
-			if st.FuncCustom[idx] {
-				input := unwrapCustomToolInput(args)
-				inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
-				inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
-				inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("ctc_%s", st.CurrentFCID))
-				inputDone, _ = sjson.SetBytes(inputDone, "output_index", outputIndex)
-				inputDone, _ = sjson.SetBytes(inputDone, "input", input)
-				out = append(out, emitEvent("response.custom_tool_call_input.done", inputDone))
-
-				itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}}`)
-				itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
-				itemDone, _ = sjson.SetBytes(itemDone, "output_index", outputIndex)
-				itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("ctc_%s", st.CurrentFCID))
-				itemDone, _ = sjson.SetBytes(itemDone, "item.input", input)
-				itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.CurrentFCID)
-				itemDone = applyResponsesFunctionCallNamespaceFields(itemDone, requestForToolMetadata, st.FuncNames[idx], "item")
-				out = append(out, emitEvent("response.output_item.done", itemDone))
-			} else {
-				fcDone := []byte(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
-				fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
-				fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", st.CurrentFCID))
-				fcDone, _ = sjson.SetBytes(fcDone, "output_index", outputIndex)
-				fcDone, _ = sjson.SetBytes(fcDone, "arguments", args)
-				out = append(out, emitEvent("response.function_call_arguments.done", fcDone))
-				itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
-				itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
-				itemDone, _ = sjson.SetBytes(itemDone, "output_index", outputIndex)
-				itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.CurrentFCID))
-				itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
-				itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.CurrentFCID)
-				itemDone = applyResponsesFunctionCallNamespaceFields(itemDone, requestForToolMetadata, st.FuncNames[idx], "item")
-				out = append(out, emitEvent("response.output_item.done", itemDone))
-			}
 			st.InFuncBlock = false
 		} else if st.ReasoningActive {
-			full := st.ReasoningBuf.String()
-			textDone := []byte(`{"type":"response.reasoning_summary_text.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`)
-			textDone, _ = sjson.SetBytes(textDone, "sequence_number", nextSeq())
-			textDone, _ = sjson.SetBytes(textDone, "item_id", st.ReasoningItemID)
-			textDone, _ = sjson.SetBytes(textDone, "output_index", st.ReasoningIndex)
-			textDone, _ = sjson.SetBytes(textDone, "text", full)
-			out = append(out, emitEvent("response.reasoning_summary_text.done", textDone))
-			partDone := []byte(`{"type":"response.reasoning_summary_part.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
-			partDone, _ = sjson.SetBytes(partDone, "sequence_number", nextSeq())
-			partDone, _ = sjson.SetBytes(partDone, "item_id", st.ReasoningItemID)
-			partDone, _ = sjson.SetBytes(partDone, "output_index", st.ReasoningIndex)
-			partDone, _ = sjson.SetBytes(partDone, "part.text", full)
-			out = append(out, emitEvent("response.reasoning_summary_part.done", partDone))
-			itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","encrypted_content":"","summary":[]}}`)
-			itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
-			itemDone, _ = sjson.SetBytes(itemDone, "item.id", st.ReasoningItemID)
-			itemDone, _ = sjson.SetBytes(itemDone, "output_index", st.ReasoningIndex)
-			itemDone, _ = sjson.SetBytes(itemDone, "item.encrypted_content", st.ReasoningSignature)
-			summary := []byte(`{"type":"summary_text","text":""}`)
-			summary, _ = sjson.SetBytes(summary, "text", full)
-			itemDone = translatorcommon.SetRawArrayItems(itemDone, "item.summary", [][]byte{summary})
-			out = append(out, emitEvent("response.output_item.done", itemDone))
-			st.ReasoningItems = append(st.ReasoningItems, claudeResponsesReasoningItem{
-				ID:          st.ReasoningItemID,
-				OutputIndex: st.ReasoningIndex,
-				Text:        full,
-				Signature:   st.ReasoningSignature,
-			})
-			st.ReasoningActive = false
-			st.ReasoningItemID = ""
-			st.ReasoningBuf.Reset()
-			st.ReasoningSignature = ""
-			st.ReasoningIndex = -1
+			out = append(out, st.finalizeReasoningDeltas(nextSeq)...)
 		}
 		return noSSEOutput(out)
 	case "message_delta":
 		st.Usage.Merge(root.Get("usage"))
+		if stopReason := root.Get("delta.stop_reason"); stopReason.Exists() {
+			st.StopReason = stopReason.String()
+		}
 		return [][]byte{}
 	case "message_stop":
+		toolStatus := claudeResponsesOutputStatus(st.StopReason)
+		if st.ReasoningActive || st.ReasoningItemID != "" {
+			out = append(out, st.finalizeReasoningItem(toolStatus, nextSeq)...)
+		}
 		out = append(out, st.finalizeAssistantMessage(nextSeq)...)
+		for idx := range st.FuncCallIDs {
+			if !st.FuncItemDone[idx] {
+				out = append(out, st.finalizeFuncItem(idx, requestForToolMetadata, toolStatus, nextSeq)...)
+			}
+		}
 		for _, item := range st.WebSearchItems {
-			out = append(out, st.finalizeWebSearch(item, nextSeq)...)
+			if !item.Emitted {
+				out = append(out, st.finalizeWebSearchWithStatus(item, toolStatus, nextSeq)...)
+			}
 		}
 
-		completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
+		eventType, responseStatus, incompleteDetails := claudeResponsesTerminalState(st.StopReason)
+		completed := []byte(`{"type":"","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"","background":false,"error":null}}`)
+		completed, _ = sjson.SetBytes(completed, "type", eventType)
 		completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
 		completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
 		completed, _ = sjson.SetBytes(completed, "response.created_at", st.CreatedAt)
+		completed, _ = sjson.SetBytes(completed, "response.status", responseStatus)
+		if len(incompleteDetails) > 0 {
+			completed, _ = sjson.SetRawBytes(completed, "response.incomplete_details", incompleteDetails)
+		}
 		// Inject original request fields into response as per docs/response.completed.json
 
 		reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
@@ -702,8 +841,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		outputsWrapper := []byte(`{"arr":[]}`)
 		// reasoning items
 		for _, reasoning := range st.ReasoningItems {
-			item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
+			status := reasoning.Status
+			if status == "" {
+				status = "completed"
+			}
+			item := []byte(`{"id":"","type":"reasoning","status":"completed","encrypted_content":"","summary":[]}`)
 			item, _ = sjson.SetBytes(item, "id", reasoning.ID)
+			item, _ = sjson.SetBytes(item, "status", status)
 			item, _ = sjson.SetBytes(item, "encrypted_content", reasoning.Signature)
 			summary := []byte(`{"type":"summary_text","text":""}`)
 			summary, _ = sjson.SetBytes(summary, "text", reasoning.Text)
@@ -714,6 +858,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		for _, message := range st.MessageItems {
 			item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 			item, _ = sjson.SetBytes(item, "id", message.ID)
+			item, _ = sjson.SetBytes(item, "status", message.Status)
 			item, _ = sjson.SetBytes(item, "content.0.text", message.Text)
 			if len(message.Annotations) > 0 {
 				item, _ = sjson.SetBytes(item, "content.0.annotations", message.Annotations)
@@ -722,7 +867,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		}
 		// web_search_call items
 		for _, item := range st.WebSearchItems {
-			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, fmt.Sprintf("arr.%d", item.OutputIndex), item.render())
+			status := item.Status
+			if status == "" {
+				status = "completed"
+			}
+			rendered := item.render()
+			rendered, _ = sjson.SetBytes(rendered, "status", status)
+			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, fmt.Sprintf("arr.%d", item.OutputIndex), rendered)
 		}
 		// function_call items (in ascending index order for determinism)
 		if len(st.FuncArgsBuf) > 0 {
@@ -740,9 +891,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				}
 			}
 			for _, idx := range idxs {
-				args := "{}"
-				if st.FuncCustom[idx] {
-					args = ""
+				status := st.FuncItemStatus[idx]
+				if status == "" {
+					status = "completed"
+				}
+				args := ""
+				if !st.FuncCustom[idx] && status == "completed" {
+					args = "{}"
 				}
 				if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
 					args = b.String()
@@ -755,6 +910,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				if st.FuncCustom[idx] {
 					item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
+					item, _ = sjson.SetBytes(item, "status", status)
 					item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
 					item, _ = sjson.SetBytes(item, "call_id", callID)
 					item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, name, "")
@@ -762,6 +918,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				} else {
 					item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
+					item, _ = sjson.SetBytes(item, "status", status)
 					item, _ = sjson.SetBytes(item, "arguments", args)
 					item, _ = sjson.SetBytes(item, "call_id", callID)
 					item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, name, "")
@@ -789,7 +946,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", totalTokens)
 			}
 		}
-		out = append(out, emitEvent("response.completed", completed))
+		out = append(out, emitEvent(eventType, completed))
 	}
 
 	return noSSEOutput(out)
@@ -831,6 +988,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	var (
 		responseID  string
 		createdAt   int64
+		stopReason  string
 		usageTokens claudeResponsesUsageTokens
 	)
 
@@ -994,12 +1152,20 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 		case "message_delta":
 			usageTokens.Merge(root.Get("usage"))
+			if value := root.Get("delta.stop_reason"); value.Exists() {
+				stopReason = value.String()
+			}
 		}
 	}
 
 	// Populate base fields
+	_, responseStatus, incompleteDetails := claudeResponsesTerminalState(stopReason)
 	out, _ = sjson.SetBytes(out, "id", responseID)
 	out, _ = sjson.SetBytes(out, "created_at", createdAt)
+	out, _ = sjson.SetBytes(out, "status", responseStatus)
+	if len(incompleteDetails) > 0 {
+		out, _ = sjson.SetRawBytes(out, "incomplete_details", incompleteDetails)
+	}
 
 	// Inject request echo fields as top-level (similar to streaming variant)
 	if len(reqBytes) > 0 {
@@ -1068,21 +1234,28 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Build output array in the order of the original content blocks.
 	outputs := make([][]byte, 0, len(outputItems))
-	for _, outputItem := range outputItems {
+	for i, outputItem := range outputItems {
+		itemStatus := "completed"
+		if responseStatus == "incomplete" && i == len(outputItems)-1 {
+			itemStatus = "incomplete"
+		}
 		var item []byte
 		switch outputItem.itemType {
 		case "reasoning":
-			item = []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
+			item = []byte(`{"id":"","type":"reasoning","status":"completed","encrypted_content":"","summary":[]}`)
 			item, _ = sjson.SetBytes(item, "id", outputItem.id)
+			item, _ = sjson.SetBytes(item, "status", itemStatus)
 			item, _ = sjson.SetBytes(item, "encrypted_content", outputItem.signature)
 			summary := []byte(`{"type":"summary_text","text":""}`)
 			summary, _ = sjson.SetBytes(summary, "text", outputItem.text.String())
 			item, _ = sjson.SetRawBytes(item, "summary", translatorcommon.JoinRawArray([][]byte{summary}))
 		case "web_search_call":
 			item = buildResponsesWebSearchCallItem(outputItem.callID, claudeWebSearchQuery(outputItem.args.String()), outputItem.results)
+			item, _ = sjson.SetBytes(item, "status", itemStatus)
 		case "message":
 			item = []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 			item, _ = sjson.SetBytes(item, "id", outputItem.id)
+			item, _ = sjson.SetBytes(item, "status", itemStatus)
 			item, _ = sjson.SetBytes(item, "content.0.text", outputItem.text.String())
 			if len(outputItem.annotations) > 0 {
 				item, _ = sjson.SetBytes(item, "content.0.annotations", outputItem.annotations)
@@ -1091,17 +1264,19 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			if outputItem.itemType == "custom_tool_call" {
 				item = []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 				item, _ = sjson.SetBytes(item, "id", outputItem.id)
+				item, _ = sjson.SetBytes(item, "status", itemStatus)
 				item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(outputItem.args.String()))
 				item, _ = sjson.SetBytes(item, "call_id", outputItem.callID)
 				item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, outputItem.name, "")
 				break
 			}
 			args := outputItem.args.String()
-			if args == "" {
+			if args == "" && itemStatus == "completed" {
 				args = "{}"
 			}
 			item = []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 			item, _ = sjson.SetBytes(item, "id", outputItem.id)
+			item, _ = sjson.SetBytes(item, "status", itemStatus)
 			item, _ = sjson.SetBytes(item, "arguments", args)
 			item, _ = sjson.SetBytes(item, "call_id", outputItem.callID)
 			item = applyResponsesFunctionCallNamespaceFields(item, reqBytes, outputItem.name, "")

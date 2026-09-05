@@ -154,31 +154,146 @@ func TestConvertClaudeRequestToAntigravity_ConvertsMessageSystemRoleToUserConten
 	}
 
 	contents := gjson.Get(outputStr, "request.contents").Array()
-	if len(contents) != 3 {
-		t.Fatalf("Expected the user and message-level system turns in request.contents, got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
+	if len(contents) != 1 {
+		t.Fatalf("Expected consecutive user and message-level system turns to be merged into a single user turn, got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
 	}
 	if got := contents[0].Get("role").String(); got != "user" {
 		t.Fatalf("Expected first content role user, got %q", got)
 	}
-	if got := contents[1].Get("role").String(); got != "user" {
-		t.Fatalf("Expected message-level system content to be downgraded to user role, got %q", got)
+	parts := contents[0].Get("parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("Expected 3 parts in merged user content, got %d: %s", len(parts), contents[0].Get("parts").Raw)
 	}
-	if got := contents[1].Get("parts.0.text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
+	if got := parts[0].Get("text").String(); got != "Hello" {
+		t.Fatalf("Unexpected initial user prompt text: %q", got)
+	}
+	if got := parts[1].Get("text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
 		t.Fatalf("Unexpected string message-level system content text: %q", got)
 	}
-	if got := contents[2].Get("role").String(); got != "user" {
-		t.Fatalf("Expected array message-level system content to be downgraded to user role, got %q", got)
-	}
-	if got := contents[2].Get("parts.0.text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
+	if got := parts[2].Get("text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
 		t.Fatalf("Unexpected array message-level system content text: %q", got)
 	}
 
-	parts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
-	if len(parts) != 1 {
-		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
+	systemInstructionParts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
+	if len(systemInstructionParts) != 1 {
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(systemInstructionParts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
 	}
-	if got := parts[0].Get("text").String(); got != "Top-level rules" {
+	if got := systemInstructionParts[0].Get("text").String(); got != "Top-level rules" {
 		t.Fatalf("Unexpected first system part: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_MessageLevelDeveloperInstructionsBecomeMergedUserReminder(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash",
+		"system": "Top-level rules",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+			{"role": "developer", "content": "String mid-conversation developer rule"},
+			{"role": "developer", "content": [{"type": "text", "text": "Array mid-conversation developer rule"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.5-flash", inputJSON, false)
+	outputStr := string(output)
+
+	if devContent := gjson.Get(outputStr, `request.contents.#(role=="developer")`); devContent.Exists() {
+		t.Fatalf("developer role should not be emitted in request.contents: %s", devContent.Raw)
+	}
+
+	contents := gjson.Get(outputStr, "request.contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("Expected consecutive user and developer turns to be merged into a single user turn, got %d: %s", len(contents), gjson.Get(outputStr, "request.contents").Raw)
+	}
+	if got := contents[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected first content role user, got %q", got)
+	}
+	parts := contents[0].Get("parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("Expected 3 parts in merged user content, got %d: %s", len(parts), contents[0].Get("parts").Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "Hello" {
+		t.Fatalf("Unexpected initial user prompt text: %q", got)
+	}
+	if got := parts[1].Get("text").String(); got != "<system-reminder>\nString mid-conversation developer rule\n</system-reminder>" {
+		t.Fatalf("Unexpected string developer content text: %q", got)
+	}
+	if got := parts[2].Get("text").String(); got != "<system-reminder>\nArray mid-conversation developer rule\n</system-reminder>" {
+		t.Fatalf("Unexpected array developer content text: %q", got)
+	}
+
+	systemInstructionParts := gjson.Get(outputStr, "request.systemInstruction.parts").Array()
+	if len(systemInstructionParts) != 1 {
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(systemInstructionParts), gjson.Get(outputStr, "request.systemInstruction.parts").Raw)
+	}
+	if got := systemInstructionParts[0].Get("text").String(); got != "Top-level rules" {
+		t.Fatalf("Unexpected first system part: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_PreservesToolPairingWithInterveningSystemMessage(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Run two tools"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_1", "name": "tool_one", "input": {"a": 1}},
+					{"type": "tool_use", "id": "toolu_2", "name": "tool_two", "input": {"b": 2}}
+				]
+			},
+			{
+				"role": "system",
+				"content": "Context reminder between tool_use and tool_result"
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_2", "content": "result 2"},
+					{"type": "tool_result", "tool_use_id": "toolu_1", "content": "result 1"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.5-flash", inputJSON, false)
+
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v\noutput: %s", errPairing, output)
+	}
+
+	contents := gjson.GetBytes(output, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 merged contents (user, model, user), got %d: %s", len(contents), output)
+	}
+
+	// First turn: user
+	if contents[0].Get("role").String() != "user" {
+		t.Fatalf("expected turn 0 role user, got %s", contents[0].Get("role").String())
+	}
+	// Second turn: model (2 function calls)
+	if contents[1].Get("role").String() != "model" {
+		t.Fatalf("expected turn 1 role model, got %s", contents[1].Get("role").String())
+	}
+	// Third turn: user (1 system reminder + 2 aligned function responses)
+	if contents[2].Get("role").String() != "user" {
+		t.Fatalf("expected turn 2 role user, got %s", contents[2].Get("role").String())
+	}
+
+	// Verify response ordering matches call ordering
+	parts := contents[2].Get("parts").Array()
+	var respIDs []string
+	for _, p := range parts {
+		if id := p.Get("functionResponse.id").String(); id != "" {
+			respIDs = append(respIDs, id)
+		}
+	}
+	if len(respIDs) != 2 {
+		t.Fatalf("expected 2 responses, got %v", respIDs)
 	}
 }
 
@@ -658,6 +773,26 @@ func TestConvertClaudeRequestToAntigravity_DropsMismatchedMarkedNonEmptyCarrier(
 		if strings.Contains(string(output), geminiSig) || strings.Contains(string(output), geminiClaudeCarrierPrefix) {
 			t.Fatalf("mismatched marked carrier reached Gemini wire: %s", output)
 		}
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_GeminiThoughtTextWithFollowingPreviousCarrierRoundTrip(t *testing.T) {
+	validSignature := testGeminiEPrefixSignature(t)
+	validCarrier := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
+	inputJSON := []byte(`{"model":"gemini-3.1-pro-preview","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"let me think","signature":""},{"type":"text","text":"answer text"},{"type":"thinking","thinking":"","signature":"` + validCarrier + `"}]},{"role":"user","content":[{"type":"text","text":"continue"}]}]}`)
+
+	inputJSON = StripInvalidGeminiSignatureThinkingBlocks(inputJSON)
+	output := ConvertClaudeRequestToAntigravity("gemini-3.1-pro-preview", inputJSON, false)
+
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("parts count = %d, want 2; output=%s", len(parts), output)
+	}
+	if !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "let me think" {
+		t.Fatalf("part[0] is not thought text; got: %s", parts[0].Raw)
+	}
+	if parts[1].Get("text").String() != "answer text" || parts[1].Get("thoughtSignature").String() != validSignature {
+		t.Fatalf("part[1] is not text with signature; got: %s", parts[1].Raw)
 	}
 }
 
@@ -1308,7 +1443,7 @@ func TestInspectDoubleLayerSignature_TracksEncodingLayers(t *testing.T) {
 	}
 }
 
-func TestConvertClaudeRequestToAntigravity_CacheModeDropsRawSignature(t *testing.T) {
+func TestConvertClaudeRequestToAntigravity_CacheModeAcceptsNativeSignature(t *testing.T) {
 	cache.ClearSignatureCache("")
 	previous := cache.SignatureCacheEnabled()
 	cache.SetSignatureCacheEnabled(true)
@@ -1318,6 +1453,7 @@ func TestConvertClaudeRequestToAntigravity_CacheModeDropsRawSignature(t *testing
 	})
 
 	rawSignature := testAnthropicNativeSignature(t)
+	expectedAntigravitySig := base64.StdEncoding.EncodeToString([]byte(rawSignature))
 	inputJSON := []byte(`{
 		"model": "claude-sonnet-4-5-thinking",
 		"messages": [
@@ -1333,11 +1469,92 @@ func TestConvertClaudeRequestToAntigravity_CacheModeDropsRawSignature(t *testing
 
 	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("Expected native signature thinking block to be preserved in cache mode, got %d parts; output=%s", len(parts), output)
+	}
+	if !parts[0].Get("thought").Bool() || parts[0].Get("thoughtSignature").String() != expectedAntigravitySig {
+		t.Fatalf("Expected normalized thinking part with signature %s, got %s", expectedAntigravitySig, parts[0].Raw)
+	}
+	if parts[1].Get("text").String() != "Answer" {
+		t.Fatalf("Expected remaining text part, got %s", parts[1].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_CacheModeDropsInvalidSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(true)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	// Seed cache with a valid signature for the same thinking text.
+	validNativeSig := testAnthropicNativeSignature(t)
+	cache.CacheSignature("claude-sonnet-4-5-thinking", "Let me think...", validNativeSig)
+
+	// Client explicitly sends an invalid signature. Cache MUST NOT be used to replace it.
+	invalidRawSignature := testNonAnthropicRawSignature(t)
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me think...", "signature": "` + invalidRawSignature + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
 	if len(parts) != 1 {
-		t.Fatalf("Expected raw signature thinking block to be dropped in cache mode, got %d parts", len(parts))
+		t.Fatalf("Expected invalid signature thinking block to be dropped in cache mode even if cache exists, got %d parts", len(parts))
 	}
 	if parts[0].Get("text").String() != "Answer" {
 		t.Fatalf("Expected remaining text part, got %s", parts[0].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_CacheModeRecoversSignatureWhenClientOmitsSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(true)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	validNativeSig := testAnthropicNativeSignature(t)
+	expectedAntigravitySig := base64.StdEncoding.EncodeToString([]byte(validNativeSig))
+	cache.CacheSignature("claude-sonnet-4-5-thinking", "Let me think...", validNativeSig)
+
+	// Client omitted signature (signature is empty or absent).
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me think...", "signature": ""},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("Expected omitted signature thinking block to be recovered from cache, got %d parts; output=%s", len(parts), output)
+	}
+	if !parts[0].Get("thought").Bool() || parts[0].Get("thoughtSignature").String() != expectedAntigravitySig {
+		t.Fatalf("Expected recovered thinking part with signature %s, got %s", expectedAntigravitySig, parts[0].Raw)
+	}
+	if parts[1].Get("text").String() != "Answer" {
+		t.Fatalf("Expected remaining text part, got %s", parts[1].Raw)
 	}
 }
 

@@ -229,6 +229,13 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # When true (default), subagents (child sessions with parent references) inherit and bind
+  # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
+  # maximizing Prompt/KV Cache reuse and minimizing TTFT.
+  # When false, subagents are distributed across the credential pool via the fallback selector
+  # for maximum parallel concurrency.
+  # Ignored when routing.session-affinity is false.
+  session-affinity-subagents: true
 
 # Codex provider behavior.
 codex:
@@ -255,6 +262,12 @@ codex:
   # normalizes encrypted agent_message content for Codex, and converts agent_message input
   # into standard user messages for non-Codex upstream protocols.
   optimize-multi-agent-v2: false
+  # When true, enable opt-in compatibility for orphan Codex delegation outputs.
+  # Converts orphan function_call_output items from codex_app/create_thread and
+  # codex_app/send_message_to_thread (which lack a valid call_id or matching function_call)
+  # into standard user messages across Responses and non-Codex protocols when the request
+  # header contains X-Openai-Subagent: collab_spawn.
+  orphan-delegation-compatibility: false
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
   # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
   live-media-relay:
@@ -573,7 +586,7 @@ nonstream-keepalive-interval: 0
 #                                     # only on api.anthropic.com; Vertex keeps provider-native signing
 
 # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
-# Claude Code 2.1.220: context-1m sits right after claude-code, mid-conversation-system
+# Claude Code: context-1m sits right after claude-code, mid-conversation-system
 # is added only for models that accept a role=system turn, advanced-tool-use only when
 # the request declares tools, and server-side-fallback / fallback-credit /
 # structured-outputs trail effort. On direct api.anthropic.com a caller may only ask for
@@ -590,8 +603,8 @@ nonstream-keepalive-interval: 0
 # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
 # the same exact software baseline rather than learning newer client versions.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.220 (external, cli)"
-#   package-version: "0.94.0"
+#   user-agent: "claude-cli/2.1.258 (external, cli)"
+#   package-version: "0.112.1"
 #   runtime-version: "v26.3.0"
 #   os: "MacOS"
 #   arch: "arm64"
@@ -836,6 +849,11 @@ nonstream-keepalive-interval: 0
 #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "reasoning.effort": "high"
+#     - models:
+#         - name: "claude-fable-5-1"
+#           protocol: "claude"
+#       params:
+#         max_tokens: 128000 # override the final Claude Messages output budget after protocol translation
 #   override-raw: # Override raw rules always set parameters using raw JSON (must be valid JSON).
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")

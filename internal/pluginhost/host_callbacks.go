@@ -152,6 +152,10 @@ func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, erro
 	return marshalRPCResult(resp)
 }
 
+func newStreamContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(ctx)
+}
+
 func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte, error) {
 	httpReq, callbackID, errDecode := decodeHostHTTPRequestWithCallbackID(request)
 	if errDecode != nil {
@@ -161,7 +165,7 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	streamCtx, cancel := context.WithCancel(ctx)
+	streamCtx, cancel := newStreamContext(ctx)
 	resp, errDo := h.newHTTPClient(nil).DoStream(streamCtx, httpReq)
 	if errDo != nil {
 		cancel()

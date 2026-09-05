@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestIsResponsesTokenEvent_Classification(t *testing.T) {
@@ -247,6 +248,7 @@ func TestObserveResponsesTokenEvent_Behavior(t *testing.T) {
 	ctx := context.Background()
 	reporter := NewUsageReporter(ctx, "codex", "gpt-5.6-luna", nil)
 	reporter.StartResponseTTFT()
+	time.Sleep(10 * time.Millisecond)
 
 	// 1. Initial state: TTFT not set
 	if reporter.IsTTFTSet() {

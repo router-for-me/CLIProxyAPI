@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -77,32 +78,75 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.ID = uuid.NewString()
 	}
 	now := time.Now()
+	if auth.Generation == 0 {
+		auth.Generation = 1
+	}
+	if auth.CreatedAt.IsZero() {
+		auth.CreatedAt = now
+	}
+	auth.UpdatedAt = now
 	cooldownStateChanged := normalizeModelStates(auth)
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
-	authClone := auth.Clone()
 	m.mu.Lock()
+	if m.authEpochs == nil {
+		m.authEpochs = make(map[string]uint64)
+	}
+	if existing, exists := m.auths[auth.ID]; exists && existing != nil && existing.RegistrationEpoch > m.authEpochs[auth.ID] {
+		m.authEpochs[auth.ID] = existing.RegistrationEpoch
+	}
+	if auth.RegistrationEpoch > m.authEpochs[auth.ID] {
+		m.authEpochs[auth.ID] = auth.RegistrationEpoch
+	}
+	m.authEpochs[auth.ID]++
+	auth.RegistrationEpoch = m.authEpochs[auth.ID]
+	auth.Generation = 1
+	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+		m.scheduler.upsertAuth(authClone.Clone())
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	if cooldownStateChanged {
-		m.persistCooldownStates(ctx)
+		m.persistCooldownStates(context.Background())
 	}
 	return auth.Clone(), nil
 }
 
+type updateAuthMode int
+
+const (
+	updateModeReplace updateAuthMode = iota
+	updateModeRefresh
+	updateModePrepare
+)
+
+// UpdatePreparedAuth atomically merges request preparation results into the latest runtime auth
+// under the manager lock, preserving concurrent modifications without modifying refresh lifecycle fields.
+func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
+	return m.updateInternal(ctx, base, updated, updateModePrepare)
+}
+
+// UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
+// under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
+func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
+	return m.updateInternal(ctx, base, updated, updateModeRefresh)
+}
+
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
+	return m.updateInternal(ctx, nil, auth, updateModeReplace)
+}
+
+func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
@@ -116,6 +160,38 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.mu.Unlock()
 		return nil, nil
 	}
+	if m.authEpochs == nil {
+		m.authEpochs = make(map[string]uint64)
+	}
+	if existing.RegistrationEpoch > m.authEpochs[auth.ID] {
+		m.authEpochs[auth.ID] = existing.RegistrationEpoch
+	}
+	if (mode == updateModeRefresh || mode == updateModePrepare) && base != nil && existing.RegistrationEpoch != base.RegistrationEpoch {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("update auth %s: stale registration epoch %d != %d", auth.ID, base.RegistrationEpoch, existing.RegistrationEpoch)
+	}
+	if mode == updateModeRefresh {
+		merged := MergeRefreshedAuth(base, existing, auth)
+		if merged != nil {
+			auth = merged
+			NormalizeCredentialMetadata(auth.Metadata)
+		}
+	} else if mode == updateModePrepare {
+		merged := MergePreparedAuth(base, existing, auth)
+		if merged != nil {
+			auth = merged
+			NormalizeCredentialMetadata(auth.Metadata)
+		}
+	}
+	if auth.RegistrationEpoch != 0 && auth.RegistrationEpoch < m.authEpochs[auth.ID] {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("update auth %s: stale registration epoch %d < %d", auth.ID, auth.RegistrationEpoch, m.authEpochs[auth.ID])
+	}
+	if auth.RegistrationEpoch >= m.authEpochs[auth.ID] {
+		m.authEpochs[auth.ID] = auth.RegistrationEpoch
+	} else if auth.RegistrationEpoch == 0 {
+		auth.RegistrationEpoch = m.authEpochs[auth.ID]
+	}
 	if !auth.indexAssigned && auth.Index == "" {
 		auth.Index = existing.Index
 		auth.indexAssigned = existing.indexAssigned
@@ -123,6 +199,11 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
+	if auth.Generation <= existing.Generation {
+		auth.Generation = existing.Generation + 1
+	} else {
+		auth.Generation++
+	}
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
@@ -137,6 +218,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		}
 	}
 	now := time.Now()
+	auth.UpdatedAt = now
 	cooldownStateChanged := normalizeModelStates(auth)
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
@@ -149,13 +231,13 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+		m.scheduler.upsertAuth(authClone.Clone())
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	if cooldownStateChanged {
-		m.persistCooldownStates(ctx)
+		m.persistCooldownStates(context.Background())
 	}
 	return auth.Clone(), nil
 }
@@ -192,13 +274,21 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 			delete(m.homeRuntimeAuths, sessionID)
 		}
 	}
+	if m.authEpochs == nil {
+		m.authEpochs = make(map[string]uint64)
+	}
+	if existing.RegistrationEpoch > m.authEpochs[id] {
+		m.authEpochs[id] = existing.RegistrationEpoch
+	}
+	m.authEpochs[id]++
+	tombstoneEpoch := m.authEpochs[id]
 	m.mu.Unlock()
 
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
-		m.scheduler.removeAuth(id)
+		m.scheduler.RecordRemovalTombstone(id, tombstoneEpoch)
 	}
 	m.queueRefreshUnschedule(id)
 	m.invalidateSessionAffinity(id)
@@ -210,14 +300,15 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 			}
 		}
 	}
-	m.persistCooldownStates(ctx)
+	m.persistCooldownStates(context.Background())
 }
 
 func (m *Manager) invalidateSessionAffinity(authID string) {
 	if m == nil || authID == "" {
 		return
 	}
-	if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
+	sel := m.Selector()
+	if invalidator, ok := sel.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
 		invalidator.InvalidateAuth(authID)
 	}
 }
@@ -234,7 +325,11 @@ func (m *Manager) Load(ctx context.Context) error {
 		m.mu.Unlock()
 		return err
 	}
+	previousAuths := m.auths
 	m.auths = make(map[string]*Auth, len(items))
+	if m.authEpochs == nil {
+		m.authEpochs = make(map[string]uint64, len(items))
+	}
 	for _, auth := range items {
 		if auth == nil || auth.ID == "" {
 			continue
@@ -244,16 +339,47 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
+		m.authEpochs[auth.ID] = max(m.authEpochs[auth.ID], auth.RegistrationEpoch) + 1
+		auth.RegistrationEpoch = m.authEpochs[auth.ID]
+		auth.Generation = 1
 		m.auths[auth.ID] = auth.Clone()
 	}
+
+	type removalTombstone struct {
+		id    string
+		epoch uint64
+	}
+	var removedTombstones []removalTombstone
+	for prevID := range previousAuths {
+		if _, exists := m.auths[prevID]; !exists {
+			m.authEpochs[prevID]++
+			removedTombstones = append(removedTombstones, removalTombstone{
+				id:    prevID,
+				epoch: m.authEpochs[prevID],
+			})
+		}
+	}
+
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 	m.mu.Unlock()
+
+	if m.scheduler != nil {
+		for _, rt := range removedTombstones {
+			m.scheduler.RecordRemovalTombstone(rt.id, rt.epoch)
+		}
+	}
 	m.syncScheduler()
 	return nil
+}
+
+type authPersistLock struct {
+	mu             sync.Mutex
+	lastEpoch      uint64
+	lastGeneration uint64
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
@@ -262,9 +388,6 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return fmt.Errorf("persist auth: %w", errWeight)
-	}
-	if shouldSkipPersist(ctx) {
-		return nil
 	}
 	if IsConfigAPIKeyAuth(auth) {
 		return nil
@@ -279,6 +402,27 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	// Skip persistence when metadata is absent (e.g., runtime-only auths).
 	if auth.Metadata == nil {
+		return nil
+	}
+
+	lockVal, _ := m.persistLocks.LoadOrStore(auth.ID, &authPersistLock{})
+	pLock, _ := lockVal.(*authPersistLock)
+	if pLock != nil {
+		pLock.mu.Lock()
+		defer pLock.mu.Unlock()
+		if auth.RegistrationEpoch < pLock.lastEpoch || (auth.RegistrationEpoch == pLock.lastEpoch && auth.Generation < pLock.lastGeneration) {
+			return nil
+		}
+		pLock.lastEpoch = auth.RegistrationEpoch
+		pLock.lastGeneration = auth.Generation
+		if shouldSkipPersist(ctx) {
+			return nil
+		}
+		_, err := m.store.Save(ctx, auth)
+		return err
+	}
+
+	if shouldSkipPersist(ctx) {
 		return nil
 	}
 	_, err := m.store.Save(ctx, auth)

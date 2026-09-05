@@ -69,7 +69,7 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 			continue
 		}
 		var calls, responses []functionRef
-		var responseParts []json.RawMessage
+		var responseParts, otherParts []json.RawMessage
 		hasOtherPart := false
 		parts.ForEach(func(_, part gjson.Result) bool {
 			switch {
@@ -80,6 +80,7 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 				responseParts = append(responseParts, json.RawMessage(part.Raw))
 			default:
 				hasOtherPart = true
+				otherParts = append(otherParts, json.RawMessage(part.Raw))
 			}
 			return true
 		})
@@ -93,33 +94,33 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 			}
 			continue
 		}
-		if hasOtherPart || len(calls) > 0 {
+		if len(calls) > 0 {
 			pending = nil
 			continue
 		}
 
-		if len(pending) == len(responses) {
+		if len(pending) > 0 && len(responses) > 0 {
 			ordered := make([]json.RawMessage, 0, len(responseParts))
 			used := make([]bool, len(responses))
 			for _, call := range pending {
-				matched := -1
 				for responseIndex, response := range responses {
 					if used[responseIndex] {
 						continue
 					}
 					if (call.id != "" && response.id == call.id) || (call.id == "" && call.name != "" && response.name == call.name) {
-						matched = responseIndex
+						used[responseIndex] = true
+						ordered = append(ordered, responseParts[responseIndex])
 						break
 					}
 				}
-				if matched < 0 {
-					ordered = nil
-					break
+			}
+			for responseIndex := range responses {
+				if !used[responseIndex] {
+					ordered = append(ordered, responseParts[responseIndex])
 				}
-				used[matched] = true
-				ordered = append(ordered, responseParts[matched])
 			}
 			if len(ordered) == len(responseParts) {
+				ordered = append(ordered, otherParts...)
 				if encoded, errMarshal := json.Marshal(ordered); errMarshal == nil {
 					if updated, errSet := sjson.SetRawBytes(out, fmt.Sprintf("request.contents.%d.parts", contentIndex), encoded); errSet == nil {
 						out = updated
@@ -128,7 +129,7 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 			}
 		}
 		pending = nil
-		if content.Get("role").String() != "model" {
+		if !hasOtherPart && content.Get("role").String() != "model" {
 			if updated, errSet := sjson.SetBytes(out, fmt.Sprintf("request.contents.%d.role", contentIndex), "model"); errSet == nil {
 				out = updated
 			}

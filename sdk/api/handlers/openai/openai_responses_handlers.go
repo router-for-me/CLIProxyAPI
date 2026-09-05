@@ -511,6 +511,20 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context
 	return updated
 }
 
+func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegation(c *gin.Context, payload []byte) []byte {
+	if h == nil || h.Cfg == nil || !h.Cfg.CodexOrphanDelegationCompatibility {
+		return payload
+	}
+	requestCtx := context.Background()
+	var requestHeaders http.Header
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+		requestHeaders = c.Request.Header
+	}
+	requestCtx = context.WithValue(requestCtx, "gin", c)
+	return multiagentv2.RewriteCodexOrphanDelegationInput(requestCtx, requestHeaders, payload, true)
+}
+
 // Responses handles the /v1/responses endpoint.
 // It determines whether the request is for a streaming or non-streaming response
 // and calls the appropriate handler based on the model provider.
@@ -531,6 +545,7 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 	}
 
 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
+	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -553,6 +568,8 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		})
 		return
 	}
+
+	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
 
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {

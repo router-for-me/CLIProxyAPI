@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"golang.org/x/net/context"
@@ -40,7 +41,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		close(errChan)
 		return nil, nil, errChan
 	}
-	execCtx, nestedTracker := withNestedExecutionTracker(ctx)
+	execCtx, nestedTracker := withNestedExecutionTracker(coreusage.WithStream(ctx, true))
 	req, opts := h.pluginExecutorRequest(execCtx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, true, execOptions)
 	lifecycle := h.newRequestLifecycleTracker(execCtx, entryProtocol, modelName, originalRequestedModel, true, opts.Metadata, execOptions.SkipInterceptorPluginID)
 	var interceptErr *interfaces.ErrorMessage
@@ -223,11 +224,14 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					RequestHeaders:  cloneHeader(streamRequestHeaders),
 					ResponseHeaders: cloneHeader(rawStreamHeaders),
 					Body:            payload,
-					HistoryChunks:   cloneByteSlices(historyChunks),
 					ChunkIndex:      chunkIndex,
 					Metadata:        opts.Metadata,
 				}
 				// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
+				// Schema v5+ omits history here.
+				if streamChunkPayloadIncludesHistory(interceptorHost) {
+					chunkReq.HistoryChunks = cloneByteSlices(historyChunks)
+				}
 				// Schema v3+ omits bodies here (one header-init clone only).
 				if streamChunkPayloadIncludesRequestBody(interceptorHost) {
 					chunkReq.OriginalRequest = cloneBytes(streamOriginalRequest)
@@ -269,7 +273,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			}
 			select {
 			case dataChan <- payload:
-				if streamInterceptorsActive {
+				if streamInterceptorsActive && streamChunkPayloadIncludesHistory(interceptorHost) {
 					historyChunks = appendStreamInterceptorHistory(historyChunks, payload)
 				}
 			case <-done:
@@ -440,11 +444,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				RequestHeaders:  cloneHeader(streamRequestHeaders),
 				ResponseHeaders: cloneHeader(rawStreamHeaders),
 				Body:            payload,
-				HistoryChunks:   cloneByteSlices(historyChunks),
 				ChunkIndex:      *chunkIndex,
 				Metadata:        opts.Metadata,
 			}
 			// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
+			// Schema v5+ omits history here.
+			if streamChunkPayloadIncludesHistory(interceptorHost) {
+				chunkReq.HistoryChunks = cloneByteSlices(historyChunks)
+			}
 			// Schema v3+ omits bodies here (one header-init clone only).
 			if streamChunkPayloadIncludesRequestBody(interceptorHost) {
 				chunkReq.OriginalRequest = cloneBytes(streamOriginalRequest)
@@ -657,7 +664,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				}
 				return
 			}
-			if streamInterceptorsActive {
+			if streamInterceptorsActive && streamChunkPayloadIncludesHistory(interceptorHost) {
 				historyChunks = appendStreamInterceptorHistory(historyChunks, bootstrapPayload)
 			}
 		}
@@ -721,7 +728,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				}
 				return
 			}
-			if streamInterceptorsActive {
+			if streamInterceptorsActive && streamChunkPayloadIncludesHistory(interceptorHost) {
 				historyChunks = appendStreamInterceptorHistory(historyChunks, payload)
 			}
 		}

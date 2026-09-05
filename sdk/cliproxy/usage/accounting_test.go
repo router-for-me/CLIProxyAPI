@@ -1,6 +1,9 @@
 package usage
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestNewSubsetTokenBreakdownAvoidsCacheAndReasoningDoubleCount(t *testing.T) {
 	breakdown := NewSubsetTokenBreakdown(100, 40, 10, 30, 12, 130)
@@ -158,5 +161,62 @@ func TestEnsureTokenBreakdownDoesNotOverrideCanonicalZeroCacheRead(t *testing.T)
 	detail := EnsureTokenBreakdownForProvider(Detail{CachedTokens: 13, CacheCreationTokens: 13}, "openai", "")
 	if detail.CacheReadTokens != 0 {
 		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestTokenBreakdown_Valid_RejectsArithmeticOverflow(t *testing.T) {
+	// MaxInt64 + MaxInt64 + 2 wraps to 0 in int64 arithmetic:
+	// math.MaxInt64 (0x7fff_ffff_ffff_ffff) + math.MaxInt64 + 2 = -2 + 2 = 0
+	b := TokenBreakdown{
+		SchemaVersion: TokenAccountingSchemaVersion,
+		Quality:       TokenAccountingQualityComplete,
+		TotalTokens:   0,
+		Input: TokenInputBreakdown{
+			TotalTokens:      0,
+			UncachedTokens:   math.MaxInt64,
+			CacheReadTokens:  math.MaxInt64,
+			CacheWriteTokens: 2,
+		},
+	}
+	if b.Valid() {
+		t.Fatalf("Valid() accepted overflowing input tokens sum: %+v", b)
+	}
+
+	bOutput := TokenBreakdown{
+		SchemaVersion: TokenAccountingSchemaVersion,
+		Quality:       TokenAccountingQualityComplete,
+		TotalTokens:   0,
+		Output: TokenOutputBreakdown{
+			TotalTokens:        -2, // will overflow if nonNegativeSum not used or negative
+			NonReasoningTokens: math.MaxInt64,
+			ReasoningTokens:    math.MaxInt64,
+		},
+	}
+	if bOutput.Valid() {
+		t.Fatalf("Valid() accepted overflowing output tokens sum: %+v", bOutput)
+	}
+}
+
+func TestNewSubsetTokenBreakdown_RejectsArithmeticOverflow(t *testing.T) {
+	// Passing MaxInt64 for cacheRead and cacheWrite will overflow cacheRead + cacheWrite to negative (-2).
+	// If unchecked, cacheRead + cacheWrite > inputTotal comparison evaluates -2 > MaxInt64 (false),
+	// returning complete quality with negative uncached tokens.
+	b := NewSubsetTokenBreakdown(math.MaxInt64, math.MaxInt64, math.MaxInt64, 0, 0, math.MaxInt64)
+	if b.Quality == TokenAccountingQualityComplete {
+		t.Fatalf("expected inconsistent quality for overflowing breakdown, got Complete: %+v", b)
+	}
+	if b.Input.UncachedTokens < 0 {
+		t.Fatalf("uncached tokens negative: %d", b.Input.UncachedTokens)
+	}
+}
+
+func TestNewSeparateReasoningTokenBreakdown_RejectsArithmeticOverflow(t *testing.T) {
+	// Passing MaxInt64 for cacheRead and cacheWrite will overflow cacheRead + cacheWrite to negative (-2).
+	b := NewSeparateReasoningTokenBreakdown(math.MaxInt64, math.MaxInt64, math.MaxInt64, 0, 0, math.MaxInt64)
+	if b.Quality == TokenAccountingQualityComplete {
+		t.Fatalf("expected inconsistent quality for overflowing breakdown, got Complete: %+v", b)
+	}
+	if b.Input.UncachedTokens < 0 {
+		t.Fatalf("uncached tokens negative: %d", b.Input.UncachedTokens)
 	}
 }

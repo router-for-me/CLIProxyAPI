@@ -204,6 +204,14 @@ func TestBuildConfigChangeDetails_CodexAlphaSearch(t *testing.T) {
 	expectContains(t, changes, "codex[0].alpha-search: false -> true")
 }
 
+func TestBuildConfigChangeDetails_CodexOrphanDelegationCompatibility(t *testing.T) {
+	oldCfg := &config.Config{Codex: config.CodexConfig{OrphanDelegationCompatibility: false}}
+	newCfg := &config.Config{Codex: config.CodexConfig{OrphanDelegationCompatibility: true}}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "codex.orphan-delegation-compatibility: false -> true")
+}
+
 func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
 	oldRetry := 1
 	newRetry := 0
