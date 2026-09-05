@@ -6,8 +6,9 @@
 // weight field.
 //
 // These tests touch only pure helper functions exported from
-// UpstreamProvidersPage.jsx (buildSchemas, buildForm, buildPayload,
-// validate, validateAPIKeyEntries). They never log fixture credentials
+// upstream-provider-editor/schemas.js (buildSchemas) and
+// upstream-provider-editor/form.js (buildForm, buildPayload, validate,
+// validateAPIKeyEntries). They never log fixture credentials
 // and never rely on the network or the React tree.
 //
 // Fixture secret material is intentionally obvious ("FAKE-SECRET-*")
@@ -22,7 +23,7 @@ import {
   buildPayload,
   validate,
   validateAPIKeyEntries,
-} from './UpstreamProvidersPage.jsx';
+} from './upstream-provider-editor/form.js';
 
 // ============================================================================
 // buildSchemas — schema mapping
