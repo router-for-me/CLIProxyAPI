@@ -74,8 +74,90 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body 
 		var report sigcompat.SignatureSanitizeReport
 		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel, preserveEmptyThinkingBlocks...)
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
+		if report.DroppedForeignProviderThinking {
+			sanitized = disableClaudeThinkingAfterForeignProviderStrip(sanitized)
+		}
 	}
 	return sanitizeClaudeWebSearchDomains(sanitized)
+}
+
+// disableClaudeThinkingAfterForeignProviderStrip request-scopes thinking off
+// after Claude Messages sanitize dropped foreign/substantive thinking. Claude-
+// compatible upstreams (e.g. SuperRelay) reject -4003 when thinking stays
+// enabled, and leftover legal thinking/redacted_thinking blocks also fail once
+// type is disabled.
+func disableClaudeThinkingAfterForeignProviderStrip(body []byte) []byte {
+	if !claudeThinkingConfigIsActive(body) {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "thinking.type", "disabled")
+	for _, path := range []string{"thinking.budget_tokens", "thinking.budgetTokens"} {
+		if gjson.GetBytes(body, path).Exists() {
+			body, _ = sjson.DeleteBytes(body, path)
+		}
+	}
+	if gjson.GetBytes(body, "output_config.effort").Exists() {
+		body, _ = sjson.DeleteBytes(body, "output_config.effort")
+	}
+	if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+		body, _ = sjson.DeleteBytes(body, "output_config")
+	}
+	return stripClaudeThinkingContentBlocksAndEmptyMessages(body)
+}
+
+func claudeThinkingConfigIsActive(body []byte) bool {
+	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())) {
+	case "enabled", "adaptive", "auto":
+		return true
+	}
+	if gjson.GetBytes(body, "thinking.budget_tokens").Int() > 0 || gjson.GetBytes(body, "thinking.budgetTokens").Int() > 0 {
+		return true
+	}
+	effort := gjson.GetBytes(body, "output_config.effort")
+	return effort.Exists() && strings.TrimSpace(effort.String()) != ""
+}
+
+func stripClaudeThinkingContentBlocksAndEmptyMessages(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body
+	}
+	messageResults := messages.Array()
+	keptMessages := make([]string, 0, len(messageResults))
+	modified := false
+	for _, message := range messageResults {
+		content := message.Get("content")
+		if !content.IsArray() {
+			keptMessages = append(keptMessages, message.Raw)
+			continue
+		}
+		contentResults := content.Array()
+		keptParts := make([]string, 0, len(contentResults))
+		messageModified := false
+		for _, part := range contentResults {
+			switch part.Get("type").String() {
+			case "thinking", "redacted_thinking":
+				messageModified = true
+				continue
+			}
+			keptParts = append(keptParts, part.Raw)
+		}
+		if !messageModified {
+			keptMessages = append(keptMessages, message.Raw)
+			continue
+		}
+		modified = true
+		if len(keptParts) == 0 {
+			continue
+		}
+		updated, _ := sjson.SetRaw(message.Raw, "content", "["+strings.Join(keptParts, ",")+"]")
+		keptMessages = append(keptMessages, updated)
+	}
+	if !modified {
+		return body
+	}
+	output, _ := sjson.SetRawBytes(body, "messages", []byte("["+strings.Join(keptMessages, ",")+"]"))
+	return output
 }
 
 // sanitizeClaudeWebSearchDomains removes empty allowed_domains/blocked_domains
@@ -112,15 +194,16 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 	}
 
 	fields := log.Fields{
-		"component":           "signature_sanitizer",
-		"executor":            "claude",
-		"action":              "sanitize_claude_messages",
-		"target_provider":     string(report.TargetProvider),
-		"target_model":        baseModel,
-		"preserved":           report.Preserved,
-		"dropped_blocks":      report.DroppedBlocks,
-		"dropped_signatures":  report.DroppedSignatures,
-		"replaced_signatures": report.ReplacedSignatures,
+		"component":                         "signature_sanitizer",
+		"executor":                          "claude",
+		"action":                            "sanitize_claude_messages",
+		"target_provider":                   string(report.TargetProvider),
+		"target_model":                      baseModel,
+		"preserved":                         report.Preserved,
+		"dropped_blocks":                    report.DroppedBlocks,
+		"dropped_signatures":                report.DroppedSignatures,
+		"replaced_signatures":               report.ReplacedSignatures,
+		"dropped_foreign_provider_thinking": report.DroppedForeignProviderThinking,
 	}
 	if len(report.Decisions) > 0 {
 		decision := report.Decisions[0]
