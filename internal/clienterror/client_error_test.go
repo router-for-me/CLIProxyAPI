@@ -183,6 +183,32 @@ func TestIsRequestFault(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "image-only model endpoint mismatch plain text",
+			status: http.StatusServiceUnavailable,
+			err:    errors.New("model gpt-image-2 is only supported on /v1/images/generations and /v1/images/edits"),
+			want:   true,
+		},
+		{
+			name:   "only-supported-on without image path is not image mismatch",
+			status: http.StatusServiceUnavailable,
+			err:    errors.New("feature is only supported on gpt-4"),
+		},
+		{
+			name:   "image path without only-supported-on is not request fault",
+			status: http.StatusBadGateway,
+			err:    errors.New("POST /v1/images/generations failed: unexpected EOF"),
+		},
+		{
+			name:   "only-supported-on image route without model is not image mismatch",
+			status: http.StatusBadGateway,
+			err:    errors.New("streaming is only supported on /v1/images/generations"),
+		},
+		{
+			name:   "image prefix alone is too weak to be an image mismatch",
+			status: http.StatusServiceUnavailable,
+			err:    errors.New("model gpt-image-2 is only supported on /v1/images"),
+		},
+		{
 			// An upstream internal error is not a request fault: it must stay eligible
 			// for credential rotation and (credential, model) cooldown.
 			name:   "upstream unknown internal error",
