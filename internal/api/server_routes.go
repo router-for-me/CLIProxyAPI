@@ -66,7 +66,7 @@ func (s *Server) setupRoutes() {
 		// :model is a wildcard so prefixed IDs containing slashes (e.g.
 		// "teamA/gemini-3-pro-preview" exposed by force-model-prefix) reach
 		// the handler; it strips the leading "models/" itself.
-		v1.GET("/models/*model", openaiHandlers.OpenAIModel)
+		v1.GET("/models/*model", s.unifiedModelDetailHandler(openaiHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
@@ -583,6 +583,43 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		} else {
 			openaiHandler.OpenAIModels(c)
 		}
+	}
+}
+
+// unifiedModelDetailHandler dispatches GET /v1/models/*model the same way
+// unifiedModelsHandler dispatches the collection: when Home is enabled the
+// per-request catalog from the control center is authoritative (a model
+// advertised by Home but absent from the local registry must still resolve),
+// otherwise it falls back to the local-registry lookup.
+func (s *Server) unifiedModelDetailHandler(openaiHandler *openai.OpenAIAPIHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+			entries, ok := s.loadHomeModelEntries(c)
+			if !ok {
+				return
+			}
+			want := strings.TrimPrefix(c.Param("model"), "/")
+			for _, entry := range entries {
+				if entry.id != want {
+					continue
+				}
+				model := map[string]any{
+					"id":     entry.id,
+					"object": "model",
+				}
+				if entry.created > 0 {
+					model["created"] = entry.created
+				}
+				if entry.ownedBy != "" {
+					model["owned_by"] = entry.ownedBy
+				}
+				c.JSON(http.StatusOK, model)
+				return
+			}
+			c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
+			return
+		}
+		openaiHandler.OpenAIModel(c)
 	}
 }
 
