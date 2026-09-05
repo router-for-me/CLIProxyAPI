@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -248,6 +249,58 @@ func TestOptimizeCodexMultiAgentV2RequestSkipsNamespaceConflict(t *testing.T) {
 	}
 }
 
+// TestOptimizeCodexMultiAgentV2RequestSkipsDottedAliasConflict ensures a
+// legitimate user-defined flat function named collaboration-optimize.<tool>
+// is treated as a reserved optimized-collaboration conflict, so the optimizer
+// stays disabled and the response-side dotted restore rule can never
+// misroute calls to that user tool. See PR #5538 review (P2).
+func TestOptimizeCodexMultiAgentV2RequestSkipsDottedAliasConflict(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"}]},{"type":"function","name":"collaboration-optimize.custom_tool","parameters":{"type":"object"}}]}`)
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
+	if optimized {
+		t.Fatal("dotted alias conflict unexpectedly enabled optimization")
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("dotted alias conflict changed payload: %s", got)
+	}
+	if namespace := gjson.GetBytes(got, "tools.0.name").String(); namespace != codexCollaborationNamespace {
+		t.Fatalf("collaboration namespace was renamed despite conflict: %q", namespace)
+	}
+}
+
+// TestCodexToolsHaveOptimizedCollaborationConflictForms verifies the conflict
+// matcher against all reserved optimized-name forms and near-prefix names
+// that must remain unaffected.
+func TestCodexToolsHaveOptimizedCollaborationConflictForms(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		toolName string
+		want     bool
+	}{
+		{name: "exact optimized namespace", toolName: "collaboration-optimize", want: true},
+		{name: "double-underscore alias", toolName: "collaboration-optimize__spawn_agent", want: true},
+		{name: "dotted flat alias", toolName: "collaboration-optimize.custom_tool", want: true},
+		{name: "near-prefix longer word", toolName: "collaboration-optimizer.custom_tool", want: false},
+		{name: "prefixed unrelated name", toolName: "x-collaboration-optimize.custom_tool", want: false},
+		{name: "unrelated dotted name", toolName: "unrelated.dotted_tool", want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tools := gjson.Parse(`[{"type":"function","name":` + strconv.Quote(tt.toolName) + `}]`)
+			if got := codexToolsHaveOptimizedCollaborationConflict(tools); got != tt.want {
+				t.Fatalf("codexToolsHaveOptimizedCollaborationConflict(%q) = %v, want %v", tt.toolName, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestOptimizeCodexCollaborationNamespaceWithoutModels(t *testing.T) {
 	t.Parallel()
 
@@ -453,6 +506,65 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	}
 	if unchanged := RestoreCodexMultiAgentV2Response(payload, false); string(unchanged) != string(payload) {
 		t.Fatalf("inactive restore changed payload: %s", unchanged)
+	}
+}
+
+// TestRestoreCodexMultiAgentV2ResponseDottedFlatNames covers third-party
+// Responses upstreams (codex-api-key over plain HTTP) that flatten the
+// optimized collaboration namespace into dotted flat function names.
+// See router-for-me/CLIProxyAPI#5524.
+func TestRestoreCodexMultiAgentV2ResponseDottedFlatNames(t *testing.T) {
+	t.Parallel()
+
+	lifecycleTools := []string{"spawn_agent", "send_message", "followup_task", "wait_agent", "list_agents"}
+	for _, tool := range lifecycleTools {
+		payload := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_838779_0","name":"collaboration-optimize.` + tool + `","namespace":null,"arguments":"{\"task_name\":\"mode2_workspace_discovery\"}"}}`)
+		got := RestoreCodexMultiAgentV2Response(payload, true)
+		if name := gjson.GetBytes(got, "item.name").String(); name != tool {
+			t.Fatalf("dotted flat name restore: item.name = %q, want %q", name, tool)
+		}
+		if namespace := gjson.GetBytes(got, "item.namespace").String(); namespace != codexCollaborationNamespace {
+			t.Fatalf("dotted flat name restore: item.namespace = %q, want %q", namespace, codexCollaborationNamespace)
+		}
+		if arguments := gjson.GetBytes(got, "item.arguments").String(); !strings.Contains(arguments, "mode2_workspace_discovery") {
+			t.Fatalf("dotted flat name restore changed arguments: %s", arguments)
+		}
+		if unchanged := RestoreCodexMultiAgentV2Response(payload, false); string(unchanged) != string(payload) {
+			t.Fatalf("inactive restore changed payload: %s", unchanged)
+		}
+	}
+}
+
+// TestRestoreCodexMultiAgentV2ResponseDottedFlatNamesGuarded ensures dotted
+// normalization is restricted to actual collaboration tool-call items and
+// leaves unrelated names, non-tool items, and malformed payloads untouched.
+func TestRestoreCodexMultiAgentV2ResponseDottedFlatNamesGuarded(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"output":[
+				{"type":"message","name":"collaboration-optimize.plain"},
+				{"type":"function_call","name":"unrelated.dotted_tool","arguments":"{}"},
+				{"type":"function_call","name":"collaboration-optimizer.spawn_agent","arguments":"{}"}
+			]
+		}
+	}`)
+	got := RestoreCodexMultiAgentV2Response(payload, true)
+	if name := gjson.GetBytes(got, "response.output.0.name").String(); name != "collaboration-optimize.plain" {
+		t.Fatalf("non-tool dotted name was unexpectedly rewritten: %q", name)
+	}
+	if name := gjson.GetBytes(got, "response.output.1.name").String(); name != "unrelated.dotted_tool" {
+		t.Fatalf("unrelated dotted tool name was unexpectedly rewritten: %q", name)
+	}
+	if name := gjson.GetBytes(got, "response.output.2.name").String(); name != "collaboration-optimizer.spawn_agent" {
+		t.Fatalf("near-prefix dotted name was unexpectedly rewritten: %q", name)
+	}
+
+	malformed := []byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","name":"collaboration-optimize.spawn_agent"}`)
+	if string(RestoreCodexMultiAgentV2Response(malformed, true)) != string(malformed) {
+		t.Fatalf("malformed payload was changed: %s", RestoreCodexMultiAgentV2Response(malformed, true))
 	}
 }
 
