@@ -29,10 +29,14 @@ const (
 	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
 	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
 	managementAssetName          = "management.html"
+	tempAssetFilePattern         = "management-*.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
 	updateCheckInterval          = 3 * time.Hour
-	maxAssetDownloadSize         = 50 << 20 // 10 MB safety limit for management asset downloads
+	maxAssetDownloadSize         = 50 << 20 // 50 MB safety limit for management asset downloads
+
+	defaultStaticDirPerm os.FileMode = 0o755
+	defaultAssetFilePerm os.FileMode = 0o644
 )
 
 // ManagementFileName exposes the control panel asset filename.
@@ -225,7 +229,7 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			}
 		}
 
-		if errMkdirAll := os.MkdirAll(staticDir, 0o755); errMkdirAll != nil {
+		if errMkdirAll := os.MkdirAll(staticDir, defaultStaticDirPerm); errMkdirAll != nil {
 			log.WithError(errMkdirAll).Warn("failed to prepare static directory for management asset")
 			return nil, nil
 		}
@@ -407,7 +411,7 @@ func fileSHA256(path string) (string, error) {
 }
 
 func atomicWriteFile(path string, data []byte) error {
-	tmpFile, err := os.CreateTemp(filepath.Dir(path), "management-*.html")
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), tempAssetFilePattern)
 	if err != nil {
 		return err
 	}
@@ -422,7 +426,7 @@ func atomicWriteFile(path string, data []byte) error {
 		return err
 	}
 
-	if err = tmpFile.Chmod(0o644); err != nil {
+	if err = tmpFile.Chmod(defaultAssetFilePerm); err != nil {
 		return err
 	}
 
