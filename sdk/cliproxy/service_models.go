@@ -74,7 +74,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		}
 		models = applyExcludedModels(models, excluded)
 	case constant.GeminiInteractions:
-		models = registry.GetGeminiModels()
+		models = registry.GetGeminiInteractionsModels()
 		if entry := s.resolveConfigInteractionsKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildGeminiConfigModels(entry)
