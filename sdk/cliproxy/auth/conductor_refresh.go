@@ -358,7 +358,12 @@ func authHasRefreshCredential(auth *Auth) bool {
 	if authMetadataString(auth, "refresh_token") != "" {
 		return true
 	}
-	return authMetadataString(auth, "refreshToken") != ""
+	if authMetadataString(auth, "refreshToken") != "" {
+		return true
+	}
+	// Meta exchanges its device token for a replacement API key after a 401.
+	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") &&
+		(authMetadataString(auth, "dca_token") != "" || strings.TrimSpace(auth.Attributes["dca_token"]) != "")
 }
 
 func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {

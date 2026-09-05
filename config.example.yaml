@@ -474,6 +474,22 @@ nonstream-keepalive-interval: 0
 #     excluded-models:
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix
+#
+# Meta API keys (Muse Code)
+# Uses the native Meta executor targeting https://api.meta.ai/v1.
+# meta-api-key:
+#   - api-key: "..."
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#     prefix: "meta" # optional: require calls like "meta/muse-spark-1.3" to target this credential
+#     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
+#     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#     base-url: "https://api.meta.ai/v1" # optional: defaults to https://api.meta.ai/v1
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models:
+#       - name: "muse-spark-1.3" # upstream model name
+#         alias: "muse-latest"   # client alias mapped to the upstream model
+#     excluded-models:
+#       - "muse-spark-1.1"
 
 # Claude API keys
 # claude-api-key:
