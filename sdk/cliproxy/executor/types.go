@@ -70,6 +70,9 @@ const (
 	LCPMinPrefixLengthMetadataKey = "lcp_min_prefix_length"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
+	// CredentialGroupsMetadataKey restricts auth selection to credentials in one of
+	// the listed operator-defined groups. An explicitly empty list denies all credentials.
+	CredentialGroupsMetadataKey = "credential_groups"
 	// SessionAffinityProviderMetadataKey carries the affinity selection namespace
 	// (provider string, e.g. the literal "mixed" pool key) used by SessionAffinitySelector.Pick,
 	// so OnResult keys the session cache identically to how selection read it.

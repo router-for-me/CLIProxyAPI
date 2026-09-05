@@ -41,6 +41,15 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Optionally restrict a downstream API key to credentials carrying one of the
+# listed credential_group values in their auth JSON. Keys omitted here retain
+# unrestricted legacy behavior. Scoped keys never fall back outside their groups.
+# An explicitly empty list denies all credentials; use the management DELETE
+# endpoint to remove a binding and restore unrestricted behavior.
+# api-key-credential-groups:
+#   "your-api-key-1": ["team-a"]
+#   "your-api-key-2": ["team-b"]
+
 # Enable debug logging
 debug: false
 
@@ -645,6 +654,7 @@ nonstream-keepalive-interval: 0
 #       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
+#         credential-group: "team-a" # optional: only downstream API keys assigned to team-a may use this credential
 #         weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
