@@ -1,0 +1,59 @@
+name: Rebase plugin model-list patch
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rebase-plugin-model-list-filter
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    if: github.repository == 'wignerStan/CLIProxyAPI'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out patch branch
+        uses: actions/checkout@v5
+        with:
+          ref: feature/plugin-model-list-filter
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Rebase onto upstream main
+        id: rebase
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_head=$(git rev-parse HEAD)
+          echo "expected_head=${expected_head}" >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          git fetch --no-tags upstream main
+          git rebase upstream/main
+
+      - name: Test patched SDK
+        run: go test ./sdk/cliproxy/...
+
+      - name: Build server
+        run: go build ./cmd/server
+
+      - name: Update patch branch
+        env:
+          EXPECTED_HEAD: ${{ steps.rebase.outputs.expected_head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push \
+            --force-with-lease=refs/heads/feature/plugin-model-list-filter:${EXPECTED_HEAD} \
+            origin HEAD:refs/heads/feature/plugin-model-list-filter
