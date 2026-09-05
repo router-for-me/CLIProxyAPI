@@ -716,7 +716,14 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		return
 	}
 
-	filtered := make([]map[string]any, 0, len(entries))
+	c.JSON(http.StatusOK, gin.H{
+		"object": "list",
+		"data":   formatHomeOpenAIModels(entries),
+	})
+}
+
+func formatHomeOpenAIModels(entries []homeModelEntry) []map[string]any {
+	models := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
 		model := map[string]any{
 			"id":     entry.id,
@@ -728,12 +735,18 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		if entry.ownedBy != "" {
 			model["owned_by"] = entry.ownedBy
 		}
-		filtered = append(filtered, model)
+		if entry.displayName != "" {
+			model["display_name"] = entry.displayName
+		}
+		if entry.contextLength > 0 {
+			model["context_length"] = entry.contextLength
+		}
+		if entry.maxCompletionTokens > 0 {
+			model["max_completion_tokens"] = entry.maxCompletionTokens
+		}
+		models = append(models, model)
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"object": "list",
-		"data":   filtered,
-	})
+	return models
 }
 
 func formatHomeClaudeModels(entries []homeModelEntry) []map[string]any {
