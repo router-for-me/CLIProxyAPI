@@ -3,8 +3,11 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -14,6 +17,29 @@ import (
 	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 )
+
+const (
+	claudeLiveUsageTickInterval  = 2 * time.Second
+	claudeThinkingTokenCountBeta = "thinking-token-count-2026-05-13"
+)
+
+func claudeThinkingTokenCountRequested(headers http.Header) bool {
+	if strings.Contains(strings.ToLower(headers.Get("Anthropic-Beta")), claudeThinkingTokenCountBeta) {
+		return true
+	}
+	// Claude App workflow workers currently omit the beta header while retaining
+	// the Claude CLI session headers and support for estimated_tokens deltas.
+	return strings.EqualFold(strings.TrimSpace(headers.Get("X-App")), "cli") && strings.TrimSpace(headers.Get("X-Claude-Code-Session-Id")) != ""
+}
+
+func validateClaudeBridgeContextWindow(model string, body []byte, opts cliproxyexecutor.Options) (int64, error) {
+	if opts.Alt != constant.ClaudeResponsesBridgeAlt {
+		return 0, nil
+	}
+	// Claude decides when to compact using its configured window. Let the
+	// upstream enforce its actual context limit instead of imposing 200k here.
+	return estimateCodexInputTokens(model, body)
+}
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -41,7 +67,6 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: tokenizer init failed: %w", err)
 	}
-
 	count, err := countCodexInputTokens(enc, body)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: token counting failed: %w", err)
@@ -50,6 +75,23 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: translated}, nil
+}
+
+func estimateCodexInputTokens(model string, body []byte) (int64, error) {
+	enc, err := tokenizerForCodexModel(model)
+	if err != nil {
+		return 0, fmt.Errorf("tokenizer init failed: %w", err)
+	}
+	count, err := countCodexInputTokens(enc, body)
+	if err != nil {
+		return 0, fmt.Errorf("token counting failed: %w", err)
+	}
+	// Account conservatively for the Codex request framing and provider prompt that
+	// are included in terminal upstream usage but are not present in the JSON body.
+	if count > 0 {
+		count += 256
+	}
+	return count, nil
 }
 
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {
