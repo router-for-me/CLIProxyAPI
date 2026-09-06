@@ -523,3 +523,42 @@ func TestApplyClaudeHeaders_StructuredHelperBetaOrderPreservedWithAdvisor(t *tes
 		t.Fatalf("helper Anthropic-Beta =\n got:  %q\n want: %q", got, helperBeta)
 	}
 }
+
+// Claude Code 2.1.261 sends a per-turn {"role":"system"} turn that carries
+// output_config, declared by per-turn-control-2026-07-01. The rebuilt baseline
+// must forward that beta when the caller asks for it, in the client's position
+// right after mid-conversation-system, while still dropping unknown betas.
+func TestApplyClaudeHeaders_PerTurnControlBetaFollowsCaller(t *testing.T) {
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", claudeCodeBeta+","+claudeMidConvSystemBeta+","+claudePerTurnControlBeta+",totally-made-up-2030-01-01")
+
+	req := newClaudeHeaderTestRequest(t, nil)
+	if err := applyClaudeHeaders(req, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, false, nil,
+		[]byte(`{"model":"claude-opus-5","messages":[{"role":"system","content":[],"output_config":{"effort":"high"}}]}`), nil, incoming, false); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+
+	got := req.Header.Get("Anthropic-Beta")
+	if !strings.Contains(got, ","+claudeMidConvSystemBeta+","+claudePerTurnControlBeta+",") {
+		t.Fatalf("Anthropic-Beta = %q, want %s right after %s", got, claudePerTurnControlBeta, claudeMidConvSystemBeta)
+	}
+	if strings.Contains(got, "totally-made-up-2030-01-01") {
+		t.Fatalf("Anthropic-Beta = %q, unknown caller beta reached upstream", got)
+	}
+
+	// count_tokens replaces the baseline with the fixed count-tokens profile; the
+	// same body is forwarded, so the beta has to survive there too.
+	body := []byte(`{"model":"claude-opus-5","messages":[{"role":"system","content":[],"output_config":{"effort":"high"}}]}`)
+	countReq := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages/count_tokens", bytes.NewReader(body))
+	if err := applyClaudeHeaders(countReq, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, false, nil,
+		body, nil, incoming, false); err != nil {
+		t.Fatalf("applyClaudeHeaders(count_tokens) error = %v", err)
+	}
+	got = countReq.Header.Get("Anthropic-Beta")
+	if !strings.Contains(got, claudePerTurnControlBeta) {
+		t.Fatalf("count_tokens Anthropic-Beta = %q, want %s forwarded", got, claudePerTurnControlBeta)
+	}
+	if strings.Contains(got, "totally-made-up-2030-01-01") {
+		t.Fatalf("count_tokens Anthropic-Beta = %q, unknown caller beta reached upstream", got)
+	}
+}
