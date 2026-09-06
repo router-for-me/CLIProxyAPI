@@ -314,6 +314,9 @@ func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}
+	if errMsg.StatusCode > 0 && errMsg.Error != nil {
+		return fmt.Errorf("model execution failed with status %d: %w", errMsg.StatusCode, errMsg.Error)
+	}
 	if errMsg.Error != nil {
 		return errMsg.Error
 	}
