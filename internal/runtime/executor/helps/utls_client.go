@@ -361,6 +361,21 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
 // fallback for other hosts.
 func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	// Priority 0: relay-bound auth. Relay traffic goes through the plain
+	// relay transport for all hosts — the relay re-originates the upstream
+	// connection, so TLS fingerprinting adds nothing here.
+	if relayRT := relayTransportFor(auth); relayRT != nil {
+		client := &http.Client{Transport: &fallbackRoundTripper{
+			anthropic: relayRT,
+			chrome:    relayRT,
+			fallback:  relayRT,
+		}}
+		if timeout > 0 {
+			client.Timeout = timeout
+		}
+		return client
+	}
+
 	var proxyURL string
 	if auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)

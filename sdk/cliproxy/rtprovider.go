@@ -26,6 +26,27 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	if auth == nil {
 		return nil
 	}
+	// Relay-bound auths come first: a relay base replaces proxy semantics
+	// entirely. Cache key is prefixed so relay URLs never collide with
+	// proxy URLs sharing the same string.
+	if relayBase := strings.TrimSpace(auth.RelayBaseURL); relayBase != "" {
+		key := "relay:" + relayBase
+		p.mu.RLock()
+		rt := p.cache[key]
+		p.mu.RUnlock()
+		if rt != nil {
+			return rt
+		}
+		relayRT, errRelay := proxyutil.NewRelayTransport(relayBase)
+		if errRelay != nil {
+			log.Errorf("%v", errRelay)
+			return nil
+		}
+		p.mu.Lock()
+		p.cache[key] = relayRT
+		p.mu.Unlock()
+		return relayRT
+	}
 	proxyStr := strings.TrimSpace(auth.ProxyURL)
 	if proxyStr == "" {
 		return nil
