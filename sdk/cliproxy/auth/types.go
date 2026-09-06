@@ -112,6 +112,34 @@ const (
 	pluginVirtualAttrEnabled = "true"
 )
 
+// AuthFileBasename returns the backing auth file basename for logs.
+// It never returns a directory path, token contents, or other secrets.
+func AuthFileBasename(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	candidates := []string{auth.FileName}
+	if auth.Attributes != nil {
+		candidates = append(candidates, auth.Attributes["path"])
+	}
+	candidates = append(candidates, auth.ID)
+	for _, raw := range candidates {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		base := filepath.Base(filepath.ToSlash(filepath.Clean(raw)))
+		if base == "" || base == "." || base == "/" {
+			continue
+		}
+		if strings.ContainsAny(base, `/\`) {
+			continue
+		}
+		return base
+	}
+	return ""
+}
+
 // MarkPluginVirtualAuth marks an auth that was expanded from a plugin-owned source file.
 func MarkPluginVirtualAuth(auth *Auth, sourcePath string, ordinal int) {
 	if auth == nil {
