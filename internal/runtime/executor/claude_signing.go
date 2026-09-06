@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
@@ -513,21 +515,68 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 	}
 
 	apiKey, baseURL := claudeCreds(auth)
-	if apiKey == "" {
+	apiKey = strings.TrimSpace(apiKey)
+	baseURL = strings.TrimSpace(baseURL)
+	if apiKey == "" && baseURL == "" {
 		return nil
+	}
+	// Header names are case-insensitive; header values distinguish credentials.
+	formatHeaderIdentity := func(headers map[string]string) string {
+		fields := make([]string, 0, len(headers))
+		for key, value := range headers {
+			fields = append(fields, http.CanonicalHeaderKey(strings.TrimSpace(key))+"\x00"+strings.TrimSpace(value))
+		}
+		sort.Strings(fields)
+		return strings.Join(fields, "\x00")
+	}
+	authHeaders := make(map[string]string)
+	for key, value := range auth.Attributes {
+		if strings.HasPrefix(key, "header:") {
+			authHeaders[strings.TrimPrefix(key, "header:")] = strings.TrimSpace(value)
+		}
+	}
+	formattedAuthHeaders := formatHeaderIdentity(authHeaders)
+	authPrefix := strings.TrimSpace(auth.Prefix)
+	authProxyURL := strings.TrimSpace(auth.ProxyURL)
+	matchesCredentials := func(entry *config.ClaudeKey) bool {
+		return strings.TrimSpace(entry.APIKey) == apiKey && strings.TrimSpace(entry.BaseURL) == baseURL
+	}
+	matchesIdentity := func(entry *config.ClaudeKey) bool {
+		return matchesCredentials(entry) && strings.TrimSpace(entry.Prefix) == authPrefix && strings.TrimSpace(entry.ProxyURL) == authProxyURL && formatHeaderIdentity(entry.Headers) == formattedAuthHeaders
+	}
+
+	configAuth := auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig
+	if configAuth && auth.Attributes != nil {
+		index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex]))
+		if errIndex == nil && index >= 0 && index < len(cfg.ClaudeKey) && matchesIdentity(&cfg.ClaudeKey[index]) {
+			return &cfg.ClaudeKey[index]
+		}
 	}
 
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if !strings.EqualFold(cfgKey, apiKey) {
-			continue
+		if matchesIdentity(entry) {
+			return entry
 		}
-		if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
-			continue
+	}
+	// Config auths record their full identity, including empty fields. Only legacy
+	// auths without a prefix, proxy or custom headers use credential-only fallback.
+	if configAuth || authPrefix != "" || authProxyURL != "" || len(authHeaders) != 0 {
+		return nil
+	}
+	for i := range cfg.ClaudeKey {
+		entry := &cfg.ClaudeKey[i]
+		if matchesCredentials(entry) {
+			return entry
 		}
-		return entry
+	}
+	if apiKey != "" && baseURL == "" {
+		for i := range cfg.ClaudeKey {
+			entry := &cfg.ClaudeKey[i]
+			if strings.TrimSpace(entry.APIKey) == apiKey {
+				return entry
+			}
+		}
 	}
 
 	return nil
