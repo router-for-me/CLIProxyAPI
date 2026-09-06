@@ -174,6 +174,10 @@ func TestClaudeOAuthRequestHeaderOrderMatchesNative220Capture(t *testing.T) {
 	if got := claudeOAuthRequestHeaderOrder("GET", "/api/oauth/claude_cli/roles"); !reflect.DeepEqual(got, wantProfile) {
 		t.Fatalf("roles header order = %v, want %v", got, wantProfile)
 	}
+	// The usage poll is the same authenticated Axios GET shape.
+	if got := claudeOAuthRequestHeaderOrder("GET", "/api/oauth/usage"); !reflect.DeepEqual(got, wantProfile) {
+		t.Fatalf("usage header order = %v, want %v", got, wantProfile)
+	}
 	// The authorization-code exchange is a POST and keeps the JSON-body order.
 	if got := claudeOAuthRequestHeaderOrder("POST", "/api/oauth/profile"); !reflect.DeepEqual(got, wantRefresh) {
 		t.Fatalf("non-GET profile target header order = %v, want %v", got, wantRefresh)
