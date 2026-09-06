@@ -631,11 +631,31 @@ func toolOutputFallbackPart(item gjson.Result) []byte {
 	return part
 }
 
-// shortenNameIfNeeded applies the simple shortening rule for a single name.
-// If the name length exceeds 64, it will try to preserve the "mcp__" prefix and last segment.
-// Otherwise it truncates to 64 characters.
+// sanitizeToolName converts a client tool name to the character set accepted
+// by the Codex Responses API. The caller keeps the original name in the
+// request-local reverse map, so this transformation is safe for responses.
+func sanitizeToolName(name string) string {
+	var sanitized strings.Builder
+	sanitized.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			sanitized.WriteRune(r)
+		default:
+			sanitized.WriteByte('_')
+		}
+	}
+	if sanitized.Len() == 0 {
+		return "_"
+	}
+	return sanitized.String()
+}
+
+// shortenNameIfNeeded normalizes a single tool name and limits it to 64
+// characters. It preserves the "mcp__" prefix and last segment when possible.
 func shortenNameIfNeeded(name string) string {
 	const limit = 64
+	name = sanitizeToolName(name)
 	if len(name) <= limit {
 		return name
 	}
@@ -653,29 +673,14 @@ func shortenNameIfNeeded(name string) string {
 	return name[:limit]
 }
 
-// buildShortNameMap generates unique short names (<=64) for the given list of names.
-// It preserves the "mcp__" prefix with the last segment when possible and ensures uniqueness
-// by appending suffixes like "~1", "~2" if needed.
+// buildShortNameMap generates unique normalized names (<=64) for the given
+// list of names. It ensures uniqueness by appending legal numeric suffixes.
 func buildShortNameMap(names []string) map[string]string {
-	const limit = 64
 	used := map[string]struct{}{}
 	m := map[string]string{}
 
 	baseCandidate := func(n string) string {
-		if len(n) <= limit {
-			return n
-		}
-		if strings.HasPrefix(n, "mcp__") {
-			idx := strings.LastIndex(n, "__")
-			if idx > 0 {
-				cand := "mcp__" + n[idx+2:]
-				if len(cand) > limit {
-					cand = cand[:limit]
-				}
-				return cand
-			}
-		}
-		return n[:limit]
+		return shortenNameIfNeeded(n)
 	}
 
 	makeUnique := func(cand string) string {
@@ -685,6 +690,7 @@ func buildShortNameMap(names []string) map[string]string {
 		base := cand
 		for i := 1; ; i++ {
 			suffix := "_" + strconv.Itoa(i)
+			const limit = 64
 			allowed := limit - len(suffix)
 			if allowed < 0 {
 				allowed = 0

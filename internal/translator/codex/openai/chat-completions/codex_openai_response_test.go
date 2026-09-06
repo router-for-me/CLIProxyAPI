@@ -390,6 +390,17 @@ func TestConvertCodexResponseToOpenAINonStream_CustomToolCall(t *testing.T) {
 	}
 }
 
+func TestConvertCodexResponseToOpenAINonStream_RestoresNormalizedToolName(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"function","function":{"name":"mcp.server:search","parameters":{"type":"object"}}}]}`)
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.5","status":"completed","output":[{"type":"function_call","call_id":"call_search","name":"mcp_server_search","arguments":"{}"}]}}`)
+
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.5", originalRequest, nil, raw, nil)
+	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.name").String(); got != "mcp.server:search" {
+		t.Fatalf("restored tool name = %q, want original name; response=%s", got, out)
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_StreamPartialImageEmitsDeltaImages(t *testing.T) {
 	ctx := context.Background()
 	var param any
