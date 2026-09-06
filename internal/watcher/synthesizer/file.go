@@ -71,6 +71,25 @@ func SynthesizeAuthFile(ctx *SynthesisContext, fullPath string, data []byte) ([]
 	return synthesizeFileAuths(ctx, fullPath, data)
 }
 
+// NormalizeCredentialPrefix reduces a raw `prefix` field to the value routing
+// actually uses, or an empty string when the credential carries no usable
+// prefix.
+//
+// Surrounding slashes are stripped, so `/team/` and `team` address the same
+// credential. A prefix with an interior slash is rejected rather than repaired:
+// it would be ambiguous against the `prefix/model` split, and a credential
+// carrying one is not reachable by prefix at all.
+//
+// Exported because the management API reports this field, and a second copy of
+// the rule would drift from the routing it is meant to describe.
+func NormalizeCredentialPrefix(raw string) string {
+	trimmed := strings.Trim(strings.TrimSpace(raw), "/")
+	if trimmed == "" || strings.Contains(trimmed, "/") {
+		return ""
+	}
+	return trimmed
+}
+
 func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, error) {
 	if ctx == nil || len(data) == 0 {
 		return nil, nil
@@ -165,11 +184,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 
 	prefix := ""
 	if rawPrefix, ok := metadata["prefix"].(string); ok {
-		trimmed := strings.TrimSpace(rawPrefix)
-		trimmed = strings.Trim(trimmed, "/")
-		if trimmed != "" && !strings.Contains(trimmed, "/") {
-			prefix = trimmed
-		}
+		prefix = NormalizeCredentialPrefix(rawPrefix)
 	}
 
 	disabled, _ := metadata["disabled"].(bool)
