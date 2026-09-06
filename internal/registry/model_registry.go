@@ -159,6 +159,9 @@ type ModelRegistry struct {
 	generation uint64
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
+	// modelAliasPatterns holds routing-only wildcard alias patterns consulted when
+	// an exact model id lookup finds no provider. See model_alias_pattern.go.
+	modelAliasPatterns []ModelAliasPattern
 }
 
 // Global model registry instance
@@ -1339,7 +1342,22 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	defer r.mutex.RUnlock()
 
 	registration, exists := r.models[modelID]
-	if !exists || registration == nil || len(registration.Providers) == 0 {
+	if !exists || registration == nil {
+		// A wildcard OAuth model alias never registers a model of its own, so an
+		// unknown id falls back to the pattern table and reports the providers of its
+		// target model. A registered id is never redirected this way, not even while
+		// it temporarily has no providers, so the fallback cannot shadow a model the
+		// operator registered on purpose.
+		target := r.resolveModelAliasPatternLocked(modelID)
+		if target == "" {
+			return nil
+		}
+		registration = r.modelRegistrationForTargetLocked(target)
+		if registration == nil {
+			return nil
+		}
+	}
+	if len(registration.Providers) == 0 {
 		return nil
 	}
 

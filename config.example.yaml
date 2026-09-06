@@ -707,6 +707,20 @@ nonstream-keepalive-interval: 0
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
+# An alias may contain '*', which matches zero or more characters (case-insensitive).
+# Wildcard aliases are routing-only: the pattern itself is never listed in /v1/models,
+# because a pattern is not a model id, so `fork` has no effect on a wildcard entry.
+# The model a wildcard targets always keeps its own catalog entry, even when the same
+# name is also mapped to an exact alias without `fork`, because routing resolves the
+# pattern to that upstream id. Exact aliases always win; wildcards are consulted only
+# when no exact alias matched, and the first matching pattern is used.
+# This is useful for clients that send dated model ids, for example:
+#   - name: "gpt-5.6-luna"
+#     alias: "claude-haiku-4-5-*"
+# Wildcards must be declared here, in the global configuration: only these entries
+# make a matching model routable. A wildcard placed in an auth file's "model_aliases"
+# resolves after a credential is selected but is not enough on its own, so it is
+# reported with a warning at load time.
 # Optional per-entry fields:
 #   fork: true                  # keep the upstream model and also expose the alias as a separate client-visible model
 #   display-name: "Model Name" # override the human-readable name shown in model catalogs
