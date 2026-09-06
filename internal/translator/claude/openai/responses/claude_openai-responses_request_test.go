@@ -1728,3 +1728,61 @@ func TestConvertOpenAIResponsesRequestToClaude_StripsTrailingThinkingBlocksFromA
 		}
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToClaudeKeepsAgentMessageText(t *testing.T) {
+	in := []byte(`{"model":"claude-fable-5-1","input":[
+		{"type":"agent_message","content":[{"type":"input_text","text":"do X"}]},
+		{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"secret task"}]},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"plain"}]}]}`)
+
+	for _, tc := range []struct {
+		name string
+		fn   func(string, []byte, bool) []byte
+	}{
+		{"standard", ConvertOpenAIResponsesRequestToClaude},
+		{"compat", ConvertOpenAIResponsesRequestToClaudeWithCompat},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := tc.fn("claude-fable-5-1", in, false)
+			root := gjson.ParseBytes(out)
+			messages := root.Get("messages").Array()
+			if len(messages) != 1 {
+				t.Fatalf("messages count = %d, want 1; output=%s", len(messages), string(out))
+			}
+			if got := messages[0].Get("role").String(); got != "user" {
+				t.Fatalf("messages[0].role = %q, want user", got)
+			}
+			parts := messages[0].Get("content").Array()
+			if len(parts) != 3 {
+				t.Fatalf("parts count = %d, want 3; output=%s", len(parts), string(out))
+			}
+			wantTexts := []string{"do X", "secret task", "plain"}
+			for i, want := range wantTexts {
+				if got := parts[i].Get("text").String(); got != want {
+					t.Errorf("parts[%d].text = %q, want %q", i, got, want)
+				}
+			}
+		})
+	}
+
+	t.Run("mixed_content_in_single_agent_message", func(t *testing.T) {
+		mixedIn := []byte(`{"model":"claude-fable-5-1","input":[
+			{"type":"agent_message","content":[
+				{"type":"input_text","text":"step 1"},
+				{"type":"encrypted_content","encrypted_content":"step 2"}
+			]}
+		]}`)
+		out := ConvertOpenAIResponsesRequestToClaude("claude-fable-5-1", mixedIn, false)
+		root := gjson.ParseBytes(out)
+		parts := root.Get("messages.0.content").Array()
+		if len(parts) != 2 {
+			t.Fatalf("parts count = %d, want 2; output=%s", len(parts), string(out))
+		}
+		if got := parts[0].Get("text").String(); got != "step 1" {
+			t.Errorf("parts[0].text = %q, want step 1", got)
+		}
+		if got := parts[1].Get("text").String(); got != "step 2" {
+			t.Errorf("parts[1].text = %q, want step 2", got)
+		}
+	})
+}
