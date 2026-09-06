@@ -510,3 +510,67 @@ func TestConvertOpenAIResponsesRequestToAntigravity_InterveningDeveloperMessageP
 		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity request: %v; output=%s", errPair, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToAntigravity_ReasoningSummaries(t *testing.T) {
+	tests := []struct {
+		name       string
+		inputJSON  string
+		wantExists bool
+		wantVal    bool
+	}{
+		{
+			name:       "effort alone enables includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high"},"input":"hello"}`,
+			wantExists: true,
+			wantVal:    true,
+		},
+		{
+			name:       "effort none does not enable includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"none"},"input":"hello"}`,
+			wantExists: false,
+		},
+		{
+			name:       "effort empty does not enable includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"  "},"input":"hello"}`,
+			wantExists: false,
+		},
+		{
+			name:       "missing effort does not enable includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{},"input":"hello"}`,
+			wantExists: false,
+		},
+		{
+			name:       "non-string effort does not enable includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":10},"input":"hello"}`,
+			wantExists: false,
+		},
+		{
+			name:       "explicit summary preserved without overriding",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","summary":"auto"},"input":"hello"}`,
+			wantExists: false, // ConvertOpenAIResponsesRequestToAntigravity leaves explicit summary to ApplySummaryConfig downstream
+		},
+		{
+			name:       "explicit null summary preserved without enabling",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","summary":null},"input":"hello"}`,
+			wantExists: false, // ConvertOpenAIResponsesRequestToAntigravity does not enable includeThoughts on null summary
+		},
+		{
+			name:       "explicit generate_summary preserved",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","generate_summary":"detailed"},"input":"hello"}`,
+			wantExists: false, // ConvertOpenAIResponsesRequestToAntigravity leaves explicit summary to ApplySummaryConfig downstream
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(tc.inputJSON), false)
+			res := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
+			if res.Exists() != tc.wantExists {
+				t.Fatalf("includeThoughts exists = %v, want %v; out=%s", res.Exists(), tc.wantExists, out)
+			}
+			if tc.wantExists && res.Bool() != tc.wantVal {
+				t.Fatalf("includeThoughts = %v, want %v; out=%s", res.Bool(), tc.wantVal, out)
+			}
+		})
+	}
+}
