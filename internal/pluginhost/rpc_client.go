@@ -269,6 +269,11 @@ func sanitizePluginMetadataValue(value any) (any, bool) {
 		int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64:
 		return value, true
+	case json.Number:
+		if _, errMarshal := json.Marshal(v); errMarshal != nil {
+			return nil, false
+		}
+		return v, true
 	case map[string]any:
 		return sanitizePluginMetadata(v), true
 	case []any:
