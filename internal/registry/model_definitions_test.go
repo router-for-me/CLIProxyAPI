@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGetStaticModelDefinitionsByChannelSupportsGeminiInteractions(t *testing.T) {
 	models := GetStaticModelDefinitionsByChannel("gemini-interactions")
@@ -109,5 +112,70 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 	}
 	if got := AntigravityWebSearchModelFor("unknown-model"); got != "" {
 		t.Fatalf("unknown model should not get Antigravity web search model, got %q", got)
+	}
+}
+
+func TestIsImageOnlyModel(t *testing.T) {
+	modelRegistry := GetGlobalRegistry()
+	const dynamicImageModelID = "registry-dynamic-image-model"
+	modelRegistry.RegisterClient("registry-dynamic-image-client", "openai-compatibility", []*ModelInfo{{
+		ID:   dynamicImageModelID,
+		Type: OpenAIImageModelType,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("registry-dynamic-image-client")
+	})
+
+	if !IsImageOnlyModel(dynamicImageModelID) {
+		t.Fatalf("IsImageOnlyModel(%q) = false, want true", dynamicImageModelID)
+	}
+
+	for _, id := range []string{
+		codexBuiltinImage15ModelID,
+		codexBuiltinImageModelID,
+		xaiBuiltinImageModelID,
+		xaiBuiltinImageQualityModelID,
+		xaiBuiltinImage20ModelID,
+	} {
+		if !IsImageOnlyModel(id) {
+			t.Fatalf("IsImageOnlyModel(%q) = false, want true", id)
+		}
+		if !IsImageOnlyModel(" " + strings.ToUpper(id) + " ") {
+			t.Fatalf("IsImageOnlyModel(%q) must ignore case and surrounding space", id)
+		}
+	}
+
+	// Video built-ins and chat models keep their existing routing.
+	for _, id := range []string{
+		xaiBuiltinVideoModelID,
+		xaiBuiltinVideo15ModelID,
+		xaiBuiltinVideo15PreviewID,
+		"gpt-5.6-luna",
+		"grok-imagine",
+		"gpt-image",
+		"",
+	} {
+		if IsImageOnlyModel(id) {
+			t.Fatalf("IsImageOnlyModel(%q) = true, want false", id)
+		}
+	}
+}
+
+// TestImageOnlyBuiltinsAreRegistered keeps the image-only set in sync with the
+// built-in definitions: every entry must still be injected by WithCodexBuiltins
+// or WithXAIBuiltins, so a renamed built-in cannot silently stop being rejected
+// on chat-style endpoints.
+func TestImageOnlyBuiltinsAreRegistered(t *testing.T) {
+	registered := make(map[string]struct{})
+	for _, model := range append(WithCodexBuiltins(nil), WithXAIBuiltins(nil)...) {
+		if model == nil {
+			continue
+		}
+		registered[strings.ToLower(strings.TrimSpace(model.ID))] = struct{}{}
+	}
+	for id := range imageOnlyBuiltinModelIDs {
+		if _, ok := registered[id]; !ok {
+			t.Fatalf("image-only model %q is not registered as a built-in", id)
+		}
 	}
 }

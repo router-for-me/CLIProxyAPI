@@ -10,6 +10,7 @@ import (
 
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -229,21 +230,32 @@ func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageMode
 		baseModel = strings.TrimSpace(modelName)
 	}
 	if isOpenAIImageOnlyModel(baseModel) && !allowImageModel {
+		message := fmt.Sprintf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel))
+		// The code is deliberately unsupported_value rather than model_not_supported:
+		// the credential cooldown path matches the literal "model_not_supported"
+		// anywhere in an upstream error message, so emitting it would make a proxy
+		// chained in front of this one suspend the (credential, model) pair for hours
+		// over a pure client mistake.
+		body := `{"error":{"message":"","type":"invalid_request_error","code":"unsupported_value","param":"model"}}`
+		body, errSet := sjson.Set(body, "error.message", message)
+		if errSet != nil {
+			// Drop the model name if encoding fails so a quote cannot corrupt the JSON
+			// object or overwrite error.code the way a formatted literal would.
+			body = `{"error":{"message":"model is only supported on /v1/images/generations and /v1/images/edits","type":"invalid_request_error","code":"unsupported_value","param":"model"}}`
+		}
 		return &interfaces.ErrorMessage{
-			StatusCode: http.StatusServiceUnavailable,
-			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", routeModelBaseName(baseModel)),
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(body),
 		}
 	}
 	return nil
 }
 
+// isOpenAIImageOnlyModel reports whether the requested model can only run on the
+// image endpoints. The model set lives in the registry alongside the built-in
+// definitions so a newly added image model does not have to be duplicated here.
 func isOpenAIImageOnlyModel(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(routeModelBaseName(model))) {
-	case "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-image-quality", "grok-imagine-image-2.0":
-		return true
-	default:
-		return false
-	}
+	return registry.IsImageOnlyModel(routeModelBaseName(model))
 }
 
 func routeModelBaseName(model string) string {
