@@ -368,6 +368,8 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "antigravity", nil
 	case "xai", "x-ai", "x.ai", "grok":
 		return "xai", nil
+	case "meta", "muse":
+		return "meta", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}
