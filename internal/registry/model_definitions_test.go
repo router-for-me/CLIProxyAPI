@@ -111,3 +111,24 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 		t.Fatalf("unknown model should not get Antigravity web search model, got %q", got)
 	}
 }
+
+func TestWithGeminiInteractionsBuiltinsIncludesTranscribe(t *testing.T) {
+	models := WithGeminiInteractionsBuiltins(nil)
+	for _, model := range models {
+		if model != nil && model.ID == geminiInteractionsTranscribeID {
+			if len(model.SupportedInputModalities) == 0 {
+				t.Fatal("transcribe builtin must declare audio input")
+			}
+			return
+		}
+	}
+	t.Fatalf("expected Gemini interactions builtin model %s", geminiInteractionsTranscribeID)
+}
+
+func TestGetGeminiModelsExcludesInteractionsOnlyBuiltins(t *testing.T) {
+	for _, model := range GetGeminiModels() {
+		if model != nil && model.ID == geminiInteractionsTranscribeID {
+			t.Fatalf("%s answers only on the Interactions API and must stay out of the plain Gemini channel", geminiInteractionsTranscribeID)
+		}
+	}
+}
