@@ -2,8 +2,10 @@ package executor
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -140,4 +142,54 @@ func TestOpenAICompatExecutorPropagatesRetryAfter(t *testing.T) {
 
 func durationPointer(value time.Duration) *time.Duration {
 	return &value
+}
+
+func TestOpenAICompatRetryAfterSecondsBoundary(t *testing.T) {
+	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	// Largest whole-second count that fits in time.Duration (int64 nanoseconds)
+	// without overflowing when multiplied by time.Second.
+	maxWholeSeconds := int64(math.MaxInt64) / int64(time.Second)
+
+	tests := []struct {
+		name    string
+		seconds int64
+		want    *time.Duration
+	}{
+		{
+			name:    "ordinary seconds",
+			seconds: 17,
+			want:    durationPointer(17 * time.Second),
+		},
+		{
+			name:    "largest whole seconds representable",
+			seconds: maxWholeSeconds,
+			want:    durationPointer(time.Duration(maxWholeSeconds) * time.Second),
+		},
+		{
+			name:    "one second beyond representable range must not wrap",
+			seconds: maxWholeSeconds + 1,
+			want:    nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			headers := http.Header{"Retry-After": {strconv.FormatInt(test.seconds, 10)}}
+			got := openAICompatRetryAfter(http.StatusTooManyRequests, headers, nil, now)
+			if test.want == nil {
+				if got != nil {
+					t.Fatalf("actual = %v, want nil", *got)
+				}
+				t.Logf("actual = nil, want nil")
+				return
+			}
+			if got == nil {
+				t.Fatalf("actual = nil, want %v", *test.want)
+			}
+			t.Logf("actual = %v, want %v", *got, *test.want)
+			if *got != *test.want {
+				t.Fatalf("actual = %v, want %v", *got, *test.want)
+			}
+		})
+	}
 }
