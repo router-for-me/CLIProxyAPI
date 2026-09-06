@@ -724,6 +724,9 @@ type OpenAICompatibilityModel struct {
 	// MaxContextLength overrides the context window advertised to Codex clients.
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 
+	// MaxOutputTokens overrides the generation limit advertised to Codex clients.
+	MaxOutputTokens int `yaml:"max-output-tokens,omitempty" json:"max-output-tokens,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
