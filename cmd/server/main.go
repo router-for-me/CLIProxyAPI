@@ -814,6 +814,7 @@ func main() {
 		// Wire the PG-backed upstream providers store (normalized source of
 		// truth for both API-key providers and OAuth/file-backed auths).
 		pgUpstreamProviders := store.NewUpstreamProviderStore(pgStoreInst)
+		pgProxyPools := store.NewProxyPoolStore(pgStoreInst)
 		// Seed model catalog when empty so the registry can load from PG.
 		seedCtx, seedCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		if count, countErr := pgModelsStore.Count(seedCtx); countErr == nil && count == 0 {
@@ -836,7 +837,7 @@ func main() {
 		// startup. This keeps persisted row identities (for example
 		// claude:94) in the config before the service synthesizes API-key auths
 		// and registers their model capabilities.
-		if renderedCfg, applyErr := applyPersistedUpstreamProviders(context.Background(), pgUpstreamProviders, cfg, configFilePath, cfg.AuthDir); applyErr != nil {
+		if renderedCfg, applyErr := applyPersistedUpstreamProviders(context.Background(), pgUpstreamProviders, cfg, configFilePath, cfg.AuthDir, pgProxyPools); applyErr != nil {
 			log.WithError(applyErr).Warn("failed to apply persisted upstream providers at startup")
 		} else if renderedCfg != nil {
 			cfg = renderedCfg
@@ -855,6 +856,7 @@ func main() {
 			PricingSourcesDir:  pgPricingSourcesDir,
 			ManagementTokens:   pgMgmtTokens,
 			UpstreamProviders:  pgUpstreamProviders,
+			ProxyPools:         pgProxyPools,
 			SyncLog:            pgSyncLog,
 			ModelGroups:        pgModelGroups,
 			AutoRouters:        pgAutoRouters,

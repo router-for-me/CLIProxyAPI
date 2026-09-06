@@ -12,6 +12,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// ProxyPoolLister is the minimal pool access the renderer needs. Satisfied
+// by store.ProxyPoolStore; nil = no pool resolution (bindings keep manual
+// proxy URLs).
+type ProxyPoolLister interface {
+	List(ctx context.Context) ([]store.ProxyPool, error)
+}
+
 // ApplyArtifacts re-renders config.yaml provider sections + auth-dir JSON
 // files from the normalized upstream_providers rows, writing them into the
 // spool paths. It returns a populated Config (the provider lists replaced)
@@ -21,8 +28,8 @@ import (
 // configPath is the spooled config.yaml path; authDir is the spooled auth
 // directory. The provider list fields of cfg are overwritten in place by the
 // rendered rows; all other fields (server, plugins, oauth-model-alias, etc.)
-// are preserved as-is.
-func ApplyArtifacts(ctx context.Context, st store.UpstreamProviderStore, cfg *config.Config, configPath, authDir string) (*config.Config, error) {
+// are preserved as-is. poolSource may be nil.
+func ApplyArtifacts(ctx context.Context, st store.UpstreamProviderStore, cfg *config.Config, configPath, authDir string, poolSource ProxyPoolLister) (*config.Config, error) {
 	if st == nil {
 		return nil, fmt.Errorf("upstreamsync: store is nil")
 	}
@@ -34,8 +41,18 @@ func ApplyArtifacts(ctx context.Context, st store.UpstreamProviderStore, cfg *co
 		return nil, fmt.Errorf("upstreamsync: list upstream providers: %w", err)
 	}
 
+	// Resolve proxy-pool bindings at render time (nil source = no pools).
+	var pools poolLookup
+	if poolSource != nil {
+		poolRows, errPools := poolSource.List(ctx)
+		if errPools != nil {
+			return nil, fmt.Errorf("upstreamsync: list proxy pools: %w", errPools)
+		}
+		pools = buildPoolLookup(poolRows)
+	}
+
 	// Render config provider lists from rows.
-	rendered := RenderConfig(providers)
+	rendered := RenderConfigWithPools(providers, pools)
 	merged := cfg.CloneForRuntime()
 	merged.GeminiKey = rendered.GeminiKey
 	merged.InteractionsKey = rendered.InteractionsKey

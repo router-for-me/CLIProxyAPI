@@ -99,6 +99,11 @@ type Handler struct {
 	// /upstream-providers routes return 503 in that case.
 	pgUpstreamProviders store.UpstreamProviderStore
 
+	// pgProxyPools stores the named egress-proxy pools backing the
+	// /v0/management/proxy-pools routes. Also feeds the render-time pool
+	// resolution in applyUpstreamProviders. nil when PG is not configured.
+	pgProxyPools store.ProxyPoolStore
+
 	// pgSyncLog stores the upstream OAuth/auth token refresh outcomes recorded
 	// by the auth manager's RefreshSink. nil when PG is not configured — the
 	// /upstream-sync-log routes return 503 in that case.
@@ -362,6 +367,18 @@ func (h *Handler) SetUpstreamProvidersStore(upstream store.UpstreamProviderStore
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgUpstreamProviders = upstream
+}
+
+// SetProxyPoolStore wires the PG-backed store for the proxy_pools table.
+// When nil, the /v0/management/proxy-pools routes return 503 and the
+// upstream-provider render skips pool resolution.
+func (h *Handler) SetProxyPoolStore(pools store.ProxyPoolStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pgProxyPools = pools
 }
 
 // SetSyncLogStore wires the PG-backed store for the upstream_sync_log table
@@ -939,6 +956,7 @@ func (h *Handler) applyUpstreamProviders(ctx context.Context) {
 	cfg := h.cfg
 	configPath := h.configFilePath
 	authDir := ""
+	poolSource := h.pgProxyPools
 	if cfg != nil {
 		authDir = cfg.AuthDir
 	}
@@ -946,7 +964,7 @@ func (h *Handler) applyUpstreamProviders(ctx context.Context) {
 	if cfg == nil {
 		return
 	}
-	merged, err := upstreamsync.ApplyArtifacts(ctx, h.pgUpstreamProviders, cfg, configPath, authDir)
+	merged, err := upstreamsync.ApplyArtifacts(ctx, h.pgUpstreamProviders, cfg, configPath, authDir, poolSource)
 	if err != nil {
 		log.WithError(err).Warn("management: apply upstream providers failed")
 		return

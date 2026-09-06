@@ -77,6 +77,10 @@ type PgStoreHandles struct {
 	// OAuth/file-backed auths). nil when PG is not configured — the
 	// /upstream-providers routes return 503 in that case.
 	UpstreamProviders store.UpstreamProviderStore
+	// ProxyPools is the PG-backed store for the proxy_pools table (named
+	// egress-proxy pools bound to upstream provider rows/entries). nil when
+	// PG is not configured — the /proxy-pools routes return 503 in that case.
+	ProxyPools store.ProxyPoolStore
 	// SyncLog is the PG-backed store for the upstream_sync_log table, which
 	// records every upstream OAuth/auth token refresh outcome (success +
 	// failure) for the Analysis → Upstream Providers page. nil when PG is not

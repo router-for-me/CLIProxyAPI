@@ -240,6 +240,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetUserStore(handles.Users)
 		s.mgmt.SetManagementTokenStore(handles.ManagementTokens)
 		s.mgmt.SetUpstreamProvidersStore(handles.UpstreamProviders)
+		s.mgmt.SetProxyPoolStore(handles.ProxyPools)
 		s.mgmt.SetModelGroupStore(handles.ModelGroups)
 		s.mgmt.SetAutoRouterStore(handles.AutoRouters)
 		s.mgmt.SetAutoRouterProfileStore(handles.AutoRouterProfiles)
