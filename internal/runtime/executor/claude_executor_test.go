@@ -4725,8 +4725,8 @@ func TestCheckSystemInstructionsWithMode_NormalTextWithAdvisorWordDoesNotBypassM
 	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
 		t.Fatalf("messages count = %d, want 3 (user + 2 system messages): %s", got, out)
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
-	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance")
+	assertClaudeMidConversationSystemMessage(t, out, 2, "second guidance")
 }
 
 func TestCheckSystemInstructionsWithMode_AdvisorToolResultArrayContent(t *testing.T) {
