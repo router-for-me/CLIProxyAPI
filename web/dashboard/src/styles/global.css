@@ -4838,3 +4838,16 @@ button.ghost:hover:not(:disabled) {
   color: var(--text-muted);
   margin-bottom: 4px;
 }
+
+/* Proxy Pools — effective-URL preview under the modal's proxy URL field.
+   Shows what upstreamsync will actually store (composite suffix or relay
+   base) so the operator never guesses at the stored form. */
+.pool-preview {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: -6px;
+  word-break: break-all;
+}
+.pool-preview code {
+  color: var(--accent);
+}

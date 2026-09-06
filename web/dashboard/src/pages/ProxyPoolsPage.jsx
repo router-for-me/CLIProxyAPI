@@ -10,6 +10,7 @@ import {
   ApiError,
 } from '../api/client.js';
 import { Spinner, ErrorBanner, EmptyState, Modal } from '../components/Primitives.jsx';
+import { ToggleRow, PasswordInput } from './manage-cpa/FormPrimitives.jsx';
 
 // parseProxyLine mirrors the server-side batch-import parse: full URLs pass
 // through (allowed schemes only), bare host:port and user:pass@host:port
@@ -59,6 +60,77 @@ export function formatTestStatus(status) {
   return 'Not tested';
 }
 
+// validatePoolForm checks the add/edit modal fields inline. Returns a map of
+// { fieldName: message } — absent keys are valid. Pure; exported for tests.
+export function validatePoolForm(form) {
+  const errors = {};
+  const name = String(form.name || '').trim();
+  if (!name) {
+    errors.name = 'Name is required.';
+  } else if (name.length < 2) {
+    errors.name = 'Name must be at least 2 characters.';
+  }
+
+  const rawURL = String(form.proxy_url || '').trim();
+  const poolType = String(form.type || 'http');
+  if (!rawURL) {
+    errors.proxy_url = poolType === 'http' ? 'Proxy URL is required.' : 'Relay base URL is required.';
+  } else {
+    let parsed = null;
+    try {
+      parsed = new URL(rawURL);
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || !parsed.protocol || !parsed.host) {
+      errors.proxy_url = 'Must be an absolute URL with scheme and host.';
+    } else if (poolType === 'http') {
+      const scheme = parsed.protocol.replace(':', '');
+      if (!ALLOWED_SCHEMES.includes(scheme)) {
+        errors.proxy_url = 'Scheme must be one of http, https, socks5, socks5h.';
+      }
+    } else if (parsed.protocol !== 'https:') {
+      errors.proxy_url = 'Relay base URL must be an https URL.';
+    }
+  }
+
+  const noProxy = String(form.no_proxy || '').trim();
+  if (noProxy) {
+    const parts = noProxy.split(',').map((p) => p.trim()).filter(Boolean);
+    const hasWildcard = parts.includes('*');
+    if (hasWildcard && parts.length > 1) {
+      errors.no_proxy = '"*" must be the only entry — it bypasses the proxy for every host.';
+    }
+  }
+  return errors;
+}
+
+// effectivePreview renders the URL as the backend will actually store and
+// use it: http pools get the composite suffix (?no_proxy=…&strict=…), relay
+// pools keep their plain https base. Invalid URLs yield '' so the preview
+// stays quiet while the operator is still typing.
+export function effectivePreview(form) {
+  const rawURL = String(form.proxy_url || '').trim();
+  if (!rawURL) return '';
+  let parsed;
+  try {
+    parsed = new URL(rawURL);
+  } catch {
+    return '';
+  }
+  if (String(form.type || 'http') !== 'http') {
+    return parsed.toString();
+  }
+  const attrs = [];
+  const parts = String(form.no_proxy || '').split(',').map((p) => p.trim()).filter(Boolean);
+  if (parts.length > 0) {
+    attrs.push(`no_proxy=${encodeURIComponent(parts.join(',').toLowerCase())}`);
+  }
+  attrs.push(form.strict_proxy ? 'strict=true' : 'strict=false');
+  const sep = rawURL.includes('?') ? '&' : '?';
+  return rawURL + sep + attrs.join('&');
+}
+
 // redactProxyURL hides credentials in the table view.
 function redactProxyURL(url) {
   return String(url || '').replace(/\/\/[^@/]*@/, '//redacted@');
@@ -102,6 +174,14 @@ export default function ProxyPoolsPage() {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(emptyForm());
   const [formError, setFormError] = useState('');
+  const [touchedFields, setTouchedFields] = useState({});
+
+  // Delete confirmation modal (replaces window.confirm): shows the pool
+  // identity + a bound-count warning, and keeps server-side 409 messages
+  // inside the modal so the operator sees why the delete was rejected.
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
@@ -140,7 +220,13 @@ export default function ProxyPoolsPage() {
     setTimeout(() => setNotice(''), 4000);
   };
 
-  const openCreate = () => { setEditing(null); setForm(emptyForm()); setFormError(''); setShowForm(true); };
+  const openCreate = () => {
+    setEditing(null);
+    setForm(emptyForm());
+    setFormError('');
+    setTouchedFields({});
+    setShowForm(true);
+  };
   const openEdit = (pool) => {
     setEditing(pool);
     setForm({
@@ -152,15 +238,23 @@ export default function ProxyPoolsPage() {
       strict_proxy: pool.strict_proxy !== false,
     });
     setFormError('');
+    setTouchedFields({});
     setShowForm(true);
+  };
+
+  // Inline per-field errors: computed live; Save blocks until clean.
+  const fieldErrors = validatePoolForm(form);
+  const hasFieldErrors = Object.keys(fieldErrors).length > 0;
+
+  const setField = (name, value) => {
+    setForm((f) => ({ ...f, [name]: value }));
+    setTouchedFields((t) => ({ ...t, [name]: true }));
   };
 
   const saveForm = async () => {
     setFormError('');
-    if (!form.name.trim() || !form.proxy_url.trim()) {
-      setFormError('Name and proxy URL are required.');
-      return;
-    }
+    setTouchedFields({ name: true, proxy_url: true, no_proxy: true });
+    if (hasFieldErrors) return;
     setBusy(true);
     try {
       if (editing) {
@@ -191,19 +285,35 @@ export default function ProxyPoolsPage() {
     }
   };
 
-  const handleDelete = async (pool) => {
-    if (!window.confirm(`Delete proxy pool "${pool.name}"?`)) return;
+  const openDelete = (pool) => {
+    setConfirmDelete(pool);
+    setDeleteError('');
+  };
+
+  const confirmDeletePool = async () => {
+    if (!confirmDelete) return;
+    setDeleting(true);
+    setDeleteError('');
     try {
-      await deleteProxyPool(pool.id);
+      await deleteProxyPool(confirmDelete.id);
+      setConfirmDelete(null);
       await reload();
       flash('Proxy pool deleted');
     } catch (err) {
+      // Keep the modal open and surface the reason in place: a 409 carries
+      // the live bound_entry_count; anything else is the server message.
       if (err instanceof ApiError && err.status === 409) {
-        const bound = err.payload?.bound_entry_count ?? 0;
-        flash(`Cannot delete: still bound by ${bound} upstream row(s)/entrie(s).`);
+        const bound = err.payload?.bound_entry_count;
+        setDeleteError(
+          Number.isFinite(bound)
+            ? `Still bound by ${bound} upstream row(s)/entrie(s) — unbind them first.`
+            : 'Still bound by upstream provider rows or entries.',
+        );
       } else {
-        flash(err instanceof ApiError ? err.message : 'Delete failed');
+        setDeleteError(err instanceof ApiError ? err.message : 'Delete failed');
       }
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -333,7 +443,6 @@ export default function ProxyPoolsPage() {
               <th>Test</th>
               <th>Last tested</th>
               <th>Active</th>
-              <th>Strict</th>
               <th>Bound</th>
               <th />
             </tr>
@@ -341,28 +450,55 @@ export default function ProxyPoolsPage() {
           <tbody>
             {pools.map((pool) => (
               <tr key={pool.id}>
-                <td>{pool.name}</td>
+                <td className="pool-name" title={pool.name}>{pool.name}</td>
                 <td>{TYPE_LABELS[pool.type] || pool.type}</td>
-                <td><code>{redactProxyURL(pool.proxy_url)}</code></td>
-                <td>{pool.no_proxy || '—'}</td>
-                <td title={pool.last_error || ''}>{formatTestStatus(pool.test_status)}</td>
+                <td><code className="pool-url" title={redactProxyURL(pool.proxy_url)}>{redactProxyURL(pool.proxy_url)}</code></td>
+                <td><code className="pool-noproxy">{pool.no_proxy || '—'}</code></td>
+                <td>
+                  <span
+                    className={`badge ${pool.test_status === 'active' ? 'badge--active' : pool.test_status === 'error' ? 'badge--revoked' : 'badge--muted'}`}
+                    title={pool.last_error || 'Not tested yet — use the Test action.'}
+                  >
+                    {formatTestStatus(pool.test_status)}
+                  </span>
+                </td>
                 <td>{formatDateTime(pool.last_tested_at)}</td>
                 <td>
-                  <input
-                    type="checkbox"
+                  <ToggleRow
+                    label=""
                     checked={pool.is_active}
                     onChange={() => toggleActive(pool)}
-                    aria-label={`Activate ${pool.name}`}
                   />
                 </td>
-                <td>{pool.strict_proxy ? 'yes' : 'no'}</td>
-                <td>{pool.bound_entry_count || 0}</td>
+                <td>
+                  <span className={`badge ${pool.bound_entry_count > 0 ? 'badge--info' : 'badge--muted'}`}>
+                    {pool.bound_entry_count || 0}
+                  </span>
+                </td>
                 <td className="row-actions">
-                  <button onClick={() => handleTest(pool)} disabled={testingId === pool.id}>
-                    {testingId === pool.id ? 'Testing…' : 'Test'}
+                  <button
+                    className="row-actions__btn"
+                    onClick={() => handleTest(pool)}
+                    disabled={testingId === pool.id}
+                    title={testingId === pool.id ? 'Testing…' : 'Test connectivity'}
+                  >
+                    {testingId === pool.id ? 'Testing…' : '⚡ Test'}
                   </button>
-                  <button onClick={() => openEdit(pool)}>Edit</button>
-                  <button className="danger" onClick={() => handleDelete(pool)}>Delete</button>
+                  <button
+                    className="row-actions__btn row-actions__btn--primary"
+                    onClick={() => openEdit(pool)}
+                    title="Edit pool"
+                  >
+                    ✎ Edit
+                  </button>
+                  <button
+                    className="btn-icon"
+                    onClick={() => openDelete(pool)}
+                    title="Delete pool"
+                    aria-label={`Delete ${pool.name}`}
+                  >
+                    🗑
+                  </button>
                 </td>
               </tr>
             ))}
@@ -372,66 +508,89 @@ export default function ProxyPoolsPage() {
 
       {showForm && (
         <Modal title={editing ? `Edit ${editing.name}` : 'Add proxy pool'} onClose={() => setShowForm(false)}>
-          <div className="form">
-            <label>
-              Name
-              <input
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="residential-pool-1"
-              />
-            </label>
-            <label>
-              Type
-              <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
-                <option value="http">HTTP/SOCKS proxy</option>
-                <option value="vercel">Vercel relay</option>
-                <option value="cloudflare">Cloudflare relay</option>
-                <option value="deno">Deno relay</option>
-              </select>
-            </label>
-            <label>
-              {form.type === 'http' ? 'Proxy URL' : 'Relay base URL (https)'}
-              <input
-                value={form.proxy_url}
-                onChange={(e) => setForm({ ...form, proxy_url: e.target.value })}
-                placeholder={form.type === 'http' ? 'socks5://user:pass@host:1080' : 'https://myrelay.example.workers.dev'}
-              />
-            </label>
-            {form.type === 'http' && (
+          <form className="form" onSubmit={(e) => { e.preventDefault(); saveForm(); }}>
+            <div className="form-section">
+              <div className="form-section__title">Pool</div>
               <label>
-                no_proxy (comma-separated host list)
+                Name
                 <input
-                  value={form.no_proxy}
-                  onChange={(e) => setForm({ ...form, no_proxy: e.target.value })}
-                  placeholder="api.anthropic.com,.internal"
+                  value={form.name}
+                  onChange={(e) => setField('name', e.target.value)}
+                  placeholder="residential-pool-1"
+                  autoFocus
                 />
+                {touchedFields.name && fieldErrors.name && <span className="error-text">{fieldErrors.name}</span>}
+                {!fieldErrors.name && <span className="muted">Shown in the provider editor's proxy pool picker.</span>}
               </label>
-            )}
-            <label className="check">
-              <input
-                type="checkbox"
+              <label>
+                Type
+                <select value={form.type} onChange={(e) => setField('type', e.target.value)}>
+                  <option value="http">HTTP/SOCKS proxy</option>
+                  <option value="vercel">Vercel relay</option>
+                  <option value="cloudflare">Cloudflare relay</option>
+                  <option value="deno">Deno relay</option>
+                </select>
+                {form.type !== 'http' && (
+                  <span className="muted">
+                    Relay base URL must be https — traffic is forwarded via x-relay-target headers to the relay worker.
+                  </span>
+                )}
+              </label>
+              <label>
+                {form.type === 'http' ? 'Proxy URL' : 'Relay base URL (https)'}
+                <PasswordInput
+                  value={form.proxy_url}
+                  onChange={(v) => setField('proxy_url', v)}
+                  placeholder={form.type === 'http' ? 'socks5://user:pass@host:1080' : 'https://myrelay.example.workers.dev'}
+                />
+                {touchedFields.proxy_url && fieldErrors.proxy_url && <span className="error-text">{fieldErrors.proxy_url}</span>}
+              </label>
+              {form.type === 'http' && (
+                <label>
+                  no_proxy
+                  <input
+                    value={form.no_proxy}
+                    onChange={(e) => setField('no_proxy', e.target.value)}
+                    placeholder="api.anthropic.com,.internal"
+                    spellCheck={false}
+                  />
+                  <span className="muted">
+                    Comma-separated hosts that bypass this proxy: <code>api.anthropic.com</code> exact,{' '}
+                    <code>.internal</code> subdomain suffix, <code>*</code> everything. Empty = proxy all targets.
+                  </span>
+                </label>
+              )}
+              {form.type === 'http' && effectivePreview(form) && (
+                <div className="pool-preview" title="What the renderer stores for this pool">
+                  Stored as <code>{redactProxyURL(effectivePreview(form))}</code>
+                </div>
+              )}
+            </div>
+
+            <div className="form-section">
+              <div className="form-section__title">Behavior</div>
+              <ToggleRow
+                label="Strict mode"
+                hint="On (default): a proxy failure fails the request. Off: one direct fallback retry — the server IP may reach the target."
                 checked={form.strict_proxy}
-                onChange={(e) => setForm({ ...form, strict_proxy: e.target.checked })}
+                onChange={(v) => setField('strict_proxy', v)}
               />
-              Strict (proxy failure fails the request; off = one direct fallback)
-            </label>
-            <label className="check">
-              <input
-                type="checkbox"
+              <ToggleRow
+                label="Active"
+                hint="Inactive pools are skipped at render time; bound entries fall back to their manual proxy URL."
                 checked={form.is_active}
-                onChange={(e) => setForm({ ...form, is_active: e.target.checked })}
+                onChange={(v) => setField('is_active', v)}
               />
-              Active
-            </label>
+            </div>
+
             {formError && <p className="error-text">{formError}</p>}
             <div className="modal-actions">
-              <button onClick={() => setShowForm(false)}>Cancel</button>
-              <button className="primary" onClick={saveForm} disabled={busy}>
-                {busy ? 'Saving…' : 'Save'}
+              <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
+              <button className="primary" type="submit" disabled={busy || hasFieldErrors}>
+                {busy ? 'Saving…' : editing ? 'Save changes' : 'Create pool'}
               </button>
             </div>
-          </div>
+          </form>
         </Modal>
       )}
 
@@ -465,6 +624,29 @@ export default function ProxyPoolsPage() {
               <button onClick={() => { setShowImport(false); setImportResult(null); }}>Close</button>
               <button className="primary" onClick={runImport} disabled={busy}>
                 {busy ? 'Importing…' : 'Import'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {confirmDelete && (
+        <Modal title="Delete proxy pool" onClose={() => setConfirmDelete(null)}>
+          <div className="form">
+            <p>
+              Delete <strong>{confirmDelete.name}</strong>?
+            </p>
+            <p className="muted">
+              <code>{redactProxyURL(confirmDelete.proxy_url)}</code>
+              {confirmDelete.bound_entry_count > 0 && (
+                <> — currently bound by <strong>{confirmDelete.bound_entry_count}</strong> upstream row(s)/entrie(s). The server will reject this delete until they are unbound.</>
+              )}
+            </p>
+            {deleteError && <p className="error-text">{deleteError}</p>}
+            <div className="modal-actions">
+              <button type="button" onClick={() => setConfirmDelete(null)} disabled={deleting}>Cancel</button>
+              <button className="danger" type="button" onClick={confirmDeletePool} disabled={deleting}>
+                {deleting ? 'Deleting…' : 'Delete pool'}
               </button>
             </div>
           </div>
