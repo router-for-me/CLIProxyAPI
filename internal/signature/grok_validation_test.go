@@ -138,6 +138,55 @@ func TestInspectGrokEncryptedContent_RejectsAntigravityClaudeThinkingSignature(t
 	}
 }
 
+func TestInspectGrokEncryptedContent_RejectsStructurallyCompleteUnknownClaudeCAISGeneration(t *testing.T) {
+	parts := defaultClaudeModelFreeCAISParts()
+	parts.envelopeVersion = 5
+	signature := parts.encode()
+
+	if IsValidClaudeCAISSignature(signature) {
+		t.Fatal("unknown-generation CAIS unexpectedly passed the generation allowlist")
+	}
+	if !IsStructurallyCompleteClaudeCAISEnvelope(signature) {
+		t.Fatal("unknown-generation CAIS was not recognized as structurally complete")
+	}
+	if _, err := InspectGrokEncryptedContent(signature); err == nil || !strings.Contains(err.Error(), "Claude CAIS") {
+		t.Fatalf("InspectGrokEncryptedContent() error = %v, want Claude CAIS exclusion", err)
+	}
+}
+
+func TestStructurallyCompleteClaudeCAISEnvelope_RejectsMalformedInputs(t *testing.T) {
+	valid := defaultClaudeModelFreeCAISParts()
+	valid.envelopeVersion = 5
+
+	wrongWire := valid
+	wrongWire.carrierTypes = []protowire.Type{protowire.VarintType}
+
+	padded := valid
+	padded.carrierLen--
+	paddedSignature := padded.encode()
+	if !strings.Contains(paddedSignature, "=") {
+		t.Fatal("padded fixture contains no padding")
+	}
+
+	nonProtobuf := base64.RawStdEncoding.EncodeToString([]byte{claudeCAISSignatureMarker, 0xff, 0xff})
+	tests := []struct {
+		name      string
+		signature string
+	}{
+		{name: "wrong wire", signature: wrongWire.encode()},
+		{name: "truncated", signature: valid.encode()[:len(valid.encode())-1]},
+		{name: "non protobuf", signature: nonProtobuf},
+		{name: "padded", signature: paddedSignature},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if IsStructurallyCompleteClaudeCAISEnvelope(tc.signature) {
+				t.Fatal("malformed input was recognized as a structurally complete Claude CAIS envelope")
+			}
+		})
+	}
+}
+
 // TestInspectGrokEncryptedContent_RejectsClaudeCAISSignature covers the CAIS
 // envelope emitted by the newest Claude Code models. CAIS payloads are
 // high-entropy standard base64 and drop their padding whenever the decoded
