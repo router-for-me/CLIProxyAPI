@@ -805,11 +805,40 @@ func TestConvertClaudeRequestToCodex_OutputConfigFormat(t *testing.T) {
 		if got := root.Get("text.format.name").String(); got != "cli_proxy_structured_output" {
 			t.Errorf("expected text.format.name to be 'cli_proxy_structured_output', got %q", got)
 		}
-		if got := root.Get("text.format.strict").Bool(); !got {
-			t.Errorf("expected text.format.strict to be true, got %v", got)
+		if got := root.Get("text.format.strict").Bool(); got {
+			t.Errorf("expected text.format.strict to default to false, got %v", got)
 		}
 		if got := root.Get("text.format.schema.properties.answer.type").String(); got != "string" {
 			t.Errorf("expected schema.properties.answer.type to be 'string', got %q", got)
+		}
+	})
+
+	t.Run("Valid json_schema format with explicit strict true", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"messages": [
+				{"role": "user", "content": "hello"}
+			],
+			"output_config": {
+				"format": {
+					"type": "json_schema",
+					"name": "strict_schema",
+					"strict": true,
+					"schema": {
+						"type": "object"
+					}
+				}
+			}
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+
+		if got := root.Get("text.format.name").String(); got != "strict_schema" {
+			t.Errorf("expected text.format.name to be 'strict_schema', got %q", got)
+		}
+		if got := root.Get("text.format.strict").Bool(); !got {
+			t.Errorf("expected text.format.strict to be true, got %v", got)
 		}
 	})
 

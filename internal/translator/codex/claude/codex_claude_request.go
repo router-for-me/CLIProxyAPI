@@ -434,9 +434,13 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 		if n := format.Get("name").String(); n != "" {
 			name = n
 		}
-		strict := true
-		if s := format.Get("strict"); s.Exists() && s.Type == gjson.False {
-			strict = false
+		// Default to non-strict: OpenAI strict mode requires "required" to list
+		// every property, which breaks upstream schemas carrying optional fields
+		// (e.g. Claude Code hook evaluator schemas). Only enable strict when the
+		// client explicitly requests it.
+		strict := false
+		if s := format.Get("strict"); s.Exists() && s.Type == gjson.True {
+			strict = true
 		}
 		translatedFormat := []byte(`{"type":"json_schema","name":"","strict":true,"schema":{}}`)
 		translatedFormat, _ = sjson.SetBytes(translatedFormat, "name", name)
