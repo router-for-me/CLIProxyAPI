@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -156,6 +157,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 	if !reflect.DeepEqual(oldCfg.Payload, newCfg.Payload) {
 		changes = appendPayloadConfigChanges(changes, oldCfg.Payload, newCfg.Payload)
+	}
+	if !thinkingEffortMappingsEqual(oldCfg.Thinking.EffortMapping, newCfg.Thinking.EffortMapping) {
+		changes = append(changes, fmt.Sprintf("thinking.effort-mapping: updated (%d -> %d rules)", len(oldCfg.Thinking.EffortMapping), len(newCfg.Thinking.EffortMapping)))
 	}
 
 	// API keys (redacted) and counts
@@ -465,6 +469,23 @@ func trimStrings(in []string) []string {
 		out[i] = strings.TrimSpace(in[i])
 	}
 	return out
+}
+
+func thinkingEffortMappingsEqual(a, b []config.ThinkingEffortMappingRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].From != b[i].From ||
+			a[i].To != b[i].To ||
+			a[i].SourceProtocol != b[i].SourceProtocol ||
+			a[i].TargetProtocol != b[i].TargetProtocol ||
+			a[i].TargetProvider != b[i].TargetProvider ||
+			!slices.Equal(a[i].Models, b[i].Models) {
+			return false
+		}
+	}
+	return true
 }
 
 func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.PayloadConfig) []string {

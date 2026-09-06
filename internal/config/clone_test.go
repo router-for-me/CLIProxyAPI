@@ -64,12 +64,20 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	if got := clone.Payload.Default[0].Params["object"].(map[string]any)["key"]; got != "value" {
 		t.Fatalf("clone payload object key = %#v, want value", got)
 	}
+	if clone.Thinking.EffortMapping[0].To != "ultra" {
+		t.Fatalf("clone thinking effort mapping target = %q, want ultra", clone.Thinking.EffortMapping[0].To)
+	}
+	if clone.Thinking.EffortMapping[0].Models[0] != "gpt-*" {
+		t.Fatalf("clone thinking effort mapping model = %q, want gpt-*", clone.Thinking.EffortMapping[0].Models[0])
+	}
 
 	clone.APIKeys[0] = "clone-client-key"
 	clone.OAuthExcludedModels["codex"][0] = "clone-hidden-model"
 	clone.OAuthModelAlias["codex"][0].Alias = "clone-client-model"
 	clone.OpenAICompatibility[0].Models[0].Thinking.Levels[0] = "clone-low"
 	clone.Payload.Default[0].Params["object"].(map[string]any)["key"] = "clone-value"
+	clone.Thinking.EffortMapping[0].To = "clone-ultra"
+	clone.Thinking.EffortMapping[0].Models[0] = "clone-gpt-*"
 	plugin := clone.Plugins.Configs["sample"]
 	setPluginRawScalar(t, &plugin.Raw, "mode", "third")
 	clone.Plugins.Configs["sample"] = plugin
@@ -91,6 +99,12 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	}
 	if got := cfg.Payload.Default[0].Params["object"].(map[string]any)["key"]; got != "mutated-value" {
 		t.Fatalf("cfg payload object key = %#v, want mutated-value", got)
+	}
+	if cfg.Thinking.EffortMapping[0].To != "mutated-ultra" {
+		t.Fatalf("cfg thinking effort mapping target = %q, want mutated-ultra", cfg.Thinking.EffortMapping[0].To)
+	}
+	if cfg.Thinking.EffortMapping[0].Models[0] != "mutated-gpt-*" {
+		t.Fatalf("cfg thinking effort mapping model = %q, want mutated-gpt-*", cfg.Thinking.EffortMapping[0].Models[0])
 	}
 }
 
@@ -186,6 +200,16 @@ func sampleCloneRuntimeConfig() *Config {
 		OAuthModelAlias: map[string][]OAuthModelAlias{
 			"codex": {{Name: "upstream-model", Alias: "client-model", Fork: true}},
 		},
+		Thinking: ThinkingPolicyConfig{
+			EffortMapping: []ThinkingEffortMappingRule{{
+				From:           "max",
+				To:             "ultra",
+				SourceProtocol: "claude",
+				TargetProtocol: "responses",
+				TargetProvider: "codex",
+				Models:         []string{"gpt-*", "o3-*"},
+			}},
+		},
 		Payload: PayloadConfig{
 			Default: []PayloadRule{{
 				Models: []PayloadModelRule{{
@@ -214,6 +238,8 @@ func mutateOriginalConfig(cfg *Config) {
 	cfg.OAuthModelAlias["codex"][0].Alias = "mutated-client-model"
 	cfg.OpenAICompatibility[0].Models[0].Thinking.Levels[0] = "mutated-low"
 	cfg.Payload.Default[0].Params["object"].(map[string]any)["key"] = "mutated-value"
+	cfg.Thinking.EffortMapping[0].To = "mutated-ultra"
+	cfg.Thinking.EffortMapping[0].Models[0] = "mutated-gpt-*"
 	plugin := cfg.Plugins.Configs["sample"]
 	setPluginRawScalar(nil, &plugin.Raw, "mode", "second")
 	cfg.Plugins.Configs["sample"] = plugin
