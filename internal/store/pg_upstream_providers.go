@@ -35,11 +35,15 @@ type UpstreamProvider struct {
 	// request-fault errors keep today's hard-stop behavior. Any valid value
 	// additionally opts the pool into aggressive failover — any entry error
 	// rotates to the next entry before surfacing to the client.
-	RoutingStrategy         string         `json:"routing_strategy,omitempty"`
-	Prefix                  string         `json:"prefix,omitempty"`
-	APIKey                  string         `json:"api_key,omitempty"`
-	BaseURL                 string         `json:"base_url,omitempty"`
-	ProxyURL                string         `json:"proxy_url,omitempty"`
+	RoutingStrategy string `json:"routing_strategy,omitempty"`
+	Prefix          string `json:"prefix,omitempty"`
+	APIKey          string `json:"api_key,omitempty"`
+	BaseURL         string `json:"base_url,omitempty"`
+	ProxyURL        string `json:"proxy_url,omitempty"`
+	// ProxyPoolID, when non-nil, binds the row to a proxy_pools entry; the
+	// renderer resolves it into the concrete ProxyURL (or RelayBaseURL for
+	// relay pools). nil = no row-level pool binding.
+	ProxyPoolID             *int64         `json:"proxy_pool_id,omitempty"`
 	Label                   string         `json:"label,omitempty"`
 	Email                   string         `json:"email,omitempty"`
 	FileName                string         `json:"file_name,omitempty"`
@@ -99,7 +103,10 @@ type UpstreamProviderAPIKey struct {
 	APIKey     string `json:"api_key"`
 	Name       string `json:"name,omitempty"`
 	ProxyURL   string `json:"proxy_url,omitempty"`
-	SortOrder  int    `json:"sort_order,omitempty"`
+	// ProxyPoolID, when non-nil, binds the entry to a proxy_pools entry and
+	// overrides the provider row's binding (see UpstreamProvider.ProxyPoolID).
+	ProxyPoolID *int64 `json:"proxy_pool_id,omitempty"`
+	SortOrder   int    `json:"sort_order,omitempty"`
 	// Weight is the optional proportional selection weight under
 	// weighted-round-robin routing. nil means the credential falls back to the
 	// scheduler default (1). The dashboard editor restricts user input to
@@ -208,7 +215,7 @@ func (s *pgUpstreamProviderStore) Get(ctx context.Context, id int64) (*UpstreamP
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT id, provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
-		       base_url, proxy_url, label, email, file_name, source_backend,
+		       base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
 		       status, unavailable, last_error, last_error_at, websockets,
 		       rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
 		       cloak_strict_mode, cloak_sensitive_words, cloak_cache_user_id,
@@ -257,17 +264,17 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 	row := tx.QueryRowContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
-			base_url, proxy_url, label, email, file_name, source_backend,
+			base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
 			status, unavailable, last_error, last_error_at, websockets,
 			rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
 			cloak_strict_mode, cloak_sensitive_words, cloak_cache_user_id,
 			token_access_token, token_refresh_token, token_token_type,
 			token_expiry, token_expired, token_scope, extra_config
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
 		)
 		RETURNING id, provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
-		          base_url, proxy_url, label, email, file_name, source_backend,
+		          base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
 		          status, unavailable, last_error, last_error_at, websockets,
 		          rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
 		          cloak_strict_mode, cloak_sensitive_words, cloak_cache_user_id,
@@ -276,7 +283,7 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 		          created_at, updated_at
 	`, s.table),
 		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), nullableString(p.Prefix),
-		nullableString(p.APIKey), nullableString(p.BaseURL), nullableString(p.ProxyURL),
+		nullableString(p.APIKey), nullableString(p.BaseURL), nullableString(p.ProxyURL), nullableID(p.ProxyPoolID),
 		nullableString(p.Label), nullableString(p.Email), nullableString(p.FileName),
 		nullableString(p.SourceBackend), nullableString(p.Status), p.Unavailable,
 		nullableString(p.LastError), nullableTime(p.LastErrorAt), p.Websockets,
@@ -340,32 +347,33 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 			api_key = $7,
 			base_url = $8,
 			proxy_url = $9,
-			label = $10,
-			email = $11,
-			file_name = $12,
-			source_backend = $13,
-			status = $14,
-			unavailable = $15,
-			last_error = $16,
-			last_error_at = $17,
-			websockets = $18,
-			rebuild_mid_system_message = $19,
-			experimental_cch_signing = $20,
-			cloak_mode = $21,
-			cloak_strict_mode = $22,
-			cloak_sensitive_words = $23,
-			cloak_cache_user_id = $24,
-			token_access_token = $25,
-			token_refresh_token = $26,
-			token_token_type = $27,
-			token_expiry = $28,
-			token_expired = $29,
-			token_scope = $30,
-			extra_config = $31,
+			proxy_pool_id = $10,
+			label = $11,
+			email = $12,
+			file_name = $13,
+			source_backend = $14,
+			status = $15,
+			unavailable = $16,
+			last_error = $17,
+			last_error_at = $18,
+			websockets = $19,
+			rebuild_mid_system_message = $20,
+			experimental_cch_signing = $21,
+			cloak_mode = $22,
+			cloak_strict_mode = $23,
+			cloak_sensitive_words = $24,
+			cloak_cache_user_id = $25,
+			token_access_token = $26,
+			token_refresh_token = $27,
+			token_token_type = $28,
+			token_expiry = $29,
+			token_expired = $30,
+			token_scope = $31,
+			extra_config = $32,
 			updated_at = NOW()
-		WHERE id = $32
+		WHERE id = $33
 		RETURNING id, provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
-		          base_url, proxy_url, label, email, file_name, source_backend,
+		          base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
 		          status, unavailable, last_error, last_error_at, websockets,
 		          rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
 		          cloak_strict_mode, cloak_sensitive_words, cloak_cache_user_id,
@@ -374,7 +382,7 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 		          created_at, updated_at
 	`, s.table),
 		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), nullableString(p.Prefix),
-		nullableString(p.APIKey), nullableString(p.BaseURL), nullableString(p.ProxyURL),
+		nullableString(p.APIKey), nullableString(p.BaseURL), nullableString(p.ProxyURL), nullableID(p.ProxyPoolID),
 		nullableString(p.Label), nullableString(p.Email), nullableString(p.FileName),
 		nullableString(p.SourceBackend), nullableString(p.Status), p.Unavailable,
 		nullableString(p.LastError), nullableTime(p.LastErrorAt), p.Websockets,
@@ -511,7 +519,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 
 	// API-key entries (openai-compatibility only).
 	aRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_id, api_key, name, proxy_url, sort_order, weight, priority
+		SELECT id, provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.entries), p.ID)
 	if err != nil {
@@ -520,8 +528,8 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	for aRows.Next() {
 		var e UpstreamProviderAPIKey
 		var entryName, proxyURL sql.NullString
-		var weight, priority sql.NullInt64
-		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &e.SortOrder, &weight, &priority); err != nil {
+		var weight, priority, entryPoolID sql.NullInt64
+		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &entryPoolID, &e.SortOrder, &weight, &priority); err != nil {
 			aRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider api key entry: %w", err)
 		}
@@ -531,6 +539,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 		if proxyURL.Valid {
 			e.ProxyURL = proxyURL.String
 		}
+		e.ProxyPoolID = nullableIDFromScan(entryPoolID)
 		if weight.Valid {
 			w := int(weight.Int64)
 			e.Weight = &w
@@ -699,20 +708,20 @@ func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *s
 		entry.SortOrder = sortOrder
 		if entry.ID == 0 {
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-				INSERT INTO %s (provider_id, api_key, name, proxy_url, sort_order, weight, priority)
-				VALUES ($1,$2,$3,$4,$5,$6,$7)
+				INSERT INTO %s (provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 				RETURNING id
-			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority)).Scan(&entry.ID); err != nil {
+			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority)).Scan(&entry.ID); err != nil {
 				return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
 			}
 		} else {
 			var persistedID int64
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 				UPDATE %s
-				SET api_key = $1, name = $2, proxy_url = $3, sort_order = $4, weight = $5, priority = $6
-				WHERE id = $7 AND provider_id = $8
+				SET api_key = $1, name = $2, proxy_url = $3, proxy_pool_id = $4, sort_order = $5, weight = $6, priority = $7
+				WHERE id = $8 AND provider_id = $9
 				RETURNING id
-			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.ID, providerID).Scan(&persistedID); err != nil {
+			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.ID, providerID).Scan(&persistedID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return fmt.Errorf("postgres store: upstream provider api key entry id %d is missing from upstream provider %d", entry.ID, providerID)
 				}
@@ -864,10 +873,11 @@ func scanUpstreamProvider(sc scanner, p *UpstreamProvider) error {
 		lastErrorAt, tokenExpiry       sql.NullTime
 		cloakCacheUserID, tokenExpired sql.NullBool
 		sensitiveBytes, extraBytes     []byte
+		proxyPoolID                    sql.NullInt64
 	)
 	if err := sc.Scan(
 		&p.ID, &p.ProviderType, &name, &p.Priority, &p.Disabled, &routingStrategy, &prefix, &apiKey,
-		&baseURL, &proxyURL, &label, &email, &fileName, &sourceBackend,
+		&baseURL, &proxyURL, &proxyPoolID, &label, &email, &fileName, &sourceBackend,
 		&status, &p.Unavailable, &lastError, &lastErrorAt, &p.Websockets,
 		&p.RebuildMidSystemMessage, &p.ExperimentalCCHSigning, &cloakMode,
 		&p.CloakStrictMode, &sensitiveBytes, &cloakCacheUserID,
@@ -877,6 +887,7 @@ func scanUpstreamProvider(sc scanner, p *UpstreamProvider) error {
 		return err
 	}
 	p.Name = name.String
+	p.ProxyPoolID = nullableIDFromScan(proxyPoolID)
 	p.RoutingStrategy = routingStrategy.String
 	p.Prefix = prefix.String
 	p.APIKey = apiKey.String
@@ -982,6 +993,24 @@ func nullableBool(b *bool) any {
 }
 
 // nullableTime binds a *time.Time as nil when zero/unset.
+// nullableID converts a *int64 binding into a NULL-able BIGINT column value.
+func nullableID(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+// nullableIDFromScan converts a scanned NullInt64 back into the *int64
+// binding shape (nil when the column is NULL).
+func nullableIDFromScan(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	id := v.Int64
+	return &id
+}
+
 func nullableTime(t *time.Time) any {
 	if t == nil || t.IsZero() {
 		return nil
