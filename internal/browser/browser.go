@@ -4,6 +4,7 @@ package browser
 
 import (
 	"fmt"
+	"net/url"
 	"os/exec"
 	"runtime"
 
@@ -12,69 +13,27 @@ import (
 )
 
 // OpenURL opens the specified URL in the default web browser.
-// It first attempts to use a platform-agnostic library and falls back to
-// platform-specific commands if that fails.
+// It validates the URL scheme and uses a platform-agnostic library to open it.
 //
 // Parameters:
-//   - url: The URL to open.
+//   - rawURL: The URL to open.
 //
 // Returns:
 //   - An error if the URL cannot be opened, otherwise nil.
-func OpenURL(url string) error {
-	fmt.Printf("Attempting to open URL in browser: %s\n", url)
-
-	// Try using the open-golang library first
-	err := open.Run(url)
-	if err == nil {
-		log.Debug("Successfully opened URL using open-golang library")
-		return nil
+func OpenURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("invalid URL: only http and https schemes are allowed")
 	}
 
-	log.Debugf("open-golang failed: %v, trying platform-specific commands", err)
+	fmt.Printf("Attempting to open URL in browser: %s\n", parsed.String())
 
-	// Fallback to platform-specific commands
-	return openURLPlatformSpecific(url)
-}
-
-// openURLPlatformSpecific is a helper function that opens a URL using OS-specific commands.
-// This serves as a fallback mechanism for OpenURL.
-//
-// Parameters:
-//   - url: The URL to open.
-//
-// Returns:
-//   - An error if the URL cannot be opened, otherwise nil.
-func openURLPlatformSpecific(url string) error {
-	var cmd *exec.Cmd
-
-	switch runtime.GOOS {
-	case "darwin": // macOS
-		cmd = exec.Command("open", url)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	case "linux":
-		// Try common Linux browsers in order of preference
-		browsers := []string{"xdg-open", "x-www-browser", "www-browser", "firefox", "chromium", "google-chrome"}
-		for _, browser := range browsers {
-			if _, err := exec.LookPath(browser); err == nil {
-				cmd = exec.Command(browser, url)
-				break
-			}
-		}
-		if cmd == nil {
-			return fmt.Errorf("no suitable browser found on Linux system")
-		}
-	default:
-		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
+	if err := open.Run(parsed.String()); err != nil {
+		log.Debugf("open-golang failed: %v", err)
+		return fmt.Errorf("failed to open URL in browser: %w", err)
 	}
 
-	log.Debugf("Running command: %s %v", cmd.Path, cmd.Args[1:])
-	err := cmd.Start()
-	if err != nil {
-		return fmt.Errorf("failed to start browser command: %w", err)
-	}
-
-	log.Debug("Successfully opened URL using platform-specific command")
+	log.Debug("Successfully opened URL using open-golang library")
 	return nil
 }
 
