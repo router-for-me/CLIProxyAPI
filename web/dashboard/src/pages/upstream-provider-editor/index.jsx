@@ -251,13 +251,20 @@ export function ProviderEditorForm({ provider, siblingNames = [], proxyPools = [
     try {
       const payload = buildPayload(form, providerType);
       if (isEdit) {
+        // Stay on the editor after saving so the operator can keep tuning
+        // the same row; the toast confirms the save.
         await updateUpstreamProvider(provider.id, payload);
         toast.success('Provider updated');
       } else {
-        await createUpstreamProvider(payload);
+        const created = await createUpstreamProvider(payload);
         toast.success('Provider created');
+        // The server returns the created row (with its id). Move to the
+        // detail route so the same editor re-mounts in edit mode instead
+        // of dropping the operator back on the list.
+        if (created && created.id) {
+          navigate(`/upstream-providers/${created.id}`, { replace: true });
+        }
       }
-      navigate('/upstream-providers');
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : (err.message || 'Save failed');
       setServerError(msg);
