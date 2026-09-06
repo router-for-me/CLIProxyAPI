@@ -1,0 +1,70 @@
+// Render-level regression tests for the upstream provider editor.
+//
+// editor.test.js covers the pure form layer only; these tests additionally
+// render the editor component with react-dom/server so render-time crashes
+// (e.g. a prop never passed into the component tree — the "proxyPools is
+// not defined" regression) surface in CI instead of only in the browser.
+// No DOM and no network: MemoryRouter satisfies useNavigate, and useToast
+// degrades to a no-op outside its provider.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { renderToString } from 'react-dom/server';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import UpstreamProviderEditorPage, { ProviderEditorForm } from './index.jsx';
+
+function renderEditor(provider, props = {}) {
+  return renderToString(
+    <MemoryRouter>
+      <ProviderEditorForm provider={provider} siblingNames={[]} {...props} />
+    </MemoryRouter>,
+  );
+}
+
+test('ProviderEditorForm renders proxy_pool_id picker with active pools passed as prop', () => {
+  const provider = {
+    id: 3,
+    provider_type: 'gemini-api-key',
+    name: 'gemini-main',
+    api_key: 'FAKE-SECRET-KEY',
+    base_url: 'https://api.example.com',
+  };
+  const pools = [
+    { id: 7, name: 'eu-pool', is_active: true },
+    { id: 9, name: 'retired-pool', is_active: false },
+  ];
+  const html = renderEditor(provider, { proxyPools: pools });
+  assert.ok(html.includes('up_proxy_pool_id'), 'renders the proxy pool select');
+  assert.ok(html.includes('eu-pool'), 'active pool appears as an option');
+  assert.ok(!html.includes('retired-pool'), 'inactive pool is filtered out');
+});
+
+test('ProviderEditorForm renders without pools (picker degrades to inherit/none)', () => {
+  const provider = {
+    id: 3,
+    provider_type: 'gemini-api-key',
+    name: 'gemini-main',
+    api_key: 'FAKE-SECRET-KEY',
+  };
+  const html = renderEditor(provider);
+  assert.ok(html.includes('up_proxy_pool_id'), 'renders the proxy pool select');
+});
+
+// Regression: the page previously referenced `proxyPools` inside
+// ProviderEditorForm without ever passing it down, crashing the detail page
+// on open with "ReferenceError: proxyPools is not defined". Create mode
+// renders the type picker first (empty schema → no fields), so this asserts
+// the page shell mounts the editor without crashing; the prop pass-through
+// itself is covered by the component-level tests above. The page must be
+// mounted inside a matching Route — resolveEditorMode depends on useParams.
+test('UpstreamProviderEditorPage (/new) renders the editor without proxyPools ReferenceError', () => {
+  const html = renderToString(
+    <MemoryRouter initialEntries={['/upstream-providers/new']}>
+      <Routes>
+        <Route path="/upstream-providers/:id" element={<UpstreamProviderEditorPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+  assert.ok(html.length > 0, 'page renders markup');
+  assert.ok(html.includes('type-picker__card'), 'create mode renders the type picker');
+});

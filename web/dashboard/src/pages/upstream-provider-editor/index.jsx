@@ -150,6 +150,7 @@ export default function UpstreamProviderEditorPage() {
       key={id}
       provider={isCreate ? null : provider}
       siblingNames={siblingNames}
+      proxyPools={proxyPools}
     />
   );
 }
@@ -167,7 +168,10 @@ function BackToListButton() {
 // Editor body (ported from the list page's editor modal)
 // ============================================================================
 
-function ProviderEditorForm({ provider, siblingNames = [] }) {
+// Also exported (named) for render-level regression tests: rendering the
+// editor with react-dom/server catches render-time scoping errors that the
+// pure-function test suite cannot see.
+export function ProviderEditorForm({ provider, siblingNames = [], proxyPools = [] }) {
   const toast = useToast();
   const navigate = useNavigate();
   const schemas = useMemo(() => buildSchemas(), []);
