@@ -4558,6 +4558,126 @@ func TestResponsesWebsocketLocalPrewarmContext(t *testing.T) {
 	}
 }
 
+func TestResponsesWebsocketLocalPrewarmResetsNativeTransport(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const nativeModel = "prewarm-switch-native"
+	const httpModel = "prewarm-switch-http"
+	const prefix = `{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},{"type":"message","role":"developer","content":"Use the execution tool for shell commands."}`
+	const delta = `{"type":"compaction","encrypted_content":"opaque-summary"},{"type":"message","role":"user","content":"Run pwd."}`
+	for _, tc := range []struct {
+		name  string
+		model string
+	}{
+		{name: "return to native model", model: nativeModel},
+		{name: "continue HTTP without explicit model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nativeExecutor := &websocketDirectCaptureExecutor{provider: "codex"}
+			httpExecutor := &websocketDirectCaptureExecutor{provider: "xai"}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(nativeExecutor)
+			manager.RegisterExecutor(httpExecutor)
+			for _, setup := range []struct {
+				auth  *coreauth.Auth
+				model string
+			}{
+				{auth: &coreauth.Auth{ID: "auth-prewarm-switch-native", Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": "true"}}, model: nativeModel},
+				{auth: &coreauth.Auth{ID: "auth-prewarm-switch-http", Provider: "xai", Status: coreauth.StatusActive}, model: httpModel},
+			} {
+				if _, errRegister := manager.Register(context.Background(), setup.auth); errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+				registry.GetGlobalRegistry().RegisterClient(setup.auth.ID, setup.auth.Provider, []*registry.ModelInfo{{ID: setup.model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(setup.auth.ID) })
+			}
+			h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+			router := gin.New()
+			router.GET("/v1/responses", h.ResponsesWebsocket)
+			server := httptest.NewServer(router)
+			defer server.Close()
+			conn, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
+			if errDial != nil {
+				t.Fatalf("dial websocket: %v", errDial)
+			}
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Errorf("close websocket: %v", errClose)
+				}
+			}()
+			exchange := func(request string) []byte {
+				t.Helper()
+				if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
+					t.Fatalf("write websocket request: %v", errWrite)
+				}
+				for {
+					_, payload, errRead := conn.ReadMessage()
+					if errRead != nil {
+						t.Fatalf("read websocket response: %v", errRead)
+					}
+					switch gjson.GetBytes(payload, "type").String() {
+					case wsEventTypeError:
+						t.Fatalf("unexpected websocket error: %s", payload)
+					case wsEventTypeCompleted:
+						return payload
+					}
+				}
+			}
+			exchange(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","role":"user","content":"Start the native conversation."}]}`, nativeModel))
+			prewarm := exchange(fmt.Sprintf(`{"type":"response.create","model":%q,"generate":false,"input":[%s]}`, httpModel, prefix))
+			prewarmID := gjson.GetBytes(prewarm, "response.id").String()
+			if !strings.HasPrefix(prewarmID, "resp_prewarm_") {
+				t.Fatalf("expected local prewarm response: %s", prewarm)
+			}
+			if len(nativeExecutor.Payloads()) != 1 || len(httpExecutor.Payloads()) != 0 {
+				t.Fatal("local prewarm unexpectedly reached an upstream executor")
+			}
+
+			modelField := ""
+			targetExecutor, wantCalls := httpExecutor, 1
+			if tc.model != "" {
+				modelField = fmt.Sprintf(`,"model":%q`, tc.model)
+				targetExecutor, wantCalls = nativeExecutor, 2
+			}
+			completed := exchange(fmt.Sprintf(`{"type":"response.create"%s,"previous_response_id":%q,"input":[%s]}`, modelField, prewarmID, delta))
+			payloads := targetExecutor.Payloads()
+			if len(payloads) != wantCalls {
+				t.Fatalf("upstream calls = %d, want %d", len(payloads), wantCalls)
+			}
+			forwarded := payloads[wantCalls-1]
+			if gjson.GetBytes(forwarded, "previous_response_id").Exists() || gjson.GetBytes(forwarded, "generate").Exists() {
+				t.Errorf("local prewarm metadata leaked upstream: %s", forwarded)
+			}
+			assertJSONSemanticallyEqual(t, []byte(gjson.GetBytes(forwarded, "input").Raw), "["+prefix+","+delta+"]")
+
+			// After reconstruction, subsequent turns must use the newly established transport.
+			const nextUser = `{"type":"message","role":"user","content":"Run whoami."}`
+			nextResponseID := gjson.GetBytes(completed, "response.id").String()
+			exchange(fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"input":[%s]}`, nextResponseID, nextUser))
+			payloads = targetExecutor.Payloads()
+			if len(payloads) != wantCalls+1 {
+				t.Fatalf("upstream calls after next turn = %d, want %d", len(payloads), wantCalls+1)
+			}
+			next := payloads[wantCalls]
+			wantNextInput := "[" + nextUser + "]"
+			if tc.model == nativeModel {
+				if got := gjson.GetBytes(next, "previous_response_id").String(); got != nextResponseID {
+					t.Fatalf("native continuation ID = %q, want %q", got, nextResponseID)
+				}
+				flags := nativeExecutor.RequiredUpstreamWebsocketFlags()
+				if flags[1] || !flags[2] {
+					t.Fatalf("native websocket requirements = %v, want [false false true]", flags)
+				}
+			} else {
+				if gjson.GetBytes(next, "previous_response_id").Exists() {
+					t.Fatalf("HTTP continuation forwarded a response ID: %s", next)
+				}
+				wantNextInput = "[" + prefix + "," + delta + "," + gjson.GetBytes(completed, "response.output.0").Raw + "," + nextUser + "]"
+			}
+			assertJSONSemanticallyEqual(t, []byte(gjson.GetBytes(next, "input").Raw), wantNextInput)
+		})
+	}
+}
+
 func TestNormalizeResponsesWebsocketLocalPrewarmTools(t *testing.T) {
 	const prewarmID = "resp_prewarm_test"
 	const tools = `[{"type":"function","name":"exec","parameters":{"type":"object"}}]`

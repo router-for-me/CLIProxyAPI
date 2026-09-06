@@ -559,6 +559,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			localPrewarmResponseID = responseID
 			lastResponseID = responseID
+			// Local prewarm replaces any previous native response chain. Rebuild its
+			// continuation before establishing the next upstream transport.
+			upstreamMode = responsesWebsocketUpstreamModeHTTP
+			upstreamWebsocketAuthID = ""
+			passthroughModelName = ""
 			continue
 		}
 
