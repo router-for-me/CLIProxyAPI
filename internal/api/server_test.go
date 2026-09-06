@@ -1953,6 +1953,79 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 	})
 }
 
+func TestOpenAIModelsIncludeRegistryTokenLimits(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	const claudeModelID = "claude-sonnet-token-limits"
+	const geminiModelID = "gemini-token-limits"
+
+	modelRegistry.RegisterClient("test-openai-models-token-limits-claude", "claude", []*registry.ModelInfo{{
+		ID:                  claudeModelID,
+		Object:              "model",
+		OwnedBy:             "anthropic",
+		Type:                "claude",
+		ContextLength:       200000,
+		MaxCompletionTokens: 128000,
+	}})
+	// Gemini catalogs express the same limits as inputTokenLimit/outputTokenLimit.
+	modelRegistry.RegisterClient("test-openai-models-token-limits-gemini", "gemini", []*registry.ModelInfo{{
+		ID:               geminiModelID,
+		Object:           "model",
+		OwnedBy:          "google",
+		Type:             "gemini",
+		InputTokenLimit:  1048576,
+		OutputTokenLimit: 65536,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("test-openai-models-token-limits-claude")
+		modelRegistry.UnregisterClient("test-openai-models-token-limits-gemini")
+	})
+
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+	}
+
+	models := make(map[string]map[string]any, len(resp.Data))
+	for _, entry := range resp.Data {
+		if id, _ := entry["id"].(string); id != "" {
+			models[id] = entry
+		}
+	}
+
+	for modelID, want := range map[string]map[string]float64{
+		claudeModelID: {"context_length": 200000, "max_completion_tokens": 128000},
+		geminiModelID: {"context_length": 1048576, "max_completion_tokens": 65536},
+	} {
+		model, ok := models[modelID]
+		if !ok {
+			t.Fatalf("expected %s in response, got %s", modelID, rr.Body.String())
+		}
+		for field, wantValue := range want {
+			got, okField := model[field].(float64)
+			if !okField {
+				t.Fatalf("expected %q in %s listing, got %v", field, modelID, model)
+			}
+			if got != wantValue {
+				t.Fatalf("%s %s = %v, want %v", modelID, field, got, wantValue)
+			}
+		}
+	}
+}
+
 func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-claude-model-list-cloaking-hot-reload"
