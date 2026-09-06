@@ -536,7 +536,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
 		var nextNativePendingToolCallIDs []string
 		if nativeWebsocketPassthrough {
-			requestJSON = h.prepareCodexOrphanDelegationWithPendingToolCallIDs(c, requestJSON, lastResponsePendingToolCallIDs)
+			pendingToolCallIDs := []string(nil)
+			if requestRequiresCurrentUpstreamWebsocket {
+				pendingToolCallIDs = lastResponsePendingToolCallIDs
+			}
+			requestJSON = h.prepareCodexOrphanDelegationWithPendingToolCallIDs(c, requestJSON, pendingToolCallIDs)
 			if requestRequiresCurrentUpstreamWebsocket {
 				nextNativePendingToolCallIDs = consumeResponsesWebsocketPendingToolCallIDs(lastResponsePendingToolCallIDs, requestJSON)
 			} else {

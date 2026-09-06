@@ -3405,6 +3405,81 @@ func TestResponsesWebsocketNativePreservesPendingDelegationOutputOnAppend(t *tes
 	}
 }
 
+func TestResponsesWebsocketNativeResetRewritesStalePendingDelegationOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketDirectCaptureExecutor{
+		done: make(chan struct{}),
+		responseOutputs: [][]byte{
+			[]byte(`[{"type":"function_call","call_id":"call-pending","name":"create_thread","namespace":"codex_app","arguments":"{}"}]`),
+			[]byte(`[]`),
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-native-reset",
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	const modelName = "native-reset-model"
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOrphanDelegationCompatibility: true}, manager)
+	handler := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", handler.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	firstRequest := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","role":"user","content":"start"}]}`, modelName)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(firstRequest)); errWrite != nil {
+		t.Fatalf("write first request: %v", errWrite)
+	}
+	if _, _, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read first response: %v", errRead)
+	}
+
+	resetRequest := `{"type":"response.create","input":[{"type":"function_call_output","call_id":"call-pending","name":"create_thread","namespace":"codex_app","output":"completed"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(resetRequest)); errWrite != nil {
+		t.Fatalf("write reset request: %v", errWrite)
+	}
+	if _, _, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read reset response: %v", errRead)
+	}
+
+	select {
+	case <-executor.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for native reset")
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("captured payload count = %d, want 2", len(payloads))
+	}
+	if itemType := gjson.GetBytes(payloads[1], "input.0.type").String(); itemType != "message" {
+		t.Fatalf("self-contained reset retained stale function output: %s", payloads[1])
+	}
+	if required := executor.RequiredUpstreamWebsocketFlags(); len(required) != 2 || required[1] {
+		t.Fatalf("required upstream websocket flags = %v, want second request false", required)
+	}
+}
+
 func TestResponsesWebsocketNativeRetryPreservesPendingDelegationOutput(t *testing.T) {
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOrphanDelegationCompatibility: true}, nil)
 	handler := NewOpenAIResponsesAPIHandler(base)
