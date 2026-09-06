@@ -1833,6 +1833,43 @@ func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 	})
 }
 
+func TestRootAndManagementHEADRequests(t *testing.T) {
+	staticDir := t.TempDir()
+	t.Setenv("MANAGEMENT_STATIC_PATH", staticDir)
+	if err := os.WriteFile(filepath.Join(staticDir, "management.html"), []byte("<html>management app</html>"), 0o600); err != nil {
+		t.Fatalf("failed to write management asset: %v", err)
+	}
+
+	server := newTestServer(t)
+
+	t.Run("HEAD root returns 200 without body", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("HEAD root body length = %d, want 0", rr.Body.Len())
+		}
+		if contentType := rr.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+			t.Fatalf("HEAD root Content-Type = %q, want application/json", contentType)
+		}
+	})
+
+	t.Run("HEAD management.html returns 200 without body", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/management.html", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("HEAD management.html body length = %d, want 0", rr.Body.Len())
+		}
+	})
+}
+
 func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-anthropic-version-dispatch"
