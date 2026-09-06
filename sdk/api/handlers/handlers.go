@@ -61,6 +61,10 @@ const (
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
 func BuildErrorResponseBody(status int, errText string) []byte {
+	return buildErrorResponseBody(status, errText, "")
+}
+
+func buildErrorResponseBody(status int, errText, explicitCode string) []byte {
 	if status <= 0 {
 		status = http.StatusInternalServerError
 	}
@@ -93,6 +97,9 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 			errType = "server_error"
 			code = "internal_server_error"
 		}
+	}
+	if explicitCode != "" {
+		code = explicitCode
 	}
 
 	payload, err := json.Marshal(ErrorResponse{
