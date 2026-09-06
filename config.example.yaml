@@ -300,6 +300,11 @@ codex:
 #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions
 #     - "API"
 #     - "proxy"
+#   web-search-models:           # optional: treat these Antigravity models as web search capable
+#     - "gemini-3.7-flash-high"  # Claude web_search tools then translate into a native googleSearch request.
+#                                # Use this for models the upstream accepts googleSearch for but omits from
+#                                # fetchAvailableModels.webSearchModelIds; without it such a request silently
+#                                # degrades into a plain chat turn that returns no search results.
 
 # xAI provider behavior.
 xai:
