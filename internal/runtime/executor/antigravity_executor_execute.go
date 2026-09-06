@@ -42,6 +42,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if opts.Alt == "responses/compact" || helps.HasResponsesCompactionTrigger(req.Payload) || helps.HasResponsesCompactionTrigger(opts.OriginalRequest) {
 		return e.executeCompaction(ctx, auth, req, opts)
 	}
+	if helps.SyntheticCompactionSupported(req.Payload, opts) {
+		return helps.ExecuteSyntheticCompaction(ctx, e, auth, req, opts)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if !antigravityCoolingDisabled(auth, e.cfg) {
 		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
