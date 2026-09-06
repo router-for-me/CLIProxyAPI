@@ -172,10 +172,16 @@ func (e *authScopedOpenAICompatPoolExecutor) ExecuteCalls() []string {
 
 func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []internalconfig.OpenAICompatibilityModel, executor *openAICompatPoolExecutor) *Manager {
 	t.Helper()
+	return newOpenAICompatPoolTestManagerWithAliasPool(t, alias, "", models, executor)
+}
+
+func newOpenAICompatPoolTestManagerWithAliasPool(t *testing.T, alias, aliasPool string, models []internalconfig.OpenAICompatibilityModel, executor *openAICompatPoolExecutor) *Manager {
+	t.Helper()
 	cfg := &internalconfig.Config{
 		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
-			Name:   "pool",
-			Models: models,
+			Name:      "pool",
+			AliasPool: aliasPool,
+			Models:    models,
 		}},
 	}
 	m := NewManager(nil, nil, nil)
@@ -273,6 +279,69 @@ func TestResolveModelAliasPoolPrefersExactSuffixedAlias(t *testing.T) {
 	result := resolveModelAliasResultFromConfigModels("public(low)", models)
 	if result.UpstreamModel != "low-model(low)" || !result.ForceMapping {
 		t.Fatalf("exact suffixed alias result = %+v, want low-model(low) with force mapping", result)
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolPreferAlwaysStartsAtPrimary(t *testing.T) {
+	alias := "family"
+	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey}
+	m := newOpenAICompatPoolTestManagerWithAliasPool(t, alias, "prefer", []internalconfig.OpenAICompatibilityModel{
+		{Name: "family-newest", Alias: alias},
+		{Name: "family-older", Alias: alias},
+	}, executor)
+
+	for i := 0; i < 3; i++ {
+		resp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("execute %d: %v", i, err)
+		}
+		if string(resp.Payload) != "family-newest" {
+			t.Fatalf("execute %d payload = %q, want primary %q", i, string(resp.Payload), "family-newest")
+		}
+	}
+	got := executor.ExecuteModels()
+	want := []string{"family-newest", "family-newest", "family-newest"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolPreferKeepsPrimaryThenFallback(t *testing.T) {
+	alias := "family"
+	executor := &openAICompatPoolExecutor{
+		id:            openAICompatPoolProviderKey,
+		executeErrors: map[string]error{"family-newest": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}},
+	}
+	m := newOpenAICompatPoolTestManagerWithAliasPool(t, alias, "prefer", []internalconfig.OpenAICompatibilityModel{
+		{Name: "family-newest", Alias: alias},
+		{Name: "family-older", Alias: alias},
+		{Name: "family-oldest", Alias: alias},
+	}, executor)
+
+	for i := 0; i < 3; i++ {
+		resp, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("execute %d: %v", i, err)
+		}
+		if string(resp.Payload) != "family-older" {
+			t.Fatalf("execute %d payload = %q, want primary-then-fallback %q", i, string(resp.Payload), "family-older")
+		}
+	}
+
+	got := executor.ExecuteModels()
+	want := []string{"family-newest", "family-older", "family-older", "family-older"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

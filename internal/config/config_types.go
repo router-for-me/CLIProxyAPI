@@ -678,6 +678,11 @@ type OpenAICompatibility struct {
 	// Models defines the model configurations including aliases for routing.
 	Models []OpenAICompatibilityModel `yaml:"models" json:"models"`
 
+	// AliasPool selects how same-alias upstream models are ordered.
+	// Empty or "round-robin" (default) rotates members. "prefer" keeps
+	// config order (primary then fallback) and still fail-over on pre-output errors.
+	AliasPool string `yaml:"alias-pool,omitempty" json:"alias-pool,omitempty"`
+
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
