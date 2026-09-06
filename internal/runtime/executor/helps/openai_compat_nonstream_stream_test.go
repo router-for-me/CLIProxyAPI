@@ -1,0 +1,275 @@
+package helps
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+)
+
+func TestShouldForceNonStreamToolCalls(t *testing.T) {
+	withTools := []byte(`{"model":"m","tools":[{"type":"function","function":{"name":"read"}}]}`)
+	withoutTools := []byte(`{"model":"m"}`)
+	emptyTools := []byte(`{"model":"m","tools":[]}`)
+
+	tests := []struct {
+		name    string
+		compat  *config.OpenAICompatibility
+		payload []byte
+		want    bool
+	}{
+		{"nil compat", nil, withTools, false},
+		{"disabled", &config.OpenAICompatibility{}, withTools, false},
+		{"enabled with tools", &config.OpenAICompatibility{NonStreamToolCalls: true}, withTools, true},
+		{"enabled without tools", &config.OpenAICompatibility{NonStreamToolCalls: true}, withoutTools, false},
+		{"enabled empty tools", &config.OpenAICompatibility{NonStreamToolCalls: true}, emptyTools, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ShouldForceNonStreamToolCalls(tc.compat, tc.payload); got != tc.want {
+				t.Fatalf("ShouldForceNonStreamToolCalls = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// decodeFrames parses every synthesized frame except the [DONE] sentinel.
+func decodeFrames(t *testing.T, frames []string) []map[string]any {
+	t.Helper()
+	if len(frames) == 0 {
+		t.Fatal("no frames produced")
+	}
+	if frames[len(frames)-1] != "[DONE]" {
+		t.Fatalf("last frame = %q, want [DONE]", frames[len(frames)-1])
+	}
+	out := make([]map[string]any, 0, len(frames)-1)
+	for _, frame := range frames[:len(frames)-1] {
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(frame), &parsed); err != nil {
+			t.Fatalf("frame %q is not valid JSON: %v", frame, err)
+		}
+		if parsed["object"] != "chat.completion.chunk" {
+			t.Fatalf("frame object = %v, want chat.completion.chunk", parsed["object"])
+		}
+		out = append(out, parsed)
+	}
+	return out
+}
+
+func TestSynthesizeOpenAIStreamFramesToolCalls(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_1","model":"claude-opus-5","created":1700000000,
+		"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[
+			{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"config.yaml\"}"}}
+		]}}],
+		"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}
+	}`)
+
+	frames := SynthesizeOpenAIStreamFrames(body)
+	parsed := decodeFrames(t, frames)
+
+	joined := strings.Join(frames, "\n")
+	if !strings.Contains(joined, `"arguments":"{\"path\":\"config.yaml\"}"`) {
+		t.Fatalf("tool call arguments missing from frames: %s", joined)
+	}
+
+	for _, frame := range parsed {
+		if frame["id"] != "msg_1" || frame["model"] != "claude-opus-5" {
+			t.Fatalf("frame lost id/model: %v", frame)
+		}
+	}
+
+	last := parsed[len(parsed)-1]
+	choice := last["choices"].([]any)[0].(map[string]any)
+	if choice["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason = %v, want tool_calls", choice["finish_reason"])
+	}
+	if _, ok := last["usage"]; !ok {
+		t.Fatal("terminal frame is missing the usage block")
+	}
+
+	// Only the terminal frame may carry the finish reason.
+	for _, frame := range parsed[:len(parsed)-1] {
+		ch := frame["choices"].([]any)[0].(map[string]any)
+		if ch["finish_reason"] != nil {
+			t.Fatalf("intermediate frame carries finish_reason: %v", frame)
+		}
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesContentOnly(t *testing.T) {
+	body := []byte(`{"id":"msg_2","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop",
+		"message":{"role":"assistant","content":"hola"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+
+	frames := SynthesizeOpenAIStreamFrames(body)
+	parsed := decodeFrames(t, frames)
+
+	if !strings.Contains(strings.Join(frames, "\n"), `"content":"hola"`) {
+		t.Fatalf("content missing from frames: %v", frames)
+	}
+	last := parsed[len(parsed)-1]
+	choice := last["choices"].([]any)[0].(map[string]any)
+	if choice["finish_reason"] != "stop" {
+		t.Fatalf("finish_reason = %v, want stop", choice["finish_reason"])
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesPreservesRefusal(t *testing.T) {
+	body := []byte(`{"id":"msg_r","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop",
+		"message":{"role":"assistant","content":null,"refusal":"I cannot help with that."}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	decodeFrames(t, frames)
+	if !strings.Contains(strings.Join(frames, "\n"), `"refusal":"I cannot help with that."`) {
+		t.Fatalf("refusal missing from frames: %v", frames)
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesRejectsUnusableChoices(t *testing.T) {
+	cases := map[string]string{
+		"empty choice":             `{"id":"x","model":"m","created":1,"choices":[{}]}`,
+		"empty array":              `{"id":"x","model":"m","created":1,"choices":[]}`,
+		"empty message":            `{"id":"x","model":"m","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":""}}]}`,
+		"mixed choices":            `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}},{"index":1,"message":{}}]}`,
+		"empty tool call":          `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{}]}}]}`,
+		"unnamed tool call":        `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"","arguments":"{}"}}]}}]}`,
+		"empty tool arguments":     `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":""}}]}}]}`,
+		"malformed tool arguments": `{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\"city\":"}}]}}]}`,
+	}
+	for name, body := range cases {
+		if frames := SynthesizeOpenAIStreamFrames([]byte(body)); frames != nil {
+			t.Fatalf("%s: expected rejection, got %v", name, frames)
+		}
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesPreservesAudio(t *testing.T) {
+	body := []byte(`{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":null,"audio":{"id":"audio_1","data":"AAAA","transcript":"hello","expires_at":1}}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	for _, want := range []string{`"audio":{`, `"transcript":"hello"`, `"data":"AAAA"`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("audio metadata %s missing: %s", want, joined)
+		}
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesPreservesAnnotations(t *testing.T) {
+	body := []byte(`{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"cited","annotations":[{"type":"url_citation","url_citation":{"url":"https://example.com","start_index":0,"end_index":5}}]}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	if !strings.Contains(joined, `"annotations":[{"type":"url_citation"`) {
+		t.Fatalf("annotations dropped: %s", joined)
+	}
+	if !strings.Contains(joined, `"content":"cited"`) {
+		t.Fatalf("content missing: %s", joined)
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesAcceptsEmptyReplyWithFinishReason(t *testing.T) {
+	body := []byte(`{"id":"x","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":""}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	if len(frames) == 0 {
+		t.Fatal("expected frames for empty assistant reply with terminal reason")
+	}
+	if !strings.Contains(strings.Join(frames, "\n"), `"finish_reason":"stop"`) {
+		t.Fatalf("missing terminal reason: %v", frames)
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesPreservesToolCallProviderMetadata(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-g","model":"gemini","created":1,"choices":[{"index":0,"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"},"extra_content":{"google":{"thought_signature":"sig-123"}}}]}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	if !strings.Contains(joined, `"thought_signature":"sig-123"`) {
+		t.Fatalf("thought signature dropped: %s", joined)
+	}
+	if !strings.Contains(joined, `"arguments":"{}"`) {
+		t.Fatalf("arguments missing: %s", joined)
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesPreservesReasoningAliasLogprobsAndFingerprint(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-meta","model":"m","created":1,"system_fingerprint":"fp_test","choices":[{"index":0,"finish_reason":"stop","logprobs":{"content":[{"token":"ok","logprob":-0.1}]},"message":{"reasoning":"alternate reasoning","content":"ok"}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	for _, want := range []string{`"system_fingerprint":"fp_test"`, `"reasoning":"alternate reasoning"`, `"logprobs":{"content":[{"token":"ok","logprob":-0.1}]}`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing metadata %s in %s", want, joined)
+		}
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesPreservesServiceTier(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-tier","model":"m","created":1,"service_tier":"priority","choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	if len(frames) < 2 {
+		t.Fatalf("expected synthesized frames, got %v", frames)
+	}
+	for _, frame := range frames[:len(frames)-1] {
+		if !strings.Contains(frame, `"service_tier":"priority"`) {
+			t.Fatalf("service tier missing from frame: %s", frame)
+		}
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesEmitsRoleForEveryChoice(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-n","model":"m","created":1,"choices":[{"index":0,"finish_reason":"stop","message":{"content":"a"}},{"index":1,"finish_reason":"stop","message":{"content":"b"}}]}`)
+	frames := SynthesizeOpenAIStreamFrames(body)
+	joined := strings.Join(frames, "\n")
+	for _, want := range []string{`"index":0,"delta":{"role":"assistant"}`, `"index":1,"delta":{"role":"assistant"}`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing role frame %s in %s", want, joined)
+		}
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesMultipleToolCalls(t *testing.T) {
+	body := []byte(`{"id":"msg_3","model":"m","created":1,"choices":[{"index":0,"finish_reason":"tool_calls",
+		"message":{"role":"assistant","tool_calls":[
+			{"id":"a","type":"function","function":{"name":"read","arguments":"{}"}},
+			{"id":"b","type":"function","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}
+		]}}]}`)
+
+	frames := SynthesizeOpenAIStreamFrames(body)
+	decodeFrames(t, frames)
+
+	joined := strings.Join(frames, "\n")
+	for _, want := range []string{`"name":"read"`, `"name":"bash"`, `"index":0`, `"index":1`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("frames missing %s: %s", want, joined)
+		}
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesUsageOnceWithMultipleChoices(t *testing.T) {
+	body := []byte(`{"id":"msg_5","model":"m","created":1,"choices":[
+		{"finish_reason":"stop","message":{"role":"assistant","content":"a"}},
+		{"finish_reason":"stop","message":{"role":"assistant","content":"b"}}
+	],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`)
+
+	frames := SynthesizeOpenAIStreamFrames(body)
+	parsed := decodeFrames(t, frames)
+
+	usageFrames := 0
+	for _, frame := range parsed {
+		if _, ok := frame["usage"]; ok {
+			usageFrames++
+		}
+	}
+	// Both choices omit "index", so a value-based guard would emit usage twice.
+	if usageFrames != 1 {
+		t.Fatalf("usage appears in %d frames, want exactly 1", usageFrames)
+	}
+}
+
+func TestSynthesizeOpenAIStreamFramesRejectsUnusableBodies(t *testing.T) {
+	for _, body := range []string{``, `{}`, `{"choices":[]}`, `not json`,
+		`{"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}}]`,
+		`{"choices":[{"index":0,"finish_reason":"stop","message":{"content":"ok"}}]} trailing`,
+	} {
+		if frames := SynthesizeOpenAIStreamFrames([]byte(body)); len(frames) != 0 {
+			t.Fatalf("body %q produced frames %v, want none", body, frames)
+		}
+	}
+}
