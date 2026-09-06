@@ -15,22 +15,24 @@ import (
 )
 
 type rpcHostHTTPRequest struct {
-	HTTPClientID   string       `json:"http_client_id,omitempty"`
-	HostCallbackID string       `json:"host_callback_id,omitempty"`
-	Method         string       `json:"method,omitempty"`
-	URL            string       `json:"url,omitempty"`
-	Headers        httpHeader   `json:"headers,omitempty"`
-	Body           []byte       `json:"body,omitempty"`
-	Request        *httpRequest `json:"request,omitempty"`
+	HTTPClientID   string                     `json:"http_client_id,omitempty"`
+	HostCallbackID string                     `json:"host_callback_id,omitempty"`
+	Method         string                     `json:"method,omitempty"`
+	URL            string                     `json:"url,omitempty"`
+	Headers        httpHeader                 `json:"headers,omitempty"`
+	Body           []byte                     `json:"body,omitempty"`
+	WireProfile    *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
+	Request        *httpRequest               `json:"request,omitempty"`
 }
 
 type httpHeader map[string][]string
 
 type httpRequest struct {
-	Method  string     `json:"method,omitempty"`
-	URL     string     `json:"url,omitempty"`
-	Headers httpHeader `json:"headers,omitempty"`
-	Body    []byte     `json:"body,omitempty"`
+	Method      string                     `json:"method,omitempty"`
+	URL         string                     `json:"url,omitempty"`
+	Headers     httpHeader                 `json:"headers,omitempty"`
+	Body        []byte                     `json:"body,omitempty"`
+	WireProfile *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
 }
 
 type rpcHostHTTPStreamResponse struct {
@@ -231,19 +233,34 @@ func decodeHostHTTPRequestWithCallbackID(raw []byte) (pluginapi.HTTPRequest, str
 		return pluginapi.HTTPRequest{}, "", fmt.Errorf("decode host http request: %w", errUnmarshal)
 	}
 	if req.Request != nil {
+		wireProfile := req.Request.WireProfile
+		if wireProfile == nil {
+			wireProfile = req.WireProfile
+		}
 		return pluginapi.HTTPRequest{
-			Method:  req.Request.Method,
-			URL:     req.Request.URL,
-			Headers: map[string][]string(req.Request.Headers),
-			Body:    append([]byte(nil), req.Request.Body...),
+			Method:      req.Request.Method,
+			URL:         req.Request.URL,
+			Headers:     map[string][]string(req.Request.Headers),
+			Body:        append([]byte(nil), req.Request.Body...),
+			WireProfile: cloneWireProfile(wireProfile),
 		}, req.HostCallbackID, nil
 	}
 	return pluginapi.HTTPRequest{
-		Method:  req.Method,
-		URL:     req.URL,
-		Headers: map[string][]string(req.Headers),
-		Body:    append([]byte(nil), req.Body...),
+		Method:      req.Method,
+		URL:         req.URL,
+		Headers:     map[string][]string(req.Headers),
+		Body:        append([]byte(nil), req.Body...),
+		WireProfile: cloneWireProfile(req.WireProfile),
 	}, req.HostCallbackID, nil
+}
+
+func cloneWireProfile(src *pluginapi.HTTPWireProfile) *pluginapi.HTTPWireProfile {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	dst.HeaderProfile = append([]string(nil), src.HeaderProfile...)
+	return &dst
 }
 
 func (h *Host) callHostStreamEmit(ctx context.Context, request []byte) ([]byte, error) {
