@@ -164,6 +164,16 @@ func Parse(raw string) (Setting, error) {
 	}
 }
 
+// hasWildcardPattern reports whether the noProxy list contains "*".
+func hasWildcardPattern(patterns []string) bool {
+	for _, p := range patterns {
+		if p == "*" {
+			return true
+		}
+	}
+	return false
+}
+
 func cloneDefaultTransport() *http.Transport {
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
 		return transport.Clone()
@@ -192,8 +202,10 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 		return NewDirectTransport(), setting.Mode, nil
 	case ModeProxy:
 		// Self-bypass guard: a proxy whose own host matches its own no_proxy
-		// list is a misconfiguration — fail fast instead of looping.
-		if setting.Bypasses("https://" + setting.URL.Host) {
+		// list is a misconfiguration — fail fast instead of looping. A
+		// wildcard list is exempt: no_proxy=* means "never proxy", which is a
+		// valid (if unusual) way of pinning the transport to direct.
+		if !hasWildcardPattern(setting.NoProxy) && setting.Bypasses("https://"+setting.URL.Host) {
 			return nil, setting.Mode, fmt.Errorf("proxy URL host %q matches its own no_proxy list", setting.URL.Host)
 		}
 		if setting.URL.Scheme == "socks5" || setting.URL.Scheme == "socks5h" {
@@ -215,7 +227,12 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			return transport, setting.Mode, nil
 		}
 		transport := cloneDefaultTransport()
-		transport.Proxy = http.ProxyURL(setting.URL)
+		if hasWildcardPattern(setting.NoProxy) {
+			// no_proxy=* pins the transport to direct for every target.
+			transport.Proxy = nil
+		} else {
+			transport.Proxy = http.ProxyURL(setting.URL)
+		}
 		return transport, setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
