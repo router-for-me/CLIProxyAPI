@@ -166,7 +166,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if sess != nil {
 				sess.reqMu.Unlock()
 			}
-			return nil, newCodexStatusErr(respHS.StatusCode, bodyErr)
+			return nil, newCodexWebsocketHandshakeStatusErr(respHS.StatusCode, bodyErr)
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		if sess != nil {
@@ -218,11 +218,18 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			// Retry once with a new websocket connection for the same execution session.
 			connRetry, closerRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry != nil || connRetry == nil {
-				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
+				retryErr := errDialRetry
+				if respHSRetry != nil && respHSRetry.StatusCode > 0 {
+					bodyErr := websocketHandshakeBody(respHSRetry)
+					helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHSRetry.StatusCode, respHSRetry.Header.Clone(), bodyErr)
+					retryErr = newCodexWebsocketHandshakeStatusErr(respHSRetry.StatusCode, bodyErr)
+				} else {
+					closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
+				}
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", retryErr)
 				sess.clearActive(conn, readCh)
 				sess.reqMu.Unlock()
-				return nil, errDialRetry
+				return nil, retryErr
 			}
 			previousConn, previousReadCh := conn, readCh
 			conn = connRetry
