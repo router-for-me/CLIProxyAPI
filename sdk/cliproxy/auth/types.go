@@ -106,9 +106,12 @@ type Auth struct {
 }
 
 const (
-	AttributeAuthIndexSeed   = "auth_index_seed"
-	AttributePluginVirtual   = "plugin_virtual"
-	AttributeVirtualSource   = "virtual_source"
+	AttributeAuthIndexSeed = "auth_index_seed"
+	AttributePluginVirtual = "plugin_virtual"
+	AttributeVirtualSource = "virtual_source"
+	// AttributeRefreshCapable permits a credential whose refresh material is
+	// held by its provider to refresh after an unauthorized response.
+	AttributeRefreshCapable  = "refresh_capable"
 	pluginVirtualAttrEnabled = "true"
 )
 
