@@ -40,13 +40,18 @@ const (
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
 type OpenAICompatExecutor struct {
-	provider string
-	cfg      *config.Config
+	provider    string
+	cfg         *config.Config
+	rateLimiter *helps.ProviderRateLimitRegistry
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
-	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
+	return &OpenAICompatExecutor{
+		provider:    provider,
+		cfg:         cfg,
+		rateLimiter: helps.NewProviderRateLimitRegistry(),
+	}
 }
 
 // Identifier implements cliproxyauth.ProviderExecutor.
@@ -81,8 +86,21 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
+	providerKey := e.providerConfigKey(auth)
+	compat := e.resolveCompatConfig(auth)
+	var authID string
+	if auth != nil {
+		authID = auth.ID
+	}
+	if errRate := e.rateLimiter.Wait(ctx, compat, providerKey, authID); errRate != nil {
+		return nil, errRate
+	}
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo == nil && httpResp != nil && httpResp.StatusCode == http.StatusTooManyRequests {
+		e.rateLimiter.NoteLimited(compat, providerKey, authID, httpResp.Header)
+	}
+	return httpResp, errDo
 }
 
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -176,6 +194,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		AuthValue: authValue,
 	})
 
+	if errRate := e.rateLimiter.Wait(ctx, e.resolveCompatConfig(auth), e.providerConfigKey(auth), authID); errRate != nil {
+		return resp, errRate
+	}
+
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
@@ -190,6 +212,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			e.rateLimiter.NoteLimited(e.resolveCompatConfig(auth), e.providerConfigKey(auth), authID, httpResp.Header)
+		}
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
@@ -270,6 +295,10 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 		AuthValue: authValue,
 	})
 
+	if errRate := e.rateLimiter.Wait(ctx, e.resolveCompatConfig(auth), e.providerConfigKey(auth), authID); errRate != nil {
+		return resp, errRate
+	}
+
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
@@ -293,6 +322,9 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			e.rateLimiter.NoteLimited(e.resolveCompatConfig(auth), e.providerConfigKey(auth), authID, httpResp.Header)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
 		err = newOpenAICompatStatusError(httpResp.StatusCode, httpResp.Header, body)
 		return resp, err
@@ -390,6 +422,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		AuthValue: authValue,
 	})
 
+	if errRate := e.rateLimiter.Wait(ctx, e.resolveCompatConfig(auth), e.providerConfigKey(auth), authID); errRate != nil {
+		return nil, errRate
+	}
+
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
@@ -399,6 +435,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			e.rateLimiter.NoteLimited(e.resolveCompatConfig(auth), e.providerConfigKey(auth), authID, httpResp.Header)
+		}
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
@@ -627,6 +666,10 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		AuthValue: authValue,
 	})
 
+	if errRate := e.rateLimiter.Wait(ctx, e.resolveCompatConfig(auth), e.providerConfigKey(auth), authID); errRate != nil {
+		return nil, errRate
+	}
+
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
@@ -637,6 +680,9 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			e.rateLimiter.NoteLimited(e.resolveCompatConfig(auth), e.providerConfigKey(auth), authID, httpResp.Header)
+		}
 		body, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
@@ -924,6 +970,16 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
 	return
+}
+
+func (e *OpenAICompatExecutor) providerConfigKey(auth *cliproxyauth.Auth) string {
+	key := e.Identifier()
+	if auth != nil && auth.Attributes != nil {
+		if configIndex := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex]); configIndex != "" {
+			key += "|config:" + configIndex
+		}
+	}
+	return key
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
