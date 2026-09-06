@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseProxyLine, formatTestStatus, validatePoolForm, effectivePreview, summarizeBulkResults, togglePoolSelection } from './ProxyPoolsPage.jsx';
+import { parseProxyLine, formatTestStatus, validatePoolForm, effectivePreview, summarizeBulkResults, togglePoolSelection, previewImportLines, healthCheckFlash } from './ProxyPoolsPage.jsx';
 
 test('parseProxyLine: bare host:port becomes http URL', () => {
   assert.equal(parseProxyLine('1.2.3.4:8080'), 'http://1.2.3.4:8080');
@@ -158,4 +158,58 @@ test('togglePoolSelection: tolerates duplicates and preserves order', () => {
   // Toggling 5 (present) removes it; toggling it again (absent) appends.
   assert.deepEqual(togglePoolSelection([5, 2, 5], 5), [2]);
   assert.deepEqual(togglePoolSelection([2], 5), [2, 5]);
+});
+
+// ── previewImportLines (batch import live preview) ──────────────────────
+
+test('previewImportLines: valid lines parse to ok chips with URLs', () => {
+  const out = previewImportLines('1.2.3.4:8080\nsocks5://h:1080');
+  assert.equal(out.length, 2);
+  assert.equal(out[0].line, 1);
+  assert.equal(out[0].ok, true);
+  assert.equal(out[0].url, 'http://1.2.3.4:8080');
+  assert.equal(out[1].ok, true);
+  assert.ok(!out[1].error);
+});
+
+test('previewImportLines: invalid lines carry the error', () => {
+  const out = previewImportLines('garbage');
+  assert.equal(out.length, 1);
+  assert.equal(out[0].ok, false);
+  assert.match(out[0].error, /expected host:port/i);
+});
+
+test('previewImportLines: duplicate URLs are marked dup', () => {
+  const out = previewImportLines('1.2.3.4:8080\n1.2.3.4:8080');
+  assert.equal(out[0].dup, false);
+  assert.equal(out[1].dup, true);
+  assert.equal(out[1].ok, true);
+});
+
+test('previewImportLines: blank and whitespace-only lines are skipped', () => {
+  const out = previewImportLines('\n   \n1.2.3.4:8080\n');
+  assert.equal(out.length, 1);
+  assert.equal(out[0].line, 3);
+});
+
+test('previewImportLines: empty input yields empty array', () => {
+  assert.deepEqual(previewImportLines(''), []);
+});
+
+// ── healthCheckFlash (completion message) ───────────────────────────────
+
+test('healthCheckFlash: complete with all healthy', () => {
+  assert.equal(healthCheckFlash({ ok: 4, failed: 0, stopped: false }), 'Health check complete: 4 healthy');
+});
+
+test('healthCheckFlash: complete with failures', () => {
+  assert.equal(healthCheckFlash({ ok: 4, failed: 2, stopped: false }), 'Health check complete: 4 healthy, 2 failed');
+});
+
+test('healthCheckFlash: stopped prefixes the interruption', () => {
+  assert.equal(healthCheckFlash({ ok: 2, failed: 1, stopped: true }), 'Health check stopped: 2 healthy, 1 failed');
+});
+
+test('healthCheckFlash: all failed still reads plainly', () => {
+  assert.equal(healthCheckFlash({ ok: 0, failed: 3, stopped: false }), 'Health check complete: 0 healthy, 3 failed');
 });

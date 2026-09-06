@@ -159,6 +159,39 @@ export function togglePoolSelection(ids, id) {
   return without;
 }
 
+// previewImportLines parses the import textarea for the live preview:
+// one entry per non-empty line with the parse outcome and a dup flag for
+// repeated URLs (first occurrence wins). Pure; exported for tests.
+export function previewImportLines(text) {
+  const seen = new Set();
+  const out = [];
+  String(text || '').split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line) return;
+    let ok = true;
+    let url = '';
+    let error = '';
+    try {
+      url = parseProxyLine(line);
+      ok = true;
+    } catch (err) {
+      ok = false;
+      error = err.message;
+    }
+    const dup = ok && seen.has(url);
+    if (ok) seen.add(url);
+    out.push({ line: i + 1, ok, url, error, dup });
+  });
+  return out;
+}
+
+// healthCheckFlash builds the completion message from the per-pool probe
+// outcomes. Stopped sweeps prefix the interruption. Pure; exported for tests.
+export function healthCheckFlash({ ok = 0, failed = 0, stopped = false }) {
+  const counts = failed > 0 ? `${ok} healthy, ${failed} failed` : `${ok} healthy`;
+  return `${stopped ? 'Health check stopped' : 'Health check complete'}: ${counts}`;
+}
+
 // redactProxyURL hides credentials in the table view.
 function redactProxyURL(url) {
   return String(url || '').replace(/\/\/[^@/]*@/, '//redacted@');
@@ -183,6 +216,14 @@ const RELAY_FIELDS = {
     { key: 'deno_token', label: 'Deno Deploy API token', type: 'password' },
     { key: 'deno_org_domain', label: 'Org domain (e.g. myorg.deno.net)', type: 'text' },
   ],
+};
+
+// Where to create each platform's one-shot credential, shown in the deploy
+// modal so the operator never has to hunt for it.
+const RELAY_TIPS = {
+  vercel: 'Create a token at vercel.com/account/tokens (scope: full account is enough for deployments).',
+  cloudflare: 'Account ID + API token from dash.cloudflare.com → Workers & Pages (token needs Workers Scripts:Edit).',
+  deno: 'Create an access token at dash.deno.com → Account Settings; the org domain looks like myorg.deno.net.',
 };
 
 function emptyForm() {
@@ -378,13 +419,20 @@ export default function ProxyPoolsPage() {
     setHealthAbort(abort);
     setHealthProgress({ done: 0, total: targets.length });
     let done = 0;
+    let healthOk = 0;
+    let healthFailed = 0;
     const queue = [...targets];
     const worker = async () => {
       while (queue.length > 0) {
         if (abort.stopped) break;
         const pool = queue.shift();
         if (!pool) break;
-        try { await testProxyPool(pool.id); } catch { /* result is persisted server-side */ }
+        try {
+          const res = await testProxyPool(pool.id);
+          if (res?.ok) healthOk += 1; else healthFailed += 1;
+        } catch {
+          healthFailed += 1;
+        }
         done += 1;
         setHealthProgress({ done, total: targets.length });
       }
@@ -394,7 +442,7 @@ export default function ProxyPoolsPage() {
     setHealthAbort(null);
     setHealthProgress(null);
     await reload();
-    flash(stopped ? `Health check stopped — ${done} checked` : 'Health check complete');
+    flash(healthCheckFlash({ ok: healthOk, failed: healthFailed, stopped }));
   };
 
   const stopHealthCheck = () => {
@@ -457,6 +505,14 @@ export default function ProxyPoolsPage() {
     flash(summarizeBulkResults({ done: targets.length, ok, skipped, failed, verb: 'deleted' }));
   };
 
+  // Live import preview: parse as the operator types; the submit button
+  // counts valid non-duplicate lines so a broken paste never reaches the API.
+  const importPreview = React.useMemo(
+    () => (showImport ? previewImportLines(importText) : []),
+    [showImport, importText],
+  );
+  const importValidCount = importPreview.filter((p) => p.ok && !p.dup).length;
+
   const runImport = async () => {
     setImportResult(null);
     const lines = importText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -482,6 +538,9 @@ export default function ProxyPoolsPage() {
     setRelayForm({ project_name: '' });
   };
 
+  // Deploy is gated until every required platform field is filled.
+  const relayReady = (RELAY_FIELDS[relayPlatform] || []).every((f) => String(relayForm[f.key] || '').trim() !== '');
+
   const runRelayDeploy = async () => {
     setRelayBusy(true);
     try {
@@ -504,18 +563,29 @@ export default function ProxyPoolsPage() {
 
   return (
     <div className="page">
-      <header className="page-header">
+      <header className="main__header">
         <div>
-          <h1>Proxy Pools</h1>
-          <p className="muted">
+          <h1 className="main__title">Proxy Pools</h1>
+          <div className="main__subtitle">
             Named egress-proxy pools bound to upstream provider entries. Relay pools forward traffic via
             deployed workers (x-relay-target/x-relay-path).
-          </p>
+          </div>
         </div>
-        <div className="actions">
-          <button onClick={runHealthCheck} disabled={pools.length === 0 || (!!healthProgress && !healthAbort)}>
+        <div className="page-actions">
+          {healthProgress && (
+            <span className="health-progress" title={`${healthProgress.done}/${healthProgress.total} checked`}>
+              <span className="lb-bar health-progress__bar">
+                <span
+                  className="lb-bar__fill"
+                  style={{ width: `${Math.round((healthProgress.done / Math.max(1, healthProgress.total)) * 100)}%` }}
+                />
+              </span>
+              <span className="health-progress__count">{healthProgress.done}/{healthProgress.total}</span>
+            </span>
+          )}
+          <button onClick={healthAbort ? stopHealthCheck : runHealthCheck} disabled={pools.length === 0 || (!!healthProgress && !healthAbort)}>
             {healthProgress
-              ? (healthAbort ? `■ Stop (${healthProgress.done}/${healthProgress.total})` : `Checking ${healthProgress.done}/${healthProgress.total}…`)
+              ? (healthAbort ? '■ Stop' : 'Checking…')
               : selectedIds.length > 0 ? `Health check (${selectedIds.length})` : 'Health check'}
           </button>
           <button onClick={() => setShowImport(true)}>Batch import</button>
@@ -753,11 +823,27 @@ export default function ProxyPoolsPage() {
               value={importText}
               onChange={(e) => setImportText(e.target.value)}
               placeholder={'1.2.3.4:8080\nuser:pass@host:3128\nsocks5://host:1080'}
+              spellCheck={false}
             />
+            {importPreview.length > 0 && (
+              <div className="import-preview" role="status" aria-label="Import preview">
+                {importPreview.map((p) => (
+                  <span
+                    key={p.line}
+                    className={`badge ${p.ok ? (p.dup ? 'badge--muted' : 'badge--active') : 'badge--revoked'}`}
+                    title={p.ok ? (p.dup ? 'Duplicate of an earlier line — the server will skip it' : p.url) : `Line ${p.line}: ${p.error}`}
+                  >
+                    {p.ok ? (p.dup ? `dup ${p.url}` : `✓ ${p.url}`) : `✗ line ${p.line}: ${p.error}`}
+                  </span>
+                ))}
+              </div>
+            )}
             {importResult?.error && <p className="error-text">{importResult.error}</p>}
             {importResult && !importResult.error && (
               <p>
-                Created {importResult.created}, skipped {importResult.skipped}, failed {importResult.failed}
+                <span className="badge badge--active">{importResult.created} created</span>{' '}
+                <span className="badge badge--muted">{importResult.skipped} skipped</span>{' '}
+                <span className={`badge ${importResult.failed > 0 ? 'badge--revoked' : 'badge--muted'}`}>{importResult.failed} failed</span>
                 {Array.isArray(importResult.errors) && importResult.errors.length > 0 && (
                   <ul className="error-text">
                     {importResult.errors.map((e) => (
@@ -769,8 +855,8 @@ export default function ProxyPoolsPage() {
             )}
             <div className="modal-actions">
               <button onClick={() => { setShowImport(false); setImportResult(null); }}>Close</button>
-              <button className="primary" onClick={runImport} disabled={busy}>
-                {busy ? 'Importing…' : 'Import'}
+              <button className="primary" onClick={runImport} disabled={busy || importValidCount === 0}>
+                {busy ? 'Importing…' : `Import (${importValidCount} valid)`}
               </button>
             </div>
           </div>
@@ -811,19 +897,24 @@ export default function ProxyPoolsPage() {
 
       {relayPlatform && (
         <Modal title={`Deploy relay to ${TYPE_LABELS[relayPlatform] || relayPlatform}`} onClose={() => setRelayPlatform(null)}>
-          <div className="form">
+          <form className="form" onSubmit={(e) => { e.preventDefault(); if (relayReady) runRelayDeploy(); }}>
             <p className="muted">
               Deploys a relay worker with the x-relay-target contract and creates a pool for it. Platform
               credentials are used once and never stored.
             </p>
+            <p className="muted relay-tip">{RELAY_TIPS[relayPlatform]}</p>
             {RELAY_FIELDS[relayPlatform].map((f) => (
               <label key={f.key}>
                 {f.label}
                 <input
                   type={f.type}
                   value={relayForm[f.key] || ''}
-                  onChange={(e) => setRelayForm({ ...relayForm, [f.key]: e.target.value })}
+                  onChange={(e) => setRelayForm({ ...relayForm, [f.key]: e.target.value, [`${f.key}Touched`]: true })}
+                  autoComplete="off"
                 />
+                {relayForm[`${f.key}Touched`] && !relayForm[f.key] && (
+                  <span className="error-text">{f.label} is required.</span>
+                )}
               </label>
             ))}
             <label>
@@ -833,15 +924,19 @@ export default function ProxyPoolsPage() {
                 onChange={(e) => setRelayForm({ ...relayForm, project_name: e.target.value })}
                 placeholder="relay-<auto>"
               />
+              <span className="muted">Optional — the platform generates one when empty.</span>
             </label>
             {relayForm.error && <p className="error-text">{relayForm.error}</p>}
             <div className="modal-actions">
-              <button onClick={() => setRelayPlatform(null)}>Cancel</button>
-              <button className="primary" onClick={runRelayDeploy} disabled={relayBusy}>
+              <button type="button" onClick={() => setRelayPlatform(null)}>Cancel</button>
+              <button className="primary" type="submit" disabled={relayBusy || !relayReady}>
                 {relayBusy ? 'Deploying…' : 'Deploy'}
               </button>
             </div>
-          </div>
+            {relayBusy && (
+              <p className="muted">May take up to 2 minutes — the worker must build first.</p>
+            )}
+          </form>
         </Modal>
       )}
     </div>

@@ -4862,3 +4862,56 @@ button.ghost:hover:not(:disabled) {
 .pool-preview code {
   color: var(--accent);
 }
+
+/* Proxy Pools — header action row: single line, right-aligned (main__header
+   pattern), wrapping only on narrow viewports. */
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+@media (max-width: 900px) {
+  .page-actions {
+    flex-wrap: wrap;
+    white-space: normal;
+    justify-content: flex-end;
+  }
+}
+
+/* Proxy Pools — inline health check progress next to the toolbar button. */
+.health-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.health-progress__bar {
+  width: 90px;
+  display: inline-block;
+}
+.health-progress__count {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Proxy Pools — batch import live preview chips under the textarea. */
+.import-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 96px;
+  overflow-y: auto;
+  margin-top: 6px;
+}
+.import-preview .badge {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Proxy Pools — relay deploy modal platform tip. */
+.relay-tip {
+  margin-top: -6px;
+}
