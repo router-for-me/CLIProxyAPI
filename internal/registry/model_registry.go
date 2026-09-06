@@ -520,6 +520,25 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	misc.LogCredentialSeparator()
 }
 
+// findModelRegistrationFoldLocked returns the registration whose key matches
+// modelID case-insensitively, or nil. Caller must hold r.mutex (read or write).
+// Used as a routing fallback so mixed-case client requests resolve to
+// lowercase-canonical registrations.
+func (r *ModelRegistry) findModelRegistrationFoldLocked(modelID string) *ModelRegistration {
+	if modelID == "" || len(r.models) == 0 {
+		return nil
+	}
+	for id, reg := range r.models {
+		if reg == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+			return reg
+		}
+	}
+	return nil
+}
+
 func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *ModelInfo, now time.Time) {
 	if model == nil || modelID == "" {
 		return
@@ -1339,7 +1358,21 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	defer r.mutex.RUnlock()
 
 	registration, exists := r.models[modelID]
-	if !exists || registration == nil || len(registration.Providers) == 0 {
+	if !exists {
+		// The registry stores model ids lowercase-canonical (see
+		// model_definitions.go). Fall back to a case-insensitive match only
+		// for requests containing uppercase letters (e.g. the official
+		// mixed-case Command Code ID Meta/Muse-Spark-1.2-Contributor). Pure
+		// lowercase requests — the historical norm — keep exact-match
+		// semantics and never pay the scan cost.
+		if modelID == strings.ToLower(modelID) {
+			return nil
+		}
+		registration = r.findModelRegistrationFoldLocked(modelID)
+		if registration == nil {
+			return nil
+		}
+	} else if registration == nil || len(registration.Providers) == 0 {
 		return nil
 	}
 

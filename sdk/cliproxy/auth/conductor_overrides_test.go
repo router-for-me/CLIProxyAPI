@@ -2486,3 +2486,187 @@ func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testin
 		t.Fatalf("expected real 401 authentication error to set model cooldown state, got %#v", state)
 	}
 }
+
+// TestManager_MarkResult_402DoesNotGloballyCooldownAuth verifies the Command
+// Code plan-entitlement failure mode: a 402 (model not included in the active
+// plan) marks only that model as unavailable and must NOT take the whole auth
+// credential offline. A subsequent allowed model on the same auth must remain
+// usable.
+func TestManager_MarkResult_402DoesNotGloballyCooldownAuth(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prevQuota) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-commandcode-402",
+		Provider: "commandcode",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// Model not in the Go plan -> upstream 402.
+	blockedModel := "meta/muse-spark-1.2"
+	allowedModel := "meta/muse-spark-1.2-contributor"
+
+	// Prime the auth with both model states so the aggregated availability has
+	// an allowed model to keep the auth usable.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    allowedModel,
+		Success:  true,
+	})
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    blockedModel,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusPaymentRequired, Message: "model not in plan"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+
+	// The blocked model is marked unavailable with a retry-after.
+	blockedState := updated.ModelStates[blockedModel]
+	if blockedState == nil {
+		t.Fatalf("expected blocked model state to be present")
+	}
+	if !blockedState.Unavailable {
+		t.Fatal("expected blocked model to be unavailable after 402")
+	}
+	if blockedState.NextRetryAfter.IsZero() {
+		t.Fatal("expected blocked model to have a retry-after after 402")
+	}
+
+	// The auth itself must NOT be globally unavailable, and the allowed model
+	// must not be cooldowned.
+	if updated.Unavailable {
+		t.Fatal("402 for one model must not mark the whole auth unavailable")
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatal("402 for one model must not set an auth-level retry-after")
+	}
+	allowedState := updated.ModelStates[allowedModel]
+	if allowedState != nil && (allowedState.Unavailable || !allowedState.NextRetryAfter.IsZero()) {
+		t.Fatalf("402 for one model must not cooldown the allowed model, got %#v", allowedState)
+	}
+}
+
+// TestManager_MarkResult_402ThenAllowedModelSucceeds verifies that after a 402
+// on a blocked model, a successful call on an allowed model keeps that model
+// usable and does not resurrect the blocked model's cooldown.
+func TestManager_MarkResult_402ThenAllowedModelSucceeds(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prevQuota) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-commandcode-402-recover",
+		Provider: "commandcode",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	blockedModel := "meta/muse-spark-1.2"
+	allowedModel := "meta/muse-spark-1.2-contributor"
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    blockedModel,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusPaymentRequired, Message: "model not in plan"},
+	})
+
+	// Allowed model call succeeds.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    allowedModel,
+		Success:  true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	allowedState := updated.ModelStates[allowedModel]
+	if allowedState == nil || allowedState.Unavailable {
+		t.Fatalf("allowed model should be clean after success, got %#v", allowedState)
+	}
+	if updated.Unavailable {
+		t.Fatal("auth must not be unavailable after allowed model success")
+	}
+	// Blocked model stays cooldowned.
+	blockedState := updated.ModelStates[blockedModel]
+	if blockedState == nil || !blockedState.Unavailable {
+		t.Fatal("blocked model cooldown must survive an allowed model success")
+	}
+}
+
+// TestManager_MarkResult_429StillCooldownsModel verifies rate-limit behavior
+// is preserved: a 429 marks the model quota-exceeded with a retry-after, but
+// keeps the auth usable for other models (no regression).
+func TestManager_MarkResult_429StillCooldownsModel(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prevQuota) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-commandcode-429",
+		Provider: "commandcode",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "deepseek/deepseek-v4-flash"
+	allowedModel := "deepseek/deepseek-v4-pro"
+
+	// Prime a second usable model so auth-level aggregation is not hard-blocked
+	// by a single model's rate limit.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    allowedModel,
+		Success:  true,
+	})
+
+	retryAfter := 30 * time.Second
+	m.MarkResult(context.Background(), Result{
+		AuthID:     auth.ID,
+		Provider:   auth.Provider,
+		Model:      model,
+		Success:    false,
+		Error:      &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+		RetryAfter: &retryAfter,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || !state.Unavailable {
+		t.Fatalf("expected 429 to mark model unavailable, got %#v", state)
+	}
+	if !state.Quota.Exceeded {
+		t.Fatal("expected 429 to set quota exceeded on the model")
+	}
+	// Auth-level must not be hard-blocked for other models.
+	if updated.Unavailable {
+		t.Fatal("429 on one model must not mark the whole auth unavailable")
+	}
+}
