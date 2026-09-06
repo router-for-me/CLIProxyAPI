@@ -232,6 +232,11 @@ func claudeKeyFromProviderWithPools(p store.UpstreamProvider, pools poolLookup) 
 	}
 	keys := make([]config.ClaudeKey, 0, len(p.APIKeyEntries))
 	for _, e := range p.APIKeyEntries {
+		if e.Disabled {
+			// Disabled entries stay persisted but never reach config.yaml;
+			// toggling them back on re-renders them on the next reload.
+			continue
+		}
 		keys = append(keys, buildClaudeKeyWithPools(p, e, pools))
 	}
 	return keys
@@ -319,6 +324,11 @@ func openAICompatFromProviderWithPools(p store.UpstreamProvider, pools poolLooku
 		Headers:      p.Headers,
 	}
 	for _, e := range p.APIKeyEntries {
+		if e.Disabled {
+			// Disabled entries stay persisted but never reach config.yaml;
+			// toggling them back on re-renders them on the next reload.
+			continue
+		}
 		// Priority is copied verbatim so nil stays nil and continues to mean
 		// "inherit the pool-level Priority" on the runtime side. The entry
 		// pool binding overrides the row binding (resolveBinding precedence).

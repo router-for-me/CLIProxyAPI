@@ -435,3 +435,42 @@ func TestSeedInverseCarriesStrategyAndEntryPriority(t *testing.T) {
 		t.Fatalf("claude seed alias strategy = %q, want round-robin (normalized)", p3.RoutingStrategy)
 	}
 }
+
+// TestRenderSkipsDisabledEntries verifies that entries with Disabled=true
+// stay persisted but never reach the rendered config: the OpenAI-compat
+// entries list and the Claude fan-out both drop them, while active
+// siblings render unchanged.
+func TestRenderSkipsDisabledEntries(t *testing.T) {
+	provider := store.UpstreamProvider{
+		ProviderType: TypeOpenAICompatibility,
+		ID:           9,
+		Name:         "compat",
+		APIKeyEntries: []store.UpstreamProviderAPIKey{
+			{ID: 31, APIKey: "compat-live-secret", Name: "live"},
+			{ID: 32, APIKey: "compat-off-secret", Name: "off", Disabled: true},
+		},
+	}
+	got := openAICompatFromProvider(provider)
+	if len(got.APIKeyEntries) != 1 {
+		t.Fatalf("rendered %d entries, want 1 (disabled entry skipped)", len(got.APIKeyEntries))
+	}
+	if got.APIKeyEntries[0].APIKey != "compat-live-secret" {
+		t.Fatalf("wrong entry rendered: %q", got.APIKeyEntries[0].APIKey)
+	}
+
+	claude := store.UpstreamProvider{
+		ProviderType: TypeClaudeAPIKey,
+		ID:           10,
+		APIKeyEntries: []store.UpstreamProviderAPIKey{
+			{ID: 41, APIKey: "claude-live-secret", Name: "live"},
+			{ID: 42, APIKey: "claude-off-secret", Name: "off", Disabled: true},
+		},
+	}
+	keys := claudeKeyFromProvider(claude)
+	if len(keys) != 1 {
+		t.Fatalf("rendered %d claude keys, want 1 (disabled entry skipped)", len(keys))
+	}
+	if keys[0].APIKey != "claude-live-secret" {
+		t.Fatalf("wrong claude key rendered: %q", keys[0].APIKey)
+	}
+}
