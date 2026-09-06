@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -13,6 +14,7 @@ import (
 
 const (
 	codexInputItemIDLimit                 = 64
+	codexCallIDLimit                      = 64
 	codexMessageItemIDPrefix              = "msg"
 	codexReasoningItemIDPrefix            = "rs"
 	codexFunctionCallItemIDPrefix         = "fc"
@@ -21,12 +23,26 @@ const (
 
 	codexInputItemIDOccupied  uint8 = 1 << 0
 	codexInputItemIDPreserved uint8 = 1 << 1
+
+	codexCallIDFunctionCall     uint8 = 1 << 1
+	codexCallIDFunctionOutput   uint8 = 1 << 2
+	codexCallIDCustomToolCall   uint8 = 1 << 3
+	codexCallIDCustomToolOutput uint8 = 1 << 4
 )
 
 // SanitizeCodexInputItemIDs normalizes supported input item IDs for Codex, removes encrypted
 // reasoning items whose IDs exceed the Codex limit, and deterministically shortens
-// other overlong input item IDs.
+// other overlong input item IDs and call IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
+	return sanitizeResponsesInputIDs(body, true)
+}
+
+// SanitizeResponsesCallIDs deterministically shortens only overlong Responses call IDs.
+func SanitizeResponsesCallIDs(body []byte) []byte {
+	return sanitizeResponsesInputIDs(body, false)
+}
+
+func sanitizeResponsesInputIDs(body []byte, sanitizeItemIDs bool) []byte {
 	input := util.GetGJSONBytesNoCopy(body, "input")
 	if !input.IsArray() {
 		return body
@@ -34,10 +50,31 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 
 	items := input.Array()
 	idStates := make(map[string]uint8, len(items))
+	var callIDStates map[string]uint8
+	var overlongCallIDRoles map[string]uint8
 	for _, item := range items {
-		if shouldDropCodexEncryptedReasoningItem(item) {
+		if sanitizeItemIDs && shouldDropCodexEncryptedReasoningItem(item) {
 			continue
 		}
+		callID := item.Get("call_id")
+		if callID.Type == gjson.String {
+			value := callID.String()
+			if utf8.RuneCountInString(value) <= codexCallIDLimit {
+				if callIDStates == nil {
+					callIDStates = make(map[string]uint8)
+				}
+				callIDStates[value] |= codexInputItemIDOccupied | codexCallIDRole(item)
+			} else {
+				if overlongCallIDRoles == nil {
+					overlongCallIDRoles = make(map[string]uint8)
+				}
+				overlongCallIDRoles[value] |= codexCallIDRole(item)
+			}
+		}
+		if !sanitizeItemIDs {
+			continue
+		}
+
 		itemID := item.Get("id")
 		if itemID.Type != gjson.String {
 			continue
@@ -58,17 +95,18 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 
 	var mapped map[string]string
 	var collisionMapped map[string]string
+	var callIDMapped map[string]string
 	rebuilt := make([]string, 0, len(items))
 	changed := false
 	for _, item := range items {
-		if shouldDropCodexEncryptedReasoningItem(item) {
+		if sanitizeItemIDs && shouldDropCodexEncryptedReasoningItem(item) {
 			changed = true
 			continue
 		}
 
 		raw := item.Raw
 		itemID := item.Get("id")
-		if itemID.Type == gjson.String {
+		if sanitizeItemIDs && itemID.Type == gjson.String {
 			originalID := itemID.String()
 			id := normalizeCodexInputItemID(item, originalID)
 			if id != originalID && idStates[id]&codexInputItemIDPreserved != 0 {
@@ -116,6 +154,46 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 				}
 			}
 		}
+
+		callID := item.Get("call_id")
+		if callID.Type == gjson.String && utf8.RuneCountInString(callID.String()) > codexCallIDLimit {
+			originalCallID := callID.String()
+			shortened, ok := callIDMapped[originalCallID]
+			if !ok {
+				claudeCallID := util.SanitizeClaudeToolID(originalCallID)
+				for attempt := 0; ; attempt++ {
+					shortened = shortenCodexCallIDWithAttempt(originalCallID, attempt)
+					shortenedState := callIDStates[shortened]
+					if codexCallIDRolesArePair(overlongCallIDRoles[originalCallID], shortenedState) {
+						break
+					}
+					if claudeCallID != originalCallID {
+						claudeShortened := shortenCodexCallIDWithAttempt(claudeCallID, attempt)
+						if codexCallIDRolesArePair(overlongCallIDRoles[originalCallID], callIDStates[claudeShortened]) {
+							shortened = claudeShortened
+							break
+						}
+					}
+					if shortenedState&codexInputItemIDOccupied == 0 {
+						break
+					}
+				}
+				if callIDMapped == nil {
+					callIDMapped = make(map[string]string)
+				}
+				if callIDStates == nil {
+					callIDStates = make(map[string]uint8)
+				}
+				callIDMapped[originalCallID] = shortened
+				callIDStates[shortened] |= codexInputItemIDOccupied
+			}
+
+			next, errSet := sjson.SetBytes([]byte(raw), "call_id", shortened)
+			if errSet == nil {
+				raw = string(next)
+				changed = true
+			}
+		}
 		rebuilt = append(rebuilt, raw)
 	}
 	if !changed {
@@ -127,6 +205,29 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+func codexCallIDRole(item gjson.Result) uint8 {
+	switch item.Get("type").String() {
+	case "function_call":
+		return codexCallIDFunctionCall
+	case "function_call_output":
+		return codexCallIDFunctionOutput
+	case "custom_tool_call":
+		return codexCallIDCustomToolCall
+	case "custom_tool_call_output":
+		return codexCallIDCustomToolOutput
+	default:
+		return 0
+	}
+}
+
+func codexCallIDRolesArePair(overlongRole, shortenedState uint8) bool {
+	shortenedRole := shortenedState &^ codexInputItemIDOccupied
+	return (overlongRole == codexCallIDFunctionCall && shortenedRole == codexCallIDFunctionOutput) ||
+		(overlongRole == codexCallIDFunctionOutput && shortenedRole == codexCallIDFunctionCall) ||
+		(overlongRole == codexCallIDCustomToolCall && shortenedRole == codexCallIDCustomToolOutput) ||
+		(overlongRole == codexCallIDCustomToolOutput && shortenedRole == codexCallIDCustomToolCall)
 }
 
 func normalizeCodexInputItemID(item gjson.Result, id string) string {
@@ -173,6 +274,14 @@ func shortenCodexInputItemIDWithAttempt(id string, attempt int) string {
 		return id
 	}
 	return codexInputItemIDWithHashSuffixRunes(id, runes, attempt)
+}
+
+func shortenCodexCallIDWithAttempt(callID string, attempt int) string {
+	runes := []rune(callID)
+	if len(runes) <= codexCallIDLimit {
+		return callID
+	}
+	return codexInputItemIDWithHashSuffixRunes(callID, runes, attempt)
 }
 
 func codexInputItemIDWithHashSuffix(id string, attempt int) string {
