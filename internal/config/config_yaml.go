@@ -13,6 +13,11 @@ import (
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	persistCfg := cfg
+	if cfg != nil && cfg.ListUnprefixedModels == nil {
+		copyConfig := *cfg
+		copyConfig.SetListUnprefixedModels(true)
+		persistCfg = &copyConfig
+	}
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -315,6 +320,11 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	// Weight is pointer-backed, so an explicit zero is meaningful and must be preserved.
 	if len(path) > 0 && path[len(path)-1] == "weight" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
 		return false
+	}
+	// list-unprefixed-models defaults to true. An explicit false is meaningful
+	// and must survive insertion into a file that did not previously contain it.
+	if len(path) > 0 && path[len(path)-1] == "list-unprefixed-models" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+		return node.Value == "true"
 	}
 
 	// First check if it's a zero value

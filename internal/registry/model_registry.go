@@ -81,6 +81,10 @@ type ModelInfo struct {
 	// IsCompat enables compatibility handling for this configured API-key model.
 	// It is internal metadata and is not exposed in model listings.
 	IsCompat bool `json:"-"`
+
+	// HiddenFromModelCatalog keeps a model available for routing while excluding
+	// it from user-facing model listings. It is internal metadata.
+	HiddenFromModelCatalog bool `json:"-"`
 }
 
 // ModelConfig holds optional runtime overrides for a model definition.
@@ -93,6 +97,12 @@ type ModelConfig struct {
 type availableModelsCacheEntry struct {
 	models    []map[string]any
 	expiresAt time.Time
+}
+
+type providerModelCatalogEntry struct {
+	count       int
+	info        *ModelInfo
+	hasMetadata bool
 }
 
 // ThinkingSupport describes a model family's supported internal reasoning budget range.
@@ -978,6 +988,28 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	return false
 }
 
+// ClientSupportsWebSearchModel reports the web-search capability advertised by
+// one client for one model. It intentionally does not use the aggregate model
+// registration, because another client may advertise a different capability.
+func (r *ModelRegistry) ClientSupportsWebSearchModel(clientID, modelID string) bool {
+	clientID = strings.TrimSpace(clientID)
+	modelID = normalizeAntigravityCapabilityModelID(modelID)
+	if clientID == "" || modelID == "" {
+		return false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	for _, info := range r.clientModelInfos[clientID] {
+		if info == nil || normalizeAntigravityCapabilityModelID(info.ID) != modelID {
+			continue
+		}
+		return info.SupportsWebSearch
+	}
+	return false
+}
+
 // IsModelSuspendedForClient reports whether a model is currently suspended for a specific client.
 func (r *ModelRegistry) IsModelSuspendedForClient(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
@@ -995,6 +1027,50 @@ func (r *ModelRegistry) IsModelSuspendedForClient(clientID, modelID string) bool
 	}
 	_, suspended := registration.SuspendedClients[clientID]
 	return suspended
+}
+
+// AllEligibleClientsSupportWebSearchModel reports whether every eligible client
+// for a provider/model advertises native web-search support. It returns false
+// when no eligible client exists or when any eligible client's metadata is
+// missing or does not advertise the capability.
+func (r *ModelRegistry) AllEligibleClientsSupportWebSearchModel(provider, modelID string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelID = normalizeAntigravityCapabilityModelID(modelID)
+	if provider == "" || modelID == "" {
+		return false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	eligibleClients := 0
+	for clientID, clientProvider := range r.clientProviders {
+		if clientProvider != provider {
+			continue
+		}
+
+		registeredModelID := ""
+		for _, candidateModelID := range r.clientModels[clientID] {
+			if normalizeAntigravityCapabilityModelID(candidateModelID) == modelID {
+				registeredModelID = strings.TrimSpace(candidateModelID)
+				break
+			}
+		}
+		if registeredModelID == "" {
+			continue
+		}
+		if !clientUsableForCatalogSelection(r.models[registeredModelID], clientID) {
+			continue
+		}
+
+		eligibleClients++
+		info := r.clientModelInfos[clientID][registeredModelID]
+		if info == nil || !info.SupportsWebSearch {
+			return false
+		}
+	}
+
+	return eligibleClients > 0
 }
 
 // IsModelQuotaExceededForClient reports whether a model is currently marked quota exceeded for a specific client.
@@ -1092,6 +1168,80 @@ func modelRegistrationAvailability(registration *ModelRegistration, now time.Tim
 	return available, expiresAt
 }
 
+func clientUsableForCatalogSelection(registration *ModelRegistration, clientID string) bool {
+	if registration == nil || registration.SuspendedClients == nil {
+		return true
+	}
+
+	reason, suspended := registration.SuspendedClients[clientID]
+	return !suspended || strings.EqualFold(reason, "quota")
+}
+
+// visibleModelInfo returns metadata for a model that should appear in a model
+// catalog. A model ID can be registered by more than one provider, so the
+// result is visible when at least one active provider registration is visible.
+func (r *ModelRegistry) visibleModelInfo(modelID string, registration *ModelRegistration) *ModelInfo {
+	if registration == nil {
+		return nil
+	}
+
+	clientIDs := make([]string, 0, len(r.clientModels))
+	for clientID := range r.clientModels {
+		clientIDs = append(clientIDs, clientID)
+	}
+	sort.Strings(clientIDs)
+
+	hasClientMetadata := false
+	for _, clientID := range clientIDs {
+		modelIDs := r.clientModels[clientID]
+		for _, registeredModelID := range modelIDs {
+			if registeredModelID != modelID {
+				continue
+			}
+			if !clientUsableForCatalogSelection(registration, clientID) {
+				break
+			}
+			info := r.clientModelInfos[clientID][modelID]
+			if info == nil {
+				break
+			}
+			hasClientMetadata = true
+			if !info.HiddenFromModelCatalog {
+				return info
+			}
+			break
+		}
+	}
+	if hasClientMetadata {
+		return nil
+	}
+
+	if len(registration.Providers) == 0 {
+		if registration.Info != nil && !registration.Info.HiddenFromModelCatalog {
+			return registration.Info
+		}
+		return nil
+	}
+
+	providers := make([]string, 0, len(registration.Providers))
+	for provider := range registration.Providers {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	for _, provider := range providers {
+		count := registration.Providers[provider]
+		if count <= 0 || registration.InfoByProvider == nil {
+			continue
+		}
+		info := registration.InfoByProvider[provider]
+		if info != nil && !info.HiddenFromModelCatalog {
+			return info
+		}
+	}
+
+	return nil
+}
+
 // GetAvailableModelInfos returns cloned metadata for all currently available models.
 func (r *ModelRegistry) GetAvailableModelInfos() []*ModelInfo {
 	now := time.Now()
@@ -1099,12 +1249,13 @@ func (r *ModelRegistry) GetAvailableModelInfos() []*ModelInfo {
 	defer r.mutex.RUnlock()
 
 	result := make([]*ModelInfo, 0, len(r.models))
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		available, _ := modelRegistrationAvailability(registration, now)
-		if !available || registration == nil || registration.Info == nil {
+		info := r.visibleModelInfo(modelID, registration)
+		if !available || info == nil {
 			continue
 		}
-		result = append(result, cloneModelInfo(registration.Info))
+		result = append(result, cloneModelInfo(info))
 	}
 	sort.Slice(result, func(i, j int) bool {
 		return strings.TrimSpace(result[i].ID) < strings.TrimSpace(result[j].ID)
@@ -1116,7 +1267,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		available, registrationExpiresAt := modelRegistrationAvailability(registration, now)
 		if !registrationExpiresAt.IsZero() && (expiresAt.IsZero() || registrationExpiresAt.Before(expiresAt)) {
 			expiresAt = registrationExpiresAt
@@ -1125,7 +1276,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			continue
 		}
 
-		model := r.convertModelToMap(registration.Info, handlerType)
+		model := r.convertModelToMap(r.visibleModelInfo(modelID, registration), handlerType)
 		if model != nil {
 			models = append(models, model)
 		}
@@ -1171,29 +1322,17 @@ func cloneModelMapValue(value any) any {
 	}
 }
 
-// GetAvailableModelsByProvider returns models available for the given provider identifier.
-// Parameters:
-//   - provider: Provider identifier (e.g., "codex", "gemini", "antigravity")
-//
-// Returns:
-//   - []*ModelInfo: List of available models for the provider
-func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelInfo {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
-		return nil
+func (r *ModelRegistry) collectProviderModelsLocked(provider string, includeHidden bool) map[string]*providerModelCatalogEntry {
+	providerModels := make(map[string]*providerModelCatalogEntry)
+
+	clientIDs := make([]string, 0, len(r.clientProviders))
+	for clientID := range r.clientProviders {
+		clientIDs = append(clientIDs, clientID)
 	}
+	sort.Strings(clientIDs)
 
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
-
-	type providerModel struct {
-		count int
-		info  *ModelInfo
-	}
-
-	providerModels := make(map[string]*providerModel)
-
-	for clientID, clientProvider := range r.clientProviders {
+	for _, clientID := range clientIDs {
+		clientProvider := r.clientProviders[clientID]
 		if clientProvider != provider {
 			continue
 		}
@@ -1209,24 +1348,44 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 			}
 			entry := providerModels[modelID]
 			if entry == nil {
-				entry = &providerModel{}
+				entry = &providerModelCatalogEntry{}
 				providerModels[modelID] = entry
 			}
 			entry.count++
-			if entry.info == nil {
-				if clientInfos != nil {
-					if info := clientInfos[modelID]; info != nil {
-						entry.info = info
-					}
+			if registration := r.models[modelID]; !clientUsableForCatalogSelection(registration, clientID) {
+				continue
+			}
+
+			info := clientInfos[modelID]
+			if info == nil {
+				continue
+			}
+			entry.hasMetadata = true
+			if !includeHidden {
+				if !info.HiddenFromModelCatalog && entry.info == nil {
+					entry.info = info
 				}
-				if entry.info == nil {
-					if reg, ok := r.models[modelID]; ok && reg != nil && reg.Info != nil {
-						entry.info = reg.Info
-					}
-				}
+				continue
+			}
+			if entry.info == nil || (!entry.info.SupportsWebSearch && info.SupportsWebSearch) {
+				entry.info = info
 			}
 		}
 	}
+
+	return providerModels
+}
+
+func (r *ModelRegistry) getAvailableModelsByProvider(provider string, includeHidden bool) []*ModelInfo {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	providerModels := r.collectProviderModelsLocked(provider, includeHidden)
 
 	if len(providerModels) == 0 {
 		return nil
@@ -1235,7 +1394,14 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 	now := time.Now()
 	result := make([]*ModelInfo, 0, len(providerModels))
 
-	for modelID, entry := range providerModels {
+	modelIDs := make([]string, 0, len(providerModels))
+	for modelID := range providerModels {
+		modelIDs = append(modelIDs, modelID)
+	}
+	sort.Strings(modelIDs)
+
+	for _, modelID := range modelIDs {
+		entry := providerModels[modelID]
 		if entry == nil || entry.count <= 0 {
 			continue
 		}
@@ -1282,17 +1448,29 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		}
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
-			if entry.info != nil {
-				result = append(result, cloneModelInfo(entry.info))
-				continue
+			info := entry.info
+			if info == nil && !entry.hasMetadata && ok && registration != nil {
+				info = registration.InfoByProvider[provider]
 			}
-			if ok && registration != nil && registration.Info != nil {
-				result = append(result, cloneModelInfo(registration.Info))
+			if info != nil && (includeHidden || !info.HiddenFromModelCatalog) {
+				result = append(result, cloneModelInfo(info))
 			}
 		}
 	}
 
 	return result
+}
+
+// GetAvailableModelsByProvider returns models available for the given provider identifier.
+// Hidden catalog aliases are excluded because this method feeds user-facing model lists.
+func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelInfo {
+	return r.getAvailableModelsByProvider(provider, false)
+}
+
+// GetAvailableModelCapabilitiesByProvider returns active model metadata for provider capability checks.
+// Unlike GetAvailableModelsByProvider, it includes models hidden from user-facing catalogs.
+func (r *ModelRegistry) GetAvailableModelCapabilitiesByProvider(provider string) []*ModelInfo {
+	return r.getAvailableModelsByProvider(provider, true)
 }
 
 // GetModelCount returns the number of available clients for a specific model
