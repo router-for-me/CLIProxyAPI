@@ -34,6 +34,59 @@ type Setting struct {
 	Raw  string
 	Mode Mode
 	URL  *url.URL
+	// NoProxy lists host patterns (exact, ".suffix" subdomain, or "*") that
+	// must bypass the proxy even when the URL configures one. Populated from
+	// the composite suffix "?no_proxy=a,b" rendered by upstreamsync.
+	NoProxy []string
+	// Strict is the failure policy: true (the default) fails the request when
+	// the proxy fails; false retries once directly with a warning log. A
+	// plain URL without a suffix parses as strict (fail-hard default).
+	Strict bool
+}
+
+// parseCompositeSuffix splits a "?no_proxy=…&strict=…" query off the raw
+// proxy value. It returns the cleaned URL string plus the decoded settings.
+// Unknown or empty-valued keys are rejected so hand-edited rendered YAML
+// fails fast instead of silently dropping pool attributes.
+func parseCompositeSuffix(raw string) (cleaned string, noProxy []string, strict bool, err error) {
+	strict = true // fail-hard default: a proxy failure fails the request
+	qIdx := strings.Index(raw, "?")
+	if qIdx < 0 {
+		return raw, nil, strict, nil
+	}
+	cleaned = raw[:qIdx]
+	values, errParse := url.ParseQuery(raw[qIdx+1:])
+	if errParse != nil {
+		return "", nil, false, fmt.Errorf("parse proxy suffix: %w", errParse)
+	}
+	for key, vals := range values {
+		if len(vals) != 1 || strings.TrimSpace(vals[0]) == "" {
+			return "", nil, false, fmt.Errorf("proxy suffix key %q must have exactly one value", key)
+		}
+		switch key {
+		case "no_proxy":
+			for _, part := range strings.Split(vals[0], ",") {
+				if p := strings.TrimSpace(part); p != "" {
+					noProxy = append(noProxy, strings.ToLower(p))
+				}
+			}
+		case "strict":
+			switch strings.ToLower(strings.TrimSpace(vals[0])) {
+			case "true":
+				strict = true
+			case "false":
+				strict = false
+			default:
+				return "", nil, false, fmt.Errorf("proxy suffix strict=%q must be true|false", vals[0])
+			}
+		default:
+			return "", nil, false, fmt.Errorf("unknown proxy suffix key %q", key)
+		}
+	}
+	if len(noProxy) == 0 {
+		return "", nil, false, fmt.Errorf("proxy suffix has no_proxy key but no host patterns")
+	}
+	return cleaned, noProxy, strict, nil
 }
 
 // Parse normalizes a proxy configuration value into inherit, direct, or proxy modes.
@@ -51,7 +104,15 @@ func Parse(raw string) (Setting, error) {
 		return setting, nil
 	}
 
-	parsedURL, errParse := url.Parse(trimmed)
+	cleaned, noProxy, strict, errSuffix := parseCompositeSuffix(trimmed)
+	if errSuffix != nil {
+		setting.Mode = ModeInvalid
+		return setting, errSuffix
+	}
+	setting.NoProxy = noProxy
+	setting.Strict = strict
+
+	parsedURL, errParse := url.Parse(cleaned)
 	if errParse != nil {
 		setting.Mode = ModeInvalid
 		return setting, fmt.Errorf("parse proxy URL failed")
@@ -264,6 +325,11 @@ func Redact(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return ""
+	}
+	// Strip the composite suffix (?no_proxy=…&strict=…) — it carries no
+	// credentials and keeping logs short is worth more than the detail.
+	if cleaned, _, _, errSuffix := parseCompositeSuffix(trimmed); errSuffix == nil {
+		trimmed = cleaned
 	}
 
 	parsedURL, errParse := url.Parse(trimmed)

@@ -395,3 +395,60 @@ func TestParseErrorDoesNotExposeProxyCredentials(t *testing.T) {
 		t.Fatalf("parse error exposes proxy credentials: %q", errParse.Error())
 	}
 }
+
+// TestParseCompositeSuffix verifies the pool-attribute query suffix rendered
+// by upstreamsync: ?no_proxy=…&strict=true is parsed into typed fields and
+// stripped from the proxy URL.
+func TestParseCompositeSuffix(t *testing.T) {
+	t.Parallel()
+
+	setting, err := Parse("socks5://user:pass@host:1080?no_proxy=api.anthropic.com,.internal&strict=true")
+	if err != nil {
+		t.Fatalf("parse composite: %v", err)
+	}
+	if setting.Mode != ModeProxy {
+		t.Fatalf("mode = %v, want ModeProxy", setting.Mode)
+	}
+	if setting.URL.String() != "socks5://user:pass@host:1080" {
+		t.Fatalf("stripped URL = %q", setting.URL.String())
+	}
+	if got := strings.Join(setting.NoProxy, ","); got != "api.anthropic.com,.internal" {
+		t.Fatalf("noProxy = %q", got)
+	}
+	if !setting.Strict {
+		t.Fatal("strict = false, want true")
+	}
+}
+
+// TestParseCompositeSuffixDefaults pins the fail-hard default: a plain URL
+// (no suffix) parses with Strict=true and an empty noProxy list.
+func TestParseCompositeSuffixDefaults(t *testing.T) {
+	t.Parallel()
+
+	setting, err := Parse("http://proxy:8080")
+	if err != nil {
+		t.Fatalf("parse plain: %v", err)
+	}
+	if !setting.Strict {
+		t.Fatal("plain URL must default strict=true")
+	}
+	if len(setting.NoProxy) != 0 {
+		t.Fatalf("noProxy = %v, want empty", setting.NoProxy)
+	}
+}
+
+// TestParseCompositeSuffixRejectsUnknownKeys keeps hand-edited rendered YAML
+// failing fast instead of silently dropping pool attributes.
+func TestParseCompositeSuffixRejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
+
+	if _, err := Parse("http://proxy:8080?surprise=1"); err == nil {
+		t.Fatal("unknown suffix key must be rejected")
+	}
+	if _, err := Parse("http://proxy:8080?strict="); err == nil {
+		t.Fatal("empty strict value must be rejected")
+	}
+	if _, err := Parse("http://proxy:8080?strict=maybe"); err == nil {
+		t.Fatal("non-boolean strict value must be rejected")
+	}
+}
