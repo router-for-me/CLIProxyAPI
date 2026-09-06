@@ -79,6 +79,10 @@ type upstreamProviderEntryReq struct {
 	// Priority is the optional selection tier for this entry. nil = inherit
 	// the row-level priority.
 	Priority *int `json:"priority,omitempty"`
+
+	// Disabled excludes this entry from routing without deleting it. The
+	// renderer skips disabled entries when rendering config.yaml.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // parseRFC3339 parses an RFC3339 timestamp string, returning ok=false on

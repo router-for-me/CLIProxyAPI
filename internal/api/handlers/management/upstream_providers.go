@@ -159,6 +159,7 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 			APIKey:      e.APIKey,
 			ProxyURL:    e.ProxyURL,
 			ProxyPoolID: e.ProxyPoolID,
+			Disabled:    e.Disabled,
 		}
 		if e.Weight != nil {
 			w := *e.Weight
