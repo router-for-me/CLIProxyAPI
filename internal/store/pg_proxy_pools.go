@@ -57,6 +57,11 @@ const proxyPoolColumns = `id, name, proxy_url, no_proxy, type, is_active, strict
 // validProxyPoolTypes is the closed set of pool types the renderer understands.
 var validProxyPoolTypes = map[string]bool{"http": true, "vercel": true, "cloudflare": true, "deno": true}
 
+// ValidProxyPoolType reports whether the pool type is one of the closed set.
+func ValidProxyPoolType(t string) bool {
+	return validProxyPoolTypes[t]
+}
+
 // pgProxyPoolStore implements ProxyPoolStore against the proxy_pools table.
 type pgProxyPoolStore struct {
 	db             *sql.DB

@@ -354,6 +354,19 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/upstream-providers/:id", s.mgmt.UpdateUpstreamProvider)
 		mgmt.DELETE("/upstream-providers/:id", s.mgmt.DeleteUpstreamProvider)
 
+		// Named egress-proxy pools (9router-derived Proxy Pools workflow).
+		// Returns 503 when the PG store is not configured. Binding lives on
+		// upstream_providers(.proxy_pool_id) rows/entries; mutations here
+		// re-render upstream artifacts so bindings resolve immediately.
+		mgmt.GET("/proxy-pools", s.mgmt.ListProxyPools)
+		mgmt.POST("/proxy-pools", s.mgmt.CreateProxyPool)
+		mgmt.GET("/proxy-pools/:id", s.mgmt.GetProxyPool)
+		mgmt.PUT("/proxy-pools/:id", s.mgmt.UpdateProxyPool)
+		mgmt.DELETE("/proxy-pools/:id", s.mgmt.DeleteProxyPool)
+		mgmt.POST("/proxy-pools/:id/test", s.mgmt.TestProxyPool)
+		mgmt.POST("/proxy-pools/batch-import", s.mgmt.BatchImportProxyPools)
+		mgmt.POST("/proxy-pools/relay-deploy", s.mgmt.DeployRelayProxyPool)
+
 		// Upstream OAuth/auth token refresh outcomes recorded by the auth
 		// manager's RefreshSink into the upstream_sync_log table. Surfaced on
 		// the dashboard under Analysis → Upstream Providers. Returns 503 when
