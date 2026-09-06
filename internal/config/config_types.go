@@ -148,6 +148,10 @@ type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
+	// ForceHTTP1 makes ChatGPT Codex HTTP/SSE requests use HTTP/1.1 while retaining
+	// the Chrome uTLS fingerprint. Use it for proxy paths that cannot reliably carry
+	// HTTP/2. Other upstream transports are unaffected. Default is false.
+	ForceHTTP1 bool `yaml:"force-http1" json:"force-http1"`
 	// StreamBootstrapBuffering holds back initial handshake events (response.created,
 	// response.in_progress and the websocket metadata frames) until the first generated event
 	// arrives. The upstream delivers server_is_overloaded rejections inside an HTTP 200 stream
