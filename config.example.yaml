@@ -629,6 +629,12 @@ nonstream-keepalive-interval: 0
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional provider override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional per-provider override; 0 disables additional rounds; omit or set < 0 to inherit global
+#     response-cache: # optional: reuse upstream responses for byte-identical requests (useful for aggregators that bill every retry and offer no prompt caching)
+#       enabled: false # default false; only exact same-payload requests hit the cache
+#       ttl: "5m" # optional: entry lifetime; default 5m
+#       max-entries: 256 # optional: retained responses; default 256
+#       max-entry-bytes: 2097152 # optional: per-response size limit; default 2 MiB
+#       models: [] # optional: restrict caching to these upstream model names; empty caches every model
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
 #         match:
