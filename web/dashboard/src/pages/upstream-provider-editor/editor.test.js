@@ -551,3 +551,64 @@ test('buildPayload: weight 0 still excluded while priority 0 emitted (distinct s
   assert.ok(!('weight' in entry), 'weight 0 stays excluded (must be >= 1)');
   assert.equal(entry.priority, 0, 'priority 0 is meaningful and emitted');
 });
+
+// ── Proxy pool binding (pool picker vs manual URL exclusivity) ─────────
+
+test('hydrateEntries: pool binding hydrates and clears manual proxy url', async () => {
+  const { buildForm } = await import('./form.js');
+  const form = buildForm('claude-api-key', {
+    api_key_entries: [{ id: 1, api_key: 'k', proxy_pool_id: 7, proxy_url: 'http://stale:1' }],
+  });
+  const entry = form.api_key_entries[0];
+  assert.equal(entry.proxy_pool_id, 7);
+  // Pool wins on hydrate: the manual URL is cleared (mutually exclusive).
+  assert.equal(entry.proxy_url, '');
+});
+
+test('hydrateEntries: no binding keeps manual proxy url', async () => {
+  const { buildForm } = await import('./form.js');
+  const form = buildForm('openai-compatibility', {
+    api_key_entries: [{ id: 2, api_key: 'k2', proxy_url: 'socks5://h:1080' }],
+  });
+  const entry = form.api_key_entries[0];
+  assert.ok(!entry.proxy_pool_id || entry.proxy_pool_id === '');
+  assert.equal(entry.proxy_url, 'socks5://h:1080');
+});
+
+test('entryPayload: emits proxy_pool_id only when set, proxy_url only when manual', async () => {
+  const { buildPayload } = await import('./form.js');
+  const base = {
+    provider_type: 'openai-compatibility',
+    name: 'compat',
+    priority: 0,
+    base_url: 'https://api.example.test/v1',
+    api_key: '',
+    proxy_url: '',
+    headers: [],
+    models: [],
+    excluded_models: [],
+    routing_strategy: '',
+    api_key_entries: [],
+  };
+  const pooled = buildPayload(
+    { ...base, api_key_entries: [{ id: 1, api_key: 'k1', proxy_pool_id: 7, proxy_url: '' }] },
+    'openai-compatibility',
+  );
+  assert.equal(pooled.api_key_entries[0].proxy_pool_id, 7);
+  assert.ok(!pooled.api_key_entries[0].proxy_url, 'pooled entry must not carry a manual URL');
+
+  const manual = buildPayload(
+    { ...base, api_key_entries: [{ id: 2, api_key: 'k2', proxy_pool_id: '', proxy_url: 'socks5://h:1' }] },
+    'openai-compatibility',
+  );
+  assert.equal(manual.api_key_entries[0].proxy_url, 'socks5://h:1');
+  assert.ok(!('proxy_pool_id' in manual.api_key_entries[0]), 'manual entry must omit proxy_pool_id');
+});
+
+test('buildForm/buildPayload: row-level proxy_pool_id round-trips', async () => {
+  const { buildForm, buildPayload } = await import('./form.js');
+  const form = buildForm('claude-api-key', { proxy_pool_id: 7, api_key: 'k', api_key_entries: [] });
+  assert.equal(form.proxy_pool_id, 7);
+  const payload = buildPayload({ ...form, api_key_entries: [] }, 'claude-api-key');
+  assert.equal(payload.proxy_pool_id, 7);
+});

@@ -16,13 +16,14 @@ import React, { useMemo } from 'react';
 import { PasswordInput } from '../manage-cpa/FormPrimitives.jsx';
 import { validateAPIKeyEntries, idHintForIdentity } from './form.js';
 
-export default function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
+export default function APIKeyEntriesEditor({ entries, onChange, error = '', proxyPools = [] }) {
   const safe = Array.isArray(entries) ? entries : [];
+  const pools = Array.isArray(proxyPools) ? proxyPools : [];
   function update(idx, patch) {
     onChange(safe.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
   }
   function add() {
-    onChange([...safe, { api_key: '', proxy_url: '', name: '', id: 0, weight: '', priority: '' }]);
+    onChange([...safe, { api_key: '', proxy_url: '', proxy_pool_id: '', name: '', id: 0, weight: '', priority: '' }]);
   }
   function remove(idx) { onChange(safe.filter((_, i) => i !== idx)); }
 
@@ -66,13 +67,34 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '' }) {
                 onChange={(v) => update(idx, { api_key: v })}
                 placeholder="api key"
               />
+              <select
+                value={e.proxy_pool_id ? String(e.proxy_pool_id) : ''}
+                onChange={(ev) => {
+                  const v = ev.target.value;
+                  // Mutually exclusive: picking a pool clears the manual URL;
+                  // "none" pins explicit direct egress; inherit keeps both empty.
+                  update(idx, v === '' || v === 'none'
+                    ? { proxy_pool_id: '', proxy_url: v === 'none' ? 'none' : '' }
+                    : { proxy_pool_id: Number(v), proxy_url: '' });
+                }}
+                aria-label="API key entry proxy pool"
+                data-testid={`api-key-entry-proxy-pool-${idx}`}
+              >
+                <option value="">pool: inherit row</option>
+                {pools.filter((p) => p.is_active).map((p) => (
+                  <option key={p.id} value={String(p.id)}>{p.name}</option>
+                ))}
+                <option value="none">direct (no proxy)</option>
+              </select>
               <input
                 type="text"
-                value={e.proxy_url || ''}
-                onChange={(ev) => update(idx, { proxy_url: ev.target.value })}
+                value={e.proxy_pool_id ? '' : (e.proxy_url || '')}
+                onChange={(ev) => update(idx, { proxy_url: ev.target.value, proxy_pool_id: ev.target.value ? '' : e.proxy_pool_id })}
                 placeholder="proxy url (optional)"
                 spellCheck={false}
                 aria-label="API key entry proxy URL"
+                disabled={!!e.proxy_pool_id}
+                title={e.proxy_pool_id ? `Bound to proxy pool #${e.proxy_pool_id} — clear the picker to edit the manual URL` : undefined}
               />
               <input
                 type="text"

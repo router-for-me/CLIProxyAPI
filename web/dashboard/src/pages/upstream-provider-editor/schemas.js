@@ -79,6 +79,8 @@ export function buildSchemas() {
     { name: 'proxy_url', label: 'Proxy URL', type: 'text', placeholder: 'socks5://user:pass@host:1080',
       hint: 'Per-key proxy override. Use "direct"/"none" to bypass global proxy.',
       validate: (v) => (v && !URL_RE.test(v) ? 'Must start with http://, https://, socks5://, or be "direct"/"none".' : '') },
+    { name: 'proxy_pool_id', label: 'Proxy pool', type: 'proxy_pool_id',
+      hint: 'Bind this provider to a named proxy pool (Proxy Pools page). Applies to entries without their own pool binding; overrides the manual proxy URL.' },
     { name: 'prefix', label: 'Model prefix', type: 'text', placeholder: 'teamA/',
       hint: 'Optional namespace prepended to every model this entry serves.' },
   ];

@@ -96,11 +96,17 @@ function hydrateEntries(src) {
   // selection tier (priority) so subsequent saves update rows in place
   // rather than deleting and reinserting them.
   if (!Array.isArray(src)) return [];
-  return src.map((e) => ({
+  return src.map((e) => {
+    const poolId = e && e.proxy_pool_id !== undefined && e.proxy_pool_id !== null ? e.proxy_pool_id : '';
+    const manualURL = e && e.proxy_url ? e.proxy_url : '';
+    return {
     id: Number(e && e.id) || 0,
     name: e && e.name ? e.name : '',
     api_key: e && e.api_key ? e.api_key : '',
-    proxy_url: e && e.proxy_url ? e.proxy_url : '',
+    // Pool binding and the manual proxy URL are mutually exclusive; a
+    // persisted pool binding wins on hydrate and clears the stale URL.
+    proxy_pool_id: poolId !== '' ? poolId : '',
+    proxy_url: poolId !== '' ? '' : manualURL,
     // Weight is optional; editors leave it blank for the "default" affordance.
     // Treat null/undefined as blank so the editor shows an empty input.
     weight: e && e.weight !== undefined && e.weight !== null ? e.weight : '',
@@ -108,7 +114,8 @@ function hydrateEntries(src) {
     // row-level priority and renders as a blank input. Unlike weight, an
     // explicit 0 is meaningful (tier 0) and must survive the round-trip.
     priority: e && e.priority !== undefined && e.priority !== null ? e.priority : '',
-  }));
+    };
+  });
 }
 
 // buildForm hydrates a provider row (or nothing, for create) into the
@@ -126,6 +133,8 @@ export function buildForm(providerType, initial, carryOver) {
     api_key: carry.api_key ?? src.api_key ?? '',
     base_url: carry.base_url ?? src.base_url ?? '',
     proxy_url: carry.proxy_url ?? src.proxy_url ?? '',
+    proxy_pool_id: carry.proxy_pool_id ?? src.proxy_pool_id ?? '',   // row-level pool binding (renderer-resolved)
+    relay_base_url: src.relay_base_url ?? '',                        // renderer-managed; display only
     prefix: carry.prefix ?? src.prefix ?? '',
     email: src.email ?? '',
     file_name: src.file_name ?? '',
@@ -265,6 +274,12 @@ export function buildPayload(form, providerType) {
       }
     }
   } else if (openai || providerType === 'claude-api-key') {
+    // Row-level proxy pool binding: emitted only when set so a cleared
+    // picker keeps the manual proxy_url (or none) semantics intact.
+    const rowPoolId = Number(form.proxy_pool_id);
+    if (Number.isFinite(rowPoolId) && rowPoolId > 0) {
+      payload.proxy_pool_id = rowPoolId;
+    }
     // OpenAI Compatibility AND Claude (API Key) both use the multi-row
     // entries editor in the modern UI; both round-trip the persisted
     // child-row id, the optional normalised identity, the optional
@@ -282,8 +297,16 @@ export function buildPayload(form, providerType) {
       .map((e) => {
         const entry = {
           api_key: String(e.api_key).trim(),
-          proxy_url: (e.proxy_url || '').trim(),
         };
+        // Mutually exclusive: a picked pool clears the manual URL and vice
+        // versa. Pool binding emitted as a number; manual URL only when no
+        // pool is picked.
+        const poolId = Number(e.proxy_pool_id);
+        if (Number.isFinite(poolId) && poolId > 0) {
+          entry.proxy_pool_id = poolId;
+        } else {
+          entry.proxy_url = (e.proxy_url || '').trim();
+        }
         const id = Number(e.id) || 0;
         if (id > 0) entry.id = id;
         const name = typeof e.name === 'string' ? e.name.trim().toLowerCase() : '';

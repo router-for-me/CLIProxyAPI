@@ -22,6 +22,7 @@ import {
   listUpstreamProviders,
   createUpstreamProvider,
   updateUpstreamProvider,
+  listProxyPools,
   oauthChannelToAuthProvider,
 } from '../../api/client.js';
 import { ApiError } from '../../api/client.js';
@@ -71,6 +72,18 @@ export function resolveEditorMode(id) {
 }
 
 export default function UpstreamProviderEditorPage() {
+  // Active proxy pools feed the row-level + per-entry pickers below. The
+  // list is fetched once on mount; a stale binding (pool deleted elsewhere)
+  // still shows its raw id so the operator can clear it.
+  const [proxyPools, setProxyPools] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    listProxyPools()
+      .then((res) => { if (!cancelled) setProxyPools(Array.isArray(res?.pools) ? res.pools : []); })
+      .catch(() => { /* picker degrades to manual URL only */ });
+    return () => { cancelled = true; };
+  }, []);
+
   const { id } = useParams();
   const { isCreate, providerId } = resolveEditorMode(id);
 
@@ -473,7 +486,7 @@ function ProviderEditorForm({ provider, siblingNames = [] }) {
                     required={field.required}
                     htmlFor={`up_${field.name.replace(/[.\s]/g, '_')}`}
                   >
-                    {renderInput(field, form, update, isEdit, providerType)}
+                    {renderInput(field, form, update, isEdit, providerType, proxyPools)}
                   </Field>
                 );
               })}
@@ -519,7 +532,7 @@ function ProviderEditorForm({ provider, siblingNames = [] }) {
 // Input renderer (dispatches by field.type)
 // ============================================================================
 
-function renderInput(field, form, update, isEdit, providerType) {
+function renderInput(field, form, update, isEdit, providerType, proxyPools = []) {
   const id = `up_${field.name.replace(/[.\s]/g, '_')}`;
   const value = form[field.name];
   switch (field.type) {
@@ -551,10 +564,40 @@ function renderInput(field, form, update, isEdit, providerType) {
           alias: 'client alias (e.g. claude-sonnet)',
           displayName: 'display name (optional)',
         }} />;
+    case 'proxy_pool_id': {
+      // Row-level pool binding: inherit (empty) / active pools / direct.
+      // Selecting a pool clears the manual proxy_url field (the renderer
+      // makes them exclusive; keep the form consistent with that).
+      const numeric = Number(value);
+      const selected = Number.isFinite(numeric) && numeric > 0 ? String(numeric) : '';
+      return (
+        <select
+          id={id}
+          value={selected}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === '') {
+              update(field.name, '');
+            } else {
+              update(field.name, Number(v));
+              update('proxy_url', '');
+            }
+          }}
+          data-testid="up_proxy_pool_id"
+        >
+          <option value="">inherit: manual proxy URL / global</option>
+          {proxyPools.filter((p) => p.is_active).map((p) => (
+            <option key={p.id} value={String(p.id)}>{p.name}</option>
+          ))}
+          <option value="0">none (no pool)</option>
+        </select>
+      );
+    }
     case 'api_key_entries':
       return <APIKeyEntriesEditor
         entries={value || []}
         onChange={(v) => update(field.name, v)}
+        proxyPools={proxyPools}
       />;
     case 'text':
     default:
