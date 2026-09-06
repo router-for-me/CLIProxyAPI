@@ -24,10 +24,10 @@ func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []by
 }
 
 func normalizeResponsesWebsocketRequestWithLastResponseID(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, lastResponseID string, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
-	return normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON, lastRequest, lastResponseOutput, lastResponseID, nil, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
+	return normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON, lastRequest, lastResponseOutput, lastResponseID, nil, "", allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
 }
 
-func normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, lastResponseID string, lastResponsePendingToolCallIDs []string, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
+func normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, lastResponseID string, lastResponsePendingToolCallIDs []string, localPrewarmResponseID string, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
 	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
 	switch requestType {
 	case wsRequestTypeCreate:
@@ -35,10 +35,10 @@ func normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON []byte, last
 		if len(lastRequest) == 0 {
 			return normalizeResponseCreateRequest(rawJSON)
 		}
-		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, lastResponseID, lastResponsePendingToolCallIDs, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
+		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, lastResponseID, lastResponsePendingToolCallIDs, localPrewarmResponseID, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
 	case wsRequestTypeAppend:
 		// log.Infof("responses websocket: response.append request")
-		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, lastResponseID, lastResponsePendingToolCallIDs, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
+		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, lastResponseID, lastResponsePendingToolCallIDs, localPrewarmResponseID, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
 	default:
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -67,7 +67,7 @@ func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces
 	return normalized, bytes.Clone(normalized), nil
 }
 
-func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, lastResponseID string, lastResponsePendingToolCallIDs []string, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
+func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, lastResponseID string, lastResponsePendingToolCallIDs []string, localPrewarmResponseID string, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
 	if len(lastRequest) == 0 {
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -83,18 +83,33 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 
+	// The last request still holds the complete prewarm until an upstream turn succeeds.
+	// Only the ID actually issued on this connection establishes that incremental base.
+	localPrewarmContinuation := localPrewarmResponseID != "" && lastResponseID == localPrewarmResponseID
+	if localPrewarmContinuation {
+		previousResponseID := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String())
+		if previousResponseID != "" && previousResponseID != localPrewarmResponseID {
+			return nil, lastRequest, responsesWebsocketPreviousResponseNotFoundError()
+		}
+		if previousResponseID == "" && strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String()) == wsRequestTypeCreate {
+			// A fresh create replaces the prewarm, including changed or removed tools.
+			normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
+			return normalized, bytes.Clone(normalized), nil
+		}
+	}
+
 	// Compaction can cause clients to replace local websocket history with a new
 	// compact transcript on the next `response.create`. When the input already
 	// contains historical model output items, treating it as an incremental append
 	// duplicates stale turn-state and can leave late orphaned function_call items.
-	if shouldReplaceWebsocketTranscript(rawJSON, nextInput) {
+	if !localPrewarmContinuation && shouldReplaceWebsocketTranscript(rawJSON, nextInput) {
 		normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
 		return normalized, bytes.Clone(normalized), nil
 	}
 
 	// Websocket v2 mode uses response.create with previous_response_id + incremental input.
 	// Do not expand it into a full input transcript; upstream expects the incremental payload.
-	if allowIncrementalInputWithPreviousResponseID {
+	if allowIncrementalInputWithPreviousResponseID && !localPrewarmContinuation {
 		prev := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String())
 		if prev == "" {
 			if !inputSatisfiesPendingToolCalls(nextInput, lastResponsePendingToolCallIDs) {
@@ -132,12 +147,14 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	// function_call / function_call_output pairings.
 	// See: https://github.com/router-for-me/CLIProxyAPI/issues/2207
 	var mergedInput []byte
-	if allowCompactionReplayBypass && inputContainsFullTranscript(nextInput) {
+	if !localPrewarmContinuation && allowCompactionReplayBypass && inputContainsFullTranscript(nextInput) {
 		log.Infof("responses websocket: full transcript detected, skipping stale merge (input items=%d)", len(nextInput.Array()))
 		mergedInput = []byte(nextInput.Raw)
 	} else {
 		appendInputRaw := nextInput.Raw
-		if inputContainsFullTranscript(nextInput) {
+		// A prewarm continuation can itself contain compact history. Preserve both
+		// that history and the input prefix the upstream has never received.
+		if !localPrewarmContinuation && inputContainsFullTranscript(nextInput) {
 			appendInputRaw = inputWithoutCompactionItems(nextInput)
 		}
 
@@ -169,6 +186,11 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	if localPrewarmContinuation && !gjson.GetBytes(normalized, "tools").Exists() {
+		if tools := gjson.GetBytes(lastRequest, "tools"); tools.Exists() {
+			normalized, _ = sjson.SetRawBytes(normalized, "tools", []byte(tools.Raw))
+		}
+	}
 	var errSet error
 	normalized, errSet = sjson.SetRawBytes(normalized, "input", mergedInput)
 	if errSet != nil {
