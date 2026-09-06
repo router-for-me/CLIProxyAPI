@@ -1119,7 +1119,7 @@ func unwrapCustomToolInput(arguments string) string {
 							if i+4 < len(content) {
 								if r, err := strconv.ParseUint(content[i+1:i+5], 16, 16); err == nil {
 									if utf16.IsSurrogate(rune(r)) && i+10 < len(content) && content[i+5:i+7] == `\u` {
-										if r2, err2 := strconv.ParseUint(content[i+7:i+11], 16, 16); err2 == nil {
+										if r2, err2 := strconv.ParseUint(content[i+7:i+11], 16, 16); err2 == nil && utf16.DecodeRune(rune(r), rune(r2)) != '\uFFFD' {
 											unescaped.WriteRune(utf16.DecodeRune(rune(r), rune(r2)))
 											i += 10
 											inEscape = false
