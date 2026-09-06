@@ -80,6 +80,7 @@ func newPoolTestRouter(h *Handler) *gin.Engine {
 	r.DELETE("/proxy-pools/:id", h.DeleteProxyPool)
 	r.POST("/proxy-pools/:id/test", h.TestProxyPool)
 	r.POST("/proxy-pools/batch-import", h.BatchImportProxyPools)
+	r.POST("/proxy-pools/relay-deploy", h.DeployRelayProxyPool)
 	return r
 }
 
