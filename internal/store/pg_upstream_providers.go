@@ -121,6 +121,11 @@ type UpstreamProviderAPIKey struct {
 	// when the upper tier cools down. Stored as nullable INTEGER so
 	// "inherit" stays distinct from an explicit 0.
 	Priority *int `json:"priority,omitempty"`
+	// Disabled excludes this entry from routing without deleting it. The
+	// upstreamsync renderer skips disabled entries when projecting the row
+	// into config.yaml. Stored NOT NULL DEFAULT FALSE so legacy rows survive
+	// the column add with unchanged behavior.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // UpstreamProviderStore is the contract the management API consumes for the
@@ -519,7 +524,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 
 	// API-key entries (openai-compatibility only).
 	aRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority
+		SELECT id, provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.entries), p.ID)
 	if err != nil {
@@ -529,7 +534,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 		var e UpstreamProviderAPIKey
 		var entryName, proxyURL sql.NullString
 		var weight, priority, entryPoolID sql.NullInt64
-		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &entryPoolID, &e.SortOrder, &weight, &priority); err != nil {
+		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &entryPoolID, &e.SortOrder, &weight, &priority, &e.Disabled); err != nil {
 			aRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider api key entry: %w", err)
 		}
@@ -708,20 +713,20 @@ func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *s
 		entry.SortOrder = sortOrder
 		if entry.ID == 0 {
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-				INSERT INTO %s (provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+				INSERT INTO %s (provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 				RETURNING id
-			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority)).Scan(&entry.ID); err != nil {
+			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled).Scan(&entry.ID); err != nil {
 				return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
 			}
 		} else {
 			var persistedID int64
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 				UPDATE %s
-				SET api_key = $1, name = $2, proxy_url = $3, proxy_pool_id = $4, sort_order = $5, weight = $6, priority = $7
-				WHERE id = $8 AND provider_id = $9
+				SET api_key = $1, name = $2, proxy_url = $3, proxy_pool_id = $4, sort_order = $5, weight = $6, priority = $7, disabled = $8
+				WHERE id = $9 AND provider_id = $10
 				RETURNING id
-			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.ID, providerID).Scan(&persistedID); err != nil {
+			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, entry.ID, providerID).Scan(&persistedID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return fmt.Errorf("postgres store: upstream provider api key entry id %d is missing from upstream provider %d", entry.ID, providerID)
 				}

@@ -743,6 +743,16 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: migrate upstream provider entries priority column: %w", err)
 	}
+	// upstream_provider_api_key_entries disabled column. Per-entry on/off
+	// toggle for the dashboard's entries editor; the upstreamsync renderer
+	// skips disabled entries when rendering config.yaml. NOT NULL DEFAULT
+	// FALSE so legacy rows keep their routing behavior after the upgrade
+	// and no NULL-scan handling is needed.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS disabled BOOLEAN NOT NULL DEFAULT FALSE`, upstreamEntriesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream provider entries disabled column: %w", err)
+	}
 
 	// proxy_pool_id binding columns (Proxy Pools feature). Entries override;
 	// the provider row value is the default for entries that leave it NULL.

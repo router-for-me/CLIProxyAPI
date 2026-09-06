@@ -779,3 +779,91 @@ func TestUpstreamProviderStoreRoutingStrategyAndEntryPriorityRoundTrip(t *testin
 		t.Fatalf("entry 1 priority after clear = %#v, want nil (inherit)", reloaded.APIKeyEntries[1].Priority)
 	}
 }
+
+func TestUpstreamProviderStoreAPIKeyEntryDisabledRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_entry_disabled")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The migration must add a NOT NULL disabled column defaulting to false
+	// so legacy rows survive the upgrade with unchanged routing behavior
+	// and no NULL-scan handling is needed.
+	colType, colNullable, colDefault := "", "", ""
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT data_type, is_nullable, COALESCE(column_default, '')
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'disabled'
+	`, pg.cfg.Schema, pg.cfg.UpstreamProviderEntriesTable).Scan(&colType, &colNullable, &colDefault); err != nil {
+		t.Fatalf("query disabled column: %v", err)
+	}
+	if colType != "boolean" {
+		t.Fatalf("disabled column type = %q, want boolean", colType)
+	}
+	if colNullable != "NO" {
+		t.Fatalf("disabled column nullable = %q, want NO (NOT NULL)", colNullable)
+	}
+	if colDefault != "false" {
+		t.Fatalf("disabled column default = %q, want false", colDefault)
+	}
+
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType: "openai-compatibility",
+		Name:         "toggleable",
+		BaseURL:      "https://api.example.test/v1",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "toggle-secret-1", Name: "alpha"},
+			{APIKey: "toggle-secret-2", Name: "beta", Disabled: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.APIKeyEntries[0].Disabled {
+		t.Fatal("Create returned Disabled=true for omitted entry, want false")
+	}
+	if !created.APIKeyEntries[1].Disabled {
+		t.Fatal("Create returned Disabled=false for entry with Disabled=true, want true")
+	}
+
+	firstID := created.APIKeyEntries[0].ID
+	secondID := created.APIKeyEntries[1].ID
+
+	loaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(loaded.APIKeyEntries) != 2 {
+		t.Fatalf("Get returned %d entries, want 2", len(loaded.APIKeyEntries))
+	}
+	for _, e := range loaded.APIKeyEntries {
+		want := e.ID == secondID
+		if e.Disabled != want {
+			t.Fatalf("loaded entry %d Disabled = %v, want %v", e.ID, e.Disabled, want)
+		}
+	}
+
+	// Toggle back: the dashboard's enable path must round-trip too.
+	updated, err := src.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "openai-compatibility",
+		Name:         "toggleable",
+		BaseURL:      "https://api.example.test/v1",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: firstID, APIKey: "toggle-secret-1", Name: "alpha", Disabled: true},
+			{ID: secondID, APIKey: "toggle-secret-2", Name: "beta"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update with toggled disabled: %v", err)
+	}
+	for _, e := range updated.APIKeyEntries {
+		want := e.ID == firstID
+		if e.Disabled != want {
+			t.Fatalf("updated entry %d Disabled = %v, want %v", e.ID, e.Disabled, want)
+		}
+	}
+}
