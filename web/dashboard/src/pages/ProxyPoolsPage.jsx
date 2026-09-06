@@ -131,6 +131,34 @@ export function effectivePreview(form) {
   return rawURL + sep + attrs.join('&');
 }
 
+// summarizeBulkResults builds the aggregate flash message for a bulk loop
+// (delete/test/activate): the success count uses the verb, skipped carries an
+// optional label (e.g. "bound"), failures always surface. Pure; exported for tests.
+export function summarizeBulkResults({ done = 0, ok = 0, skipped = 0, failed = 0, verb = 'deleted', skippedLabel = 'bound' }) {
+  const parts = [];
+  if (ok > 0 || failed === 0) {
+    parts.push(`${ok} ${verb}`);
+    if (ok === 0) parts.length = 0; // fall through to the "Deleted 0" shape below
+  }
+  const head = parts.length > 0 ? parts[0] : `${verb.charAt(0).toUpperCase() + verb.slice(1)} 0`;
+  const tail = [];
+  if (skipped > 0) tail.push(`${skipped} skipped (${skippedLabel})`);
+  if (failed > 0) tail.push(`${failed} failed`);
+  return tail.length > 0 ? `${head}, ${tail.join(', ')}` : head;
+}
+
+// togglePoolSelection adds/removes one pool id from the selection list.
+// The selection stays duplicate-free (deduped first), order-preserving.
+// Pure; exported for tests.
+export function togglePoolSelection(ids, id) {
+  const unique = [...new Set(ids)];
+  const without = unique.filter((v) => v !== id);
+  if (without.length === unique.length) {
+    without.push(id);
+  }
+  return without;
+}
+
 // redactProxyURL hides credentials in the table view.
 function redactProxyURL(url) {
   return String(url || '').replace(/\/\/[^@/]*@/, '//redacted@');
@@ -168,7 +196,14 @@ export default function ProxyPoolsPage() {
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState(null);
   const [healthProgress, setHealthProgress] = useState(null);
+  const [healthAbort, setHealthAbort] = useState(null);
   const [notice, setNotice] = useState('');
+
+  // Row selection for the bulk bar (UpstreamProvidersPage pattern). Pruned
+  // against the fetched list after every reload so deleted pools drop out.
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [bulkConfirm, setBulkConfirm] = useState(null);
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -197,7 +232,14 @@ export default function ProxyPoolsPage() {
     setError(null);
     try {
       const res = await listProxyPools({ includeUsage: true });
-      setPools(res.pools);
+      const fetched = res.pools;
+      setPools(fetched);
+      // Prune the selection to pools that still exist.
+      setSelectedIds((prev) => {
+        const live = new Set(fetched.map((p) => p.id));
+        const kept = prev.filter((id) => live.has(id));
+        return kept.length === prev.length ? prev : kept;
+      });
     } catch (err) {
       setError(err);
     } finally {
@@ -328,13 +370,18 @@ export default function ProxyPoolsPage() {
   };
 
   const runHealthCheck = async () => {
-    const targets = [...pools];
+    // Selection-aware: a checked set narrows the sweep; nothing selected sweeps all.
+    const selected = new Set(selectedIds);
+    const targets = pools.filter((p) => selected.size === 0 || selected.has(p.id));
     if (targets.length === 0) return;
+    const abort = { stopped: false };
+    setHealthAbort(abort);
     setHealthProgress({ done: 0, total: targets.length });
     let done = 0;
     const queue = [...targets];
     const worker = async () => {
       while (queue.length > 0) {
+        if (abort.stopped) break;
         const pool = queue.shift();
         if (!pool) break;
         try { await testProxyPool(pool.id); } catch { /* result is persisted server-side */ }
@@ -343,9 +390,71 @@ export default function ProxyPoolsPage() {
       }
     };
     await Promise.all(Array.from({ length: Math.min(10, targets.length) }, worker));
+    const stopped = abort.stopped;
+    setHealthAbort(null);
     setHealthProgress(null);
     await reload();
-    flash('Health check complete');
+    flash(stopped ? `Health check stopped — ${done} checked` : 'Health check complete');
+  };
+
+  const stopHealthCheck = () => {
+    if (healthAbort) healthAbort.stopped = true;
+  };
+
+  // ── Bulk actions (server loop, one aggregate flash) ────────────────────
+
+  const selectedPools = pools.filter((p) => selectedIds.includes(p.id));
+
+  const bulkSetActivation = async (isActive) => {
+    setBulkRunning(true);
+    let ok = 0; let failed = 0;
+    for (const pool of selectedPools) {
+      try {
+        await updateProxyPool(pool.id, { name: pool.name, proxy_url: pool.proxy_url, is_active: isActive });
+        ok += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    setBulkRunning(false);
+    await reload();
+    flash(summarizeBulkResults({ done: selectedPools.length, ok, skipped: 0, failed, verb: isActive ? 'activated' : 'deactivated' }));
+  };
+
+  const bulkTest = async () => {
+    setBulkRunning(true);
+    let ok = 0; let failed = 0;
+    for (const pool of selectedPools) {
+      try {
+        const res = await testProxyPool(pool.id);
+        if (res?.ok) ok += 1; else failed += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    setBulkRunning(false);
+    await reload();
+    flash(summarizeBulkResults({ done: selectedPools.length, ok, skipped: 0, failed, verb: 'tested' }));
+  };
+
+  const bulkDeleteConfirmed = async () => {
+    const targets = [...selectedPools];
+    setBulkRunning(true);
+    let ok = 0; let skipped = 0; let failed = 0;
+    for (const pool of targets) {
+      try {
+        await deleteProxyPool(pool.id);
+        ok += 1;
+      } catch (err) {
+        // 409 = still bound: skipped deliberately, anything else failed.
+        if (err instanceof ApiError && err.status === 409) skipped += 1; else failed += 1;
+      }
+    }
+    setBulkRunning(false);
+    setBulkConfirm(null);
+    setSelectedIds([]);
+    await reload();
+    flash(summarizeBulkResults({ done: targets.length, ok, skipped, failed, verb: 'deleted' }));
   };
 
   const runImport = async () => {
@@ -404,13 +513,14 @@ export default function ProxyPoolsPage() {
           </p>
         </div>
         <div className="actions">
-          <button onClick={reload} disabled={busy}>Refresh</button>
-          <button onClick={runHealthCheck} disabled={pools.length === 0 || !!healthProgress}>
-            {healthProgress ? `Checking ${healthProgress.done}/${healthProgress.total}…` : 'Health check'}
+          <button onClick={runHealthCheck} disabled={pools.length === 0 || (!!healthProgress && !healthAbort)}>
+            {healthProgress
+              ? (healthAbort ? `■ Stop (${healthProgress.done}/${healthProgress.total})` : `Checking ${healthProgress.done}/${healthProgress.total}…`)
+              : selectedIds.length > 0 ? `Health check (${selectedIds.length})` : 'Health check'}
           </button>
           <button onClick={() => setShowImport(true)}>Batch import</button>
           <div className="relay-menu" ref={relayMenuRef}>
-            <button className="primary" onClick={() => setShowRelayMenu((v) => !v)}>Deploy relay ▾</button>
+            <button onClick={() => setShowRelayMenu((v) => !v)}>Deploy relay ▾</button>
             {showRelayMenu && (
               <div className="relay-menu-items">
                 <button onClick={() => openRelayDeploy('vercel')}>Vercel</button>
@@ -419,12 +529,33 @@ export default function ProxyPoolsPage() {
               </div>
             )}
           </div>
+          <button
+            className="btn-icon"
+            onClick={reload}
+            disabled={busy}
+            title="Refresh"
+            aria-label="Refresh pools"
+          >⟳</button>
           <button className="primary" onClick={openCreate}>+ Add pool</button>
         </div>
       </header>
 
       {notice && <div className="notice">{notice}</div>}
       {error && <ErrorBanner error={error} onRetry={reload} />}
+
+      {selectedIds.length > 0 && (
+        <BulkActionBar
+          count={selectedIds.length}
+          total={pools.length}
+          selected={selectedPools}
+          running={bulkRunning}
+          onTest={bulkTest}
+          onActivate={() => bulkSetActivation(true)}
+          onDeactivate={() => bulkSetActivation(false)}
+          onDelete={() => setBulkConfirm(selectedPools)}
+          onClear={() => setSelectedIds([])}
+        />
+      )}
 
       {pools.length === 0 ? (
         <EmptyState
@@ -436,6 +567,15 @@ export default function ProxyPoolsPage() {
         <table className="table">
           <thead>
             <tr>
+              <th style={{ width: 36 }}>
+                <input
+                  type="checkbox"
+                  checked={selectedIds.length > 0 && selectedIds.length === pools.length}
+                  onChange={() => setSelectedIds(selectedIds.length === pools.length ? [] : pools.map((p) => p.id))}
+                  aria-label="Select all pools"
+                  style={{ cursor: 'pointer' }}
+                />
+              </th>
               <th>Name</th>
               <th>Type</th>
               <th>URL</th>
@@ -450,6 +590,15 @@ export default function ProxyPoolsPage() {
           <tbody>
             {pools.map((pool) => (
               <tr key={pool.id}>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.includes(pool.id)}
+                    onChange={() => setSelectedIds((prev) => togglePoolSelection(prev, pool.id))}
+                    aria-label={`Select ${pool.name}`}
+                    style={{ cursor: 'pointer' }}
+                  />
+                </td>
                 <td className="pool-name" title={pool.name}>{pool.name}</td>
                 <td>{TYPE_LABELS[pool.type] || pool.type}</td>
                 <td><code className="pool-url" title={redactProxyURL(pool.proxy_url)}>{redactProxyURL(pool.proxy_url)}</code></td>
@@ -480,25 +629,23 @@ export default function ProxyPoolsPage() {
                     className="row-actions__btn"
                     onClick={() => handleTest(pool)}
                     disabled={testingId === pool.id}
-                    title={testingId === pool.id ? 'Testing…' : 'Test connectivity'}
+                    title="Test connectivity"
+                    aria-label={`Test ${pool.name}`}
                   >
-                    {testingId === pool.id ? 'Testing…' : '⚡ Test'}
+                    {testingId === pool.id ? 'Testing…' : '⚡'}
                   </button>
                   <button
-                    className="row-actions__btn row-actions__btn--primary"
+                    className="btn-icon"
                     onClick={() => openEdit(pool)}
                     title="Edit pool"
-                  >
-                    ✎ Edit
-                  </button>
+                    aria-label={`Edit ${pool.name}`}
+                  >✎</button>
                   <button
                     className="btn-icon"
                     onClick={() => openDelete(pool)}
                     title="Delete pool"
                     aria-label={`Delete ${pool.name}`}
-                  >
-                    🗑
-                  </button>
+                  >✕</button>
                 </td>
               </tr>
             ))}
@@ -630,6 +777,15 @@ export default function ProxyPoolsPage() {
         </Modal>
       )}
 
+      {bulkConfirm && (
+        <BulkDeleteConfirmModal
+          targets={bulkConfirm}
+          running={bulkRunning}
+          onCancel={() => setBulkConfirm(null)}
+          onConfirm={bulkDeleteConfirmed}
+        />
+      )}
+
       {confirmDelete && (
         <Modal title="Delete proxy pool" onClose={() => setConfirmDelete(null)}>
           <div className="form">
@@ -689,5 +845,79 @@ export default function ProxyPoolsPage() {
         </Modal>
       )}
     </div>
+  );
+}
+
+// ============================================================================
+// Bulk selection UI (UpstreamProvidersPage patterns, pool-shaped)
+// ============================================================================
+
+// BulkActionBar — selection summary + pool-shaped bulk actions. Breakdown
+// chips surface what category of pools is about to be affected.
+function BulkActionBar({ count, total, selected, running, onTest, onActivate, onDeactivate, onDelete, onClear }) {
+  const all = count === total;
+  const byType = React.useMemo(() => {
+    const m = new Map();
+    for (const p of selected) {
+      const k = TYPE_LABELS[p.type] || p.type || 'unknown';
+      m.set(k, (m.get(k) || 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  }, [selected]);
+  return (
+    <div className="bulk-action-bar" role="region" aria-label="Bulk actions">
+      <div className="bulk-action-bar__count">
+        <strong>{count}</strong> selected{all ? '' : <> of <strong>{total}</strong></>}
+      </div>
+      <div className="bulk-action-bar__breakdown">
+        {byType.map(([k, n]) => (
+          <span key={k} className="filter-chip" title={`${n} ${k}`}>
+            {k}<span className="dim">×{n}</span>
+          </span>
+        ))}
+      </div>
+      <div className="bulk-action-bar__actions">
+        <button onClick={onTest} disabled={running} title="Test the selected pools' connectivity">⚡ Test</button>
+        <button onClick={onActivate} disabled={running} title="Activate selected">✓ Activate</button>
+        <button onClick={onDeactivate} disabled={running} title="Deactivate selected">⊘ Deactivate</button>
+        <button className="danger" onClick={onDelete} disabled={running} title="Delete selected (bound pools are skipped)">✕ Delete</button>
+        <button className="ghost" onClick={onClear} disabled={running} title="Clear selection">Clear</button>
+      </div>
+    </div>
+  );
+}
+
+// BulkDeleteConfirmModal — destructive confirm listing the pools about to be
+// deleted. Bound pools are skipped (server 409), so the copy says so up front.
+function BulkDeleteConfirmModal({ targets, running, onCancel, onConfirm }) {
+  const maxRows = 12;
+  const shown = targets.slice(0, maxRows);
+  const more = targets.length - shown.length;
+  return (
+    <Modal
+      title={`Delete ${targets.length} proxy pool${targets.length === 1 ? '' : 's'}?`}
+      size="md"
+      onClose={running ? () => {} : onCancel}
+      footer={<>
+        <button onClick={onCancel} disabled={running}>Cancel</button>
+        <button className="danger" onClick={onConfirm} disabled={running}>
+          {running ? 'Deleting…' : `Delete ${targets.length}`}
+        </button>
+      </>}
+    >
+      <p style={{ marginBottom: 12 }}>
+        This action <strong>cannot be undone</strong>. Pools still bound by
+        upstream rows/entries are skipped (the server rejects them).
+      </p>
+      <ul className="bulk-confirm__list">
+        {shown.map((p) => (
+          <li key={p.id}>
+            <code className="bulk-confirm__type">{TYPE_LABELS[p.type] || p.type}</code>
+            <span className="bulk-confirm__ident">{p.name || `id:${p.id}`}</span>
+          </li>
+        ))}
+        {more > 0 && <li className="dim">…and {more} more</li>}
+      </ul>
+    </Modal>
   );
 }

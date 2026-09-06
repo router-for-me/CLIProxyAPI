@@ -4839,6 +4839,17 @@ button.ghost:hover:not(:disabled) {
   margin-bottom: 4px;
 }
 
+/* Proxy Pools — keep row actions discoverable at rest (the shared
+   .row-actions pattern fully hides them until hover). */
+.page .row-actions {
+  opacity: 0.25;
+}
+.page .row-actions:hover,
+.page tr:hover .row-actions,
+.page tr:focus-within .row-actions {
+  opacity: 1;
+}
+
 /* Proxy Pools — effective-URL preview under the modal's proxy URL field.
    Shows what upstreamsync will actually store (composite suffix or relay
    base) so the operator never guesses at the stored form. */

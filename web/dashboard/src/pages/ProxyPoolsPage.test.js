@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseProxyLine, formatTestStatus, validatePoolForm, effectivePreview } from './ProxyPoolsPage.jsx';
+import { parseProxyLine, formatTestStatus, validatePoolForm, effectivePreview, summarizeBulkResults, togglePoolSelection } from './ProxyPoolsPage.jsx';
 
 test('parseProxyLine: bare host:port becomes http URL', () => {
   assert.equal(parseProxyLine('1.2.3.4:8080'), 'http://1.2.3.4:8080');
@@ -108,4 +108,54 @@ test('effectivePreview: relay pools render the plain https base', () => {
 
 test('effectivePreview: invalid url yields empty string (no preview noise)', () => {
   assert.equal(effectivePreview(baseForm({ proxy_url: '' })), '');
+});
+
+// ── summarizeBulkResults (aggregate flash message) ──────────────────────
+
+test('summarizeBulkResults: all clean', () => {
+  assert.equal(summarizeBulkResults({ done: 3, ok: 3, skipped: 0, failed: 0 }), '3 deleted');
+});
+
+test('summarizeBulkResults: with bound skips', () => {
+  const out = summarizeBulkResults({ done: 3, ok: 1, skipped: 2, failed: 0, skippedLabel: 'bound' });
+  assert.match(out, /1 deleted/);
+  assert.match(out, /2 skipped \(bound\)/);
+  assert.ok(!/failed/.test(out));
+});
+
+test('summarizeBulkResults: failures surface the count', () => {
+  const out = summarizeBulkResults({ done: 3, ok: 1, skipped: 0, failed: 2 });
+  assert.match(out, /1 deleted/);
+  assert.match(out, /2 failed/);
+});
+
+test('summarizeBulkResults: nothing succeeded reports the failure plainly', () => {
+  const out = summarizeBulkResults({ done: 2, ok: 0, skipped: 0, failed: 2 });
+  assert.match(out, /^Deleted 0/);
+  assert.match(out, /2 failed/);
+});
+
+test('summarizeBulkResults: test variant uses tested wording', () => {
+  const out = summarizeBulkResults({ done: 4, ok: 3, skipped: 0, failed: 1, verb: 'tested' });
+  assert.match(out, /3 tested/);
+  assert.match(out, /1 failed/);
+});
+
+// ── togglePoolSelection (selection helper) ──────────────────────────────
+
+test('togglePoolSelection: adds an unselected id', () => {
+  assert.deepEqual(togglePoolSelection([1, 2], 3), [1, 2, 3]);
+});
+
+test('togglePoolSelection: removes a selected id', () => {
+  assert.deepEqual(togglePoolSelection([1, 2, 3], 2), [1, 3]);
+});
+
+test('togglePoolSelection: tolerates duplicates and preserves order', () => {
+  // Duplicate 5 collapses to one; toggling 2 removes it.
+  assert.deepEqual(togglePoolSelection([5, 2, 5], 2), [5]);
+  assert.deepEqual(togglePoolSelection([5, 2], 2), [5]);
+  // Toggling 5 (present) removes it; toggling it again (absent) appends.
+  assert.deepEqual(togglePoolSelection([5, 2, 5], 5), [2]);
+  assert.deepEqual(togglePoolSelection([2], 5), [2, 5]);
 });
