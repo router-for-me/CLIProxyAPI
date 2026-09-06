@@ -418,6 +418,18 @@ type ClaudeKey struct {
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ProxyPoolID is renderer-managed: the proxy_pools row this entry was
+	// rendered from. Kept so the seed path (config.yaml → store) round-trips
+	// the binding. Operators should not set this field manually.
+	ProxyPoolID *int64 `yaml:"proxy-pool-id,omitempty" json:"-"`
+
+	// RelayBaseURL is renderer-managed: set when the entry is bound to an
+	// active relay-type proxy pool (vercel/cloudflare/deno). The synthesizer
+	// stamps it onto the auth and executors build a relay transport instead
+	// of a proxy dialer. Empty = standard proxy semantics. Operators should
+	// not set this field manually.
+	RelayBaseURL string `yaml:"relay-base-url,omitempty" json:"-"`
+
 	// Models defines upstream model names and aliases for request routing.
 	Models []ClaudeModel `yaml:"models" json:"models"`
 
@@ -732,6 +744,19 @@ type OpenAICompatibility struct {
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// ProxyURL overrides the global proxy setting for this provider row.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// ProxyPoolID is renderer-managed: the proxy_pools row backing this
+	// provider. Kept so the seed path round-trips the binding. Operators
+	// should not set this field manually.
+	ProxyPoolID *int64 `yaml:"proxy-pool-id,omitempty" json:"-"`
+
+	// RelayBaseURL is renderer-managed: set when the row is bound to an
+	// active relay-type proxy pool. Empty = standard proxy semantics.
+	// Operators should not set this field manually.
+	RelayBaseURL string `yaml:"relay-base-url,omitempty" json:"-"`
+
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
@@ -770,6 +795,16 @@ type OpenAICompatibilityAPIKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// ProxyPoolID is renderer-managed: the proxy_pools row this entry was
+	// rendered from. Kept so the seed path round-trips the binding. Operators
+	// should not set this field manually.
+	ProxyPoolID *int64 `yaml:"proxy-pool-id,omitempty" json:"-"`
+
+	// RelayBaseURL is renderer-managed: set when the entry is bound to an
+	// active relay-type proxy pool. Empty = standard proxy semantics.
+	// Operators should not set this field manually.
+	RelayBaseURL string `yaml:"relay-base-url,omitempty" json:"-"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,

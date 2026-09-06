@@ -179,12 +179,17 @@ func providerFromCodexKey(k config.CodexKey, providerType string) store.Upstream
 
 func providerFromClaudeKey(k config.ClaudeKey) store.UpstreamProvider {
 	p := store.UpstreamProvider{
-		ProviderType:            TypeClaudeAPIKey,
-		APIKey:                  k.APIKey,
-		Priority:                k.Priority,
-		Prefix:                  k.Prefix,
-		BaseURL:                 k.BaseURL,
-		ProxyURL:                k.ProxyURL,
+		ProviderType: TypeClaudeAPIKey,
+		APIKey:       k.APIKey,
+		Priority:     k.Priority,
+		Prefix:       k.Prefix,
+		BaseURL:      k.BaseURL,
+		ProxyURL:     k.ProxyURL,
+		// The pool binding round-trips so a YAML seed referencing a pool id
+		// keeps the binding after the first-boot store migration. Relay pools
+		// are dashboard-created; a seeded RelayBaseURL has no pool row to
+		// point at, so it is dropped here (the binding is the source of truth).
+		ProxyPoolID:             k.ProxyPoolID,
 		Headers:                 k.Headers,
 		ExcludedModels:          k.ExcludedModels,
 		RebuildMidSystemMessage: k.RebuildMidSystemMessage,
@@ -256,7 +261,9 @@ func providerFromOpenAICompat(k config.OpenAICompatibility) store.UpstreamProvid
 			Name:     e.Name,
 			APIKey:   e.APIKey,
 			ProxyURL: e.ProxyURL,
-			Weight:   e.Weight,
+			// Entry-level pool binding round-trips like the row-level one.
+			ProxyPoolID: e.ProxyPoolID,
+			Weight:      e.Weight,
 			// Copied verbatim so nil stays nil ("inherit the pool Priority")
 			// across the seed round trip.
 			Priority: e.Priority,
