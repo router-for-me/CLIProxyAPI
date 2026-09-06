@@ -30,7 +30,7 @@ func TestIsCodexMultiAgentClient(t *testing.T) {
 		},
 		{
 			name:      "codex tui",
-			userAgent: "codex-tui/0.145.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.145.0)",
+			userAgent: "codex-tui/0.153.3 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.3)",
 			want:      true,
 		},
 		{
@@ -237,7 +237,7 @@ func TestOptimizeCodexMultiAgentV2RequestSkipsNamespaceConflict(t *testing.T) {
 	t.Parallel()
 
 	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"}]},{"type":"namespace","name":"collaboration-optimize","tools":[]}]}`)
-	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.153.3"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
 	if optimized {
@@ -516,13 +516,13 @@ func TestRewriteCodexMultiAgentV2InputConditions(t *testing.T) {
 		{
 			name:      "codex tui enabled",
 			cfg:       &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}},
-			userAgent: "codex-tui/0.145.0",
+			userAgent: "codex-tui/0.153.3",
 			want:      true,
 		},
 		{
 			name:      "optimization disabled",
 			cfg:       &config.Config{},
-			userAgent: "codex-tui/0.145.0",
+			userAgent: "codex-tui/0.153.3",
 		},
 		{
 			name:      "unrelated client",
@@ -607,7 +607,7 @@ func TestRewriteCodexSpawnAgentDescriptionDisabledLeavesPayloadUnchanged(t *test
 	t.Parallel()
 
 	payload := []byte(`{"tools":[{"type":"function","name":"spawn_agent","description":"unchanged","parameters":{"properties":{"message":{"encrypted":true}}}}]}`)
-	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.153.3"}}
 	got := RewriteCodexSpawnAgentDescription(context.Background(), headers, payload, &config.Config{})
 	if string(got) != string(payload) {
 		t.Fatalf("disabled optimization changed payload: %s", got)
@@ -645,13 +645,13 @@ func TestReplaceCodexSpawnAgentModelsNormalizesSectionsAndPreservesInstructions(
 func TestCodexClientUserAgentPrefersGinRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	request.Header.Set("User-Agent", "codex-tui/0.145.0")
+	request.Header.Set("User-Agent", "codex-tui/0.153.3")
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ginCtx.Request = request
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 	headers := http.Header{"User-Agent": []string{"overridden-client/1.0"}}
 
-	if got := codexClientUserAgent(ctx, headers); got != "codex-tui/0.145.0" {
+	if got := codexClientUserAgent(ctx, headers); got != "codex-tui/0.153.3" {
 		t.Fatalf("codexClientUserAgent() = %q, want gin request User-Agent", got)
 	}
 }
@@ -785,7 +785,7 @@ func TestOptimizeCodexMultiAgentV2RequestRemovesEncryptionInAdditionalTools(t *t
 			]}
 		]
 	}`)
-	headers := http.Header{"User-Agent": []string{"codex-tui/0.145.0"}}
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.153.3"}}
 	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
 	got, _ := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
 

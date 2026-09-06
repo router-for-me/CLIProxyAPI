@@ -234,7 +234,7 @@ func codexSpawnAgentTestPayload() []byte {
 
 func codexSpawnAgentTestContext() context.Context {
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	request.Header.Set("User-Agent", "codex-tui/0.145.0")
+	request.Header.Set("User-Agent", "codex-tui/0.153.3")
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ginCtx.Request = request
 	return context.WithValue(context.Background(), "gin", ginCtx)
