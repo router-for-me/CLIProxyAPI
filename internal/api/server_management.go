@@ -138,6 +138,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)
 		mgmt.DELETE("/xai-api-key", s.mgmt.DeleteXAIKey)
 
+		mgmt.GET("/codebuddy-cn-api-key", s.mgmt.GetCodeBuddyCNKeys)
+		mgmt.PUT("/codebuddy-cn-api-key", s.mgmt.PutCodeBuddyCNKeys)
+		mgmt.PATCH("/codebuddy-cn-api-key", s.mgmt.PatchCodeBuddyCNKey)
+		mgmt.DELETE("/codebuddy-cn-api-key", s.mgmt.DeleteCodeBuddyCNKey)
+
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
@@ -177,6 +182,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/codebuddy-cn-auth-url", s.mgmt.RequestCodeBuddyCNToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
