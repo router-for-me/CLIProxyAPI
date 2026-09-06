@@ -377,6 +377,27 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
+func authPriorityForModel(auth *Auth, model string) int {
+	defaultPriority := authPriority(auth)
+	requestedModel := rewriteModelForAuth(strings.TrimSpace(model), auth)
+	_, candidates := modelAliasLookupCandidates(requestedModel)
+	if len(candidates) == 0 {
+		return defaultPriority
+	}
+	entries := OAuthModelAliasesFromAttributes(authAttributes(auth))
+	for _, candidate := range candidates {
+		for _, entry := range entries {
+			if entry.RoutingPriority == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(entry.Alias), strings.TrimSpace(candidate)) {
+				return *entry.RoutingPriority
+			}
+		}
+	}
+	return defaultPriority
+}
+
 func authWeight(auth *Auth) int64 {
 	if auth == nil {
 		return credentialweight.Default
@@ -473,7 +494,7 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			priority := authPriority(candidate)
+			priority := authPriorityForModel(candidate, model)
 			available[priority] = append(available[priority], candidate)
 			continue
 		}
@@ -584,13 +605,17 @@ func availableAuthsFromPriorityBuckets(availableByPriority map[int][]*Auth, allP
 // preserving the input order. The input slice is returned unchanged when every candidate
 // already shares the highest priority, so the common single-tier case allocates nothing.
 func highestPriorityAuths(auths []*Auth) []*Auth {
+	return highestPriorityAuthsForModel(auths, "")
+}
+
+func highestPriorityAuthsForModel(auths []*Auth, model string) []*Auth {
 	if len(auths) <= 1 {
 		return auths
 	}
 	bestPriority := 0
 	bestCount := 0
 	for _, auth := range auths {
-		priority := authPriority(auth)
+		priority := authPriorityForModel(auth, model)
 		switch {
 		case bestCount == 0 || priority > bestPriority:
 			bestPriority = priority
@@ -604,7 +629,7 @@ func highestPriorityAuths(auths []*Auth) []*Auth {
 	}
 	highest := make([]*Auth, 0, bestCount)
 	for _, auth := range auths {
-		if authPriority(auth) == bestPriority {
+		if authPriorityForModel(auth, model) == bestPriority {
 			highest = append(highest, auth)
 		}
 	}
@@ -1029,7 +1054,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := highestPriorityAuthsForModel(available, model)
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
