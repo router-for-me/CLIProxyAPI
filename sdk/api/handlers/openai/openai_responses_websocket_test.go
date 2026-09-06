@@ -1500,7 +1500,7 @@ func TestNormalizeResponsesWebsocketRequestInjectsPreviousResponseIDWhenPendingO
 	lastResponseOutput := []byte(`[]`)
 	raw := []byte(`{"type":"response.create","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1"}]}`)
 
-	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(raw, lastRequest, lastResponseOutput, "resp-1", []string{"call-1"}, true, false)
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(raw, lastRequest, lastResponseOutput, "resp-1", []string{"call-1"}, "", true, false)
 	if errMsg != nil {
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
@@ -1520,7 +1520,7 @@ func TestNormalizeResponsesWebsocketRequestSkipsPreviousResponseIDWhenPendingOut
 	]`)
 	raw := []byte(`{"type":"response.create","input":[{"type":"message","role":"user","id":"summary-1","content":"compacted summary"}]}`)
 
-	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(raw, lastRequest, lastResponseOutput, "resp-1", []string{"call-1"}, true, false)
+	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(raw, lastRequest, lastResponseOutput, "resp-1", []string{"call-1"}, "", true, false)
 	if errMsg != nil {
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
@@ -1887,6 +1887,7 @@ func TestRestoreResponsesWebsocketCompletionOutputReconcilesConflictingToolCall(
 		completedOutput,
 		"resp-1",
 		[]string{"call-1"},
+		"",
 		false,
 		false,
 	)
@@ -4402,6 +4403,192 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	input := gjson.GetBytes(forwarded, "input").Array()
 	if len(input) != 1 || input[0].Get("id").String() != "msg-1" {
 		t.Fatalf("unexpected forwarded input: %s", forwarded)
+	}
+}
+
+func TestResponsesWebsocketLocalPrewarmContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const tools = `{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}]}`
+	const instructions = `{"type":"message","role":"developer","content":[{"type":"input_text","text":"Use the execution tool for shell commands."}]}`
+	const prefix = tools + "," + instructions
+	const user = `{"type":"message","role":"user","content":[{"type":"input_text","text":"Run pwd."}]}`
+	const compact = `{"type":"compaction","id":"compact-1","encrypted_content":"opaque-summary"}`
+	const replacementTools = `{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"new_exec"}]}`
+	const emptyTools = `{"type":"additional_tools","role":"developer","tools":[]}`
+	for _, tc := range []struct {
+		name      string
+		input     string
+		reference bool
+		native    bool
+		append    bool
+		checkIDs  bool
+	}{
+		{name: "ordinary increment", input: user, reference: true},
+		{name: "compaction increment", input: compact + "," + user, reference: true, checkIDs: true},
+		{name: "compaction summary increment", input: `{"type":"compaction_summary","encrypted_content":"opaque-summary"},` + user, reference: true},
+		{name: "native websocket", input: compact + "," + user, reference: true, native: true},
+		{name: "full compact replay", input: prefix + "," + compact + "," + user},
+		{name: "replace tools", input: replacementTools + "," + instructions + "," + user},
+		{name: "clear tools", input: emptyTools + "," + instructions + "," + user},
+		{name: "remove tools", input: instructions + "," + user},
+		{name: "empty create"},
+		{name: "legacy append", input: compact + "," + user, append: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &websocketDirectCaptureExecutor{}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			modelName := "local-prewarm-model"
+			auth := &coreauth.Auth{ID: "auth-local-prewarm", Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": strconv.FormatBool(tc.native)}}
+			if _, err := manager.Register(context.Background(), auth); err != nil {
+				t.Fatalf("register auth: %v", err)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelName}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+			h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+			router := gin.New()
+			router.GET("/v1/responses", h.ResponsesWebsocket)
+			server := httptest.NewServer(router)
+			defer server.Close()
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+			conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+			if err != nil {
+				t.Fatalf("dial websocket: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+			exchange := func(socket *websocket.Conn, request string) []byte {
+				t.Helper()
+				if errWrite := socket.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
+					t.Fatalf("write websocket request: %v", errWrite)
+				}
+				for {
+					_, event, errRead := socket.ReadMessage()
+					if errRead != nil {
+						t.Fatalf("read websocket response: %v", errRead)
+					}
+					if eventType := gjson.GetBytes(event, "type").String(); eventType == wsEventTypeCompleted || eventType == wsEventTypeError {
+						return event
+					}
+				}
+			}
+			prewarm := exchange(conn, fmt.Sprintf(`{"type":"response.create","model":%q,"generate":false,"input":[%s]}`, modelName, prefix))
+			prewarmID := gjson.GetBytes(prewarm, "response.id").String()
+			if prewarmID == "" {
+				t.Fatalf("missing prewarm response ID: %s", prewarm)
+			}
+			prewarmCalls := 0
+			if tc.native {
+				prewarmCalls = 1
+			}
+			if payloads := executor.Payloads(); len(payloads) != prewarmCalls {
+				t.Fatalf("upstream prewarm calls = %d, want %d", len(payloads), prewarmCalls)
+			} else if tc.native {
+				assertJSONSemanticallyEqual(t, []byte(gjson.GetBytes(payloads[0], "input").Raw), "["+prefix+"]")
+			}
+
+			if tc.checkIDs {
+				// A similar-looking ID must not borrow this connection's prewarm.
+				unknown := exchange(conn, `{"type":"response.create","previous_response_id":"resp_prewarm_other-connection","input":[`+compact+","+user+`]}`)
+				if got := gjson.GetBytes(unknown, "error.code").String(); got != "previous_response_not_found" {
+					t.Fatalf("unknown prewarm error = %q: %s", got, unknown)
+				}
+				reconn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+				if errDial != nil {
+					t.Fatalf("reconnect websocket: %v", errDial)
+				}
+				defer func() { _ = reconn.Close() }()
+				missing := exchange(reconn, fmt.Sprintf(`{"type":"response.create","model":%q,"previous_response_id":%q,"input":[%s]}`, modelName, prewarmID, user))
+				if got := gjson.GetBytes(missing, "error.code").String(); got != "previous_response_not_found" {
+					t.Fatalf("reconnect prewarm error = %q: %s", got, missing)
+				}
+				if got := len(executor.Payloads()); got != 0 {
+					t.Fatalf("invalid continuations reached upstream: %d calls", got)
+				}
+			}
+
+			requestType := wsRequestTypeCreate
+			if tc.append {
+				requestType = wsRequestTypeAppend
+			}
+			previous := ""
+			if tc.reference {
+				previous = fmt.Sprintf(`,"previous_response_id":%q`, prewarmID)
+			}
+			response := exchange(conn, fmt.Sprintf(`{"type":%q%s,"input":[%s]}`, requestType, previous, tc.input))
+			if got := gjson.GetBytes(response, "type").String(); got != wsEventTypeCompleted {
+				t.Fatalf("continuation response type = %q: %s", got, response)
+			}
+			payloads := executor.Payloads()
+			if len(payloads) != prewarmCalls+1 {
+				t.Fatalf("upstream calls = %d, want %d", len(payloads), prewarmCalls+1)
+			}
+			forwarded := payloads[len(payloads)-1]
+			wantInput := tc.input
+			if (tc.reference || tc.append) && !tc.native {
+				wantInput = prefix + "," + tc.input
+			}
+			assertJSONSemanticallyEqual(t, []byte(gjson.GetBytes(forwarded, "input").Raw), "["+wantInput+"]")
+			if tc.native {
+				if got := gjson.GetBytes(forwarded, "previous_response_id").String(); got != prewarmID {
+					t.Fatalf("upstream prewarm chain = %q, want %q", got, prewarmID)
+				}
+			} else if gjson.GetBytes(forwarded, "previous_response_id").Exists() || gjson.GetBytes(forwarded, "generate").Exists() {
+				t.Fatalf("local prewarm metadata leaked upstream: %s", forwarded)
+			}
+			if tc.checkIDs {
+				// Successful reconstruction becomes the canonical base of the next HTTP turn.
+				nextResponseID := gjson.GetBytes(response, "response.id").String()
+				exchange(conn, fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"input":[%s]}`, nextResponseID, user))
+				payloads = executor.Payloads()
+				if len(payloads) != 2 {
+					t.Fatalf("upstream calls after next turn = %d, want 2", len(payloads))
+				}
+				output := gjson.GetBytes(response, "response.output").Raw
+				wantNextInput := "[" + wantInput + "," + strings.TrimSuffix(strings.TrimPrefix(output, "["), "]") + "," + user + "]"
+				assertJSONSemanticallyEqual(t, []byte(gjson.GetBytes(payloads[1], "input").Raw), wantNextInput)
+				stale := exchange(conn, fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"input":[%s]}`, prewarmID, user))
+				if got := gjson.GetBytes(stale, "error.code").String(); got != "previous_response_not_found" {
+					t.Fatalf("consumed prewarm error = %q: %s", got, stale)
+				}
+				if got := len(executor.Payloads()); got != 2 {
+					t.Fatalf("consumed local prewarm reached upstream: %d calls", got)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeResponsesWebsocketLocalPrewarmTools(t *testing.T) {
+	const prewarmID = "resp_prewarm_test"
+	const tools = `[{"type":"function","name":"exec","parameters":{"type":"object"}}]`
+	lastRequest := []byte(`{"model":"test-model","instructions":"Use tools.","tools":` + tools + `,"input":[]}`)
+	for _, tc := range []struct {
+		name  string
+		field string
+		want  string
+	}{
+		{name: "omitted", want: tools},
+		{name: "cleared", field: `,"tools":[]`, want: `[]`},
+		{name: "replaced", field: `,"tools":[{"type":"function","name":"new_exec"}]`, want: `[{"type":"function","name":"new_exec"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"type":"response.create","previous_response_id":"resp_prewarm_test","input":[{"type":"compaction","encrypted_content":"summary"}]` + tc.field + `}`)
+			// Local IDs must be expanded even if transport capabilities change after prewarm.
+			normalized, next, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState(raw, lastRequest, []byte("[]"), prewarmID, nil, prewarmID, true, false)
+			if errMsg != nil {
+				t.Fatalf("normalize prewarm continuation: %v", errMsg.Error)
+			}
+			assertJSONSemanticallyEqual(t, []byte(gjson.GetBytes(normalized, "tools").Raw), tc.want)
+			if got := gjson.GetBytes(normalized, "input.0.type").String(); got != "compaction" {
+				t.Fatalf("compaction item was lost: %s", normalized)
+			}
+			if gjson.GetBytes(normalized, "previous_response_id").Exists() {
+				t.Fatalf("local prewarm ID leaked upstream: %s", normalized)
+			}
+			if !bytes.Equal(next, normalized) {
+				t.Fatal("canonical request differs from the reconstructed request")
+			}
+		})
 	}
 }
 
