@@ -111,7 +111,6 @@ func serveClaudeMessages(t *testing.T, handler *ClaudeCodeAPIHandler, target, bo
 }
 
 func TestShouldUseClaudeResponsesBridge(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
 	tests := []struct {
 		name          string
 		clientModel   string
@@ -133,7 +132,6 @@ func TestShouldUseClaudeResponsesBridge(t *testing.T) {
 }
 
 func TestIsClaudeCompactRequest(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
 	tests := []struct {
 		name string
 		body string
@@ -180,7 +178,6 @@ func TestIsClaudeCompactRequest(t *testing.T) {
 }
 
 func TestClaudeMessagesResponsesBridgeNonStreaming(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
 	handler, executor := newResponsesBridgeHandler(t)
 	body := `{"model":"claude-fable-5-dd-los-6.5-tpg","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
 	recorder := serveClaudeMessages(t, handler, "/v1/messages?source=localhost", body)
@@ -221,7 +218,7 @@ func TestClaudeMessagesResponsesBridgeNonStreaming(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
-	if strings.Contains(recorder.Body.String(), claudeCompactionCapsulePrefix) {
+	if strings.Contains(recorder.Body.String(), "<cpa-responses-compaction>") {
 		t.Fatalf("ordinary summary request returned compaction marker: %s", recorder.Body.String())
 	}
 	gotOpts = executor.options
@@ -231,7 +228,6 @@ func TestClaudeMessagesResponsesBridgeNonStreaming(t *testing.T) {
 }
 
 func TestClaudeMessagesResponsesBridgeStreaming(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
 	handler, executor := newResponsesBridgeHandler(t)
 	body := `{"model":"claude-fable-5-dd-los-6.5-tpg","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
 	recorder := serveClaudeMessages(t, handler, "/v1/messages", body)
@@ -256,7 +252,6 @@ func TestClaudeMessagesResponsesBridgeStreaming(t *testing.T) {
 }
 
 func TestClaudeMessagesResponsesBridgeCompactNonStreaming(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
 	handler, executor := newResponsesBridgeHandler(t)
 	body := `{"model":"claude-fable-5-dd-los-6.5-tpg","max_tokens":128,"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far. Preserve the API details.\n\nREMINDER: Do NOT call any tools."}]}`
 	recorder := serveClaudeMessages(t, handler, "/v1/messages", body)
@@ -265,12 +260,12 @@ func TestClaudeMessagesResponsesBridgeCompactNonStreaming(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 	marker := gjson.Get(recorder.Body.String(), "content.0.text").String()
-	_, capsule, found, errStrip := stripClaudeCompactionCapsule(marker)
+	_, capsule, found, errStrip := stripClaudeCompactionCiphertext(marker)
 	if errStrip != nil || !found {
 		t.Fatalf("decode compact marker: found=%v err=%v marker=%q", found, errStrip, marker)
 	}
-	if !capsule.rawCiphertext {
-		t.Fatalf("capsule model = %q, want %q", capsule.Model, responsesBridgeUpstreamModel)
+	if len(capsule.Output) != 1 {
+		t.Fatal("expected one compact block")
 	}
 	if got := gjson.Get(recorder.Body.String(), "model").String(); got != responsesBridgeClientModel {
 		t.Fatalf("response model = %q, want %q", got, responsesBridgeClientModel)
@@ -292,7 +287,6 @@ func TestClaudeMessagesResponsesBridgeCompactNonStreaming(t *testing.T) {
 }
 
 func TestClaudeMessagesResponsesBridgeCompactStreamingUsesBufferedCompactEndpoint(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
 	handler, executor := newResponsesBridgeHandler(t)
 	body := `{"model":"claude-fable-5-dd-los-6.5-tpg","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far.\n\nREMINDER: Do NOT call any tools."}]}`
 	recorder := serveClaudeMessages(t, handler, "/v1/messages", body)
@@ -309,7 +303,6 @@ func TestClaudeMessagesResponsesBridgeCompactStreamingUsesBufferedCompactEndpoin
 }
 
 func TestClaudeMessagesResponsesBridgeRehydratesCompactCapsule(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
 	handler, executor := newResponsesBridgeHandler(t)
 	compactBody := `{"model":"claude-fable-5-dd-los-6.5-tpg","max_tokens":128,"messages":[{"role":"user","content":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far.\n\nREMINDER: Do NOT call any tools."}]}`
 	compactRecorder := serveClaudeMessages(t, handler, "/v1/messages", compactBody)
@@ -340,7 +333,6 @@ func TestClaudeMessagesResponsesBridgeRehydratesCompactCapsule(t *testing.T) {
 }
 
 func TestPrepareClaudeCompactionReplayUsesNewestCanonicalWindow(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
 	firstMarker := mustClaudeCompactionMarkerForTest(t)
 	secondCompactRequest := map[string]any{
 		"model": responsesBridgeUpstreamModel,
@@ -380,77 +372,14 @@ func TestPrepareClaudeCompactionReplayUsesNewestCanonicalWindow(t *testing.T) {
 	if !strings.Contains(encodedReplay, "gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==") {
 		t.Fatalf("new canonical window missing: %s", encodedReplay)
 	}
-	if strings.Contains(encodedReplay, "encrypted-state") {
+	if strings.Contains(encodedReplay, firstMarker) {
 		t.Fatalf("prior compacted window accumulated into replacement: %s", encodedReplay)
-	}
-}
-
-func TestPrepareClaudeCompactionReplayIgnoresQuotedMarkerConstants(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
-	marker := mustClaudeCompactionMarkerForTest(t)
-	sourceExcerpt := `const (
-	claudeCompactionCapsulePrefix = "<cpa-responses-compaction>"
-	claudeCompactionCapsuleSuffix = "</cpa-responses-compaction>"
-)`
-	body := map[string]any{
-		"model": responsesBridgeClientModel,
-		"messages": []any{
-			map[string]any{"role": "user", "content": "Compacted conversation\n\n" + marker + "\n\nContinue."},
-			map[string]any{"role": "assistant", "content": sourceExcerpt},
-			map[string]any{"role": "user", "content": "continue"},
-		},
-	}
-	rawJSON := mustJSONMarshalForTest(t, body)
-
-	updated, replay, errPrepare := prepareClaudeCompactionReplay(rawJSON, responsesBridgeUpstreamModel)
-	if errPrepare != nil {
-		t.Fatalf("prepare replay: %v", errPrepare)
-	}
-	if replay == nil || replay.Model != responsesBridgeUpstreamModel {
-		t.Fatalf("replay capsule = %#v, want matching model", replay)
-	}
-	if got := gjson.GetBytes(updated, "messages.1.content").String(); got != sourceExcerpt {
-		t.Fatalf("source excerpt changed:\ngot:  %q\nwant: %q", got, sourceExcerpt)
-	}
-	if got := gjson.GetBytes(updated, "messages.0.content").String(); strings.Contains(got, claudeCompactionCapsulePrefix) || !strings.Contains(got, "Compacted conversation") || !strings.Contains(got, "Continue.") {
-		t.Fatalf("capsule wrapper was not preserved semantically: %q", got)
 	}
 }
 
 func mustClaudeCompactionMarkerForTest(t *testing.T) string {
 	t.Helper()
-	capsule := &claudeCompactionCapsule{
-		Version: claudeCompactionCapsuleVersion,
-		Model:   responsesBridgeUpstreamModel,
-		Output: []json.RawMessage{
-			json.RawMessage(`{"type":"compaction_summary","encrypted_content":"encrypted-state"}`),
-		},
-	}
-	marker, errEncode := encodeClaudeCompactionCapsule(capsule)
-	if errEncode != nil {
-		t.Fatalf("encode capsule: %v", errEncode)
-	}
-	return marker
-}
-
-func TestStripClaudeCompactionCapsuleRejectsInvalidMarkers(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
-	marker := mustClaudeCompactionMarkerForTest(t)
-	tests := []struct {
-		name    string
-		text    string
-		wantErr string
-	}{
-		{name: "malformed", text: "before\n\n" + claudeCompactionCapsulePrefix + `"not-base64"` + claudeCompactionCapsuleSuffix + "\n\nafter", wantErr: "decode compaction capsule"},
-		{name: "multiple", text: marker + "\n\n" + marker, wantErr: "multiple compaction capsules"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, _, _, errStrip := stripClaudeCompactionCapsule(tt.text); errStrip == nil || !strings.Contains(errStrip.Error(), tt.wantErr) {
-				t.Fatalf("strip error = %v, want %q", errStrip, tt.wantErr)
-			}
-		})
-	}
+	return rawCiphertextForTest(2)
 }
 
 func mustJSONMarshalForTest(t *testing.T, value any) []byte {
@@ -463,7 +392,6 @@ func mustJSONMarshalForTest(t *testing.T, value any) []byte {
 }
 
 func TestRewriteClaudeBridgeResponseModelLeavesOtherEventsAlone(t *testing.T) {
-	t.Setenv("WRITABLE_PATH", t.TempDir())
 	input := []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n")
 	if got := rewriteClaudeBridgeResponseModel(input, responsesBridgeClientModel); string(got) != string(input) {
 		t.Fatalf("non-message_start event changed:\ngot=%s\nwant=%s", got, input)

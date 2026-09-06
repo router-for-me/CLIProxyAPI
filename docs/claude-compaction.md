@@ -22,10 +22,8 @@ Credential selection uses CPA's normal router. No auth ID is stored or pinned.
 There is no synthetic 200k rejection; Claude uses its configured window and the
 upstream enforces the model's actual context limit.
 
-New compactions require no server cache. Old inline capsules and cache references
-remain readable for existing conversations. If those conversations still contain
-cache references, retain their existing Home KV or standalone compaction cache
-until the next successful compaction replaces the reference with raw ciphertext.
+Compaction requires no server cache or persistent volume. Only raw ciphertext is
+supported; legacy inline capsules and KV cache references are not decoded.
 
 Three manual compact/resume cycles with real Luna OAuth output and unmodified
 Claude Code 2.1.211 established that ciphertext text is replayed unchanged and each
