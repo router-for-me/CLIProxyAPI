@@ -101,6 +101,7 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 		APIKey:                  strings.TrimSpace(body.APIKey),
 		BaseURL:                 strings.TrimSpace(body.BaseURL),
 		ProxyURL:                strings.TrimSpace(body.ProxyURL),
+		ProxyPoolID:             body.ProxyPoolID,
 		Label:                   strings.TrimSpace(body.Label),
 		Email:                   strings.TrimSpace(body.Email),
 		FileName:                strings.TrimSpace(body.FileName),
@@ -153,10 +154,11 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 	// secret material.
 	for _, e := range body.APIKeyEntries {
 		entry := store.UpstreamProviderAPIKey{
-			ID:       e.ID,
-			Name:     e.Name,
-			APIKey:   e.APIKey,
-			ProxyURL: e.ProxyURL,
+			ID:          e.ID,
+			Name:        e.Name,
+			APIKey:      e.APIKey,
+			ProxyURL:    e.ProxyURL,
+			ProxyPoolID: e.ProxyPoolID,
 		}
 		if e.Weight != nil {
 			w := *e.Weight

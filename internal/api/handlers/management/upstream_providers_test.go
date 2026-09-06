@@ -470,3 +470,40 @@ func TestUpstreamProviderClaudeAPIKeyTwoEntriesRequestResponse(t *testing.T) {
 		t.Fatalf("legacy store row fabricated entries: %+v", legacyRow.APIKeyEntries)
 	}
 }
+
+// TestUpstreamProviderProxyPoolBindingDTORoundTrip mirrors
+// TestUpstreamProviderEntryRequestRoundTrip for the proxy_pool_id binding
+// fields on the row and its entries.
+func TestUpstreamProviderProxyPoolBindingDTORoundTrip(t *testing.T) {
+	const payload = `{"provider_type":"openai-compatibility","proxy_pool_id":7,"api_key_entries":[{"id":1,"api_key":"k","proxy_pool_id":9}]}`
+	var req upstreamProviderReq
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := toUpstreamProvider(&req)
+	if got.ProxyPoolID == nil || *got.ProxyPoolID != 7 {
+		t.Fatalf("row binding = %v", got.ProxyPoolID)
+	}
+	if got.APIKeyEntries[0].ProxyPoolID == nil || *got.APIKeyEntries[0].ProxyPoolID != 9 {
+		t.Fatalf("entry binding = %v", got.APIKeyEntries[0].ProxyPoolID)
+	}
+
+	// Absent field decodes nil (not 0).
+	absent := `{"provider_type":"claude-api-key"}`
+	var req2 upstreamProviderReq
+	if err := json.Unmarshal([]byte(absent), &req2); err != nil {
+		t.Fatalf("decode absent: %v", err)
+	}
+	if req2.ProxyPoolID != nil {
+		t.Fatalf("absent binding must be nil, got %v", *req2.ProxyPoolID)
+	}
+
+	// Response round-trip: the embedded store row exposes proxy_pool_id.
+	encoded, err := json.Marshal(toUpstreamProviderResponse(got))
+	if err != nil {
+		t.Fatalf("encode response: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"proxy_pool_id":7`) {
+		t.Fatalf("response must carry proxy_pool_id: %s", encoded)
+	}
+}
