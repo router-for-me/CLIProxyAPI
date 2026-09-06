@@ -104,6 +104,11 @@ type Auth struct {
 	Unavailable bool `json:"unavailable"`
 	// ProxyURL overrides the global proxy setting for this auth if provided.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// RelayBaseURL, when set, routes this auth's upstream traffic through a
+	// relay worker using the x-relay-target/x-relay-path header contract
+	// instead of a network proxy. Renderer-managed (proxy pool of relay
+	// type); executors check it before ProxyURL. Empty = standard semantics.
+	RelayBaseURL string `json:"relay_base_url,omitempty"`
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).

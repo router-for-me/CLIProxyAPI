@@ -258,17 +258,22 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			attrs[coreauth.AttributePoolStrategy] = s
 		}
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		relayBaseURL := strings.TrimSpace(ck.RelayBaseURL)
+		if relayBaseURL != "" {
+			proxyURL = "" // relay replaces proxy semantics entirely
+		}
 		a := &coreauth.Auth{
-			ID:         id,
-			Provider:   "claude",
-			Label:      "claude-apikey",
-			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
-			ProxyURL:   proxyURL,
-			Attributes: attrs,
-			Metadata:   metadata,
-			CreatedAt:  now,
-			UpdatedAt:  now,
+			ID:           id,
+			Provider:     "claude",
+			Label:        "claude-apikey",
+			Prefix:       prefix,
+			Status:       coreauth.StatusActive,
+			ProxyURL:     proxyURL,
+			RelayBaseURL: relayBaseURL,
+			Attributes:   attrs,
+			Metadata:     metadata,
+			CreatedAt:    now,
+			UpdatedAt:    now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
 		if len(a.Metadata) == 0 {
@@ -379,6 +384,10 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			entry := &compat.APIKeyEntries[j]
 			key := strings.TrimSpace(entry.APIKey)
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			relayBaseURL := strings.TrimSpace(entry.RelayBaseURL)
+			if relayBaseURL != "" {
+				proxyURL = "" // relay replaces proxy semantics entirely
+			}
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 			id, token := idGen.Next(idKind, key, base, proxyURL)
 			attrs := map[string]string{
@@ -418,16 +427,17 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			addOpenAICompatEntryProviderKey(attrs, internalProviderKey, *entry)
 			a := &coreauth.Auth{
-				ID:         id,
-				Provider:   internalProviderKey,
-				Label:      compat.Name,
-				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
-				ProxyURL:   proxyURL,
-				Attributes: attrs,
-				Metadata:   metadata,
-				CreatedAt:  now,
-				UpdatedAt:  now,
+				ID:           id,
+				Provider:     internalProviderKey,
+				Label:        compat.Name,
+				Prefix:       prefix,
+				Status:       coreauth.StatusActive,
+				ProxyURL:     proxyURL,
+				RelayBaseURL: relayBaseURL,
+				Attributes:   attrs,
+				Metadata:     metadata,
+				CreatedAt:    now,
+				UpdatedAt:    now,
 			}
 			if len(a.Metadata) == 0 {
 				a.Metadata = nil

@@ -1680,3 +1680,62 @@ func TestConfigSynthesizer_OpenAICompat_PoolStrategy_FallbackAuth(t *testing.T) 
 		t.Errorf("priority = %q, want %q", got, "2")
 	}
 }
+
+// TestConfigSynthesizer_ClaudeKeys_RelayBaseURL stamps the relay base onto
+// the auth when the rendered key carries one; ProxyURL stays empty.
+func TestConfigSynthesizer_ClaudeKeys_RelayBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:       "sk-relay",
+					RelayBaseURL: "https://myrelay.workers.dev",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].RelayBaseURL != "https://myrelay.workers.dev" {
+		t.Fatalf("RelayBaseURL = %q", auths[0].RelayBaseURL)
+	}
+	if auths[0].ProxyURL != "" {
+		t.Fatalf("ProxyURL must stay empty for relay auths, got %q", auths[0].ProxyURL)
+	}
+}
+
+// TestConfigSynthesizer_ClaudeKeys_RelayOverridesProxy pins the mutual
+// exclusion at the synthesizer layer too (defense in depth vs the renderer).
+func TestConfigSynthesizer_ClaudeKeys_RelayOverridesProxy(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:       "sk-both",
+					ProxyURL:     "http://proxy:8080",
+					RelayBaseURL: "https://myrelay.workers.dev",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if auths[0].RelayBaseURL == "" || auths[0].ProxyURL != "" {
+		t.Fatalf("relay must replace proxy: relay=%q proxy=%q", auths[0].RelayBaseURL, auths[0].ProxyURL)
+	}
+}
