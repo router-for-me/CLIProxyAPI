@@ -127,6 +127,10 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAuthGetRuntime(ctx, request)
 	case pluginabi.MethodHostAuthSave:
 		return h.callHostAuthSave(ctx, request)
+	case pluginabi.MethodHostAuthSaveBatch:
+		return h.callHostAuthSaveBatch(ctx, request)
+	case pluginabi.MethodHostAuthDelete:
+		return h.callHostAuthDelete(ctx, request)
 	default:
 		return nil, fmt.Errorf("unsupported host callback %s", method)
 	}
