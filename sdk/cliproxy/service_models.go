@@ -262,13 +262,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	if ctx.Err() != nil {
 		return
 	}
-	models = applyOAuthModelAliasForAuth(s.cfg, provider, authKind, a.Attributes, models)
-	if ctx.Err() != nil {
-		return
-	}
 	key := provider
 	if key == "" {
 		key = strings.ToLower(strings.TrimSpace(a.Provider))
+	}
+	// Plugin models are appended after the alias pass, so a per-auth source that a static
+	// plugin supplies is not in `models` yet; the alias merge still needs to know it exists.
+	models = applyOAuthModelAliasForAuthWithCatalog(s.cfg, provider, authKind, a.Attributes, excluded, models, catalogModelIDs(s.appendPluginModels(key, models)))
+	if ctx.Err() != nil {
+		return
 	}
 	models = s.appendPluginModels(key, models)
 	if len(models) > 0 {
@@ -887,10 +889,20 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 }
 
 func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
-	return applyOAuthModelAliasForAuth(cfg, provider, authKind, nil, models)
+	return applyOAuthModelAliasForAuth(cfg, provider, authKind, nil, nil, models)
 }
 
-func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, attributes map[string]string, models []*ModelInfo) []*ModelInfo {
+// applyOAuthModelAliasForAuth applies the merged alias table to a catalog that has already
+// had `excluded` removed. excluded is the same effective list the caller filtered with, so a
+// source that exclusions removed is not mistaken for a hidden upstream model.
+func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, attributes map[string]string, excluded []string, models []*ModelInfo) []*ModelInfo {
+	return applyOAuthModelAliasForAuthWithCatalog(cfg, provider, authKind, attributes, excluded, models, catalogModelIDs(models))
+}
+
+// applyOAuthModelAliasForAuthWithCatalog is applyOAuthModelAliasForAuth with an explicit set
+// of upstream ids the credential will end up serving, for callers whose final catalog is
+// larger than `models` (plugin models are appended after the alias pass).
+func applyOAuthModelAliasForAuthWithCatalog(cfg *config.Config, provider, authKind string, attributes map[string]string, excluded []string, models []*ModelInfo, catalog map[string]struct{}) []*ModelInfo {
 	if len(models) == 0 {
 		return models
 	}
@@ -898,14 +910,44 @@ func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, 
 	if channel == "" {
 		return models
 	}
-	aliases := oauthModelAliasesForAuth(cfg, channel, attributes)
+	aliases := oauthModelAliasesForAuth(cfg, channel, attributes, catalog, excluded)
 	if len(aliases) == 0 {
 		return models
 	}
 	return applyOAuthModelAliasEntries(aliases, models)
 }
 
-func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string) []config.OAuthModelAlias {
+// catalogModelIDs is the set of upstream ids present in the catalog, lowercased, so the
+// alias merge can tell whether a per-auth source model can supply a catalog entry itself.
+func catalogModelIDs(models []*ModelInfo) map[string]struct{} {
+	ids := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if id := strings.ToLower(strings.TrimSpace(model.ID)); id != "" {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func modelExcluded(id string, excluded []string) bool {
+	for _, pattern := range excluded {
+		if trimmed := strings.ToLower(strings.TrimSpace(pattern)); trimmed != "" && matchWildcard(trimmed, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// oauthModelAliasesForAuth merges a credential's aliases with the channel's global table.
+// catalog is the set of upstream ids the catalog has after exclusions; nil means unknown,
+// which keeps every global fork. excluded is the effective exclusion list the catalog was
+// filtered with (global oauth-excluded-models or the synthesizer's merged attribute): a
+// per-auth source that exclusions removed must not be treated as a hidden model, or the
+// global fork would register an id that request-time resolution routes to the excluded model.
+func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string, catalog map[string]struct{}, excluded []string) []config.OAuthModelAlias {
 	perAuthAliases := coreauth.OAuthModelAliasesFromAttributes(attributes)
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
 		return perAuthAliases
@@ -917,24 +959,64 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 	if len(globalAliases) == 0 {
 		return perAuthAliases
 	}
-	out := make([]config.OAuthModelAlias, 0, len(perAuthAliases)+len(globalAliases))
-	seenAlias := make(map[string]struct{}, len(perAuthAliases)+len(globalAliases))
-	add := func(aliases []config.OAuthModelAlias) {
-		for _, entry := range aliases {
-			alias := strings.TrimSpace(entry.Alias)
-			if alias == "" {
-				continue
-			}
-			key := strings.ToLower(alias)
-			if _, exists := seenAlias[key]; exists {
-				continue
-			}
-			seenAlias[key] = struct{}{}
-			out = append(out, entry)
+	// Two tables, two jobs. The global table may fork a catalog entry (clone an upstream
+	// id under a new client-visible id); a per-auth entry decides what one credential sends
+	// upstream for that id, and request-time resolution consults per-auth first. A hidden
+	// upstream model (Codex "gpt-reserve") needs both: a global fork so the id is routable,
+	// and a per-auth rename so the body says gpt-reserve. Keyed on alias alone, the per-auth
+	// entry evicted the fork and the id was never registered.
+	//
+	// So the key is the (name, alias) pair, with one exception. A global entry that shares
+	// its alias with a per-auth entry is a fallback for the catalog, kept only when the
+	// per-auth source model is not in the catalog itself (the hidden-model case) and only
+	// when it is a fork. Keeping it otherwise would let applyOAuthModelAliasEntries build
+	// the catalog entry from the global source, in catalog order, while the credential
+	// routes the id to its own upstream: the registered entry would carry the wrong
+	// upstream's metadata and the per-auth source would stay exposed under its own id.
+	type aliasPair struct{ name, alias string }
+	pairOf := func(entry config.OAuthModelAlias) aliasPair {
+		return aliasPair{
+			name:  strings.ToLower(strings.TrimSpace(entry.Name)),
+			alias: strings.ToLower(strings.TrimSpace(entry.Alias)),
 		}
 	}
-	add(perAuthAliases)
-	add(globalAliases)
+	out := make([]config.OAuthModelAlias, 0, len(perAuthAliases)+len(globalAliases))
+	seenPair := make(map[aliasPair]struct{}, len(perAuthAliases)+len(globalAliases))
+	// alias -> whether some per-auth source for that alias can supply the catalog entry.
+	perAuthAlias := make(map[string]bool, len(perAuthAliases))
+	for _, entry := range perAuthAliases {
+		pair := pairOf(entry)
+		if pair.alias == "" {
+			continue
+		}
+		if _, exists := seenPair[pair]; exists {
+			continue
+		}
+		seenPair[pair] = struct{}{}
+		// "Can supply the entry" is the fork-fallback question. An excluded source, or
+		// an excluded alias, answers yes on purpose: the fork is dropped and the id stays
+		// unroutable through this credential, which is what the exclusion asked for.
+		canSupply := modelExcluded(pair.name, excluded) || modelExcluded(pair.alias, excluded)
+		if !canSupply && catalog != nil {
+			_, canSupply = catalog[pair.name]
+		}
+		perAuthAlias[pair.alias] = perAuthAlias[pair.alias] || canSupply
+		out = append(out, entry)
+	}
+	for _, entry := range globalAliases {
+		pair := pairOf(entry)
+		if pair.alias == "" {
+			continue
+		}
+		if _, exists := seenPair[pair]; exists {
+			continue
+		}
+		if sourceInCatalog, shadowed := perAuthAlias[pair.alias]; shadowed && (!entry.Fork || sourceInCatalog) {
+			continue
+		}
+		seenPair[pair] = struct{}{}
+		out = append(out, entry)
+	}
 	return out
 }
 
