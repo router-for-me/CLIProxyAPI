@@ -285,17 +285,50 @@ func finalInterceptorHeaders(current, intercepted http.Header) http.Header {
 }
 
 func downstreamHeadersFromExecutor(headers http.Header, passthrough bool) http.Header {
-	if !passthrough {
-		return nil
+	var out http.Header
+	if passthrough {
+		out = FilterUpstreamHeaders(headers)
 	}
-	return FilterUpstreamHeaders(headers)
+	return mergeGatewayTelemetryHeaders(out, headers)
 }
 
 func downstreamHeadersAfterInterceptors(baseRaw, finalRaw http.Header, passthrough bool) http.Header {
+	var out http.Header
 	if passthrough {
-		return FilterUpstreamHeaders(finalRaw)
+		out = FilterUpstreamHeaders(finalRaw)
+	} else {
+		out = FilterUpstreamHeaders(diffHeaders(baseRaw, finalRaw))
 	}
-	return FilterUpstreamHeaders(diffHeaders(baseRaw, finalRaw))
+	out = mergeGatewayTelemetryHeaders(out, finalRaw)
+	return mergeGatewayTelemetryHeaders(out, baseRaw)
+}
+
+// mergeGatewayTelemetryHeaders copies gateway-owned inference telemetry
+// (generation tok/s) even when passthrough-headers is false. Upstream
+// headers stay filtered.
+func mergeGatewayTelemetryHeaders(dst, src http.Header) http.Header {
+	if src == nil {
+		return dst
+	}
+	const name = "X-CLIProxyAPI-Tokens-Per-Second"
+	canonical := http.CanonicalHeaderKey(name)
+	tps := src.Get(name)
+	if tps == "" {
+		for key, values := range src {
+			if http.CanonicalHeaderKey(key) == canonical && len(values) > 0 && values[0] != "" {
+				tps = values[0]
+				break
+			}
+		}
+	}
+	if tps == "" {
+		return dst
+	}
+	if dst == nil {
+		dst = make(http.Header)
+	}
+	dst.Set(name, tps)
+	return dst
 }
 
 func diffHeaders(base, next http.Header) http.Header {

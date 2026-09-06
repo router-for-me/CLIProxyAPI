@@ -211,7 +211,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	out = helps.AttachTokensPerSecond(out, reporter)
+	headers := httpResp.Header.Clone()
+	helps.AttachTokensPerSecondHeader(headers, out, reporter)
+	resp = cliproxyexecutor.Response{Payload: out, Headers: headers}
 	return resp, nil
 }
 
@@ -483,6 +486,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			streamLine := append([]byte("data: "), dataPayload...)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
 			for i := range chunks {
+				chunks[i] = helps.AttachStreamTokensPerSecond(chunks[i], reporter)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
