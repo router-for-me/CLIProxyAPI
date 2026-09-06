@@ -236,7 +236,11 @@ func compileOpenAICompatibleModelCapabilities(out map[string][]apiKeyModelCapabi
 	for i := range models {
 		support := models[i].Thinking
 		if support == nil && !models[i].Image {
-			support = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			// Default discrete levels for OpenAI-compatible models. xhigh/max are
+			// included so upstreams that support them (e.g. DeepSeek flash with
+			// reasoning_effort=max, OpenAI xhigh) receive the user's requested level
+			// instead of being silently downgraded to high.
+			support = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}}
 		}
 		addConfiguredModelCapability(out, models[i].Name, models[i].Alias, "openai-compatibility", support, models[i].IsCompat)
 	}

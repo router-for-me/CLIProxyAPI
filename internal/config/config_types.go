@@ -742,7 +742,8 @@ type OpenAICompatibilityModel struct {
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 
 	// Thinking configures the thinking/reasoning capability for this model.
-	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
+	// If nil, the model defaults to level-based reasoning with levels
+	// ["low", "medium", "high", "xhigh", "max"].
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
 
