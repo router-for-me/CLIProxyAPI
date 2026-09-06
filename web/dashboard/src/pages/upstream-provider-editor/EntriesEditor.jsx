@@ -23,7 +23,7 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '', pro
     onChange(safe.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
   }
   function add() {
-    onChange([...safe, { api_key: '', proxy_url: '', proxy_pool_id: '', name: '', id: 0, weight: '', priority: '' }]);
+    onChange([...safe, { api_key: '', proxy_url: '', proxy_pool_id: '', name: '', id: 0, weight: '', priority: '', disabled: false }]);
   }
   function remove(idx) { onChange(safe.filter((_, i) => i !== idx)); }
 
@@ -46,12 +46,26 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '', pro
       {safe.map((e, idx) => {
         const id = Number(e && e.id) || 0;
         const rowErr = errors[idx] || {};
+        const isOff = !!e.disabled;
         const hint = id > 0
           ? `Persisted as entry #${id}. ${idHintForIdentity(e)}`
           : 'Blank identity will become key-<id> after save.';
         return (
-          <div className="list-editor__rowgroup" key={rowKey(e, idx)}>
+          <div className={`list-editor__rowgroup${isOff ? ' list-editor__rowgroup--disabled' : ''}`} key={rowKey(e, idx)}>
             <div className="list-editor__row">
+              <label
+                className="toggle-switch entry-toggle"
+                title={isOff ? 'Entry is disabled — excluded from routing' : 'Entry is active'}
+                data-testid={`api-key-entry-disabled-${idx}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={isOff}
+                  onChange={(ev) => update(idx, { disabled: ev.target.checked })}
+                  aria-label="Disable entry"
+                />
+                <span className="toggle-switch__slider" />
+              </label>
               <input
                 type="text"
                 value={e.name || ''}
@@ -130,6 +144,9 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '', pro
             </div>
             <div className="list-editor__rowhint muted" style={{ fontSize: 11 }}>
               {hint}
+              {isOff && (
+                <span className="badge badge--disabled" style={{ marginLeft: 6, fontSize: 10 }}>disabled</span>
+              )}
             </div>
             {rowErr.name && (
               <div className="form__error" role="alert">{rowErr.name}</div>

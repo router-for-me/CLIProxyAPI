@@ -612,3 +612,50 @@ test('buildForm/buildPayload: row-level proxy_pool_id round-trips', async () => 
   const payload = buildPayload({ ...form, api_key_entries: [] }, 'claude-api-key');
   assert.equal(payload.proxy_pool_id, 7);
 });
+
+// ============================================================================
+// Per-entry disabled toggle
+// ============================================================================
+
+test('buildForm: hydrates per-entry disabled flag (true stays true, absent → false)', () => {
+  const form = buildForm('openai-compatibility', {
+    api_key_entries: [
+      { id: 1, api_key: 'sk-live', name: 'live' },
+      { id: 2, api_key: 'sk-off', name: 'off', disabled: true },
+    ],
+  });
+  assert.equal(form.api_key_entries[0].disabled, false, 'absent disabled hydrates to false');
+  assert.equal(form.api_key_entries[1].disabled, true, 'disabled=true round-trips');
+});
+
+test('buildForm: legacy claude synthesized entry is not disabled', () => {
+  const form = buildForm('claude-api-key', { api_key: 'sk-legacy' });
+  assert.equal(form.api_key_entries.length, 1);
+  assert.equal(form.api_key_entries[0].disabled, false);
+});
+
+test('buildPayload: emits disabled and keeps keyed disabled entries', () => {
+  const form = buildForm('openai-compatibility', {
+    api_key_entries: [
+      { id: 1, api_key: 'sk-live', name: 'live' },
+      { id: 2, api_key: 'sk-off', name: 'off', disabled: true },
+    ],
+  });
+  const payload = buildPayload(form, 'openai-compatibility');
+  assert.equal(payload.api_key_entries.length, 2,
+    'a disabled entry with a key is NOT filtered out');
+  assert.equal(payload.api_key_entries[1].disabled, true);
+  assert.equal(payload.api_key_entries[0].disabled, false);
+});
+
+test('buildPayload: disabled blank-key entries are still dropped', () => {
+  const form = buildForm('openai-compatibility', {
+    api_key_entries: [
+      { id: 1, api_key: 'sk-live', name: 'live' },
+      { id: 2, api_key: '', name: 'blank', disabled: true },
+    ],
+  });
+  const payload = buildPayload(form, 'openai-compatibility');
+  assert.equal(payload.api_key_entries.length, 1,
+    'blank-key entries stay filtered regardless of disabled');
+});

@@ -68,3 +68,26 @@ test('UpstreamProviderEditorPage (/new) renders the editor without proxyPools Re
   assert.ok(html.length > 0, 'page renders markup');
   assert.ok(html.includes('type-picker__card'), 'create mode renders the type picker');
 });
+
+test('ProviderEditorForm renders per-entry disabled toggle (checked for disabled entries)', () => {
+  const provider = {
+    id: 5,
+    provider_type: 'openai-compatibility',
+    name: 'compat',
+    api_key_entries: [
+      { id: 1, api_key: 'FAKE-SECRET-ONE', name: 'live' },
+      { id: 2, api_key: 'FAKE-SECRET-TWO', name: 'off', disabled: true },
+    ],
+  };
+  const html = renderEditor(provider);
+  assert.ok(html.includes('api-key-entry-disabled-0'), 'toggle renders for entry 0');
+  assert.ok(html.includes('api-key-entry-disabled-1'), 'toggle renders for entry 1');
+  // SSR renders checked checkboxes with the checked attribute; entry 1's
+  // toggle (the disabled one) must carry it while entry 0's must not.
+  const toggles = html.match(/<label[^>]*api-key-entry-disabled-\d[\s\S]*?<\/label>/g) || [];
+  assert.equal(toggles.length, 2, 'two entry toggles rendered');
+  assert.ok(!/checked/.test(toggles[0]), 'active entry toggle is unchecked');
+  assert.ok(/checked/.test(toggles[1]), 'disabled entry toggle is checked');
+  // The disabled row group carries the dimmed styling hook.
+  assert.ok(html.includes('list-editor__rowgroup--disabled'), 'disabled row group is dimmed');
+});

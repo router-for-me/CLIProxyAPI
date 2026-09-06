@@ -114,6 +114,9 @@ function hydrateEntries(src) {
     // row-level priority and renders as a blank input. Unlike weight, an
     // explicit 0 is meaningful (tier 0) and must survive the round-trip.
     priority: e && e.priority !== undefined && e.priority !== null ? e.priority : '',
+    // Disabled (per-entry on/off toggle) hydrates to a plain boolean so the
+    // editor switch always has a defined value.
+    disabled: !!(e && e.disabled),
     };
   });
 }
@@ -199,6 +202,7 @@ export function buildForm(providerType, initial, carryOver) {
       proxy_url: '',
       weight: '',
       priority: '',
+      disabled: false,
     }];
   }
 
@@ -334,6 +338,10 @@ export function buildPayload(form, providerType) {
             entry.priority = Math.trunc(n);
           }
         }
+        // Per-entry on/off toggle: always emitted as a boolean. A disabled
+        // entry with a key stays in the payload (persisted, but the renderer
+        // excludes it from config.yaml); only blank-key entries are filtered.
+        entry.disabled = !!e.disabled;
         return entry;
       });
   } else {

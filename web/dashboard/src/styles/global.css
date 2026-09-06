@@ -2213,6 +2213,16 @@ select.has-error:focus {
   flex: 1 1 120px;
   min-width: 0;
 }
+/* Per-entry on/off toggle in the upstream provider entries editor. The
+   checked state means "disabled" (mirrors the data field); the rest of the
+   row dims so the off state reads at a glance. */
+.entry-toggle {
+  margin-top: 1px;
+}
+.list-editor__rowgroup--disabled .list-editor__row > input,
+.list-editor__rowgroup--disabled .list-editor__row > select {
+  opacity: 0.5;
+}
 .list-editor__row--chip {
   display: flex;
   flex-wrap: wrap;
