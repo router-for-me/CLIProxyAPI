@@ -699,6 +699,18 @@ nonstream-keepalive-interval: 0
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
 
+# Vertex AI via Application Default Credentials (ADC) — no API key and no service
+# account JSON required. On GCE the metadata server is used automatically;
+# elsewhere set GOOGLE_APPLICATION_CREDENTIALS to a credentials file. The attached
+# identity needs Vertex AI access (e.g. roles/aiplatform.user) on the project.
+# vertex-adc:
+#   - project-id: "my-gcp-project"                 # required: the project that owns the endpoint
+#     location: "global"                           # optional; defaults to us-central1. The newest
+#                                                  # Gemini models are often served only from "global".
+#     prefix: "adc"                                # optional: require calls like "adc/gemini-3-pro"
+#     weight: 5                                    # optional: weighted-round-robin share
+#     proxy-url: "socks5://proxy.example.com:1080" # optional per-credential proxy override
+
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
