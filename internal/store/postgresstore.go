@@ -45,6 +45,7 @@ const (
 	defaultUpstreamProviderHeadersTable  = "upstream_provider_headers"
 	defaultUpstreamProviderExcludedTable = "upstream_provider_excluded_models"
 	defaultUpstreamProviderEntriesTable  = "upstream_provider_api_key_entries"
+	defaultProxyPoolsTable               = "proxy_pools"
 	defaultUpstreamSyncLogTable          = "upstream_sync_log"
 	defaultModelGroupsTable              = "model_groups"
 	defaultAutoRoutersTable              = "auto_routers"
@@ -169,6 +170,12 @@ type PostgresStoreConfig struct {
 	// UpstreamProviderEntriesTable stores the api-key-entries[] list for
 	// openai-compatibility providers as child rows. FK cascade.
 	UpstreamProviderEntriesTable string
+
+	// ProxyPoolsTable stores the named egress-proxy pools (standard http/socks
+	// pools + relay pools of type vercel/cloudflare/deno). Rows and entries of
+	// upstream_providers reference a pool by id in proxy_pool_id; the
+	// upstreamsync renderer resolves the binding into concrete proxy URLs.
+	ProxyPoolsTable string
 
 	// UpstreamSyncLogTable stores the outcome of every upstream OAuth/auth
 	// token refresh (success + failure, auto/on-demand/unauthorized-retry
@@ -331,6 +338,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.UpstreamProviderEntriesTable == "" {
 		cfg.UpstreamProviderEntriesTable = defaultUpstreamProviderEntriesTable
+	}
+	if cfg.ProxyPoolsTable == "" {
+		cfg.ProxyPoolsTable = defaultProxyPoolsTable
 	}
 	if cfg.UpstreamSyncLogTable == "" {
 		cfg.UpstreamSyncLogTable = defaultUpstreamSyncLogTable
@@ -732,6 +742,24 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS priority INTEGER`, upstreamEntriesTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: migrate upstream provider entries priority column: %w", err)
+	}
+
+	// proxy_pool_id binding columns (Proxy Pools feature). Entries override;
+	// the provider row value is the default for entries that leave it NULL.
+	// Both reference proxy_pools(id): deleting a pool the DB still references
+	// fails at the store layer before the handler's bound_entry_count check.
+	// proxy_pools itself is created by EnsureSchema, which runs before Migrate.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS proxy_pool_id BIGINT REFERENCES %s(id)`,
+		upstreamProvidersTable, s.fullTableName(s.cfg.ProxyPoolsTable),
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream providers proxy_pool_id column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS proxy_pool_id BIGINT REFERENCES %s(id)`,
+		upstreamEntriesTable, s.fullTableName(s.cfg.ProxyPoolsTable),
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream entries proxy_pool_id column: %w", err)
 	}
 
 	// usage_stat_day is the pre-aggregated daily rollup of usage_events. It folds
@@ -1674,6 +1702,37 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		return fmt.Errorf("postgres store: create upstream_provider_api_key_entries index: %w", err)
 	}
 
+	// proxy_pools stores named egress-proxy pools. type discriminates standard
+	// http/socks proxies ("http") from deployed relay workers ("vercel",
+	// "cloudflare", "deno") whose proxy_url is a relay base URL used with the
+	// x-relay-target/x-relay-path header contract. strict_proxy defaults TRUE:
+	// a proxy failure fails the request (no silent direct fallback = no IP
+	// leak); tests are status-only and never flip is_active.
+	proxyPoolsTable := s.fullTableName(s.cfg.ProxyPoolsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id             BIGSERIAL PRIMARY KEY,
+			name           TEXT NOT NULL,
+			proxy_url      TEXT NOT NULL,
+			no_proxy       TEXT NOT NULL DEFAULT '',
+			type           TEXT NOT NULL DEFAULT 'http',
+			is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+			strict_proxy   BOOLEAN NOT NULL DEFAULT TRUE,
+			test_status    TEXT NOT NULL DEFAULT 'unknown',
+			last_tested_at TIMESTAMPTZ,
+			last_error     TEXT,
+			created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, proxyPoolsTable)); err != nil {
+		return fmt.Errorf("postgres store: create proxy_pools table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_pools_name ON %s(lower(name))`, proxyPoolsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create proxy_pools name index: %w", err)
+	}
+
 	// model_groups stores reusable Model Group templates: an allowed_models /
 	// blocked_models grant list plus optional per-model upstream routing
 	// (model_routes). Groups are attached to API-key policies or internal
@@ -2296,6 +2355,15 @@ func (s *PostgresStore) UpstreamProviderEntriesTable() string {
 		return quoteIdentifier(defaultUpstreamProviderEntriesTable)
 	}
 	return s.fullTableName(s.cfg.UpstreamProviderEntriesTable)
+}
+
+// ProxyPoolsTable returns the fully-qualified name of the proxy_pools table
+// (the named egress-proxy pools bound to upstream provider rows/entries).
+func (s *PostgresStore) ProxyPoolsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultProxyPoolsTable)
+	}
+	return s.fullTableName(s.cfg.ProxyPoolsTable)
 }
 
 // ModelGroupsTable returns the fully-qualified name of the model_groups

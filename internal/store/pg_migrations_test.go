@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,5 +110,53 @@ func TestMigrateUpstreamProviderEntryIdentity(t *testing.T) {
 	}
 	if indexCount != 1 {
 		t.Fatalf("entry name unique index count = %d, want 1", indexCount)
+	}
+}
+
+// TestProxyPoolsSchemaAndBindingColumns verifies the proxy_pools table is
+// created by EnsureSchema and the binding columns exist on the provider +
+// entry tables after Migrate.
+func TestProxyPoolsSchemaAndBindingColumns(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_proxy_pools_schema")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+	ctx := context.Background()
+
+	var exists bool
+	err := pg.DB().QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM information_schema.tables
+		WHERE table_schema = $1 AND table_name = $2)`, pg.cfg.Schema, "proxy_pools").Scan(&exists)
+	if err != nil || !exists {
+		t.Fatalf("proxy_pools table missing: %v %v", exists, err)
+	}
+	for _, tc := range []struct{ table, column string }{
+		{"upstream_providers", "proxy_pool_id"},
+		{"upstream_provider_api_key_entries", "proxy_pool_id"},
+	} {
+		err := pg.DB().QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = $1 AND table_name = $2 AND column_name = $3)`,
+			pg.cfg.Schema, tc.table, tc.column).Scan(&exists)
+		if err != nil || !exists {
+			t.Fatalf("%s.%s missing: %v %v", tc.table, tc.column, exists, err)
+		}
+	}
+	// Default columns materialized with the expected defaults.
+	var strictDefault, activeDefault string
+	if err := pg.DB().QueryRowContext(ctx, `SELECT column_default FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = 'proxy_pools' AND column_name = 'strict_proxy'`,
+		pg.cfg.Schema).Scan(&strictDefault); err != nil {
+		t.Fatalf("strict_proxy default query: %v", err)
+	}
+	if !strings.Contains(strictDefault, "true") {
+		t.Fatalf("strict_proxy default = %q, want true", strictDefault)
+	}
+	if err := pg.DB().QueryRowContext(ctx, `SELECT column_default FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = 'proxy_pools' AND column_name = 'is_active'`,
+		pg.cfg.Schema).Scan(&activeDefault); err != nil {
+		t.Fatalf("is_active default query: %v", err)
+	}
+	if !strings.Contains(activeDefault, "true") {
+		t.Fatalf("is_active default = %q, want true", activeDefault)
 	}
 }

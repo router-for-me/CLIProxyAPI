@@ -35,6 +35,9 @@ const (
 	// ResourceUpstreamProviders covers normalized upstream providers and their
 	// child tables (models, headers, excluded models, api-key entries).
 	ResourceUpstreamProviders BackupResource = "upstream_providers"
+	// ResourceProxyPools covers the named egress-proxy pools bound to
+	// upstream provider rows/entries via proxy_pool_id.
+	ResourceProxyPools BackupResource = "proxy_pools"
 	// ResourceManagementTokens covers management API tokens and per-token policies.
 	ResourceManagementTokens BackupResource = "management_tokens"
 	// ResourceErrorMessages covers operator-customized error responses.
@@ -105,6 +108,7 @@ var AllBackupResources = []BackupResource{
 	ResourceAutoRouters,
 	ResourceModels,
 	ResourceUpstreamProviders,
+	ResourceProxyPools,
 	ResourceManagementTokens,
 	ResourceErrorMessages,
 	ResourcePricingSources,
@@ -179,6 +183,8 @@ func (s *PostgresStore) resourceTables(res BackupResource) []backupTable {
 			{s.UpstreamProviderExcludedTable(), ""},
 			{s.UpstreamProviderEntriesTable(), "id"},
 		}
+	case ResourceProxyPools:
+		return []backupTable{{s.ProxyPoolsTable(), "id"}}
 	case ResourceManagementTokens:
 		return []backupTable{
 			{s.ManagementTokensTable(), "id"},
