@@ -26,6 +26,7 @@ import ApiTokensPage from './pages/ApiTokensPage.jsx';
 import ApiTokenDetailPage from './pages/ApiTokenDetailPage.jsx';
 import DeveloperPage from './pages/DeveloperPage.jsx';
 import UpstreamProvidersPage from './pages/UpstreamProvidersPage.jsx';
+import ProxyPoolsPage from './pages/ProxyPoolsPage.jsx';
 import UpstreamProviderEditorPage from './pages/upstream-provider-editor/index.jsx';
 import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import ModelHealthPage from './pages/ModelHealthPage.jsx';
@@ -293,6 +294,7 @@ export default function App() {
             <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
             <Route path="/upstream-providers/new" element={<UpstreamProviderEditorPage />} />
             <Route path="/upstream-providers/:id" element={<UpstreamProviderEditorPage />} />
+            <Route path="/proxy-pools" element={<ProxyPoolsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/branding" element={<BrandingPage />} />

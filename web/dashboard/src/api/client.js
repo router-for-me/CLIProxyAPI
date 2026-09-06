@@ -2072,3 +2072,41 @@ export async function restoreBackup({ objectKey, mode, confirm = false }) {
 export async function backupSettings() {
   return fetchJSON('/backup/settings');
 }
+
+// ── Proxy Pools (named egress-proxy pools) ─────────────────────────────
+// CRUD + connectivity test + batch import + one-shot relay deploy. The list
+// key is `pools`; always Array.isArray-guard on the consuming side.
+
+export async function listProxyPools({ includeUsage = false } = {}) {
+  const qs = includeUsage ? '?include_usage=1' : '';
+  const res = await fetchJSON(`/proxy-pools${qs}`);
+  return { pools: Array.isArray(res?.pools) ? res.pools : [] };
+}
+
+export async function getProxyPool(id) {
+  return fetchJSON(`/proxy-pools/${encodeURIComponent(id)}`);
+}
+
+export async function createProxyPool(payload) {
+  return fetchJSON('/proxy-pools', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export async function updateProxyPool(id, payload) {
+  return fetchJSON(`/proxy-pools/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) });
+}
+
+export async function deleteProxyPool(id) {
+  return fetchJSON(`/proxy-pools/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export async function testProxyPool(id) {
+  return fetchJSON(`/proxy-pools/${encodeURIComponent(id)}/test`, { method: 'POST' });
+}
+
+export async function batchImportProxyPools(lines) {
+  return fetchJSON('/proxy-pools/batch-import', { method: 'POST', body: JSON.stringify({ lines }) });
+}
+
+export async function deployRelayProxyPool(payload) {
+  return fetchJSON('/proxy-pools/relay-deploy', { method: 'POST', body: JSON.stringify(payload) });
+}
