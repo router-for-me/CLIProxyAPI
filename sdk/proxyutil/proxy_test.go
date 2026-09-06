@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -517,5 +519,108 @@ func TestBuildHTTPTransportSelfNoProxyIsRejected(t *testing.T) {
 
 	if _, _, err := BuildHTTPTransport("http://proxy:8080?no_proxy=proxy"); err == nil {
 		t.Fatal("proxy host matching its own no_proxy must error")
+	}
+}
+
+// roundTripFunc adapts a function into an http.RoundTripper for tests.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestProxyFuncRespectsNoProxy wires the composite setting into an
+// http.Transport-level Proxy func and verifies per-target selection.
+func TestProxyFuncRespectsNoProxy(t *testing.T) {
+	t.Parallel()
+
+	setting, err := Parse("http://proxy:8080?no_proxy=" + urlValue("api.anthropic.com,.corp"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	proxyFunc, errTransport := ProxyFuncFor(setting)
+	if errTransport != nil {
+		t.Fatalf("ProxyFuncFor: %v", errTransport)
+	}
+	reqBypass, _ := http.NewRequest(http.MethodGet, "https://api.anthropic.com/v1", nil)
+	if got, errProxy := proxyFunc(reqBypass); errProxy != nil || got != nil {
+		t.Fatalf("bypass target got proxy %v, %v", got, errProxy)
+	}
+	reqProxied, _ := http.NewRequest(http.MethodGet, "https://api.openai.com/v1", nil)
+	if got, errProxy := proxyFunc(reqProxied); errProxy != nil || got == nil || got.String() != "http://proxy:8080" {
+		t.Fatalf("proxied target got %v, %v", got, errProxy)
+	}
+}
+
+// TestProxyFuncForRejectsNonProxySettings pins the precondition.
+func TestProxyFuncForRejectsNonProxySettings(t *testing.T) {
+	t.Parallel()
+
+	setting, _ := Parse("")
+	if _, err := ProxyFuncFor(setting); err == nil {
+		t.Fatal("inherit setting must be rejected")
+	}
+	settingDirect, _ := Parse("direct")
+	if _, err := ProxyFuncFor(settingDirect); err == nil {
+		t.Fatal("direct setting must be rejected")
+	}
+}
+
+// TestStrictFallbackTransport verifies strict=false retries once directly
+// when the inner (proxied) transport fails, and passes success through. The
+// direct arm is stubbed so the test exercises the seam, not connectivity.
+func TestStrictFallbackTransport(t *testing.T) {
+	t.Parallel()
+
+	inner := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("proxy dial refused")
+	})
+	directCalled := false
+	direct := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		directCalled = true
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	})
+	loose := newStrictFallbackTransport(inner, direct)
+	resp, err := loose.RoundTrip(httptest.NewRequest(http.MethodGet, "https://target.example/x", nil))
+	if err != nil || resp == nil {
+		t.Fatalf("strict=false must fall back direct: %v %v", resp, err)
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if !directCalled {
+		t.Fatal("direct arm must be invoked after inner failure")
+	}
+
+	success := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusTeapot, Body: http.NoBody}, nil
+	})
+	hard := NewStrictFallbackTransport(success)
+	got, errTrip := hard.RoundTrip(httptest.NewRequest(http.MethodGet, "https://target.example/x", nil))
+	if errTrip != nil || got == nil || got.StatusCode != http.StatusTeapot {
+		t.Fatalf("inner success must pass through: %v %v", got, errTrip)
+	}
+	if got != nil {
+		got.Body.Close()
+	}
+}
+
+// TestBuildProxiedTransportWrapsWhenLoose pins the strict dispatch: only
+// strict=false values come back wrapped in the fallback transport.
+func TestBuildProxiedTransportWrapsWhenLoose(t *testing.T) {
+	t.Parallel()
+
+	rt, mode, err := BuildProxiedTransport("http://proxy:8080?strict=false")
+	if err != nil || mode != ModeProxy || rt == nil {
+		t.Fatalf("loose build: %v %v %v", rt, mode, err)
+	}
+	if _, wrapped := rt.(*strictFallbackTransport); !wrapped {
+		t.Fatal("strict=false must return a wrapped fallback transport")
+	}
+
+	rtStrict, _, err := BuildProxiedTransport("http://proxy:8080")
+	if err != nil || rtStrict == nil {
+		t.Fatalf("strict build: %v %v", rtStrict, err)
+	}
+	if _, wrapped := rtStrict.(*strictFallbackTransport); wrapped {
+		t.Fatal("strict=true must NOT be wrapped")
 	}
 }

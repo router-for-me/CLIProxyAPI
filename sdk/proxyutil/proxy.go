@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 )
 
@@ -59,12 +60,14 @@ func parseCompositeSuffix(raw string) (cleaned string, noProxy []string, strict 
 	if errParse != nil {
 		return "", nil, false, fmt.Errorf("parse proxy suffix: %w", errParse)
 	}
+	hasNoProxyKey := false
 	for key, vals := range values {
 		if len(vals) != 1 || strings.TrimSpace(vals[0]) == "" {
 			return "", nil, false, fmt.Errorf("proxy suffix key %q must have exactly one value", key)
 		}
 		switch key {
 		case "no_proxy":
+			hasNoProxyKey = true
 			for _, part := range strings.Split(vals[0], ",") {
 				if p := strings.TrimSpace(part); p != "" {
 					noProxy = append(noProxy, strings.ToLower(p))
@@ -83,7 +86,7 @@ func parseCompositeSuffix(raw string) (cleaned string, noProxy []string, strict 
 			return "", nil, false, fmt.Errorf("unknown proxy suffix key %q", key)
 		}
 	}
-	if len(noProxy) == 0 {
+	if hasNoProxyKey && len(noProxy) == 0 {
 		return "", nil, false, fmt.Errorf("proxy suffix has no_proxy key but no host patterns")
 	}
 	return cleaned, noProxy, strict, nil
@@ -237,6 +240,79 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	default:
 		return nil, setting.Mode, nil
 	}
+}
+
+// ProxyFuncFor returns an http.Transport-level Proxy function honoring the
+// setting's NoProxy list: matching targets get nil (direct), everything else
+// gets the parsed proxy URL.
+func ProxyFuncFor(setting Setting) (func(*http.Request) (*url.URL, error), error) {
+	if setting.Mode != ModeProxy || setting.URL == nil {
+		return nil, fmt.Errorf("proxy func requires a parsed proxy URL")
+	}
+	return func(req *http.Request) (*url.URL, error) {
+		if req == nil || req.URL == nil {
+			return setting.URL, nil
+		}
+		if setting.Bypasses(req.URL.String()) {
+			return nil, nil
+		}
+		return setting.URL, nil
+	}, nil
+}
+
+// strictFallbackTransport wraps a proxied RoundTripper; when it fails and
+// the setting allows fallback (strict=false), the request is retried once
+// against a direct transport with a warning log.
+type strictFallbackTransport struct {
+	inner  http.RoundTripper
+	direct http.RoundTripper
+}
+
+// NewStrictFallbackTransport wraps inner with a one-shot direct fallback.
+// Only meaningful when the caller has already decided strict=false;
+// strict=true callers use the inner transport directly.
+func NewStrictFallbackTransport(inner http.RoundTripper) http.RoundTripper {
+	return newStrictFallbackTransport(inner, nil)
+}
+
+// newStrictFallbackTransport allows tests to stub the direct arm; nil uses
+// the real direct transport.
+func newStrictFallbackTransport(inner, direct http.RoundTripper) http.RoundTripper {
+	if direct == nil {
+		direct = NewDirectTransport()
+	}
+	return &strictFallbackTransport{inner: inner, direct: direct}
+}
+
+func (t *strictFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, errTrip := t.inner.RoundTrip(req)
+	if errTrip == nil {
+		return resp, nil
+	}
+	host := ""
+	if req != nil && req.URL != nil {
+		host = req.URL.Host
+	}
+	log.WithError(errTrip).Warnf("proxy transport failed; falling back to direct for %s", host)
+	return t.direct.RoundTrip(req)
+}
+
+// BuildProxiedTransport is BuildHTTPTransport with strict-fallback handling:
+// strict=false proxy values come back wrapped in a one-shot direct fallback.
+// Callers needing the raw *http.Transport keep using BuildHTTPTransport.
+func BuildProxiedTransport(raw string) (http.RoundTripper, Mode, error) {
+	setting, errParse := Parse(raw)
+	if errParse != nil {
+		return nil, setting.Mode, errParse
+	}
+	transport, mode, errBuild := BuildHTTPTransport(raw)
+	if errBuild != nil || transport == nil {
+		return nil, mode, errBuild
+	}
+	if setting.Mode == ModeProxy && !setting.Strict {
+		return NewStrictFallbackTransport(transport), mode, nil
+	}
+	return transport, mode, nil
 }
 
 // BuildDialer constructs a proxy dialer for settings that operate at the connection layer.
