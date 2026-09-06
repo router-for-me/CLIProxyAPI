@@ -3692,3 +3692,60 @@ func TestConvertClaudeRequestToAntigravityStripsPropertyNames(t *testing.T) {
 		t.Errorf("property named properties was lost: %s", decls.Get("1").Raw)
 	}
 }
+
+func TestConvertClaudeRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		toolChoice string
+	}{
+		{name: "string none", toolChoice: `"none"`},
+		{name: "object none", toolChoice: `{"type":"none"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"model":"claude-sonnet-4-5",
+				"messages":[{"role":"user","content":"hi"}],
+				"tools":[{"name":"get_weather","description":"Get weather","input_schema":{"type":"object"}}],
+				"tool_choice":` + tc.toolChoice + `
+			}`)
+			out := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+			if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+				t.Fatalf("expected mode NONE, got %q", got)
+			}
+			if gjson.GetBytes(out, "request.tools").Exists() {
+				t.Fatalf("expected request.tools to be omitted, got %s", gjson.GetBytes(out, "request.tools").Raw)
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToAntigravityToolChoiceNoneOmitsInterleavedThinkingHint(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		toolChoice string
+	}{
+		{name: "string none", toolChoice: `"none"`},
+		{name: "object none", toolChoice: `{"type":"none"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"model":"claude-sonnet-4-5-thinking",
+				"messages":[{"role":"user","content":"Answer without calling tools."}],
+				"tools":[{"name":"get_weather","description":"Get weather","input_schema":{"type":"object"}}],
+				"tool_choice":` + tc.toolChoice + `,
+				"thinking":{"type":"enabled","budget_tokens":1024}
+			}`)
+			out := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+			if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+				t.Fatalf("expected mode NONE, got %q", got)
+			}
+			if gjson.GetBytes(out, "request.tools").Exists() {
+				t.Fatalf("expected request.tools to be omitted, got %s", gjson.GetBytes(out, "request.tools").Raw)
+			}
+			sysInstr := gjson.GetBytes(out, "request.systemInstruction").Raw
+			if strings.Contains(sysInstr, "Interleaved thinking is enabled") {
+				t.Fatalf("expected interleaved thinking hint to be omitted when tool_choice is none, got systemInstruction: %s", sysInstr)
+			}
+		})
+	}
+}

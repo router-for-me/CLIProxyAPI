@@ -574,3 +574,29 @@ func TestConvertOpenAIRequestToAntigravityPreservesToolResponseAsString(t *testi
 		t.Fatalf("expected %q, got %q", expected, got)
 	}
 }
+
+func TestConvertOpenAIRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		toolChoice string
+	}{
+		{name: "string none", toolChoice: `"none"`},
+		{name: "object none", toolChoice: `{"type":"none"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"model":"gemini-3-flash",
+				"messages":[{"role":"user","content":"hi"}],
+				"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],
+				"tool_choice":` + tc.toolChoice + `
+			}`)
+			out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", inputJSON, false)
+			if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+				t.Fatalf("expected mode NONE, got %q", got)
+			}
+			if gjson.GetBytes(out, "request.tools").Exists() {
+				t.Fatalf("expected request.tools to be omitted, got %s", gjson.GetBytes(out, "request.tools").Raw)
+			}
+		})
+	}
+}
