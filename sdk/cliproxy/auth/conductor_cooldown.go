@@ -753,6 +753,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 	}
+	recordUpstreamResult(result)
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth
