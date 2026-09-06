@@ -505,6 +505,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 					current.StatusMessage = "token expired"
 				}
+				logCredentialRefreshFailure(current, err, false)
 			} else {
 				// Access token remains valid. Preserve current in-flight/cooldown status without overwrite.
 				nextRetry := now.Add(refreshFailureBackoff)
@@ -514,7 +515,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 				current.NextRefreshAfter = nextRetry
 
 				if !current.Unavailable {
-					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
+					logCredentialRefreshFailure(current, err, true)
 				}
 			}
 			m.auths[id] = current
@@ -571,4 +572,20 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		registry.GetGlobalRegistry().ApplyClientModelProjections(id, regEpoch, targetAuth.Generation, projections)
 	}
 	return saved.Clone(), nil
+}
+
+func logCredentialRefreshFailure(auth *Auth, err error, retainedUnexpired bool) {
+	if auth == nil || err == nil {
+		return
+	}
+	file := AuthFileBasename(auth)
+	if file == "" {
+		file = "unknown"
+	}
+	diagnostic := safeErrorDiagnosticForLog(err)
+	if retainedUnexpired {
+		log.Warnf("credential refresh failed for %s (auth_file=%s): %s; retaining active credential as access token is unexpired", auth.Provider, file, diagnostic)
+		return
+	}
+	log.Warnf("credential refresh failed for %s (auth_file=%s): %s", auth.Provider, file, diagnostic)
 }
