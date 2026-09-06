@@ -44,7 +44,7 @@ func TestApplyPersistedUpstreamProvidersRendersClaudeRowIdentity(t *testing.T) {
 		APIKey:       "test-key",
 		Models:       []store.UpstreamProviderModel{{Name: "minimax-m3"}},
 	}}}
-	got, errApply := applyPersistedUpstreamProviders(context.Background(), providers, cfg, configPath, "")
+	got, errApply := applyPersistedUpstreamProviders(context.Background(), providers, cfg, configPath, "", nil)
 	if errApply != nil {
 		t.Fatalf("applyPersistedUpstreamProviders() error = %v", errApply)
 	}

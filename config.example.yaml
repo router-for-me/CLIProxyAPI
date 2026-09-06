@@ -474,6 +474,8 @@ nonstream-keepalive-interval: 0
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
+#     proxy-pool-id: 7 # renderer-managed: the proxy_pools row this entry is bound to (Proxy Pools page). Resolved into proxy-url (or relay-base-url for relay pools) at render time. Not set manually.
+#     # relay-base-url: "https://myrelay.example.workers.dev" # renderer-managed: stamped when bound to an active relay-type pool; executors forward via the x-relay-target/x-relay-path header contract instead of a network proxy.
 #     models:
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
@@ -570,6 +572,7 @@ nonstream-keepalive-interval: 0
 #                      # valid explicit tier, distinct from omitted
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
+#         proxy-pool-id: 7 # renderer-managed: proxy_pools binding; overrides the row-level pool when set. Resolved into proxy-url / relay-base-url at render time. Not set manually.
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
