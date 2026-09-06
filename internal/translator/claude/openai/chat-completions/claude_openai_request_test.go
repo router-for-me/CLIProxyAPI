@@ -6,6 +6,48 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToClaude_Opus5StripsConsecutiveTrailingAssistantPrefills(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"user","content":"Implement the plan."},
+			{"role":"assistant","content":[{"type":"text","text":"Writing now."}]},
+			{"role":"assistant","content":"Still writing."}
+		]
+	}`)
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-5", inputJSON, true)
+	messages := gjson.GetBytes(result, "messages").Array()
+	if len(messages) != 1 || messages[0].Get("role").String() != "user" {
+		t.Fatalf("messages = %s, want only the original user turn", gjson.GetBytes(result, "messages").Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesNativeClaudeToolsAndBlocks(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"terminal","input":{"command":"pwd"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"/workspace"}]}
+		],
+		"tools":[{
+			"name":"terminal",
+			"description":"Run a command",
+			"input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}
+		}]
+	}`)
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-5", inputJSON, false)
+	root := gjson.ParseBytes(result)
+	if got := root.Get("tools.0.name").String(); got != "terminal" {
+		t.Fatalf("native tool name = %q, want terminal. Output: %s", got, string(result))
+	}
+	if got := root.Get("messages.0.content.0.type").String(); got != "tool_use" {
+		t.Fatalf("assistant block type = %q, want tool_use. Output: %s", got, string(result))
+	}
+	if got := root.Get("messages.1.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("user block type = %q, want tool_result. Output: %s", got, string(result))
+	}
+}
+
 func TestConvertOpenAIRequestToClaudeWithCompat_GroupsAssistantThinkingTextAndTools(t *testing.T) {
 	inputJSON := []byte(`{
 		"messages":[

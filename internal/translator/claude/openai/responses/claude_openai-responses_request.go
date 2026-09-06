@@ -453,19 +453,28 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 			case "function_call_output", "custom_tool_call_output":
 				// Map to user tool_result
-				rawID := item.Get("call_id").String()
-				callID := util.SanitizeClaudeToolID(rawID)
-				if rawID != "" {
-					if _, exists := emittedToolResults[rawID]; exists {
-						return true
+				rawID := strings.TrimSpace(item.Get("call_id").String())
+				if rawID == "" {
+					output := item.Get("output")
+					content := output.String()
+					if output.Type != gjson.String {
+						content = output.Raw
 					}
-					emittedToolResults[rawID] = struct{}{}
+					if strings.TrimSpace(content) != "" {
+						textPart := []byte(`{"type":"text","text":""}`)
+						textPart, _ = sjson.SetBytes(textPart, "text", content)
+						appendParts("user", textPart)
+					}
+					return true
 				}
+				callID := util.SanitizeClaudeToolID(rawID)
+				if _, exists := emittedToolResults[rawID]; exists {
+					return true
+				}
+				emittedToolResults[rawID] = struct{}{}
 				output := item.Get("output")
-				if rawID != "" {
-					if lastItem, exists := lastToolResult[rawID]; exists {
-						output = lastItem.Get("output")
-					}
+				if lastItem, exists := lastToolResult[rawID]; exists {
+					output = lastItem.Get("output")
 				}
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)

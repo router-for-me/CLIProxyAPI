@@ -139,6 +139,13 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		messageArray := messages.Array()
+		opus5PrefillStart := len(messageArray)
+		if strings.EqualFold(modelName, "claude-opus-5") {
+			for opus5PrefillStart > 0 && isPlainAssistantPrefill(messageArray[opus5PrefillStart-1]) {
+				opus5PrefillStart--
+			}
+		}
 		lastToolMessage := map[string]gjson.Result{}
 		messages.ForEach(func(_, message gjson.Result) bool {
 			if message.Get("role").String() == "tool" {
@@ -153,9 +160,17 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 
 		systemBlocks := make([][]byte, 0)
 		messageAccumulator := common.NewClaudeMessageAccumulator(int(root.Get("messages.#").Int()))
-		messages.ForEach(func(_, message gjson.Result) bool {
+		messages.ForEach(func(index, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
+
+			// Opus 5 rejects assistant-message prefills. Cursor can append a final
+			// run of plain assistant text turns while continuing or resuming an agent
+			// loop, so omit that whole terminal run. Historical assistant turns and
+			// assistant tool calls remain part of the conversation.
+			if index.Int() >= int64(opus5PrefillStart) {
+				return true
+			}
 
 			switch role {
 			// Developer messages rank with system messages in OpenAI's instruction
@@ -311,7 +326,27 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		var anthropicTools [][]byte
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
+			toolType := tool.Get("type").String()
+			// Some clients (e.g. Cursor via the OpenAI endpoint) send tools already in
+			// Anthropic-native shape: a bare object with name + input_schema and no "type".
+			// Pass these through directly instead of dropping them.
+			if toolType == "" && tool.Get("name").Exists() {
+				name := tool.Get("name").String()
+				if name == "" {
+					return true
+				}
+				anthropicTool := []byte(`{"name":"","description":""}`)
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", name)
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", tool.Get("description").String())
+				if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(inputSchema.Raw))
+				} else if parameters := tool.Get("parameters"); parameters.Exists() {
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+				}
+				anthropicTools = append(anthropicTools, anthropicTool)
+				return true
+			}
+			if toolType == "function" {
 				function := tool.Get("function")
 				anthropicTool := []byte(`{"name":"","description":""}`)
 				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", function.Get("name").String())
@@ -368,6 +403,28 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	return out
 }
 
+func isPlainAssistantPrefill(message gjson.Result) bool {
+	if message.Get("role").String() != "assistant" || message.Get("tool_calls").Exists() {
+		return false
+	}
+	content := message.Get("content")
+	if content.Type == gjson.String {
+		return content.String() != ""
+	}
+	if !content.IsArray() || len(content.Array()) == 0 {
+		return false
+	}
+	plainText := true
+	content.ForEach(func(_, part gjson.Result) bool {
+		if part.Get("type").String() != "text" || part.Get("text").String() == "" {
+			plainText = false
+			return false
+		}
+		return true
+	})
+	return plainText
+}
+
 func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 	var claudePart []byte
 	switch part.Get("type").String() {
@@ -393,6 +450,14 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 				claudePart = docPart
 			}
 		}
+
+	case "tool_use", "tool_result":
+		// Some clients (e.g. Cursor via the OpenAI endpoint) send assistant/user
+		// content already as Anthropic-native tool_use / tool_result blocks. Pass
+		// them through unchanged instead of dropping them, which would otherwise
+		// leave the message with empty content and trigger an Anthropic
+		// "messages: user messages must have non-empty content" error.
+		return part.Raw
 	}
 
 	if len(claudePart) == 0 {

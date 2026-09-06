@@ -482,12 +482,12 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 				}
 
 				if nameResult := outputItem.Get("name"); nameResult.Exists() {
-					n := nameResult.String()
-					rev := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
-					if orig, ok := rev[n]; ok {
-						n = orig
+					name := nameResult.String()
+					reverseNames := buildReverseMapFromOriginalOpenAI(originalRequestRawJSON)
+					if originalName, ok := reverseNames[name]; ok {
+						name = originalName
 					}
-					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", n)
+					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", name)
 				}
 
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", codexToolCallArguments(outputItem))
