@@ -69,6 +69,34 @@ func TestRequestExecutionMetadataIncludesHashedCallerScope(t *testing.T) {
 	}
 }
 
+func TestRequestExecutionMetadataIncludesCredentialGroups(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Set("accessMetadata", map[string]string{"credential-groups": " team-a,team-b "})
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	meta := requestExecutionMetadata(ctx)
+	got, ok := meta[coreexecutor.CredentialGroupsMetadataKey].([]string)
+	if !ok || len(got) != 2 || got[0] != "team-a" || got[1] != "team-b" {
+		t.Fatalf("CredentialGroupsMetadataKey = %#v, want [team-a team-b]", meta[coreexecutor.CredentialGroupsMetadataKey])
+	}
+}
+
+func TestRequestExecutionMetadataPreservesExplicitEmptyCredentialGroups(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Set("accessMetadata", map[string]string{"credential-groups": ""})
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	meta := requestExecutionMetadata(ctx)
+	got, ok := meta[coreexecutor.CredentialGroupsMetadataKey].([]string)
+	if !ok || len(got) != 0 {
+		t.Fatalf("CredentialGroupsMetadataKey = %#v, want explicit empty list", meta[coreexecutor.CredentialGroupsMetadataKey])
+	}
+}
+
 func TestRequestExecutionMetadataTraceCallbackWebsocketDetection(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
