@@ -76,9 +76,9 @@ func (a *ClaudeMessageAccumulator) Messages() [][]byte {
 	return a.messages
 }
 
-// AlignClaudeToolResults orders tool_result blocks by the preceding tool_use IDs.
-// Other content blocks retain their relative order after the tool results. If a
-// complete one-to-one match is unavailable, the original content is returned.
+// AlignClaudeToolResults orders tool_result blocks by the preceding tool_use IDs,
+// preserving non-result content blocks at their existing indexes. If a complete
+// one-to-one match is unavailable, the original content is returned.
 func AlignClaudeToolResults(content gjson.Result, toolUseIDs []string) gjson.Result {
 	if !content.IsArray() || len(toolUseIDs) == 0 {
 		return content
@@ -86,19 +86,18 @@ func AlignClaudeToolResults(content gjson.Result, toolUseIDs []string) gjson.Res
 
 	parts := content.Array()
 	toolResults := make([]gjson.Result, 0, len(toolUseIDs))
-	otherParts := make([]gjson.Result, 0, len(parts))
-	for _, part := range parts {
+	toolResultIndices := make([]int, 0, len(toolUseIDs))
+	for i, part := range parts {
 		if part.Get("type").String() == "tool_result" {
 			toolResults = append(toolResults, part)
-			continue
+			toolResultIndices = append(toolResultIndices, i)
 		}
-		otherParts = append(otherParts, part)
 	}
 	if len(toolResults) != len(toolUseIDs) {
 		return content
 	}
 
-	ordered := make([][]byte, 0, len(parts))
+	reorderedResults := make([]gjson.Result, 0, len(toolUseIDs))
 	used := make([]bool, len(toolResults))
 	for _, toolUseID := range toolUseIDs {
 		matched := -1
@@ -112,10 +111,15 @@ func AlignClaudeToolResults(content gjson.Result, toolUseIDs []string) gjson.Res
 			return content
 		}
 		used[matched] = true
-		ordered = append(ordered, []byte(toolResults[matched].Raw))
+		reorderedResults = append(reorderedResults, toolResults[matched])
 	}
-	for _, part := range otherParts {
-		ordered = append(ordered, []byte(part.Raw))
+
+	ordered := make([][]byte, len(parts))
+	for i, part := range parts {
+		ordered[i] = []byte(part.Raw)
+	}
+	for i, slotIndex := range toolResultIndices {
+		ordered[slotIndex] = []byte(reorderedResults[i].Raw)
 	}
 	return gjson.ParseBytes(JoinRawArray(ordered))
 }

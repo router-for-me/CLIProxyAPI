@@ -2253,19 +2253,25 @@ func TestConvertClaudeRequestToAntigravity_AlignsPermutedParallelToolResultsWith
 	output := ConvertClaudeRequestToAntigravity("gemini-3.7-flash-high", inputJSON, false)
 	parts := gjson.GetBytes(output, "request.contents.1.parts").Array()
 	if len(parts) != 8 {
-		t.Fatalf("parts = %d, want six responses followed by two text parts; output=%s", len(parts), output)
+		t.Fatalf("parts = %d, want eight parts; output=%s", len(parts), output)
 	}
-	for index := 0; index < 6; index++ {
+	if got := parts[0].Get("text").String(); got != "Tool results follow." {
+		t.Fatalf("leading text = %q; output=%s", got, output)
+	}
+	for index := 0; index < 3; index++ {
 		wantID := fmt.Sprintf("call_162060%d", index+3)
-		if gotID := parts[index].Get("functionResponse.id").String(); gotID != wantID {
-			t.Fatalf("functionResponse[%d].id = %q, want %q; output=%s", index, gotID, wantID, output)
+		if gotID := parts[index+1].Get("functionResponse.id").String(); gotID != wantID {
+			t.Fatalf("functionResponse[%d].id = %q, want %q; output=%s", index+1, gotID, wantID, output)
 		}
 	}
-	if got := parts[6].Get("text").String(); got != "Tool results follow." {
-		t.Fatalf("first trailing text = %q; output=%s", got, output)
+	if got := parts[4].Get("text").String(); got != "Continue after reading." {
+		t.Fatalf("middle text = %q; output=%s", got, output)
 	}
-	if got := parts[7].Get("text").String(); got != "Continue after reading." {
-		t.Fatalf("second trailing text = %q; output=%s", got, output)
+	for index := 3; index < 6; index++ {
+		wantID := fmt.Sprintf("call_162060%d", index+3)
+		if gotID := parts[index+2].Get("functionResponse.id").String(); gotID != wantID {
+			t.Fatalf("functionResponse[%d].id = %q, want %q; output=%s", index+2, gotID, wantID, output)
+		}
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
 		t.Fatalf("translated parallel tool history is invalid: %v; output=%s", errPairing, output)

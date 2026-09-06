@@ -389,18 +389,21 @@ func TestConvertClaudeRequestToGemini_AlignsPermutedParallelToolResultsWithMixed
 		if gotID := callParts[index].Get("functionCall.id").String(); gotID != wantID {
 			t.Fatalf("functionCall[%d].id = %q, want %q; output=%s", index, gotID, wantID, output)
 		}
-		if gotID := responseParts[index].Get("functionResponse.id").String(); gotID != wantID {
+	}
+	if got := responseParts[0].Get("text").String(); got != "Results arrived." {
+		t.Fatalf("leading text = %q; output=%s", got, output)
+	}
+	for index, wantID := range []string{"call_1", "call_2", "call_3"} {
+		responsePart := responseParts[index+1]
+		if gotID := responsePart.Get("functionResponse.id").String(); gotID != wantID {
 			t.Fatalf("functionResponse[%d].id = %q, want %q; output=%s", index, gotID, wantID, output)
 		}
-		if gotName := responseParts[index].Get("functionResponse.name").String(); gotName != "Read" {
+		if gotName := responsePart.Get("functionResponse.name").String(); gotName != "Read" {
 			t.Fatalf("functionResponse[%d].name = %q, want Read; output=%s", index, gotName, output)
 		}
 	}
-	if got := responseParts[3].Get("text").String(); got != "Results arrived." {
-		t.Fatalf("first trailing text = %q; output=%s", got, output)
-	}
 	if got := responseParts[4].Get("text").String(); got != "Continue." {
-		t.Fatalf("second trailing text = %q; output=%s", got, output)
+		t.Fatalf("trailing text = %q; output=%s", got, output)
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
 		t.Fatalf("translated parallel tool history is invalid: %v; output=%s", errPairing, output)

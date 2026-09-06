@@ -110,7 +110,7 @@ func TestClaudeMessageAccumulatorPreservesBlockCacheControl(t *testing.T) {
 }
 
 func TestAlignClaudeToolResults(t *testing.T) {
-	t.Run("reorders permuted results and keeps other parts after", func(t *testing.T) {
+	t.Run("reorders permuted results while preserving non-result slots", func(t *testing.T) {
 		input := gjson.Parse(`[
 			{"type":"tool_result","tool_use_id":"call_2","content":"two"},
 			{"type":"text","text":"extra user text"},
@@ -124,11 +124,31 @@ func TestAlignClaudeToolResults(t *testing.T) {
 		if parts[0].Get("tool_use_id").String() != "call_1" {
 			t.Fatalf("parts[0].tool_use_id = %q, want call_1", parts[0].Get("tool_use_id").String())
 		}
-		if parts[1].Get("tool_use_id").String() != "call_2" {
-			t.Fatalf("parts[1].tool_use_id = %q, want call_2", parts[1].Get("tool_use_id").String())
+		if parts[1].Get("type").String() != "text" || parts[1].Get("text").String() != "extra user text" {
+			t.Fatalf("parts[1] = %s, want extra user text", parts[1].Raw)
 		}
-		if parts[2].Get("type").String() != "text" || parts[2].Get("text").String() != "extra user text" {
-			t.Fatalf("parts[2] = %s, want extra user text", parts[2].Raw)
+		if parts[2].Get("tool_use_id").String() != "call_2" {
+			t.Fatalf("parts[2].tool_use_id = %q, want call_2", parts[2].Get("tool_use_id").String())
+		}
+
+		leadingTextInput := gjson.Parse(`[
+			{"type":"text","text":"leading text"},
+			{"type":"tool_result","tool_use_id":"call_2","content":"two"},
+			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
+		]`)
+		leadingAligned := AlignClaudeToolResults(leadingTextInput, []string{"call_1", "call_2"})
+		leadingParts := leadingAligned.Array()
+		if len(leadingParts) != 3 {
+			t.Fatalf("len(leadingParts) = %d, want 3", len(leadingParts))
+		}
+		if leadingParts[0].Get("type").String() != "text" || leadingParts[0].Get("text").String() != "leading text" {
+			t.Fatalf("leadingParts[0] = %s, want leading text", leadingParts[0].Raw)
+		}
+		if leadingParts[1].Get("tool_use_id").String() != "call_1" {
+			t.Fatalf("leadingParts[1].tool_use_id = %q, want call_1", leadingParts[1].Get("tool_use_id").String())
+		}
+		if leadingParts[2].Get("tool_use_id").String() != "call_2" {
+			t.Fatalf("leadingParts[2].tool_use_id = %q, want call_2", leadingParts[2].Get("tool_use_id").String())
 		}
 	})
 
