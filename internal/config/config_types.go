@@ -408,6 +408,10 @@ type ClaudeKey struct {
 	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
 	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
 
+	// Disabled excludes this entry from routing without deleting it. Set
+	// per-entry on the Claude fan-out; the renderer skips disabled items.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/claude-sonnet-4").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
@@ -792,6 +796,12 @@ type OpenAICompatibilityAPIKey struct {
 	// pool. nil = inherit the pool-level Priority. The scheduler serves the
 	// highest ready tier first and descends when a tier cools down.
 	Priority *int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Disabled excludes this entry from routing without deleting it. The
+	// upstreamsync renderer skips disabled entries when projecting the
+	// provider row into config.yaml, so the credential stays persisted and
+	// re-activates when toggled back.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
