@@ -452,3 +452,70 @@ func TestParseCompositeSuffixRejectsUnknownKeys(t *testing.T) {
 		t.Fatal("non-boolean strict value must be rejected")
 	}
 }
+
+// TestParseNoProxyBypassesProxyMode verifies that a target host matching the
+// no_proxy list flips the setting to direct at transport-build time.
+func TestParseNoProxyBypassesProxyMode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		noProxy  string
+		target   string
+		wantSkip bool
+	}{
+		{"exact host", "api.anthropic.com", "https://api.anthropic.com/v1", true},
+		{"subdomain of .suffix", ".internal", "https://a.b.internal/x", true},
+		{"bare suffix match", ".internal", "https://internal/x", true},
+		{"wildcard", "*", "https://anything.example/x", true},
+		{"no match", "api.anthropic.com", "https://api.openai.com/v1", false},
+		{"case-insensitive", "API.Anthropic.com", "https://api.ANTHROPIC.com/v1", true},
+		{"prefix is not a match", "api.anthropic.com", "https://api.anthropic.com.evil.io/v1", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			setting, err := Parse("http://proxy:8080?no_proxy=" + urlValue(tc.noProxy))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := setting.Bypasses(tc.target); got != tc.wantSkip {
+				t.Fatalf("Bypasses(%q) = %v, want %v", tc.target, got, tc.wantSkip)
+			}
+		})
+	}
+}
+
+// urlValue query-escapes a no_proxy pattern for URL embedding in tests.
+func urlValue(v string) string {
+	return strings.ReplaceAll(v, ",", "%2C")
+}
+
+// TestBuildHTTPTransportNoProxyWildcardYieldsDirectPinnedTransport pins that
+// no_proxy=* still yields a usable transport (nil Proxy = direct).
+func TestBuildHTTPTransportNoProxyWildcardYieldsDirectPinnedTransport(t *testing.T) {
+	t.Parallel()
+
+	transport, mode, err := BuildHTTPTransport("http://proxy:8080?no_proxy=%2A")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %v (per-URL mode stays proxy; Bypasses evaluates per target)", mode)
+	}
+	if transport == nil || transport.Proxy != nil {
+		t.Fatal("no_proxy=* transport must have nil Proxy (direct)")
+	}
+}
+
+// TestBuildHTTPTransportSelfNoProxyIsRejected: a proxy whose own host sits in
+// its own no_proxy list is a misconfiguration — fail fast.
+func TestBuildHTTPTransportSelfNoProxyIsRejected(t *testing.T) {
+	t.Parallel()
+
+	if _, _, err := BuildHTTPTransport("http://proxy:8080?no_proxy=proxy"); err == nil {
+		t.Fatal("proxy host matching its own no_proxy must error")
+	}
+}

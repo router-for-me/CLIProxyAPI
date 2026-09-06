@@ -89,6 +89,37 @@ func parseCompositeSuffix(raw string) (cleaned string, noProxy []string, strict 
 	return cleaned, noProxy, strict, nil
 }
 
+// Bypasses reports whether the given target URL's host matches the NoProxy
+// pattern list and must therefore skip the proxy. Patterns: exact host,
+// ".suffix" (subdomain + bare suffix), or "*" (everything).
+func (s Setting) Bypasses(targetURL string) bool {
+	if len(s.NoProxy) == 0 {
+		return false
+	}
+	host := ""
+	if parsed, errParse := url.Parse(targetURL); errParse == nil {
+		host = strings.ToLower(parsed.Hostname())
+	} else if h, _, errSplit := net.SplitHostPort(targetURL); errSplit == nil {
+		host = strings.ToLower(h)
+	}
+	if host == "" {
+		return false
+	}
+	for _, pattern := range s.NoProxy {
+		switch {
+		case pattern == "*":
+			return true
+		case strings.HasPrefix(pattern, "."):
+			if host == pattern[1:] || strings.HasSuffix(host, pattern) {
+				return true
+			}
+		case host == pattern || strings.HasSuffix(host, "."+pattern):
+			return true
+		}
+	}
+	return false
+}
+
 // Parse normalizes a proxy configuration value into inherit, direct, or proxy modes.
 func Parse(raw string) (Setting, error) {
 	trimmed := strings.TrimSpace(raw)
@@ -160,6 +191,11 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	case ModeDirect:
 		return NewDirectTransport(), setting.Mode, nil
 	case ModeProxy:
+		// Self-bypass guard: a proxy whose own host matches its own no_proxy
+		// list is a misconfiguration — fail fast instead of looping.
+		if setting.Bypasses("https://" + setting.URL.Host) {
+			return nil, setting.Mode, fmt.Errorf("proxy URL host %q matches its own no_proxy list", setting.URL.Host)
+		}
 		if setting.URL.Scheme == "socks5" || setting.URL.Scheme == "socks5h" {
 			var proxyAuth *proxy.Auth
 			if setting.URL.User != nil {
