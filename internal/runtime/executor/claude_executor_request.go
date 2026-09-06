@@ -830,14 +830,39 @@ func applyClaudeHeadersWithNativeProfile(
 			incomingHeaders = ginCtx.Request.Header
 		}
 	}
+	// The configured claude-header-defaults.user-agent is a floor, not a lock, so a
+	// client that has auto-updated past the pin is still passed through. Record the
+	// mismatch once per credential and version so the operator can move the pin.
+	if helps.ObserveClaudeClientVersion(auth, apiKey, incomingHeaders, cfg) {
+		log.Warnf(
+			"claude client version %q differs from the configured baseline %q; "+
+				"a client below the baseline is cloaked rather than passed through, and the "+
+				"configured version is what a credential presents until a newer client is seen. "+
+				"Update %s to match, or inspect GET /v0/management/claude-client-versions",
+			strings.TrimSpace(incomingHeaders.Get("User-Agent")),
+			helps.ConfiguredClaudeUserAgent(cfg),
+			helps.ClaudeClientVersionConfigKey,
+		)
+	}
+
 	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
 	var deviceProfile helps.ClaudeDeviceProfile
-	if stabilizeDeviceProfile && confirmedClaudeCode {
-		var errDeviceProfile error
-		deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, incomingHeaders, cfg)
-		if errDeviceProfile != nil {
-			return errDeviceProfile
+	if confirmedClaudeCode {
+		if stabilizeDeviceProfile {
+			var errDeviceProfile error
+			deviceProfile, errDeviceProfile = helps.ResolveClaudeDeviceProfileRequired(r.Context(), auth, apiKey, incomingHeaders, cfg)
+			if errDeviceProfile != nil {
+				return errDeviceProfile
+			}
+		} else {
+			// Learn the confirmed client's profile even with stabilization off, so
+			// the cloaked branch below has a newest-observed value to present.
+			deviceProfile = helps.ResolveClaudeDeviceProfileBestEffort(r.Context(), auth, apiKey, incomingHeaders, cfg)
 		}
+	} else {
+		// nil headers: read the learned profile without letting an unconfirmed
+		// client contribute its own software profile to the credential.
+		deviceProfile = helps.ResolveClaudeDeviceProfileBestEffort(r.Context(), auth, apiKey, nil, cfg)
 	}
 
 	incomingBetas := strings.TrimSpace(strings.Join(helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta"), ","))
@@ -1097,13 +1122,12 @@ func applyClaudeHeadersWithNativeProfile(
 	// Unconfirmed clients always receive the CLI baseline instead of being
 	// allowed to populate or reuse another client's software profile.
 	if stabilizeDeviceProfile {
-		if confirmedClaudeCode {
-			helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
-		} else {
-			helps.ApplyClaudeDefaultDeviceProfileHeaders(r, cfg)
-		}
+		// Both branches use deviceProfile: confirmed clients contribute their own
+		// software profile, unconfirmed clients receive the newest one already
+		// learned for this credential (the configured baseline when none exists).
+		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
-		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, confirmedClaudeCode)
+		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, confirmedClaudeCode, deviceProfile)
 	}
 	var attrs map[string]string
 	if auth != nil {
