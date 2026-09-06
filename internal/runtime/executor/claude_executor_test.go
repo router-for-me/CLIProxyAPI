@@ -7975,6 +7975,21 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 				"fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11",
 		},
 		{
+			name: "per-turn-control and mid-conversation-tool-changes are forwarded when the caller requests them",
+			body: `{"model":"claude-fable-5-1"}`,
+			requested: map[string]bool{
+				claudePerTurnControlBeta:     true,
+				claudeMidConvToolChangesBeta: true,
+			},
+			want: constants + ",mid-conversation-system-2026-04-07,effort-2025-11-24," +
+				"per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01",
+		},
+		{
+			name: "per-turn-control is not injected when the caller did not request it",
+			body: `{"model":"claude-fable-5-1"}`,
+			want: constants + ",mid-conversation-system-2026-04-07,effort-2025-11-24",
+		},
+		{
 			name:      "disabled thinking omits effort beta even if requested",
 			body:      `{"model":"claude-sonnet-5","thinking":{"type":"disabled"}}`,
 			requested: map[string]bool{"effort-2025-11-24": true},
