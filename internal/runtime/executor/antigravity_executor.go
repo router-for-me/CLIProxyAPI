@@ -345,9 +345,9 @@ func sanitizeAntigravityGeminiRequestSignatures(modelName string, rawJSON []byte
 	return normalizeAntigravityGeminiFunctionResponseRoles(rawJSON)
 }
 
-// ensureAntigravityGeminiLeadingUserContent prepends a synthetic empty user turn
+// ensureAntigravityGeminiLeadingUserContent prepends a placeholder user turn
 // after every contents rewrite, including reasoning replay. Claude targets are
-// left unchanged because the adapter rejects empty text parts.
+// left unchanged because the adapter rejects synthetic placeholder text parts.
 func ensureAntigravityGeminiLeadingUserContent(modelName string, payload []byte) []byte {
 	if strings.Contains(strings.ToLower(modelName), "claude") {
 		return payload
