@@ -950,6 +950,19 @@ func TestRegisterExecutorsDoesNotUnregisterStaleProviderOwnedExternally(t *testi
 	}
 }
 
+func TestNormalizeRequestWithoutPluginsReturnsOriginalBody(t *testing.T) {
+	host := New()
+	body := []byte("original")
+
+	got := host.NormalizeRequest(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", body, false)
+	if string(got) != string(body) {
+		t.Fatalf("NormalizeRequest() = %q, want %q", got, body)
+	}
+	if &got[0] != &body[0] {
+		t.Fatal("NormalizeRequest() copied body without active request normalizers")
+	}
+}
+
 func TestNormalizeRequestChainsByPriority(t *testing.T) {
 	host := newHostWithRecords(
 		capabilityRecord{
