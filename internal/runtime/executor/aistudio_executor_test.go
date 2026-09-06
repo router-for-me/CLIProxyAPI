@@ -129,6 +129,47 @@ func TestAIStudioTranslateRequestPrependsLeadingUserForIssue4959ResponsesHistory
 	assertIssue4959LeadingUserContents(t, gjson.GetBytes(body.payload, "contents").Array())
 }
 
+func TestAIStudioTranslateRequestAppendsTrailingUserForTrailingModelTurn(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	_, body, err := executor.translateRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[` +
+			`{"role":"user","parts":[{"text":"hello"}]},` +
+			`{"role":"model","parts":[{"text":"answer"}]}` +
+			`]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	contents := gjson.GetBytes(body.payload, "contents").Array()
+	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
+		t.Fatalf("contents roles malformed: %s", body.payload)
+	}
+	if got := contents[2].Get("parts.0.text").String(); got != "" {
+		t.Fatalf("trailing user prompt = %q, want empty string; body=%s", got, body.payload)
+	}
+}
+
+func TestAIStudioTranslateRequestCountTokensPreservesTrailingModelTurn(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	// When action is countTokens, trailing model turn must not be modified
+	_, body, err := executor.translateRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[` +
+			`{"role":"user","parts":[{"text":"hello"}]},` +
+			`{"role":"model","parts":[{"text":"answer"}]}` +
+			`]}`),
+		Metadata: map[string]any{"action": "countTokens"},
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	contents := gjson.GetBytes(body.payload, "contents").Array()
+	if len(contents) != 2 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
+		t.Fatalf("countTokens contents roles malformed: %s", body.payload)
+	}
+}
+
 func TestAIStudioExecutorWithoutRelaySessionDoesNotMarkUpstreamAttempt(t *testing.T) {
 	const authID = "aistudio-not-connected"
 	relay := wsrelay.NewManager(wsrelay.Options{})

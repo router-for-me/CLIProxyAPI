@@ -355,6 +355,25 @@ func ensureAntigravityGeminiLeadingUserContent(modelName string, payload []byte)
 	return helps.EnsureGeminiLeadingUserContent(payload, "request.contents")
 }
 
+// ensureAntigravityGeminiTrailingUserContent appends a synthetic empty user turn
+// if the final turn is a model turn. Claude targets are left unchanged because
+// the adapter rejects empty text parts.
+func ensureAntigravityGeminiTrailingUserContent(modelName string, payload []byte) []byte {
+	if strings.Contains(strings.ToLower(modelName), "claude") {
+		return payload
+	}
+	return helps.EnsureGeminiTrailingUserContent(payload, "request.contents")
+}
+
+// ensureAntigravityGeminiBoundaryUserContent normalizes both leading and trailing
+// turns for Gemini targets. Claude targets are left unchanged.
+func ensureAntigravityGeminiBoundaryUserContent(modelName string, payload []byte) []byte {
+	if strings.Contains(strings.ToLower(modelName), "claude") {
+		return payload
+	}
+	return helps.EnsureGeminiBoundaryUserContent(payload, "request.contents")
+}
+
 type antigravityContentEdit struct {
 	index       int64
 	start       int

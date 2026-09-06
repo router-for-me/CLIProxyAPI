@@ -156,6 +156,44 @@ func TestGeminiExecutorExecutePrependsLeadingUserForIssue4959ResponsesHistory(t 
 	assertIssue4959LeadingUserContents(t, gjson.GetBytes(upstreamBody, "contents").Array())
 }
 
+func TestGeminiExecutorExecuteAppendsTrailingUserForTrailingModelTurn(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "test-key",
+		"base_url": server.URL,
+	}}
+	request := cliproxyexecutor.Request{
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[` +
+			`{"role":"user","parts":[{"text":"hello"}]},` +
+			`{"role":"model","parts":[{"text":"answer"}]}` +
+			`]}`),
+	}
+
+	if _, errExecute := executor.Execute(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
+		t.Fatalf("upstream roles malformed: %s", upstreamBody)
+	}
+	if got := contents[2].Get("parts.0.text").String(); got != "" {
+		t.Fatalf("trailing user prompt = %q, want empty string; body=%s", got, upstreamBody)
+	}
+}
+
 func TestGeminiExecutorCountTokensPrependsLeadingUser(t *testing.T) {
 	var upstreamBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
