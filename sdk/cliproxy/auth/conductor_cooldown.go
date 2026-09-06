@@ -940,7 +940,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
-		m.scheduler.upsertAuth(authSnapshot)
+		var targetModels []string
+		if !result.CredentialScope && modelKey != "" {
+			targetModels = append(targetModels, modelKey)
+			if routeKey := canonicalModelKey(result.RouteModel); routeKey != "" && routeKey != modelKey {
+				targetModels = append(targetModels, routeKey)
+			}
+		}
+		m.scheduler.upsertAuthResult(authSnapshot, targetModels, result.CredentialScope)
 	}
 	if authSnapshot != nil && cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
