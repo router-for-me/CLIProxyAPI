@@ -12,8 +12,11 @@ import (
 )
 
 func testRewriteCodexOrphan(payload []byte, enabled bool) []byte {
-	headers := http.Header{"X-Openai-Subagent": []string{"collab_spawn"}}
-	return RewriteCodexOrphanDelegationInput(context.Background(), headers, payload, enabled)
+	return RewriteCodexOrphanDelegationInput(context.Background(), http.Header{}, payload, enabled)
+}
+
+func testRewriteCodexOrphanWithPendingCalls(payload []byte, pendingToolCallIDs []string) []byte {
+	return RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(context.Background(), http.Header{}, payload, true, pendingToolCallIDs)
 }
 
 func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
@@ -35,7 +38,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		}
 	})
 
-	t.Run("missing subagent header leaves payload unchanged", func(t *testing.T) {
+	t.Run("missing subagent header rewrites matching orphan", func(t *testing.T) {
 		payload := []byte(`{
 			"model": "deepseek-v4-pro",
 			"input": [
@@ -48,12 +51,12 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := RewriteCodexOrphanDelegationInput(context.Background(), http.Header{}, payload, true)
-		if string(got) != string(payload) {
-			t.Fatalf("expected payload unchanged without header, got: %s", string(got))
+		if gjson.GetBytes(got, "input.0.type").String() != "message" {
+			t.Fatalf("expected matching orphan to be rewritten without header, got: %s", string(got))
 		}
 	})
 
-	t.Run("different subagent header leaves payload unchanged", func(t *testing.T) {
+	t.Run("different subagent header still rewrites matching orphan", func(t *testing.T) {
 		payload := []byte(`{
 			"model": "deepseek-v4-pro",
 			"input": [
@@ -67,8 +70,8 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		}`)
 		headers := http.Header{"X-Openai-Subagent": []string{"other_subagent"}}
 		got := RewriteCodexOrphanDelegationInput(context.Background(), headers, payload, true)
-		if string(got) != string(payload) {
-			t.Fatalf("expected payload unchanged with wrong header, got: %s", string(got))
+		if gjson.GetBytes(got, "input.0.type").String() != "message" {
+			t.Fatalf("expected matching orphan to be rewritten with unrelated header, got: %s", string(got))
 		}
 	})
 
@@ -110,7 +113,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		}
 	})
 
-	t.Run("case-insensitive header key and value works", func(t *testing.T) {
+	t.Run("header value does not affect structural eligibility", func(t *testing.T) {
 		payload := []byte(`{
 			"model": "deepseek-v4-pro",
 			"input": [
@@ -128,7 +131,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
-			t.Fatalf("case-insensitive header should rewrite, got: %s", item0.Raw)
+			t.Fatalf("matching orphan should rewrite regardless of header value, got: %s", item0.Raw)
 		}
 	})
 
@@ -155,6 +158,65 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		wantText := "Tool output from codex_app__send_message_to_thread:\n<codex_delegation>msg</codex_delegation>"
 		if text := item0.Get("content.0.text").String(); text != wantText {
 			t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		tool string
+	}{
+		{name: "create thread", tool: codexCreateThreadName},
+		{name: "send message to thread", tool: codexSendMessageToThreadName},
+	} {
+		t.Run("preserves incremental pending "+tc.name+" output", func(t *testing.T) {
+			payload := []byte(`{
+				"previous_response_id": "resp_previous",
+				"input": [{
+					"type": "function_call_output",
+					"call_id": "call_pending",
+					"name": "` + tc.tool + `",
+					"namespace": "codex_app",
+					"output": "completed"
+				}]
+			}`)
+			got := testRewriteCodexOrphanWithPendingCalls(payload, []string{"call_pending"})
+			if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
+				t.Fatalf("incremental pending output was rewritten: %s", got)
+			}
+		})
+	}
+
+	t.Run("response append preserves pending output without previous response id", func(t *testing.T) {
+		payload := []byte(`{
+			"type": "response.append",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_pending",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "completed"
+			}]
+		}`)
+		got := testRewriteCodexOrphanWithPendingCalls(payload, []string{"call_pending"})
+		if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
+			t.Fatalf("pending append output was rewritten: %s", got)
+		}
+	})
+
+	t.Run("ordinary request preserves unknown call id with previous response", func(t *testing.T) {
+		payload := []byte(`{
+			"previous_response_id": "resp_previous",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_unknown",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "completed"
+			}]
+		}`)
+		got := testRewriteCodexOrphan(payload, true)
+		if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
+			t.Fatalf("ordinary incremental output was rewritten: %s", got)
 		}
 	})
 
@@ -474,7 +536,7 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 	}`)
 	collabHeaders := http.Header{"X-Openai-Subagent": []string{"collab_spawn"}}
 
-	t.Run("enabled but missing X-Openai-Subagent header does not rewrite", func(t *testing.T) {
+	t.Run("enabled without X-Openai-Subagent header rewrites", func(t *testing.T) {
 		cfg := &config.Config{
 			Codex: config.CodexConfig{
 				OrphanDelegationCompatibility: true,
@@ -484,12 +546,12 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 		parsed := gjson.ParseBytes(got)
 
 		item0 := parsed.Get("input.0")
-		if item0.Get("type").String() != "function_call_output" {
-			t.Fatalf("input.0 = %s, want function_call_output when X-Openai-Subagent header is missing", item0.Raw)
+		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
+			t.Fatalf("input.0 = %s, want message/user when X-Openai-Subagent header is missing", item0.Raw)
 		}
 	})
 
-	t.Run("enabled with wrong X-Openai-Subagent header value does not rewrite", func(t *testing.T) {
+	t.Run("enabled with unrelated X-Openai-Subagent header rewrites", func(t *testing.T) {
 		cfg := &config.Config{
 			Codex: config.CodexConfig{
 				OrphanDelegationCompatibility: true,
@@ -500,8 +562,8 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 		parsed := gjson.ParseBytes(got)
 
 		item0 := parsed.Get("input.0")
-		if item0.Get("type").String() != "function_call_output" {
-			t.Fatalf("input.0 = %s, want function_call_output when X-Openai-Subagent header is wrong", item0.Raw)
+		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
+			t.Fatalf("input.0 = %s, want message/user when X-Openai-Subagent header is unrelated", item0.Raw)
 		}
 	})
 

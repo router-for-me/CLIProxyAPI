@@ -675,6 +675,7 @@ type websocketDirectCaptureExecutor struct {
 	mu                        sync.Mutex
 	provider                  string
 	failStatus                int
+	responseOutputs           [][]byte
 	authIDs                   []string
 	models                    []string
 	payloads                  [][]byte
@@ -799,7 +800,11 @@ func (e *websocketDirectCaptureExecutor) ExecuteStream(ctx context.Context, auth
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
 	responseID := fmt.Sprintf("resp-%d", count)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"output":[{"type":"message","id":"out-%d"}]}}`, responseID, count))}
+	responseOutput := []byte(fmt.Sprintf(`[{"type":"message","id":"out-%d"}]`, count))
+	if count <= len(e.responseOutputs) {
+		responseOutput = e.responseOutputs[count-1]
+	}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"output":%s}}`, responseID, responseOutput))}
 	close(chunks)
 	if count >= 2 && e.done != nil {
 		e.doneOnce.Do(func() {
@@ -3322,6 +3327,198 @@ func TestResponsesWebsocketCodexWebsocketPassthroughPassesCompactedRequestWithou
 	authIDs := executor.AuthIDs()
 	if len(authIDs) != 2 || authIDs[0] != "auth-ws" || authIDs[1] != "auth-ws" {
 		t.Fatalf("passthrough auth IDs = %v, want [auth-ws auth-ws]", authIDs)
+	}
+}
+
+func TestResponsesWebsocketNativePreservesPendingDelegationOutputOnAppend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketDirectCaptureExecutor{
+		done: make(chan struct{}),
+		responseOutputs: [][]byte{
+			[]byte(`[{"type":"function_call","call_id":"call-pending","name":"create_thread","namespace":"codex_app","arguments":"{}"}]`),
+			[]byte(`[]`),
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-native-pending",
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	const modelName = "native-pending-model"
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOrphanDelegationCompatibility: true}, manager)
+	handler := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", handler.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	firstRequest := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","role":"user","content":"start"}]}`, modelName)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(firstRequest)); errWrite != nil {
+		t.Fatalf("write first request: %v", errWrite)
+	}
+	if _, _, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read first response: %v", errRead)
+	}
+
+	appendRequest := `{"type":"response.append","input":[{"type":"function_call_output","call_id":"call-pending","name":"create_thread","namespace":"codex_app","output":"completed"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(appendRequest)); errWrite != nil {
+		t.Fatalf("write append request: %v", errWrite)
+	}
+	if _, _, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read append response: %v", errRead)
+	}
+
+	select {
+	case <-executor.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for native append")
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("captured payload count = %d, want 2", len(payloads))
+	}
+	if itemType := gjson.GetBytes(payloads[1], "input.0.type").String(); itemType != "function_call_output" {
+		t.Fatalf("native append output was rewritten: %s", payloads[1])
+	}
+	if required := executor.RequiredUpstreamWebsocketFlags(); len(required) != 2 || !required[1] {
+		t.Fatalf("required upstream websocket flags = %v, want second request true", required)
+	}
+}
+
+func TestResponsesWebsocketNativeResetRewritesStalePendingDelegationOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketDirectCaptureExecutor{
+		done: make(chan struct{}),
+		responseOutputs: [][]byte{
+			[]byte(`[{"type":"function_call","call_id":"call-pending","name":"create_thread","namespace":"codex_app","arguments":"{}"}]`),
+			[]byte(`[]`),
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-native-reset",
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	const modelName = "native-reset-model"
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOrphanDelegationCompatibility: true}, manager)
+	handler := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", handler.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	firstRequest := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","role":"user","content":"start"}]}`, modelName)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(firstRequest)); errWrite != nil {
+		t.Fatalf("write first request: %v", errWrite)
+	}
+	if _, _, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read first response: %v", errRead)
+	}
+
+	resetRequest := `{"type":"response.create","input":[{"type":"function_call_output","call_id":"call-pending","name":"create_thread","namespace":"codex_app","output":"completed"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(resetRequest)); errWrite != nil {
+		t.Fatalf("write reset request: %v", errWrite)
+	}
+	if _, _, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read reset response: %v", errRead)
+	}
+
+	select {
+	case <-executor.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for native reset")
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("captured payload count = %d, want 2", len(payloads))
+	}
+	if itemType := gjson.GetBytes(payloads[1], "input.0.type").String(); itemType != "message" {
+		t.Fatalf("self-contained reset retained stale function output: %s", payloads[1])
+	}
+	if required := executor.RequiredUpstreamWebsocketFlags(); len(required) != 2 || required[1] {
+		t.Fatalf("required upstream websocket flags = %v, want second request false", required)
+	}
+}
+
+func TestResponsesWebsocketNativeRetryPreservesPendingDelegationOutput(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOrphanDelegationCompatibility: true}, nil)
+	handler := NewOpenAIResponsesAPIHandler(base)
+	pending := []string{"call-pending"}
+	appendRequest := []byte(`{"type":"response.append","input":[{"type":"function_call_output","call_id":"call-pending","name":"create_thread","namespace":"codex_app","output":"completed"}]}`)
+
+	firstAttempt := handler.prepareCodexOrphanDelegationWithPendingToolCallIDs(nil, appendRequest, pending)
+	if itemType := gjson.GetBytes(firstAttempt, "input.0.type").String(); itemType != "function_call_output" {
+		t.Fatalf("first native append output was rewritten: %s", firstAttempt)
+	}
+	candidate := consumeResponsesWebsocketPendingToolCallIDs(pending, firstAttempt)
+	if len(candidate) != 0 {
+		t.Fatalf("successful-submit candidate = %v, want empty", candidate)
+	}
+
+	// An upstream failure exits before the candidate is committed, so retrying
+	// with the current connection state must retain the original association.
+	retryAttempt := handler.prepareCodexOrphanDelegationWithPendingToolCallIDs(nil, appendRequest, pending)
+	if itemType := gjson.GetBytes(retryAttempt, "input.0.type").String(); itemType != "function_call_output" {
+		t.Fatalf("retried native append output was rewritten: %s", retryAttempt)
+	}
+
+	pending = mergeResponsesWebsocketPendingToolCallIDs(candidate, nil)
+	if len(pending) != 0 {
+		t.Fatalf("successful submit retained consumed pending ids: %v", pending)
+	}
+}
+
+func TestConsumeResponsesWebsocketPendingToolCallIDs(t *testing.T) {
+	pending := []string{"call-first", "call-second", "call-custom", "call-first"}
+	payload := []byte(`{"input":[
+		{"type":"function_call_output","call_id":"call-first"},
+		{"type":"custom_tool_call_output","call_id":"call-custom"},
+		{"type":"function_call_output","call_id":"call-first"}
+	]}`)
+
+	remaining := consumeResponsesWebsocketPendingToolCallIDs(pending, payload)
+	if len(remaining) != 1 || remaining[0] != "call-second" {
+		t.Fatalf("remaining pending call ids = %v, want [call-second]", remaining)
 	}
 }
 

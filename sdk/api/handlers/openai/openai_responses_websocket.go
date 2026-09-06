@@ -534,7 +534,21 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
-		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
+		var nextNativePendingToolCallIDs []string
+		if nativeWebsocketPassthrough {
+			pendingToolCallIDs := []string(nil)
+			if requestRequiresCurrentUpstreamWebsocket {
+				pendingToolCallIDs = lastResponsePendingToolCallIDs
+			}
+			requestJSON = h.prepareCodexOrphanDelegationWithPendingToolCallIDs(c, requestJSON, pendingToolCallIDs)
+			if requestRequiresCurrentUpstreamWebsocket {
+				nextNativePendingToolCallIDs = consumeResponsesWebsocketPendingToolCallIDs(lastResponsePendingToolCallIDs, requestJSON)
+			} else {
+				nextNativePendingToolCallIDs = nil
+			}
+		} else {
+			requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
+		}
 
 		if !useUpstreamWebsocketPassthrough && shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, false) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
@@ -661,7 +675,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastRequest = nil
 			lastResponseOutput = []byte("[]")
 			lastResponseID = ""
-			lastResponsePendingToolCallIDs = nil
+			lastResponsePendingToolCallIDs = mergeResponsesWebsocketPendingToolCallIDs(nextNativePendingToolCallIDs, completedPendingToolCallIDs)
 		} else {
 			upstreamWebsocketAuthID = ""
 			lastRequest = nextLastRequest
@@ -679,6 +693,56 @@ func responsesWebsocketHTTPReplayRequiredError() error {
 func responsesWebsocketRequestRequiresCurrentUpstream(payload []byte) bool {
 	return strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" ||
 		strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeAppend
+}
+
+func consumeResponsesWebsocketPendingToolCallIDs(pendingToolCallIDs []string, payload []byte) []string {
+	if len(pendingToolCallIDs) == 0 {
+		return nil
+	}
+
+	outputsByCallID := make(map[string]int)
+	input := gjson.GetBytes(payload, "input")
+	if input.IsArray() {
+		for _, item := range input.Array() {
+			switch item.Get("type").String() {
+			case "function_call_output", "custom_tool_call_output":
+			default:
+				continue
+			}
+			callID := item.Get("call_id").String()
+			if strings.TrimSpace(callID) != "" {
+				outputsByCallID[callID]++
+			}
+		}
+	}
+
+	remaining := make([]string, 0, len(pendingToolCallIDs))
+	for _, callID := range pendingToolCallIDs {
+		if outputsByCallID[callID] > 0 {
+			outputsByCallID[callID]--
+			continue
+		}
+		remaining = append(remaining, callID)
+	}
+	return remaining
+}
+
+func mergeResponsesWebsocketPendingToolCallIDs(pendingToolCallIDs []string, completedToolCallIDs []string) []string {
+	seen := make(map[string]struct{}, len(pendingToolCallIDs)+len(completedToolCallIDs))
+	merged := make([]string, 0, len(pendingToolCallIDs)+len(completedToolCallIDs))
+	for _, callIDs := range [][]string{pendingToolCallIDs, completedToolCallIDs} {
+		for _, callID := range callIDs {
+			if strings.TrimSpace(callID) == "" {
+				continue
+			}
+			if _, exists := seen[callID]; exists {
+				continue
+			}
+			seen[callID] = struct{}{}
+			merged = append(merged, callID)
+		}
+	}
+	return merged
 }
 
 func responsesWebsocketNativePassthroughAllowed(upstreamMode string, useUpstreamWebsocket bool, pinnedAuthID string, upstreamAuthID string) bool {

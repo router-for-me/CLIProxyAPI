@@ -512,6 +512,10 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context
 }
 
 func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegation(c *gin.Context, payload []byte) []byte {
+	return h.prepareCodexOrphanDelegationWithPendingToolCallIDs(c, payload, nil)
+}
+
+func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegationWithPendingToolCallIDs(c *gin.Context, payload []byte, pendingToolCallIDs []string) []byte {
 	if h == nil || h.Cfg == nil || !h.Cfg.CodexOrphanDelegationCompatibility {
 		return payload
 	}
@@ -522,7 +526,7 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegation(c *gin.Context,
 		requestHeaders = c.Request.Header
 	}
 	requestCtx = context.WithValue(requestCtx, "gin", c)
-	return multiagentv2.RewriteCodexOrphanDelegationInput(requestCtx, requestHeaders, payload, true)
+	return multiagentv2.RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(requestCtx, requestHeaders, payload, true, pendingToolCallIDs)
 }
 
 // Responses handles the /v1/responses endpoint.

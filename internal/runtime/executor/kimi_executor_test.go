@@ -170,6 +170,65 @@ func TestKimiExecutorPreservesAssistantContentAndToolCallsFromResponsesHistory(t
 	}
 }
 
+func TestKimiExecutorRewritesOrphanCodexDelegationWithoutSubagentHeader(t *testing.T) {
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl_test","object":"chat.completion","created":1,"model":"k3","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			)),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{
+		Codex: config.CodexConfig{OrphanDelegationCompatibility: true},
+	})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-token"},
+	}
+	payload := []byte(`{
+		"model":"kimi-k3",
+		"input":[
+			{"type":"function_call_output","name":"create_thread","namespace":"codex_app","output":"<codex_delegation>handoff</codex_delegation>"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]
+	}`)
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	messages := gjson.GetBytes(upstreamBody, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("upstream messages count = %d, want 2; body=%s", len(messages), upstreamBody)
+	}
+	if role := messages[0].Get("role").String(); role != "user" {
+		t.Fatalf("messages.0.role = %q, want user; body=%s", role, upstreamBody)
+	}
+	if toolCallID := messages[0].Get("tool_call_id"); toolCallID.Exists() {
+		t.Fatalf("messages.0.tool_call_id = %q, want absent; body=%s", toolCallID.String(), upstreamBody)
+	}
+	wantText := "Tool output from codex_app__create_thread:\n<codex_delegation>handoff</codex_delegation>"
+	if content := messages[0].Get("content.0.text").String(); content != wantText {
+		t.Fatalf("messages.0.content.0.text = %q, want %q; body=%s", content, wantText, upstreamBody)
+	}
+}
+
 func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 	var upstreamRequest *http.Request
 	var upstreamBody []byte
