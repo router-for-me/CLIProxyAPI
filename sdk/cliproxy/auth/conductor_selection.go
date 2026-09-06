@@ -13,6 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -842,11 +843,24 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	if routeKey == "" {
 		return true
 	}
-	if registryRef.ClientSupportsModel(auth.ID, routeKey) {
-		return true
+	if models := registryRef.GetModelsForClient(auth.ID); len(models) > 0 {
+		if registryRef.ClientSupportsModel(auth.ID, routeKey) {
+			return true
+		}
+		selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
+		return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
 	}
-	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
-	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
+
+	// Fallback for cold-start / unindexed auths: when auth has no models registered in the registry yet
+	providerKey := strings.ToLower(strings.TrimSpace(executorKeyFromAuth(auth)))
+	if providerKey != "" {
+		for _, p := range util.InferredModelProviders(routeKey) {
+			if strings.EqualFold(p, providerKey) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *Manager) normalizeProviders(providers []string) []string {

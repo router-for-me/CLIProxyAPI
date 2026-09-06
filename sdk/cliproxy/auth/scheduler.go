@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -1010,11 +1011,21 @@ func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
 	if modelKey == "" {
 		return true
 	}
-	if len(m.supportedModelSet) == 0 {
-		return false
+	if len(m.supportedModelSet) > 0 {
+		_, ok := m.supportedModelSet[modelKey]
+		return ok
 	}
-	_, ok := m.supportedModelSet[modelKey]
-	return ok
+	if m.auth != nil {
+		providerKey := strings.ToLower(strings.TrimSpace(executorKeyFromAuth(m.auth)))
+		if providerKey != "" {
+			for _, p := range util.InferredModelProviders(modelKey) {
+				if strings.EqualFold(p, providerKey) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // upsertEntryLocked updates or inserts one auth entry and rebuilds indexes when ordering changes.
