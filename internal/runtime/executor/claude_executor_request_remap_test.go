@@ -367,6 +367,38 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 	}
 }
 
+func TestReverseRemapOAuthToolNamesMarksTrailingMarkupFailureRequestScoped(t *testing.T) {
+	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_clear_thinking"
+	malformedAlias := alias + "</parameter>\n<parameter name=\"merge\""
+	reverseMap := map[string]string{alias: "clear_thinking"}
+
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, malformedAlias))
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse == nil {
+		t.Fatal("reverseRemapOAuthToolNames() error = nil, want fail-closed alias error")
+	}
+	if !bytes.Equal(restored, response) {
+		t.Fatalf("reverseRemapOAuthToolNames() returned modified response: %s", restored)
+	}
+	var requestErr cliproxyexecutor.RequestScopedError
+	if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
+	}
+
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, malformedAlias))
+	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	if errStream == nil {
+		t.Fatal("reverseRemapOAuthToolNamesFromStreamLine() error = nil, want fail-closed alias error")
+	}
+	if !bytes.Equal(restoredLine, line) {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() returned modified line: %s", restoredLine)
+	}
+	requestErr = nil
+	if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
+	}
+}
+
 func TestReverseRemapOAuthToolNames_OverlappingSemanticSuffix(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"file"},{"name":"read_file"}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "overlapping-caller"})
