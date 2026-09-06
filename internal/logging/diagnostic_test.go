@@ -70,6 +70,7 @@ func TestSafeErrorDiagnosticExtractsOnlyAllowlistedSignals(t *testing.T) {
 		{name: "EOF", err: io.EOF, wantParts: []string{"EOF"}},
 		{name: "SOCKS refused", err: errors.New("socks connect with unlabeled-secret: connection refused"), wantParts: []string{"proxy=socks", "connection_refused"}},
 		{name: "OAuth response", err: errors.New(`upstream status 400 error="invalid_request" request_id="req-123" unlabeled-secret`), wantParts: []string{"status=400"}},
+		{name: "invalid_refresh_token", err: errors.New(`{"error":"invalid_refresh_token","error_description":"unlabeled-secret"}`), wantParts: []string{"oauth_error=invalid_refresh_token"}},
 		{name: "unknown", err: errors.New("unlabeled-secret")},
 	}
 	for _, tt := range tests {
