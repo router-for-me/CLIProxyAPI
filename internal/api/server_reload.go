@@ -91,6 +91,11 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	if oldCfg == nil || oldCfg.RedisUsageQueueRetentionSeconds != cfg.RedisUsageQueueRetentionSeconds {
 		redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	}
+	if s.apiKeyUsage != nil {
+		if errUpdate := s.apiKeyUsage.UpdateConfig(cfg); errUpdate != nil {
+			log.WithError(errUpdate).Error("failed to update per-key usage accounting")
+		}
+	}
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
 		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
@@ -189,6 +194,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
 		s.mgmt.SetPluginHost(s.pluginHost)
+		s.mgmt.SetAPIKeyUsageService(s.apiKeyUsage)
 	}
 	s.refreshPluginManagementRoutes()
 

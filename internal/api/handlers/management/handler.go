@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/apikeyusage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -60,6 +61,7 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginReleaseCacheMu    sync.Mutex
 	pluginReleaseCache      map[string]pluginReleaseCacheEntry
+	apiKeyUsage             *apikeyusage.Service
 }
 
 type configReloadSnapshot struct {
@@ -147,6 +149,16 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	}
 	h.mu.Lock()
 	h.pluginHost = host
+	h.mu.Unlock()
+}
+
+// SetAPIKeyUsageService updates the persistent downstream key accounting service.
+func (h *Handler) SetAPIKeyUsageService(service *apikeyusage.Service) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.apiKeyUsage = service
 	h.mu.Unlock()
 }
 

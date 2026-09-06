@@ -16,7 +16,14 @@ func Register(cfg *sdkconfig.SDKConfig) {
 		return
 	}
 
-	keys := normalizeKeys(cfg.APIKeys)
+	keys := append([]string(nil), cfg.APIKeys...)
+	for i := range cfg.APIKeyProfiles {
+		if cfg.APIKeyProfiles[i].Disabled {
+			continue
+		}
+		keys = append(keys, cfg.APIKeyProfiles[i].APIKey)
+	}
+	keys = normalizeKeys(keys)
 	if len(keys) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
