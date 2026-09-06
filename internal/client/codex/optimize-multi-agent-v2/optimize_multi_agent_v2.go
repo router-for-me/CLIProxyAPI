@@ -193,7 +193,8 @@ func IsCodexClientUserAgent(userAgent string) bool {
 	return strings.HasPrefix(userAgent, "Codex Desktop/") ||
 		strings.HasPrefix(userAgent, "codex-tui/") ||
 		userAgent == "codex_cli_rs" ||
-		strings.HasPrefix(userAgent, "codex_cli_rs/")
+		strings.HasPrefix(userAgent, "codex_cli_rs/") ||
+		strings.HasPrefix(userAgent, "codex_exec/")
 }
 
 func isCodexMultiAgentClient(userAgent string) bool {
