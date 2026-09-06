@@ -3,17 +3,14 @@ package claude
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -21,18 +18,12 @@ import (
 )
 
 const (
-	claudeCompactionCapsuleVersion = 1
-	claudeCompactionCapsulePrefix  = "<cpa-responses-compaction>"
-	claudeCompactionCapsuleSuffix  = "</cpa-responses-compaction>"
-	claudeCompactionCapsuleMaxSize = 8 << 20
-	claudeCompactionSSEChunkSize   = 16 << 10
+	claudeCompactionMaxSize      = 8 << 20
+	claudeCompactionSSEChunkSize = 16 << 10
 )
 
-type claudeCompactionCapsule struct {
-	rawCiphertext bool
-	Version       int               `json:"version"`
-	Model         string            `json:"model"`
-	Output        []json.RawMessage `json:"output"`
+type claudeCompactionReplay struct {
+	Output []json.RawMessage
 }
 
 type responsesCompactionResource struct {
@@ -90,7 +81,7 @@ func normalizedClaudeCompactPrompt(text string) string {
 	return strings.ToLower(strings.Join(strings.Fields(text), " "))
 }
 
-func prepareClaudeCompactionReplay(rawJSON []byte, upstreamModel string) ([]byte, *claudeCompactionCapsule, error) {
+func prepareClaudeCompactionReplay(rawJSON []byte, _ string) ([]byte, *claudeCompactionReplay, error) {
 	var root map[string]any
 	if errUnmarshal := json.Unmarshal(rawJSON, &root); errUnmarshal != nil {
 		return nil, nil, fmt.Errorf("decode Claude request for compaction replay: %w", errUnmarshal)
@@ -100,7 +91,7 @@ func prepareClaudeCompactionReplay(rawJSON []byte, upstreamModel string) ([]byte
 		return nil, nil, fmt.Errorf("compaction replay requires a messages array")
 	}
 
-	var capsule *claudeCompactionCapsule
+	var replay *claudeCompactionReplay
 	updatedMessages := make([]any, 0, len(messages))
 	for _, rawMessage := range messages {
 		message, okMessage := rawMessage.(map[string]any)
@@ -108,53 +99,39 @@ func prepareClaudeCompactionReplay(rawJSON []byte, upstreamModel string) ([]byte
 			updatedMessages = append(updatedMessages, rawMessage)
 			continue
 		}
-		keepMessage, found, errRewrite := rewriteClaudeMessageCapsule(message)
+		keepMessage, found, errRewrite := rewriteClaudeMessageCompaction(message)
 		if errRewrite != nil {
 			return nil, nil, errRewrite
 		}
 		if found != nil {
-			if found.rawCiphertext {
-				// The newest compact result replaces the previous context window.
-				updatedMessages = updatedMessages[:0]
-				capsule = nil
-				found.Model = upstreamModel
-			}
-			if capsule != nil {
-				return nil, nil, fmt.Errorf("multiple compaction capsules are not supported")
-			}
-			capsule = found
+			// The newest compact result replaces the previous context window.
+			updatedMessages = updatedMessages[:0]
+			replay = found
 		}
 		if keepMessage {
 			updatedMessages = append(updatedMessages, message)
 		}
 	}
-	if capsule == nil {
+	if replay == nil {
 		return rawJSON, nil, nil
 	}
-	if thinking.ParseSuffix(capsule.Model).ModelName != thinking.ParseSuffix(upstreamModel).ModelName {
-		return nil, nil, fmt.Errorf("compaction capsule model %q does not match request model %q", capsule.Model, upstreamModel)
-	}
-	if errValidate := validateClaudeCompactionCapsule(capsule); errValidate != nil {
-		return nil, nil, errValidate
-	}
-
 	root["messages"] = updatedMessages
-	root[ClaudeResponsesCompactionField] = map[string]any{"output": capsule.Output}
+	root[ClaudeResponsesCompactionField] = map[string]any{"output": replay.Output}
 	updated, errMarshal := json.Marshal(root)
 	if errMarshal != nil {
 		return nil, nil, fmt.Errorf("encode Claude request with compaction replay: %w", errMarshal)
 	}
-	return updated, capsule, nil
+	return updated, replay, nil
 }
 
-func rewriteClaudeMessageCapsule(message map[string]any) (bool, *claudeCompactionCapsule, error) {
+func rewriteClaudeMessageCompaction(message map[string]any) (bool, *claudeCompactionReplay, error) {
 	content, exists := message["content"]
 	if !exists {
 		return true, nil, nil
 	}
 	switch value := content.(type) {
 	case string:
-		text, capsule, found, errStrip := stripClaudeCompactionCapsule(value)
+		text, replay, found, errStrip := stripClaudeCompactionCiphertext(value)
 		if errStrip != nil {
 			return false, nil, errStrip
 		}
@@ -162,12 +139,12 @@ func rewriteClaudeMessageCapsule(message map[string]any) (bool, *claudeCompactio
 			return true, nil, nil
 		}
 		if text == "" {
-			return false, capsule, nil
+			return false, replay, nil
 		}
 		message["content"] = text
-		return true, capsule, nil
+		return true, replay, nil
 	case []any:
-		var capsule *claudeCompactionCapsule
+		var replay *claudeCompactionReplay
 		parts := make([]any, 0, len(value))
 		for _, rawPart := range value {
 			part, okPart := rawPart.(map[string]any)
@@ -176,15 +153,15 @@ func rewriteClaudeMessageCapsule(message map[string]any) (bool, *claudeCompactio
 				continue
 			}
 			text, _ := part["text"].(string)
-			updatedText, foundCapsule, found, errStrip := stripClaudeCompactionCapsule(text)
+			updatedText, foundReplay, found, errStrip := stripClaudeCompactionCiphertext(text)
 			if errStrip != nil {
 				return false, nil, errStrip
 			}
 			if found {
-				if capsule != nil {
-					return false, nil, fmt.Errorf("multiple compaction capsules are not supported")
+				if replay != nil {
+					return false, nil, fmt.Errorf("multiple compaction blocks in one message")
 				}
-				capsule = foundCapsule
+				replay = foundReplay
 				if updatedText == "" {
 					continue
 				}
@@ -192,149 +169,38 @@ func rewriteClaudeMessageCapsule(message map[string]any) (bool, *claudeCompactio
 			}
 			parts = append(parts, part)
 		}
-		if capsule == nil {
+		if replay == nil {
 			return true, nil, nil
 		}
 		if len(parts) == 0 {
-			return false, capsule, nil
+			return false, replay, nil
 		}
 		message["content"] = parts
-		return true, capsule, nil
+		return true, replay, nil
 	default:
 		return true, nil, nil
 	}
 }
 
-func stripClaudeCompactionCapsule(text string) (string, *claudeCompactionCapsule, bool, error) {
-	// Claude wraps the compact summary in explanatory text on replay. Only
-	// recognize a complete ciphertext line, never quoted or embedded examples.
-	if !strings.Contains(text, claudeCompactionCapsulePrefix) {
-		lines := strings.Split(text, "\n")
-		var found *claudeCompactionCapsule
-		for i, line := range lines {
-			token := strings.TrimSpace(line)
-			if len(token) > claudeCompactionCapsuleMaxSize || !signature.IsValidGPTReasoningSignature(token) {
-				continue
-			}
-			if found != nil {
-				return "", nil, false, fmt.Errorf("multiple raw compaction blocks in one message")
-			}
-			item, _ := json.Marshal(map[string]string{"type": "compaction", "encrypted_content": token})
-			found = &claudeCompactionCapsule{Version: claudeCompactionCapsuleVersion, rawCiphertext: true, Output: []json.RawMessage{item}}
-			lines[i] = ""
+func stripClaudeCompactionCiphertext(text string) (string, *claudeCompactionReplay, bool, error) {
+	lines := strings.Split(text, "\n")
+	var found *claudeCompactionReplay
+	for i, line := range lines {
+		token := strings.TrimSpace(line)
+		if len(token) > claudeCompactionMaxSize || !signature.IsValidGPTReasoningSignature(token) {
+			continue
 		}
 		if found != nil {
-			return strings.TrimSpace(strings.Join(lines, "\n")), found, true, nil
+			return "", nil, false, fmt.Errorf("multiple raw compaction blocks in one message")
 		}
+		item, _ := json.Marshal(map[string]string{"type": "compaction", "encrypted_content": token})
+		found = &claudeCompactionReplay{Output: []json.RawMessage{item}}
+		lines[i] = ""
 	}
-	searchFrom := 0
-	foundStart := -1
-	foundEnd := -1
-	var foundCapsule *claudeCompactionCapsule
-	for searchFrom < len(text) {
-		relativeStart := strings.Index(text[searchFrom:], claudeCompactionCapsulePrefix)
-		if relativeStart < 0 {
-			break
-		}
-		start := searchFrom + relativeStart
-		encodedStart := start + len(claudeCompactionCapsulePrefix)
-		relativeEnd := strings.Index(text[encodedStart:], claudeCompactionCapsuleSuffix)
-		if relativeEnd < 0 {
-			if isDelimitedClaudeCompactionMarker(text, start, len(text)) {
-				return "", nil, false, fmt.Errorf("unterminated compaction capsule")
-			}
-			searchFrom = encodedStart
-			continue
-		}
-		encodedEnd := encodedStart + relativeEnd
-		markerEnd := encodedEnd + len(claudeCompactionCapsuleSuffix)
-		if !isDelimitedClaudeCompactionMarker(text, start, markerEnd) {
-			searchFrom = encodedStart
-			continue
-		}
-		capsule, errDecode := decodeClaudeCompactionCapsule(text[encodedStart:encodedEnd])
-		if errDecode != nil {
-			return "", nil, false, errDecode
-		}
-		if foundCapsule != nil {
-			return "", nil, false, fmt.Errorf("multiple compaction capsules are not supported")
-		}
-		foundStart = start
-		foundEnd = markerEnd
-		foundCapsule = capsule
-		searchFrom = markerEnd
-	}
-	if foundCapsule == nil {
+	if found == nil {
 		return text, nil, false, nil
 	}
-	remaining := strings.TrimSpace(text[:foundStart] + text[foundEnd:])
-	return remaining, foundCapsule, true, nil
-}
-
-func isDelimitedClaudeCompactionMarker(text string, start, end int) bool {
-	return (start == 0 || isClaudeCompactionWhitespace(text[start-1])) &&
-		(end == len(text) || isClaudeCompactionWhitespace(text[end]))
-}
-
-func isClaudeCompactionWhitespace(value byte) bool {
-	return value == ' ' || value == '\t' || value == '\n' || value == '\r'
-}
-
-func encodeClaudeCompactionCapsule(capsule *claudeCompactionCapsule) (string, error) {
-	if errValidate := validateClaudeCompactionCapsule(capsule); errValidate != nil {
-		return "", errValidate
-	}
-	payload, errMarshal := json.Marshal(capsule)
-	if errMarshal != nil {
-		return "", fmt.Errorf("encode compaction capsule: %w", errMarshal)
-	}
-	if len(payload) > claudeCompactionCapsuleMaxSize {
-		return "", fmt.Errorf("compaction capsule exceeds %d bytes", claudeCompactionCapsuleMaxSize)
-	}
-	ref, errStore := cache.StoreClaudeCompaction(context.Background(), payload)
-	if errStore != nil {
-		return "", fmt.Errorf("store compaction state: %w", errStore)
-	}
-	return claudeCompactionCapsulePrefix + "ref:" + ref + claudeCompactionCapsuleSuffix, nil
-}
-
-func decodeClaudeCompactionCapsule(encoded string) (*claudeCompactionCapsule, error) {
-	if len(encoded) > base64.RawURLEncoding.EncodedLen(claudeCompactionCapsuleMaxSize) {
-		return nil, fmt.Errorf("compaction capsule is too large")
-	}
-	encoded = strings.TrimSpace(encoded)
-	var payload []byte
-	var errDecode error
-	if ref, ok := strings.CutPrefix(encoded, "ref:"); ok {
-		payload, errDecode = cache.LoadClaudeCompaction(context.Background(), ref)
-	} else {
-		// Accept inline capsules from existing conversations.
-		payload, errDecode = base64.RawURLEncoding.DecodeString(encoded)
-	}
-	if errDecode != nil {
-		return nil, fmt.Errorf("decode compaction capsule: %w", errDecode)
-	}
-	var capsule claudeCompactionCapsule
-	if errUnmarshal := json.Unmarshal(payload, &capsule); errUnmarshal != nil {
-		return nil, fmt.Errorf("decode compaction capsule JSON: %w", errUnmarshal)
-	}
-	if errValidate := validateClaudeCompactionCapsule(&capsule); errValidate != nil {
-		return nil, errValidate
-	}
-	return &capsule, nil
-}
-
-func validateClaudeCompactionCapsule(capsule *claudeCompactionCapsule) error {
-	if capsule == nil {
-		return fmt.Errorf("compaction capsule is missing")
-	}
-	if capsule.Version != claudeCompactionCapsuleVersion {
-		return fmt.Errorf("unsupported compaction capsule version %d", capsule.Version)
-	}
-	if strings.TrimSpace(capsule.Model) == "" {
-		return fmt.Errorf("compaction capsule model is missing")
-	}
-	return validateResponsesCompactionOutput(capsule.Output)
+	return strings.TrimSpace(strings.Join(lines, "\n")), found, true, nil
 }
 
 func validateResponsesCompactionOutput(output []json.RawMessage) error {
@@ -448,7 +314,7 @@ func (h *ClaudeCodeAPIHandler) handleCompactResponsesBridge(c *gin.Context, rawJ
 	cliCancel()
 }
 
-func buildClaudeCompactResponse(rawCompact []byte, clientModel, upstreamModel string) ([]byte, string, error) {
+func buildClaudeCompactResponse(rawCompact []byte, clientModel string, _ string) ([]byte, string, error) {
 	var compact responsesCompactionResource
 	if errUnmarshal := json.Unmarshal(rawCompact, &compact); errUnmarshal != nil {
 		return nil, "", fmt.Errorf("decode upstream compaction response: %w", errUnmarshal)
@@ -470,7 +336,7 @@ func buildClaudeCompactResponse(rawCompact []byte, clientModel, upstreamModel st
 		}
 		marker = gjson.GetBytes(item, "encrypted_content").String()
 	}
-	if len(marker) > claudeCompactionCapsuleMaxSize || !signature.IsValidGPTReasoningSignature(marker) {
+	if len(marker) > claudeCompactionMaxSize || !signature.IsValidGPTReasoningSignature(marker) {
 		return nil, "", fmt.Errorf("invalid upstream compaction ciphertext")
 	}
 	response := map[string]any{

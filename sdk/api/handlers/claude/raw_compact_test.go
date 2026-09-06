@@ -50,9 +50,16 @@ func TestRawCompactLeavesQuotedAndMalformedText(t *testing.T) {
 	token := rawCiphertextForTest(1)
 	quoted, _ := json.Marshal(token)
 	for _, text := range []string{string(quoted), "example: " + token, "gAAAA-not-valid", "`" + token + "`"} {
-		got, _, found, err := stripClaudeCompactionCapsule(text)
+		got, _, found, err := stripClaudeCompactionCiphertext(text)
 		if err != nil || found || got != text {
 			t.Fatalf("ordinary text interpreted as state: %q", text)
 		}
+	}
+}
+
+func TestRawCompactRejectsMultipleBlocksInOneMessage(t *testing.T) {
+	token := rawCiphertextForTest(1)
+	if _, _, _, err := stripClaudeCompactionCiphertext(token + "\n" + token); err == nil {
+		t.Fatal("ambiguous compact blocks accepted")
 	}
 }
