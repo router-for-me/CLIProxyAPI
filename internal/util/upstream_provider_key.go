@@ -36,6 +36,13 @@ func UpstreamProviderKey(providerType, name string, rowID int64) string {
 	switch {
 	case pt == "" || pt == "openai-compatibility":
 		return OpenAICompatibleProviderKey(name)
+	case pt == "opencode-go":
+		// opencode-go rows get per-row routing keys like the built-in
+		// api-key channels; rowID==0 keeps the legacy bare channel key.
+		if rowID <= 0 {
+			return "opencode-go"
+		}
+		return "opencode-go:" + strconv.FormatInt(rowID, 10)
 	case strings.HasPrefix(pt, "oauth:"):
 		return strings.ToLower(strings.TrimPrefix(pt, "oauth:"))
 	case strings.HasSuffix(pt, "-api-key") || strings.HasSuffix(pt, "-api"):

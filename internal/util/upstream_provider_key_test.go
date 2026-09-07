@@ -51,3 +51,12 @@ func TestUpstreamProviderKey(t *testing.T) {
 		})
 	}
 }
+
+func TestUpstreamProviderKeyOpenCodeGo(t *testing.T) {
+	if got := UpstreamProviderKey("opencode-go", "ocgo", 7); got != "opencode-go:7" {
+		t.Fatalf("got %q, want opencode-go:7", got)
+	}
+	if got := UpstreamProviderKey("opencode-go", "ocgo", 0); got != "opencode-go" {
+		t.Fatalf("legacy bare key: got %q, want opencode-go", got)
+	}
+}
