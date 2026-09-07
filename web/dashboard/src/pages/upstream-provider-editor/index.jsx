@@ -577,8 +577,10 @@ export function ProviderEditorForm({ provider, siblingNames = [], proxyPools = [
             form={form}
             onCatalogChanged={() => {
               // The server just mutated the row's catalog; refetch it so
-              // the form's model list reflects the new models.
-              getUpstreamProvider(providerId)
+              // the form's model list reflects the new models. Uses the
+              // row's own id — providerId lives on the page shell, not in
+              // this component's scope.
+              getUpstreamProvider(provider.id)
                 .then((row) => {
                   setProvider(row);
                   setForm(buildForm(providerType, row));

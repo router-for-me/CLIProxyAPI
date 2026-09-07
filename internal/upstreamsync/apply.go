@@ -60,6 +60,7 @@ func ApplyArtifacts(ctx context.Context, st store.UpstreamProviderStore, cfg *co
 	merged.XAIKey = rendered.XAIKey
 	merged.ClaudeKey = rendered.ClaudeKey
 	merged.OpenAICompatibility = rendered.OpenAICompatibility
+	merged.OpenCodeGo = rendered.OpenCodeGo
 	merged.VertexCompatAPIKey = rendered.VertexCompatAPIKey
 
 	// Preserve comments when writing the merged config back to the spool.

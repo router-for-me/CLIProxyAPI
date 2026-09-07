@@ -979,6 +979,7 @@ func (h *Handler) applyUpstreamProviders(ctx context.Context) {
 		h.cfg.XAIKey = merged.XAIKey
 		h.cfg.ClaudeKey = merged.ClaudeKey
 		h.cfg.OpenAICompatibility = merged.OpenAICompatibility
+		h.cfg.OpenCodeGo = merged.OpenCodeGo
 		h.cfg.VertexCompatAPIKey = merged.VertexCompatAPIKey
 	}
 	snapshot := h.reloadSnapshotConfigLocked()
