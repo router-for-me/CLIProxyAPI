@@ -15,10 +15,10 @@ import (
 // fetch adds only unknown model ids, leaving seed entries untouched.
 func TestRefreshUpstreamProviderModels_MergesNewModels(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// base_url is the stub root; the handler appends /models (the
-		// production row's base_url already ends in /v1).
-		if r.URL.Path != "/models" {
-			t.Errorf("upstream path = %s, want /models", r.URL.Path)
+		// base_url is the version-less stub root; JoinOpenAICompatUpstreamURL
+		// inserts /v1 (a production row's base_url ends in /v1 → bare /models).
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("upstream path = %s, want /v1/models", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer sk-refresh" {
 			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))

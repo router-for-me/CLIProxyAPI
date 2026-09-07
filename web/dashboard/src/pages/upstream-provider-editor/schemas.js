@@ -20,6 +20,7 @@ export const API_KEY_TYPES = [
   { value: 'claude-api-key', label: 'Claude (API Key)', simple: 'claude' },
   { value: 'vertex-api-key', label: 'Vertex (API Key)', simple: 'vertex' },
   { value: 'openai-compatibility', label: 'OpenAI Compatibility', simple: 'openai' },
+  { value: 'opencode-go', label: 'OpenCode Go', simple: 'opencode' },
 ];
 export const OAUTH_TYPES = [
   { value: 'oauth:claude', label: 'Claude (OAuth)', simple: 'claude' },
@@ -36,7 +37,20 @@ export const TYPE_SIMPLE = Object.fromEntries(ALL_TYPES.map((t) => [t.value, t.s
 
 export const isOAuth = (t) => String(t || '').startsWith('oauth:');
 export const isOpenAI = (t) => t === 'openai-compatibility';
+export const isOpenCodeGo = (t) => t === 'opencode-go';
 export const isClaude = (t) => t === 'claude-api-key' || t === 'oauth:claude';
+
+// OPENCODE_GO_BASE_URL prefills the base URL when the operator picks the
+// OpenCode Go type in the create flow.
+export const OPENCODE_GO_BASE_URL = 'https://opencode.ai/zen/go/v1';
+
+// WIRE_FORMAT_OPTIONS are the per-model upstream protocols the opencode-go
+// executor dispatches on. "openai" is the default (blank falls back to it).
+export const WIRE_FORMAT_OPTIONS = [
+  { value: '', label: 'openai (default)' },
+  { value: 'openai', label: 'openai' },
+  { value: 'anthropic', label: 'anthropic' },
+];
 
 // URL_RE matches the *start* of a value: a real URL scheme, or the literal
 // "direct"/"none" proxy bypass sentinels. Empty values are allowed (they
@@ -233,6 +247,52 @@ export function buildSchemas() {
             hint: 'Skip the cooldown schedule when this provider hits an error.' },
           { name: 'api_key_entries', label: 'API key entries', type: 'api_key_entries',
             hint: 'Multiple keys form a round-robin pool for this provider.' },
+        ]},
+      ],
+    },
+    // OpenCode Go mirrors the entry-bearing openai-compatibility shape but
+    // always carries a base_url (the OpenCode Zen Go endpoint) and a
+    // per-model wire format. The models editor type 'opencode_models' adds
+    // the wire-format select; seed/refresh/quota actions are rendered by
+    // the editor page for this type.
+    'opencode-go': {
+      sections: [
+        { title: 'Identity', fields: [
+          { name: 'name', label: 'Provider name', type: 'text', placeholder: 'opencode-go-1', required: true,
+            hint: 'Unique identifier for this OpenCode Go account.' },
+          { name: 'base_url', label: 'Base URL', type: 'text', placeholder: OPENCODE_GO_BASE_URL,
+            required: true, hint: 'The OpenCode Zen Go endpoint. Models are dispatched per wire format (openai /chat/completions, anthropic /v1/messages).',
+            validate: (v) => (v && !URL_RE.test(v) ? 'Must start with http://, https://, or socks5://.' : '') },
+        ]},
+        { title: 'Endpoint', fields: [
+          { name: 'proxy_url', label: 'Proxy URL', type: 'text', placeholder: 'direct',
+            hint: 'Per-provider proxy override.',
+            validate: (v) => (v && !URL_RE.test(v) ? 'Must start with http://, https://, socks5://, or be "direct"/"none".' : '') },
+          { name: 'proxy_pool_id', label: 'Proxy pool', type: 'proxy_pool_id',
+            hint: 'Bind this provider to a named proxy pool (Proxy Pools page).' },
+          { name: 'prefix', label: 'Model prefix', type: 'text', placeholder: 'teamA/',
+            hint: 'Optional namespace prepended to every model this provider serves.' },
+        ]},
+        { title: 'Routing', fields: [
+          { name: 'priority', label: 'Priority', type: 'number', min: 0, placeholder: '0',
+            hint: 'Higher value is preferred when multiple providers match.' },
+          routingStrategyField,
+          { name: 'models', label: 'Models', type: 'opencode_models',
+            hint: 'Upstream models. Each row picks its wire format; anthropic models execute via /v1/messages.' },
+          { name: 'excluded_models', label: 'Excluded models', type: 'chips',
+            placeholder: 'model-id or wildcard', hint: 'Models that should never route through this provider.' },
+        ], fetchModels: true },
+        { title: 'Behavior', fields: [
+          { name: 'headers', label: 'Custom headers', type: 'headers',
+            hint: 'Extra HTTP headers attached to every request to this provider.' },
+          { name: 'disabled', label: 'Disabled', type: 'toggle',
+            hint: 'When on, this provider is excluded from routing.' },
+          { name: 'disable_cooling', label: 'Disable cooldown', type: 'toggle',
+            hint: 'Skip the cooldown schedule when this provider hits an error.' },
+          { name: 'quota_url', label: 'Quota URL', type: 'text', placeholder: 'https://opencode.ai/zen/go/v1/quota',
+            hint: 'Override for the manual per-entry quota probe. Default uses the OpenCode Zen Go quota endpoint (currently not live upstream — the probe fails open with an explanation).' },
+          { name: 'api_key_entries', label: 'API key entries', type: 'api_key_entries',
+            hint: 'Multiple keys form a round-robin pool. Each entry gets a manual Quota check button.' },
         ]},
       ],
     },

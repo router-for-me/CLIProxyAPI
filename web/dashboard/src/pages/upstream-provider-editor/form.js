@@ -11,6 +11,7 @@
 import {
   isOAuth,
   isOpenAI,
+  isOpenCodeGo,
   isClaude,
   MAX_ENTRY_WEIGHT,
 } from './schemas.js';
@@ -151,6 +152,8 @@ export function buildForm(providerType, initial, carryOver) {
     rebuild_mid_system_message: src.rebuild_mid_system_message ?? false,
     experimental_cch_signing: src.experimental_cch_signing ?? false,
     disable_cooling: (src.extra_config && src.extra_config.disable_cooling) ?? false,
+    // opencode-go quota probe override (extra_config.quota_url).
+    quota_url: (src.extra_config && src.extra_config.quota_url) || '',
     headers: [],
     models: [],
     excluded_models: src.excluded_models ?? [],
@@ -178,6 +181,7 @@ export function buildForm(providerType, initial, carryOver) {
       image: !!m.image,
       'input-modalities': m.input_modalities || m.inputModalities || [],
       'output-modalities': m.output_modalities || m.outputModalities || [],
+      'wire-format': m.wire_format || m.wireFormat || '',
     }));
   }
 
@@ -240,6 +244,13 @@ export function buildPayload(form, providerType) {
         const om = r['output-modalities'];
         if (Array.isArray(om) && om.length) m.output_modalities = om;
       }
+      // Per-model upstream wire format (opencode-go only; empty = the
+      // executor's openai default). Emitted whenever set so an operator can
+      // also clear it back to '' explicitly.
+      if (isOpenCodeGo(providerType)) {
+        const wf = String(r['wire-format'] || '').trim();
+        if (wf) m.wire_format = wf;
+      }
       return m;
     });
 
@@ -248,6 +259,11 @@ export function buildPayload(form, providerType) {
   // during the OAuth connect flow).
   const extra = { ...(typeof form.extra_config === 'object' ? form.extra_config : {}) };
   if (form.disable_cooling) extra.disable_cooling = true;
+  // opencode-go quota probe override: emitted when set, dropped when cleared.
+  if (isOpenCodeGo(providerType)) {
+    const quotaURL = (form.quota_url || '').trim();
+    if (quotaURL) extra.quota_url = quotaURL; else delete extra.quota_url;
+  }
   // Don't send an empty object — extra_config defaults to '{}' server-side.
   const extraConfig = Object.keys(extra).length > 0 ? extra : {};
 

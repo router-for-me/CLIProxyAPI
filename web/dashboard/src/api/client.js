@@ -1817,6 +1817,33 @@ export async function testUpstreamProvider(id, { entryId, model }) {
   });
 }
 
+// seedUpstreamProviderModels fills the opencode-go seed catalog into the
+// provider row (idempotent — already-present model names are untouched).
+// Resolves { added, total }.
+export async function seedUpstreamProviderModels(id) {
+  return fetchJSON(`/upstream-providers/${encodeURIComponent(id)}/seed-models`, { method: 'POST' });
+}
+
+// refreshUpstreamProviderModels live-fetches the upstream /models list with
+// the chosen entry key and merges new ids into the row. Resolves
+// { added, total }.
+export async function refreshUpstreamProviderModels(id, { entryId } = {}) {
+  return fetchJSON(`/upstream-providers/${encodeURIComponent(id)}/refresh-models`, {
+    method: 'POST',
+    body: JSON.stringify({ entry_id: entryId ?? null }),
+  });
+}
+
+// fetchUpstreamProviderQuota runs the manual per-entry quota probe for an
+// opencode-go row. Fail-open: resolves { ok, windows, raw, error } with
+// ok=false + a descriptive error when the upstream quota API is unavailable.
+export async function fetchUpstreamProviderQuota(id, entryId) {
+  return fetchJSON(`/upstream-providers/${encodeURIComponent(id)}/quota`, {
+    method: 'POST',
+    body: JSON.stringify({ entry_id: entryId }),
+  });
+}
+
 // --- Global oauth-model-alias (config.yaml) ---------------------------------
 // Per-channel global model aliases for OAuth/file-backed auth channels.
 // Returns { "oauth-model-alias": { <channel>: [{name,alias,fork,display-name,force-mapping}] } }.

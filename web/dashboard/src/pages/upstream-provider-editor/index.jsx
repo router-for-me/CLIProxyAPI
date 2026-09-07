@@ -22,6 +22,7 @@ import {
   listUpstreamProviders,
   createUpstreamProvider,
   updateUpstreamProvider,
+  seedUpstreamProviderModels,
   listProxyPools,
   oauthChannelToAuthProvider,
 } from '../../api/client.js';
@@ -45,6 +46,8 @@ import {
   TYPE_SIMPLE,
   isOAuth,
   isOpenAI,
+  isOpenCodeGo,
+  OPENCODE_GO_BASE_URL,
 } from './schemas.js';
 import {
   buildForm,
@@ -55,6 +58,7 @@ import {
 import OAuthConnectSection from './OAuthConnect.jsx';
 import APIKeyEntriesEditor from './EntriesEditor.jsx';
 import TestPanel from './TestPanel.jsx';
+import OpenCodeGoActions from './OpenCodeGoPanel.jsx';
 
 // Types where the FetchModelsInline probe is meaningful (has a base_url +
 // api_key the operator can probe, or an auth-file the registry tracks).
@@ -259,6 +263,16 @@ export function ProviderEditorForm({ provider, siblingNames = [], proxyPools = [
       } else {
         const created = await createUpstreamProvider(payload);
         toast.success('Provider created');
+        // OpenCode Go rows start with an empty catalog — seed it once so
+        // the operator lands on a usable model list. Best-effort: a seed
+        // failure never blocks the create (the panel has a manual
+        // "Seed models" button for retries).
+        if (created && created.id && isOpenCodeGo(providerType)) {
+          try {
+            const seeded = await seedUpstreamProviderModels(created.id);
+            toast.success(`Seeded ${seeded?.added ?? 0} models`);
+          } catch { /* manual seed available in the tools panel */ }
+        }
         // The server returns the created row (with its id). Move to the
         // detail route so the same editor re-mounts in edit mode instead
         // of dropping the operator back on the list.
@@ -309,7 +323,14 @@ export function ProviderEditorForm({ provider, siblingNames = [], proxyPools = [
               type="button"
               key={t.value}
               className="type-picker__card"
-              onClick={() => setProviderType(t.value)}
+              onClick={() => {
+                setProviderType(t.value);
+                // Prefill type-specific defaults into the fresh form so the
+                // operator starts from the canonical endpoint.
+                if (t.value === 'opencode-go') {
+                  setForm((f) => ({ ...f, base_url: OPENCODE_GO_BASE_URL }));
+                }
+              }}
               aria-label={`Choose ${t.label}`}
             >
               <span className="type-picker__label">{t.label}</span>
@@ -541,6 +562,25 @@ export function ProviderEditorForm({ provider, siblingNames = [], proxyPools = [
         {isEdit && provider && (
           <TestPanel provider={provider} form={form} />
         )}
+
+        {/* OpenCode Go tools (quota per entry + catalog seed/refresh) —
+            edit mode only for the same reason as the test panel. */}
+        {isEdit && provider && isOpenCodeGo(providerType) && (
+          <OpenCodeGoActions
+            provider={provider}
+            form={form}
+            onCatalogChanged={() => {
+              // The server just mutated the row's catalog; refetch it so
+              // the form's model list reflects the new models.
+              getUpstreamProvider(providerId)
+                .then((row) => {
+                  setProvider(row);
+                  setForm(buildForm(providerType, row));
+                })
+                .catch(() => { /* keep the stale form; save still works */ });
+            }}
+          />
+        )}
       </div>
     </div>
   );
@@ -582,6 +622,8 @@ function renderInput(field, form, update, isEdit, providerType, proxyPools = [])
           alias: 'client alias (e.g. claude-sonnet)',
           displayName: 'display name (optional)',
         }} />;
+    case 'opencode_models':
+      return <OpenCodeGoModelListEditor rows={value || []} onChange={(v) => update(field.name, v)} />;
     case 'proxy_pool_id': {
       // Row-level pool binding: inherit (empty) / active pools / direct.
       // Selecting a pool clears the manual proxy_url field (the renderer
@@ -622,4 +664,48 @@ function renderInput(field, form, update, isEdit, providerType, proxyPools = [])
       return <input id={id} type="text" value={value || ''} onChange={(e) => update(field.name, e.target.value)}
         placeholder={field.placeholder} required={field.required} />;
   }
+}
+
+// OpenCodeGoModelListEditor extends the shared ModelListEditor with a
+// per-model wire-format select (openai default / anthropic). Wire format is
+// stored on the row under the kebab-case 'wire-format' key, matching the
+// form hydration/serialization convention.
+function OpenCodeGoModelListEditor({ rows, onChange }) {
+  const safe = Array.isArray(rows) ? rows : [];
+  function updateWire(idx, v) {
+    const next = safe.map((r, i) => (i === idx ? { ...r, 'wire-format': v } : r));
+    onChange(next);
+  }
+  return (
+    <div>
+      <ModelListEditor rows={safe} onChange={onChange}
+        fieldHints={{
+          name: 'upstream model (e.g. glm-5.2, minimax-m3)',
+          alias: 'client alias (optional)',
+          displayName: 'display name (optional)',
+        }} />
+      {safe.length > 0 && (
+        <div style={{ marginTop: 4, fontSize: 11 }} className="dim">
+          Wire format per model (rows align top-to-bottom with the list above):
+        </div>
+      )}
+      {safe.map((row, idx) => (
+        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
+          <span className="dim" style={{ minWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {row?.name || '(unnamed)'}
+          </span>
+          <select
+            value={row?.['wire-format'] || ''}
+            onChange={(e) => updateWire(idx, e.target.value)}
+            aria-label={`Wire format for ${row?.name || 'model'}`}
+            data-testid="opengo-wire-format"
+          >
+            <option value="">openai (default)</option>
+            <option value="openai">openai</option>
+            <option value="anthropic">anthropic</option>
+          </select>
+        </div>
+      ))}
+    </div>
+  );
 }

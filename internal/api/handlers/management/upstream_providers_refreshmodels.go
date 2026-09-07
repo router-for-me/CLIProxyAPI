@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
 // refreshModelsTimeout bounds the upstream /models fetch. Registered in
@@ -92,7 +93,10 @@ func (h *Handler) RefreshUpstreamProviderModels(c *gin.Context) {
 
 	fetchCtx, cancel := context.WithTimeout(c.Request.Context(), refreshModelsTimeout)
 	defer cancel()
-	req, errReq := http.NewRequestWithContext(fetchCtx, http.MethodGet, baseURL+"/models", nil)
+	// Auto-detect a trailing /vN version segment so both "…/v1" and
+	// version-less base URLs resolve to the upstream model list.
+	req, errReq := http.NewRequestWithContext(fetchCtx, http.MethodGet,
+		util.JoinOpenAICompatUpstreamURL(baseURL, "/models"), nil)
 	if errReq != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("build upstream request: %v", errReq)})
 		return
