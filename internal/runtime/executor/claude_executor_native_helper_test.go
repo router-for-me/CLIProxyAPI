@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -284,6 +285,66 @@ func TestClaudeBodyNeedsBillingFallbackTracksSystemPresence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := claudeBodyNeedsBillingFallback([]byte(test.body)); got != test.want {
 				t.Fatalf("claudeBodyNeedsBillingFallback() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// A 2.1.258 helper that reaches CPA through ANTHROPIC_BASE_URL carries no
+// x-client-request-id, because the client attaches it only for a first-party base
+// URL. The header must stay absent on a custom upstream instead of being
+// synthesized, while a helper that did carry one keeps its own value.
+func TestApplyClaudeHeadersHelperRequestIDFollowsUpstreamBase(t *testing.T) {
+	const nativeRequestID = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+	for _, test := range []struct {
+		name          string
+		url           string
+		incomingID    string
+		wantGenerated bool
+		wantID        string
+	}{
+		{name: "first party base without caller id", url: "https://api.anthropic.com/v1/messages?beta=true", wantGenerated: true},
+		{name: "custom base without caller id", url: "https://gateway.example.com/v1/messages"},
+		{name: "custom base keeps caller id", url: "https://gateway.example.com/v1/messages", incomingID: nativeRequestID, wantID: nativeRequestID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request, errRequest := http.NewRequest(http.MethodPost, test.url, nil)
+			if errRequest != nil {
+				t.Fatal(errRequest)
+			}
+			incoming := http.Header{}
+			if test.incomingID != "" {
+				incoming.Set("X-Client-Request-Id", test.incomingID)
+			}
+			if errHeaders := applyClaudeHeadersWithNativeProfile(
+				request,
+				&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-api-key"}},
+				"test-api-key",
+				false,
+				nil,
+				[]byte(`{"model":"claude-haiku-4-5-20251001"}`),
+				&config.Config{},
+				incoming,
+				true,
+				true,
+				claudeNativeHelperSessionID,
+			); errHeaders != nil {
+				t.Fatalf("applyClaudeHeadersWithNativeProfile() error = %v", errHeaders)
+			}
+			got := request.Header.Get("X-Client-Request-Id")
+			switch {
+			case test.wantID != "":
+				if got != test.wantID {
+					t.Fatalf("X-Client-Request-Id = %q, want caller value %q", got, test.wantID)
+				}
+			case test.wantGenerated:
+				if _, errParse := uuid.Parse(got); errParse != nil {
+					t.Fatalf("X-Client-Request-Id = %q, want a generated UUID", got)
+				}
+			default:
+				if got != "" {
+					t.Fatalf("X-Client-Request-Id = %q, want the header to stay absent", got)
+				}
 			}
 		})
 	}

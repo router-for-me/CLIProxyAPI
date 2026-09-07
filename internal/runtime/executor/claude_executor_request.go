@@ -1098,8 +1098,11 @@ func applyClaudeHeadersWithNativeProfile(
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	// identityHeader prefers the incoming value for a confirmed client, so a confirmed
 	// helper keeps its own native request ID and this fresh UUID only covers a caller
-	// that sent none. Helpers opt in on custom gateways too.
-	if isAnthropicBase || helperProfile {
+	// that sent none. Helpers opt in on custom gateways too, but only to carry the
+	// request ID they already sent: 2.1.258 attaches the header just for a first-party
+	// base URL, so a helper that arrived without one keeps it absent upstream rather
+	// than gaining a synthesized ID the real client would not have sent.
+	if isAnthropicBase || (helperProfile && helps.HeaderValueCaseInsensitive(incomingHeaders, "x-client-request-id") != "") {
 		identityHeader("x-client-request-id", uuid.New().String())
 	}
 	r.Header.Set("Connection", "keep-alive")
