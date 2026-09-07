@@ -88,29 +88,29 @@ func TestResolveTestTargetAuthEntryLevel(t *testing.T) {
 	})
 
 	// Entry-level resolution pins the exact entry auth.
-	auth := h.resolveTestTargetAuth(9, "openai-compat-main", int64Ptr(22))
+	auth := h.resolveTestTargetAuth("openai-compat-main:9", int64Ptr(22))
 	if auth == nil || auth.ID != "auth-entry-2" {
 		t.Fatalf("resolveTestTargetAuth entry 22 = %#v, want auth-entry-2", auth)
 	}
-	auth = h.resolveTestTargetAuth(9, "openai-compat-main", int64Ptr(21))
+	auth = h.resolveTestTargetAuth("openai-compat-main:9", int64Ptr(21))
 	if auth == nil || auth.ID != "auth-entry-1" {
 		t.Fatalf("resolveTestTargetAuth entry 21 = %#v, want auth-entry-1", auth)
 	}
 	// Unknown entry resolves to nothing.
-	if auth := h.resolveTestTargetAuth(9, "openai-compat-main", int64Ptr(99)); auth != nil {
+	if auth := h.resolveTestTargetAuth("openai-compat-main:9", int64Ptr(99)); auth != nil {
 		t.Fatalf("unknown entry resolved %#v, want nil", auth)
 	}
 
 	// Provider-level resolution skips entry-bearing auths and falls back to
 	// the parent key when nothing else matches.
-	if auth := h.resolveTestTargetAuth(9, "openai-compat-main", nil); auth == nil {
+	if auth := h.resolveTestTargetAuth("openai-compat-main:9", nil); auth == nil {
 		t.Fatal("provider-level resolution found no auth, want the parent-key fallback")
 	} else if auth.Attributes[coreauth.AttributeEntryProviderKey] != "" && auth.ID != "auth-entry-1" && auth.ID != "auth-entry-2" {
 		t.Fatalf("provider-level fallback picked unexpected auth %s", auth.ID)
 	}
 
 	// A parent key with no live auths resolves to nil.
-	if auth := h.resolveTestTargetAuth(42, "claude", int64Ptr(7)); auth != nil {
+	if auth := h.resolveTestTargetAuth("claude:42", int64Ptr(7)); auth != nil {
 		t.Fatalf("unrelated row resolved %#v, want nil", auth)
 	}
 }
@@ -121,19 +121,21 @@ func TestChannelForProviderRow(t *testing.T) {
 		name         string
 		want         string
 	}{
-		{"gemini-api-key", "", "gemini"},
-		{"interactions-api-key", "", "interactions"},
-		{"codex-api-key", "", "codex"},
-		{"xai-api-key", "", "xai"},
-		{"claude-api-key", "", "claude"},
-		{"vertex-api-key", "", "vertex"},
-		{"openai-compatibility", "My-Compat", "My-Compat"},
+		{"gemini-api-key", "", "gemini:7"},
+		{"interactions-api-key", "", "gemini-interactions:7"},
+		{"codex-api-key", "", "codex:7"},
+		{"xai-api-key", "", "xai:7"},
+		{"claude-api-key", "", "claude:7"},
+		{"vertex-api-key", "", "vertex:7"},
+		{"openai-compatibility", "My-Compat", "openai-compatible-my-compat"},
 		{"oauth:claude", "", "claude"},
 	}
 	for _, tc := range cases {
-		got := channelForProviderRow(testProviderRow(tc.providerType, tc.name))
+		row := testProviderRow(tc.providerType, tc.name)
+		row.ID = 7
+		got := testProbeRoutingKey(row)
 		if got != tc.want {
-			t.Fatalf("channelForProviderRow(%q, %q) = %q, want %q", tc.providerType, tc.name, got, tc.want)
+			t.Fatalf("testProbeRoutingKey(%q, %q) = %q, want %q", tc.providerType, tc.name, got, tc.want)
 		}
 	}
 }
