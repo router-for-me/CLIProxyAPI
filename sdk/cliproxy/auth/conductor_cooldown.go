@@ -2001,6 +2001,12 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		return
 	}
 	prevAuthRetryAfter := auth.NextRetryAfter
+	// A later failure only extends a still-live credential cooldown; it never
+	// shortens one, including the Cloudflare-challenge and invalid-grant returns
+	// above. A deliberate zero write (disableCooling) still clears it.
+	defer func() {
+		auth.NextRetryAfter = keepLongerLiveCooldown(auth.NextRetryAfter, prevAuthRetryAfter, now)
+	}()
 	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
@@ -2095,15 +2101,22 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
 		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	}
-	// A later failure only extends a still-live credential cooldown; a
-	// deliberate zero write (disableCooling) still clears it.
-	if !auth.NextRetryAfter.IsZero() && prevAuthRetryAfter.After(auth.NextRetryAfter) && prevAuthRetryAfter.After(now) {
-		auth.NextRetryAfter = prevAuthRetryAfter
-	}
+	// A later failure only extends a still-live credential cooldown; it never
+	// shortens one. The deferred clamp above covers every return path.
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
 		auth.Unavailable = true
 	}
+}
+
+// keepLongerLiveCooldown returns whichever deadline is later: the freshly
+// computed one or a still-live previous cooldown. A zero newDeadline (a
+// deliberate clear, e.g. disableCooling) is returned untouched.
+func keepLongerLiveCooldown(newDeadline, prev, now time.Time) time.Time {
+	if !newDeadline.IsZero() && prev.After(newDeadline) && prev.After(now) {
+		return prev
+	}
+	return newDeadline
 }
 
 // quotaCooldownAfterFailure returns the recovery deadline and backoff level for

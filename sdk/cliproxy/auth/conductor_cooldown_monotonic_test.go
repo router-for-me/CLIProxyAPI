@@ -125,6 +125,36 @@ func TestManager_MarkResult_LaterShorterFailureKeepsLongerModelDeadline(t *testi
 	}
 }
 
+// A Cloudflare-challenge result arriving after a longer credential-wide
+// cooldown must not shorten it: the clamp covers every failure path in
+// applyAuthFailureState, including the early-return branches (#5519 review).
+func TestManager_MarkResult_CloudflareKeepsLongerCredentialDeadline(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m, auth := newCooldownMonotonicManager(t, "model-a")
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "",
+		Success: false, Error: &Error{HTTPStatus: http.StatusNotFound, Message: "not found"},
+	})
+	before := time.Now()
+	snap, _ := m.GetByID(auth.ID)
+	if snap.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
+		t.Fatalf("precondition failed: expected a long 404 deadline, got %v", snap.NextRetryAfter.Sub(before))
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "",
+		Success: false, Error: &Error{Message: "cloudflare challenge"},
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
+		t.Fatalf("cloudflare challenge shortened the live credential deadline to %v", updated.NextRetryAfter.Sub(before))
+	}
+}
+
 // The client-facing projection must agree with scheduling: a live credential-wide
 // cooldown (auth.Unavailable + auth.NextRetryAfter) suspends models that carry no
 // per-model state (#5501).
