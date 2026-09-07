@@ -32,6 +32,7 @@ const (
 	TypeXAIAPIKey           = "xai-api-key"
 	TypeClaudeAPIKey        = "claude-api-key"
 	TypeOpenAICompatibility = "openai-compatibility"
+	TypeOpenCodeGo          = "opencode-go"
 	TypeVertexAPIKey        = "vertex-api-key"
 
 	TypeOAuthClaude      = "oauth:claude"
@@ -157,6 +158,8 @@ func RenderConfigWithPools(providers []store.UpstreamProvider, pools poolLookup)
 			cfg.ClaudeKey = append(cfg.ClaudeKey, claudeKeyFromProviderWithPools(p, pools)...)
 		case TypeOpenAICompatibility:
 			cfg.OpenAICompatibility = append(cfg.OpenAICompatibility, openAICompatFromProviderWithPools(p, pools))
+		case TypeOpenCodeGo:
+			cfg.OpenCodeGo = append(cfg.OpenCodeGo, openCodeGoFromProviderWithPools(p, pools))
 		case TypeVertexAPIKey:
 			cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey, vertexKeyFromProvider(p))
 		}
@@ -363,6 +366,74 @@ func openAICompatFromProviderWithPools(p store.UpstreamProvider, pools poolLooku
 		k.DisableCooling = v
 	}
 	return k
+}
+
+// openCodeGoFromProviderWithPools projects one opencode-go provider row into
+// a config.OpenCodeGo. Field handling mirrors openAICompatFromProviderWithPools:
+// disabled entries stay persisted but never reach config.yaml, entry pool
+// bindings override the row binding, and raw routing strategies are
+// canonicalized here. Per-model wire formats round-trip verbatim (empty =
+// the executor's openai default).
+func openCodeGoFromProviderWithPools(p store.UpstreamProvider, pools poolLookup) config.OpenCodeGo {
+	rowProxyURL, rowRelayBase := resolveBinding(pools, nil, p.ProxyPoolID, "", p.ProxyURL)
+	k := config.OpenCodeGo{
+		Name:               p.Name,
+		Priority:           p.Priority,
+		Strategy:           config.NormalizePoolRoutingStrategy(p.RoutingStrategy),
+		Disabled:           p.Disabled,
+		Prefix:             p.Prefix,
+		BaseURL:            p.BaseURL,
+		ProxyURL:           rowProxyURL,
+		RelayBaseURL:       rowRelayBase,
+		ProxyPoolID:        p.ProxyPoolID,
+		UpstreamProviderID: p.ID,
+		Headers:            p.Headers,
+	}
+	for _, e := range p.APIKeyEntries {
+		if e.Disabled {
+			// Disabled entries stay persisted but never reach config.yaml;
+			// toggling them back on re-renders them on the next reload.
+			continue
+		}
+		entryProxyURL, entryRelayBase := resolveBinding(pools, e.ProxyPoolID, p.ProxyPoolID, e.ProxyURL, "")
+		k.APIKeyEntries = append(k.APIKeyEntries, config.OpenCodeGoKey{
+			APIKey:                  e.APIKey,
+			Name:                    e.Name,
+			UpstreamProviderEntryID: e.ID,
+			Weight:                  e.Weight,
+			Priority:                e.Priority,
+			ProxyURL:                entryProxyURL,
+			RelayBaseURL:            entryRelayBase,
+			ProxyPoolID:             e.ProxyPoolID,
+		})
+	}
+	for _, m := range p.Models {
+		mm := config.OpenCodeGoModel{
+			Name:             m.Name,
+			Alias:            m.Alias,
+			DisplayName:      m.DisplayName,
+			ForceMapping:     m.ForceMapping,
+			WireFormat:       m.WireFormat,
+			MaxContextLength: maxContextLengthFromModel(m),
+		}
+		if len(m.Thinking) > 0 {
+			mm.Thinking = decodeThinkingSupport(m.Thinking)
+		}
+		k.Models = append(k.Models, mm)
+	}
+	if v, ok := p.ExtraConfig["disable_cooling"].(bool); ok {
+		k.DisableCooling = v
+	}
+	return k
+}
+
+// maxContextLengthFromModel reads the optional max_context_length extra
+// attribute off a store model row. Only opencode-go seeds set it today.
+func maxContextLengthFromModel(m store.UpstreamProviderModel) int {
+	if v, ok := m.Thinking["max_context_length"].(float64); ok {
+		return int(v)
+	}
+	return 0
 }
 
 func vertexKeyFromProvider(p store.UpstreamProvider) config.VertexCompatKey {
