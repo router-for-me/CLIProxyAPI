@@ -416,7 +416,10 @@ nonstream-keepalive-interval: 0
 #           - "context_window_exceeded"
 #         action: "stop-and-cooldown"
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
-#     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
+#     alpha-search: false # optional: allow this key to serve Codex alpha/search and alpha/history|notes via base-url
+#       # History/notes also need a Codex client that uses the official backend auth
+#       # path (is_openai + current_auth_uses_codex_backend). Token-budget flags on a
+#       # generic custom provider are not enough in Codex 0.153.4.
 #     headers:
 #       X-Custom-Header: "custom-value"
 #       # Values starting with "$" dynamically copy the header value from downstream client requests.
