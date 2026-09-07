@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -52,7 +53,36 @@ func (e *OpenCodeGoExecutor) wireFormat(model string) string {
 	return ""
 }
 
+// withCLIIdentity prepares the delegation inputs for one request: a
+// writable copy of the auth's attributes stamped with the synthesized
+// opencode CLI identity headers, and a context marked so downstream
+// helpers recognize the channel. The OpenCode Zen Go upstream rejects
+// requests lacking the x-opencode-* identity (Cloudflare + Console Go's
+// "MissingSessionID"), so stamping happens on every request. The payload
+// fingerprint is derived from the ORIGINAL translated payload when
+// available (opts.OriginalRequest mirrors what the executors translate),
+// keeping the session id stable across retries of the same conversation
+// turn.
+func (e *OpenCodeGoExecutor) withCLIIdentity(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (context.Context, *cliproxyauth.Auth) {
+	if auth == nil {
+		return ctx, auth
+	}
+	attrs := make(map[string]string, len(auth.Attributes)+5)
+	for k, v := range auth.Attributes {
+		attrs[k] = v
+	}
+	payload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		payload = opts.OriginalRequest
+	}
+	helps.StampOpencodeCLIHeaders(attrs, helps.StripThinkingSuffixForOpencode(req.Model), payload)
+	stamped := *auth
+	stamped.Attributes = attrs
+	return helps.WithOpencodeGoMarker(ctx), &stamped
+}
+
 func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx, auth = e.withCLIIdentity(ctx, auth, req, opts)
 	if e.wireFormat(req.Model) == "anthropic" {
 		return e.claudeExec.Execute(ctx, auth, req, opts)
 	}
@@ -60,6 +90,7 @@ func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *OpenCodeGoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ctx, auth = e.withCLIIdentity(ctx, auth, req, opts)
 	if e.wireFormat(req.Model) == "anthropic" {
 		return e.claudeExec.ExecuteStream(ctx, auth, req, opts)
 	}
@@ -67,6 +98,7 @@ func (e *OpenCodeGoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyau
 }
 
 func (e *OpenCodeGoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx, auth = e.withCLIIdentity(ctx, auth, req, opts)
 	if e.wireFormat(req.Model) == "anthropic" {
 		return e.claudeExec.CountTokens(ctx, auth, req, opts)
 	}
