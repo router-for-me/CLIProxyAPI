@@ -74,12 +74,14 @@ func openCodeQuotaPayload(body []byte) map[string]any {
 }
 
 // openCodeQuotaWindowKeys maps canonical window names to the aliases the
-// upstream (and OmniRoute) have been observed to use.
+// upstream has been observed to use. "rolling" (5-hour window) is the
+// official live shape (2026-09); the used/limit aliases predate it and are
+// kept for any non-official quota_url override that still speaks them.
 var openCodeQuotaWindowKeys = []struct {
 	canonical string
 	aliases   []string
 }{
-	{"5h", []string{"5h", "hourly", "short"}},
+	{"rolling", []string{"rolling", "5h", "hourly", "short"}},
 	{"weekly", []string{"weekly", "week", "wk"}},
 	{"monthly", []string{"monthly", "month", "mo"}},
 }
@@ -106,24 +108,63 @@ func openCodeQuotaNumber(v any) (float64, bool) {
 	return 0, false
 }
 
-// openCodeQuotaResetAt normalizes the window reset timestamp to RFC3339:
-// epoch seconds (<1e12) or milliseconds (>=1e12), falling back to
-// reset_after_seconds relative to now. Empty when nothing parseable exists.
+// openCodeQuotaResetAt normalizes the window reset timestamp to RFC3339.
+// Accepted inputs, in order: resetsAt / reset_at as an RFC3339/ISO string
+// (the official live shape), epoch seconds (<1e12) or milliseconds
+// (>=1e12), and reset_after_seconds relative to now. Empty when nothing
+// parseable exists.
 func openCodeQuotaResetAt(w map[string]any, now time.Time) string {
-	if v, ok := w["reset_at"]; ok {
-		if n, okNum := v.(float64); okNum && n > 0 {
-			if n < 1e12 {
-				return time.Unix(int64(n), 0).UTC().Format(time.RFC3339)
+	for _, key := range []string{"resetsAt", "reset_at"} {
+		switch v := w[key].(type) {
+		case string:
+			if s := strings.TrimSpace(v); s != "" {
+				if t, err := time.Parse(time.RFC3339, s); err == nil {
+					return t.UTC().Format(time.RFC3339)
+				}
+				// Tolerate fractional seconds (…T21:01:19.442Z), which
+				// time.RFC3339 alone rejects.
+				if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+					return t.UTC().Format(time.RFC3339)
+				}
 			}
-			return time.UnixMilli(int64(n)).UTC().Format(time.RFC3339)
+		case float64:
+			if v > 0 {
+				if v < 1e12 {
+					return time.Unix(int64(v), 0).UTC().Format(time.RFC3339)
+				}
+				return time.UnixMilli(int64(v)).UTC().Format(time.RFC3339)
+			}
 		}
 	}
-	if v, ok := w["reset_after_seconds"]; ok {
-		if n, okNum := v.(float64); okNum && n > 0 {
-			return now.Add(time.Duration(n * float64(time.Second))).UTC().Format(time.RFC3339)
-		}
+	if v, ok := w["reset_after_seconds"].(float64); ok && v > 0 {
+		return now.Add(time.Duration(v * float64(time.Second))).UTC().Format(time.RFC3339)
 	}
 	return ""
+}
+
+// openCodeQuotaWinFields extracts used/limit/percent from one window
+// object, tolerating both observed shapes:
+//   - official live shape (2026-09): {"status":"ok","percent":85,
+//     "resetsAt":"2026-09-25T06:01:44.442Z"} — used/limit stay 0 and the
+//     upstream-reported percent is authoritative;
+//   - spec shape: {"used":700,"limit":1000,"reset_at":1757500000} —
+//     percent derives from used/limit.
+func openCodeQuotaWinFields(w map[string]any) (used, limit, percent float64, percentKnown bool) {
+	if v, ok := openCodeQuotaNumber(w["percent"]); ok {
+		// The upstream percent is clamped to [0,100]; out-of-range values
+		// (shouldn't happen) clamp too rather than rendering a broken bar.
+		p := v
+		if p < 0 {
+			p = 0
+		}
+		if p > 100 {
+			p = 100
+		}
+		return 0, 0, p, true
+	}
+	u, _ := openCodeQuotaNumber(w["used"])
+	l, _ := openCodeQuotaNumber(w["limit"])
+	return u, l, 0, false
 }
 
 // UpstreamProviderQuota handles POST /v0/management/upstream-providers/:id/quota.
@@ -226,14 +267,16 @@ func (h *Handler) UpstreamProviderQuota(c *gin.Context) {
 			continue
 		}
 		win := upstreamProviderQuotaWin{Key: wk.canonical}
-		if v, ok := openCodeQuotaNumber(w["used"]); ok {
-			win.Used = v
-		}
-		if v, ok := openCodeQuotaNumber(w["limit"]); ok {
-			win.Limit = v
-		}
-		if win.Limit > 0 {
-			pct := win.Used / win.Limit * 100
+		used, limit, percent, percentKnown := openCodeQuotaWinFields(w)
+		win.Used = used
+		win.Limit = limit
+		switch {
+		case percentKnown:
+			// Official shape: the upstream reports usage as a percent
+			// directly; used/limit stay 0 (the dashboard renders the bar).
+			win.Percent = percent
+		case limit > 0:
+			pct := used / limit * 100
 			if pct < 0 {
 				pct = 0
 			}
@@ -241,7 +284,7 @@ func (h *Handler) UpstreamProviderQuota(c *gin.Context) {
 				pct = 100
 			}
 			win.Percent = pct
-		} else {
+		default:
 			win.Percent = -1
 		}
 		win.ResetAt = openCodeQuotaResetAt(w, now)

@@ -50,7 +50,9 @@ func TestUpstreamProviderQuota_HappyPath(t *testing.T) {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`"ok":true`, `"key":"5h"`, `"percent_used":40`, `"key":"weekly"`, `"percent_used":70`, `"key":"monthly"`, `"percent_used":-1`} {
+	// The 5h spec window now reports under the official "rolling" canonical
+	// key; used/limit windows keep the derived percent.
+	for _, want := range []string{`"ok":true`, `"key":"rolling"`, `"percent_used":40`, `"key":"weekly"`, `"percent_used":70`, `"key":"monthly"`, `"percent_used":-1`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %s: %s", want, body)
 		}
@@ -71,7 +73,7 @@ func TestUpstreamProviderQuota_Aliases(t *testing.T) {
 	h := newSeedModelsHandler(t, st)
 	rec := postProviderAction(t, h, st.rows[1].ID, "quota", fmt.Sprintf(`{"entry_id":%d}`, entryID))
 	body := rec.Body.String()
-	for _, want := range []string{`"key":"5h"`, `"key":"weekly"`, `"key":"monthly"`, `"percent_used":50`} {
+	for _, want := range []string{`"key":"rolling"`, `"key":"weekly"`, `"key":"monthly"`, `"percent_used":50`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %s: %s", want, body)
 		}
@@ -153,5 +155,37 @@ func TestUpstreamProviderQuota_MissingEntry(t *testing.T) {
 	rec := postProviderAction(t, h, st.rows[1].ID, "quota", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (entry_id required)", rec.Code)
+	}
+}
+
+// TestUpstreamProviderQuota_OfficialShape verifies parsing of the REAL
+// official response shape (live as of 2026-09): windows keyed
+// rolling/weekly/monthly, each {status, percent, resetsAt} with an
+// RFC3339 resetsAt string — not the used/limit shape OmniRoute's spec
+// described.
+func TestUpstreamProviderQuota_OfficialShape(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"usage":{"rolling":{"status":"ok","percent":0,"resetsAt":"2026-09-07T21:01:19.442Z"},"weekly":{"status":"ok","percent":1,"resetsAt":"2026-09-14T00:00:00.442Z"},"monthly":{"status":"ok","percent":85,"resetsAt":"2026-09-25T06:01:44.442Z"}}}`))
+	}))
+	defer upstream.Close()
+
+	st, entryID := quotaFixtureRow(t, "https://opencode.ai/zen/go/v1", map[string]any{"quota_url": upstream.URL})
+	h := newSeedModelsHandler(t, st)
+	rec := postProviderAction(t, h, st.rows[1].ID, "quota", fmt.Sprintf(`{"entry_id":%d}`, entryID))
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"ok":true`,
+		`"key":"rolling"`, `"percent_used":0`,
+		`"key":"weekly"`, `"percent_used":1`,
+		`"key":"monthly"`, `"percent_used":85`,
+		// resetsAt strings pass through normalized.
+		`2026-09-25T06:01:44`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %s: %s", want, body)
+		}
+	}
+	if strings.Contains(body, `"percent_used":-1`) {
+		t.Fatalf("percent must come from the upstream field, got -1: %s", body)
 	}
 }
