@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -63,7 +64,45 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	// Add x-opencode-session header for opencode/opencode-go providers
+	e.addOpencodeSessionHeader(req, nil)
 	return nil
+}
+
+// addOpencodeSessionHeader adds the x-opencode-session header for opencode/opencode-go providers.
+// The session ID is extracted from the incoming request headers (opts.Headers) if available.
+func (e *OpenAICompatExecutor) addOpencodeSessionHeader(req *http.Request, opts *cliproxyexecutor.Options) {
+	provider := strings.ToLower(strings.TrimSpace(e.provider))
+	if provider != "opencode" && provider != "opencode-go" {
+		return
+	}
+	var sessionID string
+	if opts != nil && opts.Headers != nil {
+		sessionID = helperHeaderValueCaseInsensitive(opts.Headers, "x-opencode-session")
+	}
+	if sessionID == "" && req != nil {
+		sessionID = helperHeaderValueCaseInsensitive(req.Header, "x-opencode-session")
+	}
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+	}
+	if sessionID != "" {
+		req.Header.Set("x-opencode-session", sessionID)
+	}
+}
+
+// helperHeaderValueCaseInsensitive returns the header value case-insensitively.
+func helperHeaderValueCaseInsensitive(headers http.Header, key string) string {
+	if headers == nil {
+		return ""
+	}
+	key = strings.ToLower(strings.TrimSpace(key))
+	for k, values := range headers {
+		if strings.ToLower(k) == key && len(values) > 0 {
+			return strings.TrimSpace(values[0])
+		}
+	}
+	return ""
 }
 
 // HttpRequest injects OpenAI-compatible credentials into the request and executes it.
@@ -145,6 +184,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	// Add x-opencode-session header for opencode/opencode-go providers
+	e.addOpencodeSessionHeader(httpReq, &opts)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -236,6 +277,8 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	// Add x-opencode-session header for opencode/opencode-go providers
+	e.addOpencodeSessionHeader(httpReq, &opts)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -344,6 +387,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	// Add x-opencode-session header for opencode/opencode-go providers
+	e.addOpencodeSessionHeader(httpReq, &opts)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -498,6 +543,8 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	// Add x-opencode-session header for opencode/opencode-go providers
+	e.addOpencodeSessionHeader(httpReq, &opts)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
