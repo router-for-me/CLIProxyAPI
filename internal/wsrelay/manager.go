@@ -20,6 +20,10 @@ type Manager struct {
 	upgrader  websocket.Upgrader
 	sessions  map[string]*session
 	sessMutex sync.RWMutex
+	// disconnectDrains tracks one channel per provider key whose disconnect
+	// callback is still running. A replacement connection waits on it so its
+	// onConnected Add can never precede the previous session's Delete.
+	disconnectDrains map[string]chan struct{}
 
 	providerFactory func(*http.Request) (string, error)
 	onConnected     func(string)
@@ -51,8 +55,9 @@ func NewManager(opts Options) *Manager {
 		path = "/" + path
 	}
 	mgr := &Manager{
-		path:     path,
-		sessions: make(map[string]*session),
+		path:             path,
+		sessions:         make(map[string]*session),
+		disconnectDrains: make(map[string]chan struct{}),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -147,12 +152,23 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		replaced = existing
 	}
 	m.sessions[s.provider] = s
+	var drain chan struct{}
+	if m.disconnectDrains != nil {
+		drain = m.disconnectDrains[s.provider]
+	}
 	m.sessMutex.Unlock()
 
 	if replaced != nil {
 		replaced.cleanup(errors.New("replaced by new connection"))
 	}
-	if m.onConnected != nil {
+	// A disconnect callback for the previous session may still be running; its
+	// Delete must be emitted before this session's onConnected Add.
+	if drain != nil {
+		<-drain
+	}
+	// Suppress a stale connect: if a newer session already replaced this one,
+	// its own onConnected is authoritative and this Add must not fire.
+	if m.onConnected != nil && m.session(s.provider) == s {
 		m.onConnected(s.provider)
 	}
 
@@ -182,20 +198,44 @@ func (m *Manager) handleSessionClosed(s *session, cause error) {
 		return
 	}
 	key := strings.ToLower(strings.TrimSpace(s.provider))
+	owner := false
 	m.sessMutex.Lock()
 	if cur, ok := m.sessions[key]; ok && cur == s {
 		delete(m.sessions, key)
+		owner = true
 	} else if ok {
 		// A newer session owns the key: this disconnect must not emit a Delete
-		// that would drop the replacement's auth. Reporting under the lock
-		// queues the disconnect before the replacement's onConnected Add can
-		// be emitted.
+		// that would drop the replacement's auth.
 		cause = errors.New("replaced by new connection")
+	}
+	// Registering the drain under the lock lets a replacement connection wait
+	// for this callback before emitting its Add, preserving Delete-before-Add
+	// ordering while the callback itself runs outside the session lock.
+	drain := make(chan struct{})
+	if owner && m.onDisconnected != nil {
+		if m.disconnectDrains == nil {
+			m.disconnectDrains = make(map[string]chan struct{})
+		}
+		m.disconnectDrains[key] = drain
+	} else {
+		drain = nil
+	}
+	m.sessMutex.Unlock()
+	if drain != nil {
+		// Close the drain even if the callback panics, so replacements of this
+		// provider key are never stuck waiting.
+		defer func() {
+			m.sessMutex.Lock()
+			if m.disconnectDrains[key] == drain {
+				delete(m.disconnectDrains, key)
+			}
+			close(drain)
+			m.sessMutex.Unlock()
+		}()
 	}
 	if m.onDisconnected != nil {
 		m.onDisconnected(s.provider, cause)
 	}
-	m.sessMutex.Unlock()
 }
 
 func randomProviderName() string {
