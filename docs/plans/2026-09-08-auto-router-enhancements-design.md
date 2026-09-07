@@ -2,6 +2,7 @@
 
 Date: 2026-09-08
 Status: Validated (brainstormed section-by-section; scope agreed: full design, phased delivery)
+Progress: F1 (scorer v2) implemented on main 2026-09-08 — parity corpus green, DecisionSnapshot shape pinned, benchmarks recorded (large-body parity at equal allocs; F2 windowing targets the allocation).
 
 ## Context
 
