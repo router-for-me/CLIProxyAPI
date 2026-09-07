@@ -206,7 +206,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		auth.Generation++
 	}
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+		if mode != updateModeRefresh && len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
 		if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
@@ -226,6 +226,12 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
+	}
+	if mode == updateModeRefresh && m.cooldownStore != nil {
+		cooldownStateChanged = !cooldownStateRecordsEqual(
+			m.cooldownStateRecordsForAuthLocked(existing, now),
+			m.cooldownStateRecordsForAuthLocked(auth, now),
+		) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()

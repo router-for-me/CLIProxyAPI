@@ -818,14 +818,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 				// Retain active credential-scoped cooldown
 			} else if modelKey != "" {
+				recoverAggregate := modelStatesOwnAvailability(auth, now) || auth.ForcedCooldownUntil.After(now)
 				state := ensureModelState(auth, modelKey)
 				modelState = state
 				recoverModelStateOnSuccess(state, now)
 				if auth.ForcedCooldownUntil.After(now) {
 					auth.NextRetryAfter = auth.ForcedCooldownUntil
-					applyCooldownFields(&auth.Quota, QuotaState{})
 				}
-				updateAggregatedAvailability(auth, now)
+				if recoverAggregate {
+					recoverAggregatedAvailability(auth, now)
+				} else {
+					updateAggregatedAvailability(auth, now)
+				}
 				if !auth.ForcedCooldownUntil.After(now) && !hasModelError(auth, now) {
 					auth.LastError = nil
 					auth.StatusMessage = ""
@@ -1352,6 +1356,52 @@ func modelStateIsClean(state *ModelState) bool {
 		return false
 	}
 	return true
+}
+
+// Model recovery may replace a derived summary, but must not clear a separate
+// credential failure. Check the pre-recovery state, before changing its models.
+func modelStatesOwnAvailability(auth *Auth, now time.Time) bool {
+	if auth == nil || len(auth.ModelStates) == 0 || auth.ForcedCooldownUntil.After(now) ||
+		(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) {
+		return false
+	}
+	if !auth.NextRetryAfter.After(now) && (!auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.After(now)) {
+		return true
+	}
+	var earliest time.Time
+	var latestModelQuota time.Time
+	matchingError := auth.LastError == nil
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		matchingError = matchingError || cooldownErrorEqual(auth.LastError, state.LastError)
+		if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(latestModelQuota) {
+			latestModelQuota = state.Quota.NextRecoverAt
+		}
+		if state.Unavailable && state.NextRetryAfter.After(now) && (earliest.IsZero() || state.NextRetryAfter.Before(earliest)) {
+			earliest = state.NextRetryAfter
+		}
+	}
+	// A credential quota can predate the model errors that supplied the current
+	// retry deadline and LastError. Do not treat its independent window as derived.
+	if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) && auth.Quota.NextRecoverAt.After(latestModelQuota) {
+		return false
+	}
+	if !auth.Unavailable && auth.NextRetryAfter.IsZero() {
+		return true
+	}
+	return !earliest.IsZero() && earliest.Equal(auth.NextRetryAfter) && matchingError
+}
+
+// Failure aggregation is monotonic. Recovery instead derives quota fields
+// afresh, so an old aggregate cannot outlive the remaining model cooldowns.
+func recoverAggregatedAvailability(auth *Auth, now time.Time) {
+	if auth == nil || (auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) {
+		return
+	}
+	applyCooldownFields(&auth.Quota, QuotaState{})
+	updateAggregatedAvailability(auth, now)
 }
 
 func updateAggregatedAvailability(auth *Auth, now time.Time) {
