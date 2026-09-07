@@ -47,7 +47,11 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	}
 
 	// Only handle ModeLevel and ModeNone; other modes pass through unchanged.
-	if config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone {
+	// Assumed level sets carry no real model contract, so an explicitly
+	// requested auto is serialized as "auto" for the upstream to interpret —
+	// otherwise a suffix-based auto request (no body field to preserve) would
+	// be silently dropped.
+	if config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && !(config.Mode == thinking.ModeAuto && modelInfo.Thinking.LevelsAssumed) {
 		return body, nil
 	}
 
@@ -63,9 +67,14 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	effort := ""
 	support := modelInfo.Thinking
 	if config.Budget == 0 {
-		if support.ZeroAllowed || thinking.HasLevel(support.Levels, string(thinking.LevelNone)) {
+		// Assumed default levels carry no real contract: an explicit disable
+		// request is forwarded as "none" for the upstream to honor or reject.
+		if support.ZeroAllowed || support.LevelsAssumed || thinking.HasLevel(support.Levels, string(thinking.LevelNone)) {
 			effort = string(thinking.LevelNone)
 		}
+	}
+	if effort == "" && config.Mode == thinking.ModeAuto && support.LevelsAssumed {
+		effort = string(thinking.LevelAuto)
 	}
 	if effort == "" && config.Level != "" {
 		effort = string(config.Level)
