@@ -123,3 +123,20 @@ func hashJoined(keys []string) string {
 	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
 	return hex.EncodeToString(sum[:])
 }
+
+// ComputeOpenCodeGoModelsHash returns a stable hash for opencode-go model
+// lists. Includes the per-model wire format so hot reload detects dispatch
+// changes, not just list changes.
+func ComputeOpenCodeGoModelsHash(models []config.OpenCodeGoModel) string {
+	keys := modelRoutingKeys(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("wire-format=%s", strings.TrimSpace(model.WireFormat)) + "|" + fmt.Sprintf("max-context=%d", model.MaxContextLength) + thinkingHashSuffix(model.Thinking))
+		}
+	})
+	return hashJoined(keys)
+}

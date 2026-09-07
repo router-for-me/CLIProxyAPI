@@ -125,6 +125,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
+	// OpenCode Go
+	out = append(out, s.synthesizeOpenCodeGo(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
 
@@ -540,6 +542,150 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, compat.ExcludedModels, "apikey")
 		out = append(out, a)
+	}
+	return out
+}
+
+// addOpenCodeGoEntryProviderKey stamps the per-entry routing identifier onto
+// the auth's attributes when the opencode-go entry was rendered from a
+// PG-backed upstream_providers row: "<provider_key>:key-<childID>". Like the
+// Claude analogue, the child-row ID is the only stable identity available,
+// so the attribute is emitted strictly when both the parent provider_key
+// and the child UpstreamProviderEntryID are positive.
+func addOpenCodeGoEntryProviderKey(attrs map[string]string, providerKey string, entry config.OpenCodeGoKey) {
+	if attrs == nil || providerKey == "" || entry.UpstreamProviderEntryID <= 0 {
+		return
+	}
+	attrs[coreauth.AttributeEntryProviderKey] = providerKey + ":key-" + strconv.FormatInt(entry.UpstreamProviderEntryID, 10)
+}
+
+// synthesizeOpenCodeGo creates Auth entries for opencode-go provider rows,
+// one auth per active api_key_entries child. Shape mirrors
+// synthesizeOpenAICompat (row + entries), with the routing key derived from
+// util.UpstreamProviderKey so the conductor, per-model routing picker, and
+// the management test/quota probes all resolve the same identities.
+func (s *ConfigSynthesizer) synthesizeOpenCodeGo(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0)
+	for i := range cfg.OpenCodeGo {
+		row := &cfg.OpenCodeGo[i]
+		if row.Disabled {
+			continue
+		}
+		prefix := strings.TrimSpace(row.Prefix)
+		base := strings.TrimSpace(row.BaseURL)
+		providerKey := util.UpstreamProviderKey("opencode-go", row.Name, row.UpstreamProviderID)
+		createdEntries := 0
+		for j := range row.APIKeyEntries {
+			entry := &row.APIKeyEntries[j]
+			if entry.Disabled {
+				// Defense-in-depth: the renderer already drops disabled
+				// entries; never route from a hand-written YAML row either.
+				continue
+			}
+			key := strings.TrimSpace(entry.APIKey)
+			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			relayBaseURL := strings.TrimSpace(entry.RelayBaseURL)
+			if relayBaseURL != "" {
+				proxyURL = "" // relay replaces proxy semantics entirely
+			}
+			idKind := "opencode-go:apikey"
+			id, token := idGen.Next(idKind, key, base, proxyURL)
+			attrs := map[string]string{
+				"source":       fmt.Sprintf("config:opencode-go[%s]", token),
+				"base_url":     base,
+				"provider_key": providerKey,
+				"config_index": strconv.Itoa(i),
+			}
+			metadata := map[string]any{}
+			if row.DisableCooling {
+				metadata["disable_cooling"] = true
+			}
+			// Entry priority takes precedence over the row-level Priority;
+			// a nil entry priority inherits the row value. An explicit
+			// entry *0 stamps "0" (explicit-tier-0 contract), while nil +
+			// row 0 leaves the attribute absent (legacy behavior).
+			switch {
+			case entry.Priority != nil:
+				attrs["priority"] = strconv.Itoa(*entry.Priority)
+			case row.Priority != 0:
+				attrs["priority"] = strconv.Itoa(row.Priority)
+			}
+			addWeightToAttrs(entry.Weight, attrs)
+			// Stamp the row-level routing strategy on every entry auth so
+			// the conductor can activate aggressive in-pool failover. Empty
+			// (unset/unknown) leaves the attribute absent.
+			if st := config.NormalizePoolRoutingStrategy(row.Strategy); st != "" {
+				attrs[coreauth.AttributePoolStrategy] = st
+			}
+			if key != "" {
+				attrs["api_key"] = key
+			}
+			if hash := diff.ComputeOpenCodeGoModelsHash(row.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(row.Headers, attrs)
+			addOpenCodeGoEntryProviderKey(attrs, providerKey, *entry)
+			a := &coreauth.Auth{
+				ID:           id,
+				Provider:     "opencode-go",
+				Label:        "opencode-go-apikey",
+				Prefix:       prefix,
+				Status:       coreauth.StatusActive,
+				ProxyURL:     proxyURL,
+				RelayBaseURL: relayBaseURL,
+				Attributes:   attrs,
+				Metadata:     metadata,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
+			}
+			out = append(out, a)
+			createdEntries++
+		}
+		// No entries: synthesize a bare row auth (keyless, same fallback
+		// shape as the OpenAI-compat path) so the row still shows up live.
+		if createdEntries == 0 {
+			idKind := "opencode-go:apikey"
+			id, token := idGen.Next(idKind, base)
+			attrs := map[string]string{
+				"source":       fmt.Sprintf("config:opencode-go[%s]", token),
+				"base_url":     base,
+				"provider_key": providerKey,
+				"config_index": strconv.Itoa(i),
+			}
+			metadata := map[string]any{}
+			if row.DisableCooling {
+				metadata["disable_cooling"] = true
+			}
+			if row.Priority != 0 {
+				attrs["priority"] = strconv.Itoa(row.Priority)
+			}
+			if hash := diff.ComputeOpenCodeGoModelsHash(row.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(row.Headers, attrs)
+			a := &coreauth.Auth{
+				ID:         id,
+				Provider:   "opencode-go",
+				Label:      "opencode-go-apikey",
+				Prefix:     prefix,
+				Status:     coreauth.StatusActive,
+				Attributes: attrs,
+				Metadata:   metadata,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
+			}
+			out = append(out, a)
+		}
 	}
 	return out
 }

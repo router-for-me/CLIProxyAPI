@@ -87,3 +87,9 @@ func hashJoined(keys []string) string {
 	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
 	return hex.EncodeToString(sum[:])
 }
+
+// ComputeOpenCodeGoModelsHash returns a stable hash for opencode-go model
+// lists, including per-model wire formats.
+func ComputeOpenCodeGoModelsHash(models []config.OpenCodeGoModel) string {
+	return modelconfig.ComputeOpenCodeGoModelsHash(models)
+}
