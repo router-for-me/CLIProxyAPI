@@ -36,6 +36,37 @@ func TestExtractRequestStructure(t *testing.T) {
 	}
 }
 
+// TestScoreLongSystemPromptShortUserTurn guards the role-aware token split: a
+// short user request wrapped in a huge agent system prompt must not be pushed
+// to a hard tier by token count alone.
+func TestScoreLongSystemPromptShortUserTurn(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"model":"x","messages":[{"role":"system","content":"`)
+	for i := 0; i < 3000; i++ {
+		sb.WriteString("instruction word ")
+	}
+	sb.WriteString(`"},{"role":"user","content":"hi what is your name?"}]}`)
+	s := Score([]byte(sb.String()), "openai")
+	if s.Tier != TierSimple {
+		t.Fatalf("expected SIMPLE despite huge system prompt, got %q (total=%v tokens=%v)", s.Tier, s.Total, s.Fields[FieldTokens])
+	}
+}
+
+// TestScoreLongUserTurnTokens pins that a genuinely long user request still
+// scores high on the token dimension.
+func TestScoreLongUserTurnTokens(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"model":"x","messages":[{"role":"user","content":"`)
+	for i := 0; i < 4000; i++ {
+		sb.WriteString("word ")
+	}
+	sb.WriteString(`"}]}`)
+	s := Score([]byte(sb.String()), "openai")
+	if s.Fields[FieldTokens] < 0.5 {
+		t.Fatalf("expected high token sub-score for long user turn, got %v", s.Fields[FieldTokens])
+	}
+}
+
 func TestTierFor(t *testing.T) {
 	cases := []struct {
 		total   float64
