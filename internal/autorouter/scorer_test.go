@@ -67,6 +67,40 @@ func TestScoreLongUserTurnTokens(t *testing.T) {
 	}
 }
 
+// TestScoreCodeFencePayload pins that a fenced code payload lifts the code
+// dimension even when its tokens are plain words that the code-density path
+// (looksLikeCode) does not catch — e.g. Python-style source. A prose-dominant
+// body with a sizeable plain-word fence must score high on FieldCode.
+func TestScoreCodeFencePayload(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"model":"x","messages":[{"role":"user","content":"please summarize what this file does`)
+	sb.WriteString(`\n` + "```python")
+	for i := 0; i < 80; i++ {
+		sb.WriteString(`\n` + "total = total + item price when the cart is not empty")
+	}
+	sb.WriteString(`\n` + "```")
+	// Small prose tail keeps code-like tokens a minority for the density path,
+	// so only the fence signal can lift FieldCode (fence ≈ 96% of the body).
+	for i := 0; i < 6; i++ {
+		sb.WriteString(" the summary should cover the main responsibilities of each function")
+	}
+	sb.WriteString(`"}]}`)
+	s := Score([]byte(sb.String()), "openai")
+	if s.Fields[FieldCode] < 0.5 {
+		t.Fatalf("expected high code sub-score from fenced payload, got %v (fields=%v)", s.Fields[FieldCode], s.Fields)
+	}
+}
+
+// TestScoreTinyFenceStaysSimple pins that a small fenced snippet inside a
+// trivial request does not push the request out of the SIMPLE tier.
+func TestScoreTinyFenceStaysSimple(t *testing.T) {
+	body := `{"model":"x","messages":[{"role":"user","content":"hi what is your name? also explain this one-liner\\n` + "```python" + `\\nprint hello world twice` + `\\n` + "```" + `"}]}`
+	s := Score([]byte(body), "openai")
+	if s.Tier == TierComplex || s.Tier == TierReasoning {
+		t.Fatalf("tiny fence must not harden the tier, got %q (total=%v)", s.Tier, s.Total)
+	}
+}
+
 func TestTierFor(t *testing.T) {
 	cases := []struct {
 		total   float64

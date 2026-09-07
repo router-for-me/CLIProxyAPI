@@ -410,6 +410,12 @@ func extractGeminiText(rawJSON []byte) string {
 // Each dimension uses a meaningful share of the 0-1 range so the weighted total
 // can cross the tier thresholds (0.15 / 0.35 / 0.60) cleanly.
 func scoreDimensions(text string) map[ScoreField]float64 {
+	return scoreDimensionsWithFence(text, 0)
+}
+
+// scoreDimensionsWithFence computes the seven dimensions for a lowered text
+// plus an optional pre-extracted fenced-code token count (0 = none).
+func scoreDimensionsWithFence(text string, fenceTokens int) map[ScoreField]float64 {
 	fields := map[ScoreField]float64{}
 	words := strings.Fields(text)
 	wordCount := len(words)
@@ -452,9 +458,16 @@ func scoreDimensions(text string) map[ScoreField]float64 {
 	}
 
 	// Code: density of code-like tokens. A request that is largely source code
-	// or identifiers scores high.
+	// or identifiers scores high. Fenced/literal code blocks count directly
+	// toward the dimension as well: a request whose payload is mostly source
+	// inside fences is a code request even when the fenced tokens are plain
+	// words the density path cannot see (the fence is taken via max() so the
+	// two signals combine without double-counting). The 1.5 factor means
+	// fences matching ~2/3 of the body saturate the dimension.
 	if wordCount > 0 {
-		fields[FieldCode] = clamp01((float64(codeTokens) / float64(wordCount)) * 4.0)
+		density := clamp01((float64(codeTokens) / float64(wordCount)) * 4.0)
+		fence := clamp01((float64(fenceTokens) / float64(wordCount)) * 1.5)
+		fields[FieldCode] = max(density, fence)
 	}
 	// Reasoning: explicit analytical words saturate around ~3 tokens.
 	fields[FieldReasoningMark] = clamp01(float64(reasoningTokens) / 3.0)
@@ -510,7 +523,7 @@ func scoreDimensions(text string) map[ScoreField]float64 {
 // history contribution at 20%). When the extraction carries no user turn (no
 // roles in the format), the flat token computation stands.
 func scoreDimensionsStructured(ext extractedRequest) map[ScoreField]float64 {
-	fields := scoreDimensions(ext.FlatText)
+	fields := scoreDimensionsWithFence(ext.FlatText, ext.CodeFenceTokens)
 	if userWords := len(strings.Fields(ext.LatestUserText)); userWords > 0 {
 		history := 0.2 * float64(ext.HistoryTokens)
 		fields[FieldTokens] = clamp01((float64(userWords) + history) / 1200.0)
