@@ -825,7 +825,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
 						} else {
-							next := now.Add(12 * time.Hour)
+							next := now.Add(modelSupportCooldown)
 							state.NextRetryAfter = next
 						}
 					} else if isCloudflareChallengeResultError(result.Error) {
@@ -859,8 +859,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 404:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
+							} else if isExplicitModelNotFoundError(result.Error, thinking.ParseSuffix(modelKey).ModelName) {
+								// A 404 that explicitly names this model as unsupported is
+								// demonstrably persistent and keeps the long cooldown.
+								state.NextRetryAfter = now.Add(modelSupportCooldown)
 							} else {
-								next := now.Add(12 * time.Hour)
+								// Concurrent in-flight failures complete in any order: a
+								// transient 404 must not shorten a still-live longer
+								// deadline recorded by an earlier result.
+								next := now.Add(notFoundCooldown)
+								if state.NextRetryAfter.After(next) && state.NextRetryAfter.After(now) {
+									next = state.NextRetryAfter
+								}
 								state.NextRetryAfter = next
 							}
 						case 429:
@@ -2112,7 +2122,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			if disableCooling {
 				auth.NextRetryAfter = time.Time{}
 			} else {
-				auth.NextRetryAfter = now.Add(12 * time.Hour)
+				auth.NextRetryAfter = now.Add(notFoundCooldown)
 			}
 		case 429:
 			auth.StatusMessage = "quota exhausted"
