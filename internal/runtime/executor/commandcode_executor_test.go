@@ -16,6 +16,36 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// TestNormalizeCommandCodeStatusError pins the billing-status normalization:
+// commandcode.ai returns billing exhaustion as 400 bad_request with an
+// "insufficient credits" message; it must surface as 402 so the auth
+// lifecycle applies payment_required cooldown instead of treating it as a
+// request-scoped fault that never rotates credentials.
+func TestNormalizeCommandCodeStatusError(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   int
+	}{
+		{"billing 400 promoted to 402", http.StatusBadRequest, `{"success":false,"error":{"code":"BAD_REQUEST","status":400,"message":"You have insufficient credits to make this request. Please top up."}}`, http.StatusPaymentRequired},
+		{"billing 400 uppercase body also promoted", http.StatusBadRequest, `{"error":"INSUFFICIENT CREDITS"}`, http.StatusPaymentRequired},
+		{"real 402 kept as-is", http.StatusPaymentRequired, `{"error":"payment required"}`, http.StatusPaymentRequired},
+		{"generic 400 untouched", http.StatusBadRequest, `{"error":{"code":"BAD_REQUEST","message":"unknown model"}}`, http.StatusBadRequest},
+		{"context overflow 400 untouched", http.StatusBadRequest, `{"error":{"code":"BAD_REQUEST","message":"context length exceeded"}}`, http.StatusBadRequest},
+		{"429 untouched", http.StatusTooManyRequests, `{"error":"rate limited"}`, http.StatusTooManyRequests},
+		{"500 untouched", http.StatusInternalServerError, `boom`, http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeCommandCodeStatusError(tt.status, []byte(tt.body))
+			if got != tt.want {
+				t.Fatalf("normalizeCommandCodeStatusError(%d, ...) = %d, want %d", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCommandCodeExecutor_NonStream_Success(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-api-key" {

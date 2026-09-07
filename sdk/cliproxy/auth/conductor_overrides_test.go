@@ -2492,6 +2492,62 @@ func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testin
 // plan) marks only that model as unavailable and must NOT take the whole auth
 // credential offline. A subsequent allowed model on the same auth must remain
 // usable.
+// TestManager_MarkResult_CommandCodeBilling400PromotedByExecutor guards the
+// executor-side normalization: the cmdc billing exhaustion surfaces as a
+// 402-classified error (normalizeCommandCodeStatusError promotes the upstream
+// 400 "insufficient credits" body). After promotion the standard payment
+// lifecycle must hold: the credential enters payment_required cooldown instead
+// of being skipped as a request-scoped fault, other credentials stay
+// selectable (rotation actually happens).
+func TestManager_MarkResult_CommandCodeBilling400PromotedByExecutor(t *testing.T) {
+	prevQuota := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prevQuota) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-commandcode-billing-402",
+		Provider: "commandcode",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// This is the exact shape the executor now produces after promotion:
+	// upstream HTTP 400 body "insufficient credits" -> normalized to 402 in
+	// commandCodeStatusError before it reaches MarkResult.
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "z-ai/glm-5.3-flash",
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusPaymentRequired, Message: `commandcode upstream error (status 402): {"success":false,"error":{"code":"BAD_REQUEST","status":400,"message":"You have insufficient credits to make this request."}}`},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+
+	// The model-state path carries the raw wrapped message, but the promoted
+	// status must put the MODEL into payment-rotation cooldown exactly like a
+	// native 402: unavailable + 30m retry-after (not skipped as request-scoped).
+	state := updated.ModelStates["z-ai/glm-5.3-flash"]
+	if state == nil {
+		t.Fatal("expected model state after promoted billing error")
+	}
+	if !state.Unavailable {
+		t.Fatal("expected model state unavailable after promoted billing 402")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatal("expected model retry-after (~30m) after promoted billing 402")
+	}
+	if d := time.Until(state.NextRetryAfter); d > 31*time.Minute || d < 29*time.Minute {
+		t.Fatalf("expected ~30m cooldown, got %v", d)
+	}
+}
+
 func TestManager_MarkResult_402DoesNotGloballyCooldownAuth(t *testing.T) {
 	prevQuota := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

@@ -54,6 +54,22 @@ func (e commandCodeStatusError) Error() string {
 
 func (e commandCodeStatusError) StatusCode() int { return e.code }
 
+// normalizeCommandCodeStatusError maps a commandcode upstream failure status to
+// the semantically correct billing status. commandcode.ai returns billing
+// exhaustion as "400 bad_request" with an "insufficient credits" message
+// instead of 402; the auth lifecycle (clienterror/conductor) classifies every
+// 400 as a request-scoped fault and skips credential rotation for it, so the
+// billing evidence in the body must be promoted to 402 up-front. Real
+// PaymentRequired/429/5xx statuses pass through unchanged, and non-billing 400s
+// (invalid model, context overflow, ...) keep their original request-fault
+// classification.
+func normalizeCommandCodeStatusError(httpStatus int, body []byte) int {
+	if httpStatus == http.StatusBadRequest && strings.Contains(strings.ToLower(string(body)), "insufficient credits") {
+		return http.StatusPaymentRequired
+	}
+	return httpStatus
+}
+
 func init() {
 	// Register custom translators between OpenAI format and Command Code format.
 	sdktranslator.Register(
@@ -257,10 +273,11 @@ func (e *CommandCodeExecutor) Execute(ctx context.Context, a *cliproxyauth.Auth,
 
 	if resp.StatusCode >= 400 {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, CommandCodeMaxErrorBodySize))
+		code := normalizeCommandCodeStatusError(resp.StatusCode, bodyBytes)
 		return cliproxyexecutor.Response{
 			Payload: bodyBytes,
 			Headers: resp.Header,
-		}, commandCodeStatusError{code: resp.StatusCode, msg: fmt.Sprintf("commandcode upstream error (status %d): %s", resp.StatusCode, string(bodyBytes))}
+		}, commandCodeStatusError{code: code, msg: fmt.Sprintf("commandcode upstream error (status %d): %s", code, string(bodyBytes))}
 	}
 
 	// Read and aggregate the NDJSON stream into full ChatCompletion JSON
@@ -312,7 +329,8 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, a *cliproxyauth
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
 		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, CommandCodeMaxErrorBodySize))
-		return nil, commandCodeStatusError{code: resp.StatusCode, msg: fmt.Sprintf("commandcode upstream error (status %d): %s", resp.StatusCode, string(bodyBytes))}
+		code := normalizeCommandCodeStatusError(resp.StatusCode, bodyBytes)
+		return nil, commandCodeStatusError{code: code, msg: fmt.Sprintf("commandcode upstream error (status %d): %s", code, string(bodyBytes))}
 	}
 
 	chunks := make(chan cliproxyexecutor.StreamChunk, 64)
