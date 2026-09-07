@@ -354,6 +354,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/upstream-providers/:id", s.mgmt.UpdateUpstreamProvider)
 		mgmt.DELETE("/upstream-providers/:id", s.mgmt.DeleteUpstreamProvider)
 		mgmt.POST("/upstream-providers/:id/test", s.mgmt.TestUpstreamProvider)
+		// OpenCode Go provider tooling: idempotent seed model catalog,
+		// live upstream model refresh, and the manual per-entry quota
+		// probe (fail-open; the upstream quota API is not live yet).
+		mgmt.POST("/upstream-providers/:id/seed-models", s.mgmt.SeedUpstreamProviderModels)
+		mgmt.POST("/upstream-providers/:id/refresh-models", s.mgmt.RefreshUpstreamProviderModels)
+		mgmt.POST("/upstream-providers/:id/quota", s.mgmt.UpstreamProviderQuota)
 
 		// Named egress-proxy pools (9router-derived Proxy Pools workflow).
 		// Returns 503 when the PG store is not configured. Binding lives on
