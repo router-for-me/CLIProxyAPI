@@ -323,14 +323,16 @@ func TestManager_ForcedCooldownKeepsOrdinaryDeadlinesSeparate(t *testing.T) {
 	})
 	for _, scope := range []string{"model", "credential"} {
 		for _, tc := range []struct {
-			name     string
-			status   int
-			reversed bool
+			name         string
+			status       int
+			forcedStatus int
+			reversed     bool
 		}{
 			{name: "forced_then_404", status: http.StatusNotFound},
 			{name: "forced_then_401", status: http.StatusUnauthorized},
 			{name: "forced_then_429", status: http.StatusTooManyRequests},
 			{name: "404_then_forced", status: http.StatusNotFound, reversed: true},
+			{name: "429_then_forced_429", status: http.StatusTooManyRequests, forcedStatus: http.StatusTooManyRequests, reversed: true},
 		} {
 			for _, restore := range []bool{false, true} {
 				for _, expired := range []bool{false, true} {
@@ -359,6 +361,11 @@ func TestManager_ForcedCooldownKeepsOrdinaryDeadlinesSeparate(t *testing.T) {
 						forced := Result{
 							AuthID: auth.ID, Provider: auth.Provider, Model: model,
 							Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadGateway, Message: "server_is_overloaded"},
+						}
+						if tc.forcedStatus != 0 {
+							forced.Error.HTTPStatus = tc.forcedStatus
+							forcedRetry := 10 * time.Minute
+							forced.RetryAfter = &forcedRetry
 						}
 						ordinaryRetry := 2 * time.Hour
 						ordinary := Result{
@@ -552,5 +559,150 @@ func TestManager_ForcedCooldownMergeAndRecordEquality(t *testing.T) {
 	b.ForcedCooldownUntil = forcedUntil.Add(time.Minute)
 	if cooldownStateRecordEqual(a, b) {
 		t.Fatal("forced-only deadline change would not trigger persistence")
+	}
+}
+
+func TestManager_ForcedCooldownLegacyAuthWithModelHistory(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	SetQuotaCooldownDisabled(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+	for _, tc := range []struct {
+		name            string
+		modelRecords    bool
+		aggregate       bool
+		credential429   bool
+		sameDeadline    bool
+		differentSource bool
+	}{
+		{name: "clean_history"},
+		{name: "unrelated_model_sidecar", modelRecords: true},
+		{name: "same_deadline_different_error", modelRecords: true, sameDeadline: true},
+		{name: "matching_model_aggregate", modelRecords: true, aggregate: true},
+		{name: "aggregate_deadline_and_error_from_different_models", modelRecords: true, aggregate: true, differentSource: true},
+		{name: "credential_quota", modelRecords: true, aggregate: true, credential429: true},
+	} {
+		for _, successModel := range []string{"", "history-model"} {
+			t.Run(tc.name+"/success_model="+successModel, func(t *testing.T) {
+				ctx := context.Background()
+				m, auth := newCooldownMonotonicManager(t, "history-model", "sidecar-model", "earlier-model")
+				// Real model history exists before loading the auth-level sidecar.
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: "history-model", Success: true})
+				store := NewFileCooldownStateStore(t.TempDir())
+				m.SetCooldownStateStore(store)
+				deadline := time.Now().Add(10 * time.Minute)
+				failure := &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadGateway, Message: "legacy forced cooldown"}
+				authRecord := CooldownStateRecord{AuthID: auth.ID, Provider: auth.Provider, NextRetryAfter: deadline, LastError: failure}
+				if tc.credential429 {
+					authRecord.Quota = QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: deadline}
+				}
+				records := []CooldownStateRecord{authRecord}
+				if tc.modelRecords {
+					modelRecord := authRecord
+					modelRecord.Model = "sidecar-model"
+					if !tc.aggregate {
+						if !tc.sameDeadline {
+							modelRecord.NextRetryAfter = deadline.Add(time.Hour)
+						}
+						modelRecord.LastError = &Error{HTTPStatus: http.StatusNotFound, Message: "unrelated model failure"}
+					}
+					if tc.differentSource {
+						modelRecord.NextRetryAfter = deadline.Add(time.Hour)
+						earlier := authRecord
+						earlier.Model = "earlier-model"
+						earlier.LastError = &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusServiceUnavailable, Message: "earlier model failure"}
+						records = append(records, earlier)
+					}
+					records = append(records, modelRecord)
+				}
+				if errSave := store.Save(ctx, records); errSave != nil {
+					t.Fatal(errSave)
+				}
+				if errRestore := m.RestoreCooldownStates(ctx); errRestore != nil {
+					t.Fatal(errRestore)
+				}
+				snapshot, _ := m.GetByID(auth.ID)
+				wantForced := !tc.aggregate || tc.credential429
+				if wantForced && !snapshot.ForcedCooldownUntil.Equal(deadline) {
+					t.Errorf("model history suppressed genuine legacy auth cooldown: got=%v want=%v", snapshot.ForcedCooldownUntil, deadline)
+				} else if !wantForced && !snapshot.ForcedCooldownUntil.IsZero() {
+					t.Errorf("model aggregate became auth-level forced cooldown: %v", snapshot.ForcedCooldownUntil)
+				}
+				if blocked, _, _ := isAuthBlockedForModel(snapshot, "history-model", time.Now()); blocked != wantForced {
+					t.Errorf("history model blocked=%v, want=%v", blocked, wantForced)
+				}
+				if wantForced && !isCredentialBlocked(snapshot, 3, time.Now()) {
+					t.Error("scheduler did not recognize the credential-wide forced cooldown")
+				}
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: successModel, Success: true})
+				snapshot, _ = m.GetByID(auth.ID)
+				if wantForced {
+					if !snapshot.ForcedCooldownUntil.Equal(deadline) || !snapshot.Unavailable || snapshot.NextRetryAfter.Before(deadline) {
+						t.Errorf("success cleared restored auth cooldown: forced=%v next=%v unavailable=%v", snapshot.ForcedCooldownUntil, snapshot.NextRetryAfter, snapshot.Unavailable)
+					}
+					if picked, errPick := m.scheduler.pickSingle(ctx, auth.Provider, "history-model", cliproxyexecutor.Options{}, nil); errPick == nil || picked != nil {
+						t.Error("scheduler selected a credential with an active auth-level forced cooldown")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestManager_ForcedCooldown429RetryAfterBoundaries(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	SetQuotaCooldownDisabled(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+	zero, negative, longer := time.Duration(0), -time.Minute, 3*time.Hour
+	for _, model := range []string{"quota-window-model", ""} {
+		for _, tc := range []struct {
+			name  string
+			retry *time.Duration
+			want  time.Duration
+		}{
+			{name: "zero_floor", retry: &zero, want: minQuotaCooldownFloor},
+			{name: "negative_floor", retry: &negative, want: minQuotaCooldownFloor},
+			{name: "absent_retry_after", want: quotaBackoffBase * (1 << 6)},
+			{name: "longer_explicit_window", retry: &longer, want: longer},
+		} {
+			t.Run("model="+model+"/"+tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				m, auth := newCooldownMonotonicManager(t, "quota-window-model")
+				ordinaryRetry := 2 * time.Hour
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, RetryAfter: &ordinaryRetry, Error: &Error{HTTPStatus: http.StatusTooManyRequests}})
+				ordinaryUntil := forcedCooldownTestState(t, m, auth.ID, model).NextRetryAfter
+				// Use an established backoff level so the no-header window remains
+				// comfortably live without relying on sub-second test timing.
+				m.mu.Lock()
+				if model == "" {
+					m.auths[auth.ID].Quota.BackoffLevel = 6
+				} else {
+					m.auths[auth.ID].ModelStates[model].Quota.BackoffLevel = 6
+				}
+				m.mu.Unlock()
+				forced := Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, RetryAfter: tc.retry, Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusTooManyRequests}}
+				before := time.Now()
+				m.MarkResult(ctx, forced)
+				state := forcedCooldownTestState(t, m, auth.ID, model)
+				deadline := state.ForcedCooldownUntil
+				if deadline.Before(before.Add(tc.want)) || deadline.After(time.Now().Add(tc.want)) {
+					t.Fatalf("forced 429 deadline = %v, want its own %v window", deadline.Sub(before), tc.want)
+				}
+				if tc.want < ordinaryRetry && (!state.NextRetryAfter.Equal(ordinaryUntil) || !state.Quota.NextRecoverAt.Equal(ordinaryUntil)) {
+					t.Fatalf("ordinary quota window shortened before success: %+v", state)
+				}
+				if tc.retry == nil {
+					m.MarkResult(ctx, forced)
+					state = forcedCooldownTestState(t, m, auth.ID, model)
+					if !state.ForcedCooldownUntil.Equal(deadline) || state.Quota.BackoffLevel != 6 {
+						t.Fatalf("in-flight no-header failure escalated the active window: %+v", state)
+					}
+				}
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Success: true})
+				state = forcedCooldownTestState(t, m, auth.ID, model)
+				if !state.Unavailable || !state.NextRetryAfter.Equal(deadline) || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() {
+					t.Fatalf("success retained more than the forced 429 window: %+v", state)
+				}
+			})
+		}
 	}
 }
