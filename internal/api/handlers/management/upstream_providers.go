@@ -145,6 +145,7 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 			InputModalities:  m.InputModalities,
 			OutputModalities: m.OutputModalities,
 			Thinking:         m.Thinking,
+			WireFormat:       m.WireFormat,
 		})
 	}
 	// Convert api-key entry requests to store structs. The entry id is

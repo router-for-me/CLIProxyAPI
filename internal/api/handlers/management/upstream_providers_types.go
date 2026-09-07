@@ -61,6 +61,9 @@ type upstreamProviderModelReq struct {
 	InputModalities  []string       `json:"input_modalities,omitempty"`
 	OutputModalities []string       `json:"output_modalities,omitempty"`
 	Thinking         map[string]any `json:"thinking,omitempty"`
+	// WireFormat selects the upstream protocol for this model ("openai"
+	// default or "anthropic"); only meaningful for opencode-go rows.
+	WireFormat string `json:"wire_format,omitempty"`
 }
 
 type upstreamProviderEntryReq struct {

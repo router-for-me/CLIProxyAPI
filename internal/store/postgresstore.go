@@ -1648,6 +1648,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 				input_modalities   JSONB NOT NULL DEFAULT '[]'::jsonb,
 				output_modalities  JSONB NOT NULL DEFAULT '[]'::jsonb,
 				thinking           JSONB,
+				wire_format        TEXT NOT NULL DEFAULT 'openai',
 				sort_order         INTEGER NOT NULL DEFAULT 0
 		)
 	`, upstreamModelsTable, upstreamProvidersTable)); err != nil {
@@ -1661,6 +1662,14 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		upstreamModelsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter upstream_provider_models add fork column: %w", err)
+	}
+	// Idempotently add wire_format for the same reason; the default covers
+	// pre-opencode-go rows (empty string in Go = the openai default).
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS wire_format TEXT NOT NULL DEFAULT 'openai'`,
+		upstreamModelsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter upstream_provider_models add wire_format column: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS idx_upstream_provider_models_provider ON %s(provider_id)`, upstreamModelsTable,

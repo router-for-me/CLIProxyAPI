@@ -867,3 +867,59 @@ func TestUpstreamProviderStoreAPIKeyEntryDisabledRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestUpstreamProviderStoreModelWireFormatRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_model_wire_format")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	store := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	created, err := store.Create(ctx, UpstreamProvider{
+		ProviderType: "opencode-go",
+		Name:         "ocgo",
+		BaseURL:      "https://opencode.ai/zen/go/v1",
+		Models: []UpstreamProviderModel{
+			{Name: "glm-5.2"},
+			{Name: "minimax-m3", WireFormat: "anthropic"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(created.Models) != 2 {
+		t.Fatalf("Create returned %d models, want 2", len(created.Models))
+	}
+
+	loaded, err := store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(loaded.Models) != 2 {
+		t.Fatalf("Get returned %d models, want 2", len(loaded.Models))
+	}
+	if got := loaded.Models[0].WireFormat; got != "" && got != "openai" {
+		t.Fatalf("default model WireFormat = %q, want empty/openai", got)
+	}
+	if got := loaded.Models[1].WireFormat; got != "anthropic" {
+		t.Fatalf("anthropic model WireFormat = %q, want anthropic", got)
+	}
+
+	// Update clears the wire format back to the openai default (the store
+	// normalizes empty to 'openai' on write).
+	updated, err := store.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "opencode-go",
+		Name:         "ocgo",
+		BaseURL:      "https://opencode.ai/zen/go/v1",
+		Models:       []UpstreamProviderModel{{Name: "minimax-m3"}},
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(updated.Models) != 1 || (updated.Models[0].WireFormat != "" && updated.Models[0].WireFormat != "openai") {
+		t.Fatalf("Update did not reset WireFormat: %+v", updated.Models)
+	}
+}

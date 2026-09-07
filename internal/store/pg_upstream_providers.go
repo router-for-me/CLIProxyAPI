@@ -92,7 +92,11 @@ type UpstreamProviderModel struct {
 	InputModalities  []string       `json:"input_modalities,omitempty"`
 	OutputModalities []string       `json:"output_modalities,omitempty"`
 	Thinking         map[string]any `json:"thinking,omitempty"`
-	SortOrder        int            `json:"sort_order,omitempty"`
+	// WireFormat selects the upstream protocol for this model: "openai"
+	// (default) or "anthropic". Only meaningful for opencode-go rows today;
+	// other provider types leave it empty.
+	WireFormat string `json:"wire_format,omitempty"`
+	SortOrder  int    `json:"sort_order,omitempty"`
 }
 
 // UpstreamProviderAPIKey is one entry of an openai-compatibility provider's
@@ -448,7 +452,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	// Models.
 	mRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, provider_id, name, alias, display_name, force_mapping, fork, image,
-		       input_modalities, output_modalities, thinking, sort_order
+		       input_modalities, output_modalities, thinking, wire_format, sort_order
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.models), p.ID)
 	if err != nil {
@@ -459,7 +463,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 		var alias, displayName sql.NullString
 		var inputMod, outputMod, thinking []byte
 		if err = mRows.Scan(&m.ID, &m.ProviderID, &m.Name, &alias, &displayName, &m.ForceMapping,
-			&m.Fork, &m.Image, &inputMod, &outputMod, &thinking, &m.SortOrder); err != nil {
+			&m.Fork, &m.Image, &inputMod, &outputMod, &thinking, &m.WireFormat, &m.SortOrder); err != nil {
 			mRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider model: %w", err)
 		}
@@ -598,10 +602,10 @@ func (s *pgUpstreamProviderStore) replaceChildrenTx(ctx context.Context, tx *sql
 		}
 		if _, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (provider_id, name, alias, display_name, force_mapping, fork, image,
-			                input_modalities, output_modalities, thinking, sort_order)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			                input_modalities, output_modalities, thinking, wire_format, sort_order)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE(NULLIF($11,''),'openai'),$12)
 		`, s.models), providerID, m.Name, nullableString(m.Alias), nullableString(m.DisplayName),
-			m.ForceMapping, m.Fork, m.Image, input, output, thinking, sortOrder,
+			m.ForceMapping, m.Fork, m.Image, input, output, thinking, nullableString(m.WireFormat), sortOrder,
 		); err != nil {
 			return fmt.Errorf("postgres store: insert upstream provider model: %w", err)
 		}
