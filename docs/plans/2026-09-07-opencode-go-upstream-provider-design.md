@@ -1,7 +1,7 @@
 # OpenCode Go Upstream Provider — Design
 
 Date: 2026-09-07
-Status: Validated (brainstorming session)
+Status: Implemented (see docs/plans/2026-09-07-opencode-go-implementation.md)
 
 ## Goal
 
