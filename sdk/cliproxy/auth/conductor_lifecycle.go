@@ -299,6 +299,7 @@ func preserveForcedCooldownsOnReplacement(auth, current *Auth, now time.Time) bo
 		auth.Status = current.Status
 		auth.StatusMessage = current.StatusMessage
 		auth.LastError = cloneError(current.LastError)
+		auth.lastFailureScope = current.lastFailureScope
 		auth.Quota = mergeQuotaObservation(current.Quota.Clone(), auth.Quota)
 	}
 	if modelsChanged {

@@ -94,6 +94,9 @@ type Auth struct {
 	NextRetryAfter time.Time `json:"next_retry_after"`
 	// ForcedCooldownUntil is the explicit cooldown deadline, independent of ordinary failures.
 	ForcedCooldownUntil time.Time `json:"forced_cooldown_until,omitzero"`
+	// lastFailureScope identifies the result path that last wrote cooldown
+	// state, independently of later diagnostics or removed model history.
+	lastFailureScope string
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 

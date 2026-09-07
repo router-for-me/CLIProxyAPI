@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "auth_id": "auth-monotonic-ordinary-a",
+  "provider": "claude",
+  "updated_at": "2026-09-07T13:18:15.372127413Z",
+  "records": [
+    {
+      "provider": "claude",
+      "auth_id": "auth-monotonic-ordinary-a",
+      "status": "cooling",
+      "next_retry_after": "2026-09-08T09:18:15.370660326+08:00",
+      "reason": "forced B failure",
+      "quota": {
+        "exceeded": false,
+        "next_recover_at": "0001-01-01T00:00:00Z",
+        "observed_at": "0001-01-01T00:00:00Z"
+      },
+      "last_error": {
+        "code": "force_cooldown",
+        "message": "forced B failure",
+        "retryable": false,
+        "http_status": 502
+      },
+      "updated_at": "2026-09-07T21:18:15.372090123+08:00"
+    },
+    {
+      "provider": "claude",
+      "auth_id": "auth-monotonic-ordinary-a",
+      "model": "ordinary-a",
+      "status": "cooling",
+      "next_retry_after": "2026-09-08T09:18:15.370660326+08:00",
+      "reason": "ordinary A failure",
+      "quota": {
+        "exceeded": false,
+        "next_recover_at": "0001-01-01T00:00:00Z",
+        "observed_at": "0001-01-01T00:00:00Z"
+      },
+      "last_error": {
+        "message": "ordinary A failure",
+        "retryable": false,
+        "http_status": 404
+      },
+      "updated_at": "2026-09-07T21:18:15.370660326+08:00"
+    }
+  ]
+}

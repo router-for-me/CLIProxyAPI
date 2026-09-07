@@ -2,13 +2,141 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+func TestManager_ForcedCooldownRecoveryAfterRegistryRemoval(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	SetQuotaCooldownDisabled(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+	for _, recovery := range []string{"success", "refresh"} {
+		for _, lifecycle := range []string{"live", "restore_before_recovery", "replacement_before_recovery", "refresh_error_before_recovery"} {
+			t.Run(recovery+"/"+lifecycle, func(t *testing.T) {
+				ctx := context.Background()
+				m, auth := newCooldownMonotonicManager(t, "ordinary-a", "removed-b", "unrelated-c")
+				store := NewFileCooldownStateStore(t.TempDir())
+				m.SetCooldownStateStore(store)
+				ordinary := 2 * time.Hour
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: "ordinary-a", RetryAfter: &ordinary, Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "ordinary A quota"}})
+				forced := 10 * time.Minute
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: "ordinary-a", RetryAfter: &forced, Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusTooManyRequests, Message: "forced A quota"}})
+				if recovery == "refresh" {
+					m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: "ordinary-a", Error: &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired A token"}})
+				}
+				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: "removed-b", Error: &Error{HTTPStatus: http.StatusNotFound, Message: "removed model B"}})
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "ordinary-a"}, {ID: "unrelated-c"}})
+				m.ReconcileRegistryModelStates(ctx, auth.ID)
+				snapshot, _ := m.GetByID(auth.ID)
+				if _, exists := snapshot.ModelStates["removed-b"]; exists {
+					t.Fatal("registry removal did not remove model B")
+				}
+				deadline := snapshot.ModelStates["ordinary-a"].ForcedCooldownUntil
+				switch lifecycle {
+				case "restore_before_recovery":
+					m, _ = newCooldownMonotonicManager(t, "ordinary-a", "unrelated-c")
+					m.SetCooldownStateStore(store)
+					if errRestore := m.RestoreCooldownStates(ctx); errRestore != nil {
+						t.Fatal(errRestore)
+					}
+				case "replacement_before_recovery":
+					if _, errUpdate := m.Update(ctx, &Auth{ID: auth.ID, Provider: auth.Provider}); errUpdate != nil {
+						t.Fatal(errUpdate)
+					}
+				case "refresh_error_before_recovery":
+					m.RegisterExecutor(&aggregateFailingRefreshExecutor{unauthorizedRefreshExecutor{id: auth.Provider}})
+					if _, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, ""); errRefresh == nil {
+						t.Fatal("expected the diagnostic token-refresh failure")
+					}
+				}
+				if recovery == "refresh" {
+					m.RegisterExecutor(&unauthorizedRefreshExecutor{id: auth.Provider})
+					if _, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, ""); errRefresh != nil {
+						t.Fatal(errRefresh)
+					}
+				} else {
+					m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: "ordinary-a", Success: true})
+				}
+				snapshot, _ = m.GetByID(auth.ID)
+				assertRecoveredForcedAggregate(t, snapshot, "ordinary-a", deadline)
+				assertForcedAggregateSchedulerExpiry(t, m, auth, "ordinary-a", deadline)
+				if blocked, _, _ := isAuthBlockedForModel(snapshot, "unrelated-c", time.Now()); blocked {
+					t.Error("model recovery blocked an unrelated model")
+				}
+				restarted, _ := newCooldownMonotonicManager(t, "ordinary-a", "unrelated-c")
+				restarted.SetCooldownStateStore(store)
+				if errRestore := restarted.RestoreCooldownStates(ctx); errRestore != nil {
+					t.Fatal(errRestore)
+				}
+				snapshot, _ = restarted.GetByID(auth.ID)
+				assertRecoveredForcedAggregate(t, snapshot, "ordinary-a", deadline)
+				assertForcedAggregateSchedulerExpiry(t, restarted, auth, "ordinary-a", deadline)
+			})
+		}
+	}
+}
+
+type aggregateFailingRefreshExecutor struct{ unauthorizedRefreshExecutor }
+
+func (e *aggregateFailingRefreshExecutor) Refresh(context.Context, *Auth) (*Auth, error) {
+	return nil, errors.New("test token-refresh failure")
+}
+
+func TestManager_ForcedCooldownRecoveryKeepsSameErrorCredentialFailure(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	SetQuotaCooldownDisabled(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+	for _, restored := range []bool{false, true} {
+		name := "live"
+		if restored {
+			name = "restored"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			m, auth := newCooldownMonotonicManager(t, "same-error-model")
+			store := NewFileCooldownStateStore(t.TempDir())
+			m.SetCooldownStateStore(store)
+			forced := 10 * time.Minute
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: "same-error-model", RetryAfter: &forced, Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusTooManyRequests}})
+			ordinaryError := &Error{HTTPStatus: http.StatusUnauthorized, Message: "same unauthorized error"}
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: "same-error-model", Error: ordinaryError})
+			// Two result paths can produce the same error and deadline. Use the
+			// real credential failure helper's clock argument to make them exact.
+			m.mu.Lock()
+			current := m.auths[auth.ID]
+			state := current.ModelStates["same-error-model"]
+			deadline := state.ForcedCooldownUntil
+			credentialDeadline := state.NextRetryAfter
+			applyAuthFailureState(current, ordinaryError, nil, state.UpdatedAt, false)
+			m.mu.Unlock()
+			m.PersistCooldownStates(ctx)
+			if restored {
+				m, _ = newCooldownMonotonicManager(t, "same-error-model")
+				m.SetCooldownStateStore(store)
+				if errRestore := m.RestoreCooldownStates(ctx); errRestore != nil {
+					t.Fatal(errRestore)
+				}
+			}
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: "same-error-model", Success: true})
+			snapshot, _ := m.GetByID(auth.ID)
+			if !snapshot.NextRetryAfter.Equal(credentialDeadline) {
+				t.Error("matching error/deadline caused recovery to clear an independent credential failure")
+			}
+			if blocked, _, next := isAuthBlockedForModel(snapshot, "", deadline.Add(time.Second)); !blocked || !next.Equal(credentialDeadline) {
+				t.Error("empty-model selection lost the independent credential deadline")
+			}
+			if blocked, _, _ := isAuthBlockedForModel(snapshot, "", credentialDeadline.Add(time.Second)); blocked {
+				t.Error("selection retained the credential error after its own expiry")
+			}
+		})
+	}
+}
 
 func TestManager_ForcedCooldownRecoveryAggregates(t *testing.T) {
 	previousDisabled := quotaCooldownDisabled.Load()

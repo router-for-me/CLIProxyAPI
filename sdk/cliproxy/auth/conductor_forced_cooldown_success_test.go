@@ -478,20 +478,22 @@ func TestManager_ForcedCooldownLegacySidecars(t *testing.T) {
 			store := NewFileCooldownStateStore(t.TempDir())
 			m.SetCooldownStateStore(store)
 			deadline := time.Now().Add(10 * time.Minute)
-			// This is the old JSON shape: no independent forced deadline.
-			if errSave := store.Save(ctx, []CooldownStateRecord{{
+			// Error-only legacy records retain ordinary recovery semantics.
+			writeLegacyCooldownRecords(t, store.dir, []CooldownStateRecord{{
 				AuthID: auth.ID, Provider: auth.Provider, Model: model,
 				NextRetryAfter: deadline, LastError: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadGateway},
-			}}); errSave != nil {
-				t.Fatal(errSave)
-			}
+			}})
 			if errRestore := m.RestoreCooldownStates(ctx); errRestore != nil {
 				t.Fatal(errRestore)
 			}
-			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Success: true})
 			state := forcedCooldownTestState(t, m, auth.ID, model)
-			if !state.Unavailable || !state.NextRetryAfter.Equal(deadline) || !state.ForcedCooldownUntil.Equal(deadline) {
-				t.Fatalf("legacy forced cooldown was lost: %+v", state)
+			if !state.Unavailable || !state.NextRetryAfter.Equal(deadline) || !state.ForcedCooldownUntil.IsZero() {
+				t.Fatalf("legacy ordinary cooldown was lost or promoted: %+v", state)
+			}
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Success: true})
+			state = forcedCooldownTestState(t, m, auth.ID, model)
+			if state.Unavailable || !state.NextRetryAfter.IsZero() || !state.ForcedCooldownUntil.IsZero() {
+				t.Fatalf("legacy ordinary cooldown did not recover on success: %+v", state)
 			}
 		})
 	}
@@ -560,6 +562,11 @@ func TestManager_ForcedCooldownMergeAndRecordEquality(t *testing.T) {
 	if cooldownStateRecordEqual(a, b) {
 		t.Fatal("forced-only deadline change would not trigger persistence")
 	}
+	b = a
+	b.LastFailureScope = cooldownFailureScopeModel
+	if cooldownStateRecordEqual(a, b) {
+		t.Fatal("failure provenance change would not trigger persistence")
+	}
 }
 
 func TestManager_ForcedCooldownLegacyAuthWithModelHistory(t *testing.T) {
@@ -614,33 +621,28 @@ func TestManager_ForcedCooldownLegacyAuthWithModelHistory(t *testing.T) {
 					}
 					records = append(records, modelRecord)
 				}
-				if errSave := store.Save(ctx, records); errSave != nil {
-					t.Fatal(errSave)
-				}
+				writeLegacyCooldownRecords(t, store.dir, records)
 				if errRestore := m.RestoreCooldownStates(ctx); errRestore != nil {
 					t.Fatal(errRestore)
 				}
 				snapshot, _ := m.GetByID(auth.ID)
-				wantForced := !tc.aggregate || tc.credential429
-				if wantForced && !snapshot.ForcedCooldownUntil.Equal(deadline) {
-					t.Errorf("model history suppressed genuine legacy auth cooldown: got=%v want=%v", snapshot.ForcedCooldownUntil, deadline)
-				} else if !wantForced && !snapshot.ForcedCooldownUntil.IsZero() {
-					t.Errorf("model aggregate became auth-level forced cooldown: %v", snapshot.ForcedCooldownUntil)
+				if !snapshot.ForcedCooldownUntil.IsZero() || !snapshot.NextRetryAfter.Equal(deadline) {
+					t.Errorf("legacy auth deadline was discarded or promoted: forced=%v next=%v", snapshot.ForcedCooldownUntil, snapshot.NextRetryAfter)
 				}
-				if blocked, _, _ := isAuthBlockedForModel(snapshot, "history-model", time.Now()); blocked != wantForced {
-					t.Errorf("history model blocked=%v, want=%v", blocked, wantForced)
+				if blocked, _, _ := isAuthBlockedForModel(snapshot, "history-model", time.Now()); blocked != tc.credential429 {
+					t.Errorf("history model blocked=%v, want=%v", blocked, tc.credential429)
 				}
-				if wantForced && !isCredentialBlocked(snapshot, 3, time.Now()) {
-					t.Error("scheduler did not recognize the credential-wide forced cooldown")
+				if tc.credential429 && !isCredentialBlocked(snapshot, 3, time.Now()) {
+					t.Error("scheduler did not recognize the legacy credential quota")
 				}
 				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: successModel, Success: true})
 				snapshot, _ = m.GetByID(auth.ID)
-				if wantForced {
-					if !snapshot.ForcedCooldownUntil.Equal(deadline) || !snapshot.Unavailable || snapshot.NextRetryAfter.Before(deadline) {
-						t.Errorf("success cleared restored auth cooldown: forced=%v next=%v unavailable=%v", snapshot.ForcedCooldownUntil, snapshot.NextRetryAfter, snapshot.Unavailable)
+				if tc.credential429 {
+					if !snapshot.ForcedCooldownUntil.IsZero() || !snapshot.Unavailable || snapshot.Quota.Reason != "credential_quota" || !snapshot.Quota.NextRecoverAt.Equal(deadline) {
+						t.Errorf("success changed the legacy credential quota: %+v", snapshot.Quota)
 					}
 					if picked, errPick := m.scheduler.pickSingle(ctx, auth.Provider, "history-model", cliproxyexecutor.Options{}, nil); errPick == nil || picked != nil {
-						t.Error("scheduler selected a credential with an active auth-level forced cooldown")
+						t.Error("scheduler selected a credential with an active legacy credential quota")
 					}
 				}
 			})
