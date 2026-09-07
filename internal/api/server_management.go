@@ -353,6 +353,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/upstream-providers/:id", s.mgmt.GetUpstreamProvider)
 		mgmt.PUT("/upstream-providers/:id", s.mgmt.UpdateUpstreamProvider)
 		mgmt.DELETE("/upstream-providers/:id", s.mgmt.DeleteUpstreamProvider)
+		mgmt.POST("/upstream-providers/:id/test", s.mgmt.TestUpstreamProvider)
 
 		// Named egress-proxy pools (9router-derived Proxy Pools workflow).
 		// Returns 503 when the PG store is not configured. Binding lives on
