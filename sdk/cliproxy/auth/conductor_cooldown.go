@@ -835,7 +835,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								state.NextRetryAfter = next
 							}
 						case 404:
-							if disableCooling {
+							if isHTMLNotFoundResultError(result.Error) {
+								state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+								state.Unavailable = !state.NextRetryAfter.IsZero()
+							} else if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
 								next := now.Add(12 * time.Hour)
@@ -1705,6 +1708,18 @@ func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time
 	return next, backoffLevel
 }
 
+// An HTML 404 page is not evidence that a model is unsupported. Use the
+// transient upstream cooldown so a temporary route failure cannot suspend it
+// for twelve hours. Structured model errors and Cloudflare challenges retain
+// their existing classification.
+func isHTMLNotFoundResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusNotFound || isModelNotFoundIdentifier(err.Code) {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Message))
+	return strings.HasPrefix(message, "<html>") || strings.HasPrefix(message, "<html ") || strings.HasPrefix(message, "<!doctype html")
+}
+
 func isRequestScopedNotFoundResultError(err *Error) bool {
 	if err == nil || statusCodeFromResult(err) != http.StatusNotFound {
 		return false
@@ -2060,7 +2075,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			}
 		case 404:
 			auth.StatusMessage = "not_found"
-			if disableCooling {
+			if isHTMLNotFoundResultError(resultErr) {
+				auth.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
+				auth.Unavailable = !auth.NextRetryAfter.IsZero()
+			} else if disableCooling {
 				auth.NextRetryAfter = time.Time{}
 			} else {
 				auth.NextRetryAfter = now.Add(12 * time.Hour)
