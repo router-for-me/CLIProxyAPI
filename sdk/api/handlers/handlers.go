@@ -333,6 +333,11 @@ type BaseAPIHandler struct {
 	// AutoRouterProfileResolver optionally loads the versioned scoring profile
 	// for a router. When nil the scorer uses built-in defaults.
 	AutoRouterProfileResolver AutoRouterProfileResolver
+
+	// AutoRouterCompiledProfileResolver optionally loads the precompiled
+	// scoring profile for a router. When set it takes precedence over
+	// AutoRouterProfileResolver (same data, compiled once per version).
+	AutoRouterCompiledProfileResolver AutoRouterCompiledProfileResolver
 }
 
 // ModelsCatalogResolver resolves an internal provider key to the official
@@ -352,6 +357,14 @@ type GlobalModelRouteResolver interface {
 // resolver when versioned per-router scoring profiles are available.
 type AutoRouterProfileResolver interface {
 	AutoRouterProfile(ctx context.Context, routerID string) *autorouter.Profile
+}
+
+// AutoRouterCompiledProfileResolver is the compiled-profile extension of
+// AutoRouterProfileResolver: it returns a precompiled scoring profile so the
+// per-request path skips normalization work. Optional; when nil the scorer
+// uses built-in defaults via the legacy profile path.
+type AutoRouterCompiledProfileResolver interface {
+	AutoRouterProfileCompiled(ctx context.Context, routerID string) *autorouter.CompiledProfile
 }
 
 // AutoRouterResolver resolves an Auto Router definition by its client-facing

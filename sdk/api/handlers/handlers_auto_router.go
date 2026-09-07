@@ -116,6 +116,20 @@ func (r autoRouterResolved) withDecisionContext(ctx context.Context) context.Con
 	return coreusage.WithAutoRouterDecision(ctx, string(r.decision.ScoredTier), string(r.decision.MappingTier), r.decision.DecisionCause, r.decision.ProfileVersion, r.decision.ProfileHash, raw)
 }
 
+// autoRouterScoreCache is the process-local score cache shared by every
+// handler instance. Bodies never enter the cache (SHA-256 keys only); a
+// profile upsert changes the profile hash and so invalidates naturally.
+var autoRouterScoreCache = autorouter.NewScoreCache(0)
+
+// compiledVersion extracts the profile version from a compiled profile
+// (0 when nil).
+func compiledVersion(compiled *autorouter.CompiledProfile) int64 {
+	if compiled == nil {
+		return 0
+	}
+	return compiled.Version
+}
+
 // resolveAutoRouterModel scores an incoming request and returns the upstream
 // model id to send it to, when the requested model matches an Auto Router.
 func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtocol, modelName string, rawJSON []byte) autoRouterResolved {
@@ -126,17 +140,44 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 	if router == nil {
 		return autoRouterResolved{}
 	}
+	// Prefer the compiled profile (normalization done once per version); fall
+	// back to the legacy per-request profile path when only that resolver is
+	// wired.
+	if compiledResolver, ok := h.AutoRouterProfileResolver.(interface {
+		AutoRouterProfileCompiled(context.Context, string) *autorouter.CompiledProfile
+	}); ok {
+		compiled := compiledResolver.AutoRouterProfileCompiled(ctx, router.ID)
+		hash := ""
+		if compiled != nil {
+			hash = compiled.Hash
+		}
+		cacheKey := autoRouterScoreCache.Key(rawJSON, entryProtocol, router.ID, hash)
+		if cached, hit := autoRouterScoreCache.Get(cacheKey); hit {
+			return h.autoRouterResolvedFromScore(router, cached, compiled.Hash, compiledVersion(compiled))
+		}
+		result := autorouter.ScoreWithProfileCompiled(rawJSON, entryProtocol, compiled)
+		autoRouterScoreCache.Put(cacheKey, result)
+		return h.autoRouterResolvedFromScore(router, result, result.ProfileHash, result.ProfileVersion)
+	}
 	var profile *autorouter.Profile
 	if h.AutoRouterProfileResolver != nil {
 		profile = h.AutoRouterProfileResolver.AutoRouterProfile(ctx, router.ID)
 	}
 	result := autorouter.ScoreWithProfile(rawJSON, entryProtocol, profile)
+	return h.autoRouterResolvedFromScore(router, result, result.ProfileHash, result.ProfileVersion)
+}
+
+// autoRouterResolvedFromScore turns a score result into the concrete upstream
+// resolution: resolves the tier against the router's config, builds the
+// explainability snapshot, and returns the matched outcome. Shared by the
+// compiled-profile path (with its score cache) and the legacy path.
+func (h *BaseAPIHandler) autoRouterResolvedFromScore(router *store.AutoRouter, result autorouter.ScoreResult, profileHash string, profileVersion int64) autoRouterResolved {
 	resolved, ok := autorouter.Resolve(result.EffectiveTier, storeRouterToConfig(router))
 	if !ok || resolved == nil || strings.TrimSpace(resolved.Model) == "" {
 		return autoRouterResolved{}
 	}
 	decision := autorouter.DecisionSnapshot{
-		ProfileVersion: result.ProfileVersion, ProfileHash: result.ProfileHash, ProfileSnapshot: result.ProfileConfig,
+		ProfileVersion: profileVersion, ProfileHash: profileHash, ProfileSnapshot: result.ProfileConfig,
 		ScoreTotal: result.Score.Total, ScoreFields: result.Score.Fields, ReasoningMarkers: result.Score.ReasoningMarkers,
 		ScoredTier: result.Score.Tier, EffectiveTier: result.EffectiveTier, DecisionCause: result.DecisionCause,
 		MatchedRules: result.MatchedRules, MappingTier: resolved.MappingTier, FallbackChain: resolved.FallbackChain, TargetModel: resolved.Model,
