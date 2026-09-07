@@ -45,7 +45,7 @@ func ScoreWithProfile(rawJSON []byte, format string, profile *Profile) ScoreResu
 		hash = profile.ProfileHash
 		version = profile.ProfileVersion
 	}
-	text := extractText(rawJSON, format)
+	text := extractRequest(rawJSON, format).FlatText
 	fields := scoreDimensions(text)
 	weights := config.Weights
 	if weights == nil {
@@ -157,25 +157,205 @@ func extractMessageString(content gjson.Result) string {
 	return content.String()
 }
 
-// extractText gathers every piece of message text plus system instructions from
-// the request body, joined into a single lowercased string for scoring.
-func extractText(rawJSON []byte, format string) string {
+// extractedRequest is the structured result of parsing one request body:
+// everything the scorer needs, extracted once. It replaces the single
+// lowercased flat string that extractText used to return.
+type extractedRequest struct {
+	// FlatText is the whitespace-joined, lowercased text of every message plus
+	// system instructions (the historical extractText output).
+	FlatText string
+	// LatestUserText is the lowercased text of the final message whose role is
+	// "user" (empty when the format has no notion of roles, e.g. Gemini).
+	LatestUserText string
+	// HistoryTokens is the lowercased word count of everything except the
+	// latest user turn (system + prior turns + assistant replies).
+	HistoryTokens int
+	// CodeFenceTokens is the raw (non-lowercased) whitespace-token count of
+	// fenced code blocks (``` … ```) and multi-line JSON/XML-looking literals
+	// found anywhere in message text.
+	CodeFenceTokens int
+}
+
+// extractRequest parses the raw body into an extractedRequest according to the
+// entry protocol format, mirroring the format dispatch of the former
+// extractText. One walk yields the flat scoring text, the role split, and the
+// fenced-code payload size.
+func extractRequest(rawJSON []byte, format string) extractedRequest {
 	format = strings.ToLower(strings.TrimSpace(format))
 	switch format {
 	case constant.OpenAI, constant.OpenaiResponse, constant.Claude:
-		return extractMessagesAndSystem(rawJSON)
+		return extractChatRequest(rawJSON)
 	case constant.Gemini, constant.GeminiInteractions, constant.Interactions:
-		return extractGeminiText(rawJSON)
+		return extractGeminiRequest(rawJSON)
 	default:
 		// Unknown/empty format: probe for the most specific known shape.
 		if gjson.GetBytes(rawJSON, "contents").Exists() {
-			return extractGeminiText(rawJSON)
+			return extractGeminiRequest(rawJSON)
 		}
 		if gjson.GetBytes(rawJSON, "messages").Exists() || gjson.GetBytes(rawJSON, "input").Exists() {
-			return extractMessagesAndSystem(rawJSON)
+			return extractChatRequest(rawJSON)
 		}
-		return strings.ToLower(gjson.GetBytes(rawJSON, "prompt").String())
+		flat := strings.ToLower(gjson.GetBytes(rawJSON, "prompt").String())
+		return extractedRequest{FlatText: flat, LatestUserText: flat}
 	}
+}
+
+// extractChatRequest walks the OpenAI/Claude message arrays (including the
+// Responses "input"/"instructions" fields) once, accumulating the lowercased
+// flat text, tracking the final user turn, and sizing the history word count.
+// Responses-format messages carry text via either a `content` block (string or
+// array of content parts) or a top-level `text` field — the `text` field is
+// picked up regardless of whether the message also declares a `role`, so a
+// role-less message that holds its prompt body in `text` is not silently
+// dropped from scoring.
+func extractChatRequest(rawJSON []byte) extractedRequest {
+	root := gjson.ParseBytes(rawJSON)
+	var ext extractedRequest
+	var flat strings.Builder
+	collect := func(role, text string) {
+		if text == "" {
+			return
+		}
+		lower := strings.ToLower(text)
+		flat.WriteString(lower)
+		flat.WriteByte(' ')
+		if role == "user" {
+			ext.LatestUserText = lower
+			return
+		}
+		ext.HistoryTokens += len(strings.Fields(lower))
+	}
+	if sys := root.Get("system").String(); sys != "" {
+		collect("system", sys)
+	}
+	if instr := root.Get("instructions").String(); instr != "" {
+		collect("system", instr)
+	}
+	for _, msg := range root.Get("messages").Array() {
+		collect(strings.ToLower(msg.Get("role").String()), extractMessageString(msg.Get("content")))
+	}
+	for _, msg := range root.Get("input").Array() {
+		role := strings.ToLower(msg.Get("role").String())
+		text := extractMessageString(msg.Get("content"))
+		if t := msg.Get("text").String(); t != "" {
+			if text != "" {
+				text += " "
+			}
+			text += t
+		}
+		collect(role, text)
+	}
+	ext.FlatText = strings.TrimSpace(flat.String())
+	if ext.LatestUserText != "" {
+		ext.CodeFenceTokens = countFenceTokens(ext.LatestUserText)
+	}
+	return ext
+}
+
+// extractGeminiRequest reads text out of Gemini contents[].parts[].text. The
+// format has no per-part roles in practice, so LatestUserText stays empty and
+// every part counts as history — the token dimension then falls back to the
+// flat text (see scoreDimensions).
+func extractGeminiRequest(rawJSON []byte) extractedRequest {
+	root := gjson.ParseBytes(rawJSON)
+	var ext extractedRequest
+	var flat strings.Builder
+	var raw strings.Builder
+	if sys := root.Get("system_instruction.parts.#.text").String(); sys != "" {
+		flat.WriteString(strings.ToLower(sys))
+		flat.WriteByte(' ')
+		raw.WriteString(sys)
+		raw.WriteByte('\n')
+		ext.HistoryTokens += len(strings.Fields(sys))
+	}
+	for _, t := range root.Get("contents.#.parts.#.text").Array() {
+		if s := t.String(); s != "" {
+			flat.WriteString(strings.ToLower(s))
+			flat.WriteByte(' ')
+			raw.WriteString(s)
+			raw.WriteByte('\n')
+			ext.HistoryTokens += len(strings.Fields(s))
+		}
+	}
+	ext.FlatText = strings.TrimSpace(flat.String())
+	ext.CodeFenceTokens = countFenceTokens(raw.String())
+	return ext
+}
+
+// countFenceTokens counts whitespace-separated tokens inside fenced code
+// regions of the raw (non-lowercased) text: ``` fenced blocks and multi-line
+// brace/bracket literals (a line opening with "{" or "[" whose block spans at
+// least two further indented lines and closes). Single-line braces in prose do
+// not count. Deterministic and allocation-light (no slices kept).
+func countFenceTokens(text string) int {
+	const fenceMarker = "```"
+	total := 0
+	inFence := false
+	var literal strings.Builder
+	// literalDepth tracks brace/bracket nesting across consecutive lines for the
+	// non-fenced literal detector; >0 means we are inside a multi-line literal.
+	literalDepth := 0
+	literalLines := 0
+	flushLiteral := func() {
+		total += len(strings.Fields(literal.String()))
+		literal.Reset()
+		literalLines = 0
+		literalDepth = 0
+	}
+	for line := range strings.Lines(text) {
+		trimmed := strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(strings.TrimSpace(trimmed), fenceMarker) {
+			if inFence {
+				// Closing fence: flush the accumulated block.
+				total += len(strings.Fields(literal.String()))
+				literal.Reset()
+				inFence = false
+			} else {
+				// Opening fence: flush any literal state first.
+				flushLiteral()
+				inFence = true
+			}
+			continue
+		}
+		if inFence {
+			literal.WriteString(trimmed)
+			literal.WriteByte(' ')
+			continue
+		}
+		// Multi-line brace/bracket literal detection outside fences.
+		openCount := strings.Count(trimmed, "{") + strings.Count(trimmed, "[")
+		closeCount := strings.Count(trimmed, "}") + strings.Count(trimmed, "]")
+		indent := strings.TrimSpace(trimmed)
+		opensLiteral := literalDepth == 0 && openCount > closeCount &&
+			(strings.HasPrefix(indent, "{") || strings.HasPrefix(indent, "["))
+		if opensLiteral {
+			literalDepth = openCount - closeCount
+			literalLines = 1
+			literal.WriteString(trimmed)
+			literal.WriteByte(' ')
+			continue
+		}
+		if literalDepth > 0 {
+			literal.WriteString(trimmed)
+			literal.WriteByte(' ')
+			literalLines++
+			literalDepth += openCount - closeCount
+			if literalDepth <= 0 {
+				if literalLines >= 3 {
+					total += len(strings.Fields(literal.String()))
+				}
+				flushLiteral()
+			}
+		}
+	}
+	// Unterminated block at EOF: treat as literal only when it spanned enough
+	// lines to look like real code/JSON rather than a stray brace.
+	if literalDepth > 0 && literalLines >= 3 {
+		total += len(strings.Fields(literal.String()))
+	} else if inFence && literal.Len() > 0 {
+		total += len(strings.Fields(literal.String()))
+	}
+	return total
 }
 
 // extractMessagesAndSystem reads the OpenAI/Claude message arrays (including

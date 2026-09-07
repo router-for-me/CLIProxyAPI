@@ -1,8 +1,40 @@
 package autorouter
 
 import (
+	"strings"
 	"testing"
 )
+
+// TestExtractRequestStructure guards the structured-extraction contract: the
+// latest user turn, history size, and fenced code payload must all be captured
+// from a single pass over the body.
+func TestExtractRequestStructure(t *testing.T) {
+	// The fence payload is embedded with JSON \n escapes (a real newline inside
+	// a JSON string literal would truncate parsing at the fence marker).
+	body := `{"model":"x","messages":[
+		{"role":"system","content":"You are a coding agent. Follow instructions."},
+		{"role":"user","content":"hi there"},
+		{"role":"assistant","content":"sure"},
+		{"role":"user","content":"please summarize this:\\n` + "```go\\nfunc main() { a := 1 }\\n```\\n" + `thanks"}
+	]}`
+	ext := extractRequest([]byte(body), "openai")
+	if len(ext.LatestUserText) == 0 {
+		t.Fatal("expected latest user text to be captured")
+	}
+	if !strings.Contains(ext.LatestUserText, "summarize") {
+		t.Fatalf("latest user text = %q", ext.LatestUserText)
+	}
+	if ext.CodeFenceTokens == 0 {
+		t.Fatal("expected code fence tokens > 0")
+	}
+	if ext.FlatText == "" {
+		t.Fatal("expected flat text to be populated")
+	}
+	// Flat text covers system + history + latest turn.
+	if !strings.Contains(ext.FlatText, "coding agent") {
+		t.Fatal("expected flat text to include system prompt")
+	}
+}
 
 func TestTierFor(t *testing.T) {
 	cases := []struct {
