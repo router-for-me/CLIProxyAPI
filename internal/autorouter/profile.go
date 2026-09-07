@@ -209,9 +209,12 @@ func normalizeKeywordText(text string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// matchedKeywordRules returns deterministic matches against normalized text.
+// matchedKeywordRules returns deterministic matches for the supplied rules.
+// The text must already be normalized (normalizeKeywordText applied by the
+// caller exactly once per request); keywords are normalized here because they
+// are short and rule definitions may arrive raw from the profile store.
 func matchedKeywordRules(text string, rules []KeywordTierRule) []MatchedKeywordRule {
-	text = " " + normalizeKeywordText(text) + " "
+	text = " " + text + " "
 	matched := make([]MatchedKeywordRule, 0)
 	for _, rule := range rules {
 		keywords := make([]string, 0)

@@ -75,7 +75,10 @@ func ScoreWithProfile(rawJSON []byte, format string, profile *Profile) ScoreResu
 	total = clamp01(total)
 	markers := countReasoningMarkers(ext.FlatText)
 	scoredTier := tierFor(total, markers, config.Thresholds)
-	matched := matchedKeywordRules(ext.FlatText, config.KeywordTierRules)
+	// Single normalization pass: the flat text is normalized once here and the
+	// result feeds keyword matching; the dimensions keep working on the
+	// punctuation-preserving lowercase text (looksLikeCode needs the symbols).
+	matched := matchedKeywordRules(normalizeKeywordText(ext.FlatText), config.KeywordTierRules)
 	effective := scoredTier
 	cause := DecisionCauseComplexityScorer
 	if len(matched) > 0 {
@@ -356,54 +359,6 @@ func countFenceTokens(text string) int {
 		total += len(strings.Fields(literal.String()))
 	}
 	return total
-}
-
-// extractMessagesAndSystem reads the OpenAI/Claude message arrays (including
-// the Responses "input"/"instructions" fields) and joins their text.
-func extractMessagesAndSystem(rawJSON []byte) string {
-	root := gjson.ParseBytes(rawJSON)
-	var parts []string
-	if sys := root.Get("system").String(); sys != "" {
-		parts = append(parts, sys)
-	}
-	if instr := root.Get("instructions").String(); instr != "" {
-		parts = append(parts, instr)
-	}
-	for _, msg := range root.Get("messages").Array() {
-		if t := extractMessageString(msg.Get("content")); t != "" {
-			parts = append(parts, t)
-		}
-	}
-	// Responses format places content in "input" (an array of message objects).
-	// Each message may carry text via either a `content` block (string or array
-	// of content parts) or a top-level `text` field — the `text` field must be
-	// picked up regardless of whether the message also declares a `role`, so a
-	// role-less message that holds its prompt body in `text` is not silently
-	// dropped from scoring.
-	for _, msg := range root.Get("input").Array() {
-		if t := extractMessageString(msg.Get("content")); t != "" {
-			parts = append(parts, t)
-		}
-		if t := msg.Get("text").String(); t != "" {
-			parts = append(parts, t)
-		}
-	}
-	return strings.ToLower(strings.Join(parts, " "))
-}
-
-// extractGeminiText reads text out of Gemini contents[].parts[].text.
-func extractGeminiText(rawJSON []byte) string {
-	root := gjson.ParseBytes(rawJSON)
-	var parts []string
-	if sys := root.Get("system_instruction.parts.#.text").String(); sys != "" {
-		parts = append(parts, sys)
-	}
-	for _, t := range root.Get("contents.#.parts.#.text").Array() {
-		if s := t.String(); s != "" {
-			parts = append(parts, s)
-		}
-	}
-	return strings.ToLower(strings.Join(parts, " "))
 }
 
 // scoreDimensions computes the seven 0-1 sub-scores for a lowered text string.

@@ -101,6 +101,18 @@ func TestScoreTinyFenceStaysSimple(t *testing.T) {
 	}
 }
 
+// TestKeywordMatchOnPreNormalizedText pins the Task 4 contract: after the
+// single-pass refactor, matchedKeywordRules receives text that
+// normalizeKeywordText already processed, and phrase keywords still match.
+func TestKeywordMatchOnPreNormalizedText(t *testing.T) {
+	rules := []KeywordTierRule{{ID: "db", Tier: TierComplex, Keywords: []string{"migrate the database"}}}
+	text := normalizeKeywordText("Please migrate the database to Postgres 16, this weekend!")
+	matched := matchedKeywordRules(text, rules)
+	if len(matched) != 1 || matched[0].ID != "db" {
+		t.Fatalf("matched = %+v", matched)
+	}
+}
+
 func TestTierFor(t *testing.T) {
 	cases := []struct {
 		total   float64
