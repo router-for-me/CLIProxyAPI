@@ -147,6 +147,10 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
+	// OpenCodeGo holds opencode-go upstream provider rows rendered from the
+	// upstream_providers table.
+	OpenCodeGo []OpenCodeGo `yaml:"opencode-go,omitempty" json:"opencode-go,omitempty"`
+
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`

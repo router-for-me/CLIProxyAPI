@@ -864,3 +864,143 @@ func (m OpenAICompatibilityModel) GetForceMapping() bool    { return m.ForceMapp
 func (m OpenAICompatibilityModel) GetIsCompat() bool        { return m.IsCompat }
 
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+// OpenCodeGoKey represents one API key entry of an opencode-go provider row,
+// mirroring OpenAICompatibilityAPIKey field-for-field so the scheduler,
+// pool bindings, and routing strategy behave identically.
+type OpenCodeGoKey struct {
+	// APIKey is the authentication key for accessing the OpenCode Zen Go endpoint.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Name is the optional identity for this API key entry.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+
+	// UpstreamProviderEntryID is the persisted child-row ID for this API key entry.
+	UpstreamProviderEntryID int64 `yaml:"upstream-provider-entry-id,omitempty" json:"-"`
+
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
+	// Priority is the optional selection tier for this entry within the
+	// pool. nil = inherit the pool-level Priority. The scheduler serves the
+	// highest ready tier first and descends when a tier cools down.
+	Priority *int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Disabled excludes this entry from routing without deleting it. The
+	// upstreamsync renderer skips disabled entries when projecting the
+	// provider row into config.yaml, so the credential stays persisted and
+	// re-activates when toggled back.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// ProxyPoolID is renderer-managed: the proxy_pools row this entry was
+	// rendered from. Kept so the seed path round-trips the binding. Operators
+	// should not set this field manually.
+	ProxyPoolID *int64 `yaml:"proxy-pool-id,omitempty" json:"-"`
+
+	// RelayBaseURL is renderer-managed: set when the entry is bound to an
+	// active relay-type proxy pool. Empty = standard proxy semantics.
+	// Operators should not set this field manually.
+	RelayBaseURL string `yaml:"relay-base-url,omitempty" json:"-"`
+}
+
+// OpenCodeGoModel represents one upstream model on an opencode-go provider
+// row, carrying the wire format the upstream expects for that model.
+type OpenCodeGoModel struct {
+	// Name is the actual model name used by the upstream provider.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the model name alias that clients will use to reference this model.
+	Alias string `yaml:"alias" json:"alias"`
+
+	// DisplayName is the optional human-readable name shown in model catalogs.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+
+	// ForceMapping rewrites upstream response model fields back to Alias.
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	// WireFormat selects the upstream protocol for this model: "openai"
+	// (default, /chat/completions + Bearer) or "anthropic"
+	// (/v1/messages + x-api-key). Unknown values fall back to "openai".
+	WireFormat string `yaml:"wire-format,omitempty" json:"wire-format,omitempty"`
+
+	// Thinking configures the thinking/reasoning capability for this model.
+	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+}
+
+func (m OpenCodeGoModel) GetName() string { return m.Name }
+
+func (m OpenCodeGoModel) GetAlias() string { return m.Alias }
+
+func (m OpenCodeGoModel) GetDisplayName() string   { return m.DisplayName }
+func (m OpenCodeGoModel) GetMaxContextLength() int { return m.MaxContextLength }
+func (m OpenCodeGoModel) GetForceMapping() bool    { return m.ForceMapping }
+
+func (m OpenCodeGoModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+// OpenCodeGo represents an opencode-go upstream provider row: one OpenCode
+// Zen Go account (https://opencode.ai/zen/go/v1) with multiple API key
+// entries. Models declare their per-model wire format (openai or anthropic).
+type OpenCodeGo struct {
+	// Name is the identifier for this opencode-go configuration.
+	Name string `yaml:"name" json:"name"`
+
+	// Priority controls selection preference when multiple providers or credentials match.
+	// Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Strategy selects the in-pool credential selection strategy for this
+	// provider's api-key-entries (round-robin, weighted-round-robin,
+	// fill-first). Empty = follow the global routing.strategy. Any non-empty
+	// value opts the pool into aggressive failover: entry errors rotate to
+	// the next entry before surfacing to the client.
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// Disabled prevents this provider from being used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// Prefix optionally namespaces model aliases for this provider.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL is the base URL for the OpenCode Zen Go endpoint.
+	BaseURL string `yaml:"base-url" json:"base-url"`
+
+	// ProxyURL overrides the global proxy setting for this provider row.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// ProxyPoolID is renderer-managed: the proxy_pools row backing this
+	// provider. Kept so the seed path round-trips the binding. Operators
+	// should not set this field manually.
+	ProxyPoolID *int64 `yaml:"proxy-pool-id,omitempty" json:"-"`
+
+	// RelayBaseURL is renderer-managed: set when the row is bound to an
+	// active relay-type proxy pool. Empty = standard proxy semantics.
+	// Operators should not set this field manually.
+	RelayBaseURL string `yaml:"relay-base-url,omitempty" json:"-"`
+
+	// UpstreamProviderID is renderer-managed: the stable upstream_providers
+	// row id this config entry was rendered from. Consumed by the runtime
+	// routing-key derivation (util.UpstreamProviderKey) and stamped onto
+	// each synthesized auth's provider_key attribute. Operators should not
+	// set this field manually.
+	UpstreamProviderID int64 `yaml:"upstream-provider-id,omitempty" json:"-"`
+
+	// APIKeyEntries defines API keys with optional per-key proxy configuration.
+	APIKeyEntries []OpenCodeGoKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
+
+	// Models defines the model configurations including aliases for routing.
+	Models []OpenCodeGoModel `yaml:"models" json:"models"`
+
+	// Headers optionally adds extra HTTP headers for requests sent to this provider.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
+	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+}
