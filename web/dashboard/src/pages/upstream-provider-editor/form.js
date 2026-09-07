@@ -293,7 +293,9 @@ export function buildPayload(form, providerType) {
         payload.token_expiry = t.toISOString();
       }
     }
-  } else if (openai || providerType === 'claude-api-key') {
+  } else if (openai || claude || isOpenCodeGo(providerType)) {
+    // Entry-bearing providers: openai-compatibility, claude-api-key, and
+    // opencode-go all use the multi-row api_key_entries editor below.
     // Row-level proxy pool binding: emitted only when set so a cleared
     // picker keeps the manual proxy_url (or none) semantics intact.
     const rowPoolId = Number(form.proxy_pool_id);

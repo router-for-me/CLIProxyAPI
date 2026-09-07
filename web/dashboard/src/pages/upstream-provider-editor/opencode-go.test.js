@@ -15,6 +15,28 @@ import {
   savedEntryOptions,
 } from './OpenCodeGoPanel.jsx';
 
+// Regression: opencode-go rows use the same multi-row api_key_entries
+// editor as openai-compatibility / claude-api-key; buildPayload must emit
+// the entries array instead of falling through to the single api_key
+// branch (which silently dropped every entry on Save).
+test('buildPayload: opencode-go emits api_key_entries like the other entry-bearing types', () => {
+  const form = {
+    name: 'ocgo',
+    base_url: OPENCODE_GO_BASE_URL,
+    api_key_entries: [
+      { id: 0, name: 'alpha', api_key: 'FAKE-SECRET-A', proxy_url: '' },
+      { id: 5, name: 'beta', api_key: 'FAKE-SECRET-B', proxy_url: '', disabled: true },
+    ],
+  };
+  const payload = buildPayload(form, 'opencode-go');
+  assert.ok(Array.isArray(payload.api_key_entries), 'entries must serialize as an array');
+  assert.equal(payload.api_key_entries.length, 2);
+  assert.equal(payload.api_key_entries[0].api_key, 'FAKE-SECRET-A');
+  assert.equal(payload.api_key_entries[1].id, 5);
+  assert.equal(payload.api_key_entries[1].disabled, true);
+  assert.ok(!('api_key' in payload), 'opencode-go must not gain the legacy single api_key field');
+});
+
 test('buildSchemas: opencode-go exists with entries, wire-format models, and quota_url', () => {
   const schemas = buildSchemas();
   const schema = schemas['opencode-go'];
