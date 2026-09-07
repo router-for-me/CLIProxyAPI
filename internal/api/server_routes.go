@@ -87,6 +87,8 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 		v1.POST("/alpha/search", s.codexAlphaSearch)
+		v1.POST("/alpha/history/v2/:action", s.codexAlphaHistoryNotes)
+		v1.POST("/alpha/notes/v2/:action", s.codexAlphaHistoryNotes)
 		v1.POST("/live", s.codexLiveHandler.Handle)
 		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)
 	}
@@ -124,6 +126,8 @@ func (s *Server) setupRoutes() {
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
 		codexDirect.POST("/alpha/search", s.codexAlphaSearch)
+		codexDirect.POST("/alpha/history/v2/:action", s.codexAlphaHistoryNotes)
+		codexDirect.POST("/alpha/notes/v2/:action", s.codexAlphaHistoryNotes)
 	}
 
 	// Gemini compatible API routes
