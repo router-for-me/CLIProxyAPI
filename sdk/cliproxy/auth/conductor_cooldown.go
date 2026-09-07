@@ -357,6 +357,12 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	}
 	reason := strings.TrimSpace(record.Reason)
 	model := strings.TrimSpace(record.Model)
+	forcedUntil := record.ForcedCooldownUntil
+	// Older sidecars only had the error marker. An aggregate auth record must
+	// not turn a restored model cooldown into an auth-level forced cooldown.
+	if forcedUntil.IsZero() && record.LastError != nil && record.LastError.Code == ErrorCodeForceCooldown && (model != "" || len(auth.ModelStates) == 0) {
+		forcedUntil = record.NextRetryAfter
+	}
 	quota := record.Quota
 	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
 		quota.NextRecoverAt = record.NextRetryAfter
@@ -366,6 +372,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		auth.Unavailable = true
 		auth.Status = StatusError
 		auth.NextRetryAfter = record.NextRetryAfter
+		auth.ForcedCooldownUntil = forcedUntil
 		applyCooldownFields(&auth.Quota, quota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
 		auth.Generation++
@@ -379,13 +386,14 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 
 	state := ensureModelState(auth, model)
 	mergeModelState(state, &ModelState{
-		Unavailable:    true,
-		Status:         StatusError,
-		StatusMessage:  reason,
-		NextRetryAfter: record.NextRetryAfter,
-		Quota:          quota,
-		LastError:      cloneError(record.LastError),
-		UpdatedAt:      updatedAt,
+		Unavailable:         true,
+		Status:              StatusError,
+		StatusMessage:       reason,
+		NextRetryAfter:      record.NextRetryAfter,
+		ForcedCooldownUntil: forcedUntil,
+		Quota:               quota,
+		LastError:           cloneError(record.LastError),
+		UpdatedAt:           updatedAt,
 	})
 	auth.Generation++
 	auth.UpdatedAt = updatedAt
@@ -398,9 +406,10 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		return false
 	}
 	changed := false
-	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
+	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || !auth.ForcedCooldownUntil.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
+		auth.ForcedCooldownUntil = time.Time{}
 		applyCooldownFields(&auth.Quota, QuotaState{})
 		auth.UpdatedAt = now
 		changed = true
@@ -409,9 +418,10 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		if state == nil {
 			continue
 		}
-		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() {
+		if state.Unavailable || !state.NextRetryAfter.IsZero() || !state.ForcedCooldownUntil.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
+			state.ForcedCooldownUntil = time.Time{}
 			applyCooldownFields(&state.Quota, QuotaState{})
 			state.UpdatedAt = now
 			changed = true
@@ -652,6 +662,7 @@ func cooldownStateRecordEqual(a, b CooldownStateRecord) bool {
 		a.Status != b.Status ||
 		a.Reason != b.Reason ||
 		!a.NextRetryAfter.Equal(b.NextRetryAfter) ||
+		!a.ForcedCooldownUntil.Equal(b.ForcedCooldownUntil) ||
 		!a.UpdatedAt.Equal(b.UpdatedAt) ||
 		!cooldownQuotaEqual(a.Quota, b.Quota) {
 		return false
@@ -681,15 +692,16 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 		return CooldownStateRecord{}, false
 	}
 	return CooldownStateRecord{
-		Provider:       strings.TrimSpace(auth.Provider),
-		AuthID:         auth.ID,
-		AuthFile:       cooldownAuthFile(auth),
-		Status:         "cooling",
-		NextRetryAfter: auth.NextRetryAfter,
-		Reason:         cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
-		Quota:          cooldownFieldsOf(auth.Quota),
-		LastError:      cloneError(auth.LastError),
-		UpdatedAt:      auth.UpdatedAt,
+		Provider:            strings.TrimSpace(auth.Provider),
+		AuthID:              auth.ID,
+		AuthFile:            cooldownAuthFile(auth),
+		Status:              "cooling",
+		NextRetryAfter:      auth.NextRetryAfter,
+		ForcedCooldownUntil: auth.ForcedCooldownUntil,
+		Reason:              cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
+		Quota:               cooldownFieldsOf(auth.Quota),
+		LastError:           cloneError(auth.LastError),
+		UpdatedAt:           auth.UpdatedAt,
 	}, true
 }
 
@@ -699,16 +711,17 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 		return CooldownStateRecord{}, false
 	}
 	return CooldownStateRecord{
-		Provider:       strings.TrimSpace(auth.Provider),
-		AuthID:         auth.ID,
-		AuthFile:       cooldownAuthFile(auth),
-		Model:          model,
-		Status:         "cooling",
-		NextRetryAfter: state.NextRetryAfter,
-		Reason:         cooldownReason(state.StatusMessage, state.Quota, state.LastError),
-		Quota:          cooldownFieldsOf(state.Quota),
-		LastError:      cloneError(state.LastError),
-		UpdatedAt:      state.UpdatedAt,
+		Provider:            strings.TrimSpace(auth.Provider),
+		AuthID:              auth.ID,
+		AuthFile:            cooldownAuthFile(auth),
+		Model:               model,
+		Status:              "cooling",
+		NextRetryAfter:      state.NextRetryAfter,
+		ForcedCooldownUntil: state.ForcedCooldownUntil,
+		Reason:              cooldownReason(state.StatusMessage, state.Quota, state.LastError),
+		Quota:               cooldownFieldsOf(state.Quota),
+		LastError:           cloneError(state.LastError),
+		UpdatedAt:           state.UpdatedAt,
 	}, true
 }
 
@@ -772,9 +785,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
 				modelState = state
-				// A success from an already in-flight request must not undo an
-				// explicit cooldown before its deadline.
-				if !hasActiveForcedCooldown(state.LastError, state.NextRetryAfter, now) {
+				// Success heals ordinary failures but cannot clear an explicit
+				// cooldown before its own deadline.
+				if state.ForcedCooldownUntil.After(now) {
+					state.NextRetryAfter = state.ForcedCooldownUntil
+					state.Unavailable = true
+					state.Status = StatusError
+					applyCooldownFields(&state.Quota, QuotaState{})
+				} else {
 					resetModelState(state, now)
 				}
 				updateAggregatedAvailability(auth, now)
@@ -783,16 +801,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
 				}
-			} else if !hasActiveForcedCooldown(auth.LastError, auth.NextRetryAfter, now) {
+			} else if auth.ForcedCooldownUntil.After(now) {
+				auth.NextRetryAfter = auth.ForcedCooldownUntil
+				auth.Unavailable = true
+				auth.Status = StatusError
+				applyCooldownFields(&auth.Quota, QuotaState{})
+			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
 					state := ensureModelState(auth, modelKey)
-					preserveForcedCooldown := hasActiveForcedCooldown(state.LastError, state.NextRetryAfter, now)
 					disableCooling := m.cooldownDisabledForAuth(auth)
-					if preserveForcedCooldown || (result.Error != nil && result.Error.Code == ErrorCodeForceCooldown) {
+					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 						disableCooling = false
 					}
 					modelState = state
@@ -802,11 +824,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					prevModelRetryAfter := state.NextRetryAfter
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
-						if preserveForcedCooldown {
-							state.LastError.Code = ErrorCodeForceCooldown
-						}
 						state.StatusMessage = result.Error.Message
-						auth.LastError = cloneError(state.LastError)
+						auth.LastError = cloneError(result.Error)
 						auth.StatusMessage = result.Error.Message
 					}
 
@@ -924,10 +943,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.NextRetryAfter = now.Add(transientErrorCooldown)
 						state.Unavailable = true
 					}
-					// Later failures cannot shorten a live deadline. A zero write
-					// can clear ordinary cooldowns, but not an explicit action.
-					if (preserveForcedCooldown || !state.NextRetryAfter.IsZero()) && prevModelRetryAfter.After(state.NextRetryAfter) && prevModelRetryAfter.After(now) {
+					// Capture this action's deadline before merging ordinary cooldowns.
+					state.ForcedCooldownUntil = extendForcedCooldown(state.ForcedCooldownUntil, state.NextRetryAfter, result.Error)
+					// Later failures only extend ordinary live cooldowns. Explicit
+					// actions remain a floor even when ordinary cooling is disabled.
+					if !state.NextRetryAfter.IsZero() && prevModelRetryAfter.After(state.NextRetryAfter) && prevModelRetryAfter.After(now) {
 						state.NextRetryAfter = prevModelRetryAfter
+						state.Unavailable = true
+					}
+					if state.ForcedCooldownUntil.After(now) && state.ForcedCooldownUntil.After(state.NextRetryAfter) {
+						state.NextRetryAfter = state.ForcedCooldownUntil
 						state.Unavailable = true
 					}
 					auth.Status = StatusError
@@ -1118,11 +1143,12 @@ func mergeModelState(target, source *ModelState) *ModelState {
 		fallback = target
 	}
 	merged := ModelState{
-		Status:         preferred.Status,
-		StatusMessage:  preferred.StatusMessage,
-		Unavailable:    target.Unavailable || source.Unavailable,
-		NextRetryAfter: target.NextRetryAfter,
-		LastError:      cloneError(preferred.LastError),
+		Status:              preferred.Status,
+		StatusMessage:       preferred.StatusMessage,
+		Unavailable:         target.Unavailable || source.Unavailable,
+		NextRetryAfter:      target.NextRetryAfter,
+		ForcedCooldownUntil: target.ForcedCooldownUntil,
+		LastError:           cloneError(preferred.LastError),
 		Quota: QuotaState{
 			Exceeded:      target.Quota.Exceeded || source.Quota.Exceeded,
 			Reason:        preferred.Quota.Reason,
@@ -1135,6 +1161,9 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	merged.Quota = mergeQuotaObservation(merged.Quota, preferred.Quota)
 	if source.NextRetryAfter.After(merged.NextRetryAfter) {
 		merged.NextRetryAfter = source.NextRetryAfter
+	}
+	if source.ForcedCooldownUntil.After(merged.ForcedCooldownUntil) {
+		merged.ForcedCooldownUntil = source.ForcedCooldownUntil
 	}
 	if source.Quota.NextRecoverAt.After(merged.Quota.NextRecoverAt) {
 		merged.Quota.NextRecoverAt = source.Quota.NextRecoverAt
@@ -1163,10 +1192,12 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	return target
 }
 
-// Explicit cooldown actions retain their deadline even if an older request
-// succeeds. Ordinary cooldowns still use the existing success-based recovery.
-func hasActiveForcedCooldown(lastError *Error, nextRetryAfter, now time.Time) bool {
-	return lastError != nil && lastError.Code == ErrorCodeForceCooldown && nextRetryAfter.After(now)
+// Only explicit actions can extend the success-resistant cooldown deadline.
+func extendForcedCooldown(current, next time.Time, resultErr *Error) time.Time {
+	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && next.After(current) {
+		return next
+	}
+	return current
 }
 
 func resetModelState(state *ModelState, now time.Time) {
@@ -1177,6 +1208,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.Status = StatusActive
 	state.StatusMessage = ""
 	state.NextRetryAfter = time.Time{}
+	state.ForcedCooldownUntil = time.Time{}
 	state.LastError = nil
 	applyCooldownFields(&state.Quota, QuotaState{})
 	state.UpdatedAt = now
@@ -1258,7 +1290,7 @@ func modelStateIsClean(state *ModelState) bool {
 	if state.Status != StatusActive {
 		return false
 	}
-	if state.Unavailable || state.StatusMessage != "" || !state.NextRetryAfter.IsZero() || state.LastError != nil {
+	if state.Unavailable || state.StatusMessage != "" || !state.NextRetryAfter.IsZero() || !state.ForcedCooldownUntil.IsZero() || state.LastError != nil {
 		return false
 	}
 	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
@@ -1389,6 +1421,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.BackoffLevel = 0
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
+	auth.ForcedCooldownUntil = time.Time{}
 	auth.UpdatedAt = now
 }
 
@@ -2023,10 +2056,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
-	preserveForcedCooldown := hasActiveForcedCooldown(auth.LastError, auth.NextRetryAfter, now)
-	if preserveForcedCooldown {
-		disableCooling = false
-	}
 	defer func() {
 		if disableCooling && auth.NextRetryAfter.IsZero() && auth.Quota.NextRecoverAt.IsZero() {
 			auth.Unavailable = false
@@ -2038,9 +2067,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	auth.UpdatedAt = now
 	if resultErr != nil {
 		auth.LastError = cloneError(resultErr)
-		if preserveForcedCooldown {
-			auth.LastError.Code = ErrorCodeForceCooldown
-		}
 		if resultErr.Message != "" {
 			auth.StatusMessage = resultErr.Message
 		}
@@ -2119,13 +2145,18 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.Unavailable = !auth.NextRetryAfter.IsZero()
 		}
 	}
-	// A zero write can clear ordinary cooldowns, but not an explicit action.
-	if (preserveForcedCooldown || !auth.NextRetryAfter.IsZero()) && prevAuthRetryAfter.After(auth.NextRetryAfter) && prevAuthRetryAfter.After(now) {
+	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
+		auth.NextRetryAfter = now.Add(transientErrorCooldown)
+		auth.Unavailable = true
+	}
+	// Capture this action's deadline before merging ordinary cooldowns.
+	auth.ForcedCooldownUntil = extendForcedCooldown(auth.ForcedCooldownUntil, auth.NextRetryAfter, resultErr)
+	if !auth.NextRetryAfter.IsZero() && prevAuthRetryAfter.After(auth.NextRetryAfter) && prevAuthRetryAfter.After(now) {
 		auth.NextRetryAfter = prevAuthRetryAfter
 		auth.Unavailable = true
 	}
-	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
-		auth.NextRetryAfter = now.Add(transientErrorCooldown)
+	if auth.ForcedCooldownUntil.After(now) && auth.ForcedCooldownUntil.After(auth.NextRetryAfter) {
+		auth.NextRetryAfter = auth.ForcedCooldownUntil
 		auth.Unavailable = true
 	}
 }

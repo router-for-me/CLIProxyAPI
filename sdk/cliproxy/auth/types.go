@@ -92,6 +92,8 @@ type Auth struct {
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
+	// ForcedCooldownUntil is the explicit cooldown deadline, independent of ordinary failures.
+	ForcedCooldownUntil time.Time `json:"forced_cooldown_until,omitzero"`
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
@@ -212,6 +214,8 @@ type ModelState struct {
 	Unavailable bool `json:"unavailable"`
 	// NextRetryAfter defines the per-model retry time.
 	NextRetryAfter time.Time `json:"next_retry_after"`
+	// ForcedCooldownUntil is the explicit cooldown deadline, independent of ordinary failures.
+	ForcedCooldownUntil time.Time `json:"forced_cooldown_until,omitzero"`
 	// LastError records the latest error observed for this model.
 	LastError *Error `json:"last_error,omitempty"`
 	// Quota retains quota information if this model hit rate limits.

@@ -167,7 +167,7 @@ func testForcedCooldownInFlightSuccess(t *testing.T, mode string, status int, co
 	}
 	after, _ := m.GetByID(auth.ID)
 	stateAfter := after.ModelStates[model]
-	if stateAfter == nil || !stateAfter.Unavailable || !stateAfter.NextRetryAfter.Equal(deadline) {
+	if stateAfter == nil || !stateAfter.Unavailable || !stateAfter.NextRetryAfter.Equal(deadline) || !stateAfter.ForcedCooldownUntil.Equal(deadline) {
 		t.Errorf("in-flight success cleared forced cooldown: %+v", stateAfter)
 	}
 	if after.Success != 1 || after.Failed != 1 {
@@ -176,7 +176,7 @@ func testForcedCooldownInFlightSuccess(t *testing.T, mode string, status int, co
 	records, errLoad := store.Load(ctx)
 	found := false
 	for _, record := range records {
-		if record.Model == model && record.NextRetryAfter.Equal(deadline) && record.LastError != nil && record.LastError.Code == ErrorCodeForceCooldown {
+		if record.Model == model && record.NextRetryAfter.Equal(deadline) && record.ForcedCooldownUntil.Equal(deadline) && record.LastError != nil && record.LastError.Code == ErrorCodeForceCooldown {
 			found = true
 		}
 	}
@@ -248,8 +248,10 @@ func TestManager_ForcedCooldownRecoveryBoundaries(t *testing.T) {
 					m.mu.Lock()
 					current := m.auths[auth.ID]
 					current.NextRetryAfter = time.Now().Add(-time.Second)
+					current.ForcedCooldownUntil = current.NextRetryAfter
 					if model != "" {
 						current.ModelStates[model].NextRetryAfter = current.NextRetryAfter
+						current.ModelStates[model].ForcedCooldownUntil = current.NextRetryAfter
 					}
 					m.mu.Unlock()
 				}
@@ -276,7 +278,11 @@ func TestManager_ForcedCooldownRecoveryBoundaries(t *testing.T) {
 				}
 				wantRetained := !tc.ordinary && !tc.expired && !tc.manualReset
 				if wantRetained {
-					if !unavailable || !next.Equal(deadline) || lastError == nil || lastError.Code != ErrorCodeForceCooldown {
+					wantCode := ErrorCodeForceCooldown
+					if tc.secondFailure {
+						wantCode = ""
+					}
+					if !unavailable || !next.Equal(deadline) || lastError == nil || lastError.Code != wantCode {
 						t.Fatalf("forced cooldown not retained: unavailable=%v next=%v lastError=%v", unavailable, next, lastError)
 					}
 					if blocked, _, _ := isAuthBlockedForModel(after, "recovery-model", deadline.Add(time.Second)); blocked {
@@ -305,5 +311,246 @@ func TestManager_ForcedCooldownRecoveryBoundaries(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestManager_ForcedCooldownKeepsOrdinaryDeadlinesSeparate(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	previousTransient := transientErrorCooldownSeconds.Load()
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(previousDisabled)
+		transientErrorCooldownSeconds.Store(previousTransient)
+	})
+	for _, scope := range []string{"model", "credential"} {
+		for _, tc := range []struct {
+			name     string
+			status   int
+			reversed bool
+		}{
+			{name: "forced_then_404", status: http.StatusNotFound},
+			{name: "forced_then_401", status: http.StatusUnauthorized},
+			{name: "forced_then_429", status: http.StatusTooManyRequests},
+			{name: "404_then_forced", status: http.StatusNotFound, reversed: true},
+		} {
+			for _, restore := range []bool{false, true} {
+				for _, expired := range []bool{false, true} {
+					name := scope + "/" + tc.name
+					if restore {
+						name += "/restored"
+					} else {
+						name += "/live"
+					}
+					if expired {
+						name += "/after_forced_expiry"
+					} else {
+						name += "/during_forced_cooldown"
+					}
+					t.Run(name, func(t *testing.T) {
+						SetQuotaCooldownDisabled(false)
+						SetTransientErrorCooldownSeconds(600)
+						ctx := context.Background()
+						m, auth := newCooldownMonotonicManager(t, "separate-deadlines")
+						model := "separate-deadlines"
+						if scope == "credential" {
+							model = ""
+						}
+						store := NewFileCooldownStateStore(t.TempDir())
+						m.SetCooldownStateStore(store)
+						forced := Result{
+							AuthID: auth.ID, Provider: auth.Provider, Model: model,
+							Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadGateway, Message: "server_is_overloaded"},
+						}
+						ordinaryRetry := 2 * time.Hour
+						ordinary := Result{
+							AuthID: auth.ID, Provider: auth.Provider, Model: model, RetryAfter: &ordinaryRetry,
+							Error: &Error{HTTPStatus: tc.status, Message: "ordinary upstream failure"},
+						}
+						beforeForce := time.Now()
+						if tc.reversed {
+							m.MarkResult(ctx, ordinary)
+							m.MarkResult(ctx, forced)
+						} else {
+							m.MarkResult(ctx, forced)
+							m.MarkResult(ctx, ordinary)
+						}
+						state := forcedCooldownTestState(t, m, auth.ID, model)
+						forcedUntil := state.ForcedCooldownUntil
+						if forcedUntil.Before(beforeForce.Add(10*time.Minute)) || forcedUntil.After(time.Now().Add(10*time.Minute)) {
+							t.Fatalf("forced deadline inherited an ordinary duration: %v", forcedUntil.Sub(beforeForce))
+						}
+						if !state.NextRetryAfter.After(forcedUntil.Add(19 * time.Minute)) {
+							t.Fatalf("ordinary cooldown was lost before success: %+v", state)
+						}
+						if !tc.reversed && (state.LastError == nil || state.LastError.Code != "" || state.LastError.HTTPStatus != tc.status) {
+							t.Fatalf("ordinary error was relabeled as forced: %+v", state.LastError)
+						}
+						if ordinary.Error.Code != "" {
+							t.Fatal("caller-owned ordinary error was mutated")
+						}
+
+						if expired {
+							// Expire only the explicit action, leaving the longer ordinary
+							// deadline live. No wall-clock waiting is needed.
+							m.mu.Lock()
+							current := m.auths[auth.ID]
+							if model == "" {
+								current.ForcedCooldownUntil = time.Now().Add(-time.Second)
+							} else {
+								current.ModelStates[model].ForcedCooldownUntil = time.Now().Add(-time.Second)
+							}
+							m.mu.Unlock()
+							m.persistCooldownStates(ctx)
+						}
+						if restore {
+							restored := NewManager(nil, nil, nil)
+							restored.SetCooldownStateStore(store)
+							if _, errRegister := restored.Register(ctx, auth); errRegister != nil {
+								t.Fatal(errRegister)
+							}
+							if errRestore := restored.RestoreCooldownStates(ctx); errRestore != nil {
+								t.Fatal(errRestore)
+							}
+							m = restored
+							if model != "" {
+								snapshot, _ := m.GetByID(auth.ID)
+								if !snapshot.ForcedCooldownUntil.IsZero() {
+									t.Fatal("model cooldown was promoted into an auth-level forced deadline")
+								}
+							}
+						}
+						m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Success: true})
+						state = forcedCooldownTestState(t, m, auth.ID, model)
+						if expired {
+							if state.Unavailable || !state.NextRetryAfter.IsZero() || !state.ForcedCooldownUntil.IsZero() || state.LastError != nil {
+								t.Fatalf("success did not heal ordinary cooldown after forced expiry: %+v", state)
+							}
+						} else if !state.Unavailable || !state.NextRetryAfter.Equal(forcedUntil) || !state.ForcedCooldownUntil.Equal(forcedUntil) || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() {
+							t.Fatalf("success should retain only the original forced deadline: %+v", state)
+						}
+						if _, _, errReset := m.ResetQuota(ctx, auth.ID); errReset != nil {
+							t.Fatal(errReset)
+						}
+						state = forcedCooldownTestState(t, m, auth.ID, model)
+						if state.Unavailable || !state.NextRetryAfter.IsZero() || !state.ForcedCooldownUntil.IsZero() {
+							t.Fatalf("manual reset left cooldown state behind: %+v", state)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func forcedCooldownTestState(t *testing.T, m *Manager, authID, model string) *ModelState {
+	t.Helper()
+	auth, ok := m.GetByID(authID)
+	if !ok || auth == nil {
+		t.Fatal("auth missing")
+	}
+	if model != "" {
+		state := auth.ModelStates[model]
+		if state == nil {
+			t.Fatal("model state missing")
+		}
+		return state
+	}
+	return &ModelState{
+		Unavailable: auth.Unavailable, NextRetryAfter: auth.NextRetryAfter,
+		ForcedCooldownUntil: auth.ForcedCooldownUntil, LastError: auth.LastError, Quota: auth.Quota,
+	}
+}
+
+func TestManager_ForcedCooldownLegacySidecars(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	SetQuotaCooldownDisabled(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousDisabled) })
+	for _, model := range []string{"legacy-model", ""} {
+		t.Run("model="+model, func(t *testing.T) {
+			ctx := context.Background()
+			m, auth := newCooldownMonotonicManager(t, "legacy-model")
+			store := NewFileCooldownStateStore(t.TempDir())
+			m.SetCooldownStateStore(store)
+			deadline := time.Now().Add(10 * time.Minute)
+			// This is the old JSON shape: no independent forced deadline.
+			if errSave := store.Save(ctx, []CooldownStateRecord{{
+				AuthID: auth.ID, Provider: auth.Provider, Model: model,
+				NextRetryAfter: deadline, LastError: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadGateway},
+			}}); errSave != nil {
+				t.Fatal(errSave)
+			}
+			if errRestore := m.RestoreCooldownStates(ctx); errRestore != nil {
+				t.Fatal(errRestore)
+			}
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Success: true})
+			state := forcedCooldownTestState(t, m, auth.ID, model)
+			if !state.Unavailable || !state.NextRetryAfter.Equal(deadline) || !state.ForcedCooldownUntil.Equal(deadline) {
+				t.Fatalf("legacy forced cooldown was lost: %+v", state)
+			}
+		})
+	}
+}
+
+func TestManager_ForcedCooldownOnlyExplicitActionsExtendDeadline(t *testing.T) {
+	previousDisabled := quotaCooldownDisabled.Load()
+	previousTransient := transientErrorCooldownSeconds.Load()
+	t.Cleanup(func() {
+		quotaCooldownDisabled.Store(previousDisabled)
+		transientErrorCooldownSeconds.Store(previousTransient)
+	})
+	for _, model := range []string{"forced-extensions", ""} {
+		t.Run("model="+model, func(t *testing.T) {
+			SetQuotaCooldownDisabled(false)
+			SetTransientErrorCooldownSeconds(600)
+			ctx := context.Background()
+			m, auth := newCooldownMonotonicManager(t, "forced-extensions")
+			result := Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusBadGateway}}
+			m.MarkResult(ctx, result)
+			first := forcedCooldownTestState(t, m, auth.ID, model).ForcedCooldownUntil
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Error: &Error{HTTPStatus: http.StatusNotFound}})
+			SetTransientErrorCooldownSeconds(15)
+			m.MarkResult(ctx, result)
+			state := forcedCooldownTestState(t, m, auth.ID, model)
+			if !state.ForcedCooldownUntil.Equal(first) {
+				t.Fatalf("shorter explicit action inherited the ordinary 12h deadline: %+v", state)
+			}
+			longer := 2 * time.Hour
+			result.Error = &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusTooManyRequests}
+			result.RetryAfter = &longer
+			before := time.Now()
+			m.MarkResult(ctx, result)
+			state = forcedCooldownTestState(t, m, auth.ID, model)
+			if state.ForcedCooldownUntil.Before(before.Add(longer)) || state.ForcedCooldownUntil.After(time.Now().Add(longer)) {
+				t.Fatalf("longer explicit action did not establish its own 2h deadline: %+v", state)
+			}
+			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: auth.Provider, Model: model, Success: true})
+			after := forcedCooldownTestState(t, m, auth.ID, model)
+			if !after.Unavailable || !after.NextRetryAfter.Equal(state.ForcedCooldownUntil) {
+				t.Fatalf("success did not retain only the explicit deadline: %+v", after)
+			}
+		})
+	}
+}
+
+func TestManager_ForcedCooldownMergeAndRecordEquality(t *testing.T) {
+	now := time.Now()
+	forcedUntil := now.Add(10 * time.Minute)
+	ordinaryUntil := now.Add(12 * time.Hour)
+	forced := &ModelState{Unavailable: true, NextRetryAfter: forcedUntil, ForcedCooldownUntil: forcedUntil}
+	ordinary := &ModelState{Unavailable: true, NextRetryAfter: ordinaryUntil, UpdatedAt: now}
+	for _, reversed := range []bool{false, true} {
+		target, source := forced.Clone(), ordinary.Clone()
+		if reversed {
+			target, source = source, target
+		}
+		merged := mergeModelState(target, source)
+		if !merged.NextRetryAfter.Equal(ordinaryUntil) || !merged.ForcedCooldownUntil.Equal(forcedUntil) {
+			t.Fatalf("merge conflated ordinary and forced deadlines: %+v", merged)
+		}
+	}
+	a := CooldownStateRecord{NextRetryAfter: ordinaryUntil, ForcedCooldownUntil: forcedUntil}
+	b := a
+	b.ForcedCooldownUntil = forcedUntil.Add(time.Minute)
+	if cooldownStateRecordEqual(a, b) {
+		t.Fatal("forced-only deadline change would not trigger persistence")
 	}
 }
