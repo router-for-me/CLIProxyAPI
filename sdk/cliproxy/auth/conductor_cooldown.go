@@ -390,9 +390,23 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	}
 
 	if model == "" {
+		nextRetry := record.NextRetryAfter
+		// Restore can run while requests are active. An older auth snapshot or
+		// model aggregate must not shorten a live credential-level action.
+		if auth.ForcedCooldownUntil.After(now) {
+			if auth.ForcedCooldownUntil.After(forcedUntil) {
+				forcedUntil = auth.ForcedCooldownUntil
+			}
+			if auth.NextRetryAfter.After(nextRetry) {
+				nextRetry = auth.NextRetryAfter
+			}
+		}
+		if forcedUntil.After(nextRetry) {
+			nextRetry = forcedUntil
+		}
 		auth.Unavailable = true
 		auth.Status = StatusError
-		auth.NextRetryAfter = record.NextRetryAfter
+		auth.NextRetryAfter = nextRetry
 		auth.ForcedCooldownUntil = forcedUntil
 		applyCooldownFields(&auth.Quota, quota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
@@ -806,16 +820,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
 				modelState = state
-				// Success heals ordinary failures but cannot clear an explicit
-				// cooldown before its own deadline.
-				if state.ForcedCooldownUntil.After(now) {
-					state.NextRetryAfter = state.ForcedCooldownUntil
-					state.Unavailable = true
-					state.Status = StatusError
-					applyCooldownFields(&state.Quota, QuotaState{})
-					state.UpdatedAt = now
-				} else {
-					resetModelState(state, now)
+				recoverModelStateOnSuccess(state, now)
+				if auth.ForcedCooldownUntil.After(now) {
+					auth.NextRetryAfter = auth.ForcedCooldownUntil
+					applyCooldownFields(&auth.Quota, QuotaState{})
 				}
 				updateAggregatedAvailability(auth, now)
 				if !auth.ForcedCooldownUntil.After(now) && !hasModelError(auth, now) {
@@ -1228,6 +1236,23 @@ func extendForcedCooldown(current, next time.Time, resultErr *Error) time.Time {
 		return next
 	}
 	return current
+}
+
+// Request and token-refresh success heal ordinary failures, but cannot remove
+// an explicit cooldown before its own deadline.
+func recoverModelStateOnSuccess(state *ModelState, now time.Time) {
+	if state == nil {
+		return
+	}
+	if !state.ForcedCooldownUntil.After(now) {
+		resetModelState(state, now)
+		return
+	}
+	state.NextRetryAfter = state.ForcedCooldownUntil
+	state.Unavailable = true
+	state.Status = StatusError
+	applyCooldownFields(&state.Quota, QuotaState{})
+	state.UpdatedAt = now
 }
 
 func resetModelState(state *ModelState, now time.Time) {

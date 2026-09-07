@@ -105,12 +105,13 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Generation = 1
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	schedulerSnapshot := authClone.Clone()
 	m.mu.Unlock()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone.Clone())
+		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
@@ -220,18 +221,22 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	now := time.Now()
 	auth.UpdatedAt = now
 	cooldownStateChanged := normalizeModelStates(auth)
+	if mode == updateModeReplace && !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+		cooldownStateChanged = preserveForcedCooldownsOnReplacement(auth, existing, now) || cooldownStateChanged
+	}
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	schedulerSnapshot := authClone.Clone()
 	m.mu.Unlock()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone.Clone())
+		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
@@ -240,6 +245,61 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		m.persistCooldownStates(context.Background())
 	}
 	return auth.Clone(), nil
+}
+
+// Configuration replacements can contain no runtime state, or an older snapshot.
+// The manager owns forced cooldowns: preserve current deadlines, including a
+// concurrent extension or reset, without restoring deadlines from the caller.
+func preserveForcedCooldownsOnReplacement(auth, current *Auth, now time.Time) bool {
+	authChanged := current.ForcedCooldownUntil.After(now) || !auth.ForcedCooldownUntil.IsZero()
+	var states map[string]*ModelState
+	modelsChanged := false
+	copyCurrentModel := func(model string) {
+		if !modelsChanged {
+			states = make(map[string]*ModelState, len(auth.ModelStates))
+			for key, state := range auth.ModelStates {
+				states[key] = state
+			}
+		}
+		incoming := states[model]
+		state := current.ModelStates[model].Clone()
+		if state == nil {
+			state = &ModelState{}
+			resetModelState(state, now)
+		}
+		if incoming != nil {
+			state.Quota = mergeQuotaObservation(state.Quota, incoming.Quota)
+			if incoming.Status == StatusDisabled {
+				state.Status = StatusDisabled
+			}
+		}
+		states[model] = state
+		modelsChanged = true
+	}
+	for model, state := range auth.ModelStates {
+		if state != nil && !state.ForcedCooldownUntil.IsZero() {
+			copyCurrentModel(model)
+		}
+	}
+	for model, state := range current.ModelStates {
+		if state != nil && state.ForcedCooldownUntil.After(now) {
+			copyCurrentModel(model)
+		}
+	}
+	if authChanged || modelsChanged {
+		auth.ForcedCooldownUntil = current.ForcedCooldownUntil
+		auth.NextRetryAfter = current.NextRetryAfter
+		auth.Unavailable = current.Unavailable
+		auth.Status = current.Status
+		auth.StatusMessage = current.StatusMessage
+		auth.LastError = cloneError(current.LastError)
+		auth.Quota = mergeQuotaObservation(current.Quota.Clone(), auth.Quota)
+	}
+	if modelsChanged {
+		auth.ModelStates = states
+		updateAggregatedAvailability(auth, now)
+	}
+	return authChanged || modelsChanged
 }
 
 // Remove deletes an auth from runtime state without persisting.

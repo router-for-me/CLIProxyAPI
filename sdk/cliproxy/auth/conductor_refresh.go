@@ -373,8 +373,10 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 		if state.LastError.StatusCode() != http.StatusUnauthorized && !strings.EqualFold(state.LastError.Code, "unauthorized") {
 			continue
 		}
-		resetModelState(state, now)
-		resumed = append(resumed, model)
+		recoverModelStateOnSuccess(state, now)
+		if !state.Unavailable {
+			resumed = append(resumed, model)
+		}
 	}
 	if len(resumed) > 0 {
 		updateAggregatedAvailability(auth, now)
