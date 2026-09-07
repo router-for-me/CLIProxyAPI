@@ -47,6 +47,86 @@ type Profile struct {
 	ProfileHash    string `json:"profile_hash"`
 }
 
+// compiledKeywordRule is one keyword-tier rule with its keywords already
+// normalized, so request-time matching never re-normalizes rule definitions.
+type compiledKeywordRule struct {
+	id       string
+	tier     Tier
+	keywords []string
+}
+
+// CompiledProfile is a profile preprocessed for scoring: the config is
+// normalized, every rule keyword is normalized once, and the identity hash is
+// fixed. Building one costs the full NormalizeProfile + hash work; scoring
+// with one skips that work entirely (see ScoreWithProfileCompiled).
+type CompiledProfile struct {
+	Config           ProfileConfig
+	KeywordTierRules []compiledKeywordRule
+	// Hash is the profile identity ("sha256:…"), identical to ProfileHash(Config).
+	Hash string
+	// Version is copied from the profile row (0 for the built-in default).
+	Version int64
+}
+
+// CompileProfile validates, normalizes, and precompiles a profile config.
+func CompileProfile(config ProfileConfig) (CompiledProfile, error) {
+	normalized, err := NormalizeProfile(config)
+	if err != nil {
+		return CompiledProfile{}, err
+	}
+	hash, err := ProfileHash(normalized)
+	if err != nil {
+		return CompiledProfile{}, err
+	}
+	rules := make([]compiledKeywordRule, 0, len(normalized.KeywordTierRules))
+	for _, r := range normalized.KeywordTierRules {
+		keywords := make([]string, 0, len(r.Keywords))
+		for _, kw := range r.Keywords {
+			if kw = normalizeKeywordText(kw); kw != "" {
+				keywords = append(keywords, kw)
+			}
+		}
+		rules = append(rules, compiledKeywordRule{id: r.ID, tier: r.Tier, keywords: keywords})
+	}
+	return CompiledProfile{
+		Config:           normalized,
+		KeywordTierRules: rules,
+		Hash:             hash,
+	}, nil
+}
+
+// DefaultCompiledProfile compiles the built-in scoring policy.
+func DefaultCompiledProfile() CompiledProfile {
+	c, _ := CompileProfile(DefaultProfileConfig())
+	c.Version = 1
+	return c
+}
+
+// compiledMatchedRules is the compiled-path twin of matchedKeywordRules: it
+// walks precompiled rules over pre-normalized text with no per-request
+// normalization work.
+func (p *CompiledProfile) compiledMatchedRules(text string) []MatchedKeywordRule {
+	if p == nil {
+		return nil
+	}
+	text = " " + text + " "
+	matched := make([]MatchedKeywordRule, 0)
+	for _, rule := range p.KeywordTierRules {
+		keywords := make([]string, 0)
+		for _, keyword := range rule.keywords {
+			if keyword != "" && strings.Contains(text, " "+keyword+" ") {
+				keywords = append(keywords, keyword)
+			}
+		}
+		if len(keywords) == 0 {
+			continue
+		}
+		sort.Strings(keywords)
+		matched = append(matched, MatchedKeywordRule{ID: rule.id, Tier: rule.tier, Keywords: keywords})
+	}
+	return matched
+}
+
 // DefaultProfileConfig returns a fresh copy of the built-in scoring policy.
 func DefaultProfileConfig() ProfileConfig {
 	weights := make(map[ScoreField]float64, len(DefaultWeights))

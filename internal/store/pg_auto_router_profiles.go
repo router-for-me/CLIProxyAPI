@@ -24,6 +24,10 @@ type AutoRouterProfileStore struct {
 
 	cacheMu sync.RWMutex
 	cache   map[string]*autorouter.Profile
+	// compiled caches the compiled form of each cached profile, keyed like
+	// cache. CompileProfile work happens once per profile version instead of
+	// once per request; invalidate() clears both maps together.
+	compiled map[string]*autorouter.CompiledProfile
 }
 
 // NewAutoRouterProfileStore builds a profile store from a PostgresStore.
@@ -32,10 +36,47 @@ func NewAutoRouterProfileStore(parent *PostgresStore) *AutoRouterProfileStore {
 		return nil
 	}
 	return &AutoRouterProfileStore{
-		db:    parent.DB(),
-		table: parent.AutoRouterProfilesTable(),
-		cache: map[string]*autorouter.Profile{},
+		db:       parent.DB(),
+		table:    parent.AutoRouterProfilesTable(),
+		cache:    map[string]*autorouter.Profile{},
+		compiled: map[string]*autorouter.CompiledProfile{},
 	}
+}
+
+// Compiled returns the compiled form of the active profile for routerID. A
+// missing profile row compiles the built-in defaults. Compile results are
+// cached until invalidated, so the per-request path skips all normalization.
+func (s *AutoRouterProfileStore) Compiled(ctx context.Context, routerID string) (*autorouter.CompiledProfile, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: auto router profile store not initialized")
+	}
+	routerID = strings.ToLower(strings.TrimSpace(routerID))
+	if routerID == "" {
+		return nil, ErrAutoRouterProfileNotFound
+	}
+	if compiled := s.cachedCompiled(routerID); compiled != nil {
+		return compiled, nil
+	}
+	// Reuse the raw cache/Get path so compilation rides on the same
+	// invalidation guarantees.
+	if _, err := s.Get(ctx, routerID); err != nil {
+		return nil, err
+	}
+	if compiled := s.cachedCompiled(routerID); compiled != nil {
+		return compiled, nil
+	}
+	// Get cached the raw profile; compile and store it now.
+	profile, err := s.cached(routerID), error(nil)
+	if profile == nil {
+		return nil, ErrAutoRouterProfileNotFound
+	}
+	compiled, err := autorouter.CompileProfile(profile.ProfileConfig)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: compile auto router profile: %w", err)
+	}
+	compiled.Version = profile.ProfileVersion
+	s.cacheCompiled(routerID, &compiled)
+	return &compiled, nil
 }
 
 // Get returns the active profile for routerID. A missing profile row uses the
@@ -219,9 +260,27 @@ func (s *AutoRouterProfileStore) invalidate(routerID string) {
 	defer s.cacheMu.Unlock()
 	if strings.TrimSpace(routerID) == "" {
 		s.cache = map[string]*autorouter.Profile{}
+		s.compiled = map[string]*autorouter.CompiledProfile{}
 		return
 	}
-	delete(s.cache, strings.ToLower(strings.TrimSpace(routerID)))
+	key := strings.ToLower(strings.TrimSpace(routerID))
+	delete(s.cache, key)
+	delete(s.compiled, key)
+}
+
+func (s *AutoRouterProfileStore) cachedCompiled(routerID string) *autorouter.CompiledProfile {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.compiled[routerID]
+}
+
+func (s *AutoRouterProfileStore) cacheCompiled(routerID string, compiled *autorouter.CompiledProfile) {
+	if s == nil || compiled == nil {
+		return
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	s.compiled[routerID] = compiled
 }
 
 func cloneProfile(profile autorouter.Profile) autorouter.Profile {

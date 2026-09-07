@@ -109,6 +109,87 @@ func ScoreWithProfile(rawJSON []byte, format string, profile *Profile) ScoreResu
 	}
 }
 
+// ScoreWithProfileCompiled is the compiled-path twin of ScoreWithProfile: it
+// produces identical results but skips per-request profile normalization and
+// rule-keyword normalization by consuming a precompiled profile. A nil
+// compiled profile falls back to the built-in defaults.
+func ScoreWithProfileCompiled(rawJSON []byte, format string, compiled *CompiledProfile) ScoreResult {
+	var config ProfileConfig
+	var hash string
+	version := int64(0)
+	var rules *CompiledProfile
+	if compiled != nil {
+		config = compiled.Config
+		hash = compiled.Hash
+		version = compiled.Version
+		rules = compiled
+	} else {
+		config = DefaultProfileConfig()
+		version = 1
+		def := DefaultCompiledProfile()
+		rules = &def
+		hash = def.Hash
+	}
+	ext := extractRequest(rawJSON, format)
+	fields := scoreDimensionsStructured(ext)
+	weights := config.Weights
+	if weights == nil {
+		weights = DefaultWeights
+	}
+	total := 0.0
+	norm := 0.0
+	for _, f := range []ScoreField{
+		FieldTokens, FieldCode, FieldReasoningMark, FieldTechnicalTerms,
+		FieldMultiStep, FieldQuestion,
+	} {
+		weight, ok := weights[f]
+		if !ok {
+			weight = DefaultWeights[f]
+		}
+		total += fields[f] * weight
+		norm += weight
+	}
+	simpleWeight, ok := weights[FieldSimpleIndic]
+	if !ok {
+		simpleWeight = DefaultWeights[FieldSimpleIndic]
+	}
+	total -= fields[FieldSimpleIndic] * simpleWeight
+	if norm > 0 {
+		total /= norm
+	}
+	total = clamp01(total)
+	markers := countReasoningMarkers(ext.FlatText)
+	scoredTier := tierFor(total, markers, config.Thresholds)
+	// Single normalization pass, mirroring ScoreWithProfile.
+	matched := rules.compiledMatchedRules(normalizeKeywordText(ext.FlatText))
+	effective := scoredTier
+	cause := DecisionCauseComplexityScorer
+	if len(matched) > 0 {
+		for _, rule := range matched {
+			if tierIndex(rule.Tier) > tierIndex(effective) {
+				effective = rule.Tier
+			}
+		}
+		if effective != scoredTier {
+			cause = DecisionCauseKeywordMatch
+		}
+	}
+	return ScoreResult{
+		Score: RequestScore{
+			Fields:           fields,
+			Total:            total,
+			ReasoningMarkers: markers,
+			Tier:             effective,
+		},
+		EffectiveTier:  effective,
+		DecisionCause:  cause,
+		MatchedRules:   matched,
+		ProfileVersion: version,
+		ProfileHash:    hash,
+		ProfileConfig:  config,
+	}
+}
+
 // tierFor maps a weighted total and reasoning-marker count to a tier. Two or
 // more independent reasoning markers force REASONING regardless of the score.
 func tierFor(total float64, reasonerMarkers int, configured ...TierThresholds) Tier {

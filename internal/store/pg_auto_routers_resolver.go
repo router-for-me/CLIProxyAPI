@@ -63,7 +63,28 @@ func (r *AutoRoutersResolverImpl) AutoRouterProfile(ctx context.Context, routerI
 	return &profile
 }
 
+// AutoRouterProfileCompiled returns the compiled scoring profile for a router
+// id, falling back to the built-in compiled defaults on any error. Compiled
+// profiles skip all per-request normalization work.
+func (r *AutoRoutersResolverImpl) AutoRouterProfileCompiled(ctx context.Context, routerID string) *autorouter.CompiledProfile {
+	if r == nil || ctx == nil {
+		def := autorouter.DefaultCompiledProfile()
+		return &def
+	}
+	if r.profiles == nil {
+		def := autorouter.DefaultCompiledProfile()
+		return &def
+	}
+	compiled, err := r.profiles.Compiled(ctx, strings.TrimSpace(routerID))
+	if err != nil || compiled == nil {
+		def := autorouter.DefaultCompiledProfile()
+		return &def
+	}
+	return compiled
+}
+
 var _ interface {
 	AutoRouterForModel(context.Context, string) *AutoRouter
 	AutoRouterProfile(context.Context, string) *autorouter.Profile
+	AutoRouterProfileCompiled(context.Context, string) *autorouter.CompiledProfile
 } = (*AutoRoutersResolverImpl)(nil)
