@@ -91,3 +91,38 @@ test('ProviderEditorForm renders per-entry disabled toggle (checked for disabled
   // The disabled row group carries the dimmed styling hook.
   assert.ok(html.includes('list-editor__rowgroup--disabled'), 'disabled row group is dimmed');
 });
+
+test('ProviderEditorForm renders the TestPanel in edit mode (entry-bearing provider)', () => {
+  const provider = {
+    id: 5,
+    provider_type: 'openai-compatibility',
+    name: 'compat',
+    base_url: 'https://api.example.com',
+    models: [{ name: 'gpt-4o' }],
+    api_key_entries: [
+      { id: 1, api_key: 'FAKE-SECRET-ONE', name: 'live' },
+      { id: 2, api_key: 'FAKE-SECRET-TWO', name: 'off', disabled: true },
+    ],
+  };
+  const html = renderEditor(provider);
+  assert.ok(html.includes('provider-test-panel'), 'test panel renders');
+  assert.ok(html.includes('Test entry'), 'panel title renders');
+  assert.ok(html.includes('test-panel-entry'), 'entry dropdown renders for entry-bearing provider');
+  assert.ok(html.includes('(provider-level)'), 'provider-level option present');
+  assert.ok(html.includes('live'), 'entry 1 label visible');
+  assert.ok(html.includes('off (disabled)'), 'disabled entry labeled with suffix');
+  assert.ok(html.includes('gpt-4o'), 'model dropdown populated from form.models');
+  assert.ok(html.includes('test-panel-run'), 'run button renders');
+});
+
+test('ProviderEditorForm omits the TestPanel in create mode', () => {
+  const html = renderToString(
+    <MemoryRouter initialEntries={['/upstream-providers/new']}>
+      <Routes>
+        <Route path="/upstream-providers/:id" element={<UpstreamProviderEditorPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+  assert.ok(html.length > 0, 'page renders');
+  assert.ok(!html.includes('provider-test-panel'), 'no test panel in create mode');
+});

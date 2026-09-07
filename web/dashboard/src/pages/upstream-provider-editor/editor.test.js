@@ -659,3 +659,83 @@ test('buildPayload: disabled blank-key entries are still dropped', () => {
   assert.equal(payload.api_key_entries.length, 1,
     'blank-key entries stay filtered regardless of disabled');
 });
+
+// ============================================================================
+// TestPanel helpers
+// ============================================================================
+
+test('TestPanel: entryLabel uses identity, key-<id> fallback, disabled suffix', async () => {
+  const { entryLabel } = await import('./TestPanel.jsx');
+  assert.equal(entryLabel({ id: 4, name: 'team-a' }), 'team-a');
+  assert.equal(entryLabel({ id: 7, name: '' }), 'key-7');
+  assert.equal(entryLabel({ id: 7, name: '', disabled: true }), 'key-7 (disabled)');
+  assert.equal(entryLabel(null), '');
+});
+
+test('TestPanel: entryOptions filters unsaved rows and includes provider-level', async () => {
+  const { entryOptions } = await import('./TestPanel.jsx');
+  const opts = entryOptions({
+    api_key_entries: [
+      { id: 1, name: 'alpha' },
+      { id: 0, name: 'unsaved' },
+      { id: 2, name: '', disabled: true },
+    ],
+  });
+  assert.deepEqual(opts, [
+    { value: '', label: '(provider-level)' },
+    { value: '1', label: 'alpha' },
+    { value: '2', label: 'key-2 (disabled)' },
+  ]);
+  assert.deepEqual(entryOptions({}), [{ value: '', label: '(provider-level)' }]);
+  assert.deepEqual(entryOptions(null), [{ value: '', label: '(provider-level)' }]);
+});
+
+test('TestPanel: modelOptions dedupes name/alias and drops empties', async () => {
+  const { modelOptions } = await import('./TestPanel.jsx');
+  assert.deepEqual(
+    modelOptions({
+      models: [
+        { name: 'gpt-4o', alias: 'fast' },
+        { name: '', alias: 'gpt-4o' },
+        { name: '', alias: '' },
+        { name: 'claude-4', alias: '' },
+      ],
+    }),
+    ['gpt-4o', 'claude-4'],
+  );
+  assert.deepEqual(modelOptions({ models: [] }), []);
+  assert.deepEqual(modelOptions(null), []);
+});
+
+test('TestPanel: describeResult maps ok/mismatch/error states', async () => {
+  const { describeResult } = await import('./TestPanel.jsx');
+  assert.equal(describeResult(null), null);
+
+  const okMatch = describeResult({
+    ok: true, latency_ms: 842, question: 'What is 2 + 2? Reply with just the number.',
+    expected_answer: 4, answer: '4',
+  });
+  assert.equal(okMatch.ok, true);
+  assert.equal(okMatch.flag, null);
+  assert.equal(okMatch.title, '✓ 842ms');
+  assert.equal(okMatch.detail.answer, '4');
+
+  const okMismatch = describeResult({
+    ok: true, latency_ms: 500, question: 'Q', expected_answer: 3921, answer: ' 3920 ',
+  });
+  assert.equal(okMismatch.ok, true);
+  assert.equal(okMismatch.flag, 'wrong answer', 'mismatch flags but stays ok');
+  assert.equal(okMismatch.detail.answer, '3920', 'answer is trimmed');
+
+  const failed = describeResult({ ok: false, latency_ms: 310, error: '401 Unauthorized' });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.title, '✗ 401 Unauthorized');
+});
+
+test('TestPanel: isEntryBearing matches openai-compat and claude only', async () => {
+  const { isEntryBearing } = await import('./TestPanel.jsx');
+  assert.equal(isEntryBearing('openai-compatibility'), true);
+  assert.equal(isEntryBearing('claude-api-key'), true);
+  assert.equal(isEntryBearing('gemini-api-key'), false);
+  assert.equal(isEntryBearing('oauth:claude'), false);
+});
