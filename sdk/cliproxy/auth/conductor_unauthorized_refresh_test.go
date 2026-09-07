@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -20,6 +21,48 @@ type unauthorizedRefreshExecutor struct {
 	tokenInvalid  map[string]struct{}
 	refreshFail   bool
 	refreshTokens map[string]string
+}
+
+func TestManager_Execute_ExpiredOAuthRefreshesOnFirstRequest(t *testing.T) {
+	model := "gpt-5.5"
+	auth := &Auth{
+		ID:       "expired-oauth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":  "expired-access-token",
+			"refresh_token": "refresh-token",
+			"expired":       time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	executor := &unauthorizedRefreshExecutor{
+		id: "codex",
+		tokenInvalid: map[string]struct{}{
+			"expired-access-token": {},
+		},
+		refreshTokens: map[string]string{
+			auth.ID: "fresh-access-token",
+		},
+	}
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v, want refresh recovery", errExecute)
+	}
+	if got := string(resp.Payload); got != auth.ID+":fresh-access-token" {
+		t.Fatalf("payload = %q, want refreshed response", got)
+	}
+	if got := executor.RefreshCalls(); got != 1 {
+		t.Fatalf("Refresh calls = %d, want 1", got)
+	}
 }
 
 func (e *unauthorizedRefreshExecutor) Identifier() string { return e.id }
