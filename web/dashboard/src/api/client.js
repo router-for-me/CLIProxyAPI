@@ -1806,6 +1806,17 @@ export async function deleteUpstreamProvider(id) {
   await fetchJSON(`/upstream-providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+// testUpstreamProvider runs one pinned chat-completion probe (a random math
+// question) against the provider row (entryId null) or one of its
+// api_key_entries, through the server's real execution pipeline. Resolves
+// { ok, latency_ms, question, expected_answer, answer, model, error }.
+export async function testUpstreamProvider(id, { entryId, model }) {
+  return fetchJSON(`/upstream-providers/${encodeURIComponent(id)}/test`, {
+    method: 'POST',
+    body: JSON.stringify({ entry_id: entryId ?? null, model }),
+  });
+}
+
 // --- Global oauth-model-alias (config.yaml) ---------------------------------
 // Per-channel global model aliases for OAuth/file-backed auth channels.
 // Returns { "oauth-model-alias": { <channel>: [{name,alias,fork,display-name,force-mapping}] } }.

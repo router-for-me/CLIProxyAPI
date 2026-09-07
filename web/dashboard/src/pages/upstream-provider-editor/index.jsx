@@ -54,6 +54,7 @@ import {
 } from './form.js';
 import OAuthConnectSection from './OAuthConnect.jsx';
 import APIKeyEntriesEditor from './EntriesEditor.jsx';
+import TestPanel from './TestPanel.jsx';
 
 // Types where the FetchModelsInline probe is meaningful (has a base_url +
 // api_key the operator can probe, or an auth-file the registry tracks).
@@ -534,6 +535,12 @@ export function ProviderEditorForm({ provider, siblingNames = [], proxyPools = [
           </div>
           );
         })}
+
+        {/* Test panel — edit mode only: create mode has no persisted row or
+            entry for the server to resolve into a live credential yet. */}
+        {isEdit && provider && (
+          <TestPanel provider={provider} form={form} />
+        )}
       </div>
     </div>
   );
