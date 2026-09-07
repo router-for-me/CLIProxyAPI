@@ -45,8 +45,8 @@ func ScoreWithProfile(rawJSON []byte, format string, profile *Profile) ScoreResu
 		hash = profile.ProfileHash
 		version = profile.ProfileVersion
 	}
-	text := extractRequest(rawJSON, format).FlatText
-	fields := scoreDimensions(text)
+	ext := extractRequest(rawJSON, format)
+	fields := scoreDimensionsStructured(ext)
 	weights := config.Weights
 	if weights == nil {
 		weights = DefaultWeights
@@ -73,9 +73,9 @@ func ScoreWithProfile(rawJSON []byte, format string, profile *Profile) ScoreResu
 		total /= norm
 	}
 	total = clamp01(total)
-	markers := countReasoningMarkers(text)
+	markers := countReasoningMarkers(ext.FlatText)
 	scoredTier := tierFor(total, markers, config.Thresholds)
-	matched := matchedKeywordRules(text, config.KeywordTierRules)
+	matched := matchedKeywordRules(ext.FlatText, config.KeywordTierRules)
 	effective := scoredTier
 	cause := DecisionCauseComplexityScorer
 	if len(matched) > 0 {
@@ -417,6 +417,12 @@ func scoreDimensions(text string) map[ScoreField]float64 {
 	// Token count: longer bodies carry more context and are harder to answer.
 	fields[FieldTokens] = clamp01(float64(wordCount) / 1200.0)
 
+	// Role-aware token share is applied by scoreDimensionsStructured (see
+	// below): when the request carries roles, the latest user turn drives the
+	// token dimension and history (system + prior turns) is capped at 20% so a
+	// huge agent system prompt cannot push a short user request into a hard
+	// tier. Formats without roles keep the flat computation above.
+
 	codeTokens := 0
 	simpleInd := 0
 	technical := 0
@@ -495,6 +501,20 @@ func scoreDimensions(text string) map[ScoreField]float64 {
 		q += 0.10
 	}
 	fields[FieldQuestion] = clamp01(q)
+	return fields
+}
+
+// scoreDimensionsStructured computes the seven dimensions from a structured
+// extraction: all dimensions run on the flat text as before, then the token
+// dimension is overridden with the role-aware split (latest user turn leading,
+// history contribution at 20%). When the extraction carries no user turn (no
+// roles in the format), the flat token computation stands.
+func scoreDimensionsStructured(ext extractedRequest) map[ScoreField]float64 {
+	fields := scoreDimensions(ext.FlatText)
+	if userWords := len(strings.Fields(ext.LatestUserText)); userWords > 0 {
+		history := 0.2 * float64(ext.HistoryTokens)
+		fields[FieldTokens] = clamp01((float64(userWords) + history) / 1200.0)
+	}
 	return fields
 }
 
