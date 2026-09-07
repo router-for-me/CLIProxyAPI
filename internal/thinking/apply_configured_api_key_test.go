@@ -96,6 +96,51 @@ func TestApplyThinkingWithModelInfoKeepsAssumedLevelRequestsVerbatim(t *testing.
 	}
 }
 
+// Sentinel requests on assumed level sets reach the upstream unchanged:
+// an explicit disable must not become "low" and auto must be serialized as
+// "auto" rather than a fixed level or dropped (#5499 review).
+func TestApplyThinkingWithModelInfoKeepsAssumedSentinelsVerbatim(t *testing.T) {
+	modelInfo := &registry.ModelInfo{
+		ID:   "compat-upstream",
+		Type: "openai-compatibility",
+		Thinking: &registry.ThinkingSupport{
+			Levels:        []string{"low", "medium", "high"},
+			LevelsAssumed: true,
+		},
+	}
+
+	noneBody := []byte(`{}`)
+	noneSource := []byte(`{"reasoning":{"effort":"none"}}`)
+	out, err := thinking.ApplyThinkingWithModelInfo(noneBody, noneSource, "compat-upstream", "openai-response", "openai", "compat-provider", modelInfo)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithModelInfo(none) error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "none" {
+		t.Fatalf("reasoning_effort = %q, want none; body=%s", got, out)
+	}
+
+	autoBody := []byte(`{}`)
+	autoSource := []byte(`{"reasoning":{"effort":"auto"}}`)
+	out, err = thinking.ApplyThinkingWithModelInfo(autoBody, autoSource, "compat-upstream", "openai-response", "openai", "compat-provider", modelInfo)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithModelInfo(auto) error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "auto" {
+		t.Fatalf("reasoning_effort = %q, want auto; body=%s", got, out)
+	}
+
+	// The (auto) model suffix carries no body field to preserve; the request
+	// must still be serialized as an explicit auto effort.
+	suffixBody := []byte(`{}`)
+	out, err = thinking.ApplyThinkingWithModelInfo(suffixBody, suffixBody, "compat-upstream(auto)", "openai", "openai", "compat-provider", modelInfo)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithModelInfo(suffix auto) error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "auto" {
+		t.Fatalf("suffix auto reasoning_effort = %q, want auto; body=%s", got, out)
+	}
+}
+
 func TestApplyThinkingWithModelInfoMapsResponsesToCodexHighIntent(t *testing.T) {
 	modelInfo := &registry.ModelInfo{
 		ID:       "codex-upstream",
