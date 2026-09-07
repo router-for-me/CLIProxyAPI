@@ -113,6 +113,51 @@ func TestKeywordMatchOnPreNormalizedText(t *testing.T) {
 	}
 }
 
+// TestWindowWords pins the window helper: text beyond head+tail capacity is
+// truncated to exactly head words followed by tail words, preserving both
+// ends, and the true word count is reported even when truncated. Short
+// bodies pass through unchanged.
+func TestWindowWords(t *testing.T) {
+	text := "w0 w1 w2 w3 w4 w5 w6 w7 w8 w9"
+	got, count := windowText(text, 4, 3)
+	if count != 10 {
+		t.Fatalf("wordCount = %d, want 10 (true count despite truncation)", count)
+	}
+	win := strings.Fields(got)
+	if len(win) != 7 {
+		t.Fatalf("window words = %d, want 7", len(win))
+	}
+	if head := strings.Join(win[:4], " "); head != "w0 w1 w2 w3" {
+		t.Fatalf("head = %q", head)
+	}
+	if tail := strings.Join(win[4:], " "); tail != "w7 w8 w9" {
+		t.Fatalf("tail = %q", tail)
+	}
+	// Within capacity: unchanged, count matches.
+	got2, count2 := windowText(text, 20, 20)
+	if got2 != text || count2 != 10 {
+		t.Fatalf("short body changed: %q count=%d", got2, count2)
+	}
+}
+
+// TestWindowPreservesHeadAndTailSignals pins the windowing contract: a sparse
+// code signal must be captured identically whether it sits at the head or the
+// tail of a body far larger than the window — a head-only window fails this.
+func TestWindowPreservesHeadAndTailSignals(t *testing.T) {
+	code := "code_token_a := fn_a(param_a) code_token_b := fn_b(param_b) code_token_c := fn_c(param_c) "
+	filler := strings.Repeat("plain ordinary filler words ", 50000) // 200k words
+	headBody := `{"messages":[{"content":"` + code + filler + `"}]}`
+	tailBody := `{"messages":[{"content":"` + filler + code + `"}]}`
+	head := Score([]byte(headBody), "openai").Fields[FieldCode]
+	tail := Score([]byte(tailBody), "openai").Fields[FieldCode]
+	if head == 0 || tail == 0 {
+		t.Fatalf("window dropped a code signal: head=%v tail=%v", head, tail)
+	}
+	if head != tail {
+		t.Fatalf("window asymmetric: head-code %v != tail-code %v", head, tail)
+	}
+}
+
 func TestTierFor(t *testing.T) {
 	cases := []struct {
 		total   float64

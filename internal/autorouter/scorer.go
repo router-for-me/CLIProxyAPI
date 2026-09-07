@@ -449,12 +449,117 @@ func scoreDimensions(text string) map[ScoreField]float64 {
 	return scoreDimensionsWithFence(text, 0)
 }
 
+// scoreWindowHead / scoreWindowTail bound the word loop inside
+// scoreDimensionsWithFence: for bodies beyond head+tail words, dimension
+// scoring runs on the head+tail window only. Density-based signals are stable
+// under this truncation, and keyword rules / reasoning markers deliberately
+// still scan the full text (they are bounded by rule count, not body size).
+const (
+	scoreWindowHead = 24000
+	scoreWindowTail = 8000
+)
+
+// windowWords truncates a token slice to head + tail capacity. Bodies within
+// capacity pass through unchanged.
+func windowWords(words []string, head, tail int) []string {
+	if head+tail >= len(words) {
+		return words
+	}
+	out := make([]string, 0, head+tail)
+	out = append(out, words[:head]...)
+	out = append(out, words[len(words)-tail:]...)
+	return out
+}
+
+// windowText splits the flat text into the head+tail window without
+// materializing a slice of every word in the body: it walks word boundaries
+// from the start for the head window and from the end for the tail window,
+// allocating only the window substring. Returned wordCount is the true total
+// word count (windows are a scoring optimization; the token dimension still
+// reflects the full body).
+func windowText(text string, head, tail int) (window string, wordCount int) {
+	space := func(r byte) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }
+	// Forward pass: find the cut index after the head-th word and count the
+	// words seen up to there.
+	headEnd := len(text)
+	counted := 0
+	inWord := false
+	for i := 0; i < len(text); i++ {
+		isSpace := space(text[i])
+		if !inWord && !isSpace {
+			inWord = true
+			counted++
+			if counted > head {
+				headEnd = i
+				break
+			}
+		} else if inWord && isSpace {
+			inWord = false
+		}
+	}
+	if headEnd == len(text) {
+		// Body fits inside the head window: no truncation.
+		return text, counted
+	}
+	// Backward pass: find the cut index at the first character of the word
+	// that begins the tail window (the tail-th word counting from the end).
+	tailStart := 0
+	tailCount := 0
+	inWord = false
+	for i := len(text) - 1; i >= 0; i-- {
+		isSpace := space(text[i])
+		if !inWord && !isSpace {
+			inWord = true
+			tailCount++
+			if tailCount == tail {
+				// Scanning backward, i lands on the word's last character;
+				// walk back to the word's first character.
+				j := i
+				for j > 0 && !space(text[j-1]) {
+					j--
+				}
+				tailStart = j
+				break
+			}
+		} else if inWord && isSpace {
+			inWord = false
+		}
+	}
+	if tailStart < headEnd {
+		// Windows overlap (body is only slightly larger than head+tail):
+		// the whole body fits, return it intact.
+		return text, counted
+	}
+	// True total = head words + words strictly between the windows + tail
+	// words. The middle word count is computed without materializing a slice.
+	middle := 0
+	inWord = false
+	for i := headEnd; i < tailStart; i++ {
+		isSpace := space(text[i])
+		if !inWord && !isSpace {
+			inWord = true
+			middle++
+		} else if inWord && isSpace {
+			inWord = false
+		}
+	}
+	return text[:headEnd] + " " + text[tailStart:], head + middle + tail
+}
+
 // scoreDimensionsWithFence computes the seven dimensions for a lowered text
-// plus an optional pre-extracted fenced-code token count (0 = none).
+// plus an optional pre-extracted fenced-code token count (0 = none). For
+// bodies beyond the head+tail window, the word loop runs on the window only
+// (density signals are stable under truncation); the token dimension still
+// uses the true word count.
 func scoreDimensionsWithFence(text string, fenceTokens int) map[ScoreField]float64 {
 	fields := map[ScoreField]float64{}
-	words := strings.Fields(text)
-	wordCount := len(words)
+	var words []string
+	wordCount := 0
+	if len(text) > 0 {
+		window, total := windowText(text, scoreWindowHead, scoreWindowTail)
+		words = strings.Fields(window)
+		wordCount = total
+	}
 
 	// Token count: longer bodies carry more context and are harder to answer.
 	fields[FieldTokens] = clamp01(float64(wordCount) / 1200.0)
