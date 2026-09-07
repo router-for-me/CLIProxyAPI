@@ -120,14 +120,9 @@ func (l *authAutoRefreshLoop) rebuild(now time.Time) {
 }
 
 func (l *authAutoRefreshLoop) loop(ctx context.Context) {
-	timer := time.NewTimer(time.Hour)
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-	defer timer.Stop()
+	timer := newRefreshDeadlineTimer(time.Hour)
+	timer.Stop()
+	defer timer.Close()
 
 	var timerCh <-chan time.Time
 	l.resetTimer(timer, &timerCh, time.Now())
@@ -149,15 +144,10 @@ func (l *authAutoRefreshLoop) loop(ctx context.Context) {
 	}
 }
 
-func (l *authAutoRefreshLoop) resetTimer(timer *time.Timer, timerCh *<-chan time.Time, now time.Time) {
+func (l *authAutoRefreshLoop) resetTimer(timer refreshDeadlineTimer, timerCh *<-chan time.Time, now time.Time) {
 	next, ok := l.peek()
 	if !ok {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
+		timer.Stop()
 		*timerCh = nil
 		return
 	}
@@ -166,14 +156,8 @@ func (l *authAutoRefreshLoop) resetTimer(timer *time.Timer, timerCh *<-chan time
 	if wait < 0 {
 		wait = 0
 	}
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
 	timer.Reset(wait)
-	*timerCh = timer.C
+	*timerCh = timer.Chan()
 }
 
 func (l *authAutoRefreshLoop) peek() (time.Time, bool) {

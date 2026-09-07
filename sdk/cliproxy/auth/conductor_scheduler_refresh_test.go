@@ -350,7 +350,7 @@ func TestManager_RefreshAuthTransientFailure_ExpiredTokenMarkedUnavailableWithRe
 	}
 }
 
-func TestManager_RefreshAuth_ExpiredAccessTokenBlockedFromSelection(t *testing.T) {
+func TestManager_RefreshAuth_ExpiredAccessTokenWithoutRefreshCredentialBlockedFromSelection(t *testing.T) {
 	pastExpiry := time.Now().Add(-1 * time.Hour)
 	auth := &Auth{
 		ID:       "expired-token-blocked",
@@ -368,6 +368,46 @@ func TestManager_RefreshAuth_ExpiredAccessTokenBlockedFromSelection(t *testing.T
 		t.Fatal("isAuthBlockedForModel should return blocked=true for expired access token")
 	}
 	_ = reason
+}
+
+func TestManager_RefreshAuth_ExpiredAccessTokenWithRefreshCredentialRemainsSelectable(t *testing.T) {
+	pastExpiry := time.Now().Add(-1 * time.Hour)
+	auth := &Auth{
+		ID:       "expired-token-refreshable",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"email":         "user@example.com",
+			"access_token":  "expired-token",
+			"refresh_token": "refresh-token",
+			"expired":       pastExpiry.Format(time.RFC3339),
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5", time.Now())
+	if blocked || reason != blockReasonNone || !next.IsZero() {
+		t.Fatalf("isAuthBlockedForModel() = %v, %v, %v; want false, none, zero", blocked, reason, next)
+	}
+}
+
+func TestManager_RefreshAuth_ExpiredRefreshableTokenStillRespectsUnavailableState(t *testing.T) {
+	pastExpiry := time.Now().Add(-1 * time.Hour)
+	auth := &Auth{
+		ID:          "expired-token-unavailable",
+		Provider:    "codex",
+		Status:      StatusError,
+		Unavailable: true,
+		Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "refresh-token",
+			"expired":       pastExpiry.Format(time.RFC3339),
+		},
+	}
+
+	blocked, _, _ := isAuthBlockedForModel(auth, "gpt-5", time.Now())
+	if !blocked {
+		t.Fatal("isAuthBlockedForModel should preserve an explicit unavailable state")
+	}
 }
 
 type blockingRefreshTestExecutor struct {
