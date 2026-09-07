@@ -20,6 +20,11 @@ func TestManager_HTMLNotFoundCooldown(t *testing.T) {
 		}{
 			{"html", "<html>\n<head><title>404 Not Found</title></head></html>", time.Minute},
 			{"doctype", " \n<!DOCTYPE HTML><html><body>Not Found</body></html>", time.Minute},
+			{"newline", "<html\nlang=\"en\">Not Found</html>", time.Minute},
+			{"tab", "<html\tlang=\"en\">Not Found</html>", time.Minute},
+			{"cr", "<html\rlang=\"en\">Not Found</html>", time.Minute},
+			{"form feed", "<html\flang=\"en\">Not Found</html>", time.Minute},
+			{"not html tag", "<htmlish>not found", 12 * time.Hour},
 			{"plain", "404 page not found", 12 * time.Hour},
 			{"model", `{"error":{"code":"model_not_found","message":"model html-not-found-model was not found"}}`, 12 * time.Hour},
 		} {

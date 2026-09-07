@@ -1717,7 +1717,18 @@ func isHTMLNotFoundResultError(err *Error) bool {
 		return false
 	}
 	message := strings.ToLower(strings.TrimSpace(err.Message))
-	return strings.HasPrefix(message, "<html>") || strings.HasPrefix(message, "<html ") || strings.HasPrefix(message, "<!doctype html")
+	if strings.HasPrefix(message, "<!doctype html") {
+		return true
+	}
+	if !strings.HasPrefix(message, "<html") || len(message) <= len("<html") {
+		return false
+	}
+	switch message[len("<html")] {
+	case '>', ' ', '\t', '\n', '\r', '\f':
+		return true
+	default:
+		return false
+	}
 }
 
 func isRequestScopedNotFoundResultError(err *Error) bool {
