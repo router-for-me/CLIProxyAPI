@@ -1032,6 +1032,8 @@ func (m *Manager) reportHomeResult(ctx context.Context, result Result, auth *Aut
 	if m == nil || result.AuthID == "" {
 		return
 	}
+	// Home outcomes bypass MarkResult; count them here once for all execution paths.
+	recordUpstreamResult(result)
 	var snapshot *Auth
 	if auth != nil {
 		snapshot = auth.Clone()
