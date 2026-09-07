@@ -1,6 +1,7 @@
 package chat_completions
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -856,6 +857,41 @@ func TestCustomToolNameShortening(t *testing.T) {
 	}
 	if got := buildReverseMapFromOriginalOpenAI(input)[shortName]; got != longName {
 		t.Fatalf("expected reverse name mapping to %q, got %q", longName, got)
+	}
+}
+
+func TestToolNameNormalizationPreservesRequestMapping(t *testing.T) {
+	input := []byte(`{
+		"messages": [
+			{"role":"user","content":"Search."},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_search","type":"function","function":{"name":"mcp.server:search","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_search","content":"done"}
+		],
+		"tools": [
+			{"type":"function","function":{"name":"mcp.server:search","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"mcp_server_search","parameters":{"type":"object"}}}
+		],
+		"tool_choice":{"type":"function","function":{"name":"mcp.server:search"}}
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	firstName := gjson.GetBytes(out, "tools.0.name").String()
+	secondName := gjson.GetBytes(out, "tools.1.name").String()
+	if firstName != "mcp_server_search" {
+		t.Fatalf("normalized tool name = %q, want mcp_server_search: %s", firstName, out)
+	}
+	if secondName != "mcp_server_search_1" {
+		t.Fatalf("collision tool name = %q, want mcp_server_search_1: %s", secondName, out)
+	}
+	for _, name := range []string{firstName, secondName, gjson.GetBytes(out, "input.1.name").String(), gjson.GetBytes(out, "tool_choice.name").String()} {
+		if name == "" || strings.ContainsAny(name, ".: ") || len(name) > 64 {
+			t.Fatalf("normalized tool name is invalid: %q; payload=%s", name, out)
+		}
+	}
+	if got := buildReverseMapFromOriginalOpenAI(input)[firstName]; got != "mcp.server:search" {
+		t.Fatalf("reverse map = %q, want original tool name", got)
 	}
 }
 
