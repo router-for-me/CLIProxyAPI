@@ -68,11 +68,17 @@ const FETCHABLE_TYPES = new Set([
 ]);
 
 // resolveEditorMode classifies the :id route param. 'new' means create;
-// anything else is a numeric PG row id (the router guarantees the segment is
-// non-empty). Exported as a pure function so the mode contract is testable
-// without a DOM.
+// anything else is a numeric PG row id. Exported as a pure function so the
+// mode contract is testable without a DOM.
+//
+// The undefined case is the load-bearing one: React Router v6 matches
+// "/upstream-providers/new" against the STATIC /new route (higher
+// specificity than :id), whose params object is empty — so id arrives as
+// undefined exactly when the operator is creating. Treating undefined as
+// edit mode made the page fetch GET /upstream-providers/undefined and fail
+// with "id must be a positive integer" before the type picker ever showed.
 export function resolveEditorMode(id) {
-  const isCreate = id === 'new';
+  const isCreate = id === 'new' || id === undefined;
   return { isCreate, providerId: isCreate ? null : id };
 }
 
