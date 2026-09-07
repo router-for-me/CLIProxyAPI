@@ -2,9 +2,14 @@ package wsrelay
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // When a disconnecting session no longer owns the provider key, a newer session
@@ -70,4 +75,100 @@ func TestHandleSessionClosed_OwnerKeepsCauseAndDeletes(t *testing.T) {
 	if len(causes) != 1 || causes[0] == nil || causes[0].Error() != "connection reset" {
 		t.Fatalf("cause = %v, want the original error", causes)
 	}
+}
+
+// A replacement connection must emit its onConnected Add only after the
+// previous session's disconnect callback (and its queued Delete) completed,
+// and only while it still owns the provider key (#5520 review).
+func TestHandleWebsocket_OrdersReplacementConnectAfterDisconnectCallback(t *testing.T) {
+	type event struct {
+		kind string
+	}
+	events := make(chan event, 16)
+
+	releaseCh := make(chan struct{})
+	var disconnectOnce sync.Once
+
+	relay := NewManager(Options{
+		ProviderFactory: func(*http.Request) (string, error) { return "p", nil },
+		OnConnected: func(string) {
+			events <- event{kind: "connect"}
+		},
+		OnDisconnected: func(provider string, err error) {
+			if err != nil && strings.Contains(err.Error(), "replaced by new connection") {
+				events <- event{kind: "disconnect-replaced"}
+				return
+			}
+			// First (owner) disconnect: block until the test releases it.
+			disconnectOnce.Do(func() {
+				events <- event{kind: "disconnect-owner-start"}
+				<-releaseCh
+			})
+			events <- event{kind: "disconnect-owner-done"}
+		},
+	})
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + relay.Path()
+
+	dial := func() *websocket.Conn {
+		conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+		if errDial != nil {
+			t.Fatalf("dial websocket: %v", errDial)
+		}
+		return conn
+	}
+
+	connA := dial()
+	select {
+	case ev := <-events:
+		if ev.kind != "connect" {
+			t.Fatalf("first event = %v, want connect", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first connect")
+	}
+
+	// Drop A: its owner disconnect callback blocks until released.
+	_ = connA.Close()
+waitLoop:
+	for {
+		select {
+		case ev := <-events:
+			if ev.kind == "disconnect-owner-start" {
+				break waitLoop
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for owner disconnect to start")
+		}
+	}
+
+	// Replacement dials while the disconnect callback is still blocked; its
+	// connect must wait for the callback to finish.
+	connB := dial()
+	select {
+	case ev := <-events:
+		t.Fatalf("replacement connected before the disconnect callback finished: %v", ev)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseCh)
+	select {
+	case ev := <-events:
+		if ev.kind != "disconnect-owner-done" {
+			t.Fatalf("event after release = %v, want disconnect-owner-done", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for disconnect completion")
+	}
+	select {
+	case ev := <-events:
+		if ev.kind != "connect" {
+			t.Fatalf("event after release = %v, want the replacement connect", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("replacement connect never fired after the disconnect callback finished")
+	}
+
+	_ = connB.Close()
 }
