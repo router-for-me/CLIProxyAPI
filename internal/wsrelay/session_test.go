@@ -247,23 +247,84 @@ func TestSession_Dispatch_TerminalDeliveredWhenBufferFullAndSessionClosing(t *te
 		})
 	}
 
-	// Dispatch terminal message
-	s.dispatch(Message{
-		ID:   reqID,
-		Type: MessageTypeStreamEnd,
-	})
+	enteredDispatch := make(chan struct{})
+	go func() {
+		close(enteredDispatch)
+		// Dispatch terminal message against a saturated buffer
+		s.dispatch(Message{
+			ID:   reqID,
+			Type: MessageTypeStreamEnd,
+		})
+	}()
 
-	var msgs []Message
-	for msg := range req.ch {
-		msgs = append(msgs, msg)
+	<-enteredDispatch
+	// Small yield to ensure the goroutine is in deliverTerminal's select
+	time.Sleep(10 * time.Millisecond)
+
+	msgs := make([]Message, 0, pendingChannelBuffer+1)
+drain:
+	for {
+		select {
+		case msg, ok := <-req.ch:
+			if !ok {
+				break drain
+			}
+			msgs = append(msgs, msg)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out after %d frames waiting for the terminal message", len(msgs))
+		}
 	}
 
-	if len(msgs) == 0 {
-		t.Fatalf("expected messages, got 0")
+	if len(msgs) != pendingChannelBuffer+1 {
+		t.Fatalf("frame loss: expected %d frames, got %d", pendingChannelBuffer+1, len(msgs))
+	}
+	for i := 0; i < pendingChannelBuffer; i++ {
+		if msgs[i].Type != MessageTypeStreamChunk {
+			t.Fatalf("expected frame %d to be MessageTypeStreamChunk, got %s", i, msgs[i].Type)
+		}
+		if seq, ok := msgs[i].Payload["seq"].(int); !ok || seq != i {
+			t.Fatalf("frame %d out of order: payload %v", i, msgs[i].Payload)
+		}
 	}
 	lastMsg := msgs[len(msgs)-1]
 	if lastMsg.Type != MessageTypeStreamEnd {
 		t.Fatalf("expected last message to be MessageTypeStreamEnd, got %s", lastMsg.Type)
+	}
+}
+
+func TestSession_Dispatch_TerminalUnblocksOnSessionClose(t *testing.T) {
+	sess := &session{
+		closed: make(chan struct{}),
+	}
+	reqID := "req-terminal-sess-close"
+	req := newPendingRequest(context.Background())
+	sess.pending.Store(reqID, req)
+
+	// Fill channel to buffer capacity
+	for i := 0; i < pendingChannelBuffer; i++ {
+		sess.dispatch(Message{ID: reqID, Type: MessageTypeStreamChunk})
+	}
+
+	enteredDispatch := make(chan struct{})
+	doneDispatch := make(chan struct{})
+	go func() {
+		close(enteredDispatch)
+		sess.dispatch(Message{ID: reqID, Type: MessageTypeStreamEnd})
+		close(doneDispatch)
+	}()
+
+	<-enteredDispatch
+	// Small yield to ensure the goroutine is in deliverTerminal's select
+	time.Sleep(10 * time.Millisecond)
+
+	// Close session to unblock the saturated terminal delivery
+	sess.cleanup(errClosed)
+
+	select {
+	case <-doneDispatch:
+		// Succeeded in unblocking
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("terminal dispatch remained blocked after session cleanup")
 	}
 }
 

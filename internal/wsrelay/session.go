@@ -89,22 +89,25 @@ func (pr *pendingRequest) deliverTerminal(sessClosed <-chan struct{}, msg Messag
 	if pr.closed {
 		return false
 	}
-	pr.terminal = true
 
+	var ctxDone <-chan struct{}
+	if pr.reqCtx != nil {
+		ctxDone = pr.reqCtx.Done()
+	}
+
+	// Wait for buffer space like deliver does instead of evicting a queued
+	// frame: dropping response data to make room for the terminal message
+	// reports a successful stream while part of the response is missing.
 	select {
+	case <-pr.done:
+		return false
+	case <-sessClosed:
+		return false
+	case <-ctxDone:
+		return false
 	case pr.ch <- msg:
+		pr.terminal = true
 		return true
-	default:
-		select {
-		case <-pr.ch:
-		default:
-		}
-		select {
-		case pr.ch <- msg:
-			return true
-		default:
-			return false
-		}
 	}
 }
 
