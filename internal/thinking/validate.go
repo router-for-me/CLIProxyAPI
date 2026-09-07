@@ -156,8 +156,10 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		}
 	}
 
-	// Convert ModeAuto to mid-range if dynamic not allowed
-	if config.Mode == ModeAuto && !support.DynamicAllowed {
+	// Convert ModeAuto to mid-range if dynamic not allowed. Assumed default
+	// levels carry no real model contract, so the requested sentinel is
+	// forwarded for the upstream to interpret instead of being rewritten.
+	if config.Mode == ModeAuto && !support.DynamicAllowed && !support.LevelsAssumed {
 		config = convertAutoToMidRange(config, support, toFormat, model)
 		// The canonical mid-range level may not be present in a model's discrete
 		// level subset (for example, Levels=[low, high]). Clamp the generated
@@ -182,9 +184,10 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		// ModeNone for a model that cannot be disabled falls back to the lowest
 		// supported level. Budget-capable models reach this path with Budget > 0;
 		// level-only models need the capability flags checked explicitly because
-		// their Min/Max range is zero.
+		// their Min/Max range is zero. Assumed level sets skip the fallback so an
+		// explicit disable request is forwarded instead of becoming "low".
 		cannotDisableLevelModel := !support.ZeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
-		if config.Mode == ModeNone && len(support.Levels) > 0 && (config.Budget > 0 || cannotDisableLevelModel) {
+		if config.Mode == ModeNone && !support.LevelsAssumed && len(support.Levels) > 0 && (config.Budget > 0 || cannotDisableLevelModel) {
 			config.Level = ThinkingLevel(support.Levels[0])
 		}
 	}
