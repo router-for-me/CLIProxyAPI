@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -397,6 +398,18 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures .
 func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
+	}
+	// Observability for the auto-router empty-output symptom: a routed request
+	// that consumed input but produced zero output tokens (and did not fail
+	// outright) usually means reasoning starved the visible budget. Streaming
+	// responses cannot be inspected cheaply per-chunk, so the usage record is
+	// the detection point. Non-routed requests are unaffected.
+	if r.routerID != "" && !failed && fail.Body == "" && detail.OutputTokens == 0 && detail.InputTokens > 0 {
+		log.WithFields(log.Fields{
+			"router_id":  r.routerID,
+			"model":      model,
+			"request_id": r.requestID,
+		}).Warn("auto-router: routed request completed with zero output tokens (possible max_tokens starvation)")
 	}
 	return usage.Record{
 		Provider:                 r.provider,

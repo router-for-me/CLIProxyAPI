@@ -3,9 +3,11 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -63,15 +65,22 @@ func (h *BaseAPIHandler) applyVisionBridgeIfNeeded(ctx context.Context, resolved
 	return replaceImagesWithVisionText(rawJSON, "", analysis)
 }
 
+// defaultThinkingCompletionCap is the max_tokens fallback for registered
+// thinking models that carry no MaxCompletionTokens metadata: reasoning and
+// visible output share one budget, so a small client cap yields empty visible
+// content. 32k sits above ordinary client caps and below typical model limits.
+const defaultThinkingCompletionCap = 32000
+
 // inflateThinkingModelMaxTokens raises the request's max_tokens to the target
 // model's MaxCompletionTokens when the target is a thinking model (Thinking
 // config present) and the client requested a smaller cap. Thinking models share
 // the max_tokens budget between reasoning and visible output, so a small client
 // cap makes long answers truncate with finish_reason "max_tokens" (the Complex
 // tier antigravity claude-sonnet-4-6 symptom). Inflating to the model cap lets
-// the full answer complete. A no-op when the model isn't a thinking model, has
-// no registered cap, or the request already caps at/above it. The original
-// []byte is not mutated.
+// the full answer complete. When the model is registered as thinking but has no
+// registered cap, the defaultThinkingCompletionCap fallback applies. A no-op
+// when the model isn't a thinking model or the request already caps at/above
+// the cap (a client cap is never lowered). The original []byte is not mutated.
 func inflateThinkingModelMaxTokens(rawJSON []byte, targetModel string) []byte {
 	if len(rawJSON) == 0 || strings.TrimSpace(targetModel) == "" {
 		return rawJSON
@@ -83,8 +92,12 @@ func inflateThinkingModelMaxTokens(rawJSON []byte, targetModel string) []byte {
 		base = strings.TrimSpace(targetModel)
 	}
 	info := registry.LookupModelInfo(base)
-	if info == nil || info.Thinking == nil || info.MaxCompletionTokens <= 0 {
+	if info == nil || info.Thinking == nil {
 		return rawJSON
+	}
+	cap := info.MaxCompletionTokens
+	if cap <= 0 {
+		cap = defaultThinkingCompletionCap
 	}
 
 	// Handle both "max_tokens" (OpenAI/Claude chat) and "max_completion_tokens"
@@ -94,14 +107,45 @@ func inflateThinkingModelMaxTokens(rawJSON []byte, targetModel string) []byte {
 		if !v.Exists() || v.Type != gjson.Number {
 			continue
 		}
-		if int(v.Int()) >= info.MaxCompletionTokens {
+		if int(v.Int()) >= cap {
 			continue
 		}
-		if out, err := sjson.SetBytes(rawJSON, field, int64(info.MaxCompletionTokens)); err == nil {
+		if out, err := sjson.SetBytes(rawJSON, field, int64(cap)); err == nil {
 			rawJSON = out
 		}
 	}
 	return rawJSON
+}
+
+// autoRouterEmptyCompletionError converts a routed non-streaming response that
+// finished with finish_reason=max_tokens and zero visible content (and no tool
+// calls) into an explicit 502 so clients see the cause instead of an empty 200.
+// Any other shape passes through untouched (nil).
+func autoRouterEmptyCompletionError(payload []byte) *interfaces.ErrorMessage {
+	if len(payload) == 0 {
+		return nil
+	}
+	choices := gjson.GetBytes(payload, "choices")
+	if !choices.IsArray() {
+		return nil
+	}
+	for _, choice := range choices.Array() {
+		if choice.Get("finish_reason").String() != "max_tokens" {
+			continue
+		}
+		msg := choice.Get("message")
+		if msg.Get("content").Exists() && msg.Get("content").String() != "" {
+			continue
+		}
+		if msg.Get("tool_calls").Exists() {
+			continue
+		}
+		return &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadGateway,
+			Error:      fmt.Errorf("model hit the token cap before producing output; raise max_tokens or reduce reasoning effort"),
+		}
+	}
+	return nil
 }
 
 // autoRouterRequestAdjustments applies per-request adjustments for an auto-router

@@ -182,6 +182,15 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		return nil, nil, errMsg
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
+	if resolvedAR.matched {
+		// A routed request that hit the token cap with zero visible content is
+		// an upstream/config fault, not an empty success: surface it explicitly
+		// so clients see the cause instead of an empty 200.
+		if emptyErr := autoRouterEmptyCompletionError(resp.Payload); emptyErr != nil {
+			lifecycle.completeError(ctx, emptyErr)
+			return nil, nil, emptyErr
+		}
+	}
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
