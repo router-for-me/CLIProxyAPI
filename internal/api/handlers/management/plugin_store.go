@@ -731,11 +731,11 @@ func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Cl
 
 	expiresAt := time.Now().Add(ttl)
 	var rateLimit *pluginstore.RateLimitError
+	h.pluginReleaseCacheMu.Lock()
 	if errors.As(errRelease, &rateLimit) {
-		version = entry.version
+		version = h.pluginReleaseCache[repository].version
 		expiresAt = rateLimit.RetryAt
 	}
-	h.pluginReleaseCacheMu.Lock()
 	if h.pluginReleaseCache == nil {
 		h.pluginReleaseCache = make(map[string]pluginReleaseCacheEntry)
 	}

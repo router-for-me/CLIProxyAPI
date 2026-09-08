@@ -461,6 +461,46 @@ func TestLatestPluginVersionCacheStartsAfterRequest(t *testing.T) {
 	}
 }
 
+func TestLatestPluginVersionRateLimitPreservesConcurrentRefresh(t *testing.T) {
+	t.Parallel()
+	repository := "https://github.com/author/sample"
+	plugin := pluginstore.Plugin{ID: "sample", Repository: repository}
+	retryAt := time.Now().Add(time.Hour).Truncate(time.Second)
+	h := &Handler{pluginReleaseCache: map[string]pluginReleaseCacheEntry{
+		repository: {version: "0.1.0", expiresAt: time.Now().Add(-time.Second)},
+	}}
+	started := make(chan struct{})
+	releaseLimited := make(chan struct{})
+	limitedResult := make(chan string, 1)
+	limitedClient := pluginstore.Client{HTTPClient: pluginStoreHTTPDoerFunc(func(request *http.Request) (*http.Response, error) {
+		close(started)
+		<-releaseLimited
+		headers := make(http.Header)
+		headers.Set("Retry-After", retryAt.Format(http.TimeFormat))
+		return &http.Response{StatusCode: http.StatusForbidden, Header: headers, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	go func() {
+		limitedResult <- h.latestPluginVersion(context.Background(), limitedClient, plugin)
+	}()
+	<-started
+	successClient := pluginstore.Client{HTTPClient: pluginStoreHTTPDoerFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v0.2.0"}`))}, nil
+	})}
+	successVersion := h.latestPluginVersion(context.Background(), successClient, plugin)
+	close(releaseLimited)
+	limitedVersion := <-limitedResult
+	if successVersion != "0.2.0" || limitedVersion != "0.2.0" {
+		t.Fatalf("versions: success = %q, limited = %q; want 0.2.0", successVersion, limitedVersion)
+	}
+	entry := h.pluginReleaseCache[repository]
+	if entry.version != "0.2.0" || !entry.expiresAt.Equal(retryAt) {
+		t.Fatalf("cache = %+v, want version 0.2.0 until %v", entry, retryAt)
+	}
+	if version := h.latestPluginVersion(context.Background(), limitedClient, plugin); version != "0.2.0" {
+		t.Fatalf("cached version = %q, want 0.2.0", version)
+	}
+}
+
 func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 	t.Parallel()
 

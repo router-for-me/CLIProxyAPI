@@ -33,8 +33,14 @@ func TestPluginStoreRateLimitError(t *testing.T) {
 		{"past", 429, "", strconv.FormatInt(now.Add(-time.Hour).Unix(), 10), "0", time.Minute},
 		{"overflow", 429, "", "", "9223372036854775807", time.Minute},
 		{"negative", 429, "", "-1", "-30", time.Minute},
-		{"permission", 403, "1", strconv.FormatInt(now.Add(time.Hour).Unix(), 10), "120", 0},
-		{"permission missing remaining", 403, "", "", "120", 0},
+		{"secondary nonzero remaining", 403, "1", "", "120", 2 * time.Minute},
+		{"secondary missing remaining", 403, "", "", "120", 2 * time.Minute},
+		{"secondary date", 403, "1", "", now.Add(3 * time.Minute).Format(http.TimeFormat), 3 * time.Minute},
+		{"secondary reset later", 403, "1", strconv.FormatInt(now.Add(time.Hour).Unix(), 10), "120", time.Hour},
+		{"secondary zero", 403, "", "", "0", time.Minute},
+		{"permission", 403, "1", strconv.FormatInt(now.Add(time.Hour).Unix(), 10), "", 0},
+		{"permission missing remaining", 403, "", "", "", 0},
+		{"permission invalid retry", 403, "1", "", "bad", 0},
 		{"server error", 500, "0", "", "120", 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {

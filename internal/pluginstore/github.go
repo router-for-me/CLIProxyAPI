@@ -52,9 +52,6 @@ func (err *RateLimitError) Error() string {
 }
 
 func pluginStoreRateLimitError(status int, headers http.Header, now time.Time) *RateLimitError {
-	if status != http.StatusTooManyRequests && (status != http.StatusForbidden || strings.TrimSpace(headers.Get("X-RateLimit-Remaining")) != "0") {
-		return nil
-	}
 	var retryAt time.Time
 	if reset, errParse := strconv.ParseInt(strings.TrimSpace(headers.Get("X-RateLimit-Reset")), 10, 64); errParse == nil && reset > 0 {
 		retryAt = time.Unix(reset, 0).UTC()
@@ -65,6 +62,9 @@ func pluginStoreRateLimitError(status int, headers http.Header, now time.Time) *
 		retryAfterTime = now.Add(time.Duration(seconds) * time.Second)
 	} else if date, errDate := http.ParseTime(retryAfter); errDate == nil {
 		retryAfterTime = date
+	}
+	if status != http.StatusTooManyRequests && (status != http.StatusForbidden || (strings.TrimSpace(headers.Get("X-RateLimit-Remaining")) != "0" && retryAfterTime.IsZero())) {
+		return nil
 	}
 	if retryAfterTime.After(retryAt) {
 		retryAt = retryAfterTime
