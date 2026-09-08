@@ -11,6 +11,33 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestConvertOpenAIResponsesRequestToClaude_PreservesToolOutputWithoutCallIDAsUserMessage(t *testing.T) {
+	const delegation = `<codex_delegation><input>run the canary</input></codex_delegation>`
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run the canary"}]},
+			{"type":"function_call_output","id":"fco_create_thread","name":"create_thread","output":"` + delegation + `"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if got := root.Get("messages.#").Int(); got != 1 {
+		t.Fatalf("messages count = %d, want one accumulated user message. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user. Output: %s", got, string(out))
+	}
+	if got := root.Get("messages.0.content.1.text").String(); got != delegation {
+		t.Fatalf("delegation content = %q, want %q. Output: %s", got, delegation, string(out))
+	}
+	if strings.Contains(root.Get("messages").Raw, "tool_result") {
+		t.Fatalf("call-ID-less function_call_output must not become a Claude tool_result. Output: %s", string(out))
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
@@ -1295,7 +1322,8 @@ func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesToolOutputs(t *testin
 		t.Fatalf("messages[3].content.1.id = %q, want toolu_parallel", got)
 	}
 
-	// Message 4: user tool_results: call_custom_dup (custom final), toolu_parallel (parallel result), and empty id output
+	// Message 4: user tool_results for the two identified calls plus the
+	// call-ID-less output preserved as ordinary user text.
 	msg4Blocks := messages[4].Get("content").Array()
 	if len(msg4Blocks) != 3 {
 		t.Fatalf("expected 3 tool_result blocks in message 4, got %d. Output: %s", len(msg4Blocks), string(out))
@@ -1314,8 +1342,11 @@ func TestConvertOpenAIResponsesRequestToClaude_DeduplicatesToolOutputs(t *testin
 		t.Fatalf("msg4Blocks[1].content = %q, want 'parallel result'", got)
 	}
 
-	if got := msg4Blocks[2].Get("content").String(); got != "empty id output" {
-		t.Fatalf("msg4Blocks[2].content = %q, want 'empty id output'", got)
+	if got := msg4Blocks[2].Get("type").String(); got != "text" {
+		t.Fatalf("msg4Blocks[2].type = %q, want text", got)
+	}
+	if got := msg4Blocks[2].Get("text").String(); got != "empty id output" {
+		t.Fatalf("msg4Blocks[2].text = %q, want 'empty id output'", got)
 	}
 }
 
