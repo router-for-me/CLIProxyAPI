@@ -38,6 +38,10 @@ var logFieldOrder = []string{
 	"mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error",
 	"credential", "connection", "proxy_scheme", "remote_transport",
 	"media_session_id", "call_id", "peer", "state", "reason",
+	// Auto-router diagnostics (vision bridge duration, resolve-failure,
+	// cooldown waits, zero-output warnings).
+	"router_id", "tier", "vision_bridge_model", "target_model", "elapsed_ms",
+	"wait_ms", "max_wait_ms", "request_id",
 }
 
 var quotedLogFields = map[string]struct{}{
