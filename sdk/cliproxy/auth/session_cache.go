@@ -395,6 +395,41 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	}
 }
 
+// InvalidateMatching removes every alias group that owns at least one alias
+// accepted by match. It returns the number of removed groups and the number of
+// aliases those groups held.
+//
+// Removal is deliberately group-wide rather than alias-wide. Every alias in a
+// group names the same logical session (the canonical key plus any parent or
+// fork identity merged by SetAliases), so dropping only the requested alias
+// would let the very next request rediscover the surviving sibling and re-bind
+// the caller to the same auth. Invalidate remains available when a caller
+// really wants the surgical, sibling-preserving removal.
+func (c *SessionCache) InvalidateMatching(match func(alias string) bool) (groups int, aliases int) {
+	if c == nil || match == nil {
+		return 0, 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitializedLocked()
+	for _, group := range c.groups {
+		matched := false
+		for _, alias := range group.aliases {
+			if match(alias) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		groups++
+		aliases += len(group.aliases)
+		c.removeAliasGroupLocked(group)
+	}
+	return groups, aliases
+}
+
 // Stop terminates the background cleanup goroutine.
 func (c *SessionCache) Stop() {
 	if c == nil {

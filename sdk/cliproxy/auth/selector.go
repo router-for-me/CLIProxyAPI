@@ -1407,6 +1407,69 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
 	return "", "unbound"
 }
 
+// SessionInvalidation reports what a single-session affinity invalidation removed.
+type SessionInvalidation struct {
+	// CacheGroups counts TTL-cache alias groups that were dropped.
+	CacheGroups int `json:"cache_groups"`
+	// CacheAliases counts the individual identifiers those groups held.
+	CacheAliases int `json:"cache_aliases"`
+	// LCPGroups counts Merkle-prefix bindings that were dropped.
+	LCPGroups int `json:"lcp_groups"`
+}
+
+// Removed reports whether the invalidation dropped at least one binding.
+func (r SessionInvalidation) Removed() bool {
+	return r.CacheGroups > 0 || r.LCPGroups > 0
+}
+
+// InvalidateSession releases the affinity bindings of a single logical session
+// across every provider and model, in both the TTL cache and the LCP matcher,
+// and reports what it removed.
+//
+// InvalidateAuth is the credential-wide hammer: it moves every session off one
+// credential. This is its per-session counterpart, for the case where a single
+// caller has to be re-spread onto another credential while every other session
+// keeps its binding, its upstream prompt cache, and its place in the pool.
+// Without it the only ways to move one caller are to change its session id
+// (which loses the upstream prompt cache for that conversation) or to restart
+// the proxy (which loses every binding for every caller).
+//
+// The cache is keyed by provider + "::" + sessionID + "::" + model, so one
+// logical session usually owns several cache entries; all of them are matched.
+func (s *SessionAffinitySelector) InvalidateSession(sessionID string) SessionInvalidation {
+	result := SessionInvalidation{}
+	if s == nil || sessionID == "" {
+		return result
+	}
+	if s.cache != nil {
+		result.CacheGroups, result.CacheAliases = s.cache.InvalidateMatching(func(alias string) bool {
+			return alias == sessionID || affinityCacheKeySessionID(alias) == sessionID
+		})
+	}
+	if s.matcher != nil {
+		result.LCPGroups = s.matcher.InvalidateSession(sessionID)
+	}
+	return result
+}
+
+// affinityCacheKeySessionID extracts the session identifier from a composite
+// affinity cache key of the form provider "::" sessionID "::" model. It returns
+// an empty string for aliases that do not have that shape.
+//
+// The provider is taken from the first separator and the model from the last,
+// so session identifiers that themselves contain "::" survive the round trip.
+func affinityCacheKeySessionID(alias string) string {
+	_, rest, ok := strings.Cut(alias, "::")
+	if !ok {
+		return ""
+	}
+	modelSeparator := strings.LastIndex(rest, "::")
+	if modelSeparator <= 0 {
+		return ""
+	}
+	return rest[:modelSeparator]
+}
+
 // OnResult handles session affinity binding or release based on execution outcome.
 func (s *SessionAffinitySelector) OnResult(res Result) {
 	if s == nil || res.AuthID == "" {
