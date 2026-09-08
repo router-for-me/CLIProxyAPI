@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -482,12 +483,235 @@ func TestCodexWebsocketsExecuteStreamHandshakeErrorReturnsWithoutLockingSession(
 			if !ok || statusErr.StatusCode() != http.StatusUnauthorized {
 				t.Fatalf("attempt %d error = %T %v, want status 401", i+1, errExecute, errExecute)
 			}
+			if requestError, ok := errExecute.(cliproxyexecutor.RequestScopedError); ok && requestError.IsRequestScoped() {
+				t.Fatalf("attempt %d error = %T, credential 401 must not be request-scoped", i+1, errExecute)
+			}
 			if !cliproxyexecutor.UpstreamAttempted(attemptCtx) {
 				t.Fatalf("attempt %d websocket handshake was not marked as upstream", i+1)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatalf("attempt %d timed out; execution session remained locked", i+1)
 		}
+	}
+}
+
+func TestCodexWebsocketsHandshakeNotFoundIsRequestScoped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-test",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","id":"msg-1"}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+
+	t.Run("execute", func(t *testing.T) {
+		_, errExecute := exec.Execute(context.Background(), auth, req, opts)
+		if errExecute == nil {
+			t.Fatal("Execute() error = nil, want websocket handshake error")
+		}
+		statusError, ok := errExecute.(interface{ StatusCode() int })
+		if !ok || statusError.StatusCode() != http.StatusNotFound {
+			t.Fatalf("Execute() error = %T %v, want status 404", errExecute, errExecute)
+		}
+		requestError, ok := errExecute.(cliproxyexecutor.RequestScopedError)
+		if !ok || !requestError.IsRequestScoped() {
+			t.Fatalf("Execute() error = %T, want request-scoped handshake failure", errExecute)
+		}
+	})
+
+	t.Run("execute_stream", func(t *testing.T) {
+		_, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts)
+		if errExecute == nil {
+			t.Fatal("ExecuteStream() error = nil, want websocket handshake error")
+		}
+		statusError, ok := errExecute.(interface{ StatusCode() int })
+		if !ok || statusError.StatusCode() != http.StatusNotFound {
+			t.Fatalf("ExecuteStream() error = %T %v, want status 404", errExecute, errExecute)
+		}
+		requestError, ok := errExecute.(cliproxyexecutor.RequestScopedError)
+		if !ok || !requestError.IsRequestScoped() {
+			t.Fatalf("ExecuteStream() error = %T, want request-scoped handshake failure", errExecute)
+		}
+	})
+}
+
+func TestCodexWebsocketsHandshakeNotFoundDoesNotChangeAuthAvailability(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	for _, disableCooling := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disable_cooling_%t", disableCooling), func(t *testing.T) {
+			manager := cliproxyauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(NewCodexAutoExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}}))
+
+			const authID = "codex-websocket-404-auth"
+			const model = "gpt-5.4"
+			auth := &cliproxyauth.Auth{
+				ID:       authID,
+				Provider: "codex",
+				Status:   cliproxyauth.StatusActive,
+				Attributes: map[string]string{
+					"api_key":    "sk-test",
+					"base_url":   server.URL,
+					"websockets": "true",
+				},
+				Metadata: map[string]any{"disable_cooling": disableCooling},
+			}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+			ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+			_, errExecute := manager.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{
+				Model:   model,
+				Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","id":"msg-1"}]}`),
+			}, cliproxyexecutor.Options{
+				Stream:         true,
+				SourceFormat:   sdktranslator.FromString("openai-response"),
+				ResponseFormat: sdktranslator.FromString("openai-response"),
+			})
+			if errExecute == nil {
+				t.Fatal("ExecuteStream() error = nil, want websocket handshake error")
+			}
+			statusError, ok := errExecute.(interface{ StatusCode() int })
+			if !ok || statusError.StatusCode() != http.StatusNotFound {
+				t.Fatalf("ExecuteStream() error = %T %v, want status 404", errExecute, errExecute)
+			}
+
+			updated, ok := manager.GetByID(authID)
+			if !ok || updated == nil {
+				t.Fatal("auth missing after request-scoped websocket failure")
+			}
+			if updated.Status != cliproxyauth.StatusActive || updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+				t.Fatalf("auth availability changed after request-scoped websocket 404: status=%s unavailable=%t retry=%v", updated.Status, updated.Unavailable, updated.NextRetryAfter)
+			}
+			if len(updated.ModelStates) != 0 {
+				t.Fatalf("websocket handshake 404 created model cooldown state: %#v", updated.ModelStates)
+			}
+			if reg.IsModelSuspendedForClient(authID, model) {
+				t.Fatal("websocket handshake 404 suspended the model registry entry")
+			}
+		})
+	}
+}
+
+func TestCodexWebsocketsReconnectHandshakeNotFoundIsRequestScoped(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	staleServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade stale websocket: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer staleServer.Close()
+
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"message":"temporary websocket route miss"}}`))
+	}))
+	defer targetServer.Close()
+
+	tests := []struct {
+		name string
+		run  func(*CodexWebsocketsExecutor, context.Context, *cliproxyauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) error
+	}{
+		{
+			name: "execute",
+			run: func(exec *CodexWebsocketsExecutor, ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, errExecute := exec.Execute(ctx, auth, req, opts)
+				return errExecute
+			},
+		},
+		{
+			name: "execute_stream",
+			run: func(exec *CodexWebsocketsExecutor, ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+				_, errExecute := exec.ExecuteStream(ctx, auth, req, opts)
+				return errExecute
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			staleURL := "ws" + strings.TrimPrefix(staleServer.URL, "http")
+			staleConn, _, errDial := websocket.DefaultDialer.Dial(staleURL, nil)
+			if errDial != nil {
+				t.Fatalf("dial stale websocket: %v", errDial)
+			}
+			if errClose := staleConn.Close(); errClose != nil {
+				t.Fatalf("close stale websocket: %v", errClose)
+			}
+
+			exec := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+			exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+			sessionID := "reconnect-404-" + tt.name
+			auth := &cliproxyauth.Auth{
+				ID:       "codex-reconnect-test",
+				Provider: "codex",
+				Attributes: map[string]string{
+					"api_key":  "sk-test",
+					"base_url": targetServer.URL,
+				},
+			}
+			wsURL := "ws" + strings.TrimPrefix(targetServer.URL, "http") + "/responses"
+			sess := exec.getOrCreateSession(sessionID)
+			sess.connMu.Lock()
+			sess.conn = staleConn
+			sess.connCloser = newWebsocketConnectionCloser(staleConn)
+			sess.wsURL = wsURL
+			sess.authID = auth.ID
+			sess.readerConn = staleConn
+			sess.connMu.Unlock()
+			sess.resetUpstreamDisconnectError(staleConn)
+
+			req := cliproxyexecutor.Request{
+				Model:   "gpt-5.4",
+				Payload: []byte(`{"model":"gpt-5.4","input":[{"type":"message","id":"msg-1"}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai-response"),
+				Metadata: map[string]any{
+					cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
+				},
+			}
+
+			errExecute := tt.run(exec, context.Background(), auth, req, opts)
+			if errExecute == nil {
+				t.Fatal("reconnect error = nil, want websocket handshake error")
+			}
+			statusError, ok := errExecute.(interface{ StatusCode() int })
+			if !ok || statusError.StatusCode() != http.StatusNotFound {
+				t.Fatalf("reconnect error = %T %v, want status 404", errExecute, errExecute)
+			}
+			requestError, ok := errExecute.(cliproxyexecutor.RequestScopedError)
+			if !ok || !requestError.IsRequestScoped() {
+				t.Fatalf("reconnect error = %T, want request-scoped handshake failure", errExecute)
+			}
+			if !strings.Contains(errExecute.Error(), "temporary websocket route miss") {
+				t.Fatalf("reconnect error did not preserve response body: %v", errExecute)
+			}
+		})
 	}
 }
 
