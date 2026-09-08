@@ -73,6 +73,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, errReplay
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
+	body = helps.NormalizeZAIToolOutputImages(baseModel, baseURL, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
