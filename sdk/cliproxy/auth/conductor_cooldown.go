@@ -361,11 +361,27 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
 		quota.NextRecoverAt = record.NextRetryAfter
 	}
+	// A store written before the ceiling existed can hold a multi-day quota deadline.
+	// The selector blocks such a credential, so no 429 path can ever run to re-clamp it;
+	// without migrating on restore the credential stays latched for its original
+	// duration even after this fix is deployed. The migrated deadline is persisted by
+	// the RestoreCooldownStates caller.
+	restoredRetryAfter := record.NextRetryAfter
+	if quota.Exceeded {
+		quotaNext := quota.NextRecoverAt
+		quota.NextRecoverAt = clampQuotaCooldown(quotaNext, now)
+		// Only clamp the retry deadline when it is the quota cooldown itself. A longer
+		// value carries a non-quota cooldown (e.g. a 12h 404) that the ceiling must not
+		// shorten, matching the live failure paths.
+		if !quotaNext.IsZero() && !restoredRetryAfter.After(quotaNext) {
+			restoredRetryAfter = clampQuotaCooldown(restoredRetryAfter, now)
+		}
+	}
 
 	if model == "" {
 		auth.Unavailable = true
 		auth.Status = StatusError
-		auth.NextRetryAfter = record.NextRetryAfter
+		auth.NextRetryAfter = restoredRetryAfter
 		applyCooldownFields(&auth.Quota, quota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
 		auth.Generation++
@@ -382,7 +398,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		Unavailable:    true,
 		Status:         StatusError,
 		StatusMessage:  reason,
-		NextRetryAfter: record.NextRetryAfter,
+		NextRetryAfter: restoredRetryAfter,
 		Quota:          quota,
 		LastError:      cloneError(record.LastError),
 		UpdatedAt:      updatedAt,
@@ -897,6 +913,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherQuotaNext) {
 											otherQuotaNext = otherState.Quota.NextRecoverAt
 										}
+										// Clamp after the maximum: a sibling's stored multi-day quota
+										// deadline would otherwise be promoted to credential_quota and
+										// park every model for the original duration.
+										otherQuotaNext = clampQuotaCooldown(otherQuotaNext, now)
 										otherRetryAfter := otherQuotaNext
 										// Propagation only extends a sibling's still-live
 										// per-model deadline; it never shortens one.
@@ -919,6 +939,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if auth.Quota.NextRecoverAt.After(authNext) {
 									authNext = auth.Quota.NextRecoverAt
 								}
+								// Same reasoning as the sibling clamp above: this deadline becomes the
+								// credential-wide credential_quota that isAuthBlockedForModel enforces.
+								authNext = clampQuotaCooldown(authNext, now)
 								auth.Quota.NextRecoverAt = authNext
 								auth.NextRetryAfter = authNext
 							}

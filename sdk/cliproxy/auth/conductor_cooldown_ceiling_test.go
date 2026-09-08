@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -145,5 +146,139 @@ func TestApplyAuthFailureState_NonQuotaDeadlineIsNotClamped(t *testing.T) {
 
 	if !auth.NextRetryAfter.After(now.Add(maxQuotaCooldownCeiling)) {
 		t.Fatalf("NextRetryAfter = %v, want a 404 deadline well beyond the quota ceiling", auth.NextRetryAfter)
+	}
+}
+
+// A cooldown store written before the ceiling existed can hold a multi-day quota
+// deadline. The selector blocks such a credential, so no 429 path can run to re-clamp
+// it; unless the deadline is migrated on restore the credential stays latched for its
+// original duration even after this fix ships.
+func TestRestoreCooldownStates_ClampsPreFixMultiDayQuotaRecord(t *testing.T) {
+	now := time.Now()
+	sevenDaysOut := now.Add(7 * 24 * time.Hour)
+
+	manager := NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-prefix-record", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+	manager.SetCooldownStateStore(&mockCooldownStateStore{records: []CooldownStateRecord{
+		{
+			Provider:       "codex",
+			AuthID:         "auth-prefix-record",
+			NextRetryAfter: sevenDaysOut,
+			Reason:         "quota exhausted",
+			Quota: QuotaState{
+				Exceeded:      true,
+				Reason:        "credential_quota",
+				NextRecoverAt: sevenDaysOut,
+			},
+			UpdatedAt: now,
+		},
+	}})
+
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
+	}
+
+	restored, ok := manager.GetByID("auth-prefix-record")
+	if !ok || restored == nil {
+		t.Fatal("restored auth not found")
+	}
+	ceiling := now.Add(maxQuotaCooldownCeiling)
+	if restored.Quota.NextRecoverAt.After(ceiling.Add(time.Minute)) {
+		t.Fatalf("restored Quota.NextRecoverAt = %v, want clamped to ~%v", restored.Quota.NextRecoverAt, ceiling)
+	}
+	if restored.NextRetryAfter.After(ceiling.Add(time.Minute)) {
+		t.Fatalf("restored NextRetryAfter = %v, want clamped to ~%v", restored.NextRetryAfter, ceiling)
+	}
+	// The credential must still be cooling; migrating the deadline must not clear it.
+	if !restored.Quota.Exceeded {
+		t.Fatal("restored Quota.Exceeded = false, want the cooldown preserved")
+	}
+	if blocked, _, _ := isAuthBlockedForModel(restored, "", now); !blocked {
+		t.Fatal("restored credential is not blocked, want it still cooling until the ceiling")
+	}
+}
+
+// A restored record whose retry deadline is longer than its quota deadline carries a
+// non-quota cooldown (e.g. a 12h 404). The ceiling must not shorten that.
+func TestRestoreCooldownStates_LeavesLongerNonQuotaDeadlineIntact(t *testing.T) {
+	now := time.Now()
+	quotaNext := now.Add(20 * time.Minute)
+	notFoundNext := now.Add(12 * time.Hour)
+
+	manager := NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-mixed-record", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+	manager.SetCooldownStateStore(&mockCooldownStateStore{records: []CooldownStateRecord{
+		{
+			Provider:       "codex",
+			AuthID:         "auth-mixed-record",
+			NextRetryAfter: notFoundNext,
+			Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: quotaNext},
+			UpdatedAt:      now,
+		},
+	}})
+
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
+	}
+
+	restored, ok := manager.GetByID("auth-mixed-record")
+	if !ok || restored == nil {
+		t.Fatal("restored auth not found")
+	}
+	if !restored.NextRetryAfter.Equal(notFoundNext) {
+		t.Fatalf("restored NextRetryAfter = %v, want the non-quota deadline %v untouched", restored.NextRetryAfter, notFoundNext)
+	}
+	if !restored.Quota.NextRecoverAt.Equal(quotaNext) {
+		t.Fatalf("restored Quota.NextRecoverAt = %v, want %v untouched (already inside the ceiling)", restored.Quota.NextRecoverAt, quotaNext)
+	}
+}
+
+// A credential-scoped 429 promotes a deadline to every model on the credential. If the
+// stored aggregate deadline were carried through the maximum unclamped, it would become
+// credential_quota and park the whole credential for the original multi-day duration.
+func TestMarkResult_CredentialScopePropagationIsClamped(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m, auth := newCooldownMonotonicManager(t, "model-a", "model-b")
+
+	// Simulate a credential that already carries a pre-fix multi-day quota deadline.
+	now := time.Now()
+	stale := auth.Clone()
+	stale.Quota.Exceeded = true
+	stale.Quota.Reason = "quota"
+	stale.Quota.NextRecoverAt = now.Add(7 * 24 * time.Hour)
+	if _, errUpdate := m.Update(WithSkipPersist(context.Background()), stale); errUpdate != nil {
+		t.Fatalf("Update() returned error: %v", errUpdate)
+	}
+
+	short := 5 * time.Minute
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "model-a",
+		Success: false, RetryAfter: &short, CredentialScope: true,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "credential 429"},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("auth not found")
+	}
+	ceiling := now.Add(maxQuotaCooldownCeiling).Add(time.Minute)
+	if updated.Quota.NextRecoverAt.After(ceiling) {
+		t.Fatalf("credential-wide Quota.NextRecoverAt = %v, want clamped to ~%v", updated.Quota.NextRecoverAt, ceiling)
+	}
+	for _, model := range []string{"model-a", "model-b"} {
+		state := existingModelState(updated, canonicalModelKey(model))
+		if state == nil {
+			continue
+		}
+		if state.Quota.NextRecoverAt.After(ceiling) {
+			t.Fatalf("model %q Quota.NextRecoverAt = %v, want clamped to ~%v", model, state.Quota.NextRecoverAt, ceiling)
+		}
 	}
 }
