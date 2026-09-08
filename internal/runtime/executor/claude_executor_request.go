@@ -50,6 +50,8 @@ const (
 	claudeExtendedCacheTTLBeta       = "extended-cache-ttl-2025-04-11"
 	claudeCacheDiagnosisBeta         = "cache-diagnosis-2026-04-07"
 	claudeRedactThinkingBeta         = "redact-thinking-2026-02-12"
+	claudePerTurnControlBeta         = "per-turn-control-2026-07-01"
+	claudeMidConvToolChangesBeta     = "mid-conversation-tool-changes-2026-07-01"
 )
 
 // claudeCodeCLIConstantBetas are the betas Claude Code sends on every
@@ -74,6 +76,8 @@ var claudeCodeTrailingBetas = []string{
 	claudeServerSideFallbackBeta,
 	claudeFallbackCreditBeta,
 	claudeStructuredOutputsBeta,
+	claudePerTurnControlBeta,
+	claudeMidConvToolChangesBeta,
 }
 
 // claudeCodeCLIBetas assembles the Anthropic-Beta baseline the way Claude Code
