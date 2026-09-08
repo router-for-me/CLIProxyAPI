@@ -334,6 +334,53 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 	h.persist(c)
 }
 
+// defaultSessionAffinityTTL mirrors the runtime default applied when
+// routing.session-affinity-ttl is unset (sdk/cliproxy/service_config.go).
+const (
+	defaultSessionAffinityTTL = "1h"
+	// minSessionAffinityTTL mirrors the floor the routing runtime enforces.
+	minSessionAffinityTTL = time.Second
+)
+
+// RoutingSessionAffinity exposes routing.session-affinity and its TTL the
+// same way routing/strategy is exposed: read the effective values, write
+// either field, persist to the config file and hot-reload.
+func (h *Handler) GetRoutingSessionAffinity(c *gin.Context) {
+	ttl := strings.TrimSpace(h.cfg.Routing.SessionAffinityTTL)
+	if ttl == "" {
+		ttl = defaultSessionAffinityTTL
+	}
+	c.JSON(200, gin.H{"enabled": h.cfg.Routing.SessionAffinity, "ttl": ttl})
+}
+func (h *Handler) PutRoutingSessionAffinity(c *gin.Context) {
+	var body struct {
+		Enabled *bool   `json:"enabled"`
+		TTL     *string `json:"ttl"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || (body.Enabled == nil && body.TTL == nil) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.TTL != nil {
+		ttl := strings.TrimSpace(*body.TTL)
+		if ttl != "" {
+			// The runtime clamps the selector TTL to one second
+			// (normalizedRoutingRuntimeState); reject shorter values so
+			// the persisted setting never diverges from the effective one.
+			parsed, errParse := time.ParseDuration(ttl)
+			if errParse != nil || parsed < minSessionAffinityTTL {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid ttl"})
+				return
+			}
+		}
+		h.cfg.Routing.SessionAffinityTTL = ttl
+	}
+	if body.Enabled != nil {
+		h.cfg.Routing.SessionAffinity = *body.Enabled
+	}
+	h.persist(c)
+}
+
 // Proxy URL
 func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL}) }
 func (h *Handler) PutProxyURL(c *gin.Context) {
