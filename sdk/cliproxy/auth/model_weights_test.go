@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"context"
 	"fmt"
 	"testing"
@@ -8,6 +9,29 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+func TestParseModelWeights_RejectsAmbiguousKeys(t *testing.T) {
+	t.Parallel()
+
+	// Both entries normalize to the same key. Keeping either one would make the
+	// loaded table depend on map iteration order, so the same file could route
+	// differently on each read — with 0 and a positive weight the credential
+	// would flip between excluded and active.
+	cases := []map[string]any{
+		{"Claude-Opus-5": 0, "claude-opus-5": 10000},        // case
+		{" claude-opus-5 ": 0, "claude-opus-5": 10000},      // surrounding space
+		{"gpt-5.6-sol(high)": 0, "gpt-5.6-sol": 10000},      // thinking suffix
+	}
+	for _, raw := range cases {
+		got, err := ParseModelWeights(raw)
+		if err == nil {
+			t.Fatalf("ParseModelWeights(%v) = %#v, want error", raw, got)
+		}
+		if !strings.Contains(err.Error(), "ambiguous") {
+			t.Fatalf("ParseModelWeights(%v) error = %v, want it to name the ambiguity", raw, err)
+		}
+	}
+}
 
 func TestParseModelWeights_NormalizesKeysAndValues(t *testing.T) {
 	t.Parallel()

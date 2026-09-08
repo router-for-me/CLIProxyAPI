@@ -61,11 +61,27 @@ func ParseModelWeights(value any) (map[string]int64, error) {
 		return nil, nil
 	}
 	out := make(map[string]int64, len(raw))
+	// Two entries can normalize to the same key ("Claude-Opus-5" and
+	// "claude-opus-5", or a model and its thinking-suffix form). Silently
+	// keeping one of them would make the table depend on Go's unspecified map
+	// iteration order: the same file could load a different weight on each
+	// read, and with values 0 and positive the credential would flip between
+	// excluded and active. Reject the table instead — an ambiguous routing
+	// rule must be corrected by its author, not resolved by chance.
+	seen := make(map[string]string, len(raw))
 	for model, rawWeight := range raw {
 		key := modelWeightKey(model)
 		if key == "" {
 			return nil, fmt.Errorf("model_weights contains an empty model key")
 		}
+		if previous, dup := seen[key]; dup {
+			first, second := previous, model
+			if second < first {
+				first, second = second, first
+			}
+			return nil, fmt.Errorf("model_weights has ambiguous entries %q and %q: both resolve to %q", first, second, key)
+		}
+		seen[key] = model
 		weight, errParse := credentialweight.ParseValue(rawWeight)
 		if errParse != nil {
 			return nil, fmt.Errorf("model_weights[%s]: %w", model, errParse)
