@@ -36,6 +36,7 @@ import AlertsPage from './pages/AlertsPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import ImportExportPage from './pages/ImportExportPage.jsx';
 import BackupPage from './pages/BackupPage.jsx';
+import LogsPage from './pages/LogsPage.jsx';
 import PlaygroundPage from './pages/PlaygroundPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
@@ -300,6 +301,7 @@ export default function App() {
             <Route path="/branding" element={<BrandingPage />} />
             <Route path="/import-export" element={<ImportExportPage />} />
             <Route path="/backup" element={<BackupPage />} />
+            <Route path="/logs" element={<LogsPage />} />
             <Route path="/manage-cpa" element={<ManageCpaLayout />}>
               <Route index element={<OverviewTab />} />
               <Route path="providers" element={<ProvidersTab />} />

@@ -4925,3 +4925,112 @@ button.ghost:hover:not(:disabled) {
 .relay-tip {
   margin-top: -6px;
 }
+
+/* Server Logs page (/logs) — raw + table log viewer. */
+
+.logs-disabled-banner {
+  margin-top: 16px;
+  border-color: rgba(251, 191, 36, 0.4);
+}
+
+.logs-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.logs-view-toggle button {
+  border: none;
+  border-radius: 0;
+  padding: 6px 14px;
+  background: transparent;
+  color: var(--text-muted);
+}
+.logs-view-toggle button.is-active {
+  background: var(--accent-dim);
+  color: var(--text);
+}
+
+.logs-counter {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.logs-status-row {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.logs-status-error { color: var(--danger); }
+.logs-status-note { color: var(--warning); }
+
+.logs-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+  /* Fill the remaining viewport below the toolbar + status bar. */
+  height: calc(100vh - 320px);
+  padding: 0;
+  overflow: hidden;
+}
+.logs-panel__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-muted);
+}
+
+.logs-view {
+  flex: 1;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.logs-view--raw { padding: 10px 14px; }
+
+.logs-line { white-space: pre-wrap; word-break: break-all; }
+.logs-line--warn { color: var(--warning); }
+.logs-line--error,
+.logs-line--fatal { color: var(--danger); }
+.logs-line--panic { color: var(--danger); font-weight: 600; }
+.logs-line--debug,
+.logs-line--other { color: var(--text-muted); }
+
+.logs-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.logs-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  text-align: left;
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.logs-table td {
+  padding: 3px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.logs-table__ts { color: var(--text-muted); white-space: nowrap; }
+.logs-table__level { white-space: nowrap; }
+.logs-table__msg { white-space: pre-wrap; word-break: break-word; }
+
+.logs-status-bar {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+}

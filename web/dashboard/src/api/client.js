@@ -2210,3 +2210,23 @@ export async function batchImportProxyPools(lines) {
 export async function deployRelayProxyPool(payload) {
   return fetchJSON('/proxy-pools/relay-deploy', { method: 'POST', body: JSON.stringify(payload) });
 }
+
+// --- Server logs -----------------------------------------------------------
+
+// getLogs reads server log lines. Without `cursor` the server applies tail
+// semantics to `limit`; with `cursor` it returns lines appended since the
+// cursor (incremental). Response: { lines, line-count, latest-timestamp,
+// next-cursor, cursor-reset? }. Throws ApiError(400) when logging-to-file
+// is disabled on the server.
+export async function getLogs({ cursor, limit = 1000, after } = {}) {
+  const params = new URLSearchParams();
+  if (cursor) params.set('cursor', cursor);
+  if (after) params.set('after', String(after));
+  params.set('limit', String(limit));
+  return fetchJSON(`/logs?${params.toString()}`);
+}
+
+// clearLogs removes rotated log files and truncates the active log.
+export async function clearLogs() {
+  return fetchJSON('/logs', { method: 'DELETE' });
+}
