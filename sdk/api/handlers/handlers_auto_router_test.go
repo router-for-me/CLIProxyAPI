@@ -23,13 +23,16 @@ func (r stubAutoRouterResolver) AutoRouterForModel(_ context.Context, modelID st
 
 // TestResolveAutoRouterCapturesTierAndRouterID verifies that when a request
 // matches an Auto Router, resolveAutoRouterModel populates the resolved tier
-// and the router's client-facing id, which the caller threads into the usage
-// context for later attribution by the UsageReporter.
+// and the router's PK id, which the caller threads into the usage context for
+// later attribution by the UsageReporter. The PK (not the requestable model id)
+// is the attribution key: usage_events.router_id must match the identifier the
+// management endpoints (decisions/simulate/replay) address the router by.
 func TestResolveAutoRouterCapturesTierAndRouterID(t *testing.T) {
-	const routerID = "router:smart"
+	const modelID = "router:smart"
+	const pkID = "router-1"
 	router := &store.AutoRouter{
-		ID:      "router-1",
-		ModelID: routerID,
+		ID:      pkID,
+		ModelID: modelID,
 		Name:    "Smart Router",
 		Enabled: true,
 		Mappings: []store.TierMapping{
@@ -42,18 +45,21 @@ func TestResolveAutoRouterCapturesTierAndRouterID(t *testing.T) {
 	h := &BaseAPIHandler{AutoRouterResolver: stubAutoRouterResolver{router: router}}
 
 	// A trivial greeting scores into the simple tier, but we keep the assertion
-	// to the round-trip contract (non-empty tier/routerID + routerID matches the
-	// configured ModelID) so the test does not couple to scorer internals.
-	res := h.resolveAutoRouterModel(context.Background(), "openai", routerID,
-		[]byte(`{"model":"`+routerID+`","messages":[{"role":"user","content":"hi"}]}`))
+	// to the round-trip contract (non-empty tier/routerID) so the test does not
+	// couple to scorer internals. routerID must be the PK id, NOT ModelID.
+	res := h.resolveAutoRouterModel(context.Background(), "openai", modelID,
+		[]byte(`{"model":"`+modelID+`","messages":[{"role":"user","content":"hi"}]}`))
 	if !res.matched {
-		t.Fatalf("expected auto router to resolve for model %q, got unmatched", routerID)
+		t.Fatalf("expected auto router to resolve for model %q, got unmatched", modelID)
 	}
 	if res.tier == "" {
 		t.Error("expected a non-empty resolved tier")
 	}
-	if res.routerID != routerID {
-		t.Errorf("resolved routerID = %q, want %q", res.routerID, routerID)
+	if res.routerID != pkID {
+		t.Errorf("resolved routerID = %q, want PK %q (not model id)", res.routerID, pkID)
+	}
+	if res.routerID == modelID {
+		t.Error("routerID must not be the requestable model id (attribution mismatch)")
 	}
 	if res.targetModel == "" {
 		t.Error("expected a non-empty target model")

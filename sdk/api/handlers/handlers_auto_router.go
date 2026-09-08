@@ -182,7 +182,12 @@ func (h *BaseAPIHandler) autoRouterResolvedFromScore(router *store.AutoRouter, r
 		ScoredTier: result.Score.Tier, EffectiveTier: result.EffectiveTier, DecisionCause: result.DecisionCause,
 		MatchedRules: result.MatchedRules, MappingTier: resolved.MappingTier, FallbackChain: resolved.FallbackChain, TargetModel: resolved.Model,
 	}
-	return autoRouterResolved{targetModel: resolved.Model, route: resolved, visionBridgeModel: strings.TrimSpace(router.VisionBridgeModel), tier: string(result.EffectiveTier), routerID: strings.TrimSpace(router.ModelID), decision: decision, matched: true}
+	// routerID is the router's PK id, not the requestable model id: usage
+	// attribution (usage_events.router_id) must key on the same identifier the
+	// management endpoints (decisions/simulate/replay) address the router by.
+	// ModelID previously landed here and made those endpoints miss every
+	// persisted event.
+	return autoRouterResolved{targetModel: resolved.Model, route: resolved, visionBridgeModel: strings.TrimSpace(router.VisionBridgeModel), tier: string(result.EffectiveTier), routerID: strings.TrimSpace(router.ID), decision: decision, matched: true}
 }
 
 // applyAutoRouterRoute applies a resolved tier's per-model routing (providers +
