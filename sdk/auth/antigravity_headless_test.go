@@ -29,7 +29,13 @@ func TestAntigravityConstantsAndURLBuilder(t *testing.T) {
 
 	// Test with custom redirect URI
 	customURI := "https://admin.example.com/oauth/antigravity/callback"
-	authURL := auth.BuildAntigravityAuthURL("state-123", customURI)
+	authURL, codeVerifier, errBuild := auth.BuildAntigravityAuthURL("state-123", customURI)
+	if errBuild != nil {
+		t.Fatalf("BuildAntigravityAuthURL error: %v", errBuild)
+	}
+	if codeVerifier == "" {
+		t.Fatalf("expected non-empty code verifier")
+	}
 	parsed, err := url.Parse(authURL)
 	if err != nil {
 		t.Fatalf("failed to parse auth URL: %v", err)
@@ -50,12 +56,21 @@ func TestAntigravityConstantsAndURLBuilder(t *testing.T) {
 	if q.Get("prompt") != "consent" {
 		t.Fatalf("expected prompt=consent, got %q", q.Get("prompt"))
 	}
+	if q.Get("code_challenge") == "" {
+		t.Fatalf("expected non-empty code_challenge")
+	}
+	if q.Get("code_challenge_method") != "S256" {
+		t.Fatalf("expected code_challenge_method=S256, got %q", q.Get("code_challenge_method"))
+	}
 	if !strings.Contains(q.Get("scope"), "cloud-platform") {
 		t.Fatalf("scope should include cloud-platform: %s", q.Get("scope"))
 	}
 
 	// Test with empty redirect URI (should fallback to default)
-	authURLDefault := auth.BuildAntigravityAuthURL("state-456", "")
+	authURLDefault, _, errBuildDefault := auth.BuildAntigravityAuthURL("state-456", "")
+	if errBuildDefault != nil {
+		t.Fatalf("BuildAntigravityAuthURL error: %v", errBuildDefault)
+	}
 	parsedDefault, err := url.Parse(authURLDefault)
 	if err != nil {
 		t.Fatalf("failed to parse auth URL: %v", err)
@@ -95,7 +110,7 @@ func TestExchangeAntigravityCode(t *testing.T) {
 		}),
 	}
 
-	tokenResp, err := auth.ExchangeAntigravityCode(context.Background(), "auth-code-123", "http://localhost:51121/oauth-callback", client)
+	tokenResp, err := auth.ExchangeAntigravityCode(context.Background(), "auth-code-123", "http://localhost:51121/oauth-callback", "verifier-abc", client)
 	if err != nil {
 		t.Fatalf("ExchangeAntigravityCode error: %v", err)
 	}
@@ -203,6 +218,13 @@ func TestCompleteAntigravityOAuth(t *testing.T) {
 					Header:     make(http.Header),
 					Body:       io.NopCloser(strings.NewReader(respJSON)),
 				}, nil
+			case strings.Contains(req.URL.String(), "fetchLicenses"):
+				respJSON := `{"licenses":[]}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(respJSON)),
+				}, nil
 			case strings.Contains(req.URL.String(), "loadCodeAssist"):
 				respJSON := `{"cloudaicompanionProject":"complete-proj-123"}`
 				return &http.Response{
@@ -217,7 +239,7 @@ func TestCompleteAntigravityOAuth(t *testing.T) {
 		}),
 	}
 
-	record, err := auth.CompleteAntigravityOAuth(context.Background(), "auth-code-xyz", "http://localhost:51121/oauth-callback", client)
+	record, err := auth.CompleteAntigravityOAuth(context.Background(), "auth-code-xyz", "http://localhost:51121/oauth-callback", "verifier-xyz", client)
 	if err != nil {
 		t.Fatalf("CompleteAntigravityOAuth error: %v", err)
 	}
@@ -248,7 +270,7 @@ func TestExchangeAntigravityCodeDefaultRedirectAndErrors(t *testing.T) {
 		}),
 	}
 
-	_, err := auth.ExchangeAntigravityCode(context.Background(), "code-123", "", client)
+	_, err := auth.ExchangeAntigravityCode(context.Background(), "code-123", "", "verifier-1", client)
 	if err != nil {
 		t.Fatalf("ExchangeAntigravityCode error: %v", err)
 	}
@@ -267,7 +289,7 @@ func TestExchangeAntigravityCodeDefaultRedirectAndErrors(t *testing.T) {
 			}, nil
 		}),
 	}
-	_, err = auth.ExchangeAntigravityCode(context.Background(), "bad-code", "", errorClient)
+	_, err = auth.ExchangeAntigravityCode(context.Background(), "bad-code", "", "verifier-2", errorClient)
 	if err == nil {
 		t.Fatal("expected error on upstream 400 response")
 	}
@@ -287,7 +309,7 @@ func TestExchangeAntigravityCodeDefaultRedirectAndErrors(t *testing.T) {
 			}, nil
 		}),
 	}
-	_, err = auth.ExchangeAntigravityCode(canceledCtx, "code", "", contextAwareClient)
+	_, err = auth.ExchangeAntigravityCode(canceledCtx, "code", "", "verifier-3", contextAwareClient)
 	if err == nil {
 		t.Fatal("expected error with canceled context")
 	}

@@ -1,12 +1,28 @@
 // Package antigravity provides OAuth2 authentication functionality for the Antigravity provider.
 package antigravity
 
-// OAuth client credentials and configuration
-const (
-	ClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	ClientSecret = "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"
-	CallbackPort = 51121
+import (
+	"os"
+	"strings"
 )
+
+// OAuth client credentials and configuration.
+// These must match the real Antigravity IDE plugin's registered OAuth client, since
+// businessaicode.googleapis.com attributes API quota/enablement to the token's client
+// project - a different (e.g. CLI-only) client project may not have that API enabled.
+const (
+	CallbackPort    = 51121
+	ClientIDEnv     = "ANTIGRAVITY_CLIENT_ID"
+	ClientSecretEnv = "ANTIGRAVITY_CLIENT_SECRET"
+)
+
+func OAuthClientID() string {
+	return strings.TrimSpace(os.Getenv(ClientIDEnv))
+}
+
+func OAuthClientSecret() string {
+	return strings.TrimSpace(os.Getenv(ClientSecretEnv))
+}
 
 // Scopes defines the OAuth scopes required for Antigravity authentication
 var Scopes = []string{
@@ -30,3 +46,8 @@ const (
 	DailyAPIEndpoint = "https://daily-cloudcode-pa.googleapis.com"
 	APIVersion       = "v1internal"
 )
+
+// BAICLicensesEndpoint reports Gemini Enterprise (Business AI Code) licenses assigned to the
+// authenticated user, including the GCP project/region generation traffic must route to.
+// Individual/free accounts have no licenses and get an empty "licenses" array here.
+const BAICLicensesEndpoint = "https://businessaicode.googleapis.com/v1beta:fetchLicenses"

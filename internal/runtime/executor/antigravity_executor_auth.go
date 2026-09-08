@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -147,8 +148,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 
 func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth *cliproxyauth.Auth, refreshToken string) (*antigravityTokenRefreshData, error) {
 	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
+	form.Set("client_id", antigravityauth.OAuthClientID())
+	form.Set("client_secret", antigravityauth.OAuthClientSecret())
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -219,6 +220,9 @@ func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, au
 	return nil
 }
 
+// fetchAntigravityProjectID resolves the account's GCP project ID (and, for Gemini Enterprise
+// (BAIC) accounts, its onboarded tier and required region), persisting the tier/region onto
+// auth.Metadata so BAIC generation requests get routed correctly.
 func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (string, error) {
 	token := strings.TrimSpace(accessToken)
 	if token == "" {
@@ -229,11 +233,22 @@ func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, aut
 	}
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(ctx, token, httpClient)
+	result, errFetch := sdkAuth.FetchAntigravityProjectIDWithTier(ctx, token, httpClient)
 	if errFetch != nil {
 		return "", errFetch
 	}
-	return strings.TrimSpace(projectID), nil
+	if auth != nil {
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		if tier := strings.TrimSpace(result.Tier); tier != "" {
+			auth.Metadata["user_tier"] = tier
+		}
+		if region := strings.TrimSpace(result.Region); region != "" {
+			auth.Metadata["region"] = region
+		}
+	}
+	return strings.TrimSpace(result.ProjectID), nil
 }
 
 func (e *AntigravityExecutor) projectIDForRequest(_ context.Context, auth *cliproxyauth.Auth, _ string) (string, error) {
