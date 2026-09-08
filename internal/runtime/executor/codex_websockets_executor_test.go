@@ -1901,6 +1901,7 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 		"Originator":            "Codex Desktop",
 		"Version":               "0.115.0-alpha.27",
 		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
+		"X-Codex-Turn-State":    "opaque-turn-state",
 		"X-Client-Request-Id":   "019d2233-e240-7162-992d-38df0a2a0e0d",
 	}))
 
@@ -1915,6 +1916,9 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	}
 	if got := req.Header.Get("X-Codex-Turn-Metadata"); got != `{"turn_id":"turn-1"}` {
 		t.Fatalf("X-Codex-Turn-Metadata = %s, want %s", got, `{"turn_id":"turn-1"}`)
+	}
+	if got := req.Header.Get("X-Codex-Turn-State"); got != "opaque-turn-state" {
+		t.Fatalf("X-Codex-Turn-State = %q, want %q", got, "opaque-turn-state")
 	}
 	if got := req.Header.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
 		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
@@ -1934,6 +1938,9 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 	}
 	if got := req.Header.Get("X-Codex-Turn-Metadata"); got != "" {
 		t.Fatalf("X-Codex-Turn-Metadata = %q, want empty", got)
+	}
+	if got := req.Header.Get("X-Codex-Turn-State"); got != "" {
+		t.Fatalf("X-Codex-Turn-State = %q, want empty", got)
 	}
 	if got := req.Header.Get("X-Client-Request-Id"); got != "" {
 		t.Fatalf("X-Client-Request-Id = %q, want empty", got)
