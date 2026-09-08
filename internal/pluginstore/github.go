@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,39 @@ type ReleaseAsset struct {
 	APIURL             string `json:"url"`
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+type RateLimitError struct {
+	StatusCode int
+	RetryAt    time.Time
+}
+
+func (err *RateLimitError) Error() string {
+	return fmt.Sprintf("unexpected status %d; retry at %s", err.StatusCode, err.RetryAt.UTC().Format(time.RFC3339))
+}
+
+func pluginStoreRateLimitError(status int, headers http.Header, now time.Time) *RateLimitError {
+	if status != http.StatusTooManyRequests && (status != http.StatusForbidden || strings.TrimSpace(headers.Get("X-RateLimit-Remaining")) != "0") {
+		return nil
+	}
+	var retryAt time.Time
+	if reset, errParse := strconv.ParseInt(strings.TrimSpace(headers.Get("X-RateLimit-Reset")), 10, 64); errParse == nil && reset > 0 {
+		retryAt = time.Unix(reset, 0).UTC()
+	}
+	retryAfter := strings.TrimSpace(headers.Get("Retry-After"))
+	var retryAfterTime time.Time
+	if seconds, errParse := strconv.ParseUint(retryAfter, 10, 63); errParse == nil && seconds <= uint64((1<<63-1)/int64(time.Second)) {
+		retryAfterTime = now.Add(time.Duration(seconds) * time.Second)
+	} else if date, errDate := http.ParseTime(retryAfter); errDate == nil {
+		retryAfterTime = date
+	}
+	if retryAfterTime.After(retryAt) {
+		retryAt = retryAfterTime
+	}
+	if !retryAt.After(now) {
+		retryAt = now.Add(time.Minute)
+	}
+	return &RateLimitError{StatusCode: status, RetryAt: retryAt}
 }
 
 func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
@@ -266,6 +300,9 @@ func readPluginStoreResponse(resp *http.Response, maxSize int64, authenticated b
 		}
 	}()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if errRateLimit := pluginStoreRateLimitError(resp.StatusCode, resp.Header, time.Now()); errRateLimit != nil {
+			return nil, errRateLimit
+		}
 		if authenticated {
 			return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
 		}

@@ -153,15 +153,24 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		return
 	}
 
-	latestInput := make([]pluginstore.Plugin, 0, len(plugins))
-	for _, item := range plugins {
-		latestInput = append(latestInput, item.plugin)
-	}
-	client := h.newPluginStoreClient(proxyURL, "", storeAuth)
-	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
 	pluginSourceCounts := make(map[string]int, len(plugins))
 	for _, item := range plugins {
 		pluginSourceCounts[item.plugin.ID]++
+	}
+	latestInput := make([]pluginstore.Plugin, 0, len(plugins))
+	latestIndices := make([]int, 0, len(plugins))
+	for index, item := range plugins {
+		status := statuses[item.plugin.ID]
+		_, _, sourceAllowsUpdate := pluginStoreInstallSourceStatus(status, sources, item.source.ID, pluginSourceCounts[item.plugin.ID])
+		if (status.Installed || status.Registered) && sourceAllowsUpdate && pluginstore.PluginInstallType(item.plugin) == pluginstore.InstallTypeGitHubRelease {
+			latestInput = append(latestInput, item.plugin)
+			latestIndices = append(latestIndices, index)
+		}
+	}
+	client := h.newPluginStoreClient(proxyURL, "", storeAuth)
+	latestVersions := make([]string, len(plugins))
+	for index, version := range h.latestPluginVersions(c.Request.Context(), client, latestInput) {
+		latestVersions[latestIndices[index]] = version
 	}
 
 	entries := make([]pluginStoreListEntry, 0, len(plugins))
@@ -690,8 +699,8 @@ func (h *Handler) latestPluginVersions(ctx context.Context, client pluginstore.C
 
 // latestPluginVersion returns the plugin's latest release version, caching
 // lookups per repository so repeated listings do not exhaust the GitHub API
-// rate limit. Failed lookups are cached for a shorter interval and reported
-// as an empty version.
+// rate limit. Rate-limited lookups retain the previous version until retry is
+// allowed; other failures use a short cache interval and an empty version.
 func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Client, plugin pluginstore.Plugin) string {
 	if pluginstore.PluginInstallType(plugin) != pluginstore.InstallTypeGitHubRelease {
 		return ""
@@ -720,11 +729,17 @@ func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Cl
 		ttl = pluginReleaseCacheTTL
 	}
 
+	expiresAt := time.Now().Add(ttl)
+	var rateLimit *pluginstore.RateLimitError
+	if errors.As(errRelease, &rateLimit) {
+		version = entry.version
+		expiresAt = rateLimit.RetryAt
+	}
 	h.pluginReleaseCacheMu.Lock()
 	if h.pluginReleaseCache == nil {
 		h.pluginReleaseCache = make(map[string]pluginReleaseCacheEntry)
 	}
-	h.pluginReleaseCache[repository] = pluginReleaseCacheEntry{version: version, expiresAt: now.Add(ttl)}
+	h.pluginReleaseCache[repository] = pluginReleaseCacheEntry{version: version, expiresAt: expiresAt}
 	h.pluginReleaseCacheMu.Unlock()
 	return version
 }

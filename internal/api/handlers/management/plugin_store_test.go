@@ -3,9 +3,11 @@ package management
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"html"
 	"io"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -280,6 +283,184 @@ func TestListPluginStoreEscapesRegistryStrings(t *testing.T) {
 	}
 }
 
+func TestListPluginStoreOnlyChecksInstalledSources(t *testing.T) {
+	t.Parallel()
+	for _, installedCount := range []int{0, 2} {
+		t.Run(fmt.Sprintf("installed-%d", installedCount), func(t *testing.T) {
+			pluginsDir := t.TempDir()
+			archDir := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH)
+			if errMkdir := os.MkdirAll(archDir, 0o755); errMkdir != nil {
+				t.Fatal(errMkdir)
+			}
+			communityURL := "https://community.example/registry.json"
+			configs := map[string]config.PluginInstanceConfig{}
+			var plugins []map[string]any
+			responses := fakePluginStoreHTTPClient{}
+			for index := 0; index < 57; index++ {
+				id := fmt.Sprintf("sample-%d", index)
+				repository := fmt.Sprintf("https://github.com/author/plugin-%d", index)
+				plugins = append(plugins, map[string]any{"id": id, "name": id, "description": "Test plugin", "author": "author", "version": "0.1.0", "repository": repository})
+				responses[fmt.Sprintf("https://api.github.com/repos/author/plugin-%d/releases/latest", index)] = []byte(fmt.Sprintf(`{"tag_name":"v0.2.%d"}`, index))
+				if index == 3 || index == 41 {
+					configs[id] = pluginConfigWithStoreSource(t, pluginstore.DefaultSourceID, pluginstore.DefaultRegistryURL)
+					if installedCount > 0 {
+						path := filepath.Join(archDir, id+"-v0.0.1"+managementPluginExtension(runtime.GOOS))
+						if errWrite := os.WriteFile(path, []byte("x"), 0o644); errWrite != nil {
+							t.Fatal(errWrite)
+						}
+					}
+				}
+			}
+			registry, errMarshal := json.Marshal(map[string]any{"schema_version": 1, "plugins": plugins})
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+			responses[pluginstore.DefaultRegistryURL] = registry
+			responses[communityURL] = []byte(`{"schema_version":1,"plugins":[{"id":"sample-3","name":"Other source","description":"Test plugin","author":"community","version":"0.9.0","repository":"https://github.com/community/other"}]}`)
+			httpClient := &countingPluginStoreHTTPClient{responses: responses}
+			h := &Handler{cfg: &config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: pluginsDir, StoreSources: []string{communityURL}, Configs: configs}}, pluginStoreHTTPClient: httpClient}
+			for call := 0; call < 2; call++ {
+				body := listPluginStoreForTest(t, h)
+				if len(body.Plugins) != 58 {
+					t.Fatalf("got %d plugins, want 58", len(body.Plugins))
+				}
+				for _, entry := range body.Plugins {
+					wantVersion := "0.1.0"
+					if entry.SourceID != pluginstore.DefaultSourceID {
+						wantVersion = "0.9.0"
+					} else if installedCount > 0 && (entry.ID == "sample-3" || entry.ID == "sample-41") {
+						wantVersion = "0.2." + strings.TrimPrefix(entry.ID, "sample-")
+					}
+					if entry.Version != wantVersion {
+						t.Fatalf("%s: version %s, want %s", entry.StoreID, entry.Version, wantVersion)
+					}
+				}
+			}
+			for index := 0; index < 57; index++ {
+				want := 0
+				if installedCount > 0 && (index == 3 || index == 41) {
+					want = 1
+				}
+				if got := httpClient.count(fmt.Sprintf("https://api.github.com/repos/author/plugin-%d/releases/latest", index)); got != want {
+					t.Fatalf("plugin-%d calls = %d, want %d", index, got, want)
+				}
+			}
+			if got := httpClient.count("https://api.github.com/repos/community/other/releases/latest"); got != 0 {
+				t.Fatalf("other source queried %d times", got)
+			}
+		})
+	}
+}
+
+func listPluginStoreForTest(t *testing.T, h *Handler) pluginStoreListResponse {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugin-store", nil)
+	h.ListPluginStore(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var body pluginStoreListResponse
+	if errDecode := json.Unmarshal(recorder.Body.Bytes(), &body); errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	return body
+}
+
+type pluginStoreHTTPDoerFunc func(*http.Request) (*http.Response, error)
+
+func (do pluginStoreHTTPDoerFunc) Do(request *http.Request) (*http.Response, error) {
+	return do(request)
+}
+
+func TestListPluginStoreRateLimitCache(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		status  int
+		limited bool
+	}{
+		{http.StatusForbidden, true},
+		{http.StatusTooManyRequests, true},
+		{http.StatusForbidden, false},
+	} {
+		for _, previousVersion := range []string{"", "0.2.0"} {
+			t.Run(fmt.Sprintf("%d/limited-%t/previous-%s", test.status, test.limited, previousVersion), func(t *testing.T) {
+				repository := "https://github.com/author-name/cliproxy-sample-provider-plugin"
+				retryAt := time.Now().Add(time.Hour).Truncate(time.Second)
+				calls := 0
+				h := &Handler{cfg: &config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: writeManagementPluginFile(t, "sample-provider")}}}
+				h.pluginReleaseCache = map[string]pluginReleaseCacheEntry{repository: {version: previousVersion, expiresAt: time.Now().Add(-time.Hour)}}
+				h.pluginStoreHTTPClient = pluginStoreHTTPDoerFunc(func(request *http.Request) (*http.Response, error) {
+					if request.URL.String() == pluginstore.DefaultRegistryURL {
+						return fakePluginStoreHTTPClient{pluginstore.DefaultRegistryURL: registryJSON(t)}.Do(request)
+					}
+					calls++
+					headers := make(http.Header)
+					headers.Set("X-RateLimit-Reset", fmt.Sprint(retryAt.Unix()))
+					if test.limited {
+						headers.Set("X-RateLimit-Remaining", "0")
+					}
+					return &http.Response{StatusCode: test.status, Header: headers, Body: io.NopCloser(strings.NewReader("limited"))}, nil
+				})
+				for call := 0; call < 2; call++ {
+					body := listPluginStoreForTest(t, h)
+					wantVersion := "0.1.0"
+					if previousVersion != "" && test.limited {
+						wantVersion = previousVersion
+					}
+					if len(body.Plugins) != 1 || body.Plugins[0].Version != wantVersion || !body.Plugins[0].Installed {
+						t.Fatalf("unexpected entries: %+v", body.Plugins)
+					}
+				}
+				if calls != 1 {
+					t.Fatalf("calls = %d, want 1", calls)
+				}
+				entry := h.pluginReleaseCache[repository]
+				if test.limited {
+					if !entry.expiresAt.Equal(retryAt) {
+						t.Fatalf("expiry = %v, want %v", entry.expiresAt, retryAt)
+					}
+				} else if entry.expiresAt.After(time.Now().Add(time.Minute)) {
+					t.Fatal("ordinary error received long cooldown")
+				}
+				entry.expiresAt = time.Now().Add(-time.Second)
+				h.pluginReleaseCache[repository] = entry
+				listPluginStoreForTest(t, h)
+				if calls != 2 {
+					t.Fatalf("calls after expiry = %d, want 2", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestLatestPluginVersionCacheStartsAfterRequest(t *testing.T) {
+	t.Parallel()
+	for _, success := range []bool{false, true} {
+		t.Run(fmt.Sprintf("success-%t", success), func(t *testing.T) {
+			var completedAt time.Time
+			client := pluginstore.Client{HTTPClient: pluginStoreHTTPDoerFunc(func(request *http.Request) (*http.Response, error) {
+				completedAt = time.Now()
+				if !success {
+					return nil, fmt.Errorf("simulated network failure")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v0.2.0"}`))}, nil
+			})}
+			h := &Handler{}
+			plugin := pluginstore.Plugin{ID: "sample", Repository: "https://github.com/author/sample"}
+			h.latestPluginVersion(context.Background(), client, plugin)
+			ttl := pluginReleaseFailureCacheTTL
+			if success {
+				ttl = pluginReleaseCacheTTL
+			}
+			if expiry := h.pluginReleaseCache[plugin.Repository].expiresAt; expiry.Before(completedAt.Add(ttl)) {
+				t.Fatalf("expiry %v precedes completion plus TTL %v", expiry, completedAt.Add(ttl))
+			}
+		})
+	}
+}
+
 func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 	t.Parallel()
 
@@ -294,7 +475,7 @@ func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 		cfg: &config.Config{
 			Plugins: config.PluginsConfig{
 				Enabled: true,
-				Dir:     t.TempDir(),
+				Dir:     writeManagementPluginFile(t, "sample-provider"),
 			},
 		},
 		configFilePath:         writeTestConfigFile(t),

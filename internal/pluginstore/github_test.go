@@ -3,9 +3,70 @@ package pluginstore
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
+	"net/http"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestPluginStoreRateLimitError(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name       string
+		status     int
+		remaining  string
+		reset      string
+		retryAfter string
+		wait       time.Duration
+	}{
+		{"reset", 403, "0", strconv.FormatInt(now.Add(time.Hour).Unix(), 10), "", time.Hour},
+		{"seconds", 429, "", "", "120", 2 * time.Minute},
+		{"date", 429, "", "", now.Add(3 * time.Minute).Format(http.TimeFormat), 3 * time.Minute},
+		{"reset later", 403, "0", strconv.FormatInt(now.Add(time.Hour).Unix(), 10), "120", time.Hour},
+		{"retry later", 429, "", strconv.FormatInt(now.Add(time.Minute).Unix(), 10), "120", 2 * time.Minute},
+		{"missing", 429, "", "", "", time.Minute},
+		{"invalid", 403, "0", "bad", "bad", time.Minute},
+		{"past", 429, "", strconv.FormatInt(now.Add(-time.Hour).Unix(), 10), "0", time.Minute},
+		{"overflow", 429, "", "", "9223372036854775807", time.Minute},
+		{"negative", 429, "", "-1", "-30", time.Minute},
+		{"permission", 403, "1", strconv.FormatInt(now.Add(time.Hour).Unix(), 10), "120", 0},
+		{"permission missing remaining", 403, "", "", "120", 0},
+		{"server error", 500, "0", "", "120", 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			headers := make(http.Header)
+			headers.Set("X-RateLimit-Remaining", test.remaining)
+			headers.Set("X-RateLimit-Reset", test.reset)
+			headers.Set("Retry-After", test.retryAfter)
+			err := pluginStoreRateLimitError(test.status, headers, now)
+			if test.wait == 0 {
+				if err != nil {
+					t.Fatalf("unexpected rate limit: %v", err)
+				}
+				return
+			}
+			if err == nil || !err.RetryAt.Equal(now.Add(test.wait)) || err.StatusCode != test.status {
+				t.Fatalf("rate limit = %v, want retry at %v", err, now.Add(test.wait))
+			}
+		})
+	}
+}
+
+func TestReadPluginStoreResponseRateLimit(t *testing.T) {
+	t.Parallel()
+	for _, authenticated := range []bool{false, true} {
+		response := &http.Response{StatusCode: 429, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("private upstream details"))}
+		_, err := readPluginStoreResponse(response, 0, authenticated)
+		var rateLimit *RateLimitError
+		if !errors.As(err, &rateLimit) || strings.Contains(err.Error(), "private") {
+			t.Fatalf("expected sanitized rate limit, got %v", err)
+		}
+	}
+}
 
 func TestSelectReleaseAssets(t *testing.T) {
 	t.Parallel()
