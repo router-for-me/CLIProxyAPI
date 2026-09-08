@@ -111,6 +111,7 @@ func (s *Server) setupRoutes() {
 	codexDirect := s.engine.Group("/backend-api/codex")
 	codexDirect.Use(AuthMiddleware(s.accessManager))
 	{
+		codexDirect.GET("/models", s.codexModelsHandler(openaiHandlers))
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
@@ -566,6 +567,7 @@ func isAnthropicModelsRequest(c *gin.Context) bool {
 // Anthropic API requests (Anthropic-Version header, or a claude-cli User-Agent)
 // route to the Claude handler, otherwise they route to the OpenAI handler.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
+	codexModels := s.codexModelsHandler(openaiHandler)
 	return func(c *gin.Context) {
 		if grokbuild.IsGrokShellUserAgent(c.GetHeader("User-Agent")) {
 			s.handleGrokModels(c)
@@ -573,12 +575,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		}
 
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
-			clientVersion := c.Query("client_version")
-			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
-				s.handleHomeCodexClientModels(c, clientVersion)
-				return
-			}
-			openaiHandler.OpenAIModels(c)
+			codexModels(c)
 			return
 		}
 
@@ -593,6 +590,16 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		} else {
 			openaiHandler.OpenAIModels(c)
 		}
+	}
+}
+
+func (s *Server) codexModelsHandler(openaiHandler *openai.OpenAIAPIHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+			s.handleHomeCodexClientModels(c, c.Query("client_version"))
+			return
+		}
+		openaiHandler.CodexModels(c)
 	}
 }
 
