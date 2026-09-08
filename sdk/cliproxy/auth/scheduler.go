@@ -79,9 +79,12 @@ type modelScheduler struct {
 }
 
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
+// weight is the routing weight resolved for this shard's model: the auth's model_weights
+// override when it names the model, the account-level meta.weight otherwise.
 type scheduledAuth struct {
 	meta        *scheduledAuthMeta
 	auth        *Auth
+	weight      int64
 	state       scheduledState
 	nextRetryAt time.Time
 }
@@ -600,7 +603,7 @@ func scheduledAuthPredicate(eligibility authSelectionEligibility, tried map[stri
 		if entry == nil || entry.auth == nil || !eligibility.allows(entry.auth) {
 			return false
 		}
-		if requirePositiveWeight && (entry.meta == nil || entry.meta.weight <= 0) {
+		if requirePositiveWeight && (entry.meta == nil || entry.weight <= 0) {
 			return false
 		}
 		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
@@ -1038,6 +1041,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 
 	entry.meta = meta
 	entry.auth = meta.auth
+	entry.weight = authWeightForModel(meta.auth, m.modelKey)
 	entry.nextRetryAt = time.Time{}
 	blocked, reason, next := isAuthBlockedForModel(meta.auth, m.modelKey, now)
 	switch {
@@ -1503,13 +1507,13 @@ func scheduledWeightVector(entries []*scheduledAuth) map[string]int64 {
 func scheduledWeightVectorMatching(entries []*scheduledAuth, predicate func(*scheduledAuth) bool) map[string]int64 {
 	weights := make(map[string]int64, len(entries))
 	for _, entry := range entries {
-		if entry == nil || entry.auth == nil || entry.meta == nil || entry.meta.weight <= 0 {
+		if entry == nil || entry.auth == nil || entry.meta == nil || entry.weight <= 0 {
 			continue
 		}
 		if predicate != nil && !predicate(entry) {
 			continue
 		}
-		weights[entry.auth.ID] = entry.meta.weight
+		weights[entry.auth.ID] = entry.weight
 	}
 	return weights
 }
@@ -1519,14 +1523,14 @@ func pickSmoothWeightedScheduled(entries []*scheduledAuth, current map[string]in
 	var pickedCurrent int64
 	var totalWeight int64
 	for _, entry := range entries {
-		if entry == nil || entry.auth == nil || entry.meta == nil || entry.meta.weight <= 0 {
+		if entry == nil || entry.auth == nil || entry.meta == nil || entry.weight <= 0 {
 			continue
 		}
 		if predicate != nil && !predicate(entry) {
 			continue
 		}
-		current[entry.auth.ID] = saturatingAddInt64(current[entry.auth.ID], entry.meta.weight)
-		totalWeight = saturatingAddInt64(totalWeight, entry.meta.weight)
+		current[entry.auth.ID] = saturatingAddInt64(current[entry.auth.ID], entry.weight)
+		totalWeight = saturatingAddInt64(totalWeight, entry.weight)
 		if picked == nil || current[entry.auth.ID] > pickedCurrent {
 			picked = entry
 			pickedCurrent = current[entry.auth.ID]

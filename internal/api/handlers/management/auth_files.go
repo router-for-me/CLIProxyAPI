@@ -275,6 +275,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						}
 					}
 				}
+				if mv := gjson.GetBytes(data, coreauth.AttributeModelWeights); mv.Exists() && mv.IsObject() {
+					if modelWeights, errModelWeights := coreauth.ParseModelWeights(mv.Raw); errModelWeights == nil && len(modelWeights) > 0 {
+						fileData[coreauth.AttributeModelWeights] = modelWeights
+					}
+				}
 				if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
 					if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
 						fileData["note"] = trimmed
@@ -428,6 +433,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	if weight, ok := authWeightValue(auth); ok {
 		entry[coreauth.AttributeWeight] = weight
 	}
+	if modelWeights := authModelWeightsValue(auth); len(modelWeights) > 0 {
+		entry[coreauth.AttributeModelWeights] = modelWeights
+	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
 	}
@@ -502,6 +510,33 @@ func authWeightValue(auth *coreauth.Auth) (int64, bool) {
 	}
 	weight, errWeight := credentialweight.ParseValue(rawWeight)
 	return weight, errWeight == nil
+}
+
+// authModelWeightsValue exposes the per-model weight table (attribute form first, raw
+// metadata second) so the management API mirrors what the selector actually uses.
+func authModelWeightsValue(auth *coreauth.Auth) map[string]int64 {
+	if auth == nil {
+		return nil
+	}
+	if raw := strings.TrimSpace(authAttribute(auth, coreauth.AttributeModelWeights)); raw != "" {
+		modelWeights, errParse := coreauth.ParseModelWeights(raw)
+		if errParse != nil {
+			return nil
+		}
+		return modelWeights
+	}
+	if auth.Metadata == nil {
+		return nil
+	}
+	rawModelWeights, ok := auth.Metadata[coreauth.AttributeModelWeights]
+	if !ok || rawModelWeights == nil {
+		return nil
+	}
+	modelWeights, errParse := coreauth.ParseModelWeights(rawModelWeights)
+	if errParse != nil {
+		return nil
+	}
+	return modelWeights
 }
 
 func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
