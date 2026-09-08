@@ -88,6 +88,27 @@ func TestNextRefreshCheckAt_NextRefreshAfterGate(t *testing.T) {
 	}
 }
 
+func TestNextRefreshCheckAt_NextRefreshAfterDue(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	auth := &Auth{
+		ID:               "a1",
+		Provider:         "plugin-provider",
+		NextRefreshAfter: now.Add(-time.Second),
+		Metadata:         map[string]any{"auth_kind": "oauth"},
+	}
+
+	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	if !ok {
+		t.Fatal("nextRefreshCheckAt() ok = false, want true for due explicit refresh")
+	}
+	if !got.Equal(now) {
+		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, now)
+	}
+	if !(&Manager{}).shouldRefresh(auth, now) {
+		t.Fatal("shouldRefresh() = false, want true for due explicit refresh")
+	}
+}
+
 func TestNextRefreshCheckAt_PreferredInterval_PicksEarliestCandidate(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	expiry := now.Add(20 * time.Minute)

@@ -45,6 +45,7 @@ type codexSearchCaptureExecutor struct {
 	statuses     []int
 	refreshCalls int
 	httpCalls    int
+	countCalls   int
 	beforeReturn func()
 }
 
@@ -69,7 +70,8 @@ func (e *codexSearchCaptureExecutor) Refresh(_ context.Context, a *auth.Auth) (*
 }
 
 func (e *codexSearchCaptureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
-	return coreexecutor.Response{}, nil
+	e.countCalls++
+	return coreexecutor.Response{Payload: []byte(`{"object":"response.input_tokens","input_tokens":7}`)}, nil
 }
 
 func (e *codexSearchCaptureExecutor) PrepareRequest(req *http.Request, a *auth.Auth) error {
@@ -627,6 +629,34 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath, opts...)
+}
+
+func TestResponsesInputTokensRoute(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{ID: "input-token-auth", Provider: "codex", Status: auth.StatusActive}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential.ID) })
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/input_tokens", strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.countCalls != 1 {
+		t.Fatalf("count calls = %d, want 1", executor.countCalls)
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"object":"response.input_tokens","input_tokens":7}` {
+		t.Fatalf("body = %s", got)
+	}
 }
 
 func TestHealthz(t *testing.T) {
