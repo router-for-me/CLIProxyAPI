@@ -58,6 +58,11 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	ThinkingContentBlockIndex int
 	// Next available content block index
 	NextContentBlockIndex int
+	// Usage metrics cached from streaming chunks
+	UsageInputTokens      int64
+	UsageOutputTokens     int64
+	UsageCachedTokens     int64
+	UsageCacheWriteTokens int64
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -101,6 +106,10 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 			TextContentBlockIndex:       -1,
 			ThinkingContentBlockIndex:   -1,
 			NextContentBlockIndex:       0,
+			UsageInputTokens:            0,
+			UsageOutputTokens:           0,
+			UsageCachedTokens:           0,
+			UsageCacheWriteTokens:       0,
 		}
 	}
 
@@ -304,16 +313,23 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		// Don't send message_delta here - wait for usage info or [DONE]
 	}
 
-	// Handle usage information separately (this comes in a later chunk)
-	// Only process if usage has actual values (not null)
-	if !param.MessageDeltaSent && (param.FinishReason != "" || param.SawToolCall) {
-		usage := root.Get("usage")
-		if usage.Exists() && usage.Type != gjson.Null {
-			finalizeOpenAIAnthropicContentBlocks(param, &results)
-			inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(usage)
-			emitAnthropicMessageDelta(param, &results, inputTokens, outputTokens, cachedTokens)
-			emitMessageStopIfNeeded(param, &results)
-		}
+	// Cache usage information whenever present
+	usage := root.Get("usage")
+	hasUsage := usage.Exists() && usage.Type != gjson.Null
+	if hasUsage {
+		param.UsageInputTokens, param.UsageOutputTokens, param.UsageCachedTokens, param.UsageCacheWriteTokens = extractOpenAIUsage(usage)
+	}
+
+	// Emit message_delta and message_stop only when generation is finished:
+	// 1. Upstream provided a finish_reason, or
+	// 2. Upstream sent a trailing usage-only chunk (choices array is empty or absent) after content/tools started.
+	isTrailingUsageChunk := hasUsage && !root.Get("choices.0").Exists() &&
+		(param.FinishReason != "" || param.SawToolCall || param.TextContentBlockStarted || param.ThinkingContentBlockStarted || param.ContentAccumulator.Len() > 0)
+
+	if !param.MessageDeltaSent && (param.FinishReason != "" || isTrailingUsageChunk) && hasUsage {
+		finalizeOpenAIAnthropicContentBlocks(param, &results)
+		emitAnthropicMessageDelta(param, &results, param.UsageInputTokens, param.UsageOutputTokens, param.UsageCachedTokens, param.UsageCacheWriteTokens)
+		emitMessageStopIfNeeded(param, &results)
 	}
 
 	return results
@@ -326,7 +342,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	finalizeOpenAIAnthropicContentBlocks(param, &results)
 
 	if !param.MessageDeltaSent {
-		emitAnthropicMessageDelta(param, &results, 0, 0, 0)
+		emitAnthropicMessageDelta(param, &results, param.UsageInputTokens, param.UsageOutputTokens, param.UsageCachedTokens, param.UsageCacheWriteTokens)
 	}
 
 	emitMessageStopIfNeeded(param, &results)
@@ -400,11 +416,14 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 
 	// Set usage information
 	if usage := root.Get("usage"); usage.Exists() {
-		inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(usage)
+		inputTokens, outputTokens, cachedTokens, cacheWriteTokens := extractOpenAIUsage(usage)
 		out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 		out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
 		if cachedTokens > 0 {
 			out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
+		}
+		if cacheWriteTokens > 0 {
+			out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", cacheWriteTokens)
 		}
 	}
 
@@ -570,7 +589,7 @@ func finalizeOpenAIAnthropicContentBlocks(param *ConvertOpenAIResponseToAnthropi
 	}
 }
 
-func emitAnthropicMessageDelta(param *ConvertOpenAIResponseToAnthropicParams, results *[][]byte, inputTokens, outputTokens, cachedTokens int64) {
+func emitAnthropicMessageDelta(param *ConvertOpenAIResponseToAnthropicParams, results *[][]byte, inputTokens, outputTokens, cachedTokens, cacheWriteTokens int64) {
 	if param == nil || param.MessageDeltaSent {
 		return
 	}
@@ -580,6 +599,9 @@ func emitAnthropicMessageDelta(param *ConvertOpenAIResponseToAnthropicParams, re
 	messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.output_tokens", outputTokens)
 	if cachedTokens > 0 {
 		messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.cache_read_input_tokens", cachedTokens)
+	}
+	if cacheWriteTokens > 0 {
+		messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.cache_creation_input_tokens", cacheWriteTokens)
 	}
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "message_delta", messageDeltaJSON, 2))
 	param.MessageDeltaSent = true
@@ -748,11 +770,14 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 	}
 
 	if respUsage := root.Get("usage"); respUsage.Exists() {
-		inputTokens, outputTokens, cachedTokens := extractOpenAIUsage(respUsage)
+		inputTokens, outputTokens, cachedTokens, cacheWriteTokens := extractOpenAIUsage(respUsage)
 		out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 		out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
 		if cachedTokens > 0 {
 			out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
+		}
+		if cacheWriteTokens > 0 {
+			out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", cacheWriteTokens)
 		}
 	}
 
@@ -771,14 +796,18 @@ func ClaudeTokenCount(ctx context.Context, count int64) []byte {
 	return translatorcommon.ClaudeInputTokensJSON(count)
 }
 
-func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64) {
+func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64, int64) {
 	if !usage.Exists() || usage.Type == gjson.Null {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 
 	inputTokens := usage.Get("prompt_tokens").Int()
 	outputTokens := usage.Get("completion_tokens").Int()
 	cachedTokens := usage.Get("prompt_tokens_details.cached_tokens").Int()
+	cacheWriteTokens := usage.Get("prompt_tokens_details.cache_write_tokens").Int()
+	if cacheWriteTokens == 0 {
+		cacheWriteTokens = usage.Get("prompt_tokens_details.cache_creation_tokens").Int()
+	}
 
 	if cachedTokens > 0 {
 		if inputTokens >= cachedTokens {
@@ -788,5 +817,5 @@ func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64) {
 		}
 	}
 
-	return inputTokens, outputTokens, cachedTokens
+	return inputTokens, outputTokens, cachedTokens, cacheWriteTokens
 }

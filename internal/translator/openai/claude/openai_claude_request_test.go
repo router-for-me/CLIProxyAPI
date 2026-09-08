@@ -401,6 +401,64 @@ func TestConvertClaudeRequestToOpenAI_MessageSystemRoleWrapsAsUserReminder(t *te
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_PreservesToolAdjacencyWithInterveningSystemMessage(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-5",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Execute tools"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "tool_one", "input": {"a": 1}},
+					{"type": "tool_use", "id": "call_2", "name": "tool_two", "input": {"b": 2}}
+				]
+			},
+			{"role": "system", "content": "Context update between tool call and tool result"},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_2", "content": "result 2"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "result 1"},
+					{"type": "text", "text": "Now summarize"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+	messages := gjson.GetBytes(result, "messages").Array()
+
+	// Expected roles order:
+	// 0: user ("Execute tools")
+	// 1: assistant (tool_calls [call_1, call_2])
+	// 2: tool (tool_call_id: call_1)
+	// 3: tool (tool_call_id: call_2)
+	// 4: user (<system-reminder>...)
+	// 5: user ("Now summarize")
+	roles := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		roles = append(roles, msg.Get("role").String())
+	}
+	wantRoles := []string{"user", "assistant", "tool", "tool", "user", "user"}
+	if fmt.Sprintf("%v", roles) != fmt.Sprintf("%v", wantRoles) {
+		t.Fatalf("unexpected roles: got %v, want %v", roles, wantRoles)
+	}
+
+	// Verify tool messages immediately follow assistant
+	if messages[2].Get("tool_call_id").String() != "call_1" {
+		t.Fatalf("expected tool message 0 to respond to call_1, got %q", messages[2].Get("tool_call_id").String())
+	}
+	if messages[3].Get("tool_call_id").String() != "call_2" {
+		t.Fatalf("expected tool message 1 to respond to call_2, got %q", messages[3].Get("tool_call_id").String())
+	}
+	if messages[4].Get("content.0.text").String() != "<system-reminder>\nContext update between tool call and tool result\n</system-reminder>" {
+		t.Fatalf("unexpected system reminder content: %q", messages[4].Get("content.0.text").String())
+	}
+	if messages[5].Get("content.0.text").String() != "Now summarize" {
+		t.Fatalf("unexpected user summary content: %q", messages[5].Get("content.0.text").String())
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 	tests := []struct {
 		name        string

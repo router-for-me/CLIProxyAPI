@@ -375,6 +375,7 @@ func TestIsCodexOverloadBootstrapFailureRejectsRequestFaults(t *testing.T) {
 		`{"error":{"type":"invalid_request_error","code":"invalid_value"}}`,
 		`{"error":{"type":"authentication_error","code":"invalid_api_key"}}`,
 		`{"error":{"type":"upstream_error","code":"unknown"}}`,
+		`{"error":{"type":"server_error","code":"server_error","message":"An internal error occurred without retry advice"}}`,
 	}
 	for _, body := range notOverload {
 		if isCodexOverloadBootstrapFailure([]byte(body)) {
@@ -383,6 +384,14 @@ func TestIsCodexOverloadBootstrapFailureRejectsRequestFaults(t *testing.T) {
 	}
 	if !isCodexOverloadBootstrapFailure([]byte(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}`)) {
 		t.Fatal("rate limit rejections should be eligible for bootstrap failover")
+	}
+	serverErrorFull := `{"error":{"type":"server_error","code":"server_error","message":"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 2f5014c9-7cfe-4fb7-813e-ecb447da3edd in your message."}}`
+	if !isCodexOverloadBootstrapFailure([]byte(serverErrorFull)) {
+		t.Fatal("server_error with 'You can retry your request' should be eligible for bootstrap failover")
+	}
+	serverErrorShort := `{"error":{"type":"server_error","code":"server_error","message":"You can retry your request"}}`
+	if !isCodexOverloadBootstrapFailure([]byte(serverErrorShort)) {
+		t.Fatal("short server_error with 'You can retry your request' should be eligible for bootstrap failover")
 	}
 }
 

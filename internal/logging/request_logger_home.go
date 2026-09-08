@@ -202,15 +202,15 @@ func (w *homeStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	client := currentHomeRequestLogClient()
-	if client == nil || !client.HeartbeatOK() {
-		return nil
-	}
-
 	if w.chunkChan != nil {
 		close(w.chunkChan)
 		<-w.doneChan
 		w.chunkChan = nil
+	}
+
+	client := currentHomeRequestLogClient()
+	if client == nil || !client.HeartbeatOK() {
+		return nil
 	}
 
 	responsePayload := w.responseBody.Bytes()

@@ -1141,3 +1141,39 @@ func TestConvertGeminiRequestToAntigravity_PreservesSiblingToolImageOnUserRole(t
 		t.Fatalf("sibling inline data should be absorbed into functionResponse.parts. Output: %s", out)
 	}
 }
+
+func TestNormalizeRoles_InvalidRoleWithoutFunctionResponseAlternates(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "first"}]},
+			{"role": "invalid", "parts": [{"text": "second"}]}
+		]
+	}`)
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("expected 2 contents, got %d", len(contents))
+	}
+	if got := contents[1].Get("role").String(); got != "model" {
+		t.Fatalf("text-only invalid role following user should normalize to model, got %q", got)
+	}
+}
+
+func TestNormalizeRoles_InvalidRoleWithFunctionResponseNormalizesToUser(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "model", "parts": [{"functionCall": {"name": "test", "args": {}}}]},
+			{"role": "user", "parts": [{"text": "intervening user message"}]},
+			{"role": "invalid", "parts": [{"functionResponse": {"name": "test", "response": {}}}]}
+		]
+	}`)
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	// Role functionResponse should NEVER be normalized to model
+	for _, content := range gjson.GetBytes(out, "request.contents").Array() {
+		if content.Get("parts.0.functionResponse").Exists() {
+			if got := content.Get("role").String(); got != "user" && got != "function" {
+				t.Fatalf("functionResponse role should be user or function, got %q", got)
+			}
+		}
+	}
+}

@@ -54,3 +54,54 @@ func claudeSystemTextParts(content gjson.Result) []string {
 	})
 	return parts
 }
+
+// BuildClaudeStructuredOutputInstruction formats structured output settings
+// (from Chat Completions response_format or Responses text.format) as explicit
+// instructions to inject into Claude's system prompt.
+func BuildClaudeStructuredOutputInstruction(format gjson.Result) string {
+	if !format.Exists() {
+		return ""
+	}
+
+	formatType := strings.ToLower(strings.TrimSpace(format.Get("type").String()))
+	switch formatType {
+	case "json_object":
+		return "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object."
+	case "json_schema":
+		jsonSchema := format.Get("json_schema")
+		schema := jsonSchema.Get("schema")
+		if !schema.Exists() {
+			schema = format.Get("schema")
+		}
+		if !schema.Exists() {
+			return "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object."
+		}
+
+		var builder strings.Builder
+		builder.WriteString("You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n")
+		name := strings.TrimSpace(jsonSchema.Get("name").String())
+		if name == "" {
+			name = strings.TrimSpace(format.Get("name").String())
+		}
+		if name != "" {
+			builder.WriteString("Schema Name: ")
+			builder.WriteString(name)
+			builder.WriteString("\n")
+		}
+		desc := strings.TrimSpace(jsonSchema.Get("description").String())
+		if desc == "" {
+			desc = strings.TrimSpace(format.Get("description").String())
+		}
+		if desc != "" {
+			builder.WriteString("Schema Description: ")
+			builder.WriteString(desc)
+			builder.WriteString("\n")
+		}
+		builder.WriteString("JSON Schema:\n")
+		builder.WriteString(schema.Raw)
+		builder.WriteString("\nDo not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.")
+		return builder.String()
+	default:
+		return ""
+	}
+}

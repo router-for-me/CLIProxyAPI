@@ -48,9 +48,9 @@ func TestAntigravityExecutorExecuteStreamTranslatesInteractionsRequest(t *testin
 			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
 		},
 	}
-	payload := []byte(`{"model":"gemini-3.5-flash-low","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]}],"tools":[{"name":"get_weather","description":"weather","type":"function","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}],"generation_config":{"tool_choice":"auto","thinking_level":"high","thinking_summaries":"auto"},"stream":true,"store":false}`)
+	payload := []byte(`{"model":"gemini-3.1-pro-low","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]}],"tools":[{"name":"get_weather","description":"weather","type":"function","parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}],"generation_config":{"tool_choice":"auto","thinking_level":"high","thinking_summaries":"auto"},"stream":true,"store":false}`)
 	result, errExecute := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gemini-3.5-flash-low",
+		Model:   "gemini-3.1-pro-low",
 		Payload: payload,
 	}, cliproxyexecutor.Options{
 		SourceFormat:    sdktranslator.FormatInteractions,

@@ -1,7 +1,9 @@
 package responses
 
 import (
+	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	log "github.com/sirupsen/logrus"
 
@@ -12,6 +14,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+)
+
+const (
+	defaultClaudeResponsesMaxTokens = 32000
+	defaultFableResponsesMaxTokens  = 64000
 )
 
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
@@ -36,13 +43,14 @@ func ConvertOpenAIResponsesRequestToClaudeWithCompat(modelName string, inputRawJ
 }
 
 func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := normalizeCodexAgentMessages(inputRawJSON)
 
 	userID := common.DeriveClaudeUserID(rawJSON)
 
 	// Base Claude message payload
 	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
 	out, _ = sjson.SetBytes(out, "metadata.user_id", userID)
+	out, _ = sjson.SetBytes(out, "max_tokens", defaultClaudeResponsesMaxTokensForModel(modelName))
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -99,8 +107,12 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Max tokens
-	if mot := root.Get("max_output_tokens"); mot.Exists() {
-		out, _ = sjson.SetBytes(out, "max_tokens", mot.Int())
+	if mot := root.Get("max_output_tokens"); mot.Exists() && mot.Type != gjson.Null {
+		val := mot.Int()
+		if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && val > int64(info.MaxCompletionTokens) {
+			val = int64(info.MaxCompletionTokens)
+		}
+		out, _ = sjson.SetBytes(out, "max_tokens", val)
 	}
 
 	// Stream
@@ -165,6 +177,14 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 			return true
 		})
+	}
+
+	formatResult := root.Get("text.format")
+	if !formatResult.Exists() {
+		formatResult = root.Get("response_format")
+	}
+	if formatInstruction := common.BuildClaudeStructuredOutputInstruction(formatResult); formatInstruction != "" {
+		appendSystemText(formatInstruction, gjson.Result{})
 	}
 
 	// input array processing
@@ -566,6 +586,17 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	return out
+}
+
+func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
+	maxTokens := defaultClaudeResponsesMaxTokens
+	if strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "fable") {
+		maxTokens = defaultFableResponsesMaxTokens
+	}
+	if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && info.MaxCompletionTokens < maxTokens {
+		return info.MaxCompletionTokens
+	}
+	return maxTokens
 }
 
 // isResponsesSystemLevelRole reports whether an input item carries system-level
@@ -1060,11 +1091,76 @@ func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
 }
 
 func unwrapCustomToolInput(arguments string) string {
-	if v := gjson.Get(arguments, "input"); v.Exists() {
+	trimmed := strings.TrimSpace(arguments)
+	if v := gjson.Get(trimmed, "input"); v.Exists() {
 		if v.Type == gjson.String {
 			return v.String()
 		}
 		return v.Raw
+	}
+	idx := strings.Index(trimmed, `"input"`)
+	if idx >= 0 {
+		rest := strings.TrimSpace(trimmed[idx+7:])
+		if strings.HasPrefix(rest, ":") {
+			rest = strings.TrimSpace(rest[1:])
+			if strings.HasPrefix(rest, `"`) {
+				content := rest[1:]
+				var unescaped strings.Builder
+				inEscape := false
+				for i := 0; i < len(content); i++ {
+					c := content[i]
+					if inEscape {
+						switch c {
+						case '"', '\\', '/':
+							unescaped.WriteByte(c)
+						case 'b':
+							unescaped.WriteByte('\b')
+						case 'f':
+							unescaped.WriteByte('\f')
+						case 'n':
+							unescaped.WriteByte('\n')
+						case 'r':
+							unescaped.WriteByte('\r')
+						case 't':
+							unescaped.WriteByte('\t')
+						case 'u':
+							if i+4 < len(content) {
+								if r, err := strconv.ParseUint(content[i+1:i+5], 16, 16); err == nil {
+									if utf16.IsSurrogate(rune(r)) && i+10 < len(content) && content[i+5:i+7] == `\u` {
+										if r2, err2 := strconv.ParseUint(content[i+7:i+11], 16, 16); err2 == nil {
+											unescaped.WriteRune(utf16.DecodeRune(rune(r), rune(r2)))
+											i += 10
+											inEscape = false
+											continue
+										}
+									}
+									unescaped.WriteRune(rune(r))
+									i += 4
+									inEscape = false
+									continue
+								}
+							}
+							unescaped.WriteByte('\\')
+							unescaped.WriteByte('u')
+						default:
+							unescaped.WriteByte('\\')
+							unescaped.WriteByte(c)
+						}
+						inEscape = false
+					} else if c == '\\' {
+						inEscape = true
+					} else if c == '"' {
+						break
+					} else {
+						unescaped.WriteByte(c)
+					}
+				}
+				if inEscape {
+					unescaped.WriteByte('\\')
+				}
+				return unescaped.String()
+			}
+		}
 	}
 	return arguments
 }
@@ -1199,4 +1295,57 @@ func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {
 	default:
 		return false
 	}
+}
+
+// normalizeCodexAgentMessages rewrites Codex multi-agent v2 "agent_message"
+// input items into plain user "message" items so the Claude translator does
+// not drop the delegated task text. Encrypted content parts are surfaced as
+// input_text, mirroring the multi-agent v2 optimizer used for other upstreams.
+func normalizeCodexAgentMessages(payload []byte) []byte {
+	input := gjson.GetBytes(payload, "input")
+	if !input.IsArray() {
+		return payload
+	}
+	updated := payload
+	changed := false
+	for itemIndex, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
+			continue
+		}
+		itemPath := "input." + strconv.Itoa(itemIndex)
+		var errSet error
+		if content := item.Get("content"); content.IsArray() {
+			for partIndex, part := range content.Array() {
+				if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
+					continue
+				}
+				enc := part.Get("encrypted_content")
+				if enc.Type != gjson.String {
+					continue
+				}
+				partPath := itemPath + ".content." + strconv.Itoa(partIndex)
+				if updated, errSet = sjson.SetBytes(updated, partPath+".type", "input_text"); errSet != nil {
+					return payload
+				}
+				if updated, errSet = sjson.SetBytes(updated, partPath+".text", enc.String()); errSet != nil {
+					return payload
+				}
+				var errDelete error
+				if updated, errDelete = sjson.DeleteBytes(updated, partPath+".encrypted_content"); errDelete != nil {
+					return payload
+				}
+			}
+		}
+		if updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user"); errSet != nil {
+			return payload
+		}
+		if updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message"); errSet != nil {
+			return payload
+		}
+		changed = true
+	}
+	if !changed {
+		return payload
+	}
+	return updated
 }

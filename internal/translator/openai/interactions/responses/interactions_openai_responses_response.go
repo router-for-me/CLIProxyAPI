@@ -93,9 +93,10 @@ func ConvertInteractionsResponseToOpenAIResponsesNonStream(ctx context.Context, 
 	if !steps.Exists() {
 		steps = root.Get("interaction.steps")
 	}
+	forAntigravity := isAntigravityModel(responseModel(modelName, root))
 	var outputs [][]byte
 	steps.ForEach(func(_, step gjson.Result) bool {
-		if item, ok := interactionsStepToResponsesOutput(step); ok {
+		if item, ok := interactionsStepToResponsesOutput(step, forAntigravity); ok {
 			outputs = append(outputs, item)
 		}
 		return true
@@ -130,7 +131,7 @@ func convertInteractionsEventToResponses(modelName string, originalRequestRawJSO
 	case "interaction.created":
 		return [][]byte{responsesCreatedEvent(modelName, originalRequestRawJSON, requestRawJSON, root, st)}
 	case "step.start":
-		return interactionsStepStartToResponses(root, st)
+		return interactionsStepStartToResponses(modelName, root, st)
 	case "step.delta":
 		return interactionsStepDeltaToResponses(root, st)
 	case "step.stop":
@@ -147,7 +148,7 @@ func convertInteractionsEventToResponses(modelName string, originalRequestRawJSO
 	return nil
 }
 
-func interactionsStepToResponsesOutput(step gjson.Result) ([]byte, bool) {
+func interactionsStepToResponsesOutput(step gjson.Result, forAntigravity bool) ([]byte, bool) {
 	switch step.Get("type").String() {
 	case "model_output":
 		item := []byte(`{"type":"message","role":"assistant","content":[]}`)
@@ -189,7 +190,7 @@ func interactionsStepToResponsesOutput(step gjson.Result) ([]byte, bool) {
 		}
 		return item, true
 	case "function_call":
-		return interactionsFunctionCallToResponses(step), true
+		return interactionsFunctionCallToResponses(step, forAntigravity), true
 	}
 	return nil, false
 }
@@ -215,7 +216,7 @@ func responsesCreatedEvent(modelName string, originalRequestRawJSON, requestRawJ
 	return emitResponsesEvent("response.created", payload)
 }
 
-func interactionsStepStartToResponses(root gjson.Result, st *interactionsToResponsesStreamState) [][]byte {
+func interactionsStepStartToResponses(modelName string, root gjson.Result, st *interactionsToResponsesStreamState) [][]byte {
 	index := int(root.Get("index").Int())
 	step := root.Get("step")
 	stepType := step.Get("type").String()
@@ -246,9 +247,13 @@ func interactionsStepStartToResponses(root gjson.Result, st *interactionsToRespo
 		if st.FunctionCalls[index] != nil {
 			return nil
 		}
+		name := step.Get("name").String()
+		if isAntigravityModel(modelName) {
+			name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
+		}
 		call := &interactionsFunctionCallState{
 			ID:   itemID,
-			Name: step.Get("name").String(),
+			Name: name,
 		}
 		if args := step.Get("arguments"); args.Exists() && strings.TrimSpace(args.Raw) != "{}" {
 			call.Arguments.WriteString(jsonStringValue(args, "{}"))
@@ -593,9 +598,10 @@ func ConvertOpenAIResponsesResponseToInteractionsNonStream(ctx context.Context, 
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
 	out, _ = sjson.SetBytes(out, "id", root.Get("id").String())
 	out, _ = sjson.SetBytes(out, "model", responseModel(modelName, root))
+	forAntigravity := isAntigravityModel(modelName)
 	var stepItems [][]byte
 	root.Get("output").ForEach(func(_, item gjson.Result) bool {
-		if step, ok := openAIResponsesOutputItemToInteractionsStep(item); ok {
+		if step, ok := openAIResponsesOutputItemToInteractionsStep(item, forAntigravity); ok {
 			stepItems = append(stepItems, step)
 		}
 		return true
@@ -645,7 +651,7 @@ func convertOpenAIResponsesEventToInteractions(modelName string, rawJSON []byte,
 	return nil
 }
 
-func openAIResponsesOutputItemToInteractionsStep(item gjson.Result) ([]byte, bool) {
+func openAIResponsesOutputItemToInteractionsStep(item gjson.Result, forAntigravity bool) ([]byte, bool) {
 	switch item.Get("type").String() {
 	case "message":
 		step := []byte(`{"type":"model_output","content":[]}`)
@@ -657,7 +663,7 @@ func openAIResponsesOutputItemToInteractionsStep(item gjson.Result) ([]byte, boo
 		})
 		return step, true
 	case "function_call":
-		return responsesFunctionCallToInteractions(item), true
+		return responsesFunctionCallToInteractions(item, forAntigravity), true
 	case "reasoning":
 		step := []byte(`{"type":"thought","content":[]}`)
 		item.Get("summary").ForEach(func(_, summary gjson.Result) bool {
@@ -680,7 +686,11 @@ func openAIResponsesOutputItemAddedToInteractions(modelName string, root gjson.R
 		out := ensureInteractionsCreatedDirect(nil, st, modelName)
 		out = appendInteractionsStepStopDirect(out, st)
 		step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-		step, _ = sjson.SetBytes(step, "name", item.Get("name").String())
+		name := item.Get("name").String()
+		if isAntigravityModel(modelName) {
+			name = translatorcommon.AntigravityToolNameToUpstream(name)
+		}
+		step, _ = sjson.SetBytes(step, "name", name)
 		if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String()); callID != "" {
 			step, _ = sjson.SetBytes(step, "id", callID)
 			step, _ = sjson.SetBytes(step, "call_id", callID)
@@ -897,7 +907,11 @@ func ensureInteractionsFunctionCallStep(out [][]byte, st *responsesToInteraction
 		item = root
 	}
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-	step, _ = sjson.SetBytes(step, "name", item.Get("name").String())
+	name := item.Get("name").String()
+	if isAntigravityModel(modelName) {
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
+	}
+	step, _ = sjson.SetBytes(step, "name", name)
 	if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String(), root.Get("call_id").String(), root.Get("item_id").String()); callID != "" {
 		step, _ = sjson.SetBytes(step, "id", callID)
 		step, _ = sjson.SetBytes(step, "call_id", callID)

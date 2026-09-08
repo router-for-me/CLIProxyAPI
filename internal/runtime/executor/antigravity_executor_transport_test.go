@@ -18,6 +18,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 func antigravityAuthWithProxy(proxyURL string) *cliproxyauth.Auth {
@@ -40,17 +42,32 @@ func antigravityAuthWithIDAndProxy(id, proxyURL string) *cliproxyauth.Auth {
 // every proxied Antigravity request created a new transport, so no keep-alive connection
 // was ever reused and every request paid a full TCP + TLS handshake.
 func TestNewAntigravityHTTPClientSharesTransport(t *testing.T) {
+	enabled := true
+	poolCfg := func(sdkCfg ...config.SDKConfig) *config.Config {
+		cfg := &config.Config{
+			Antigravity: config.AntigravityConfig{
+				ConnectionPool: config.AntigravityConnectionPoolConfig{
+					Enabled: &enabled,
+				},
+			},
+		}
+		if len(sdkCfg) > 0 {
+			cfg.SDKConfig = sdkCfg[0]
+		}
+		return cfg
+	}
+
 	cases := []struct {
 		name string
 		cfg  *config.Config
 		auth *cliproxyauth.Auth
 	}{
-		{"direct", &config.Config{}, antigravityAuthWithProxy("")},
-		{"auth http proxy", &config.Config{}, antigravityAuthWithProxy("http://127.0.0.1:18080")},
-		{"auth socks5 proxy", &config.Config{}, antigravityAuthWithProxy("socks5://127.0.0.1:18081")},
+		{"direct", poolCfg(), antigravityAuthWithProxy("")},
+		{"auth http proxy", poolCfg(), antigravityAuthWithProxy("http://127.0.0.1:18080")},
+		{"auth socks5 proxy", poolCfg(), antigravityAuthWithProxy("socks5://127.0.0.1:18081")},
 		{
 			"config proxy",
-			&config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://127.0.0.1:18082"}},
+			poolCfg(config.SDKConfig{ProxyURL: "http://127.0.0.1:18082"}),
 			antigravityAuthWithProxy(""),
 		},
 	}
@@ -80,59 +97,85 @@ func TestNewAntigravityHTTPClientSharesTransport(t *testing.T) {
 			if len(transport.TLSClientConfig.NextProtos) != 0 {
 				t.Fatalf("Antigravity must omit ALPN like the native client, got %v", transport.TLSClientConfig.NextProtos)
 			}
-			// Go's DefaultMaxIdleConnsPerHost of 2 would force concurrent sessions on one
-			// credential to re-handshake. The native Antigravity stack raises it to 100.
-			if transport.MaxIdleConnsPerHost < antigravityMaxIdleConnsPerHost {
-				t.Fatalf("MaxIdleConnsPerHost = %d, want >= %d", transport.MaxIdleConnsPerHost, antigravityMaxIdleConnsPerHost)
+			// Native Antigravity uses DefaultMaxIdleConnsPerHost of 2.
+			if transport.MaxIdleConnsPerHost < antigravityDefaultMaxIdleConnsPerHost {
+				t.Fatalf("MaxIdleConnsPerHost = %d, want >= %d", transport.MaxIdleConnsPerHost, antigravityDefaultMaxIdleConnsPerHost)
 			}
 			if transport.MaxIdleConns > 0 && transport.MaxIdleConns < transport.MaxIdleConnsPerHost {
 				t.Fatalf("MaxIdleConns = %d must not throttle MaxIdleConnsPerHost = %d", transport.MaxIdleConns, transport.MaxIdleConnsPerHost)
 			}
-			if transport.IdleConnTimeout > 0 && transport.IdleConnTimeout < antigravityIdleConnTimeout {
-				t.Fatalf("IdleConnTimeout = %v, want >= %v", transport.IdleConnTimeout, antigravityIdleConnTimeout)
+			if transport.IdleConnTimeout > 0 && transport.IdleConnTimeout < antigravityDefaultIdleConnTimeout {
+				t.Fatalf("IdleConnTimeout = %v, want >= %v", transport.IdleConnTimeout, antigravityDefaultIdleConnTimeout)
+			}
+			if transport.IdleConnTimeout > antigravityMaxAllowedIdleConnTimeout {
+				t.Fatalf("IdleConnTimeout = %v exceeds GFE cutoff %v", transport.IdleConnTimeout, antigravityMaxAllowedIdleConnTimeout)
 			}
 		})
 	}
 }
 
-// TestAntigravityPoolLimitsOnlyWiden guards that an operator-supplied base transport
-// with a larger pool keeps its own settings, and that "unlimited" sentinels are not
-// narrowed into finite limits.
-func TestAntigravityPoolLimitsOnlyWiden(t *testing.T) {
+// TestAntigravityPoolLimitsGuardsDefaultAndGFECutoff guards that Antigravity pool
+// limits defaults to 30s timeout, 2 idle conns per host, and hard-caps idle timeout at 240s
+// when connection pooling is enabled.
+func TestAntigravityPoolLimitsGuardsDefaultAndGFECutoff(t *testing.T) {
+	enabled := true
+	poolCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabled,
+			},
+		},
+	}
+
 	wide := &http.Transport{
 		MaxIdleConns:        512,
 		MaxIdleConnsPerHost: 256,
 		IdleConnTimeout:     time.Hour,
 	}
-	applyAntigravityPoolLimits(wide)
-	if wide.MaxIdleConnsPerHost != 256 || wide.MaxIdleConns != 512 || wide.IdleConnTimeout != time.Hour {
-		t.Fatalf("wider pool settings must be preserved, got perHost=%d total=%d idle=%v",
-			wide.MaxIdleConnsPerHost, wide.MaxIdleConns, wide.IdleConnTimeout)
+	applyAntigravityPoolLimits(wide, poolCfg)
+	// Larger connection limits are kept, but IdleConnTimeout MUST be hard-capped at 240s
+	// to avoid exceeding the Google Frontend (GFE / ESF) 240-second cutoff.
+	if wide.MaxIdleConnsPerHost != 256 || wide.MaxIdleConns != 512 {
+		t.Fatalf("larger connection limits must be preserved, got perHost=%d total=%d",
+			wide.MaxIdleConnsPerHost, wide.MaxIdleConns)
+	}
+	if wide.IdleConnTimeout != antigravityMaxAllowedIdleConnTimeout {
+		t.Fatalf("IdleConnTimeout = %v, want capped at %v", wide.IdleConnTimeout, antigravityMaxAllowedIdleConnTimeout)
 	}
 
-	// Zero means unlimited for both MaxIdleConns and IdleConnTimeout.
+	// Zero idle timeout (unlimited in Go) must be capped to safe default so it doesn't cause GFE RSTs.
 	unlimited := &http.Transport{MaxIdleConns: 0, IdleConnTimeout: 0}
-	applyAntigravityPoolLimits(unlimited)
+	applyAntigravityPoolLimits(unlimited, poolCfg)
 	if unlimited.MaxIdleConns != 0 {
 		t.Fatalf("MaxIdleConns = %d, want 0 (unlimited) to stay unlimited", unlimited.MaxIdleConns)
 	}
-	if unlimited.IdleConnTimeout != 0 {
-		t.Fatalf("IdleConnTimeout = %v, want 0 (never expire) to stay unlimited", unlimited.IdleConnTimeout)
+	if unlimited.IdleConnTimeout != antigravityDefaultIdleConnTimeout {
+		t.Fatalf("IdleConnTimeout = %v, want default %v", unlimited.IdleConnTimeout, antigravityDefaultIdleConnTimeout)
 	}
 
 	// A negative MaxIdleConnsPerHost is how an operator disables idle pooling; Go never
 	// pools a connection in that case, so the intent must survive.
 	disabled := &http.Transport{MaxIdleConnsPerHost: -1}
-	applyAntigravityPoolLimits(disabled)
+	applyAntigravityPoolLimits(disabled, poolCfg)
 	if disabled.MaxIdleConnsPerHost != -1 {
 		t.Fatalf("MaxIdleConnsPerHost = %d, want -1 (pooling disabled) to be preserved", disabled.MaxIdleConnsPerHost)
 	}
 
-	// Go's zero value means DefaultMaxIdleConnsPerHost (2), which must be raised.
+	// Go's zero value defaults to 2 and 30s when enabled.
 	defaulted := &http.Transport{}
-	applyAntigravityPoolLimits(defaulted)
-	if defaulted.MaxIdleConnsPerHost != antigravityMaxIdleConnsPerHost {
-		t.Fatalf("MaxIdleConnsPerHost = %d, want %d", defaulted.MaxIdleConnsPerHost, antigravityMaxIdleConnsPerHost)
+	applyAntigravityPoolLimits(defaulted, poolCfg)
+	if defaulted.MaxIdleConnsPerHost != antigravityDefaultMaxIdleConnsPerHost {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want %d", defaulted.MaxIdleConnsPerHost, antigravityDefaultMaxIdleConnsPerHost)
+	}
+	if defaulted.IdleConnTimeout != antigravityDefaultIdleConnTimeout {
+		t.Fatalf("IdleConnTimeout = %v, want %v", defaulted.IdleConnTimeout, antigravityDefaultIdleConnTimeout)
+	}
+
+	// When cfg is nil (or default enabled: false), short mode is applied: MaxIdleConnsPerHost = -1
+	defaultDisabled := &http.Transport{}
+	applyAntigravityPoolLimits(defaultDisabled)
+	if defaultDisabled.MaxIdleConnsPerHost != -1 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want -1 when pooling is disabled by default", defaultDisabled.MaxIdleConnsPerHost)
 	}
 
 	applyAntigravityPoolLimits(nil) // must not panic
@@ -187,7 +230,17 @@ func TestAntigravityConcurrentRequestsReusePooledConnections(t *testing.T) {
 	defer srv.Close()
 
 	auth := antigravityAuthWithIDAndProxy("concurrent-reuse", "")
-	client := &http.Client{Transport: antigravityHTTP11Transport(auth, http.DefaultTransport.(*http.Transport))}
+	enabledPool := true
+	maxIdle := 100
+	poolCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled:             &enabledPool,
+				MaxIdleConnsPerHost: &maxIdle,
+			},
+		},
+	}
+	client := &http.Client{Transport: antigravityHTTP11Transport(auth, http.DefaultTransport.(*http.Transport), poolCfg)}
 
 	const (
 		waves      = 3
@@ -228,6 +281,70 @@ func TestAntigravityConcurrentRequestsReusePooledConnections(t *testing.T) {
 	if distinct > perWave {
 		t.Fatalf("%d waves of %d concurrent requests opened %d connections, want at most %d (unpooled worst case is %d)",
 			waves, perWave, distinct, perWave, totalConns)
+	}
+}
+
+// TestAntigravityConcurrentRequestsDefaultPoolLimitsToTwo verifies that when pooling is enabled
+// without specifying max-idle-conns-per-host, it defaults to 2 (matching Go's default and official agy).
+func TestAntigravityConcurrentRequestsDefaultPoolLimitsToTwo(t *testing.T) {
+	var mu sync.Mutex
+	remotes := map[string]struct{}{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		remotes[r.RemoteAddr] = struct{}{}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	auth := antigravityAuthWithIDAndProxy("concurrent-default-2", "")
+	enabledPool := true
+	poolCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabledPool,
+			},
+		},
+	}
+	client := &http.Client{Transport: antigravityHTTP11Transport(auth, http.DefaultTransport.(*http.Transport), poolCfg)}
+
+	const (
+		waves      = 3
+		perWave    = 8
+		totalConns = waves * perWave
+	)
+	for wave := 0; wave < waves; wave++ {
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(perWave)
+		for i := 0; i < perWave; i++ {
+			go func() {
+				defer wg.Done()
+				<-start
+				resp, errDo := client.Get(srv.URL)
+				if errDo != nil {
+					t.Error(errDo)
+					return
+				}
+				if _, errDrain := io.Copy(io.Discard, resp.Body); errDrain != nil {
+					t.Error(errDrain)
+				}
+				if errClose := resp.Body.Close(); errClose != nil {
+					t.Error(errClose)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+	}
+
+	mu.Lock()
+	distinct := len(remotes)
+	mu.Unlock()
+	// With default limit of 2, only 2 survive each wave, so later waves open new conns: distinct > perWave
+	if distinct <= perWave || distinct > totalConns {
+		t.Fatalf("expected distinct connections between %d and %d for default limit of 2, got %d",
+			perWave+1, totalConns, distinct)
 	}
 }
 
@@ -535,7 +652,14 @@ func TestAntigravityProxiedRequestsReuseOneConnection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config.Config{}
+	enabled := true
+	cfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabled,
+			},
+		},
+	}
 	auth := antigravityAuthWithProxy(srv.URL)
 	const requests = 8
 	for i := 0; i < requests; i++ {
@@ -556,5 +680,311 @@ func TestAntigravityProxiedRequestsReuseOneConnection(t *testing.T) {
 	mu.Unlock()
 	if distinct != 1 {
 		t.Fatalf("expected %d requests to share one connection, got %d connections", requests, distinct)
+	}
+}
+
+// TestAntigravityPoolConfigIdleTimeoutCustomAndCap verifies that custom idle-conn-timeout
+// is honored (e.g. 10s, 30s) and hard-capped at 210s when configured higher (e.g. 10m),
+// and that connection pool is disabled by default (enabled: false).
+func TestAntigravityPoolConfigIdleTimeoutCustomAndCap(t *testing.T) {
+	enabledTrue := true
+	enabledFalse := false
+	excessiveMaxIdle := 1000000
+	negativeMaxIdle := -5
+
+	cases := []struct {
+		name        string
+		cfg         *config.Config
+		wantTimeout time.Duration
+		wantShort   bool
+		wantMaxIdle int
+	}{
+		{
+			name:      "default config disables pooling (enabled: false by default)",
+			cfg:       &config.Config{},
+			wantShort: true,
+		},
+		{
+			name: "explicit enabled false activates short mode",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled: &enabledFalse,
+					},
+				},
+			},
+			wantShort: true,
+		},
+		{
+			name: "enabled true defaults to 30s",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled: &enabledTrue,
+					},
+				},
+			},
+			wantTimeout: 30 * time.Second,
+		},
+		{
+			name: "enabled true with custom 15s via connection-pool struct",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled:         &enabledTrue,
+						IdleConnTimeout: "15s",
+					},
+				},
+			},
+			wantTimeout: 15 * time.Second,
+		},
+		{
+			name: "enabled true with custom 45s via connection-pool struct",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled:         &enabledTrue,
+						IdleConnTimeout: "45s",
+					},
+				},
+			},
+			wantTimeout: 45 * time.Second,
+		},
+		{
+			name: "enabled true with 10m timeout hard-capped at 210s GFE cutoff",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled:         &enabledTrue,
+						IdleConnTimeout: "10m",
+					},
+				},
+			},
+			wantTimeout: 210 * time.Second,
+		},
+		{
+			name: "enabled true with 500s timeout hard-capped at 210s GFE cutoff",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled:         &enabledTrue,
+						IdleConnTimeout: "500s",
+					},
+				},
+			},
+			wantTimeout: 210 * time.Second,
+		},
+		{
+			name: "enabled true with 0s timeout activates short mode",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled:         &enabledTrue,
+						IdleConnTimeout: "0s",
+					},
+				},
+			},
+			wantShort: true,
+		},
+		{
+			name: "enabled true with invalid timeout string falls back to 30s default",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled:         &enabledTrue,
+						IdleConnTimeout: "invalid-timeout",
+					},
+				},
+			},
+			wantTimeout: 30 * time.Second,
+		},
+		{
+			name: "enabled true with negative max-idle activates short mode",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled:             &enabledTrue,
+						MaxIdleConnsPerHost: &negativeMaxIdle,
+					},
+				},
+			},
+			wantShort: true,
+		},
+		{
+			name: "enabled true with excessive max-idle capped at 100",
+			cfg: &config.Config{
+				Antigravity: config.AntigravityConfig{
+					ConnectionPool: config.AntigravityConnectionPoolConfig{
+						Enabled:             &enabledTrue,
+						MaxIdleConnsPerHost: &excessiveMaxIdle,
+					},
+				},
+			},
+			wantTimeout: 30 * time.Second,
+			wantMaxIdle: 100,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := antigravityAuthWithIDAndProxy("cfg-test-"+tc.name, "")
+			client := newAntigravityHTTPClient(context.Background(), tc.cfg, auth, 0)
+			transport, ok := client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("expected *http.Transport, got %T", client.Transport)
+			}
+			if tc.wantShort {
+				if transport.MaxIdleConnsPerHost != -1 {
+					t.Fatalf("MaxIdleConnsPerHost = %d, want -1 for short mode", transport.MaxIdleConnsPerHost)
+				}
+				if transport.DisableKeepAlives {
+					t.Fatal("DisableKeepAlives must be false to avoid adding Connection: close header")
+				}
+			} else {
+				if transport.IdleConnTimeout != tc.wantTimeout {
+					t.Fatalf("IdleConnTimeout = %v, want %v", transport.IdleConnTimeout, tc.wantTimeout)
+				}
+				if tc.wantMaxIdle > 0 && transport.MaxIdleConnsPerHost != tc.wantMaxIdle {
+					t.Fatalf("MaxIdleConnsPerHost = %d, want %d", transport.MaxIdleConnsPerHost, tc.wantMaxIdle)
+				}
+			}
+		})
+	}
+}
+
+// TestAntigravityShortModeNeverAdvertisesConnectionCloseAndDisconnects verifies that
+// in short mode (MaxIdleConnsPerHost=-1), repeated requests do not reuse connections,
+// but the HTTP wire request never leaks "Connection: close".
+func TestAntigravityShortModeNeverAdvertisesConnectionCloseAndDisconnects(t *testing.T) {
+	var mu sync.Mutex
+	remotes := map[string]int{}
+	var connectionHeaders []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		remotes[r.RemoteAddr]++
+		connectionHeaders = append(connectionHeaders, r.Header.Get("Connection"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	auth := antigravityAuthWithProxy(srv.URL)
+
+	const requests = 4
+	for i := 0; i < requests; i++ {
+		client := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+		req, errReq := http.NewRequest(http.MethodGet, "http://antigravity.invalid/v1internal:streamGenerateContent", nil)
+		if errReq != nil {
+			t.Fatalf("NewRequest() error = %v", errReq)
+		}
+		resp, errDo := client.Do(req)
+		if errDo != nil {
+			t.Fatalf("request %d error = %v", i, errDo)
+		}
+		_ = resp.Body.Close()
+	}
+
+	mu.Lock()
+	distinct := len(remotes)
+	headers := append([]string(nil), connectionHeaders...)
+	mu.Unlock()
+
+	// In short mode, every request should use a fresh connection
+	if distinct != requests {
+		t.Fatalf("short mode: expected %d distinct connections, got %d", requests, distinct)
+	}
+	// Crucial: wire request must not leak "Connection: close"
+	for i, h := range headers {
+		if strings.Contains(strings.ToLower(h), "close") {
+			t.Fatalf("request %d leaked Connection: close header: %q", i, h)
+		}
+	}
+}
+
+// TestCloseAntigravityAuthIdleTransportsEvictsIdlePool verifies that calling
+// closeAntigravityAuthIdleTransports cleans up cached transports for that auth.
+func TestCloseAntigravityAuthIdleTransportsEvictsIdlePool(t *testing.T) {
+	auth := antigravityAuthWithIDAndProxy("auth-to-close", "")
+	cfg := &config.Config{}
+
+	client := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+	if client.Transport == nil {
+		t.Fatal("expected transport to be initialized")
+	}
+
+	scope := antigravityTransportScope(auth)
+	key := antigravityTransportKey{credential: scope, base: antigravityBaseTransport}
+
+	// Verify it's cached
+	if !antigravityTransports.Contains(key) {
+		t.Fatal("expected transport to be in cache")
+	}
+
+	// Trigger close
+	closeAntigravityAuthIdleTransports(auth)
+
+	// Verify it's removed from cache
+	if antigravityTransports.Contains(key) {
+		t.Fatal("expected transport to be removed from cache after closeAntigravityAuthIdleTransports")
+	}
+}
+
+// TestAntigravityCountTokens429EvictsIdleTransports verifies that a 429 during count_tokens
+// evicts cached transports for that auth.
+func TestAntigravityCountTokens429EvictsIdleTransports(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource exhausted","status":"RESOURCE_EXHAUSTED"}}`))
+	}))
+	defer srv.Close()
+
+	auth := &cliproxyauth.Auth{
+		ID:         "auth-tokens-429-evict",
+		Provider:   "antigravity",
+		Attributes: map[string]string{"base_url": srv.URL},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	enabledPool := true
+	cfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabledPool,
+			},
+		},
+	}
+	exec := NewAntigravityExecutor(cfg)
+
+	// Build client to populate cache
+	client := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+	if client.Transport == nil {
+		t.Fatal("expected transport to be initialized")
+	}
+
+	scope := antigravityTransportScope(auth)
+	key := antigravityTransportKey{credential: scope, base: antigravityBaseTransport}
+	if !antigravityTransports.Contains(key) {
+		t.Fatal("expected transport to be in cache before count_tokens")
+	}
+
+	// Trigger CountTokens which returns 429
+	payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+	_, _ = exec.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3.6-flash-high",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatGemini,
+	})
+
+	// Verify transport is evicted
+	if antigravityTransports.Contains(key) {
+		t.Fatal("expected transport to be evicted after 429 in CountTokens")
 	}
 }

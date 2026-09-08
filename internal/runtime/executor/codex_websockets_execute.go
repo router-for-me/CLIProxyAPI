@@ -64,6 +64,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
 	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
+	body = helps.NormalizeCodexToolSchemas(body)
 	multiAgentV2Conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
 	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
@@ -267,6 +268,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
+	sawOutputDelta := false
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -322,10 +324,23 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 		payload = normalizeCodexWebsocketCompletion(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
+		if helps.HasMeaningfulCodexOutputDelta(payload) {
+			sawOutputDelta = true
+		}
 		switch eventType {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed", "response.done", "response.incomplete":
+			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
+				if sess != nil {
+					e.invalidateUpstreamConn(sess, conn, "terminal_empty_incomplete", nil)
+					unlockSession()
+				}
+				streamErr := newCodexEmptyIncompleteStreamError()
+				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+				reporter.PublishFailure(ctx, streamErr)
+				return resp, streamErr
+			}
 			payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
 			if eventType != "response.incomplete" {
 				cacheCodexReasoningReplayFromCompleted(replayScope, payload)

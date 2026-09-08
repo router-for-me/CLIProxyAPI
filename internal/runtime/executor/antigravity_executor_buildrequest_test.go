@@ -295,6 +295,33 @@ func TestAntigravityPrepareRequestAuth_FetchesMissingProjectID(t *testing.T) {
 	}
 }
 
+func TestAntigravityPrepareRequestAuth_UpstreamForbiddenPreserves403(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		"access_token": "token",
+		"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+	}}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":403,"message":"The caller does not have permission"}}`)),
+		}, nil
+	}))
+
+	_, err := executor.PrepareRequestAuth(ctx, auth)
+	if err == nil {
+		t.Fatalf("PrepareRequestAuth should fail on upstream 403")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error should expose StatusCode(), got %T (%v)", err, err)
+	}
+	if got := status.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("status code = %d, want %d", got, http.StatusForbidden)
+	}
+}
+
 func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 	executor := &AntigravityExecutor{}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{}}

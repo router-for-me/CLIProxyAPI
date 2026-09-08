@@ -483,6 +483,47 @@ func TestManagerExecute_PreparesAndPersistsMissingRequestAuthMetadata(t *testing
 	}
 }
 
+func TestManagerExecute_PrepareAuth403TriggersCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	const model = "gemini-3.1-pro"
+	store := &requestPrepareStore{}
+	executor := &requestPrepareExecutor{
+		prepareErr: customStatusError{code: http.StatusForbidden, msg: "forbidden"},
+	}
+	manager := NewManager(store, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "auth-prepare-403",
+		Provider: "antigravity",
+		Metadata: map[string]any{"access_token": "token"},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	_, errExecute := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected Execute error on 403 prepare failure")
+	}
+
+	current, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("expected auth in manager")
+	}
+	if !current.Unavailable {
+		t.Fatal("expected auth to be marked unavailable after 403 prepare failure")
+	}
+	if current.Quota.NextRecoverAt.IsZero() && current.NextRetryAfter.IsZero() {
+		t.Fatal("expected auth cooldown to be scheduled after 403 prepare failure")
+	}
+}
+
 func testStringValue(value any) string {
 	if value == nil {
 		return ""

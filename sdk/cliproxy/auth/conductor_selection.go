@@ -478,6 +478,10 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 	}
 
 	if len(availableByPriority) == 0 {
+		lastCandidateErr := latestCandidateErrorForModel(auths, func(candidate *Auth) string {
+			return m.selectionModelForAuth(candidate, routeModel)
+		})
+
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
@@ -487,9 +491,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownError(routeModel, providerForError, resetIn)
+			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
 		}
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+		return nil, WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
 	}
 
 	return availableAuthsFromPriorityBuckets(availableByPriority, allPriorities), nil
@@ -527,6 +531,19 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 	return routeModel
 }
 
+func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
+	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
+	if !isBuiltInSelector(selector) {
+		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
+			return ctx
+		}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
+}
+
 func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if err == nil || requestedModel == "" {
 		return err
@@ -535,7 +552,84 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownError(requestedModel, cooldownErr.provider, cooldownErr.resetIn)
+	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
+}
+
+func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) string) error {
+	var latestModelTime time.Time
+	var latestModelAuthID string
+	var latestModelErr error
+
+	var latestAuthTime time.Time
+	var latestAuthID string
+	var latestAuthErr error
+
+	for _, candidate := range auths {
+		if candidate == nil {
+			continue
+		}
+		checkModel := candidate.ID
+		if selectionModelFunc != nil {
+			checkModel = selectionModelFunc(candidate)
+		}
+		var modelErr error
+		var modelTime time.Time
+		if len(candidate.ModelStates) > 0 {
+			if state, ok := candidate.ModelStates[checkModel]; ok && state != nil {
+				if state.LastError != nil {
+					modelErr = state.LastError
+					modelTime = state.UpdatedAt
+				} else if strings.TrimSpace(state.StatusMessage) != "" {
+					modelErr = errors.New(state.StatusMessage)
+					modelTime = state.UpdatedAt
+				}
+			} else if state, ok := candidate.ModelStates[canonicalModelKey(checkModel)]; ok && state != nil {
+				if state.LastError != nil {
+					modelErr = state.LastError
+					modelTime = state.UpdatedAt
+				} else if strings.TrimSpace(state.StatusMessage) != "" {
+					modelErr = errors.New(state.StatusMessage)
+					modelTime = state.UpdatedAt
+				}
+			}
+		}
+
+		if modelErr != nil {
+			if modelTime.IsZero() {
+				modelTime = candidate.UpdatedAt
+			}
+			if latestModelErr == nil || modelTime.After(latestModelTime) || (modelTime.Equal(latestModelTime) && candidate.ID > latestModelAuthID) {
+				latestModelTime = modelTime
+				latestModelAuthID = candidate.ID
+				latestModelErr = modelErr
+			}
+		} else {
+			var authErr error
+			var authTime time.Time
+			if candidate.LastError != nil {
+				authErr = candidate.LastError
+				authTime = candidate.UpdatedAt
+			} else if strings.TrimSpace(candidate.StatusMessage) != "" {
+				authErr = errors.New(candidate.StatusMessage)
+				authTime = candidate.UpdatedAt
+			}
+			if authErr != nil {
+				if authTime.IsZero() {
+					authTime = candidate.UpdatedAt
+				}
+				if latestAuthErr == nil || authTime.After(latestAuthTime) || (authTime.Equal(latestAuthTime) && candidate.ID > latestAuthID) {
+					latestAuthTime = authTime
+					latestAuthID = candidate.ID
+					latestAuthErr = authErr
+				}
+			}
+		}
+	}
+
+	if latestModelErr != nil {
+		return latestModelErr
+	}
+	return latestAuthErr
 }
 
 func schedulerAttributeSensitive(key string) bool {
@@ -918,6 +1012,10 @@ func credentialRetryRoundStateEligible(lastErr *Error, quotaExceeded bool) bool 
 }
 
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int, eligibility authSelectionEligibility, pinnedAuthID string, defaultRequestRetry int) (time.Duration, bool) {
+	return m.closestCooldownWaitWithAttempted(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, 0, nil)
+}
+
+func (m *Manager) closestCooldownWaitWithAttempted(providers []string, model string, attempt int, eligibility authSelectionEligibility, pinnedAuthID string, defaultRequestRetry int, status int, attempted map[string]struct{}) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
 	}
@@ -969,12 +1067,37 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 		if !retryEligible {
 			continue
 		}
-		if next.IsZero() {
-			return 0, true
+
+		wasAttempted := false
+		if len(attempted) > 0 {
+			_, wasAttempted = attempted[auth.ID]
 		}
-		wait := next.Sub(now)
-		if wait < 0 {
+		coolingDisabled := m.cooldownDisabledForAuth(auth)
+		if !wasAttempted || coolingDisabled || status != http.StatusTooManyRequests {
+			if next.IsZero() {
+				return 0, true
+			}
+			wait := next.Sub(now)
+			if wait < 0 {
+				continue
+			}
+			if !found || wait < minWait {
+				minWait = wait
+				found = true
+			}
 			continue
+		}
+
+		// auth was already attempted in the round that just failed with 429,
+		// and cooling is enabled. It must not trigger an immediate zero-wait retry round.
+		var wait time.Duration
+		if next.IsZero() {
+			wait = minQuotaCooldownFloor
+		} else {
+			wait = next.Sub(now)
+			if wait < minQuotaCooldownFloor {
+				wait = minQuotaCooldownFloor
+			}
 		}
 		if !found || wait < minWait {
 			minWait = wait
@@ -1050,6 +1173,10 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 // immediately. If every eligible credential still needs a positive cooldown,
 // retry stops without waiting.
 func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, opts cliproxyexecutor.Options, err error, attempt int, providers []string, model string, maxWait time.Duration, homeRetryLimit int, defaultRequestRetry int) (time.Duration, bool) {
+	return m.shouldRetryAfterErrorWithAttempted(ctx, opts, err, attempt, providers, model, maxWait, homeRetryLimit, defaultRequestRetry, nil)
+}
+
+func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts cliproxyexecutor.Options, err error, attempt int, providers []string, model string, maxWait time.Duration, homeRetryLimit int, defaultRequestRetry int, attempted map[string]struct{}) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
 	}
@@ -1103,7 +1230,7 @@ func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, o
 	if !isCredentialRetryRoundStatus(status) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry) {
 		return 0, false
 	}
-	wait, found := m.closestCooldownWait(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry)
+	wait, found := m.closestCooldownWaitWithAttempted(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted)
 	if found {
 		if wait > 0 && (maxWait <= 0 || wait > maxWait) {
 			return 0, false
@@ -1325,7 +1452,7 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
-	return isBuiltInSelector(m.selector)
+	return isBuiltInSelector(m.Selector())
 }
 
 func shouldRetrySchedulerPick(err error) bool {
@@ -1358,13 +1485,13 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
-	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 
 	m.mu.RLock()
 	selector := m.selector
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
 	pluginScheduler := m.pluginScheduler
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
@@ -1417,7 +1544,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, errPick
 	}
 	if !handled {
-		selectorCtx := withWeightedSelectorStateModel(ctx, selector, model)
+		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -1674,7 +1801,6 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
-	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
@@ -1693,6 +1819,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	m.mu.RLock()
 	selector := m.selector
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
 	pluginScheduler := m.pluginScheduler
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
@@ -1750,7 +1877,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", errPick
 	}
 	if !handled {
-		selectorCtx := withWeightedSelectorStateModel(ctx, selector, model)
+		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -1871,12 +1998,15 @@ func isAuthUnavailableError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var cooldownErr *modelCooldownError
+	if errors.As(err, &cooldownErr) && cooldownErr != nil {
+		return true
+	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil {
 		return authErr.Code == "auth_unavailable" || authErr.Code == "model_cooldown"
 	}
-	var cooldownErr *modelCooldownError
-	return errors.As(err, &cooldownErr) && cooldownErr != nil
+	return false
 }
 
 func authCoolingSummary(auth *Auth, model string, next time.Time, now time.Time) string {

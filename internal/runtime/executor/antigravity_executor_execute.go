@@ -24,16 +24,33 @@ import (
 
 // Execute performs a non-streaming request to the Antigravity API.
 func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	if opts.Alt == "responses/compact" {
-		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	if helps.HasResponsesCompactionItem(req.Payload) {
+		expanded, errExpand := helps.ExpandAntigravityCompactionCapsules(req.Payload)
+		if errExpand != nil {
+			return resp, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+		}
+		req.Payload = expanded
+		if len(opts.OriginalRequest) > 0 {
+			expandedOrig, errOrig := helps.ExpandAntigravityCompactionCapsules(opts.OriginalRequest)
+			if errOrig == nil {
+				opts.OriginalRequest = expandedOrig
+			} else {
+				opts.OriginalRequest = expanded
+			}
+		}
+	}
+	if opts.Alt == "responses/compact" || helps.HasResponsesCompactionTrigger(req.Payload) || helps.HasResponsesCompactionTrigger(opts.OriginalRequest) {
+		return e.executeCompaction(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
-		return resp, homeKVUnavailableStatusErr(errCooldown)
-	} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
-		log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
-		d := remaining
-		return resp, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
+	if !antigravityCoolingDisabled(auth, e.cfg) {
+		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
+			return resp, homeKVUnavailableStatusErr(errCooldown)
+		} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
+			log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
+			d := remaining
+			return resp, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
+		}
 	}
 
 	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
@@ -68,7 +85,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 	originalTranslated, translated := helps.TranslateRequestPairWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, false)
 
-	translated, err = helps.ApplyThinkingWithSourcePayload(translated, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -103,7 +120,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 			return resp, err
 		}
 	}
-	requestPayload = ensureAntigravityGeminiLeadingUserContent(baseModel, requestPayload)
+	requestPayload = ensureAntigravityGeminiBoundaryUserContent(baseModel, requestPayload)
 
 	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 	if errReq != nil {
@@ -137,7 +154,8 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		decision := decideAntigravity429(bodyBytes)
 		switch decision.kind {
 		case antigravity429DecisionShortCooldownSwitchAuth:
-			if decision.retryAfter != nil && *decision.retryAfter > 0 {
+			closeAntigravityAuthIdleTransports(auth)
+			if decision.retryAfter != nil && *decision.retryAfter > 0 && !antigravityCoolingDisabled(auth, e.cfg) {
 				if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
 					err = homeKVUnavailableStatusErr(errMarkCooldown)
 					return resp, err
@@ -145,7 +163,8 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 				log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
 			}
 		case antigravity429DecisionFullQuotaExhausted:
-			if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
+			closeAntigravityAuthIdleTransports(auth)
+			if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, e.cfg) {
 				markAntigravityCreditsPermanentlyDisabled(auth)
 			}
 			// No credits logic - just fall through to error return below
@@ -179,15 +198,68 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	return resp, nil
 }
 
+func (e *AntigravityExecutor) executeCompaction(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	payload := req.Payload
+	if len(payload) == 0 && len(opts.OriginalRequest) > 0 {
+		payload = opts.OriginalRequest
+	}
+	summaryPayload := helps.PrepareAntigravityCompactionSummaryPayload(payload, baseModel)
+
+	summaryReq := cliproxyexecutor.Request{
+		Model:    req.Model,
+		Payload:  summaryPayload,
+		Metadata: req.Metadata,
+	}
+	summaryOpts := opts
+	summaryOpts.Alt = ""
+	summaryOpts.Stream = false
+	summaryOpts.OriginalRequest = nil
+	summaryOpts.SourceFormat = sdktranslator.FormatOpenAIResponse
+	summaryOpts.ResponseFormat = sdktranslator.FormatOpenAIResponse
+
+	summaryResp, errSummary := e.Execute(ctx, auth, summaryReq, summaryOpts)
+	if errSummary != nil {
+		return resp, errSummary
+	}
+
+	summaryText, errExtract := helps.ExtractAntigravitySummaryText(summaryResp.Payload)
+	if errExtract != nil {
+		return resp, fmt.Errorf("extract summary: %w", errExtract)
+	}
+	capsule, errSeal := helps.SealAntigravityCompaction(summaryText, baseModel)
+	if errSeal != nil {
+		return resp, fmt.Errorf("seal compaction capsule: %w", errSeal)
+	}
+
+	inputTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.input_tokens").Int())
+	outputTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.output_tokens").Int())
+	totalTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.total_tokens").Int())
+	if totalTokens == 0 && inputTokens == 0 {
+		usage := helps.ParseOpenAIUsage(summaryResp.Payload)
+		inputTokens = int(usage.InputTokens)
+		outputTokens = int(usage.OutputTokens)
+		totalTokens = int(usage.TotalTokens)
+	}
+
+	respBytes := helps.BuildAntigravityCompactionResponse(baseModel, capsule, inputTokens, outputTokens, totalTokens)
+	return cliproxyexecutor.Response{
+		Payload: respBytes,
+		Headers: summaryResp.Headers,
+	}, nil
+}
+
 // executeClaudeNonStream performs a claude non-streaming request to the Antigravity API.
 func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
-		return resp, homeKVUnavailableStatusErr(errCooldown)
-	} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
-		log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
-		d := remaining
-		return resp, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
+	if !antigravityCoolingDisabled(auth, e.cfg) {
+		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
+			return resp, homeKVUnavailableStatusErr(errCooldown)
+		} else if inCooldown && !antigravityShouldBypassShortCooldown(ctx, e.cfg) {
+			log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", auth.ID, baseModel, remaining)
+			d := remaining
+			return resp, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
+		}
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
@@ -217,7 +289,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	}
 	originalTranslated, translated := helps.TranslateRequestPairWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, true)
 
-	translated, err = helps.ApplyThinkingWithSourcePayload(translated, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -253,7 +325,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			return resp, err
 		}
 	}
-	requestPayload = ensureAntigravityGeminiLeadingUserContent(baseModel, requestPayload)
+	requestPayload = ensureAntigravityGeminiBoundaryUserContent(baseModel, requestPayload)
 	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 	if errReq != nil {
 		err = errReq
@@ -294,7 +366,8 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 			switch decision.kind {
 			case antigravity429DecisionShortCooldownSwitchAuth:
-				if decision.retryAfter != nil && *decision.retryAfter > 0 {
+				closeAntigravityAuthIdleTransports(auth)
+				if decision.retryAfter != nil && *decision.retryAfter > 0 && !antigravityCoolingDisabled(auth, e.cfg) {
 					if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
 						err = homeKVUnavailableStatusErr(errMarkCooldown)
 						return resp, err
@@ -302,7 +375,8 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 					log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
 				}
 			case antigravity429DecisionFullQuotaExhausted:
-				if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
+				closeAntigravityAuthIdleTransports(auth)
+				if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, e.cfg) {
 					markAntigravityCreditsPermanentlyDisabled(auth)
 				}
 				// No credits logic - just fall through to error return below

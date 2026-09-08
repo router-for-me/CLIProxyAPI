@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
@@ -29,6 +31,7 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"gopkg.in/yaml.v3"
 )
 
 type codexSearchCaptureExecutor struct {
@@ -150,6 +153,7 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 }
 
 type codexSearchHomeDispatcher struct {
+	authID string
 	calls  atomic.Int32
 	policy atomic.Value
 }
@@ -198,18 +202,22 @@ func (*codexSearchHomeDispatcher) HeartbeatOK() bool { return true }
 
 func (d *codexSearchHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
 	d.calls.Add(1)
+	authID := d.authID
+	if authID == "" {
+		authID = "home-codex-search"
+	}
 	return json.Marshal(map[string]any{
 		"model":      model,
-		"auth_index": "home-codex-search",
+		"auth_index": authID,
 		"auth": map[string]any{
-			"id":       "home-codex-search",
+			"id":       authID,
 			"provider": "codex",
 			"status":   "active",
 			"metadata": map[string]any{"access_token": "home-search-token"},
 		},
 		"concurrency": map[string]any{
 			"accounted":     true,
-			"credential_id": "home-codex-search",
+			"credential_id": authID,
 			"model":         model,
 		},
 	})
@@ -466,7 +474,8 @@ func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) 
 			server := newTestServer(t)
 			registry := executionregistry.New()
 			server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
-			server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{}, registry, 1)
+			testAuthID := "home-codex-search-" + strings.ReplaceAll(test.name, " ", "-")
+			server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{authID: testAuthID}, registry, 1)
 			executor := &codexSearchCaptureExecutor{
 				statuses:     []int{http.StatusUnauthorized},
 				responseBody: test.responseBody(),
@@ -475,7 +484,7 @@ func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) 
 				executor.beforeReturn = func() { test.beforeReturn(registry) }
 			}
 			server.handlers.AuthManager.RegisterExecutor(executor)
-			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), "home-codex-search")
+			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), testAuthID)
 
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
@@ -2437,7 +2446,13 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 			{
 				"name": "models/gemini-3-pro",
 				"inputTokenLimit": 1048576,
-				"outputTokenLimit": 65536
+				"outputTokenLimit": 65536,
+				"thinking": {
+					"min": 128,
+					"max": 65535,
+					"dynamic_allowed": true,
+					"levels": ["low", "medium", "high"]
+				}
 			}
 		]
 	}`))
@@ -2462,6 +2477,17 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	}
 	if geminiEntry.contextLength != 1048576 || geminiEntry.maxCompletionTokens != 65536 {
 		t.Fatalf("gemini token metadata = %d/%d, want 1048576/65536", geminiEntry.contextLength, geminiEntry.maxCompletionTokens)
+	}
+	if geminiEntry.thinking == nil || !reflect.DeepEqual(geminiEntry.thinking.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("gemini thinking metadata = %#v, want low/medium/high", geminiEntry.thinking)
+	}
+
+	formatted := formatHomeCodexModel(geminiEntry)
+	if got := homeModelInt64Value(formatted, "context_length"); got != 1048576 {
+		t.Fatalf("formatted Gemini context_length = %d, want 1048576", got)
+	}
+	if got, ok := formatted["thinking"].(*registry.ThinkingSupport); !ok || !reflect.DeepEqual(got.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("formatted Gemini thinking metadata = %#v, want low/medium/high", formatted["thinking"])
 	}
 }
 
@@ -2509,5 +2535,53 @@ func TestInteractionsRouteRegistered(t *testing.T) {
 	server.engine.ServeHTTP(rr, req)
 	if rr.Code == http.StatusNotFound {
 		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUpdateClientsContext_AntigravityConnectionPoolPurgesTransports(t *testing.T) {
+	server := newTestServer(t)
+
+	enabled := true
+	disabled := false
+
+	cfg1 := *server.cfg
+	cfg1.Antigravity.ConnectionPool.Enabled = &enabled
+	cfg1.Antigravity.ConnectionPool.IdleConnTimeout = "30s"
+	server.oldConfigYaml, _ = yaml.Marshal(&cfg1)
+
+	// Pre-populate the cache before reload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	testAuth := &auth.Auth{
+		ID:         "hot-reload-test-auth",
+		Provider:   "antigravity",
+		Attributes: map[string]string{"base_url": srv.URL},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "proj",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	exec := executor.NewAntigravityExecutor(&cfg1)
+	req := httptest.NewRequest(http.MethodGet, srv.URL, nil)
+	_, _ = exec.HttpRequest(context.Background(), testAuth, req)
+
+	if executor.AntigravityTransportsLen() == 0 {
+		t.Fatal("expected Antigravity transports to be cached before hot reload")
+	}
+
+	cfg2 := cfg1
+	cfg2.Antigravity.ConnectionPool.Enabled = &disabled
+	cfg2.Antigravity.ConnectionPool.IdleConnTimeout = "10s"
+
+	if ok := server.UpdateClientsContext(context.Background(), &cfg2); !ok {
+		t.Fatal("UpdateClientsContext returned false")
+	}
+
+	if got := executor.AntigravityTransportsLen(); got != 0 {
+		t.Fatalf("AntigravityTransportsLen() after reload = %d, want 0", got)
 	}
 }

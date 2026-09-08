@@ -365,10 +365,17 @@ func TestValidateGeminiFunctionCallPairing_ValidParallelGroup(t *testing.T) {
 	}
 }
 
-func TestValidateGeminiFunctionCallPairing_RejectsUserBoundaryBeforeResponse(t *testing.T) {
-	payload := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}}]},{"role":"user","parts":[{"text":"boundary"}]},{"role":"model","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"ok"}}}]}]}`)
+func TestValidateGeminiFunctionCallPairing_AllowsUserBoundaryBeforeResponse(t *testing.T) {
+	payload := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}}]},{"role":"user","parts":[{"text":"boundary"}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"ok"}}}]}]}`)
+	if err := ValidateGeminiFunctionCallPairing(payload); err != nil {
+		t.Fatalf("user boundary before function response should be accepted: %v", err)
+	}
+}
+
+func TestValidateGeminiFunctionCallPairing_RejectsModelBoundaryBeforeResponse(t *testing.T) {
+	payload := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"run","args":{}}}]},{"role":"model","parts":[{"text":"boundary"}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"run","response":{"result":"ok"}}}]}]}`)
 	if err := ValidateGeminiFunctionCallPairing(payload); err == nil {
-		t.Fatal("user boundary before function response was accepted")
+		t.Fatal("model boundary before function response should be rejected")
 	}
 }
 

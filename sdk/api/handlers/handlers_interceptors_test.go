@@ -29,6 +29,8 @@ type handlerInterceptorTestHost struct {
 	completeRequest               func(context.Context, pluginapi.RequestCompletion)
 	// includeStreamChunkRequestBodies simulates legacy schema_version < 3 plugins.
 	includeStreamChunkRequestBodies bool
+	// includeStreamChunkHistory simulates legacy schema_version < 5 plugins.
+	includeStreamChunkHistory bool
 }
 
 type handlerInterceptorNoStreamTestHost struct {
@@ -106,6 +108,15 @@ func (h *handlerInterceptorTestHost) StreamChunkPayloadIncludesRequestBody() boo
 		return false
 	}
 	return h.includeStreamChunkRequestBodies
+}
+
+// StreamChunkPayloadIncludesHistory implements streamChunkHistoryPolicy.
+// Default false simulates schema_version >= 5 (omit history on payload chunks).
+func (h *handlerInterceptorTestHost) StreamChunkPayloadIncludesHistory() bool {
+	if h == nil {
+		return false
+	}
+	return h.includeStreamChunkHistory
 }
 
 type interceptorCaptureExecutor struct {
@@ -975,6 +986,7 @@ func TestHandlerStreamInterceptorRewritesAndDropsChunks(t *testing.T) {
 	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
 	var streamCalls int
 	handler.SetPluginHost(&handlerInterceptorTestHost{
+		includeStreamChunkHistory: true,
 		interceptRequestBeforeAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
 			headers := cloneHeader(req.Headers)
 			if headers == nil {
@@ -1119,6 +1131,97 @@ func TestHandlerStreamInterceptorLegacySchemaClonesRequestBodiesOnPayloadChunks(
 	}
 	if &payloadBodies[0][0] == &payloadBodies[1][0] {
 		t.Fatal("payload OriginalRequest slices alias across chunks; want fresh clones")
+	}
+}
+
+func TestHandlerStreamInterceptorModernSchemaOmitsHistoryOnPayloadChunks(t *testing.T) {
+	model := "handler-interceptor-stream-modern-omit-history-model"
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("first")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("second")}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream": []string{"stream"}},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
+	var observedHistories [][][]byte
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		includeStreamChunkHistory: false,
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+				return pluginapi.StreamChunkInterceptResponse{}
+			}
+			observedHistories = append(observedHistories, cloneByteSlices(req.HistoryChunks))
+			return pluginapi.StreamChunkInterceptResponse{Body: req.Body}
+		},
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	for range dataChan {
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if len(observedHistories) != 2 {
+		t.Fatalf("payload chunk count = %d, want 2", len(observedHistories))
+	}
+	for i, h := range observedHistories {
+		if len(h) != 0 {
+			t.Fatalf("chunk %d history = %#v, want omitted for schema v5+", i, h)
+		}
+	}
+}
+
+func TestHandlerStreamInterceptorLegacySchemaClonesHistoryChunksOnPayloadChunks(t *testing.T) {
+	model := "handler-interceptor-stream-legacy-history-model"
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("first")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("second")}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream": []string{"stream"}},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
+	var observedHistories [][][]byte
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		includeStreamChunkHistory: true,
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+				return pluginapi.StreamChunkInterceptResponse{}
+			}
+			observedHistories = append(observedHistories, cloneByteSlices(req.HistoryChunks))
+			return pluginapi.StreamChunkInterceptResponse{Body: req.Body}
+		},
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	for range dataChan {
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if len(observedHistories) != 2 {
+		t.Fatalf("payload chunk count = %d, want 2", len(observedHistories))
+	}
+	if len(observedHistories[0]) != 0 {
+		t.Fatalf("chunk 0 history = %#v, want empty", observedHistories[0])
+	}
+	if len(observedHistories[1]) != 1 || string(observedHistories[1][0]) != "first" {
+		t.Fatalf("chunk 1 history = %#v, want ['first']", observedHistories[1])
 	}
 }
 
