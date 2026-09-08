@@ -1139,3 +1139,30 @@ func TestResponsesCustomToolNames_OnlyReportsMergedTools(t *testing.T) {
 		}
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ForwardsSamplingParams(t *testing.T) {
+	t.Parallel()
+
+	in := []byte(`{"model":"m","input":"hi","max_output_tokens":10,"temperature":0.3,"top_p":0.9,"top_k":20,"min_p":0.05,"seed":7,"presence_penalty":0.1,"frequency_penalty":0.2,"repetition_penalty":1.1}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("m", in, false)
+
+	checks := map[string]string{
+		"temperature":        "0.3",
+		"top_p":              "0.9",
+		"top_k":              "20",
+		"min_p":              "0.05",
+		"seed":               "7",
+		"presence_penalty":   "0.1",
+		"frequency_penalty":  "0.2",
+		"repetition_penalty": "1.1",
+		"max_tokens":         "10",
+	}
+	for key, want := range checks {
+		if got := gjson.GetBytes(out, key).Raw; got != want {
+			t.Fatalf("%s = %q, want %q; out=%s", key, got, want, out)
+		}
+	}
+	if gjson.GetBytes(out, "max_output_tokens").Exists() {
+		t.Fatalf("max_output_tokens must not leak into the chat request: %s", out)
+	}
+}
