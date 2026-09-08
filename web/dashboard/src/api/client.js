@@ -2008,6 +2008,68 @@ export async function getAutoRouterStats(params = {}) {
   return fetchJSON(`/auto-routers/stats${suffix}`);
 }
 
+// Decision-distribution rollup for one router: score histogram, dimension
+// averages, cause counts, fallback chains, mismatch count.
+// params: { router_id (required), api_key_id?, from?, to? (RFC3339 UTC) }.
+// Returns { decision_stats: {...} }.
+export async function getAutoRouterDecisionStats(params = {}) {
+  return getAutoRouterStats({ ...params, top: 'decision-stats' });
+}
+
+// Tier × target-model performance rows for one router (p50/p95 latency, avg
+// ttft, cost, error rate). Returns { performance: [...] }.
+export async function getAutoRouterTierPerformance(params = {}) {
+  return getAutoRouterStats({ ...params, top: 'performance' });
+}
+
+// Active scoring profile of one router (id = router PK id, not model_id).
+// Returns { router_id, version, hash, config, is_default }.
+export async function getAutoRouterProfile(id) {
+  return fetchJSON(`/auto-routers/${encodeURIComponent(id)}/profile`);
+}
+
+// Replace the scoring profile of one router. config is the ProfileConfig
+// object (thresholds, weights, keyword_tier_rules) — the server normalizes
+// and versions it. Returns the saved profile shape.
+export async function putAutoRouterProfile(id, config) {
+  return fetchJSON(`/auto-routers/${encodeURIComponent(id)}/profile`, {
+    method: 'PUT',
+    body: JSON.stringify({ config }),
+  });
+}
+
+// Dry-run a candidate scoring profile over the stored decision snapshots of
+// one router. Read-only — nothing is persisted. Returns the simulation report
+// (moves, confusion matrix, unsimulable rules, truncation flags).
+export async function simulateAutoRouterProfile(id, { config, from, to, api_key_id } = {}) {
+  return fetchJSON(`/auto-routers/${encodeURIComponent(id)}/profile/simulate`, {
+    method: 'POST',
+    body: JSON.stringify({ config, from, to, api_key_id }),
+  });
+}
+
+// Paginated decision explainability feed of one router. params mirror the
+// server filters: { page?, page_size?, api_key_id?, scored_tier?,
+// effective_tier?, mapping_tier?, decision_cause?, target_model?,
+// profile_hash?, from?, to? }. Returns { router_id, decisions: [...], total }.
+export async function listAutoRouterDecisions(id, params = {}) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+  }
+  const suffix = qs.toString() ? `?${qs}` : '';
+  return fetchJSON(`/auto-routers/${encodeURIComponent(id)}/decisions${suffix}`);
+}
+
+// One decision's full snapshot joined with its event metrics
+// (latency, ttft, tokens, cost, failure). Returns { router_id, request_id,
+// decision, event }.
+export async function getAutoRouterDecision(id, requestId) {
+  return fetchJSON(
+    `/auto-routers/${encodeURIComponent(id)}/decisions/${encodeURIComponent(requestId)}`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Backup / restore (export & import all data)
 // ---------------------------------------------------------------------------
