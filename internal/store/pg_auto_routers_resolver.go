@@ -45,6 +45,25 @@ func (r *AutoRoutersResolverImpl) AutoRouterForModel(ctx context.Context, modelI
 	return &cp
 }
 
+// AutoRouterConfigForModel returns the router exposing modelID plus its cached
+// bridged config. ok=false when no router matches. The config comes from the
+// store's per-router cache (bridged lazily on first hit); nil when the router
+// was not cacheable, in which case the caller bridges on demand.
+func (r *AutoRoutersResolverImpl) AutoRouterConfigForModel(ctx context.Context, modelID string) (*AutoRouter, *autorouter.Config, bool) {
+	if r == nil || r.store == nil || ctx == nil {
+		return nil, nil, false
+	}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil, nil, false
+	}
+	router, err := r.store.GetByModelID(ctx, modelID)
+	if err != nil {
+		return nil, nil, false
+	}
+	return &router, r.store.cachedConfigByModel(modelID), true
+}
+
 // AutoRouterProfile returns the active profile for a persisted router id. A
 // missing profile is represented by the built-in default profile.
 func (r *AutoRoutersResolverImpl) AutoRouterProfile(ctx context.Context, routerID string) *autorouter.Profile {
@@ -85,6 +104,7 @@ func (r *AutoRoutersResolverImpl) AutoRouterProfileCompiled(ctx context.Context,
 
 var _ interface {
 	AutoRouterForModel(context.Context, string) *AutoRouter
+	AutoRouterConfigForModel(context.Context, string) (*AutoRouter, *autorouter.Config, bool)
 	AutoRouterProfile(context.Context, string) *autorouter.Profile
 	AutoRouterProfileCompiled(context.Context, string) *autorouter.CompiledProfile
 } = (*AutoRoutersResolverImpl)(nil)

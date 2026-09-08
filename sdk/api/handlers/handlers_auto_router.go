@@ -30,66 +30,10 @@ func (h *BaseAPIHandler) autoRouterFromModel(ctx context.Context, modelID string
 }
 
 // storeRouterToConfig bridges a store.AutoRouter into the pure autorouter.Config
-// used by the scorer and resolver.
+// used by the scorer and resolver. Kept as a thin wrapper over the store's
+// BridgeAutoRouterConfig (which also feeds the per-router config cache).
 func storeRouterToConfig(r *store.AutoRouter) *autorouter.Config {
-	if r == nil {
-		return nil
-	}
-	c := &autorouter.Config{
-		ID:                r.ID,
-		Name:              r.Name,
-		ModelID:           r.ModelID,
-		Description:       r.Description,
-		DisplayName:       r.DisplayName,
-		Enabled:           r.Enabled,
-		VisionBridgeModel: strings.TrimSpace(r.VisionBridgeModel),
-		Mappings:          make([]autorouter.TierMapping, 0, len(r.Mappings)),
-	}
-	for _, m := range r.Mappings {
-		arm := autorouter.TierMapping{
-			Tier:           autorouter.Tier(strings.ToLower(strings.TrimSpace(m.Tier))),
-			Model:          strings.TrimSpace(m.Model),
-			TargetStrategy: strings.TrimSpace(m.TargetStrategy),
-			Strategy:       strings.TrimSpace(m.Strategy),
-		}
-		if len(m.Targets) > 0 {
-			arm.Targets = make([]autorouter.TierTarget, 0, len(m.Targets))
-			for _, t := range m.Targets {
-				target := autorouter.TierTarget{
-					Model:    strings.TrimSpace(t.Model),
-					Weight:   t.Weight,
-					Strategy: strings.TrimSpace(t.Strategy),
-				}
-				if len(t.Providers) > 0 {
-					target.Providers = append([]string{}, t.Providers...)
-				}
-				if len(t.Priorities) > 0 {
-					target.Priorities = make([]autorouter.ProviderPriority, 0, len(t.Priorities))
-					for _, p := range t.Priorities {
-						target.Priorities = append(target.Priorities, autorouter.ProviderPriority{
-							Provider: strings.TrimSpace(p.Provider),
-							Priority: p.Priority,
-						})
-					}
-				}
-				arm.Targets = append(arm.Targets, target)
-			}
-		}
-		if len(m.Providers) > 0 {
-			arm.Providers = append([]string{}, m.Providers...)
-		}
-		if len(m.Priorities) > 0 {
-			arm.Priorities = make([]autorouter.ProviderPriority, 0, len(m.Priorities))
-			for _, p := range m.Priorities {
-				arm.Priorities = append(arm.Priorities, autorouter.ProviderPriority{
-					Provider: strings.TrimSpace(p.Provider),
-					Priority: p.Priority,
-				})
-			}
-		}
-		c.Mappings = append(c.Mappings, arm)
-	}
-	return c
+	return store.BridgeAutoRouterConfig(r)
 }
 
 // autoRouterResolved bundles the outcome of resolving an auto router request:
@@ -137,6 +81,11 @@ func (r autoRouterResolved) withDecisionContext(ctx context.Context) context.Con
 // profile upsert changes the profile hash and so invalidates naturally.
 var autoRouterScoreCache = autorouter.NewScoreCache(0)
 
+// maxAutoRouterCacheableBody caps score-cache participation: the cache key is
+// a SHA-256 over the full body, so beyond this size hashing costs more than
+// the (head+tail windowed) scoring itself and the cache is skipped.
+const maxAutoRouterCacheableBody = 256 * 1024
+
 // compiledVersion extracts the profile version from a compiled profile
 // (0 when nil).
 func compiledVersion(compiled *autorouter.CompiledProfile) int64 {
@@ -152,9 +101,29 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 	parsed := thinking.ParseSuffix(modelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	router := h.autoRouterFromModel(ctx, baseModel)
+	// Prefer the store's per-router config cache (router + bridged config in
+	// one lookup, no per-request bridging); fall back to the plain resolver
+	// and on-demand bridging (also covers test resolvers stubbing only
+	// AutoRouterForModel).
+	var router *store.AutoRouter
+	var routerCfg *autorouter.Config
+	type configResolver interface {
+		AutoRouterConfigForModel(context.Context, string) (*store.AutoRouter, *autorouter.Config, bool)
+	}
+	if cr, okCfg := h.AutoRouterResolver.(configResolver); okCfg {
+		if r2, cfg, okCfg2 := cr.AutoRouterConfigForModel(ctx, baseModel); okCfg2 {
+			router = r2
+			routerCfg = cfg
+		}
+	}
 	if router == nil {
+		router = h.autoRouterFromModel(ctx, baseModel)
+	}
+	if router == nil || !router.Enabled {
 		return autoRouterResolved{}
+	}
+	if routerCfg == nil {
+		routerCfg = storeRouterToConfig(router)
 	}
 	// Prefer the compiled profile (normalization done once per version); fall
 	// back to the legacy per-request profile path when only that resolver is
@@ -168,27 +137,31 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 			hash = compiled.Hash
 		}
 		cacheKey := autoRouterScoreCache.Key(rawJSON, entryProtocol, router.ID, hash)
-		if cached, hit := autoRouterScoreCache.Get(cacheKey); hit {
-			return h.autoRouterResolvedFromScore(router, cached, compiled.Hash, compiledVersion(compiled))
+		if len(rawJSON) <= maxAutoRouterCacheableBody {
+			if cached, hit := autoRouterScoreCache.Get(cacheKey); hit {
+				return h.autoRouterResolvedFromScore(router, routerCfg, cached, compiled.Hash, compiledVersion(compiled))
+			}
 		}
 		result := autorouter.ScoreWithProfileCompiled(rawJSON, entryProtocol, compiled)
-		autoRouterScoreCache.Put(cacheKey, result)
-		return h.autoRouterResolvedFromScore(router, result, result.ProfileHash, result.ProfileVersion)
+		if len(rawJSON) <= maxAutoRouterCacheableBody {
+			autoRouterScoreCache.Put(cacheKey, result)
+		}
+		return h.autoRouterResolvedFromScore(router, routerCfg, result, result.ProfileHash, result.ProfileVersion)
 	}
 	var profile *autorouter.Profile
 	if h.AutoRouterProfileResolver != nil {
 		profile = h.AutoRouterProfileResolver.AutoRouterProfile(ctx, router.ID)
 	}
 	result := autorouter.ScoreWithProfile(rawJSON, entryProtocol, profile)
-	return h.autoRouterResolvedFromScore(router, result, result.ProfileHash, result.ProfileVersion)
+	return h.autoRouterResolvedFromScore(router, routerCfg, result, result.ProfileHash, result.ProfileVersion)
 }
 
 // autoRouterResolvedFromScore turns a score result into the concrete upstream
 // resolution: resolves the tier against the router's config, builds the
 // explainability snapshot, and returns the matched outcome. Shared by the
 // compiled-profile path (with its score cache) and the legacy path.
-func (h *BaseAPIHandler) autoRouterResolvedFromScore(router *store.AutoRouter, result autorouter.ScoreResult, profileHash string, profileVersion int64) autoRouterResolved {
-	resolved, ok := autorouter.Resolve(result.EffectiveTier, storeRouterToConfig(router))
+func (h *BaseAPIHandler) autoRouterResolvedFromScore(router *store.AutoRouter, routerCfg *autorouter.Config, result autorouter.ScoreResult, profileHash string, profileVersion int64) autoRouterResolved {
+	resolved, ok := autorouter.Resolve(result.EffectiveTier, routerCfg)
 	if !ok || resolved == nil || strings.TrimSpace(resolved.Model) == "" {
 		log.WithFields(log.Fields{
 			"router_id": strings.TrimSpace(router.ID),

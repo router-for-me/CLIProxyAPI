@@ -78,7 +78,7 @@ func ScoreWithProfile(rawJSON []byte, format string, profile *Profile) ScoreResu
 	// Single normalization pass: the flat text is normalized once here and the
 	// result feeds keyword matching; the dimensions keep working on the
 	// punctuation-preserving lowercase text (looksLikeCode needs the symbols).
-	matched := matchedKeywordRules(normalizeKeywordText(ext.FlatText), config.KeywordTierRules)
+	matched := matchedKeywordRulesFromNormalized(collapseKeywordText(ext.FlatText), config.KeywordTierRules)
 	effective := scoredTier
 	cause := DecisionCauseComplexityScorer
 	if len(matched) > 0 {
@@ -161,7 +161,7 @@ func ScoreWithProfileCompiled(rawJSON []byte, format string, compiled *CompiledP
 	markers := countReasoningMarkers(ext.FlatText)
 	scoredTier := tierFor(total, markers, config.Thresholds)
 	// Single normalization pass, mirroring ScoreWithProfile.
-	matched := rules.compiledMatchedRules(normalizeKeywordText(ext.FlatText))
+	matched := rules.compiledMatchedRules(collapseKeywordText(ext.FlatText))
 	effective := scoredTier
 	cause := DecisionCauseComplexityScorer
 	if len(matched) > 0 {

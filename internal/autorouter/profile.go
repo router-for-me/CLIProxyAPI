@@ -273,9 +273,19 @@ func isCanonicalTier(tier Tier) bool {
 // normalizeKeywordText lowercases a keyword and treats punctuation as word
 // separators, allowing literal phrases to match normal request punctuation.
 func normalizeKeywordText(text string) string {
+	return collapseKeywordText(strings.ToLower(text))
+}
+
+// collapseKeywordText normalizes pre-lowercased text for keyword matching:
+// non-alphanumerics fold to single spaces without re-lowercasing. The scorer's
+// FlatText is already lowercase (extractRequest lowercases while extracting),
+// so ToLower here would copy the whole body a second time for nothing. Output
+// must match normalizeKeywordText on already-lowercased input exactly.
+func collapseKeywordText(text string) string {
 	var b strings.Builder
+	b.Grow(len(text))
 	lastSpace := true
-	for _, r := range strings.ToLower(text) {
+	for _, r := range text {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
 			lastSpace = false
@@ -294,6 +304,12 @@ func normalizeKeywordText(text string) string {
 // caller exactly once per request); keywords are normalized here because they
 // are short and rule definitions may arrive raw from the profile store.
 func matchedKeywordRules(text string, rules []KeywordTierRule) []MatchedKeywordRule {
+	return matchedKeywordRulesFromNormalized(normalizeKeywordText(text), rules)
+}
+
+// matchedKeywordRulesFromNormalized is the match loop over pre-normalized
+// text: keywords are normalized per rule, the text is used as-is.
+func matchedKeywordRulesFromNormalized(text string, rules []KeywordTierRule) []MatchedKeywordRule {
 	text = " " + text + " "
 	matched := make([]MatchedKeywordRule, 0)
 	for _, rule := range rules {

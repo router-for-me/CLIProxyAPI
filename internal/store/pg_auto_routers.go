@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
 )
 
 // ErrAutoRouterNotFound is returned when no Auto Router matches the supplied
@@ -129,7 +131,16 @@ type AutoRouterStore struct {
 	db         *sql.DB
 	table      string
 	cacheMu    sync.RWMutex
-	modelCache map[string]*AutoRouter // model_id -> router
+	modelCache map[string]*cachedAutoRouter // model_id -> cached entry
+}
+
+// cachedAutoRouter is one model-cache entry: the router row plus a lazily
+// bridged pure autorouter.Config so the request path never re-bridges. The
+// config is built on first hit after the entry is (re)populated and is dropped
+// together with the entry by invalidateModelCache.
+type cachedAutoRouter struct {
+	router *AutoRouter
+	config *autorouter.Config
 }
 
 // NewAutoRouterStore builds an AutoRouterStore that reuses the PostgresStore
@@ -142,7 +153,7 @@ func NewAutoRouterStore(parent *PostgresStore) *AutoRouterStore {
 	return &AutoRouterStore{
 		db:         parent.DB(),
 		table:      parent.AutoRoutersTable(),
-		modelCache: map[string]*AutoRouter{},
+		modelCache: map[string]*cachedAutoRouter{},
 	}
 }
 
@@ -221,7 +232,7 @@ func (s *AutoRouterStore) GetByModelID(ctx context.Context, modelID string) (Aut
 		return AutoRouter{}, fmt.Errorf("postgres store: auto router store not initialized")
 	}
 	if cached := s.cachedByModel(modelID); cached != nil {
-		return *cached, nil
+		return *cached.router, nil
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT %s FROM %s WHERE LOWER(model_id) = LOWER($1)
@@ -524,8 +535,73 @@ func mapAutoRouterWriteError(err error, name, modelID string) error {
 	return fmt.Errorf("postgres store: insert auto router (%s/%s): %w", name, modelID, err)
 }
 
-// cachedByModel returns the cached router for a lowercase model id, or nil.
-func (s *AutoRouterStore) cachedByModel(modelID string) *AutoRouter {
+// BridgeAutoRouterConfig bridges an AutoRouter row into the pure
+// autorouter.Config used by the scorer and resolver. The store's model cache
+// keeps the bridged result per row (see cachedConfigByModel) so the request
+// path calls this only on cache misses.
+func BridgeAutoRouterConfig(r *AutoRouter) *autorouter.Config {
+	if r == nil {
+		return nil
+	}
+	c := &autorouter.Config{
+		ID:                r.ID,
+		Name:              r.Name,
+		ModelID:           r.ModelID,
+		Description:       r.Description,
+		DisplayName:       r.DisplayName,
+		Enabled:           r.Enabled,
+		VisionBridgeModel: strings.TrimSpace(r.VisionBridgeModel),
+		Mappings:          make([]autorouter.TierMapping, 0, len(r.Mappings)),
+	}
+	for _, m := range r.Mappings {
+		arm := autorouter.TierMapping{
+			Tier:           autorouter.Tier(strings.ToLower(strings.TrimSpace(m.Tier))),
+			Model:          strings.TrimSpace(m.Model),
+			TargetStrategy: strings.TrimSpace(m.TargetStrategy),
+			Strategy:       strings.TrimSpace(m.Strategy),
+		}
+		if len(m.Targets) > 0 {
+			arm.Targets = make([]autorouter.TierTarget, 0, len(m.Targets))
+			for _, t := range m.Targets {
+				target := autorouter.TierTarget{
+					Model:    strings.TrimSpace(t.Model),
+					Weight:   t.Weight,
+					Strategy: strings.TrimSpace(t.Strategy),
+				}
+				if len(t.Providers) > 0 {
+					target.Providers = append([]string{}, t.Providers...)
+				}
+				if len(t.Priorities) > 0 {
+					target.Priorities = make([]autorouter.ProviderPriority, 0, len(t.Priorities))
+					for _, p := range t.Priorities {
+						target.Priorities = append(target.Priorities, autorouter.ProviderPriority{
+							Provider: strings.TrimSpace(p.Provider),
+							Priority: p.Priority,
+						})
+					}
+				}
+				arm.Targets = append(arm.Targets, target)
+			}
+		}
+		if len(m.Providers) > 0 {
+			arm.Providers = append([]string{}, m.Providers...)
+		}
+		if len(m.Priorities) > 0 {
+			arm.Priorities = make([]autorouter.ProviderPriority, 0, len(m.Priorities))
+			for _, p := range m.Priorities {
+				arm.Priorities = append(arm.Priorities, autorouter.ProviderPriority{
+					Provider: strings.TrimSpace(p.Provider),
+					Priority: p.Priority,
+				})
+			}
+		}
+		c.Mappings = append(c.Mappings, arm)
+	}
+	return c
+}
+
+// cachedByModel returns the cached entry for a lowercase model id, or nil.
+func (s *AutoRouterStore) cachedByModel(modelID string) *cachedAutoRouter {
 	if s == nil {
 		return nil
 	}
@@ -534,7 +610,28 @@ func (s *AutoRouterStore) cachedByModel(modelID string) *AutoRouter {
 	return s.modelCache[strings.ToLower(strings.TrimSpace(modelID))]
 }
 
-// cacheByModel stores (or clears) the in-memory router for a model id.
+// cachedConfigByModel returns the bridged config for a cached router, bridging
+// lazily on first hit. Returns nil when the router is not cached (cache misses
+// fall back to the request-path bridging via BridgeAutoRouterConfig).
+func (s *AutoRouterStore) cachedConfigByModel(modelID string) *autorouter.Config {
+	if s == nil {
+		return nil
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	entry, ok := s.modelCache[strings.ToLower(strings.TrimSpace(modelID))]
+	if !ok || entry == nil || entry.router == nil {
+		return nil
+	}
+	if entry.config == nil {
+		entry.config = BridgeAutoRouterConfig(entry.router)
+	}
+	return entry.config
+}
+
+// cacheByModel stores (or clears) the in-memory router for a model id. Any
+// previously bridged config is discarded with the entry so a re-population
+// can never serve a stale config.
 func (s *AutoRouterStore) cacheByModel(modelID string, r *AutoRouter) {
 	if s == nil {
 		return
@@ -545,7 +642,7 @@ func (s *AutoRouterStore) cacheByModel(modelID string, r *AutoRouter) {
 		delete(s.modelCache, strings.ToLower(strings.TrimSpace(modelID)))
 		return
 	}
-	s.modelCache[strings.ToLower(strings.TrimSpace(modelID))] = r
+	s.modelCache[strings.ToLower(strings.TrimSpace(modelID))] = &cachedAutoRouter{router: r}
 }
 
 // invalidateModelCache clears the whole model cache after any mutation so
@@ -556,7 +653,7 @@ func (s *AutoRouterStore) invalidateModelCache() {
 	}
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
-	s.modelCache = map[string]*AutoRouter{}
+	s.modelCache = map[string]*cachedAutoRouter{}
 }
 
 func autoRouterSortColumn(sortBy string) (string, error) {

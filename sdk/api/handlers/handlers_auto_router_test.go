@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
@@ -257,5 +258,74 @@ func TestResolveAutoRouterUnmatchedNotFailed(t *testing.T) {
 		[]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
 	if res.matched || res.resolveFailed {
 		t.Fatalf("non-router model must be neither matched nor resolveFailed, got %+v", res)
+	}
+}
+
+// TestResolveAutoRouterNoMappingFailsExplicitlyLeveragesCacheConfig checks that
+// the cached-config path (AutoRouterConfigForModel) feeds Resolve the same way
+// the on-demand bridged path does: an enabled router with a valid mapping must
+// match.
+func TestResolveAutoRouterCachedConfigPathMatches(t *testing.T) {
+	router := &store.AutoRouter{
+		ID:      "router-3",
+		ModelID: "router:cachedpath",
+		Name:    "Cached Path Router",
+		Enabled: true,
+		Mappings: []store.TierMapping{
+			{Tier: "simple", Model: "gpt-4o"},
+			{Tier: "medium", Model: "gpt-4o"},
+			{Tier: "complex", Model: "gpt-4o"},
+			{Tier: "reasoning", Model: "gpt-4o"},
+		},
+	}
+	h := &BaseAPIHandler{AutoRouterResolver: stubCachedConfigResolver{router: router}}
+	res := h.resolveAutoRouterModel(context.Background(), "openai", "router:cachedpath",
+		[]byte(`{"model":"router:cachedpath","messages":[{"role":"user","content":"hi"}]}`))
+	if !res.matched || res.targetModel != "gpt-4o" {
+		t.Fatalf("cached-config path must resolve to gpt-4o, got %+v", res)
+	}
+}
+
+// stubCachedConfigResolver mimics the store resolver's full contract including
+// AutoRouterConfigForModel, exercising the cache-backed branch.
+type stubCachedConfigResolver struct {
+	router *store.AutoRouter
+}
+
+func (r stubCachedConfigResolver) AutoRouterForModel(_ context.Context, modelID string) *store.AutoRouter {
+	if r.router != nil && r.router.ModelID == modelID {
+		return r.router
+	}
+	return nil
+}
+
+func (r stubCachedConfigResolver) AutoRouterConfigForModel(_ context.Context, modelID string) (*store.AutoRouter, *autorouter.Config, bool) {
+	if r.router != nil && r.router.ModelID == modelID {
+		return r.router, store.BridgeAutoRouterConfig(r.router), true
+	}
+	return nil, nil, false
+}
+
+// Bodies above the cache-size threshold must bypass the score cache (hashing
+// a multi-MB body costs more than windowed scoring) while small bodies stay
+// cached.
+func TestScoreCacheSkipsLargeBodies(t *testing.T) {
+	router := &store.AutoRouter{
+		ID: "router-big", ModelID: "router:big", Enabled: true,
+		Mappings: []store.TierMapping{{Tier: "simple", Model: "gpt-4o"}},
+	}
+	h := &BaseAPIHandler{AutoRouterResolver: stubAutoRouterResolver{router: router}}
+	big := []byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("word ", 300*1024) + `"}]}`)
+	if len(big) <= maxAutoRouterCacheableBody {
+		t.Fatalf("test body must exceed the threshold: %d", len(big))
+	}
+	autoRouterScoreCache.Put(
+		autoRouterScoreCache.Key(big, "openai", "router-big", ""),
+		autorouter.ScoreResult{DecisionCause: "cache-marker"},
+	)
+	res := h.resolveAutoRouterModel(context.Background(), "openai", "router:big", big)
+	// If the cache had been consulted, DecisionCause would be "cache-marker".
+	if res.decision.DecisionCause == "cache-marker" {
+		t.Fatal("large body must bypass the score cache")
 	}
 }
