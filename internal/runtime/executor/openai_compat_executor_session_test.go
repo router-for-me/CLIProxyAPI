@@ -18,7 +18,7 @@ func TestOpencodeSessionHeaderAdded(t *testing.T) {
 	}{
 		{"opencode sets header", "opencode", nil, true},
 		{"opencode-go sets header", "opencode-go", nil, true},
-		{"openai-compat with opencode in name sets header", "openai-compatible-ocd-account", nil, true},
+		{"openai-compat with opencode in name sets header", "openai-compatible-ocd-account", &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://opencode.ai/zen/v1"}}, true},
 		{"openrouter does not set header", "openrouter", nil, false},
 		{"kilo does not set header", "kilo", nil, false},
 		{"unknown provider with opencode base_url sets header", "openai-compatible-unknown", &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://opencode.ai/zen/v1"}}, true},
@@ -90,7 +90,7 @@ func TestIsOpenCodeProvider(t *testing.T) {
 	}{
 		{"opencode by name", "opencode", "", true},
 		{"opencode-go by name", "opencode-go", "", true},
-		{"openai-compat with opencode in name", "openai-compatible-ocd-account", "", true},
+		{"openai-compat with opencode in name", "openai-compatible-ocd-account", "https://opencode.ai/zen/v1", true},
 		{"openai by name", "openai", "", false},
 		{"openrouter by name", "openrouter", "", false},
 		{"auth base_url opencode", "openai-compatible-unknown", "https://opencode.ai/zen/v1", true},
