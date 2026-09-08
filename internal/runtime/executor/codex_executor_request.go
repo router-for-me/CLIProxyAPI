@@ -3,10 +3,8 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -158,126 +156,40 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	return httpReq, rawJSON, identityState, nil
 }
 
-type jsonStringField struct {
-	path  string
-	value string
-}
-
 func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, userPayload []byte, rawJSON []byte) ([]byte, codexIdentityConfuseState) {
 	if !codexIdentityConfuseEnabled(cfg) || auth == nil || strings.TrimSpace(auth.ID) == "" || len(rawJSON) == 0 {
 		return rawJSON, codexIdentityConfuseState{}
 	}
 
 	state := codexIdentityConfuseState{enabled: true, authID: strings.TrimSpace(auth.ID)}
-	var fields []jsonStringField
+	var fields []helps.JSONStringField
 	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(userPayload, "prompt_cache_key").String()); promptCacheKey != "" {
 		state.originalPromptCacheKey = promptCacheKey
 		state.promptCacheKey = codexIdentityConfuseUUID(auth.ID, "prompt-cache", promptCacheKey)
-		fields = append(fields, jsonStringField{path: "prompt_cache_key", value: state.promptCacheKey})
+		fields = append(fields, helps.JSONStringField{Path: "prompt_cache_key", Value: state.promptCacheKey})
 	}
 	if installationID := strings.TrimSpace(gjson.GetBytes(userPayload, "client_metadata.x-codex-installation-id").String()); installationID != "" {
-		fields = append(fields, jsonStringField{
-			path:  "client_metadata.x-codex-installation-id",
-			value: codexIdentityConfuseUUID(auth.ID, "installation", installationID),
+		fields = append(fields, helps.JSONStringField{
+			Path:  "client_metadata.x-codex-installation-id",
+			Value: codexIdentityConfuseUUID(auth.ID, "installation", installationID),
 		})
 	}
 	if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
-		fields = append(fields, jsonStringField{
-			path:  "client_metadata.x-codex-turn-metadata",
-			value: applyCodexTurnMetadataIdentityConfuse(turnMetadata, &state),
+		fields = append(fields, helps.JSONStringField{
+			Path:  "client_metadata.x-codex-turn-metadata",
+			Value: applyCodexTurnMetadataIdentityConfuse(turnMetadata, &state),
 		})
 	}
 	if state.promptCacheKey != "" {
 		if windowID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-window-id").String()); windowID != "" {
-			fields = append(fields, jsonStringField{
-				path:  "client_metadata.x-codex-window-id",
-				value: state.promptCacheKey + ":0",
+			fields = append(fields, helps.JSONStringField{
+				Path:  "client_metadata.x-codex-window-id",
+				Value: state.promptCacheKey + ":0",
 			})
 		}
 	}
 
-	return replaceJSONStringFields(rawJSON, fields), state
-}
-
-func replaceJSONStringFields(payload []byte, fields []jsonStringField) []byte {
-	if len(payload) == 0 || len(fields) == 0 {
-		return payload
-	}
-
-	type replacement struct {
-		index int
-		oldN  int
-		neu   []byte
-	}
-	replacements := make([]replacement, 0, len(fields))
-	var missing []jsonStringField
-	extra := 0
-	for _, field := range fields {
-		if field.path == "" {
-			continue
-		}
-		current := gjson.GetBytes(payload, field.path)
-		if !current.Exists() || current.Index <= 0 {
-			missing = append(missing, field)
-			continue
-		}
-		encoded, errMarshal := json.Marshal(field.value)
-		if errMarshal != nil {
-			missing = append(missing, field)
-			continue
-		}
-		if current.Raw == string(encoded) {
-			continue
-		}
-		replacements = append(replacements, replacement{
-			index: current.Index,
-			oldN:  len(current.Raw),
-			neu:   encoded,
-		})
-		extra += len(encoded) - len(current.Raw)
-	}
-	if extra < 0 {
-		extra = 0
-	}
-
-	out := payload
-	if len(replacements) > 0 {
-		sort.Slice(replacements, func(i, j int) bool {
-			return replacements[i].index < replacements[j].index
-		})
-		buf := make([]byte, 0, len(payload)+extra)
-		last := 0
-		for _, item := range replacements {
-			if item.index < last || item.index+item.oldN > len(payload) {
-				return fallbackSetJSONStringFields(payload, fields)
-			}
-			buf = append(buf, payload[last:item.index]...)
-			buf = append(buf, item.neu...)
-			last = item.index + item.oldN
-		}
-		buf = append(buf, payload[last:]...)
-		out = buf
-	}
-	for _, field := range missing {
-		updated, errSet := sjson.SetBytes(out, field.path, field.value)
-		if errSet != nil {
-			continue
-		}
-		out = updated
-	}
-	return out
-}
-
-func fallbackSetJSONStringFields(payload []byte, fields []jsonStringField) []byte {
-	out := payload
-	for _, field := range fields {
-		updated, errSet := sjson.SetBytes(out, field.path, field.value)
-		if errSet != nil {
-			continue
-		}
-		out = updated
-	}
-	return out
+	return helps.ReplaceJSONStringFields(rawJSON, fields), state
 }
 
 func applyCodexIdentityConfuseHeaders(headers http.Header, state *codexIdentityConfuseState) {
