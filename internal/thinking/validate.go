@@ -114,12 +114,12 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	case CapabilityHybrid:
 	}
 
-	if config.Mode == ModeLevel && config.Level == LevelNone {
+	if config.Mode == ModeLevel && strings.EqualFold(string(config.Level), string(LevelNone)) {
 		config.Mode = ModeNone
 		config.Budget = 0
 		config.Level = ""
 	}
-	if config.Mode == ModeLevel && config.Level == LevelAuto {
+	if config.Mode == ModeLevel && strings.EqualFold(string(config.Level), string(LevelAuto)) {
 		config.Mode = ModeAuto
 		config.Budget = -1
 		config.Level = ""

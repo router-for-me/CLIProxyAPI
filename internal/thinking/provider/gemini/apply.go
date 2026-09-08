@@ -2,7 +2,7 @@
 //
 // Gemini models have two formats:
 //   - Gemini 2.5: Uses thinkingBudget (numeric)
-//   - Gemini 3.x: Uses thinkingLevel (string: minimal/low/medium/high)
+//   - Gemini 3.x: Uses thinkingLevel (string: MINIMAL/LOW/MEDIUM/HIGH)
 //     or thinkingBudget=-1 for auto/dynamic mode
 //
 // Output format is determined by ThinkingConfig.Mode and ThinkingSupport.Levels:
@@ -12,6 +12,8 @@
 package gemini
 
 import (
+	"strings"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
@@ -53,7 +55,7 @@ func init() {
 //	{
 //	  "generationConfig": {
 //	    "thinkingConfig": {
-//	      "thinkingLevel": "high",
+//	      "thinkingLevel": "HIGH",
 //	      "includeThoughts": true
 //	    }
 //	  }
@@ -135,7 +137,7 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 			return result, nil
 		}
 		if config.Level != "" {
-			result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+			result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", strings.ToUpper(string(config.Level)))
 		}
 		return applyGeminiIncludeThoughts(result, body), nil
 	}
@@ -145,7 +147,7 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 		return body, nil
 	}
 
-	level := string(config.Level)
+	level := strings.ToUpper(string(config.Level))
 	result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", level)
 	return applyGeminiIncludeThoughts(result, body), nil
 }

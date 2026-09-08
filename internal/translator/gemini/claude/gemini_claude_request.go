@@ -319,7 +319,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 				effort = strings.ToLower(strings.TrimSpace(v.String()))
 			}
 			if effort != "" {
-				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", effort)
+				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", strings.ToUpper(effort))
 			} else {
 				maxBudget := 0
 				if mi := registry.LookupModelInfo(modelName, "gemini"); mi != nil && mi.Thinking != nil {
@@ -328,7 +328,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 				if maxBudget > 0 {
 					out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", maxBudget)
 				} else {
-					out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "high")
+					out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "HIGH")
 				}
 			}
 		}
