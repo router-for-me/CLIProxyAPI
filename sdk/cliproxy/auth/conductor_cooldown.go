@@ -1434,6 +1434,8 @@ func resultErrorFromError(err error) *Error {
 		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
 	switch {
+	case isExplicitModelNotFoundError(err, ""):
+		resultErr.Code = "model_not_found"
 	case isRequestScopedError(err) || isRequestInvalidError(err):
 		// Prefer true request-scoped faults (including Claude OAuth cancellation)
 		// over the broader connection-lifecycle classification.
@@ -1660,6 +1662,9 @@ func isInvalidGrantResultError(err *Error) bool {
 func isModelSupportResultError(err *Error) bool {
 	if err == nil {
 		return false
+	}
+	if isExplicitModelNotFoundError(err, "") {
+		return true
 	}
 	status := statusCodeFromResult(err)
 	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
@@ -1976,6 +1981,9 @@ func isRequestInvalidError(err error) bool {
 	}
 	if isRequestScopedError(err) {
 		return true
+	}
+	if isExplicitModelNotFoundError(err, "") {
+		return false
 	}
 	if isCloudflareChallengeError(err) {
 		return false
