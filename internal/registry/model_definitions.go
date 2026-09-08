@@ -116,7 +116,7 @@ func GetXAIModels() []*ModelInfo {
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
+	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo(), codexBuiltinImage25SunburstModelInfo(), codexBuiltinImage25FlareModelInfo())
 }
 
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
@@ -232,6 +232,30 @@ func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
 		DisplayName: "Grok Imagine Video 1.5 Preview",
 		Name:        xaiBuiltinVideo15PreviewID,
 		Description: "Compatibility alias for the xAI Grok video generation model.",
+	}
+}
+
+func codexBuiltinImage25SunburstModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          "gpt-image-2.5-sunburst",
+		Object:      "model",
+		Created:     1788825600, // 2026-09-08
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.5 Sunburst",
+		Version:     "gpt-image-2.5-sunburst",
+	}
+}
+
+func codexBuiltinImage25FlareModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          "gpt-image-2.5-flare",
+		Object:      "model",
+		Created:     1788825600, // 2026-09-08
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.5 Flare",
+		Version:     "gpt-image-2.5-flare",
 	}
 }
 
