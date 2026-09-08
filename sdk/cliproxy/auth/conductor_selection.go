@@ -55,9 +55,11 @@ type requiredAuthKindContextKey struct{}
 type credentialPolicyContextKey struct{}
 
 type authSelectionEligibility struct {
-	requiredKind     string
-	credentialPolicy string
-	disallowFreeAuth bool
+	requiredKind               string
+	credentialPolicy           string
+	credentialGroups           map[string]struct{}
+	credentialGroupsRestricted bool
+	disallowFreeAuth           bool
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -77,7 +79,12 @@ func credentialPolicyFromContext(ctx context.Context) string {
 }
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
-	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
+	credentialGroups, credentialGroupsRestricted := credentialGroupsFromMetadata(opts.Metadata)
+	eligibility := authSelectionEligibility{
+		disallowFreeAuth:           disallowFreeAuthFromMetadata(opts.Metadata),
+		credentialGroups:           credentialGroups,
+		credentialGroupsRestricted: credentialGroupsRestricted,
+	}
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
@@ -95,7 +102,82 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
 		return false
 	}
+	if e.credentialGroupsRestricted && !authInCredentialGroups(auth, e.credentialGroups) {
+		return false
+	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
+}
+
+func credentialGroupsFromMetadata(metadata map[string]any) (map[string]struct{}, bool) {
+	if len(metadata) == 0 {
+		return nil, false
+	}
+	raw, ok := metadata[cliproxyexecutor.CredentialGroupsMetadataKey]
+	if !ok {
+		return nil, false
+	}
+	groups := make(map[string]struct{})
+	add := func(value string) {
+		for _, group := range strings.Split(value, ",") {
+			if group = strings.TrimSpace(group); group != "" {
+				groups[group] = struct{}{}
+			}
+		}
+	}
+	switch value := raw.(type) {
+	case string:
+		add(value)
+	case []string:
+		for _, group := range value {
+			add(group)
+		}
+	case []any:
+		for _, group := range value {
+			if text, okString := group.(string); okString {
+				add(text)
+			}
+		}
+	}
+	if len(groups) == 0 {
+		return nil, true
+	}
+	return groups, true
+}
+
+func authInCredentialGroups(auth *Auth, allowed map[string]struct{}) bool {
+	if auth == nil || len(allowed) == 0 {
+		return false
+	}
+	values := make([]string, 0, 2)
+	for _, key := range []string{"credential_group", "credential-group", "credential_groups", "credential-groups"} {
+		if auth.Attributes != nil {
+			if value := strings.TrimSpace(auth.Attributes[key]); value != "" {
+				values = append(values, value)
+			}
+		}
+		if auth.Metadata != nil {
+			switch value := auth.Metadata[key].(type) {
+			case string:
+				values = append(values, value)
+			case []string:
+				values = append(values, value...)
+			case []any:
+				for _, item := range value {
+					if text, okString := item.(string); okString {
+						values = append(values, text)
+					}
+				}
+			}
+		}
+	}
+	for _, value := range values {
+		for _, group := range strings.Split(value, ",") {
+			if _, ok := allowed[strings.TrimSpace(group)]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {

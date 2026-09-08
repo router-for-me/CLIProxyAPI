@@ -193,6 +193,21 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if callerScope := requestCallerScope(ginCtx); callerScope != "" {
 		meta[coreexecutor.CallerScopeMetadataKey] = callerScope
 	}
+	if ginCtx != nil {
+		if rawAccessMetadata, exists := ginCtx.Get("accessMetadata"); exists {
+			if accessMetadata, ok := rawAccessMetadata.(map[string]string); ok {
+				if rawGroups, restricted := accessMetadata["credential-groups"]; restricted {
+					groups := make([]string, 0)
+					for _, group := range strings.Split(rawGroups, ",") {
+						if group = strings.TrimSpace(group); group != "" {
+							groups = append(groups, group)
+						}
+					}
+					meta[coreexecutor.CredentialGroupsMetadataKey] = groups
+				}
+			}
+		}
+	}
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
