@@ -34,7 +34,16 @@ const (
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
 	minQuotaCooldownFloor     = 10 * time.Second
-	transientErrorCooldown    = time.Minute
+	// maxQuotaCooldownCeiling bounds how long a single quota cooldown may keep a
+	// credential parked. Providers report a reset deadline (e.g. Codex
+	// usage_limit_reached carries resets_at) that can sit days out, and that value is
+	// only a prediction made at the moment of failure: a weekly window can roll over
+	// early, and OpenAI lets users spend a "reset" to restore quota on demand. Without
+	// a ceiling the deadline is a one-way latch, so restored quota stays unreachable
+	// until it expires. Capping it lets the next request probe upstream for real; a
+	// still-exhausted credential simply re-arms on the next 429.
+	maxQuotaCooldownCeiling = time.Hour
+	transientErrorCooldown  = time.Minute
 )
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness

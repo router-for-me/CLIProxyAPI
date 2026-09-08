@@ -551,6 +551,28 @@ func modelsForRegisteredAuth(authID string) []string {
 	return models
 }
 
+// clampQuotaCooldown bounds a computed quota cooldown deadline to
+// maxQuotaCooldownCeiling past now.
+//
+// The clamp is applied to the final deadline rather than to the provider-supplied
+// retry-after, because both quota paths take the maximum of the new deadline and the
+// credential's existing NextRecoverAt in order to preserve an active cooldown across
+// subsequent failures. Clamping only the incoming value would let a previously stored
+// long deadline win and re-extend the cooldown unbounded.
+//
+// A zero deadline means "no cooldown" (cooling disabled) and is returned untouched, and
+// a deadline already inside the ceiling is left exactly as the provider reported it.
+func clampQuotaCooldown(next, now time.Time) time.Time {
+	if next.IsZero() {
+		return next
+	}
+	ceiling := now.Add(maxQuotaCooldownCeiling)
+	if next.After(ceiling) {
+		return ceiling
+	}
+	return next
+}
+
 func (m *Manager) persistCooldownStates(ctx context.Context) {
 	if m == nil {
 		return
@@ -857,6 +879,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
 								}
+								next = clampQuotaCooldown(next, now)
 							}
 							state.NextRetryAfter = next
 							applyCooldownFields(&state.Quota, QuotaState{
@@ -2083,6 +2106,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
 				}
+				next = clampQuotaCooldown(next, now)
 			}
 			auth.Quota.NextRecoverAt = next
 			auth.NextRetryAfter = next
