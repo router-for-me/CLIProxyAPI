@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/tidwall/gjson"
 )
 
@@ -152,5 +155,36 @@ func TestInflateThinkingModelMaxTokensSuffix(t *testing.T) {
 	got := gjson.GetBytes(out, "max_completion_tokens").Int()
 	if got != 64000 {
 		t.Fatalf("expected max_completion_tokens 64000, got %d", got)
+	}
+}
+
+func TestVisionBridgeTimeoutConfig(t *testing.T) {
+	// Unset/zero -> default 30s.
+	if got := VisionBridgeTimeout(nil); got != 30*time.Second {
+		t.Fatalf("VisionBridgeTimeout(nil) = %v, want 30s", got)
+	}
+	if got := VisionBridgeTimeout(&config.SDKConfig{}); got != 30*time.Second {
+		t.Fatalf("VisionBridgeTimeout(empty) = %v, want 30s", got)
+	}
+	// Explicit value wins.
+	cfg := &config.SDKConfig{VisionBridgeTimeoutSeconds: 5}
+	if got := VisionBridgeTimeout(cfg); got != 5*time.Second {
+		t.Fatalf("VisionBridgeTimeout(5) = %v, want 5s", got)
+	}
+	// Negative disables the bridge (zero duration sentinel).
+	if got := VisionBridgeTimeout(&config.SDKConfig{VisionBridgeTimeoutSeconds: -1}); got != 0 {
+		t.Fatalf("VisionBridgeTimeout(-1) = %v, want 0 (disabled)", got)
+	}
+}
+
+func TestApplyVisionBridgeDisabledByNegativeConfig(t *testing.T) {
+	// A negative timeout must skip the bridge call entirely (body unchanged)
+	// even when a bridge model is configured and images are present.
+	res := autoRouterResolved{targetModel: "gpt-4o", visionBridgeModel: "bridge-model", matched: true}
+	body := []byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}]}]}`)
+	h := &BaseAPIHandler{Cfg: &config.SDKConfig{VisionBridgeTimeoutSeconds: -1}}
+	out := h.applyVisionBridgeIfNeeded(context.Background(), res, body)
+	if string(out) != string(body) {
+		t.Fatalf("bridge must be skipped when disabled; body changed: %s", out)
 	}
 }

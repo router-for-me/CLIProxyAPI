@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -19,11 +20,20 @@ import (
 // tier target model lacks vision support and the request contains image(s). It
 // returns the (possibly rewritten) request body with image blocks replaced by
 // the bridge's textual analysis. When the router has no bridge model, the
-// target supports vision, the request has no images, or the bridge call fails,
-// it returns the original body unchanged (a bridge outage never breaks the tier
-// workflow).
+// target supports vision, the request has no images, the bridge is disabled by
+// configuration, or the bridge call fails/deadlines, it returns the original
+// body unchanged (a bridge outage never breaks the tier workflow).
+//
+// The bridge call is bounded by VisionBridgeTimeout: without a deadline a hung
+// upstream bridge would hang the client request with zero output. This is an
+// intentional exception to the no-timeouts rule (see AGENTS.md).
 func (h *BaseAPIHandler) applyVisionBridgeIfNeeded(ctx context.Context, resolved autoRouterResolved, rawJSON []byte) []byte {
 	if !resolved.matched || strings.TrimSpace(resolved.visionBridgeModel) == "" {
+		return rawJSON
+	}
+	timeout := VisionBridgeTimeout(h.Cfg)
+	if timeout == 0 {
+		// Explicitly disabled by configuration (negative value).
 		return rawJSON
 	}
 	if modelSupportsVision(resolved.targetModel) {
@@ -32,14 +42,24 @@ func (h *BaseAPIHandler) applyVisionBridgeIfNeeded(ctx context.Context, resolved
 	if !requestContainsImage(rawJSON) {
 		return rawJSON
 	}
-	analysis, err := h.runVisionBridge(ctx, resolved.visionBridgeModel, rawJSON)
+	started := time.Now()
+	bridgeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	analysis, err := h.runVisionBridge(bridgeCtx, resolved.visionBridgeModel, rawJSON)
+	elapsed := time.Since(started)
 	if err != nil {
 		log.WithError(err).
 			WithField("vision_bridge_model", resolved.visionBridgeModel).
 			WithField("target_model", resolved.targetModel).
+			WithField("elapsed_ms", elapsed.Milliseconds()).
 			Warn("vision bridge failed; continuing with the original request")
 		return rawJSON
 	}
+	log.WithFields(log.Fields{
+		"vision_bridge_model": resolved.visionBridgeModel,
+		"target_model":        resolved.targetModel,
+		"elapsed_ms":          elapsed.Milliseconds(),
+	}).Info("vision bridge completed")
 	return replaceImagesWithVisionText(rawJSON, "", analysis)
 }
 

@@ -149,6 +149,23 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	return retries
 }
 
+// defaultVisionBridgeTimeout bounds the synchronous vision bridge call when the
+// operator has not configured one.
+const defaultVisionBridgeTimeout = 30 * time.Second
+
+// VisionBridgeTimeout returns the configured deadline for the auto-router
+// vision bridge. Unset/zero = defaultVisionBridgeTimeout; a negative value
+// disables the bridge (returns 0 as a sentinel the caller checks).
+func VisionBridgeTimeout(cfg *config.SDKConfig) time.Duration {
+	if cfg != nil && cfg.VisionBridgeTimeoutSeconds < 0 {
+		return 0
+	}
+	if cfg != nil && cfg.VisionBridgeTimeoutSeconds > 0 {
+		return time.Duration(cfg.VisionBridgeTimeoutSeconds) * time.Second
+	}
+	return defaultVisionBridgeTimeout
+}
+
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
 // Default is false.
 func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {

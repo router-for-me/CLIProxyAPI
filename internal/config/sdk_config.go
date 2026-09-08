@@ -58,6 +58,11 @@ type SDKConfig struct {
 	// Streaming configures server-side streaming behavior (keep-alives and safe bootstrap retries).
 	Streaming StreamingConfig `yaml:"streaming" json:"streaming"`
 
+	// VisionBridgeTimeoutSeconds bounds the synchronous auto-router vision bridge
+	// call. 0/unset = default 30s; negative = vision bridge disabled (requests
+	// with images proceed unmodified).
+	VisionBridgeTimeoutSeconds int `yaml:"vision-bridge-timeout-seconds,omitempty" json:"vision-bridge-timeout-seconds,omitempty"`
+
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
