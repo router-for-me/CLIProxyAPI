@@ -238,6 +238,157 @@ type AutoRouterDecisionRow struct {
 	OutputTokens       int64           `json:"output_tokens"`
 	TotalTokens        int64           `json:"total_tokens"`
 	CostUSD            float64         `json:"cost_usd"`
+	// Event metrics surfaced by the replay endpoint; zero on list responses
+	// that did not select them.
+	LatencyMs      int64 `json:"latency_ms,omitempty"`
+	TTFTMs         int64 `json:"ttft_ms,omitempty"`
+	Failed         bool  `json:"failed,omitempty"`
+	FailStatusCode int   `json:"fail_status_code,omitempty"`
+}
+
+// AutoRouterDecisionEvent is one raw decision event selected for simulation:
+// the stored snapshot plus the tier/cause fields the recompute compares
+// against. Ordered newest-first by the store; the caller applies the cap.
+type AutoRouterDecisionEvent struct {
+	RequestID          string
+	ScoredTier         string
+	EffectiveTier      string
+	MappingTier        string
+	DecisionCause      string
+	ProfileVersion     int64
+	ProfileHash        string
+	AutoRouterDecision []byte
+}
+
+// SelectAutoRouterDecisionEvents loads up to limit stored decision snapshots
+// for a router within the optional window, newest first, plus the total count
+// of matching events (so the caller can flag truncation when total > limit).
+func (s *UsageStore) SelectAutoRouterDecisionEvents(ctx context.Context, routerID string, filter UsageFilter, limit int) ([]AutoRouterDecisionEvent, int64, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	if strings.TrimSpace(routerID) == "" {
+		return nil, 0, fmt.Errorf("postgres store: router_id is required for decision events")
+	}
+	if limit <= 0 {
+		limit = 10000
+	}
+	var b strings.Builder
+	args := []any{routerID}
+	b.WriteString(`SELECT COALESCE(e.request_id, ''), COALESCE(e.scored_tier, ''), COALESCE(e.effective_tier, ''),
+		COALESCE(e.mapping_tier, ''), COALESCE(e.decision_cause, ''), COALESCE(e.profile_version, 0),
+		COALESCE(e.profile_hash, ''), e.auto_router_decision
+		FROM ` + s.eventsTable + ` e
+		WHERE e.router_id = $1 AND e.router_id IS NOT NULL AND e.router_id <> ''
+		AND e.auto_router_decision IS NOT NULL
+		AND jsonb_typeof(e.auto_router_decision) = 'object'`)
+	if filter.APIKeyID != "" {
+		args = append(args, filter.APIKeyID)
+		b.WriteString(` AND e.api_key_id = $`)
+		b.WriteString(itoa(len(args)))
+	}
+	if !filter.From.IsZero() {
+		args = append(args, filter.From)
+		b.WriteString(` AND e.requested_at >= $`)
+		b.WriteString(itoa(len(args)))
+	}
+	if !filter.To.IsZero() {
+		args = append(args, filter.To)
+		b.WriteString(` AND e.requested_at < $`)
+		b.WriteString(itoa(len(args)))
+	}
+	b.WriteString(` ORDER BY e.requested_at DESC, e.id DESC LIMIT $`)
+	args = append(args, limit)
+	b.WriteString(itoa(len(args)))
+
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("postgres store: select auto-router decision events: %w", err)
+	}
+	defer rows.Close()
+	out := make([]AutoRouterDecisionEvent, 0, limit)
+	for rows.Next() {
+		var ev AutoRouterDecisionEvent
+		if err := rows.Scan(&ev.RequestID, &ev.ScoredTier, &ev.EffectiveTier, &ev.MappingTier,
+			&ev.DecisionCause, &ev.ProfileVersion, &ev.ProfileHash, &ev.AutoRouterDecision); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	// Total matching events (same predicate, no LIMIT) for truncation flags.
+	var countB strings.Builder
+	cargs := []any{routerID}
+	countB.WriteString(`SELECT COUNT(*) FROM ` + s.eventsTable + ` e
+		WHERE e.router_id = $1 AND e.router_id IS NOT NULL AND e.router_id <> ''
+		AND e.auto_router_decision IS NOT NULL
+		AND jsonb_typeof(e.auto_router_decision) = 'object'`)
+	if filter.APIKeyID != "" {
+		cargs = append(cargs, filter.APIKeyID)
+		countB.WriteString(` AND e.api_key_id = $`)
+		countB.WriteString(itoa(len(cargs)))
+	}
+	if !filter.From.IsZero() {
+		cargs = append(cargs, filter.From)
+		countB.WriteString(` AND e.requested_at >= $`)
+		countB.WriteString(itoa(len(cargs)))
+	}
+	if !filter.To.IsZero() {
+		cargs = append(cargs, filter.To)
+		countB.WriteString(` AND e.requested_at < $`)
+		countB.WriteString(itoa(len(cargs)))
+	}
+	var total int64
+	if err := s.db.QueryRowContext(ctx, countB.String(), cargs...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("postgres store: count auto-router decision events: %w", err)
+	}
+	return out, total, nil
+}
+
+// GetAutoRouterDecisionByRequest loads the newest decision event matching
+// router + request_id with its event metrics (latency/ttft/failure), for the
+// replay endpoint. Returns (nil, nil) when no row matches.
+func (s *UsageStore) GetAutoRouterDecisionByRequest(ctx context.Context, routerID, requestID string) (*AutoRouterDecisionRow, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	routerID = strings.TrimSpace(routerID)
+	requestID = strings.TrimSpace(requestID)
+	if routerID == "" || requestID == "" {
+		return nil, fmt.Errorf("postgres store: router_id and request_id are required for decision replay")
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT id, requested_at, COALESCE(request_id, ''), COALESCE(api_key_id, ''),
+		model, COALESCE(alias, ''), COALESCE(scored_tier, ''), COALESCE(effective_tier, ''),
+		COALESCE(mapping_tier, ''), COALESCE(decision_cause, ''), COALESCE(profile_version, 0),
+		COALESCE(profile_hash, ''), auto_router_decision,
+		input_tokens, output_tokens, total_tokens, cost_usd,
+		COALESCE(latency_ms, 0), COALESCE(ttft_ms, 0), failed, COALESCE(fail_status_code, 0)
+		FROM `+s.eventsTable+`
+		WHERE router_id = $1 AND router_id IS NOT NULL AND router_id <> ''
+		AND request_id = $2 AND auto_router_decision IS NOT NULL
+		ORDER BY requested_at DESC, id DESC LIMIT 1`, routerID, requestID)
+	var (
+		r        AutoRouterDecisionRow
+		snapshot []byte
+		at       time.Time
+	)
+	if err := row.Scan(&r.ID, &at, &r.RequestID, &r.APIKeyID, &r.Model, &r.Alias,
+		&r.ScoredTier, &r.EffectiveTier, &r.MappingTier, &r.DecisionCause,
+		&r.ProfileVersion, &r.ProfileHash, &snapshot,
+		&r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.CostUSD,
+		&r.LatencyMs, &r.TTFTMs, &r.Failed, &r.FailStatusCode); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("postgres store: get auto router decision by request: %w", err)
+	}
+	r.RequestedAt = at.UTC()
+	if len(snapshot) > 0 {
+		r.AutoRouterDecision = append(json.RawMessage(nil), snapshot...)
+	}
+	return &r, nil
 }
 
 // UsageWindow mirrors a row in usage_windows and is used both for budget

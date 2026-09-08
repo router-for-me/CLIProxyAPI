@@ -448,6 +448,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auto-routers/:id/profile", s.mgmt.GetAutoRouterProfile)
 		mgmt.PUT("/auto-routers/:id/profile", s.mgmt.UpdateAutoRouterProfile)
 		mgmt.GET("/auto-routers/:id/decisions", s.mgmt.ListAutoRouterDecisions)
+		mgmt.GET("/auto-routers/:id/decisions/:request_id", s.mgmt.GetAutoRouterDecision)
+		// Profile simulation: dry-run a candidate scoring profile against the
+		// stored decision snapshots. Read-only — applying remains the explicit
+		// PUT to the profile route above.
+		mgmt.POST("/auto-routers/:id/profile/simulate", s.mgmt.SimulateAutoRouterProfile)
 
 		// PG-backed management API tokens: gate access to the /v0/management
 		// REST surface with per-token policy (read/write scope, per-endpoint
