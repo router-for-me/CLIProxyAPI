@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -169,13 +170,18 @@ func TestPostgresCooldownStateStore_SaveLoad(t *testing.T) {
 	nextRetry := time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC)
 	records := []cliproxyauth.CooldownStateRecord{
 		{
-			Provider:       "codex",
-			AuthID:         "account-1",
-			Model:          "gpt-test",
-			Status:         string(cliproxyauth.StatusError),
-			NextRetryAfter: nextRetry,
-			Reason:         "rate limited",
-			UpdatedAt:      nextRetry.Add(-time.Minute),
+			Provider: "codex", AuthID: "account-1", NextRetryAfter: nextRetry,
+			LastFailureScope: "model", UpdatedAt: nextRetry.Add(-time.Minute),
+		},
+		{
+			Provider:            "codex",
+			AuthID:              "account-1",
+			Model:               "gpt-test",
+			Status:              string(cliproxyauth.StatusError),
+			NextRetryAfter:      nextRetry,
+			ForcedCooldownUntil: nextRetry.Add(-30 * time.Second),
+			Reason:              "rate limited",
+			UpdatedAt:           nextRetry.Add(-time.Minute),
 		},
 	}
 	if errSave := cooldownStore.Save(context.Background(), records); errSave != nil {
@@ -185,6 +191,8 @@ func TestPostgresCooldownStateStore_SaveLoad(t *testing.T) {
 	if errLoad != nil {
 		t.Fatalf("Load() error = %v", errLoad)
 	}
+	// Neither the query nor the map-backed test driver guarantees row order.
+	sort.Slice(loaded, func(i, j int) bool { return loaded[i].Model < loaded[j].Model })
 	if !reflect.DeepEqual(loaded, records) {
 		t.Fatalf("Load() = %#v, want %#v", loaded, records)
 	}

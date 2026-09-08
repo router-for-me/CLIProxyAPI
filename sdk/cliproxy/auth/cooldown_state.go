@@ -17,16 +17,20 @@ import (
 
 // CooldownStateRecord is a persisted runtime cooldown snapshot for one auth/model pair.
 type CooldownStateRecord struct {
-	Provider       string     `json:"provider,omitempty"`
-	AuthID         string     `json:"auth_id"`
-	AuthFile       string     `json:"-"`
-	Model          string     `json:"model,omitempty"`
-	Status         string     `json:"status,omitempty"`
-	NextRetryAfter time.Time  `json:"next_retry_after"`
-	Reason         string     `json:"reason,omitempty"`
-	Quota          QuotaState `json:"quota,omitempty"`
-	LastError      *Error     `json:"last_error,omitempty"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	Provider       string    `json:"provider,omitempty"`
+	AuthID         string    `json:"auth_id"`
+	AuthFile       string    `json:"-"`
+	Model          string    `json:"model,omitempty"`
+	Status         string    `json:"status,omitempty"`
+	NextRetryAfter time.Time `json:"next_retry_after"`
+	// Always persist the authoritative value, including zero (no forced action).
+	// Readers must not infer a missing legacy deadline from LastError.
+	ForcedCooldownUntil time.Time  `json:"forced_cooldown_until"`
+	Reason              string     `json:"reason,omitempty"`
+	Quota               QuotaState `json:"quota,omitempty"`
+	LastError           *Error     `json:"last_error,omitempty"`
+	LastFailureScope    string     `json:"last_failure_scope,omitempty"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 // CooldownStateStore persists runtime cooldown state independently from auth tokens.

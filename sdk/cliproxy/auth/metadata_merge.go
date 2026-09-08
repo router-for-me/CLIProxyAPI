@@ -58,6 +58,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
 		return merged
 	}
+	now := time.Now()
 
 	// 1. Refresh Lifecycle Timestamps
 	if !updated.LastRefreshedAt.IsZero() {
@@ -128,6 +129,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	}
 
 	// 3. ModelStates: three-way merge to preserve concurrent cooldown/quota
+	modelsChanged := false
 	var baseModels map[string]*ModelState
 	if base != nil {
 		baseModels = base.ModelStates
@@ -144,7 +146,25 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			changedByUser := !reflect.DeepEqual(baseState, currentState)
 
 			if changedByExecutor && !changedByUser {
-				merged.ModelStates[model] = updState
+				next := updState.Clone()
+				// Token refresh can heal ordinary errors, but executor cleanup
+				// is not an explicit reset of a manager-owned forced action.
+				if currentState != nil && currentState.ForcedCooldownUntil.After(now) {
+					if next == nil {
+						next = currentState.Clone()
+						recoverModelStateOnSuccess(next, now)
+					}
+					next.ForcedCooldownUntil = currentState.ForcedCooldownUntil
+					if next.NextRetryAfter.Before(next.ForcedCooldownUntil) {
+						next.NextRetryAfter = next.ForcedCooldownUntil
+					}
+					next.Unavailable = true
+					if next.Status != StatusDisabled {
+						next.Status = StatusError
+					}
+				}
+				merged.ModelStates[model] = next
+				modelsChanged = true
 			}
 		}
 		if baseModels != nil {
@@ -152,11 +172,28 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 				if _, inUpdated := updated.ModelStates[model]; !inUpdated {
 					if currentState, ok := current.ModelStates[model]; ok {
 						if reflect.DeepEqual(baseState, currentState) {
-							delete(merged.ModelStates, model)
+							if currentState != nil && currentState.ForcedCooldownUntil.After(now) {
+								next := currentState.Clone()
+								recoverModelStateOnSuccess(next, now)
+								merged.ModelStates[model] = next
+							} else {
+								delete(merged.ModelStates, model)
+							}
+							modelsChanged = true
 						}
 					}
 				}
 			}
+		}
+	}
+	// Recompute from the final three-way model merge, not the executor's stale
+	// aggregate. Independent credential cooldowns remain owned by current.
+	if modelsChanged && !finalDisabled && modelStatesOwnAvailability(current, now) {
+		recoverAggregatedAvailability(merged, now)
+		if !hasModelError(merged, now) {
+			merged.LastError = nil
+			merged.StatusMessage = ""
+			merged.Status = StatusActive
 		}
 	}
 

@@ -92,6 +92,11 @@ type Auth struct {
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
+	// ForcedCooldownUntil is the explicit cooldown deadline, independent of ordinary failures.
+	ForcedCooldownUntil time.Time `json:"forced_cooldown_until,omitzero"`
+	// lastFailureScope identifies the result path that last wrote cooldown
+	// state, independently of later diagnostics or removed model history.
+	lastFailureScope string
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
@@ -212,6 +217,8 @@ type ModelState struct {
 	Unavailable bool `json:"unavailable"`
 	// NextRetryAfter defines the per-model retry time.
 	NextRetryAfter time.Time `json:"next_retry_after"`
+	// ForcedCooldownUntil is the explicit cooldown deadline, independent of ordinary failures.
+	ForcedCooldownUntil time.Time `json:"forced_cooldown_until,omitzero"`
 	// LastError records the latest error observed for this model.
 	LastError *Error `json:"last_error,omitempty"`
 	// Quota retains quota information if this model hit rate limits.
@@ -291,19 +298,19 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
-	if len(a.Attributes) > 0 {
+	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		for key, value := range a.Attributes {
 			copyAuth.Attributes[key] = value
 		}
 	}
-	if len(a.Metadata) > 0 {
+	if a.Metadata != nil {
 		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
 		for key, value := range a.Metadata {
 			copyAuth.Metadata[key] = value
 		}
 	}
-	if len(a.ModelStates) > 0 {
+	if a.ModelStates != nil {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()

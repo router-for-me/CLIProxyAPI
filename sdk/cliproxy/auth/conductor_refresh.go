@@ -365,6 +365,8 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 	if auth == nil || len(auth.ModelStates) == 0 {
 		return nil
 	}
+	recoverAggregate := modelStatesOwnAvailability(auth, now)
+	changed := false
 	var resumed []string
 	for model, state := range auth.ModelStates {
 		if state == nil || state.LastError == nil {
@@ -373,11 +375,14 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 		if state.LastError.StatusCode() != http.StatusUnauthorized && !strings.EqualFold(state.LastError.Code, "unauthorized") {
 			continue
 		}
-		resetModelState(state, now)
-		resumed = append(resumed, model)
+		recoverModelStateOnSuccess(state, now)
+		changed = true
+		if !state.Unavailable {
+			resumed = append(resumed, model)
+		}
 	}
-	if len(resumed) > 0 {
-		updateAggregatedAvailability(auth, now)
+	if changed && recoverAggregate {
+		recoverAggregatedAvailability(auth, now)
 	}
 	return resumed
 }

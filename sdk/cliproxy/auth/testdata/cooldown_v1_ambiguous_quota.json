@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "auth_id": "auth-monotonic-ordinary-a",
+  "provider": "claude",
+  "updated_at": "2026-09-07T13:26:47.566998575Z",
+  "records": [
+    {
+      "provider": "claude",
+      "auth_id": "auth-monotonic-ordinary-a",
+      "status": "cooling",
+      "next_retry_after": "2026-09-07T23:26:47.565815694+08:00",
+      "reason": "quota",
+      "quota": {
+        "exceeded": true,
+        "reason": "quota",
+        "next_recover_at": "2026-09-07T23:26:47.565815694+08:00",
+        "observed_at": "0001-01-01T00:00:00Z"
+      },
+      "last_error": {
+        "code": "force_cooldown",
+        "message": "server_is_overloaded",
+        "retryable": false,
+        "http_status": 502
+      },
+      "updated_at": "2026-09-07T21:26:47.566965805+08:00"
+    },
+    {
+      "provider": "claude",
+      "auth_id": "auth-monotonic-ordinary-a",
+      "model": "ordinary-a",
+      "status": "cooling",
+      "next_retry_after": "2026-09-07T23:26:47.565815694+08:00",
+      "reason": "quota",
+      "quota": {
+        "exceeded": true,
+        "reason": "quota",
+        "next_recover_at": "2026-09-07T23:26:47.565815694+08:00",
+        "observed_at": "0001-01-01T00:00:00Z"
+      },
+      "last_error": {
+        "message": "ordinary A quota",
+        "retryable": false,
+        "http_status": 429
+      },
+      "updated_at": "2026-09-07T21:26:47.565815694+08:00"
+    }
+  ]
+}
