@@ -390,3 +390,26 @@ func TestProfileHashDeterministicAfterNormalization(t *testing.T) {
 		t.Fatalf("hashes differ: %q != %q", first, second)
 	}
 }
+
+// collapseKeywordText must produce byte-identical output to
+// normalizeKeywordText on already-lowercased text (the hot path feeds
+// extractRequest's lowercase FlatText through it, so re-lowercasing would copy
+// the body a second time for nothing).
+func TestCollapseKeywordTextParity(t *testing.T) {
+	corpus := []string{
+		"hello world",
+		"code-fence ```go func main() {}``` end",
+		"upper lower mixed 123 !!! ---",
+		"tabs\tand\nnewlines   collapse",
+		"unicode: café ño 汉字 emoji 🙂 done",
+		"parens (brackets) braces {and} operators < > = ;",
+		"",
+		"   leading and trailing   ",
+	}
+	for _, in := range corpus {
+		lower := strings.ToLower(in)
+		if collapseKeywordText(lower) != normalizeKeywordText(lower) {
+			t.Fatalf("collapse(%q) != normalize on lowered text", in)
+		}
+	}
+}
