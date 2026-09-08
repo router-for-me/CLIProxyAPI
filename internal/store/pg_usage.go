@@ -164,6 +164,44 @@ type AutoRouterModelStat struct {
 	AvgCostPerReq float64 `json:"avg_cost_per_request"`
 }
 
+// AutoRouterScoreBucket is one histogram cell of the weighted score total:
+// bucket i covers [0.05*i, 0.05*(i+1)) for i in 0..19.
+type AutoRouterScoreBucket struct {
+	Bucket int   `json:"bucket"`
+	Count  int64 `json:"count"`
+}
+
+// AutoRouterChainCount counts occurrences of one fallback chain (serialized
+// tier list) across a router's decision events.
+type AutoRouterChainCount struct {
+	Chain string `json:"chain"`
+	Count int64  `json:"count"`
+}
+
+// AutoRouterDecisionStats is the decision-distribution rollup over one
+// router's stored decision snapshots.
+type AutoRouterDecisionStats struct {
+	EventCount        int64                   `json:"event_count"`
+	ScoreHistogram    []AutoRouterScoreBucket `json:"score_histogram"`
+	DimensionAverages map[string]float64      `json:"dimension_averages"`
+	CauseCounts       map[string]int64        `json:"cause_counts"`
+	FallbackChains    []AutoRouterChainCount  `json:"fallback_chains"`
+	MismatchCount     int64                   `json:"mismatch_count"`
+}
+
+// AutoRouterTierPerformance is one tier × target-model performance row.
+type AutoRouterTierPerformance struct {
+	Tier         string  `json:"tier"`
+	Model        string  `json:"model"`
+	RequestCount int64   `json:"request_count"`
+	P50LatencyMs float64 `json:"p50_latency_ms"`
+	P95LatencyMs float64 `json:"p95_latency_ms"`
+	AvgTTFTMs    float64 `json:"avg_ttft_ms"`
+	CostUSD      float64 `json:"cost_usd"`
+	ErrorCount   int64   `json:"error_count"`
+	ErrorRate    float64 `json:"error_rate"`
+}
+
 // AutoRouterDecisionFilter narrows the auto-router decisions listing. Empty
 // fields mean "no constraint". RouterID is required by the management
 // endpoint; the rest are optional and stack.
@@ -2099,6 +2137,280 @@ func (s *UsageStore) SelectAutoRouterModelStats(ctx context.Context, filter Usag
 			st.AvgCostPerReq = st.CostUSD / float64(st.RequestCount)
 		}
 		out = append(out, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// autoRouterSnapshotWhere returns the common router-scoped snapshot predicate
+// plus the shared scope clauses for the decision-aggregation queries.
+func autoRouterSnapshotWhere(eventsTable string, filter UsageFilter, extraCondition string) (string, []any) {
+	var b strings.Builder
+	args := []any{filter.RouterID}
+	b.WriteString(` FROM ` + eventsTable + ` e
+		WHERE e.router_id = $1 AND e.router_id IS NOT NULL AND e.router_id <> ''
+		AND e.auto_router_decision IS NOT NULL
+		AND jsonb_typeof(e.auto_router_decision) = 'object'`)
+	if extraCondition != "" {
+		b.WriteString(` AND `)
+		b.WriteString(extraCondition)
+	}
+	if filter.APIKeyID != "" {
+		args = append(args, filter.APIKeyID)
+		b.WriteString(` AND e.api_key_id = $`)
+		b.WriteString(itoa(len(args)))
+	}
+	if filter.UserID != "" {
+		args = append(args, filter.UserID)
+		b.WriteString(` AND e.user_id = $`)
+		b.WriteString(itoa(len(args)))
+	}
+	if !filter.From.IsZero() {
+		args = append(args, filter.From)
+		b.WriteString(` AND e.requested_at >= $`)
+		b.WriteString(itoa(len(args)))
+	}
+	if !filter.To.IsZero() {
+		args = append(args, filter.To)
+		b.WriteString(` AND e.requested_at < $`)
+		b.WriteString(itoa(len(args)))
+	}
+	return b.String(), args
+}
+
+// SelectAutoRouterDecisionStats aggregates the stored decision snapshots of one
+// router into a distribution rollup: score-total histogram (20 buckets of
+// 0.05), per-dimension averages, decision-cause counts, fallback-chain
+// frequencies, and the effective-vs-mapping tier mismatch count. The window is
+// enforced by the caller (handler defaults/caps it).
+func (s *UsageStore) SelectAutoRouterDecisionStats(ctx context.Context, filter UsageFilter) (*AutoRouterDecisionStats, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	if strings.TrimSpace(filter.RouterID) == "" {
+		return nil, fmt.Errorf("postgres store: router_id is required for decision stats")
+	}
+	out := &AutoRouterDecisionStats{
+		ScoreHistogram: make([]AutoRouterScoreBucket, 20),
+		DimensionAverages: map[string]float64{
+			"token_count":         0,
+			"code_presence":       0,
+			"reasoning_markers":   0,
+			"technical_terms":     0,
+			"simple_indicators":   0,
+			"multi_step_patterns": 0,
+			"question_complexity": 0,
+		},
+		CauseCounts: map[string]int64{
+			"literal_keyword_match": 0,
+			"complexity_scorer":     0,
+		},
+		FallbackChains: []AutoRouterChainCount{},
+	}
+
+	// Single-row aggregate: count, dimension averages, cause counts, mismatch.
+	base, args := autoRouterSnapshotWhere(s.eventsTable, filter, "")
+	var b strings.Builder
+	b.WriteString(`SELECT
+		COUNT(*),
+		COALESCE(AVG((e.auto_router_decision->'score_fields'->>'token_count')::float8), 0),
+		COALESCE(AVG((e.auto_router_decision->'score_fields'->>'code_presence')::float8), 0),
+		COALESCE(AVG((e.auto_router_decision->'score_fields'->>'reasoning_markers')::float8), 0),
+		COALESCE(AVG((e.auto_router_decision->'score_fields'->>'technical_terms')::float8), 0),
+		COALESCE(AVG((e.auto_router_decision->'score_fields'->>'simple_indicators')::float8), 0),
+		COALESCE(AVG((e.auto_router_decision->'score_fields'->>'multi_step_patterns')::float8), 0),
+		COALESCE(AVG((e.auto_router_decision->'score_fields'->>'question_complexity')::float8), 0),
+		COALESCE(SUM(CASE WHEN e.decision_cause = 'literal_keyword_match' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN e.decision_cause = 'complexity_scorer' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN e.effective_tier IS DISTINCT FROM e.mapping_tier THEN 1 ELSE 0 END), 0)`)
+	b.WriteString(base)
+	var (
+		count       int64
+		avgTokens   float64
+		avgCode     float64
+		avgReason   float64
+		avgTech     float64
+		avgSimple   float64
+		avgMulti    float64
+		avgQuestion float64
+		causeKw     int64
+		causeScore  int64
+		mismatch    int64
+	)
+	if err := s.db.QueryRowContext(ctx, b.String(), args...).Scan(
+		&count, &avgTokens, &avgCode, &avgReason, &avgTech, &avgSimple, &avgMulti, &avgQuestion,
+		&causeKw, &causeScore, &mismatch,
+	); err != nil {
+		return nil, fmt.Errorf("postgres store: auto-router decision stats aggregate: %w", err)
+	}
+	out.EventCount = count
+	out.DimensionAverages["token_count"] = avgTokens
+	out.DimensionAverages["code_presence"] = avgCode
+	out.DimensionAverages["reasoning_markers"] = avgReason
+	out.DimensionAverages["technical_terms"] = avgTech
+	out.DimensionAverages["simple_indicators"] = avgSimple
+	out.DimensionAverages["multi_step_patterns"] = avgMulti
+	out.DimensionAverages["question_complexity"] = avgQuestion
+	out.CauseCounts["literal_keyword_match"] = causeKw
+	out.CauseCounts["complexity_scorer"] = causeScore
+	out.MismatchCount = mismatch
+
+	// Histogram: width_bucket over score_total. width_bucket returns 1..20 for
+	// [0,1); score_total == 1.0 lands in bucket 21 (right-open) and is folded
+	// into the last bucket so the histogram sums to the event count.
+	hb := strings.Builder{}
+	hb.WriteString(`SELECT width_bucket((e.auto_router_decision->>'score_total')::float8, 0, 1, 20), COUNT(*)
+		FROM ` + s.eventsTable + ` e
+		WHERE e.router_id = $1 AND e.router_id IS NOT NULL AND e.router_id <> ''
+		AND e.auto_router_decision IS NOT NULL
+		AND jsonb_typeof(e.auto_router_decision) = 'object'
+		AND e.auto_router_decision ? 'score_total'`)
+	hargs := []any{filter.RouterID}
+	appendScopeTo(&hb, &hargs, filter)
+	hb.WriteString(` GROUP BY 1 ORDER BY 1`)
+	histRows, err := s.db.QueryContext(ctx, hb.String(), hargs...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: auto-router decision stats histogram: %w", err)
+	}
+	defer histRows.Close()
+	for histRows.Next() {
+		var bucket int
+		var n int64
+		if err := histRows.Scan(&bucket, &n); err != nil {
+			return nil, err
+		}
+		if bucket >= 1 && bucket <= 20 {
+			out.ScoreHistogram[bucket-1].Count = n
+		} else if bucket == 21 {
+			out.ScoreHistogram[19].Count += n
+		}
+	}
+	if err := histRows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out.ScoreHistogram {
+		out.ScoreHistogram[i].Bucket = i
+	}
+
+	// Fallback chains: serialized tier list text → count, most frequent first.
+	cargs := []any{filter.RouterID}
+	cb := strings.Builder{}
+	cb.WriteString(`SELECT (e.auto_router_decision->>'fallback_chain'), COUNT(*)
+		FROM ` + s.eventsTable + ` e
+		WHERE e.router_id = $1 AND e.router_id IS NOT NULL AND e.router_id <> ''
+		AND e.auto_router_decision IS NOT NULL
+		AND jsonb_typeof(e.auto_router_decision) = 'object'
+		AND e.auto_router_decision ? 'fallback_chain'`)
+	appendScopeTo(&cb, &cargs, filter)
+	cb.WriteString(` GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 25`)
+	chainRows, err := s.db.QueryContext(ctx, cb.String(), cargs...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: auto-router decision stats chains: %w", err)
+	}
+	defer chainRows.Close()
+	for chainRows.Next() {
+		var c AutoRouterChainCount
+		if err := chainRows.Scan(&c.Chain, &c.Count); err != nil {
+			return nil, err
+		}
+		out.FallbackChains = append(out.FallbackChains, c)
+	}
+	if err := chainRows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// appendScopeTo appends the shared api_key_id / user_id / time-range clauses
+// (same placeholders as addUsageScopeArgs) onto an arbitrary builder/args pair.
+func appendScopeTo(b *strings.Builder, args *[]any, filter UsageFilter) {
+	if filter.APIKeyID != "" {
+		*args = append(*args, filter.APIKeyID)
+		b.WriteString(` AND e.api_key_id = $`)
+		b.WriteString(itoa(len(*args)))
+	}
+	if filter.UserID != "" {
+		*args = append(*args, filter.UserID)
+		b.WriteString(` AND e.user_id = $`)
+		b.WriteString(itoa(len(*args)))
+	}
+	if !filter.From.IsZero() {
+		*args = append(*args, filter.From)
+		b.WriteString(` AND e.requested_at >= $`)
+		b.WriteString(itoa(len(*args)))
+	}
+	if !filter.To.IsZero() {
+		*args = append(*args, filter.To)
+		b.WriteString(` AND e.requested_at < $`)
+		b.WriteString(itoa(len(*args)))
+	}
+}
+
+// SelectAutoRouterTierPerformance returns per tier × target-model performance
+// metrics for a router: request count, p50/p95 latency (percentile_cont),
+// average time-to-first-token, total cost, and error rate. Mirrors the tier
+// stats restriction to actually-routed events (tier IS NOT NULL).
+func (s *UsageStore) SelectAutoRouterTierPerformance(ctx context.Context, filter UsageFilter) ([]AutoRouterTierPerformance, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	if strings.TrimSpace(filter.RouterID) == "" {
+		return nil, fmt.Errorf("postgres store: router_id is required for tier performance")
+	}
+	var b strings.Builder
+	args := []any{filter.RouterID}
+	b.WriteString(`SELECT e.tier, e.model,
+		COUNT(*),
+		COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY e.latency_ms), 0),
+		COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY e.latency_ms), 0),
+		COALESCE(AVG(e.ttft_ms), 0),
+		COALESCE(SUM(e.cost_usd), 0),
+		COALESCE(SUM(CASE WHEN e.failed THEN 1 ELSE 0 END), 0)
+		FROM ` + s.eventsTable + ` e
+		WHERE e.tier IS NOT NULL AND e.router_id = $1 AND e.router_id <> ''`)
+	if filter.APIKeyID != "" {
+		args = append(args, filter.APIKeyID)
+		b.WriteString(` AND e.api_key_id = $`)
+		b.WriteString(itoa(len(args)))
+	}
+	if filter.UserID != "" {
+		args = append(args, filter.UserID)
+		b.WriteString(` AND e.user_id = $`)
+		b.WriteString(itoa(len(args)))
+	}
+	if !filter.From.IsZero() {
+		args = append(args, filter.From)
+		b.WriteString(` AND e.requested_at >= $`)
+		b.WriteString(itoa(len(args)))
+	}
+	if !filter.To.IsZero() {
+		args = append(args, filter.To)
+		b.WriteString(` AND e.requested_at < $`)
+		b.WriteString(itoa(len(args)))
+	}
+	b.WriteString(` GROUP BY e.tier, e.model ORDER BY e.tier, COALESCE(SUM(e.cost_usd), 0) DESC`)
+	if filter.Limit > 0 {
+		args = append(args, filter.Limit)
+		b.WriteString(` LIMIT $`)
+		b.WriteString(itoa(len(args)))
+	}
+	rows, err := s.db.QueryContext(ctx, b.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: select auto-router tier performance: %w", err)
+	}
+	defer rows.Close()
+	out := make([]AutoRouterTierPerformance, 0, 16)
+	for rows.Next() {
+		var p AutoRouterTierPerformance
+		if err := rows.Scan(&p.Tier, &p.Model, &p.RequestCount, &p.P50LatencyMs, &p.P95LatencyMs, &p.AvgTTFTMs, &p.CostUSD, &p.ErrorCount); err != nil {
+			return nil, err
+		}
+		if p.RequestCount > 0 {
+			p.ErrorRate = float64(p.ErrorCount) / float64(p.RequestCount)
+		}
+		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

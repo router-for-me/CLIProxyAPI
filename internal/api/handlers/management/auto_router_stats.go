@@ -47,9 +47,29 @@ func parseAutoRouterStatsQuery(c *gin.Context) autoRouterStatsQuery {
 	return q
 }
 
+// maxAutoRouterStatsWindow bounds the time range of the aggregation endpoints:
+// jsonb aggregate scans over an unbounded window are too expensive.
+const maxAutoRouterStatsWindow = 90 * 24 * time.Hour
+
+// defaultAutoRouterStatsWindow is applied when neither from nor to is given.
+const defaultAutoRouterStatsWindow = 7 * 24 * time.Hour
+
+// applyStatsWindow fills in the default window when both bounds are zero and
+// reports whether the resulting window is within the allowed maximum.
+func applyStatsWindow(q *autoRouterStatsQuery) bool {
+	if q.From.IsZero() && q.To.IsZero() {
+		q.To = time.Now().UTC()
+		q.From = q.To.Add(-defaultAutoRouterStatsWindow)
+	}
+	window := q.To.Sub(q.From)
+	return window >= 0 && window <= maxAutoRouterStatsWindow
+}
+
 // GetAutoRouterStats handles GET /v0/management/auto-routers/stats. Returns
-// per-tier request stats (top=tier, default) or per-target-model cost stats
-// (top=model) for a router, scoped by api_key_id and time range.
+// per-tier request stats (top=tier, default), per-target-model cost stats
+// (top=model), tier performance metrics (top=performance), or the decision
+// distribution rollup (top=decision-stats) for a router, scoped by api_key_id
+// and time range.
 func (h *Handler) GetAutoRouterStats(c *gin.Context) {
 	_, usage, _, _, ok := h.requirePG(c)
 	if !ok {
@@ -58,6 +78,10 @@ func (h *Handler) GetAutoRouterStats(c *gin.Context) {
 	q := parseAutoRouterStatsQuery(c)
 	if q.RouterID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "router_id is required"}})
+		return
+	}
+	if !applyStatsWindow(&q) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "time range exceeds 90 days"}})
 		return
 	}
 	filter := store.UsageFilter{
@@ -69,14 +93,29 @@ func (h *Handler) GetAutoRouterStats(c *gin.Context) {
 	}
 	aggCtx := c.Request.Context()
 	resp := gin.H{}
-	if q.TopBy == "model" {
+	switch q.TopBy {
+	case "model":
 		models, err := usage.SelectAutoRouterModelStats(aggCtx, filter)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
 			return
 		}
 		resp["models"] = models
-	} else {
+	case "performance":
+		perf, err := usage.SelectAutoRouterTierPerformance(aggCtx, filter)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+			return
+		}
+		resp["performance"] = perf
+	case "decision-stats":
+		stats, err := usage.SelectAutoRouterDecisionStats(aggCtx, filter)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+			return
+		}
+		resp["decision_stats"] = stats
+	default:
 		tiers, err := usage.SelectAutoRouterTierStats(aggCtx, filter)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
