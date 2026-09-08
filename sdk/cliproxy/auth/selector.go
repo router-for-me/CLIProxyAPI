@@ -1443,7 +1443,7 @@ func (s *SessionAffinitySelector) InvalidateSession(sessionID string) SessionInv
 	}
 	if s.cache != nil {
 		result.CacheGroups, result.CacheAliases = s.cache.InvalidateMatching(func(alias string) bool {
-			return alias == sessionID || affinityCacheKeySessionID(alias) == sessionID
+			return alias == sessionID || affinityCacheKeyOwnedBySession(alias, sessionID)
 		})
 	}
 	if s.matcher != nil {
@@ -1452,22 +1452,24 @@ func (s *SessionAffinitySelector) InvalidateSession(sessionID string) SessionInv
 	return result
 }
 
-// affinityCacheKeySessionID extracts the session identifier from a composite
-// affinity cache key of the form provider "::" sessionID "::" model. It returns
-// an empty string for aliases that do not have that shape.
+// affinityCacheKeyOwnedBySession reports whether a composite affinity cache key
+// of the form provider "::" sessionID "::" model belongs to sessionID.
 //
-// The provider is taken from the first separator and the model from the last,
-// so session identifiers that themselves contain "::" survive the round trip.
-func affinityCacheKeySessionID(alias string) string {
+// The key is not decoded. Both the session id and the model may themselves
+// contain "::", so no split point can be inferred from the key alone: taking
+// the model from the last separator misreads a model that contains "::", and
+// taking it from the first misreads a session id that does. Testing a known
+// session id as a prefix of the remainder is exact for both, because the
+// session id is the first field after the provider.
+func affinityCacheKeyOwnedBySession(alias, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
 	_, rest, ok := strings.Cut(alias, "::")
 	if !ok {
-		return ""
+		return false
 	}
-	modelSeparator := strings.LastIndex(rest, "::")
-	if modelSeparator <= 0 {
-		return ""
-	}
-	return rest[:modelSeparator]
+	return strings.HasPrefix(rest, sessionID+"::")
 }
 
 // OnResult handles session affinity binding or release based on execution outcome.

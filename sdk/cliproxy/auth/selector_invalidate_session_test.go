@@ -170,23 +170,36 @@ func TestSessionAffinitySelector_InvalidateSessionMatchesExactly(t *testing.T) {
 	}
 }
 
-func TestAffinityCacheKeySessionID(t *testing.T) {
+func TestAffinityCacheKeyOwnedBySession(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		alias string
-		want  string
+		name      string
+		alias     string
+		sessionID string
+		want      bool
 	}{
-		{"claude::claude:8046da35::claude-sonnet-4-5", "claude:8046da35"},
-		{"claude::claude:8046da35:agent:explore::claude-sonnet-4-5", "claude:8046da35:agent:explore"},
-		{"claude::pck:abc123::claude-sonnet-4-5", "pck:abc123"},
-		{"claude::weird::session::model", "weird::session"},
-		{"claude:8046da35", ""},
-		{"", ""},
+		{"plain", "claude::claude:8046da35::claude-sonnet-4-5", "claude:8046da35", true},
+		{"subagent id is its own session", "claude::claude:8046da35:agent:explore::claude-sonnet-4-5", "claude:8046da35:agent:explore", true},
+		{"parent does not own the subagent key", "claude::claude:8046da35:agent:explore::claude-sonnet-4-5", "claude:8046da35", false},
+		{"prompt cache key session", "claude::pck:abc123::claude-sonnet-4-5", "pck:abc123", true},
+		{"session id containing the separator", "claude::weird::session::model", "weird::session", true},
+		{"model containing the separator", "claude::s1::foo::bar", "s1", true},
+		// "claude::s1::foo::bar" is genuinely ambiguous: it is a valid key for
+		// session "s1" with model "foo::bar" AND for session "s1::foo" with
+		// model "bar". Neither reading can be ruled out from the key alone, so
+		// both session ids own it. Removal is the safe resolution — a spurious
+		// release costs one re-selection, while a missed release leaves the
+		// caller pinned, which is the failure this endpoint exists to fix.
+		{"ambiguous key belongs to either candidate session", "claude::s1::foo::bar", "s1::foo", true},
+		{"different session", "claude::s1::claude-sonnet-4-5", "s2", false},
+		{"not a composite key", "claude:8046da35", "claude:8046da35", false},
+		{"empty alias", "", "s1", false},
+		{"empty session", "claude::s1::model", "", false},
 	}
 	for _, tt := range tests {
-		if got := affinityCacheKeySessionID(tt.alias); got != tt.want {
-			t.Errorf("affinityCacheKeySessionID(%q) = %q, want %q", tt.alias, got, tt.want)
+		if got := affinityCacheKeyOwnedBySession(tt.alias, tt.sessionID); got != tt.want {
+			t.Errorf("%s: affinityCacheKeyOwnedBySession(%q, %q) = %v, want %v", tt.name, tt.alias, tt.sessionID, got, tt.want)
 		}
 	}
 }
