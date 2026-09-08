@@ -4,6 +4,7 @@ Date: 2026-09-08
 Status: Validated (brainstormed section-by-section; scope agreed: full design, phased delivery)
 Progress: F1 (scorer v2) implemented on main 2026-09-08 — parity corpus green, DecisionSnapshot shape pinned, benchmarks recorded (large-body parity at equal allocs; F2 windowing targets the allocation).
 Progress: F2 (runtime perf) implemented on main 2026-09-08 — CompiledProfile precompute cached in the profile store, process-local score cache (2048 entries, SHA-256 keys, hash-based invalidation), head+tail windowing (large-body 115.9ms→71.0ms, 41.6MB→34.4MB). F3 (observability API) and F4 (dashboard) remain.
+Progress: F3 (observability API) implemented on main 2026-09-08 — decision-stats aggregation (top=decision-stats), tier performance (top=performance: p50/p95 percentile_cont, ttft, error rate), profile simulate (POST /auto-routers/:id/profile/simulate; unsimulable rules flagged, 10k cap, truncation + unsampled counts), decision replay (GET /auto-routers/:id/decisions/:request_id). Windows default 7d, cap 90d. F4 (dashboard tabs) remains.
 
 ## Context
 
