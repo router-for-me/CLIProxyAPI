@@ -297,7 +297,9 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		}
 		return applySummaryConfigForProvider(body, providerFormat, baseModel, providerKey, modelInfo, summaryConfig), nil
 	}
-	if modelInfoResolved && config.Mode == ModeLevel && modelInfo != nil && modelInfo.Thinking != nil && shouldMapConfiguredHighIntent(fromFormat, providerFormat, modelInfo) {
+	var compatibilityResolved bool
+	config, compatibilityResolved = resolveOpenAICompatibilityConfig(config, modelInfo)
+	if !compatibilityResolved && modelInfoResolved && config.Mode == ModeLevel && modelInfo != nil && modelInfo.Thinking != nil && shouldMapConfiguredHighIntent(fromFormat, providerFormat, modelInfo) {
 		config.Level = mapConfiguredHighIntent(config.Level, modelInfo)
 	}
 
@@ -384,6 +386,40 @@ func mapConfiguredHighIntent(level ThinkingLevel, modelInfo *registry.ModelInfo)
 		}
 	}
 	return level
+}
+
+func resolveOpenAICompatibilityConfig(config ThinkingConfig, modelInfo *registry.ModelInfo) (ThinkingConfig, bool) {
+	if modelInfo == nil || !strings.EqualFold(strings.TrimSpace(modelInfo.Type), "openai-compatibility") {
+		return config, false
+	}
+	if modelInfo.Thinking == nil || len(modelInfo.Thinking.Levels) == 0 {
+		return config, true
+	}
+	if config.Mode == ModeBudget {
+		if level, ok := ConvertBudgetToLevel(config.Budget); ok {
+			config.Mode = ModeLevel
+			config.Level = ThinkingLevel(level)
+			config.Budget = 0
+		}
+	}
+	if config.Mode == ModeLevel {
+		config.Level = clampCompatibilityLevel(config.Level, modelInfo)
+	}
+	return config, true
+}
+
+func clampCompatibilityLevel(level ThinkingLevel, modelInfo *registry.ModelInfo) ThinkingLevel {
+	level = ThinkingLevel(strings.ToLower(strings.TrimSpace(string(level))))
+	if isLevelSupported(string(level), modelInfo.Thinking.Levels) {
+		return level
+	}
+	if level == LevelXHigh && isLevelSupported(string(LevelMax), modelInfo.Thinking.Levels) {
+		return LevelMax
+	}
+	if level == LevelMax && isLevelSupported(string(LevelXHigh), modelInfo.Thinking.Levels) {
+		return LevelXHigh
+	}
+	return clampLevel(level, modelInfo, "openai-compatibility")
 }
 
 func extractSourceThinkingConfig(body []byte, provider string) ThinkingConfig {
@@ -490,6 +526,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return body, nil
 	}
 
+	config, _ = resolveOpenAICompatibilityConfig(config, modelInfo)
 	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
 	log.WithFields(log.Fields{
 		"provider": toFormat,
