@@ -542,6 +542,14 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 	return entry.Cloak
 }
 
+func foldMidSystemMessageEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["fold_mid_system_message"]), "true") {
+		return true
+	}
+	entry := resolveClaudeKeyConfig(cfg, auth)
+	return entry != nil && entry.FoldMidSystemMessage
+}
+
 func rebuildMidSystemMessageEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
 	if auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["rebuild_mid_system_message"]), "true") {
 		return true
