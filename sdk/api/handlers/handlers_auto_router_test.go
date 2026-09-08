@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
@@ -212,5 +213,49 @@ func TestApplyAutoRouterRouteOpenAICompatColonPoolPinMatchesEntry(t *testing.T) 
 	}
 	if len(got) != 1 || got[0] != "openai-compatible-foo:bar:key-17" {
 		t.Fatalf("expected colon pool pin to retain entry provider, got %v", got)
+	}
+}
+
+// TestResolveAutoRouterNoMappingFailsExplicitly verifies that an enabled router
+// whose tier mapping cannot resolve reports resolveFailed with tier/routerID
+// populated, instead of silently falling through to the synthetic provider.
+func TestResolveAutoRouterNoMappingFailsExplicitly(t *testing.T) {
+	router := &store.AutoRouter{
+		ID:      "router-2",
+		ModelID: "router:broken",
+		Name:    "Broken Router",
+		Enabled: true,
+		// No mappings at all -> Resolve must fail for every tier.
+	}
+	h := &BaseAPIHandler{AutoRouterResolver: stubAutoRouterResolver{router: router}}
+	res := h.resolveAutoRouterModel(context.Background(), "openai", "router:broken",
+		[]byte(`{"model":"router:broken","messages":[{"role":"user","content":"hi"}]}`))
+	if res.matched {
+		t.Fatal("unresolvable router must not be reported as matched")
+	}
+	if !res.resolveFailed {
+		t.Fatal("expected resolveFailed=true for a router with no resolvable mapping")
+	}
+	if res.routerID != "router-2" {
+		t.Fatalf("routerID = %q, want router-2", res.routerID)
+	}
+	if res.tier == "" {
+		t.Fatal("expected the scored tier to be populated for diagnostics")
+	}
+	// The ready-made error must be explicit and diagnosable.
+	errMsg := res.resolveFailureError()
+	if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("resolveFailureError() = %+v, want 503", errMsg)
+	}
+}
+
+// TestResolveAutoRouterUnmatchedNotFailed verifies non-router models never set
+// resolveFailed (the flag is only for router matches whose mapping fails).
+func TestResolveAutoRouterUnmatchedNotFailed(t *testing.T) {
+	h := &BaseAPIHandler{}
+	res := h.resolveAutoRouterModel(context.Background(), "openai", "gpt-4o",
+		[]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+	if res.matched || res.resolveFailed {
+		t.Fatalf("non-router model must be neither matched nor resolveFailed, got %+v", res)
 	}
 }

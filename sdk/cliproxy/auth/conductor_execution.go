@@ -62,7 +62,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, maxWait, normalized, retryModel); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
@@ -107,7 +107,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, maxWait, normalized, retryModel); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
 	}
@@ -148,7 +148,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
+		if errWait := waitForCooldown(ctx, wait, maxWait, normalized, retryModel); errWait != nil {
 			return nil, errWait
 		}
 	}

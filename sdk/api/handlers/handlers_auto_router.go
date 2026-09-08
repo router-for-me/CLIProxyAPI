@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -105,6 +106,21 @@ type autoRouterResolved struct {
 	routerID          string
 	decision          autorouter.DecisionSnapshot
 	matched           bool
+	// resolveFailed reports that the request targeted an enabled auto-router
+	// whose tier could not be resolved to any mapping — surfaced to the client
+	// as an explicit 503 instead of falling through to the synthetic
+	// auto-router provider (auth_not_found or an unknown upstream model).
+	resolveFailed bool
+}
+
+// resolveFailureError builds the explicit 503 for an auto-router match whose
+// tier mapping could not resolve. tier may be empty for legacy zero values.
+func (r autoRouterResolved) resolveFailureError() *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusServiceUnavailable,
+		Error: fmt.Errorf("auto router %s has no resolvable tier mapping for tier %s; configure a mapping or fix the fallback chain",
+			r.routerID, r.tier),
+	}
 }
 
 func (r autoRouterResolved) withDecisionContext(ctx context.Context) context.Context {
@@ -174,7 +190,15 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 func (h *BaseAPIHandler) autoRouterResolvedFromScore(router *store.AutoRouter, result autorouter.ScoreResult, profileHash string, profileVersion int64) autoRouterResolved {
 	resolved, ok := autorouter.Resolve(result.EffectiveTier, storeRouterToConfig(router))
 	if !ok || resolved == nil || strings.TrimSpace(resolved.Model) == "" {
-		return autoRouterResolved{}
+		log.WithFields(log.Fields{
+			"router_id": strings.TrimSpace(router.ID),
+			"tier":      string(result.EffectiveTier),
+		}).Warn("auto-router: no resolvable tier mapping; rejecting request")
+		return autoRouterResolved{
+			resolveFailed: true,
+			tier:          string(result.EffectiveTier),
+			routerID:      strings.TrimSpace(router.ID),
+		}
 	}
 	decision := autorouter.DecisionSnapshot{
 		ProfileVersion: profileVersion, ProfileHash: profileHash, ProfileSnapshot: result.ProfileConfig,

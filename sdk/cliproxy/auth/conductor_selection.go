@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 func (m *Manager) SetPluginScheduler(scheduler PluginScheduler) {
@@ -1038,10 +1039,20 @@ func jitteredCooldownWait(wait, maxWait time.Duration) time.Duration {
 	return wait + rand.N(jitterRange)
 }
 
-func waitForCooldown(ctx context.Context, wait, maxWait time.Duration) error {
+// waitForCooldown blocks until the closest upstream cooldown expires (bounded
+// by maxWait) or ctx is canceled. A request held here produces no output, so
+// every nonzero wait is logged: "stopped without reason" reports were usually
+// requests silently waiting in cooldown with no trace.
+func waitForCooldown(ctx context.Context, wait, maxWait time.Duration, providers []string, model string) error {
 	if wait <= 0 {
 		return nil
 	}
+	log.WithFields(log.Fields{
+		"providers":   strings.Join(providers, ","),
+		"model":       model,
+		"wait_ms":     wait.Milliseconds(),
+		"max_wait_ms": maxWait.Milliseconds(),
+	}).Info("all upstreams cooling down; delaying retry")
 	timer := time.NewTimer(jitteredCooldownWait(wait, maxWait))
 	defer timer.Stop()
 	select {

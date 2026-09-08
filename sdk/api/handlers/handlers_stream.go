@@ -255,6 +255,16 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		executionModel = resolvedAR.targetModel
 		autoRoute = resolvedAR.route
 		ctx = resolvedAR.withDecisionContext(ctx)
+	} else if rr.resolveFailed {
+		// The request targeted an enabled auto-router whose tier mapping cannot
+		// resolve: an explicit 503 beats auth_not_found from the synthetic
+		// auto-router provider (or an unknown model forwarded upstream).
+		errMsg := rr.resolveFailureError()
+		recordPreExecutionFailure(ctx, routeDecision.Provider, originalRequestedModel, modelName, errMsg)
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
 	}
 	if resolvedAR.matched {
 		rawJSON = h.autoRouterRequestAdjustments(ctx, resolvedAR, rawJSON)
