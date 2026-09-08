@@ -501,6 +501,60 @@ func TestLatestPluginVersionRateLimitPreservesConcurrentRefresh(t *testing.T) {
 	}
 }
 
+func TestLatestPluginVersionPreservesConcurrentCooldown(t *testing.T) {
+	t.Parallel()
+	for _, outcome := range []string{"success", "failure", "shorter-limit"} {
+		t.Run(outcome, func(t *testing.T) {
+			repository := "https://github.com/author/sample"
+			plugin := pluginstore.Plugin{ID: "sample", Repository: repository}
+			retryAt := time.Now().Add(time.Hour).Truncate(time.Second)
+			h := &Handler{pluginReleaseCache: map[string]pluginReleaseCacheEntry{
+				repository: {version: "0.1.0", expiresAt: time.Now().Add(-time.Second)},
+			}}
+			started := make(chan struct{})
+			finish := make(chan struct{})
+			result := make(chan string, 1)
+			laterClient := pluginstore.Client{HTTPClient: pluginStoreHTTPDoerFunc(func(request *http.Request) (*http.Response, error) {
+				close(started)
+				<-finish
+				switch outcome {
+				case "failure":
+					return nil, fmt.Errorf("simulated network failure")
+				case "shorter-limit":
+					headers := make(http.Header)
+					headers.Set("Retry-After", "120")
+					return &http.Response{StatusCode: http.StatusTooManyRequests, Header: headers, Body: io.NopCloser(strings.NewReader(""))}, nil
+				default:
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v0.2.0"}`))}, nil
+				}
+			})}
+			go func() {
+				result <- h.latestPluginVersion(context.Background(), laterClient, plugin)
+			}()
+			<-started
+			limitedClient := pluginstore.Client{HTTPClient: pluginStoreHTTPDoerFunc(func(request *http.Request) (*http.Response, error) {
+				headers := make(http.Header)
+				headers.Set("Retry-After", retryAt.Format(http.TimeFormat))
+				return &http.Response{StatusCode: http.StatusForbidden, Header: headers, Body: io.NopCloser(strings.NewReader(""))}, nil
+			})}
+			h.latestPluginVersion(context.Background(), limitedClient, plugin)
+			close(finish)
+			version := <-result
+			wantVersion := "0.1.0"
+			if outcome == "success" {
+				wantVersion = "0.2.0"
+			}
+			entry := h.pluginReleaseCache[repository]
+			if version != wantVersion || entry.version != wantVersion || !entry.expiresAt.Equal(retryAt) || !entry.retryAt.Equal(retryAt) {
+				t.Fatalf("version = %q, cache = %+v; want %s until %v", version, entry, wantVersion, retryAt)
+			}
+			if cached := h.latestPluginVersion(context.Background(), laterClient, plugin); cached != wantVersion {
+				t.Fatalf("cached version = %q, want %q", cached, wantVersion)
+			}
+		})
+	}
+}
+
 func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 	t.Parallel()
 

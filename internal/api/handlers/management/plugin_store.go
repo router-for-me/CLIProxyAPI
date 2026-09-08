@@ -35,6 +35,7 @@ const (
 type pluginReleaseCacheEntry struct {
 	version   string
 	expiresAt time.Time
+	retryAt   time.Time
 }
 
 type pluginStoreListResponse struct {
@@ -732,14 +733,24 @@ func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Cl
 	expiresAt := time.Now().Add(ttl)
 	var rateLimit *pluginstore.RateLimitError
 	h.pluginReleaseCacheMu.Lock()
+	current := h.pluginReleaseCache[repository]
+	retryAt := current.retryAt
 	if errors.As(errRelease, &rateLimit) {
-		version = h.pluginReleaseCache[repository].version
+		version = current.version
 		expiresAt = rateLimit.RetryAt
+		if rateLimit.RetryAt.After(retryAt) {
+			retryAt = rateLimit.RetryAt
+		}
+	} else if version == "" && time.Now().Before(retryAt) {
+		version = current.version
+	}
+	if retryAt.After(expiresAt) {
+		expiresAt = retryAt
 	}
 	if h.pluginReleaseCache == nil {
 		h.pluginReleaseCache = make(map[string]pluginReleaseCacheEntry)
 	}
-	h.pluginReleaseCache[repository] = pluginReleaseCacheEntry{version: version, expiresAt: expiresAt}
+	h.pluginReleaseCache[repository] = pluginReleaseCacheEntry{version: version, expiresAt: expiresAt, retryAt: retryAt}
 	h.pluginReleaseCacheMu.Unlock()
 	return version
 }
