@@ -15,7 +15,6 @@ import (
 )
 
 func TestOpenAIResponsesForwardsInvalidReasoningEncryptedContentToExecutor(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	executor := &compactCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -49,7 +48,6 @@ func TestOpenAIResponsesForwardsInvalidReasoningEncryptedContentToExecutor(t *te
 }
 
 func TestOpenAIResponsesCompactForwardsInvalidReasoningEncryptedContentToExecutor(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	executor := &compactCaptureExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
