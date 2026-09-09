@@ -423,8 +423,8 @@ func (m *Manager) Selector() Selector {
 // It returns (auth, status) where status can be "bound", "unbound", "ambiguous", or "unsupported".
 func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Auth, string) {
 	// The standard service always attaches a plugin host. Native affinity
-	// remains authoritative unless that host has an active scheduler capability.
-	if m == nil || m.hasPluginScheduler() {
+	// remains authoritative unless Home or an active plugin owns selection.
+	if m == nil || m.HomeEnabled() || m.hasPluginScheduler() {
 		return nil, "unsupported"
 	}
 	m.mu.RLock()

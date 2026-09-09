@@ -2,10 +2,12 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -104,6 +106,39 @@ func TestManagerLookupAffinityWithInactivePluginSchedulerDoesNotRefreshTTL(t *te
 	}
 	if scheduler.calls != 0 {
 		t.Errorf("lookup selected a credential %d times", scheduler.calls)
+	}
+}
+
+func TestManagerLookupAffinityIsUnsupportedWhileHomeOwnsRouting(t *testing.T) {
+	selector := NewSessionAffinitySelector(nil)
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	manager.SetPluginScheduler(&inactivePluginScheduler{})
+	auth := &Auth{ID: "local-affinity-auth", Provider: "codex", Status: StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	selector.cache.Set("codex::codex:known-session::test-model", auth.ID)
+	for _, enabled := range []bool{true, false} {
+		cfg := &internalconfig.Config{}
+		cfg.Home.Enabled = enabled
+		manager.SetConfig(cfg)
+		for _, sessionID := range []string{"known-session", "unknown-session"} {
+			t.Run(fmt.Sprintf("home=%t/%s", enabled, sessionID), func(t *testing.T) {
+				found, status := manager.LookupSessionAffinity("codex", "test-model", sessionID)
+				if enabled {
+					if status != "unsupported" || found != nil {
+						t.Errorf("Home lookup = %v, %q; want unsupported", found, status)
+					}
+				} else if sessionID == "known-session" {
+					if status != "bound" || found == nil || found.ID != auth.ID {
+						t.Errorf("native lookup = %v, %q; want bound auth", found, status)
+					}
+				} else if status != "unbound" || found != nil {
+					t.Errorf("native absent lookup = %v, %q; want unbound", found, status)
+				}
+			})
+		}
 	}
 }
 
