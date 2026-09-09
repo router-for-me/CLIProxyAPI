@@ -6,6 +6,18 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
+func TestBuildOpenAICompatibilityConfigModelsPropagatesMaxOutputTokens(t *testing.T) {
+	const want = 64000
+	model := buildOpenAICompatibilityConfigModels(&config.OpenAICompatibility{
+		Models: []config.OpenAICompatibilityModel{{
+			Name: "compat-upstream", Alias: "compat-alias", MaxOutputTokens: want,
+		}},
+	})[0]
+	if model.MaxCompletionTokens != want {
+		t.Fatalf("max completion tokens = %d, want %d", model.MaxCompletionTokens, want)
+	}
+}
+
 func TestBuildConfigModelsPropagatesMaxContextLength(t *testing.T) {
 	const want = 1048576
 
