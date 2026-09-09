@@ -770,6 +770,12 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for i := range arr {
+		if errValidate := config.ValidateOpenAICompatibilityWireAPI(arr[i].WireAPI); errValidate != nil {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("openai-compatibility[%d].wire-api: %v", i, errValidate)})
+			return
+		}
+	}
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
 		normalizeOpenAICompatibilityEntry(&arr[i])
@@ -813,6 +819,13 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
+	}
+
+	if body.Value.WireAPI != nil {
+		if errValidate := config.ValidateOpenAICompatibilityWireAPI(*body.Value.WireAPI); errValidate != nil {
+			c.JSON(400, gin.H{"error": errValidate.Error()})
+			return
+		}
 	}
 
 	h.mu.Lock()
