@@ -52,6 +52,18 @@ func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatE
 // Identifier implements cliproxyauth.ProviderExecutor.
 func (e *OpenAICompatExecutor) Identifier() string { return e.provider }
 
+// RequestToFormatWithAuth reports the protocol selected by this credential's
+// compatibility config, including config-index overrides for duplicate names.
+func (e *OpenAICompatExecutor) RequestToFormatWithAuth(auth *cliproxyauth.Auth, _ cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
+	if source := opts.SourceFormat.String(); source == "openai-image" || source == "openai-video" {
+		return opts.SourceFormat
+	}
+	if (opts.Alt == "responses/compact" && !opts.Stream) || e.usesNativeResponses(auth) {
+		return sdktranslator.FormatOpenAIResponse
+	}
+	return sdktranslator.FormatOpenAI
+}
+
 // PrepareRequest injects OpenAI-compatible credentials into the outgoing HTTP request.
 func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
