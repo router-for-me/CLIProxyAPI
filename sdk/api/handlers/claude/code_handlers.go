@@ -72,12 +72,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
-			},
-		})
+		c.Data(http.StatusBadRequest, "application/json", BuildErrorResponse(http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err)))
 		return
 	}
 
@@ -104,12 +99,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
-			},
-		})
+		c.Data(http.StatusBadRequest, "application/json", BuildErrorResponse(http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err)))
 		return
 	}
 
@@ -349,6 +339,17 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 			}
 		}
 	}
+	return newClaudeErrorResponse(status, errText)
+}
+
+// BuildErrorResponse builds an Anthropic error envelope for failures that occur
+// before execution, such as authentication or reading the request body.
+func BuildErrorResponse(status int, message string) []byte {
+	body, _ := json.Marshal(newClaudeErrorResponse(status, message))
+	return body
+}
+
+func newClaudeErrorResponse(status int, errText string) claudeErrorResponse {
 	errType, message := claudeErrorDetailFromText(status, errText)
 	return claudeErrorResponse{
 		Type: "error",
