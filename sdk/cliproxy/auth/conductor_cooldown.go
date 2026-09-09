@@ -30,8 +30,9 @@ func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
 }
 
-// SetTransientErrorCooldownSeconds configures cooldowns for 408/500/502/503/504.
-// 0 keeps the legacy default; negative values disable transient error cooldowns.
+// SetTransientErrorCooldownSeconds configures transient upstream cooldowns.
+// 0 keeps the 60s default (10s for ordinary Cloudflare HTML 5xx pages);
+// negative values disable transient error cooldowns.
 func SetTransientErrorCooldownSeconds(seconds int) {
 	transientErrorCooldownSeconds.Store(int64(seconds))
 }
@@ -806,7 +807,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
-					} else if isCloudflareChallengeResultError(result.Error) {
+					} else if isCloudflareChallengeResultError(result.Error, responseHeaders) {
 						next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)
 						state.NextRetryAfter = next
 						state.StatusMessage = "cloudflare challenge"
@@ -819,6 +820,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							NextRecoverAt: next,
 							BackoffLevel:  backoffLevel,
 						})
+					} else if isCloudflareOriginResultError(result.Error) {
+						state.NextRetryAfter = cloudflareOriginRetryAfter(now, disableCooling)
+						state.Unavailable = !state.NextRetryAfter.IsZero()
 					} else if isInvalidGrantResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
@@ -930,7 +934,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, responseHeaders)
 			}
 		}
 
@@ -1673,7 +1677,7 @@ func isCloudflareChallengeErrorMessage(message string) bool {
 	return strings.Contains(lower, "challenge-platform") ||
 		strings.Contains(lower, "cf-mitigated") ||
 		strings.Contains(lower, "cloudflare challenge") ||
-		(strings.Contains(lower, "cloudflare") && strings.Contains(lower, "<html"))
+		(strings.Contains(lower, "cloudflare") && strings.Contains(lower, "just a moment"))
 }
 
 func isCloudflareChallengeError(err error) bool {
@@ -1683,11 +1687,39 @@ func isCloudflareChallengeError(err error) bool {
 	return isCloudflareChallengeErrorMessage(err.Error())
 }
 
-func isCloudflareChallengeResultError(err *Error) bool {
+func isCloudflareChallengeResultError(err *Error, responseHeaders ...http.Header) bool {
 	if err == nil {
 		return false
 	}
+	for _, headers := range responseHeaders {
+		if strings.EqualFold(strings.TrimSpace(headers.Get("Cf-Mitigated")), "challenge") {
+			return true
+		}
+	}
 	return isCloudflareChallengeErrorMessage(err.Message)
+}
+
+// Cloudflare's ordinary HTML 5xx pages describe upstream failures, not an
+// authentication challenge. Explicit challenge evidence always takes priority.
+func isCloudflareOriginResultError(err *Error) bool {
+	if err == nil || err.HTTPStatus < 500 || err.HTTPStatus > 599 || isCloudflareChallengeResultError(err) {
+		return false
+	}
+	lower := strings.ToLower(err.Message)
+	return strings.Contains(lower, "cloudflare") && strings.Contains(lower, "<html")
+}
+
+func cloudflareOriginRetryAfter(now time.Time, disableCooling bool) time.Time {
+	seconds := transientErrorCooldownSeconds.Load()
+	if disableCooling || seconds < 0 {
+		return time.Time{}
+	}
+	if seconds > 0 {
+		return now.Add(time.Duration(seconds) * time.Second)
+	}
+	// Keep the former initial 10s delay without entering the challenge/quota
+	// backoff ladder or falling through to the generic 60s transient default.
+	return now.Add(10 * time.Second)
 }
 
 func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time) (time.Time, int) {
@@ -1734,13 +1766,18 @@ func isResponsesCompactRequest(opts cliproxyexecutor.Options) bool {
 	return opts.Alt == "responses/compact"
 }
 
-func isResponsesCompactRequestFaultError(opts cliproxyexecutor.Options, err error) bool {
+func isResponsesCompactRequestFaultError(opts cliproxyexecutor.Options, err error, responseHeaders ...http.Header) bool {
 	if !isResponsesCompactRequest(opts) || err == nil {
 		return false
 	}
 	if isCredentialScopedError(err) || isCloudflareChallengeError(err) || isInvalidGrantError(err) {
 		return false
 	}
+	resultErr := resultErrorFromError(err)
+	if isCloudflareOriginResultError(resultErr) || isCloudflareChallengeResultError(resultErr, responseHeaders...) {
+		return false
+	}
+
 	status := statusCodeFromError(err)
 	if clienterror.IsRequestFault(status, err) {
 		return true
@@ -1759,7 +1796,7 @@ func isResponsesCompactRequestFaultError(opts cliproxyexecutor.Options, err erro
 	}
 }
 
-func isResponsesCompactAvailabilityNeutralError(opts cliproxyexecutor.Options, err error, resultErr *Error) bool {
+func isResponsesCompactAvailabilityNeutralError(opts cliproxyexecutor.Options, err error, resultErr *Error, responseHeaders ...http.Header) bool {
 	if !isResponsesCompactRequest(opts) {
 		return false
 	}
@@ -1769,7 +1806,7 @@ func isResponsesCompactAvailabilityNeutralError(opts cliproxyexecutor.Options, e
 	if isCredentialScopedError(err) || isCloudflareChallengeError(err) || isInvalidGrantError(err) {
 		return false
 	}
-	if resultErr != nil && (isCloudflareChallengeResultError(resultErr) || isInvalidGrantResultError(resultErr)) {
+	if resultErr != nil && (isCloudflareChallengeResultError(resultErr, responseHeaders...) || isCloudflareOriginResultError(resultErr) || isInvalidGrantResultError(resultErr)) {
 		return false
 	}
 	status := statusCodeFromError(err)
@@ -2001,7 +2038,7 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool, responseHeaders ...http.Header) {
 	if auth == nil {
 		return
 	}
@@ -2025,7 +2062,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
-	if isCloudflareChallengeResultError(resultErr) {
+	if isCloudflareChallengeResultError(resultErr, responseHeaders...) {
 		auth.StatusMessage = "cloudflare challenge"
 		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)
 		applyCooldownFields(&auth.Quota, QuotaState{
@@ -2035,6 +2072,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			BackoffLevel:  backoffLevel,
 		})
 		auth.NextRetryAfter = next
+	} else if isCloudflareOriginResultError(resultErr) {
+		auth.NextRetryAfter = cloudflareOriginRetryAfter(now, disableCooling)
+		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	} else if isInvalidGrantResultError(resultErr) {
 		auth.StatusMessage = "invalid_grant"
 		if disableCooling {

@@ -172,8 +172,10 @@ disable-cooling: false
 # Default is false; when false, cooldown status is kept in memory only.
 save-cooldown-status: false
 
-# Cooldown duration in seconds for transient upstream errors (408/500/502/503/504).
-# Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
+# Cooldown duration in seconds for transient upstream errors, including ordinary Cloudflare HTML 5xx pages.
+# Set to 0 for the 60-second default (10 seconds for Cloudflare origin errors).
+# A positive value overrides both defaults; set to -1 to disable transient error cooldowns.
+# Actual Cloudflare challenges retain their separate challenge backoff.
 transient-error-cooldown-seconds: 0
 
 # When true, globally disable Claude request cloaking (the Claude Code CLI disguise and

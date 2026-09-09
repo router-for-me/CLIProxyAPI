@@ -69,7 +69,8 @@ type Config struct {
 	SaveCooldownStatus bool `yaml:"save-cooldown-status" json:"save-cooldown-status"`
 
 	// TransientErrorCooldownSeconds controls cooldowns for transient upstream errors.
-	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
+	// 0 keeps the 60s default, or 10s for ordinary Cloudflare HTML 5xx pages.
+	// Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
