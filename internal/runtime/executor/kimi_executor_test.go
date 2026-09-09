@@ -127,6 +127,9 @@ func TestKimiExecutorResponsesFiltersUnsupportedToolSearch(t *testing.T) {
 	const function = `{"type":"function","name":"ping","parameters":{"type":"object","properties":{}}}`
 	const otherTools = function + `,{"type":"namespace","name":"workspace","tools":[{"type":"function","name":"read","parameters":{"type":"object","properties":{}}}]},{"type":"web_search"}`
 	const search = `{"type":"tool_search"}`
+	const searchNamespace = `{"type":"namespace","name":"discovery","tools":[` + search + `]}`
+	const mixedNamespace = `{"type":"namespace","name":"workspace","tools":[` + search + `,` + function + `]}`
+	const functionNamespace = `{"type":"namespace","name":"workspace","tools":[` + function + `]}`
 	tests := []struct {
 		name       string
 		tools      string
@@ -146,6 +149,11 @@ func TestKimiExecutorResponsesFiltersUnsupportedToolSearch(t *testing.T) {
 		{name: "mixed allowed choices", tools: search + "," + function, choice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"tool_search"},{"type":"function","name":"ping"}]}`, wantTools: "[" + function + "]", wantChoice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"ping"}]}`},
 		{name: "supported allowed choice remains", tools: search + "," + function, choice: `{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"ping"}]}`, wantTools: "[" + function + "]", wantChoice: `{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"ping"}]}`},
 		{name: "supported tools unchanged", tools: otherTools, choice: `"none"`, wantTools: "[" + otherTools + "]", wantChoice: `"none"`},
+		{name: "namespace search only", tools: searchNamespace, choice: `"required"`, wantTools: `[]`, wantChoice: `"auto"`},
+		{name: "namespace with supported member", tools: mixedNamespace, choice: `"required"`, wantTools: "[" + functionNamespace + "]", wantChoice: `"required"`},
+		{name: "allowed removed namespace", tools: searchNamespace + "," + function, choice: `{"type":"allowed_tools","tools":[{"type":"namespace","name":"discovery"}]}`, wantTools: "[" + function + "]", wantChoice: `"auto"`},
+		{name: "mixed allowed namespaces", tools: searchNamespace + "," + mixedNamespace, choice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"namespace","name":"discovery"},{"type":"namespace","name":"workspace"}]}`, wantTools: "[" + functionNamespace + "]", wantChoice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"namespace","name":"workspace"}]}`},
+		{name: "deeper namespace", tools: `{"type":"namespace","name":"outer","tools":[` + mixedNamespace + `]}`, wantTools: `[{"type":"namespace","name":"outer","tools":[` + functionNamespace + `]}]`},
 	}
 	for _, mode := range []string{"non-streaming", "streaming"} {
 		for _, tt := range tests {
@@ -162,7 +170,7 @@ func TestKimiExecutorResponsesFiltersUnsupportedToolSearch(t *testing.T) {
 						t.Errorf("upstream path = %q, want native Responses", req.URL.Path)
 					}
 					// Reproduce the provider's rejection without a live Kimi account.
-					if gjson.GetBytes(upstreamBody, `tools.#(type=="tool_search")`).Exists() {
+					if kimiTestContainsToolSearch(gjson.GetBytes(upstreamBody, "tools")) {
 						return &http.Response{
 							StatusCode: http.StatusBadRequest,
 							Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -218,6 +226,15 @@ func TestKimiExecutorResponsesFiltersUnsupportedToolSearch(t *testing.T) {
 			})
 		}
 	}
+}
+
+func kimiTestContainsToolSearch(tools gjson.Result) bool {
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() == "tool_search" || (tool.Get("type").String() == "namespace" && kimiTestContainsToolSearch(tool.Get("tools"))) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestKimiExecutorResponsesStreamPassthrough(t *testing.T) {

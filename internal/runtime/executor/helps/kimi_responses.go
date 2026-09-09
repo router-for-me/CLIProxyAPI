@@ -17,17 +17,21 @@ func NormalizeKimiResponsesTools(body []byte) []byte {
 	if !tools.IsArray() {
 		return body
 	}
-	removed := false
-	var kept []string
-	for _, tool := range tools.Array() {
-		if tool.Get("type").String() == "tool_search" {
-			removed = true
-			continue
-		}
-		kept = append(kept, tool.Raw)
-	}
+	kept, removed := filterKimiToolSearchDeclarations(tools.Array())
 	if !removed {
 		return body
+	}
+	removedNamespaces := make(map[string]bool)
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() == "namespace" {
+			removedNamespaces[tool.Get("name").String()] = true
+		}
+	}
+	for _, raw := range kept {
+		tool := gjson.Parse(raw)
+		if tool.Get("type").String() == "namespace" {
+			delete(removedNamespaces, tool.Get("name").String())
+		}
 	}
 	out, errSet := sjson.SetRawBytes(body, "tools", JoinRawJSONStrings(kept))
 	if errSet != nil {
@@ -39,7 +43,7 @@ func NormalizeKimiResponsesTools(body []byte) []byte {
 	if choice.Get("type").String() == "allowed_tools" && choice.Get("tools").IsArray() {
 		var allowed []string
 		for _, tool := range choice.Get("tools").Array() {
-			if tool.Get("type").String() != "tool_search" {
+			if tool.Get("type").String() != "tool_search" && !(tool.Get("type").String() == "namespace" && removedNamespaces[tool.Get("name").String()]) {
 				allowed = append(allowed, tool.Raw)
 			}
 		}
@@ -57,6 +61,33 @@ func NormalizeKimiResponsesTools(body []byte) []byte {
 		}
 	}
 	return out
+}
+
+func filterKimiToolSearchDeclarations(tools []gjson.Result) ([]string, bool) {
+	var kept []string
+	removed := false
+	for _, tool := range tools {
+		if tool.Get("type").String() == "tool_search" {
+			removed = true
+			continue
+		}
+		raw := tool.Raw
+		if tool.Get("type").String() == "namespace" && tool.Get("tools").IsArray() {
+			members, removedMembers := filterKimiToolSearchDeclarations(tool.Get("tools").Array())
+			if removedMembers {
+				if len(members) == 0 {
+					removed = true
+					continue
+				}
+				if updated, errMembers := sjson.SetRaw(raw, "tools", string(JoinRawJSONStrings(members))); errMembers == nil {
+					raw = updated
+					removed = true
+				}
+			}
+		}
+		kept = append(kept, raw)
+	}
+	return kept, removed
 }
 
 func normalizeKimiResponsesToolSearchHistory(body []byte) []byte {

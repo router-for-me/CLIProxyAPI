@@ -1148,6 +1148,13 @@ func normalizeKimiToolList(body []byte, arrayKey string, isTools bool) []byte {
 	var updatedItems []string
 	for _, item := range arr {
 		itemRaw := item.Raw
+		if isTools && item.Get("type").String() == "namespace" {
+			normalized := normalizeKimiToolList([]byte(itemRaw), "tools", true)
+			if string(normalized) != itemRaw {
+				itemRaw = string(normalized)
+				changed = true
+			}
+		}
 		var paramPath string
 		if isTools && item.Get("function.parameters").Exists() {
 			paramPath = "function.parameters"
