@@ -37,9 +37,9 @@ func TestStoresRestoreAccountProxyBeforeWatcherStarts(t *testing.T) {
 				if test.present {
 					metadata["proxy_url"] = test.value
 				}
-				payload, err := json.Marshal(metadata)
-				if err != nil {
-					t.Fatal(err)
+				payload, errMarshal := json.Marshal(metadata)
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
 				}
 				dir := t.TempDir()
 				var store cliproxyauth.Store
@@ -49,26 +49,30 @@ func TestStoresRestoreAccountProxyBeforeWatcherStarts(t *testing.T) {
 					gitStore := NewGitTokenStore(remote, "", "", "main")
 					dir = filepath.Join(dir, "workspace", "auths")
 					gitStore.SetBaseDir(dir)
-					if err := gitStore.EnsureRepository(); err != nil {
-						t.Fatal(err)
+					if errEnsure := gitStore.EnsureRepository(); errEnsure != nil {
+						t.Fatal(errEnsure)
 					}
 					store = gitStore
 				case "object":
 					store = &ObjectTokenStore{authDir: dir}
 				case "postgres":
 					db := sql.OpenDB(&authProxyTestConnector{payload: string(payload)})
-					t.Cleanup(func() { _ = db.Close() })
+					t.Cleanup(func() {
+						if errClose := db.Close(); errClose != nil {
+							t.Errorf("close fixture database: %v", errClose)
+						}
+					})
 					store = &PostgresStore{db: db, authDir: dir, cfg: PostgresStoreConfig{AuthTable: "auth_store"}}
 				}
 				if backend != "postgres" {
-					if err := os.WriteFile(filepath.Join(dir, "account.json"), payload, 0o600); err != nil {
-						t.Fatal(err)
+					if errWrite := os.WriteFile(filepath.Join(dir, "account.json"), payload, 0o600); errWrite != nil {
+						t.Fatal(errWrite)
 					}
 				}
 				manager := cliproxyauth.NewManager(store, nil, nil)
 				defer manager.StopAutoRefresh()
-				if err := manager.Load(context.Background()); err != nil {
-					t.Fatal(err)
+				if errLoad := manager.Load(context.Background()); errLoad != nil {
+					t.Fatal(errLoad)
 				}
 				auth, ok := manager.GetByID("account.json")
 				if !ok {
