@@ -762,6 +762,10 @@ type OpenAICompatibilityModel struct {
 	// Default false keeps the normal signature validation behavior.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 
+	// UseMaxCompletionTokens renames max_tokens for this model's Chat Completions requests.
+	// The request's value is preserved; an explicit max_completion_tokens takes precedence.
+	UseMaxCompletionTokens bool `yaml:"use-max-completion-tokens,omitempty" json:"use-max-completion-tokens,omitempty"`
+
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
