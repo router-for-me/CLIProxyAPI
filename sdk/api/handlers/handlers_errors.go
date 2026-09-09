@@ -36,8 +36,8 @@ func isAuthSelectionUnavailable(err error) bool {
 }
 
 func enrichAuthSelectionError(err error, providers []string, model string) error {
-	if err == nil {
-		return nil
+	if err == nil || coreauth.IsUpstreamAuthenticationRequired(err) {
+		return err
 	}
 
 	type modelCooldownMarker interface {

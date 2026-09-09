@@ -546,6 +546,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		lastCandidateErr := latestCandidateErrorForModel(auths, func(candidate *Auth) string {
 			return m.selectionModelForAuth(candidate, routeModel)
 		})
+		if allAuthsRequireReauthentication(auths, now) {
+			return nil, newUpstreamAuthenticationRequiredError(lastCandidateErr)
+		}
 
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
@@ -1242,7 +1245,7 @@ func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, o
 }
 
 func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts cliproxyexecutor.Options, err error, attempt int, providers []string, model string, maxWait time.Duration, homeRetryLimit int, defaultRequestRetry int, attempted map[string]struct{}) (time.Duration, bool) {
-	if err == nil {
+	if err == nil || IsUpstreamAuthenticationRequired(err) {
 		return 0, false
 	}
 	var homeBusy *HomeConcurrencyBusyError
