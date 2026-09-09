@@ -584,6 +584,11 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			return
 		}
 
+		if c.Query("capabilities") == "true" {
+			openaiHandler.OpenAIModels(c)
+			return
+		}
+
 		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
 			s.handleHomeModels(c)
 			return

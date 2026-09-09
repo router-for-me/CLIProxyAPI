@@ -27,6 +27,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	claudeHandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
+	openaiHandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -2255,6 +2257,39 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
 		}
+	}
+}
+
+func TestModelsCapabilitiesUsesLocalProviderRegistryWhenHomeEnabled(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	const clientID = "test-home-capability-catalog"
+	modelRegistry.RegisterClient(clientID, "factory", []*registry.ModelInfo{{
+		ID:                  "factory/home-capability-test",
+		ContextLength:       1050000,
+		MaxCompletionTokens: 128000,
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+
+	rr := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rr)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models?capabilities=true", nil)
+	server.unifiedModelsHandler(&openaiHandlers.OpenAIAPIHandler{}, &claudeHandlers.ClaudeCodeAPIHandler{})(ctx)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Object        string `json:"object"`
+		SchemaVersion int    `json:"schema_version"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Object != "model_capability_list" || response.SchemaVersion != 1 {
+		t.Fatalf("response = %#v body=%s", response, rr.Body.String())
 	}
 }
 

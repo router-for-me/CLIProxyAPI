@@ -156,6 +156,83 @@ func TestGetAvailableModelsIncludesMaxContextLengthOverride(t *testing.T) {
 	}
 }
 
+func TestGetAvailableModelCapabilitiesKeepsProviderSpecificMetadata(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("factory-client", "factory", []*ModelInfo{{
+		ID:                        "shared-model",
+		ContextLength:             1050000,
+		MaxCompletionTokens:       128000,
+		SupportedParameters:       []string{"max_output_tokens", "tools"},
+		UnsupportedParameters:     []string{"temperature", "top_p"},
+		SupportedInputModalities:  []string{"TEXT", "IMAGE"},
+		SupportedOutputModalities: []string{"TEXT"},
+		Thinking:                  &ThinkingSupport{Levels: []string{"low", "HIGH"}},
+	}})
+	r.RegisterClient("cursor-client", "cursor", []*ModelInfo{{
+		ID:                        "shared-model",
+		ContextLength:             256000,
+		MaxCompletionTokens:       64000,
+		SupportedParameters:       []string{},
+		UnsupportedParameters:     []string{},
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"text"},
+	}})
+
+	models := r.GetAvailableModelCapabilities()
+	if len(models) != 2 {
+		t.Fatalf("GetAvailableModelCapabilities() returned %d rows, want 2: %#v", len(models), models)
+	}
+
+	byProvider := make(map[string]ModelCapability, len(models))
+	for _, model := range models {
+		byProvider[model.Provider] = model
+	}
+	factory := byProvider["factory"]
+	if factory.ID != "shared-model" {
+		t.Fatalf("factory row = %#v, want factory/shared-model", factory)
+	}
+	if factory.ContextWindow == nil || *factory.ContextWindow != 1050000 {
+		t.Fatalf("factory context_window = %#v, want 1050000", factory.ContextWindow)
+	}
+	if factory.MaxOutputTokens == nil || *factory.MaxOutputTokens != 128000 {
+		t.Fatalf("factory max_output_tokens = %#v, want 128000", factory.MaxOutputTokens)
+	}
+	if got := factory.UnsupportedParameters; len(got) != 2 || got[0] != "temperature" || got[1] != "top_p" {
+		t.Fatalf("factory unsupported_parameters = %#v", got)
+	}
+	if got := factory.InputModalities; len(got) != 2 || got[0] != "text" || got[1] != "image" {
+		t.Fatalf("factory input_modalities = %#v", got)
+	}
+	if factory.Reasoning == nil || len(factory.Reasoning.Levels) != 2 || factory.Reasoning.Levels[1] != "high" {
+		t.Fatalf("factory reasoning = %#v", factory.Reasoning)
+	}
+
+	cursor := byProvider["cursor"]
+	if cursor.Provider != "cursor" || cursor.ContextWindow == nil || *cursor.ContextWindow != 256000 {
+		t.Fatalf("second row = %#v, want cursor-specific metadata", cursor)
+	}
+	if cursor.Reasoning != nil {
+		t.Fatalf("cursor reasoning = %#v, want nil (unknown)", cursor.Reasoning)
+	}
+	if cursor.SupportedParameters == nil || cursor.UnsupportedParameters == nil {
+		t.Fatalf("known empty parameter lists must remain [], got supported=%#v unsupported=%#v", cursor.SupportedParameters, cursor.UnsupportedParameters)
+	}
+}
+
+func TestGetAvailableModelCapabilitiesUsesNullForUnknownValues(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("unknown-client", "unknown-provider", []*ModelInfo{{ID: "unknown-model"}})
+
+	models := r.GetAvailableModelCapabilities()
+	if len(models) != 1 {
+		t.Fatalf("GetAvailableModelCapabilities() returned %d rows, want 1", len(models))
+	}
+	model := models[0]
+	if model.ContextWindow != nil || model.MaxOutputTokens != nil || model.InputModalities != nil || model.OutputModalities != nil || model.SupportedParameters != nil || model.UnsupportedParameters != nil || model.Reasoning != nil {
+		t.Fatalf("unknown capability fields must remain nil: %#v", model)
+	}
+}
+
 func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	first := LookupModelInfo("claude-sonnet-4-6")
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {

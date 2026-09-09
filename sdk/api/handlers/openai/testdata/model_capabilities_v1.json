@@ -1,0 +1,57 @@
+{
+  "object": "model_capability_list",
+  "schema_version": 1,
+  "data": [
+    {
+      "id": "factory/gpt-5.6-luna",
+      "provider": "factory",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": ["text", "image"],
+      "output_modalities": ["text"],
+      "reasoning": {
+        "supported": true,
+        "levels": ["none", "low", "medium", "high", "xhigh", "max"],
+        "min_tokens": null,
+        "max_tokens": null,
+        "zero_allowed": false,
+        "dynamic_allowed": false
+      },
+      "supported_parameters": ["max_output_tokens", "stream", "tools"],
+      "unsupported_parameters": ["temperature", "top_p"]
+    },
+    {
+      "id": "shared/example-model",
+      "provider": "provider-a",
+      "context_window": 200000,
+      "max_output_tokens": 32000,
+      "input_modalities": ["text"],
+      "output_modalities": ["text"],
+      "reasoning": null,
+      "supported_parameters": [],
+      "unsupported_parameters": []
+    },
+    {
+      "id": "shared/example-model",
+      "provider": "provider-b",
+      "context_window": 128000,
+      "max_output_tokens": 16000,
+      "input_modalities": ["text", "image"],
+      "output_modalities": ["text"],
+      "reasoning": null,
+      "supported_parameters": [],
+      "unsupported_parameters": []
+    },
+    {
+      "id": "unknown/example-model",
+      "provider": "unknown-provider",
+      "context_window": null,
+      "max_output_tokens": null,
+      "input_modalities": null,
+      "output_modalities": null,
+      "reasoning": null,
+      "supported_parameters": null,
+      "unsupported_parameters": null
+    }
+  ]
+}

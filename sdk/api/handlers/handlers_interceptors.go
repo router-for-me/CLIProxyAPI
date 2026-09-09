@@ -492,11 +492,23 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 }
 
 func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCapture, requestID, skipPluginID string) coreexecutor.RequestAfterAuthInterceptor {
-	if !requestInterceptorsEnabled(h.interceptorHost()) {
-		return nil
-	}
 	return func(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest) coreexecutor.RequestAfterAuthInterceptResponse {
-		resp := h.applyRequestInterceptorsAfterAuth(ctx, req, requestID, skipPluginID)
+		resp := coreexecutor.RequestAfterAuthInterceptResponse{}
+		if requestInterceptorsEnabled(h.interceptorHost()) {
+			resp = h.applyRequestInterceptorsAfterAuth(ctx, req, requestID, skipPluginID)
+		}
+		if !resp.Terminate {
+			policyReq := req
+			if len(resp.Body) > 0 {
+				policyReq.Body = cloneBytes(resp.Body)
+			}
+			policyResp := applyModelCapabilityPolicy(policyReq)
+			if policyResp.Terminate {
+				resp = policyResp
+			} else if len(policyResp.Body) > 0 {
+				resp.Body = policyResp.Body
+			}
+		}
 		if capture != nil {
 			capture.record(req, resp)
 		}

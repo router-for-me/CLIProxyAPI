@@ -64,6 +64,14 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		c.JSON(http.StatusOK, h.codexClientModelsResponse(clientVersion))
 		return
 	}
+	if c.Query("capabilities") == "true" {
+		c.JSON(http.StatusOK, gin.H{
+			"object":         "model_capability_list",
+			"schema_version": 1,
+			"data":           registry.GetGlobalRegistry().GetAvailableModelCapabilities(),
+		})
+		return
+	}
 
 	// Get all available models
 	allModels := h.Models()
