@@ -7,14 +7,15 @@ import (
 )
 
 const (
-	codexBuiltinImage15ModelID    = "gpt-image-1.5"
-	codexBuiltinImageModelID      = "gpt-image-2"
-	xaiBuiltinImageModelID        = "grok-imagine-image"
-	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
-	xaiBuiltinImage20ModelID      = "grok-imagine-image-2.0"
-	xaiBuiltinVideoModelID        = "grok-imagine-video"
-	xaiBuiltinVideo15ModelID      = "grok-imagine-video-1.5"
-	xaiBuiltinVideo15PreviewID    = "grok-imagine-video-1.5-preview"
+	codexBuiltinImage15ModelID     = "gpt-image-1.5"
+	codexBuiltinImageModelID       = "gpt-image-2"
+	xaiBuiltinImageModelID         = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID  = "grok-imagine-image-quality"
+	xaiBuiltinImage20ModelID       = "grok-imagine-image-2.0"
+	xaiBuiltinVideoModelID         = "grok-imagine-video"
+	xaiBuiltinVideo15ModelID       = "grok-imagine-video-1.5"
+	xaiBuiltinVideo15PreviewID     = "grok-imagine-video-1.5-preview"
+	geminiInteractionsTranscribeID = "gemini-3.5-transcribe"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -40,6 +41,13 @@ func GetClaudeModels() []*ModelInfo {
 // GetGeminiModels returns the standard Gemini model definitions.
 func GetGeminiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Gemini)
+}
+
+// GetGeminiInteractionsModels returns the Gemini model definitions reachable through
+// the native Interactions API. It adds models that only answer on /v1beta/interactions
+// and therefore must not be offered to plain generateContent credentials.
+func GetGeminiInteractionsModels() []*ModelInfo {
+	return WithGeminiInteractionsBuiltins(cloneModelInfos(getModels().Gemini))
 }
 
 // GetGeminiVertexModels returns Gemini model definitions for Vertex AI.
@@ -123,6 +131,38 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+}
+
+// WithGeminiInteractionsBuiltins injects hard-coded Interactions-only Gemini model
+// definitions that should not depend on remote models.json updates. Built-ins replace
+// any matching IDs already present in the provided slice.
+func WithGeminiInteractionsBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, geminiInteractionsTranscribeModelInfo())
+}
+
+// geminiInteractionsTranscribeModelInfo describes Gemini 3.5 Transcribe. The model lists
+// generateContent among its supported generation methods, but that surface returns a
+// candidate with no parts: transcripts are only produced through the Interactions API,
+// so the model is registered for the interactions channel alone.
+func geminiInteractionsTranscribeModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                         geminiInteractionsTranscribeID,
+		Object:                     "model",
+		Created:                    1785542400, // 2026-08-01
+		OwnedBy:                    "google",
+		Type:                       "gemini",
+		DisplayName:                "Gemini 3.5 Transcribe",
+		Name:                       geminiInteractionsTranscribeID,
+		Version:                    "3.5-transcribe-08-2026",
+		Description:                "Speech-to-text model with language detection, speaker diarization and word timestamps.",
+		InputTokenLimit:            98304,
+		OutputTokenLimit:           32768,
+		SupportedGenerationMethods: []string{"generateContent", "countTokens"},
+		ContextLength:              98304,
+		MaxCompletionTokens:        32768,
+		SupportedInputModalities:   []string{"text", "audio"},
+		SupportedOutputModalities:  []string{"text"},
+	}
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -314,7 +354,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "gemini":
 		return GetGeminiModels()
 	case "gemini-interactions":
-		return GetGeminiModels()
+		return GetGeminiInteractionsModels()
 	case "vertex":
 		return GetGeminiVertexModels()
 	case "aistudio":
