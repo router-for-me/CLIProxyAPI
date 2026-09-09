@@ -5,7 +5,43 @@ import (
 
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+// NormalizeKimiResponsesTools removes the unsupported tool_search declaration
+// from native Kimi Responses requests while preserving other tool types.
+func NormalizeKimiResponsesTools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return body
+	}
+	removed := false
+	var kept []string
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() == "tool_search" {
+			removed = true
+			continue
+		}
+		kept = append(kept, tool.Raw)
+	}
+	if !removed {
+		return body
+	}
+	out, errSet := sjson.SetRawBytes(body, "tools", JoinRawJSONStrings(kept))
+	if errSet != nil {
+		return body
+	}
+
+	// Do not force a removed tool, or require a tool when none remain.
+	choice := gjson.GetBytes(out, "tool_choice")
+	if choice.Get("type").String() == "tool_search" || (len(kept) == 0 && choice.String() == "required") {
+		if updated, errChoice := sjson.SetBytes(out, "tool_choice", "auto"); errChoice == nil {
+			out = updated
+		}
+	}
+	return out
+}
 
 // ResolveKimiResponsesURL resolves the upstream URL for Kimi Responses API requests.
 func ResolveKimiResponsesURL(auth *cliproxyauth.Auth) string {
