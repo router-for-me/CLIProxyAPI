@@ -325,9 +325,17 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 						metadata["region"] = region
 					}
 					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
-						if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
-							_, _ = file.Write(raw)
-							_ = file.Close()
+						tmpFile, errTemp := os.CreateTemp(filepath.Dir(path), ".auth-*.tmp")
+						if errTemp == nil {
+							tmpPath := tmpFile.Name()
+							_, errWrite := tmpFile.Write(raw)
+							errClose := tmpFile.Close()
+							if errWrite == nil && errClose == nil {
+								_ = os.Chmod(tmpPath, 0o600)
+								_ = os.Rename(tmpPath, path)
+							} else {
+								_ = os.Remove(tmpPath)
+							}
 						}
 					}
 				}

@@ -319,7 +319,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	if (resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) && clientID != antigravityauth.LegacyClientID {
 		// If current client fails with client mismatch, retry with legacy credentials
 		errMsg := strings.ToLower(string(bodyBytes))
-		if strings.Contains(errMsg, "unauthorized_client") || strings.Contains(errMsg, "invalid_client") {
+		if strings.Contains(errMsg, "unauthorized_client") || strings.Contains(errMsg, "invalid_client") || strings.Contains(errMsg, "invalid_grant") {
 			legacyForm := url.Values{}
 			legacyForm.Set("client_id", antigravityauth.LegacyClientID)
 			legacyForm.Set("client_secret", antigravityauth.LegacyClientSecret)

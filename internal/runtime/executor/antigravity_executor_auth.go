@@ -149,7 +149,12 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	auth.Metadata["timestamp"] = now.UnixMilli()
 	auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
 	auth.Metadata["type"] = antigravityAuthType
-	if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
+	// On refresh, periodically re-check license/project discovery if not an enterprise tier yet
+	if !isAntigravityEnterpriseTier(auth) {
+		if _, errFetch := e.fetchAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errFetch != nil {
+			log.Warnf("antigravity executor: refresh project id/tier check failed: %v", errFetch)
+		}
+	} else if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
 		log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
 	}
 	e.updateAntigravityCreditsBalance(ctx, auth, tokenResp.AccessToken)
@@ -248,6 +253,7 @@ func isOAuthClientMismatchError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unauthorized_client") ||
 		strings.Contains(msg, "invalid_client") ||
+		strings.Contains(msg, "invalid_grant") ||
 		strings.Contains(msg, "the oauth client was not found")
 }
 
