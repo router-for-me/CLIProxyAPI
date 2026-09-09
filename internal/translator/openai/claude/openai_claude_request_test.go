@@ -733,24 +733,37 @@ func TestConvertClaudeRequestToOpenAI_ToolResultTextAndImageContent(t *testing.T
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
-	if len(messages) != 2 {
-		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	toolContent := messages[1].Get("content")
-	if !toolContent.IsArray() {
-		t.Fatalf("Expected tool content array, got %s", toolContent.Raw)
+	// The tool message keeps only the textual payload; OpenAI drops image parts there.
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("Expected second message role %q, got %q", "tool", got)
 	}
-	if got := toolContent.Get("0.type").String(); got != "text" {
-		t.Fatalf("Expected first tool content type %q, got %q", "text", got)
+	if messages[1].Get("content").IsArray() {
+		t.Fatalf("Tool content must not be an array, got %s", messages[1].Get("content").Raw)
 	}
-	if got := toolContent.Get("0.text").String(); got != "tool ok" {
-		t.Fatalf("Expected first tool content text %q, got %q", "tool ok", got)
+	if got := messages[1].Get("content").String(); got != "tool ok" {
+		t.Fatalf("Expected tool content %q, got %q", "tool ok", got)
 	}
-	if got := toolContent.Get("1.type").String(); got != "image_url" {
-		t.Fatalf("Expected second tool content type %q, got %q", "image_url", got)
+
+	// The image is relayed as a user message directly after the tool result.
+	relay := messages[2]
+	if got := relay.Get("role").String(); got != "user" {
+		t.Fatalf("Expected relay message role %q, got %q", "user", got)
 	}
-	if got := toolContent.Get("1.image_url.url").String(); got != "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==" {
+	relayContent := relay.Get("content")
+	if !relayContent.IsArray() {
+		t.Fatalf("Expected relay content array, got %s", relayContent.Raw)
+	}
+	if got := relayContent.Get("0.text").String(); got != toolResultImageRelayNotice {
+		t.Fatalf("Expected relay notice %q, got %q", toolResultImageRelayNotice, got)
+	}
+	if got := relayContent.Get("1.type").String(); got != "image_url" {
+		t.Fatalf("Expected relay content type %q, got %q", "image_url", got)
+	}
+	if got := relayContent.Get("1.image_url.url").String(); got != "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==" {
 		t.Fatalf("Unexpected image_url: %q", got)
 	}
 }
@@ -788,19 +801,84 @@ func TestConvertClaudeRequestToOpenAI_ToolResultURLImageOnly(t *testing.T) {
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
-	if len(messages) != 2 {
-		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	toolContent := messages[1].Get("content")
-	if !toolContent.IsArray() {
-		t.Fatalf("Expected tool content array, got %s", toolContent.Raw)
+	// An image-only tool_result still needs a non-empty text payload on the tool message.
+	if got := messages[1].Get("content").String(); got != toolResultImagePlaceholder {
+		t.Fatalf("Expected tool content %q, got %q", toolResultImagePlaceholder, got)
 	}
-	if got := toolContent.Get("0.type").String(); got != "image_url" {
-		t.Fatalf("Expected tool content type %q, got %q", "image_url", got)
+
+	relayContent := messages[2].Get("content")
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected relay message role %q, got %q", "user", got)
 	}
-	if got := toolContent.Get("0.image_url.url").String(); got != "https://example.com/tool.png" {
+	if got := relayContent.Get("1.type").String(); got != "image_url" {
+		t.Fatalf("Expected relay content type %q, got %q", "image_url", got)
+	}
+	if got := relayContent.Get("1.image_url.url").String(); got != "https://example.com/tool.png" {
 		t.Fatalf("Unexpected image_url: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultImageMergesIntoUserText(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_1",
+						"content": [
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "iVBORw0KGgoAAAANSUhEUg=="
+								}
+							}
+						]
+					},
+					{"type": "text", "text": "What color?"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	// The relayed image joins the user text instead of adding a second user turn.
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected third message role %q, got %q", "user", got)
+	}
+
+	content := messages[2].Get("content")
+	if got := len(content.Array()); got != 3 {
+		t.Fatalf("Expected 3 user content parts, got %d: %s", got, content.Raw)
+	}
+	if got := content.Get("0.text").String(); got != toolResultImageRelayNotice {
+		t.Fatalf("Expected relay notice %q, got %q", toolResultImageRelayNotice, got)
+	}
+	if got := content.Get("1.type").String(); got != "image_url" {
+		t.Fatalf("Expected second part type %q, got %q", "image_url", got)
+	}
+	if got := content.Get("2.text").String(); got != "What color?" {
+		t.Fatalf("Expected trailing user text %q, got %q", "What color?", got)
 	}
 }
 
