@@ -46,6 +46,10 @@ func LogProviderStreamFailure(ctx context.Context, response *http.Response, body
 // LogIncompleteResponseStream records transport evidence without response text,
 // URLs, authorization headers or credentials. HTTP 200 alone is not success.
 func LogIncompleteResponseStream(ctx context.Context, response *http.Response, err error, startedAt time.Time) {
+	// A downstream cancellation does not establish an upstream transport failure.
+	if ctx.Err() != nil {
+		return
+	}
 	LogWithRequestID(ctx).WithFields(logrus.Fields{
 		"stream_end":            streamEndKind(ctx, err),
 		"upstream_status":       response.StatusCode,
