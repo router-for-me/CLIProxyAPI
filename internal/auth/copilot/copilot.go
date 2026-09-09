@@ -97,6 +97,10 @@ func (c *Client) request(ctx context.Context, method, endpoint, token string, fo
 		return fmt.Errorf("github-copilot: create request: %w", err)
 	}
 	SetHeaders(req.Header)
+	if endpoint == c.apiURL+"/user" {
+		// GitHub's account API rejects the version used by Copilot's internal APIs.
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	}
 	if token != "" {
 		if !strings.HasPrefix(token, "Bearer ") {
 			token = "token " + token

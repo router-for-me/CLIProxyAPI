@@ -187,10 +187,22 @@ func TestAccountIdentityAndQuota(t *testing.T) {
 		}
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/copilot_internal/user"):
+			if got := r.Header.Get("X-GitHub-Api-Version"); got != "2025-04-01" {
+				t.Errorf("Copilot quota API version = %q, want 2025-04-01", got)
+			}
 			return response(`{"copilot_plan":"individual","quota_snapshots":{"premium_interactions":{"entitlement":300,"remaining":225,"percent_remaining":75}}}`), nil
 		case strings.HasSuffix(r.URL.Path, "/v2/token"):
+			if got := r.Header.Get("X-GitHub-Api-Version"); got != "2025-04-01" {
+				t.Errorf("Copilot token API version = %q, want 2025-04-01", got)
+			}
 			return response(fmt.Sprintf(`{"token":"short-lived","expires_at":%d}`, time.Now().Add(time.Hour).Unix())), nil
 		default:
+			// GitHub REST rejects the version used by Copilot's internal APIs.
+			if r.Header.Get("X-GitHub-Api-Version") != "2022-11-28" {
+				res := response(`{"message":"Bad Request","errors":"Unsupported X-GitHub-Api-Version","status":"400"}`)
+				res.StatusCode = http.StatusBadRequest
+				return res, nil
+			}
 			return response(`{"login":"octocat","id":42}`), nil
 		}
 	})
