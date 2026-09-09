@@ -56,6 +56,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	// Vertex ADC
+	out = append(out, s.synthesizeVertexADC(ctx)...)
 
 	return out, nil
 }
@@ -387,6 +389,72 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			out = append(out, a)
 		}
+	}
+	return out
+}
+
+// synthesizeVertexADC creates Auth entries for Vertex AI credentials backed by
+// Application Default Credentials (config: vertex-adc entries). No api_key
+// attribute and no service_account metadata are set, so the executor resolves
+// tokens via google.DefaultTokenSource — on GCE the metadata server, elsewhere
+// GOOGLE_APPLICATION_CREDENTIALS.
+//
+// Malformed entries are skipped, not errored: ValidateVertexADC rejects them
+// at load time, and returning an error here would discard every other
+// family's auths from the synthesis snapshot. No config_index attribute is
+// set: generic index resolvers (e.g. resolveConfigVertexCompatKey) would
+// cross-match a vertex-api-key entry at the same position and leak its model
+// catalog onto this credential.
+func (s *ConfigSynthesizer) synthesizeVertexADC(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.VertexADC))
+	for i := range cfg.VertexADC {
+		entry := &cfg.VertexADC[i]
+		projectID := strings.TrimSpace(entry.ProjectID)
+		if projectID == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		if prefix != "" && strings.Contains(prefix, "/") {
+			continue
+		}
+		location := strings.TrimSpace(entry.Location)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		id, token := idGen.Next("vertex:adc", projectID, location, proxyURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:vertex-adc[%s]", token),
+			"provider_key": "vertex",
+			// ADC authenticates with an OAuth bearer; AuthKind must agree so
+			// kind-scoped selection (SelectAuthByKind with AuthKindOAuth)
+			// does not skip the credential.
+			"auth_kind": coreauth.AuthKindOAuth,
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		addWeightToAttrs(entry.Weight, attrs)
+		metadata := map[string]any{
+			"project_id": projectID,
+			"adc":        true,
+		}
+		if location != "" {
+			metadata["location"] = location
+		}
+		out = append(out, &coreauth.Auth{
+			ID:         id,
+			Provider:   "vertex",
+			Label:      "vertex-adc",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		})
 	}
 	return out
 }

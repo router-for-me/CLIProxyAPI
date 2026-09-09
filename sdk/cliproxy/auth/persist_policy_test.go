@@ -91,3 +91,40 @@ func TestPersist_SkipsConfigAPIKeyAuth(t *testing.T) {
 		t.Fatalf("expected MarkResult to skip persist for config api key, got %d Save calls", got)
 	}
 }
+
+func TestConfigADCAuthIsNotPersisted(t *testing.T) {
+	store := &countingStore{}
+	mgr := NewManager(store, nil, nil)
+
+	adcAuth := &Auth{
+		ID:       "vertex-adc-1",
+		Provider: "vertex",
+		Attributes: map[string]string{
+			"source":       "config:vertex-adc[token]",
+			"provider_key": "vertex",
+		},
+		Metadata: map[string]any{"project_id": "proj-1", "adc": true},
+	}
+	if _, err := mgr.Register(context.Background(), adcAuth); err != nil {
+		t.Fatalf("Register(adc) returned error: %v", err)
+	}
+	if _, err := mgr.Update(context.Background(), adcAuth); err != nil {
+		t.Fatalf("Update(adc) returned error: %v", err)
+	}
+	if got := store.saveCount.Load(); got != 0 {
+		t.Fatalf("expected 0 Save calls for config vertex-adc auth, got %d", got)
+	}
+
+	nonConfigADC := &Auth{
+		ID:         "vertex-file-adc",
+		Provider:   "vertex",
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"project_id": "proj-2", "adc": true},
+	}
+	if _, err := mgr.Register(context.Background(), nonConfigADC); err != nil {
+		t.Fatalf("Register(non-config adc) returned error: %v", err)
+	}
+	if got := store.saveCount.Load(); got != 1 {
+		t.Fatalf("expected 1 Save call for non-config auth, got %d", got)
+	}
+}
