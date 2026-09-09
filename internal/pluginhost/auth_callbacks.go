@@ -326,6 +326,29 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 	if email, ok := metadata["email"].(string); ok && strings.TrimSpace(email) != "" {
 		label = strings.TrimSpace(email)
 	}
+	// Mirror the watcher's file synthesizer (synthesizeFileAuths): both
+	// "prefix" and "disabled" are part of the physical auth-file contract, so
+	// rebuilding the in-memory auth from the file payload must carry them over.
+	// Without this, every host.auth.save from a plugin drops Prefix and the
+	// model registry loses the "<provider>/<model>" IDs until the watcher
+	// re-synthesizes the file (and re-flips Disabled back to active).
+	prefix := ""
+	prefixKeyPresent := false
+	if rawPrefix, ok := metadata["prefix"]; ok {
+		prefixKeyPresent = true
+		if rawString, okString := rawPrefix.(string); okString {
+			trimmed := strings.TrimSpace(rawString)
+			trimmed = strings.Trim(trimmed, "/")
+			if trimmed != "" && !strings.Contains(trimmed, "/") {
+				prefix = trimmed
+			}
+		}
+	}
+	disabled, _ := metadata["disabled"].(bool)
+	status := coreauth.StatusActive
+	if disabled {
+		status = coreauth.StatusDisabled
+	}
 	authID := h.authIDForPath(path)
 	if authID == "" {
 		authID = path
@@ -335,7 +358,9 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 		Provider: provider,
 		FileName: filepath.Base(path),
 		Label:    label,
-		Status:   coreauth.StatusActive,
+		Prefix:   prefix,
+		Status:   status,
+		Disabled: disabled,
 		Attributes: map[string]string{
 			"path":   path,
 			"source": path,
@@ -350,6 +375,15 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRetryAfter = existing.NextRetryAfter
 			auth.Runtime = existing.Runtime
+			// Manager.Update replaces the whole record, so a payload written
+			// before the "prefix" field existed (key absent) must inherit the
+			// live Prefix — otherwise the model registry silently loses every
+			// "<prefix>/<model>" ID this auth had registered. An explicitly
+			// present key stays authoritative, even when it normalizes to
+			// empty (that is how a prefix gets removed).
+			if !prefixKeyPresent {
+				auth.Prefix = existing.Prefix
+			}
 		}
 	}
 	if errWeight := coreauth.ValidateAuthWeight(auth); errWeight != nil {
