@@ -406,8 +406,8 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
-	body = normalizeKimiTools(body)
 	body = helps.NormalizeKimiResponsesTools(body)
+	body = normalizeKimiTools(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiResponsesURL(auth)
@@ -515,8 +515,8 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
-	body = normalizeKimiTools(body)
 	body = helps.NormalizeKimiResponsesTools(body)
+	body = normalizeKimiTools(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiResponsesURL(auth)
