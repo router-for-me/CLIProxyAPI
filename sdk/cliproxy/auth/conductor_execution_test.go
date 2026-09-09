@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 // TestRoutingKeyFromAuth covers the new routing-key helper that lets the
@@ -144,6 +145,8 @@ func TestExecutorKeyFromRoutingKey(t *testing.T) {
 		{"compound gemini key with whitespace", "  GEMINI:7  ", "gemini"},
 		{"compound vertex key", "vertex:11", "vertex"},
 		{"compound interactions key", "gemini-interactions:5", "gemini-interactions"},
+		{"compound opencode-go key", "opencode-go:9", "opencode-go"},
+		{"compound opencode-go key with whitespace", "  OpenCode-Go:12  ", "opencode-go"},
 		{"colon in openai-compat provider name is preserved", "openai-compatible-foo:bar", "openai-compatible-foo:bar"},
 		{"colon in custom provider key is preserved", "custom:row", "custom:row"},
 		{"nonnumeric built-in prefix is preserved", "claude:plugin", "claude:plugin"},
@@ -539,5 +542,62 @@ func TestManagerLiveProviderKeysForModelIncludesClaudeEntryKey(t *testing.T) {
 	}
 	if !slices.Contains(got, "claude:42:key-7") {
 		t.Fatalf("LiveProviderKeysForModel() = %v, want entry-level pin \"claude:42:key-7\"", got)
+	}
+}
+
+// TestManagerExecute_OpencodeGoCompoundRoutingKey reproduces the
+// "auth_not_found: no auth available" failure of the management probe
+// (POST /v0/management/upstream-providers/:id/test) against an opencode-go
+// upstream row. The probe resolves the row's canonical routing key
+// ("opencode-go:<rowID>", util.UpstreamProviderKey) and pins the live auth
+// before calling authManager.Execute — the exact path live traffic takes
+// through per-model routes. executorKeyFromRoutingKey must translate the
+// compound key back to the bare "opencode-go" channel so the registered
+// OpenCodeGoExecutor is found; before the fix the channel was missing from
+// the compound-key whitelist, so the executor lookup failed and the
+// fast-path selection returned auth_not_found with zero candidates.
+func TestManagerExecute_OpencodeGoCompoundRoutingKey(t *testing.T) {
+	t.Parallel()
+	const (
+		routingKey = "opencode-go:9"
+		model      = "grok-code"
+	)
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &aliasRoutingExecutor{id: "opencode-go"}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "opencode-go-row-auth",
+		Provider: "opencode-go",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"provider_key": routingKey,
+			"base_url":     "https://opencode.ai/zen/go/v1",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	// Mirror the live registry: the synthesizer registers the row's models
+	// under the auth id, and authSupportsRouteModel gates candidates on it.
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "opencode-go", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	resp, errExecute := manager.Execute(context.Background(), []string{routingKey},
+		cliproxyexecutor.Request{Model: model},
+		cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.PinnedAuthMetadataKey: auth.ID,
+			},
+		})
+	if errExecute != nil {
+		t.Fatalf("Execute(%q) error = %v, want success", routingKey, errExecute)
+	}
+	if string(resp.Payload) != model {
+		t.Fatalf("Execute payload = %q, want %q", string(resp.Payload), model)
 	}
 }
