@@ -42,6 +42,35 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
+func TestWithCodexBuiltinsIncludesImage25Models(t *testing.T) {
+	models := WithCodexBuiltins(nil)
+	want := map[string]string{
+		codexBuiltinImage25FlareModelID:    "GPT Image 2.5 Flare",
+		codexBuiltinImage25SunburstModelID: "GPT Image 2.5 Sunburst",
+	}
+
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		displayName, ok := want[model.ID]
+		if !ok {
+			continue
+		}
+		if model.Version != model.ID {
+			t.Errorf("model %s version = %q, want canonical ID", model.ID, model.Version)
+		}
+		if model.DisplayName != displayName {
+			t.Errorf("model %s display name = %q, want %q", model.ID, model.DisplayName, displayName)
+		}
+		delete(want, model.ID)
+	}
+
+	for modelID := range want {
+		t.Errorf("expected Codex builtin model %s", modelID)
+	}
+}
+
 func TestWithXAIBuiltinsIncludesImage20(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	for _, model := range models {
