@@ -339,9 +339,11 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 		if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
 			attr["email"] = email
 		}
+		proxyURL, _ := metadata["proxy_url"].(string)
 		auth := &cliproxyauth.Auth{
 			ID:               normalizeAuthID(id),
 			Provider:         provider,
+			ProxyURL:         proxyURL,
 			FileName:         normalizeAuthID(id),
 			Label:            labelFor(metadata),
 			Status:           cliproxyauth.StatusActive,
