@@ -69,7 +69,7 @@ func TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata(t *testing.T) {
 	t.Parallel()
 
 	catalog := []byte(`{"models":[
-		{"slug":"model-template","display_name":"Template","description":"Template model.","default_reasoning_level":"low","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"}],"service_tiers":[{"id":"priority"}],"priority":1},
+		{"slug":"model-template","display_name":"Template","description":"Template model.","default_reasoning_level":"low","supported_reasoning_levels":[{"effort":"minimal"},{"effort":"low"},{"effort":"medium"}],"service_tiers":[{"id":"priority"}],"priority":1},
 		{"slug":"gpt-5.5","display_name":"Default","description":"Default model.","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}],"service_tiers":[{"id":"priority"}],"priority":2}
 	]}`)
 	available := []map[string]any{
@@ -84,7 +84,7 @@ func TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata(t *testing.T) {
 		return &registry.ModelInfo{
 			Description: "Dynamic model.",
 			Thinking: &registry.ThinkingSupport{
-				Levels: []string{"none", "low", "medium", "high"},
+				Levels: []string{"none", "minimal", "low", "medium", "high"},
 			},
 		}
 	}
@@ -96,6 +96,9 @@ func TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata(t *testing.T) {
 	if got := models[0]; got.id != "model-template" || got.description != "Template model." || got.defaultReasoningEffort != "low" {
 		t.Fatalf("template model = %+v", got)
 	}
+	if got := strings.Join(models[0].reasoningEfforts, ","); got != "minimal,low,medium" {
+		t.Fatalf("template reasoning efforts = %q", got)
+	}
 	if got := strings.Join(models[0].serviceTiers, ","); got != "priority" {
 		t.Fatalf("template service tiers = %q, want priority", got)
 	}
@@ -103,7 +106,7 @@ func TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata(t *testing.T) {
 	if custom.id != "custom-model" || custom.description != "Dynamic model." {
 		t.Fatalf("custom model = %+v", custom)
 	}
-	if got := strings.Join(custom.reasoningEfforts, ","); got != "none,low,medium,high" {
+	if got := strings.Join(custom.reasoningEfforts, ","); got != "none,minimal,low,medium,high" {
 		t.Fatalf("custom reasoning efforts = %q", got)
 	}
 	if custom.defaultReasoningEffort != "medium" {
