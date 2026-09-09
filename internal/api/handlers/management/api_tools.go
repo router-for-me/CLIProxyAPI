@@ -172,6 +172,13 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to build request"})
 		return
 	}
+	if body.Data != "" {
+		payload := body.Data
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(payload)), nil
+		}
+		req.ContentLength = int64(len(payload))
+	}
 
 	for key, value := range reqHeaders {
 		if strings.EqualFold(key, "host") {
@@ -192,7 +199,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
+		c.JSON(http.StatusBadGateway, gin.H{"error": apiCallRequestFailedMessage(errDo)})
 		return
 	}
 	defer func() {
@@ -481,10 +488,20 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	return nil
 }
 
+func (h *Handler) maybeWrapProxyFallback(proxyStr string, transport http.RoundTripper) http.RoundTripper {
+	if transport == nil {
+		return nil
+	}
+	if h != nil && h.cfg != nil && h.cfg.ProxyFallbackDirect {
+		return wrapProxyDirectFallback(proxyStr, transport)
+	}
+	return transport
+}
+
 func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) http.RoundTripper {
 	if proxyStr := strings.TrimSpace(requestProxyURL); proxyStr != "" {
 		if transport := buildProxyTransport(proxyStr); transport != nil {
-			return transport
+			return h.maybeWrapProxyFallback(proxyStr, transport)
 		}
 		return directAPICallTransport()
 	}
@@ -508,7 +525,7 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) 
 
 	for _, proxyStr := range proxyCandidates {
 		if transport := buildProxyTransport(proxyStr); transport != nil {
-			return transport
+			return h.maybeWrapProxyFallback(proxyStr, transport)
 		}
 	}
 
