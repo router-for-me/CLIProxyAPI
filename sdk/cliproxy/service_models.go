@@ -144,6 +144,18 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "opencode-go":
+		// Per-row model catalog: resolve the row through cfg.OpenCodeGo using
+		// the same config_index contract as the other built-in channels. The
+		// auth MUST NOT fall into the OpenAI-compat default branch — its
+		// provider_key attribute would flag isCompatAuth there and
+		// configEntryForAuthIndex would index cfg.OpenAICompatibility with an
+		// OpenCodeGo index, registering another row's models under this auth.
+		if entry := s.resolveConfigOpenCodeGo(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildOpenCodeGoConfigModels(entry)
+			}
+		}
 	case "xai":
 		models = registry.GetXAIModels()
 		if entry := s.resolveConfigXAIKey(a); entry != nil {
@@ -494,6 +506,30 @@ func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
 	return resolveConfigCodexStyleKey(auth, s.cfg.XAIKey, false)
 }
 
+// resolveConfigOpenCodeGo locates the opencode-go config row backing an
+// opencode-go auth. The config_index attribute (stamped by the synthesizer)
+// indexes cfg.OpenCodeGo; when it is missing or out of range, fall back to
+// matching the row's UpstreamProviderID and then base_url.
+func (s *Service) resolveConfigOpenCodeGo(auth *coreauth.Auth) *config.OpenCodeGo {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	if entry := configEntryForAuthIndex(auth, s.cfg.OpenCodeGo); entry != nil {
+		return entry
+	}
+	var attrBase string
+	if auth.Attributes != nil {
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.OpenCodeGo {
+		entry := &s.cfg.OpenCodeGo[i]
+		if attrBase != "" && strings.EqualFold(strings.TrimSpace(entry.BaseURL), attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
 func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {
 	if auth == nil {
 		return nil
@@ -816,6 +852,13 @@ func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "xai", "xai")
+}
+
+func buildOpenCodeGoConfigModels(entry *config.OpenCodeGo) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, entry.Name, "opencode-go")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
