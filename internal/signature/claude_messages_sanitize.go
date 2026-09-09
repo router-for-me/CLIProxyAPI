@@ -14,8 +14,9 @@ type ClaudeMessagesSignatureSanitizeOptions struct {
 	DropEmptyMessages             bool
 	DropToolSignatures            bool
 	DropEmptyThinkingPlaceholders bool
-	// PreserveEmptyThinkingBlocks preserves compatibility-mode thinking blocks
-	// together with their original signatures, including opaque signatures.
+	// PreserveEmptyThinkingBlocks keeps compatibility-mode thinking block shape
+	// (including the signature member). Incompatible or opaque signatures are
+	// still cleared; this flag does not bypass provider validation.
 	PreserveEmptyThinkingBlocks bool
 }
 
@@ -124,10 +125,53 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				continue
 			}
 
+			// Replay provenance is added only internally by the executor after the
+			// sanitizer has already run. Any client-supplied marker is untrusted and
+			// must be stripped so it cannot bypass signature validation.
+			if part.Get("_cliproxy_replay_provenance").Exists() {
+				updated, _ := sjson.Delete(part.Raw, "_cliproxy_replay_provenance")
+				part = gjson.Parse(updated)
+				messageModified = true
+			}
+
 			rawSignature := part.Get("signature").String()
 			if opts.PreserveEmptyThinkingBlocks {
-				report.Preserved++
-				keptParts = append(keptParts, part.Raw)
+				// In compat mode the block shape must survive, but the signature still
+				// needs to be normalized, emulated, or stripped to avoid sending an
+				// incompatible or opaque signature to the upstream.
+				decision := DecideSignatureCompatibilityForModel(targetProvider, opts.TargetModel, rawSignature, SignatureBlockKindClaudeThinking)
+				decision.Reason = fmt.Sprintf("messages[%d].content[%d]: %s", i, j, decision.Reason)
+				report.Decisions = append(report.Decisions, decision)
+
+				switch decision.Action {
+				case SignatureActionPreserve:
+					report.Preserved++
+					if decision.NormalizedSignature != "" && decision.NormalizedSignature != rawSignature {
+						updated, _ := sjson.Set(part.Raw, "signature", decision.NormalizedSignature)
+						keptParts = append(keptParts, updated)
+						messageModified = true
+					} else {
+						keptParts = append(keptParts, part.Raw)
+					}
+				case SignatureActionReplaceWithGeminiBypass:
+					report.ReplacedSignatures++
+					updated, _ := sjson.Set(part.Raw, "signature", decision.ReplacementSignature)
+					keptParts = append(keptParts, updated)
+					messageModified = true
+				default:
+					// DropBlock, DropSignature, or NoCompatibleReplacement: keep the
+					// block shape for the compat endpoint and preserve empty placeholders
+					// with their required signature member.
+					if isEmptyClaudeThinkingPlaceholder(part) {
+						report.Preserved++
+						keptParts = append(keptParts, part.Raw)
+					} else {
+						report.DroppedSignatures++
+						updated, _ := sjson.Set(part.Raw, "signature", "")
+						keptParts = append(keptParts, updated)
+					}
+					messageModified = true
+				}
 				continue
 			}
 			if targetProvider == SignatureProviderClaude && isEmptyClaudeThinkingPlaceholder(part) && !opts.DropEmptyThinkingPlaceholders {
