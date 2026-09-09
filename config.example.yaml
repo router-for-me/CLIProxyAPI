@@ -141,6 +141,23 @@ force-model-prefix: false
 # Default is false (disabled).
 passthrough-headers: false
 
+# Optional credential subset routing via the X-Auth-Subset request header.
+# When enabled, a request may carry "X-Auth-Subset: <auth_index>,<auth_index>,..."
+# (the stable auth_index values surfaced by the management API) and selection is
+# narrowed to those credentials before the configured selector rotates and
+# fails over as usual. Disabled by default: with enabled=false, or without the
+# header, behavior is identical to an unpatched build.
+# empty-policy applies when every listed entry is unknown to the pool:
+#   fallback (default) - select from the full pool
+#   reject             - fail the request with HTTP 429
+# require-signature / signature-key reserve header signature verification and
+# are not enforced yet.
+# subset:
+#   enabled: false
+#   empty-policy: "fallback"
+#   require-signature: false
+#   signature-key: ""
+
 # Number of additional credential retry rounds after the first round exhausts
 # its eligible credentials. Round 0 is the initial round; round r only admits
 # credentials whose effective request-retry is at least r. Explicit non-negative

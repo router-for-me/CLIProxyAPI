@@ -58,6 +58,9 @@ type authSelectionEligibility struct {
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
+	// subsetAuthIDs, when non-nil, restricts selection to the listed auth IDs
+	// (X-Auth-Subset routing; see subset.go).
+	subsetAuthIDs map[string]struct{}
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -81,6 +84,7 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
+		eligibility.subsetAuthIDs = subsetAllowedAuthIDsFromContext(ctx)
 	}
 	return eligibility
 }
@@ -94,6 +98,11 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 	}
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
 		return false
+	}
+	if e.subsetAuthIDs != nil {
+		if _, ok := e.subsetAuthIDs[auth.ID]; !ok {
+			return false
+		}
 	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
 }
