@@ -8,6 +8,12 @@ CLIProxyAPI can forward those headers with its existing dynamic custom-header
 configuration. A `$Header-Name` value copies that incoming request header; when
 the client omits it, CLIProxyAPI omits the corresponding custom header.
 
+The session extractor also recognizes `X-Opencode-Session` as an explicit
+conversation identity for local affinity, using the same namespace as
+`X-Session-Affinity`. If both are supplied, the existing affinity header keeps
+precedence. This local recognition and upstream header forwarding are separate:
+configure the forwarding below so Go receives the original session signal.
+
 ## Chat Completions models
 
 Add the following provider to `config.yaml`, replacing the API key with your
