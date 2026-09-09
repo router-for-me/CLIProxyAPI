@@ -326,18 +326,20 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 							data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", partText)
 							appendEvent("content_block_delta", string(data))
 							params.HasContent = true
-						} else {
+						} else if partText != "" {
+							// Only close the active block when a text block actually follows.
+							// Closing it for an empty text part would advance the index while
+							// leaving ResponseType set, so the next event targets a block
+							// that was never started.
 							if params.ResponseType != 0 {
 								appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
 								params.ResponseIndex++
 							}
-							if partText != "" {
-								appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex))
-								data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", partText)
-								appendEvent("content_block_delta", string(data))
-								params.ResponseType = 1
-								params.HasContent = true
-							}
+							appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex))
+							data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", partText)
+							appendEvent("content_block_delta", string(data))
+							params.ResponseType = 1
+							params.HasContent = true
 						}
 					}
 					if partText != "" {

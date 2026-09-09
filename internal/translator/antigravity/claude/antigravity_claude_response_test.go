@@ -252,6 +252,54 @@ func testEmptyAntigravityResponse() []byte {
 	}`)
 }
 
+func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartKeepsThinkingBlockOpen(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	thinkingChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Thinking","thought":true}]}}],"responseId":"resp-1"}}`)
+	emptyTextChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]}}]}}`)
+	finishChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"thoughtsTokenCount":20,"totalTokenCount":120}}}`)
+
+	var param any
+	ctx := context.Background()
+	var output []byte
+	for _, chunk := range [][]byte{thinkingChunk, emptyTextChunk, finishChunk, []byte("[DONE]")} {
+		output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, chunk, &param), nil)...)
+	}
+	outputText := string(output)
+
+	started := map[int64]bool{}
+	stops := 0
+	currentEvent := ""
+	for _, line := range strings.Split(outputText, "\n") {
+		if strings.HasPrefix(line, "event: ") {
+			currentEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		index := gjson.Get(strings.TrimPrefix(line, "data: "), "index").Int()
+		switch currentEvent {
+		case "content_block_start":
+			started[index] = true
+		case "content_block_delta", "content_block_stop":
+			if !started[index] {
+				t.Fatalf("%s for index %d without content_block_start in:\n%s", currentEvent, index, outputText)
+			}
+			if currentEvent == "content_block_stop" {
+				stops++
+			}
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("content_block_stop count = %d, want 1 in:\n%s", stops, outputText)
+	}
+
+	messageDelta := sseDataForEvent(t, outputText, "message_delta")
+	if got := gjson.Get(messageDelta, "delta.stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, messageDelta)
+	}
+}
+
 func TestWebSearchResultsFromGrounding_DeduplicatesAndSkipsEmptyURLs(t *testing.T) {
 	groundingMetadata := gjson.Parse(`{
 		"groundingChunks": [
