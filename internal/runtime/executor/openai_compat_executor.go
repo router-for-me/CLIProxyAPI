@@ -40,8 +40,9 @@ const (
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
 type OpenAICompatExecutor struct {
-	provider string
-	cfg      *config.Config
+	provider       string
+	cfg            *config.Config
+	upstreamFormat sdktranslator.Format
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
@@ -103,8 +104,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
-	to := sdktranslator.FromString("openai")
-	endpoint := "/chat/completions"
+	to, endpoint := e.upstream()
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
@@ -135,7 +135,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			return resp, err
 		}
 	}
-	if opts.Alt == "responses/compact" {
+	if to == sdktranslator.FormatOpenAIResponse {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
 		}
@@ -322,7 +322,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
-	to := sdktranslator.FromString("openai")
+	to, endpoint := e.upstream()
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -352,10 +352,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	if to == sdktranslator.FormatOpenAI {
+		translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -480,6 +482,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				}
 			}
 
+			if to == sdktranslator.FormatOpenAIResponse && !isDone {
+				streamUsage.Observe(helps.ParseCodexUsage(dataPayload))
+			}
+			eventType := gjson.GetBytes(dataPayload, "type").String()
+			terminal := isDone || (to == sdktranslator.FormatOpenAIResponse && (eventType == "response.completed" || eventType == "response.incomplete"))
 			streamLine := append([]byte("data: "), dataPayload...)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
 			for i := range chunks {
@@ -490,7 +497,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					return true
 				}
 			}
-			if isDone {
+			if terminal {
 				seenDone = true
 				return true
 			}
@@ -501,7 +508,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			streamUsage.ObserveOpenAIStream(line)
+			if to == sdktranslator.FormatOpenAI {
+				streamUsage.ObserveOpenAIStream(line)
+			}
 			trimmedLine := bytes.TrimSpace(line)
 			if len(trimmedLine) == 0 {
 				if processFrame() {
@@ -542,7 +551,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		} else if !seenDone {
 			// Responses clients require an explicit terminal event. Treat a clean
 			// upstream EOF without [DONE] as a failed stream instead of completing it.
-			if responseFormat == sdktranslator.FormatOpenAIResponse {
+			if responseFormat == sdktranslator.FormatOpenAIResponse || to == sdktranslator.FormatOpenAIResponse {
 				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				reporter.PublishFailure(ctx, streamErr)
@@ -913,6 +922,13 @@ func (e *OpenAICompatExecutor) applyPromptCacheKey(ctx context.Context, auth *cl
 	}, "\x00")
 	promptCacheKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()
 	return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
+}
+
+func (e *OpenAICompatExecutor) upstream() (sdktranslator.Format, string) {
+	if e.upstreamFormat == sdktranslator.FormatOpenAIResponse {
+		return sdktranslator.FormatOpenAIResponse, "/responses"
+	}
+	return sdktranslator.FormatOpenAI, "/chat/completions"
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {

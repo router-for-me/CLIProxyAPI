@@ -25,6 +25,8 @@ const (
 
 // ModelInfo represents information about an available model
 type ModelInfo struct {
+	// UpstreamEndpoint selects the provider protocol for dynamically discovered models.
+	UpstreamEndpoint string `json:"-"`
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
 	// Object type for the model (typically "model")
