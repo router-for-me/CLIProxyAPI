@@ -35,6 +35,21 @@ func NormalizeKimiResponsesTools(body []byte) []byte {
 
 	// Do not force a removed tool, or require a tool when none remain.
 	choice := gjson.GetBytes(out, "tool_choice")
+	if choice.Get("type").String() == "allowed_tools" && choice.Get("tools").IsArray() {
+		var allowed []string
+		for _, tool := range choice.Get("tools").Array() {
+			if tool.Get("type").String() != "tool_search" {
+				allowed = append(allowed, tool.Raw)
+			}
+		}
+		if len(allowed) == 0 {
+			if updated, errChoice := sjson.SetBytes(out, "tool_choice", "auto"); errChoice == nil {
+				out = updated
+			}
+		} else if updated, errChoice := sjson.SetRawBytes(out, "tool_choice.tools", JoinRawJSONStrings(allowed)); errChoice == nil {
+			out = updated
+		}
+	}
 	if choice.Get("type").String() == "tool_search" || (len(kept) == 0 && choice.String() == "required") {
 		if updated, errChoice := sjson.SetBytes(out, "tool_choice", "auto"); errChoice == nil {
 			out = updated

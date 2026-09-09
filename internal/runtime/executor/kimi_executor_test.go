@@ -141,6 +141,10 @@ func TestKimiExecutorResponsesFiltersUnsupportedToolSearch(t *testing.T) {
 		{name: "required search only", tools: search, choice: `"required"`, wantTools: `[]`, wantChoice: `"auto"`},
 		{name: "required function remains", tools: search + "," + function, choice: `"required"`, wantTools: "[" + function + "]", wantChoice: `"required"`},
 		{name: "forced function remains", tools: search + "," + function, choice: `{"type":"function","name":"ping"}`, wantTools: "[" + function + "]", wantChoice: `{"type":"function","name":"ping"}`},
+		{name: "allowed search only", tools: search, choice: `{"type":"allowed_tools","tools":[{"type":"tool_search"}]}`, wantTools: `[]`, wantChoice: `"auto"`},
+		{name: "only removed choice allowed", tools: search + "," + function, choice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"tool_search"}]}`, wantTools: "[" + function + "]", wantChoice: `"auto"`},
+		{name: "mixed allowed choices", tools: search + "," + function, choice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"tool_search"},{"type":"function","name":"ping"}]}`, wantTools: "[" + function + "]", wantChoice: `{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"ping"}]}`},
+		{name: "supported allowed choice remains", tools: search + "," + function, choice: `{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"ping"}]}`, wantTools: "[" + function + "]", wantChoice: `{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"ping"}]}`},
 		{name: "supported tools unchanged", tools: otherTools, choice: `"none"`, wantTools: "[" + otherTools + "]", wantChoice: `"none"`},
 	}
 	for _, mode := range []string{"non-streaming", "streaming"} {
