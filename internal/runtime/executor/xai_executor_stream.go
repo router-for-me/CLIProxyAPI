@@ -13,6 +13,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -30,6 +31,12 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
 	if err != nil {
 		return nil, err
+	}
+
+	// Grok Build rejects top-level Responses metadata, including an empty object.
+	// Keep it intact for the official API path and in the original request context.
+	if !xaiUsingAPI(auth) {
+		prepared.body, _ = sjson.DeleteBytes(prepared.body, "metadata")
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)

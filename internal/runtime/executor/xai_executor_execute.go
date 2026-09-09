@@ -38,6 +38,12 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		return resp, err
 	}
 
+	// Grok Build rejects top-level Responses metadata, including an empty object.
+	// Keep it intact for the official API path and in the original request context.
+	if !xaiUsingAPI(auth) {
+		prepared.body, _ = sjson.DeleteBytes(prepared.body, "metadata")
+	}
+
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
