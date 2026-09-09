@@ -111,3 +111,32 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 		t.Fatalf("unknown model should not get Antigravity web search model, got %q", got)
 	}
 }
+
+func TestLookupStaticModelProviders(t *testing.T) {
+	// 1. Model present across multiple catalog sections (Claude and Antigravity)
+	providers := LookupStaticModelProviders("claude-sonnet-4-6")
+	hasClaude := false
+	hasAntigravity := false
+	for _, p := range providers {
+		if p == "claude" {
+			hasClaude = true
+		}
+		if p == "antigravity" {
+			hasAntigravity = true
+		}
+	}
+	if !hasClaude || !hasAntigravity {
+		t.Fatalf("LookupStaticModelProviders(claude-sonnet-4-6) = %v, want both claude and antigravity", providers)
+	}
+
+	// 2. Model in single section
+	antigravityOnly := LookupStaticModelProviders("gemini-3.7-flash-high")
+	if len(antigravityOnly) != 1 || antigravityOnly[0] != "antigravity" {
+		t.Fatalf("LookupStaticModelProviders(gemini-3.7-flash-high) = %v, want [antigravity]", antigravityOnly)
+	}
+
+	// 3. Unknown model
+	if unknown := LookupStaticModelProviders("non-existent-model"); len(unknown) != 0 {
+		t.Fatalf("LookupStaticModelProviders(non-existent-model) = %v, want empty", unknown)
+	}
+}

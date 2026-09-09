@@ -70,7 +70,46 @@ func GetProviderName(modelName string) []string {
 		return providers
 	}
 
+	for _, p := range InferredModelProviders(modelName) {
+		appendProvider(p)
+	}
 	return providers
+}
+
+// InferredModelProviders returns all static and heuristic providers capable of serving the model.
+func InferredModelProviders(modelName string) []string {
+	if providers := staticModelProviders(modelName); len(providers) > 0 {
+		return providers
+	}
+	return heuristicModelProviders(modelName)
+}
+
+func staticModelProviders(modelName string) []string {
+	return registry.LookupStaticModelProviders(modelName)
+}
+
+func heuristicModelProviders(modelName string) []string {
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	switch {
+	case strings.Contains(lower, "gemini"):
+		return []string{"gemini", "antigravity", "vertex", "aistudio"}
+	case strings.HasPrefix(lower, "claude"):
+		return []string{"claude"}
+	case strings.HasPrefix(lower, "gpt-") || strings.HasPrefix(lower, "chatgpt") ||
+		strings.HasPrefix(lower, "o1-") || lower == "o1" ||
+		strings.HasPrefix(lower, "o3-") || lower == "o3" ||
+		strings.HasPrefix(lower, "o4-") || lower == "o4" ||
+		strings.HasPrefix(lower, "codex") || strings.HasPrefix(lower, "text-embedding"):
+		return []string{"codex"}
+	case strings.HasPrefix(lower, "grok") || strings.HasPrefix(lower, "xai"):
+		return []string{"xai"}
+	case strings.HasPrefix(lower, "kimi") || strings.HasPrefix(lower, "moonshot"):
+		return []string{"kimi"}
+	case strings.HasPrefix(lower, "deepseek"):
+		return []string{"codex", "claude"}
+	default:
+		return nil
+	}
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.

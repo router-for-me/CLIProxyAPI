@@ -286,3 +286,18 @@ func TestExecuteImageWithAuthManager_AllowsImageOnlyModels(t *testing.T) {
 		})
 	}
 }
+
+func TestGetRequestDetails_RejectsOversizedModelNames(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	oversizedModel := strings.Repeat("a", 513)
+	_, _, errMsg := handler.getRequestDetails(oversizedModel)
+	if errMsg == nil {
+		t.Fatal("expected error for oversized model name, got nil")
+	}
+	if errMsg.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", errMsg.StatusCode)
+	}
+	if !strings.Contains(errMsg.Error.Error(), "exceeds maximum allowed length") {
+		t.Fatalf("error message = %q, want contains 'exceeds maximum allowed length'", errMsg.Error.Error())
+	}
+}
