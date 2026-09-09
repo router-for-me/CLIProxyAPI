@@ -821,6 +821,12 @@ nonstream-keepalive-interval: 0
 #       action: "stop"
 
 # Optional payload configuration
+# Model entries in all five rule kinds also accept auth-index and prefix selectors.
+# They match the selected credential on each execution attempt, including fallback.
+# Both are optional, exact and case-sensitive; when combined, both must match.
+# auth-index is the management API's auth_index (not an API key); rotating a key can change it.
+# prefix matches the credential's configured prefix, without requiring a prefixed client model.
+# SDK calls without a selected credential skip rules containing either selector.
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.
 #     - models:
@@ -847,6 +853,12 @@ nonstream-keepalive-interval: 0
 #         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
 #   override: # Override rules always set parameters, overwriting any existing values.
 #     - models:
+#         - name: "gpt-*"
+#           protocol: "codex"
+#           auth-index: "selected-auth-index" # optional: use the auth_index shown in /v0/management/auth-files
+#       params:
+#         service_tier: priority
+#     - models:
 #         - name: "gpt-5.4-fast"
 #           protocol: "codex"
 #         - name: "gpt-5.5-fast"
@@ -870,6 +882,12 @@ nonstream-keepalive-interval: 0
 #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
 #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
 #   filter: # Filter rules remove specified parameters from the payload.
+#     - models:
+#         - name: "gpt-*"
+#           protocol: "codex"
+#           prefix: "gateway-without-tool-search" # optional: selected credential's configured prefix
+#       params:
+#         - "tools.#(type==\"tool_search\")"
 #     - models:
 #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
 #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity

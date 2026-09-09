@@ -131,7 +131,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	translatedReq, body, err := e.translateRequest(ctx, req, opts, false)
+	translatedReq, body, err := e.translateRequest(ctx, auth, req, opts, false)
 	if err != nil {
 		return resp, err
 	}
@@ -203,7 +203,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	translatedReq, body, err := e.translateRequest(ctx, req, opts, true)
+	translatedReq, body, err := e.translateRequest(ctx, auth, req, opts, true)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +393,7 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 	countMetadata["action"] = "countTokens"
 	countReq.Metadata = countMetadata
 
-	_, body, err := e.translateRequest(ctx, countReq, opts, false)
+	_, body, err := e.translateRequest(ctx, auth, countReq, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -461,7 +461,7 @@ type translatedPayload struct {
 	toFormat sdktranslator.Format
 }
 
-func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) ([]byte, translatedPayload, error) {
+func (e *AIStudioExecutor) translateRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) ([]byte, translatedPayload, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat
@@ -480,7 +480,7 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 	payload = fixGeminiImageAspectRatio(baseModel, payload)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	payload = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", payload, originalTranslated, requestedModel, requestPath, opts.Headers)
+	payload = helps.ApplyPayloadConfigForAuth(e.cfg, auth, baseModel, to.String(), from.String(), "", payload, originalTranslated, requestedModel, requestPath, opts.Headers)
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.maxOutputTokens")
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseMimeType")
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseJsonSchema")
