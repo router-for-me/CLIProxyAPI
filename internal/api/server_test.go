@@ -51,6 +51,7 @@ type codexSearchCaptureExecutor struct {
 	refreshCalls int
 	httpCalls    int
 	countCalls   int
+	countPayload []byte
 	beforeReturn func()
 }
 
@@ -76,7 +77,10 @@ func (e *codexSearchCaptureExecutor) Refresh(_ context.Context, a *auth.Auth) (*
 
 func (e *codexSearchCaptureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	e.countCalls++
-	return coreexecutor.Response{Payload: []byte(`{"object":"response.input_tokens","input_tokens":7}`)}, nil
+	if len(e.countPayload) > 0 {
+		return coreexecutor.Response{Payload: e.countPayload}, nil
+	}
+	return coreexecutor.Response{Payload: []byte(`{"response":{"usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}`)}, nil
 }
 
 func (e *codexSearchCaptureExecutor) PrepareRequest(req *http.Request, a *auth.Auth) error {
@@ -661,6 +665,34 @@ func TestResponsesInputTokensRoute(t *testing.T) {
 	}
 	if got := strings.TrimSpace(rr.Body.String()); got != `{"object":"response.input_tokens","input_tokens":7}` {
 		t.Fatalf("body = %s", got)
+	}
+}
+
+func TestResponsesInputTokensRouteEstimatesPluginZeroCount(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{countPayload: []byte(`{"total_tokens":0}`)}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{ID: "input-token-estimate-auth", Provider: "codex", Status: auth.StatusActive}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential.ID) })
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/input_tokens", strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var body struct {
+		InputTokens int64 `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil || body.InputTokens == 0 {
+		t.Fatalf("input_tokens = 0, want a local estimate; body=%s", rr.Body.String())
 	}
 }
 
