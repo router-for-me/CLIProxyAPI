@@ -610,6 +610,9 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		}
 		clone := *model
 		clone.ID = trimmedPrefix + "/" + baseID
+		if strings.HasPrefix(clone.Name, "models/") {
+			clone.Name = "models/" + clone.ID
+		}
 		addModel(&clone)
 	}
 	return out

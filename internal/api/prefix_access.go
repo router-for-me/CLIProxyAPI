@@ -2,10 +2,12 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -35,6 +37,7 @@ func authorizePrefixRequest(c *gin.Context) bool {
 		}
 	}
 	model := ""
+	liveSession := path == "/v1/live" || path == "/v1/realtime" || path == "/v1/realtime/calls"
 	if strings.HasPrefix(path, "/v1beta/models/") {
 		model = strings.TrimPrefix(path, "/v1beta/models/")
 		model, _, _ = strings.Cut(model, ":")
@@ -53,23 +56,45 @@ func authorizePrefixRequest(c *gin.Context) bool {
 		mediaType, params, _ := mime.ParseMediaType(c.GetHeader("Content-Type"))
 		if mediaType == "multipart/form-data" {
 			reader := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+			modelSeen := false
 			for {
 				part, errPart := reader.NextPart()
-				if errPart != nil {
+				if errPart == io.EOF {
 					break
 				}
-				if part.FormName() == "model" {
-					value, errValue := io.ReadAll(io.LimitReader(part, 4096))
-					if errValue == nil {
-						model = string(value)
+				if errPart != nil {
+					c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid multipart body"})
+					return false
+				}
+				if (liveSession && part.FormName() == "session") || (!liveSession && part.FormName() == "model" && part.FileName() == "" && !modelSeen) {
+					value, errValue := io.ReadAll(part)
+					if errValue != nil {
+						_ = part.Close()
+						c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "failed to read multipart field"})
+						return false
 					}
+					model = strings.TrimSpace(string(value))
+					if liveSession {
+						model = prefixLiveModel(value)
+					}
+					modelSeen = true
 				}
 				_ = part.Close()
 			}
+		} else if mediaType == "application/x-www-form-urlencoded" {
+			form, errForm := url.ParseQuery(string(body))
+			if errForm != nil {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid form body"})
+				return false
+			}
+			model = strings.TrimSpace(form.Get("model"))
 		} else {
 			model = gjson.GetBytes(body, "model").String()
 			if model == "" {
 				model = gjson.GetBytes(body, "session.model").String()
+			}
+			if liveSession {
+				model = prefixLiveModel(body)
 			}
 		}
 	}
@@ -87,4 +112,21 @@ func authorizePrefixRequest(c *gin.Context) bool {
 		"type":    "permission_error", "code": "model_not_allowed",
 	}})
 	return false
+}
+
+// Match Codex Live's nested-session precedence and JSON string validation.
+func prefixLiveModel(body []byte) string {
+	var payload struct {
+		Model   string `json:"model"`
+		Session struct {
+			Model string `json:"model"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	if model := strings.TrimSpace(payload.Session.Model); model != "" {
+		return model
+	}
+	return strings.TrimSpace(payload.Model)
 }
