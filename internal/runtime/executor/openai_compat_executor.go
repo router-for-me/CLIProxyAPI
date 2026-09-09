@@ -574,6 +574,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				}
 			}
 			for i := range chunks {
+				if nativeResponses && responseFormat == sdktranslator.FormatOpenAIResponse {
+					chunks[i] = helps.FrameNativeResponsesChunk(eventName, chunks[i])
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():

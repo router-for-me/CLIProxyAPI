@@ -169,7 +169,13 @@ func TestOpenAICompatNativeResponsesTerminalOutcomes(t *testing.T) {
 				output.Write(chunk.Payload)
 			}
 			if tt.wantCode == 0 {
-				payload := strings.TrimSpace(strings.TrimPrefix(output.String(), "data: "))
+				var dataLines []string
+				for _, line := range strings.Split(output.String(), "\n") {
+					if strings.HasPrefix(line, "data:") {
+						dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+					}
+				}
+				payload := strings.Join(dataLines, "\n")
 				if streamErr != nil || !gjson.Valid(payload) {
 					t.Fatalf("error = %v, output = %s", streamErr, output.String())
 				}
