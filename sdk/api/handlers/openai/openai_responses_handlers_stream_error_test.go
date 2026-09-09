@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -148,6 +150,34 @@ func TestSanitizeResponsesStreamErrorMessageNormalizesSuccessStatus(t *testing.T
 	got := sanitizeResponsesStreamErrorMessage(&interfaces.ErrorMessage{StatusCode: http.StatusOK, Error: errors.New("upstream failed")})
 	if got == nil || got.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("sanitized status = %#v, want %d", got, http.StatusInternalServerError)
+	}
+}
+
+func TestResponsesStreamErrorPreservesExtensions(t *testing.T) {
+	const fields = `"code":"upstream_failed","message":"try later","param":null,"future":{"retry":true,"delay":1.25,"id":9007199254740993,"items":[null,false,"value"],"dotted.key":"kept","api_key":"private-key","nested":[{"authorization":"Bearer private-token"}]},"resets_at":1800000000`
+	for _, body := range []string{`{"error":{` + fields + `}}`, `{"type":"response.failed","response":{"error":{` + fields + `}}}`, `{` + fields + `}`} {
+		t.Run(body[:20], func(t *testing.T) {
+			cause := errors.New(body)
+			errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: cause, Headers: http.Header{"Retry-After": {"17"}}}
+			safe := sanitizeResponsesInitialErrorMessage(errMsg)
+			text := safe.Error.Error()
+			t.Logf("sanitized error: %s", text)
+			if safe.StatusCode != errMsg.StatusCode || safe.Headers.Get("Retry-After") != "17" || !errors.Is(safe.Error, cause) {
+				t.Fatal("error routing metadata changed")
+			}
+			root := gjson.Parse(text)
+			if root.Get("error").IsObject() {
+				root = root.Get("error")
+			}
+			for path, want := range map[string]string{"param": "null", "future.retry": "true", "future.delay": "1.25", "future.id": "9007199254740993", "future.items": `[null,false,"value"]`, "future.dotted\\.key": `"kept"`, "resets_at": "1800000000"} {
+				if got := root.Get(path).Raw; got != want {
+					t.Errorf("%s = %s, want %s", path, got, want)
+				}
+			}
+			if strings.Contains(text, "private-key") || strings.Contains(text, "private-token") || !strings.Contains(text, "[REDACTED]") {
+				t.Errorf("extension credentials were not redacted: %s", text)
+			}
+		})
 	}
 }
 
@@ -663,6 +693,13 @@ func TestForwardResponsesStreamSanitizesDiagnosticErrorDetails(t *testing.T) {
 }
 
 func TestForwardResponsesStreamPreservesNestedResponseError(t *testing.T) {
+	for _, userAgent := range []string{"", "Codex Desktop/26.803.41515"} {
+		t.Run(userAgent, func(t *testing.T) { testForwardResponsesStreamNestedError(t, userAgent) })
+	}
+}
+
+func testForwardResponsesStreamNestedError(t *testing.T, userAgent string) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, nil)
@@ -671,7 +708,7 @@ func TestForwardResponsesStreamPreservesNestedResponseError(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	c.Request.Header.Set("User-Agent", "Codex Desktop/26.803.41515")
+	c.Request.Header.Set("User-Agent", userAgent)
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		t.Fatal("expected gin writer to implement http.Flusher")
@@ -681,14 +718,32 @@ func TestForwardResponsesStreamPreservesNestedResponseError(t *testing.T) {
 	framer.WriteChunk(c.Writer, []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
 	data := make(chan []byte)
 	errs := make(chan *interfaces.ErrorMessage, 1)
-	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New(`{"type":"response.failed","response":{"error":{"type":"server_error","code":"upstream_failed","message":"nested response failure","param":"input"}}}`)}
+	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New(`{"type":"response.failed","response":{"error":{"type":"server_error","code":"upstream_failed","message":"nested response failure","param":null,"future":{"id":9007199254740993,"retry":true,"token":"private-nested-token"}}}}`)}
 	close(errs)
 
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, framer)
 	body := recorder.Body.String()
-	for _, want := range []string{"nested response failure", "upstream_failed", "server_error"} {
+	t.Logf("downstream error stream: %s", body)
+	for _, want := range []string{"nested response failure", "upstream_failed"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("response.failed lost nested response error field %q: %q", want, body)
+		}
+	}
+	if strings.Contains(body, "private-nested-token") {
+		t.Fatal("upstream error secret reached the client")
+	}
+	if userAgent == "" {
+		if !strings.Contains(body, "event: error\n") || strings.Contains(body, "response.failed") || strings.Contains(body, "future") {
+			t.Fatalf("generic Responses error envelope changed: %s", body)
+		}
+		return
+	}
+	if !strings.Contains(body, "event: response.failed\n") || !strings.Contains(body, "server_error") {
+		t.Fatalf("native error envelope changed: %s", body)
+	}
+	for _, want := range []string{`"id":9007199254740993`, `"retry":true`, `"param":null`, `"token":"[REDACTED]"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("response.failed lost error extension %s: %s", want, body)
 		}
 	}
 }

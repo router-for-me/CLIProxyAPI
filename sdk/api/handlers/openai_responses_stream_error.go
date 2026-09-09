@@ -131,7 +131,9 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 
 func openAIResponsesStreamFailedErrorDetail(status int, errText, code, message string) map[string]any {
 	var payload map[string]any
-	if errUnmarshal := json.Unmarshal([]byte(strings.TrimSpace(errText)), &payload); errUnmarshal == nil {
+	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(errText)))
+	decoder.UseNumber()
+	if errUnmarshal := decoder.Decode(&payload); errUnmarshal == nil {
 		if errorDetail, ok := payload["error"].(map[string]any); ok {
 			return errorDetail
 		}

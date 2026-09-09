@@ -798,6 +798,7 @@ const (
 var (
 	responsesStreamSensitiveValuePattern = regexp.MustCompile(`(?i)((?:"?(?:api[_-]?key|access[_-]?token|token|authorization|secret)"?)\s*[=:]\s*"?)([^\s"&,;}]+)`)
 	responsesStreamBearerPattern         = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
+	responsesStreamSensitiveKeyPattern   = regexp.MustCompile(`(?i)^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|authorization|secret)$`)
 )
 
 func truncateResponsesStreamErrorText(text string, limit int) string {
@@ -817,6 +818,36 @@ func sanitizeResponsesStreamEventName(eventName string) string {
 	return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(strings.TrimSpace(eventName)), responsesStreamErrorFieldLimit)
 }
 
+func sanitizeResponsesStreamErrorValue(value gjson.Result, field string) any {
+	if responsesStreamSensitiveKeyPattern.MatchString(field) {
+		return "[REDACTED]"
+	}
+	if value.IsObject() {
+		safe := make(map[string]any)
+		value.ForEach(func(key, child gjson.Result) bool {
+			safe[key.String()] = sanitizeResponsesStreamErrorValue(child, key.String())
+			return true
+		})
+		return safe
+	}
+	if value.IsArray() {
+		safe := make([]any, 0)
+		value.ForEach(func(_, child gjson.Result) bool {
+			safe = append(safe, sanitizeResponsesStreamErrorValue(child, field))
+			return true
+		})
+		return safe
+	}
+	if value.Type == gjson.String {
+		limit := responsesStreamErrorFieldLimit
+		if field == "message" {
+			limit = responsesStreamErrorMessageLimit
+		}
+		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(value.String()), limit)
+	}
+	return json.RawMessage(value.Raw)
+}
+
 func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) string {
 	text := http.StatusText(status)
 	if errMsg != nil && errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
@@ -832,41 +863,16 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 		errorNode = root.Get("response.error")
 	}
 	if errorNode.Exists() && errorNode.IsObject() {
-		safe := []byte(`{"error":{}}`)
-		copied := false
-		for _, field := range []string{"type", "code", "message", "param"} {
-			value := errorNode.Get(field)
-			if !value.Exists() || value.Type == gjson.Null {
-				continue
-			}
-			limit := responsesStreamErrorFieldLimit
-			if field == "message" {
-				limit = responsesStreamErrorMessageLimit
-			}
-			safe, _ = sjson.SetBytes(safe, "error."+field, truncateResponsesStreamErrorText(redactResponsesStreamErrorText(value.String()), limit))
-			copied = true
-		}
-		if copied {
-			return string(safe)
-		}
+		safe, _ := json.Marshal(map[string]any{"error": sanitizeResponsesStreamErrorValue(errorNode, "error")})
+		return string(safe)
 	}
 
-	safe := []byte(`{"type":"error"}`)
-	copied := false
 	for _, field := range []string{"code", "message", "param"} {
-		value := root.Get(field)
-		if !value.Exists() || value.Type == gjson.Null {
-			continue
+		if root.Get(field).Exists() {
+			safe, _ := json.Marshal(sanitizeResponsesStreamErrorValue(root, ""))
+			safe, _ = sjson.SetBytes(safe, "type", "error")
+			return string(safe)
 		}
-		limit := responsesStreamErrorFieldLimit
-		if field == "message" {
-			limit = responsesStreamErrorMessageLimit
-		}
-		safe, _ = sjson.SetBytes(safe, field, truncateResponsesStreamErrorText(redactResponsesStreamErrorText(value.String()), limit))
-		copied = true
-	}
-	if copied {
-		return string(safe)
 	}
 	return http.StatusText(status)
 }
