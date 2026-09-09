@@ -296,6 +296,7 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 		return
 	}
 	cfg.APIKeys = nil
+	cfg.APIKeyPrefixes = nil
 	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.SaveCooldownStatus = false

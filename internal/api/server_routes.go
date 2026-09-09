@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
@@ -638,7 +639,13 @@ func (s *Server) handleGrokModels(c *gin.Context) {
 	} else {
 		models = grokModelsFromRegistryInfos(registry.GetGlobalRegistry().GetAvailableModelInfos())
 	}
-	c.JSON(http.StatusOK, grokbuild.BuildResponse(models))
+	visible := make([]grokbuild.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if sdkaccess.AllowsModel(c.Request.Context(), model.ID) {
+			visible = append(visible, model)
+		}
+	}
+	c.JSON(http.StatusOK, grokbuild.BuildResponse(visible))
 }
 
 // handleHomeCodexClientModels builds the Codex client catalog from Home model IDs.
@@ -654,7 +661,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 		models = append(models, formatHomeCodexModel(entry))
 	}
 
-	c.JSON(http.StatusOK, codexmodels.BuildResponseForClient(models, nil, s.cfg.Codex.OptimizeMultiAgentV2, clientVersion))
+	c.JSON(http.StatusOK, codexmodels.BuildResponseForClient(sdkaccess.FilterModels(c.Request.Context(), models), nil, s.cfg.Codex.OptimizeMultiAgentV2, clientVersion))
 }
 
 func formatHomeCodexModel(entry homeModelEntry) map[string]any {
@@ -726,7 +733,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 
 	if isClaude {
 		disableCloaking := s.cfg != nil && s.cfg.ClaudeCode.DisableCloakingModelList
-		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries), disableCloaking))
+		c.JSON(http.StatusOK, claudemodels.BuildResponse(sdkaccess.FilterModels(c.Request.Context(), formatHomeClaudeModels(entries)), disableCloaking || len(sdkaccess.AllowedPrefixes(c.Request.Context())) > 0))
 		return
 	}
 
@@ -746,7 +753,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
-		"data":   filtered,
+		"data":   sdkaccess.FilterModels(c.Request.Context(), filtered),
 	})
 }
 
@@ -793,7 +800,7 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"models": formatHomeGeminiModels(entries),
+		"models": sdkaccess.FilterModels(c.Request.Context(), formatHomeGeminiModels(entries)),
 	})
 }
 

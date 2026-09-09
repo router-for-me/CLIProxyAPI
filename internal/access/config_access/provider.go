@@ -22,15 +22,21 @@ func Register(cfg *sdkconfig.SDKConfig) {
 		return
 	}
 
+	p := newProvider(sdkaccess.DefaultAccessProviderName, keys)
+	p.prefixes = make(map[string][]string, len(cfg.APIKeyPrefixes))
+	for key, prefixes := range cfg.APIKeyPrefixes {
+		p.prefixes[strings.TrimSpace(key)] = append([]string(nil), prefixes...)
+	}
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		p,
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name     string
+	keys     map[string]struct{}
+	prefixes map[string][]string
 }
 
 func newProvider(name string, keys []string) *provider {
@@ -91,8 +97,9 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		}
 		if _, ok := p.keys[candidate.value]; ok {
 			return &sdkaccess.Result{
-				Provider:  p.Identifier(),
-				Principal: candidate.value,
+				Provider:        p.Identifier(),
+				Principal:       candidate.value,
+				AllowedPrefixes: append([]string(nil), p.prefixes[candidate.value]...),
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},
