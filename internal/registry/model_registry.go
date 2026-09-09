@@ -643,7 +643,7 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	}
 	if model.Config != nil {
 		copyConfig := *model.Config
-		if len(model.Config.OverrideHeader) > 0 {
+		if model.Config.OverrideHeader != nil {
 			copyConfig.OverrideHeader = make(map[string]string, len(model.Config.OverrideHeader))
 			for key, value := range model.Config.OverrideHeader {
 				copyConfig.OverrideHeader[key] = value
