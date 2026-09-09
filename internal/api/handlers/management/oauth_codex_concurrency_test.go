@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -73,6 +74,45 @@ func TestRequestCodexTokenCompletionKeepsConcurrentSessionPending(t *testing.T) 
 	if !IsOAuthSessionPending(secondState, "codex") {
 		t.Fatalf("expected concurrent codex session %s to remain pending after %s completed", secondState, firstState)
 	}
+}
+
+func TestRequestCodexTokenWebUIAllowsManualCallbackWhenForwarderIsUnavailable(t *testing.T) {
+	originalNewCodexOAuthService := newCodexOAuthService
+	originalStartWebUICallbackForwarder := startWebUICallbackForwarder
+	newCodexOAuthService = func(cfg *config.Config) codexOAuthService {
+		return &fakeCodexOAuthService{}
+	}
+	startWebUICallbackForwarder = func(int, string, string) (*callbackForwarder, error) {
+		return nil, errors.New("listen tcp 0.0.0.0:1455: bind: address already in use")
+	}
+	defer func() {
+		newCodexOAuthService = originalNewCodexOAuthService
+		startWebUICallbackForwarder = originalStartWebUICallbackForwarder
+	}()
+
+	authDir := filepath.Join(t.TempDir(), "auths")
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, Port: 18317}, nil)
+	router := gin.New()
+	router.GET("/codex-auth-url", handler.RequestCodexToken)
+
+	req := httptest.NewRequest(http.MethodGet, "/codex-auth-url?is_webui=true", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var payload struct {
+		State string `json:"state"`
+		URL   string `json:"url"`
+	}
+	if errDecode := json.Unmarshal(w.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatalf("decode codex auth URL response: %v", errDecode)
+	}
+	if payload.State == "" || payload.URL == "" {
+		t.Fatalf("expected OAuth URL and state, got %+v", payload)
+	}
+	CompleteOAuthSession(payload.State)
 }
 
 func requestCodexTokenState(t *testing.T, router http.Handler) string {
