@@ -282,6 +282,21 @@ nonstream-keepalive-interval: 0
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
 #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
 
+# Server-side pre-compaction: when a request's estimated input tokens exceed
+# window * threshold (minus max_tokens), older turns are summarized by an
+# auxiliary model and the shortened request is forwarded upstream. The system
+# prompt, tools, and the last keep-recent-turns turns are kept byte-identical.
+# Applies to Claude Messages and OpenAI chat formats; Gemini is out of scope.
+# Summaries are cached per session (X-Claude-Code-Session-Id, else derived) so
+# a later turn in the same session does not re-summarize already-covered turns.
+# pre-compact:
+#   enabled: true
+#   aux-model: bedrock/claude-haiku-4-5-20251001 # model used for the summarization call
+#   threshold: 0.85            # fraction of the model's context window usable before compacting
+#   keep-recent-turns: 6       # most recent user turns kept verbatim (prompt-cache prefix safe)
+#   cache-ttl: 2h              # how long a per-session summary is reused
+#   cache-max-sessions: 2000   # LRU cap on cached sessions
+
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.
 # When false, client signatures are used directly after normalization (bypass mode for testing).

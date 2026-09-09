@@ -40,6 +40,20 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
 - `test/` — Cross-module integration tests
 
+## Pre-compact
+
+`internal/precompact/` shrinks a request when its estimated input tokens exceed the selected
+model's context window (`window * threshold - max_tokens`). It splits the body so the system
+prompt, tools, and the last `keep-recent-turns` turns stay byte-identical, summarizes everything
+older with an auxiliary model call (`(*BaseAPIHandler).ExecuteModel`, `InternalSource: true` so
+the interceptor skips its own aux call), and caches the summary per session
+(`internal/precompact/cache.go`, TTL + LRU) so a later turn does not re-summarize covered
+messages. Wired into `requestAfterAuthInterceptor` in `sdk/api/handlers/handlers_interceptors.go`
+and the plugin-executor route in `handlers_execution.go`, so it runs even without a plugin host.
+A summarization failure (or any error) always forwards the original, unmodified body — it never
+blocks the request. Config: `pre-compact` block in `config.yaml` (see `config.example.yaml`).
+Supports Claude Messages and OpenAI chat; Gemini is out of scope.
+
 ## Code Conventions
 - Keep changes small and simple (KISS)
 - Comments in English only

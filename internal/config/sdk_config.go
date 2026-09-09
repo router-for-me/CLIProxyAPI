@@ -45,6 +45,9 @@ type SDKConfig struct {
 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
 	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
 
+	// PreCompact configures server-side pre-compaction of oversized requests.
+	PreCompact PreCompactConfig `yaml:"pre-compact" json:"pre-compact"`
+
 	// ClaudeCode configures Claude Code compatibility behavior.
 	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
 
