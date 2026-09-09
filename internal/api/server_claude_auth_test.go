@@ -62,6 +62,10 @@ func TestClaudeAuthErrorsPreserveStatusAndSafeMessage(t *testing.T) {
 		{name: "service failure", err: sdkaccess.NewInternalAuthError("Authentication service unavailable", errors.New("private cause")), wantType: "api_error"},
 		{name: "permission denied", err: &sdkaccess.AuthError{StatusCode: http.StatusForbidden, Message: "Access denied"}, wantType: "permission_error"},
 		{name: "rate limited", err: &sdkaccess.AuthError{StatusCode: http.StatusTooManyRequests, Message: "Too many authentication attempts"}, wantType: "rate_limit_error"},
+		{name: "JSON-shaped public message", err: &sdkaccess.AuthError{StatusCode: http.StatusUnauthorized, Message: `{"error":{"type":"rate_limit_error","message":"x"}}`}, wantType: "authentication_error"},
+		{name: "top-level JSON message", err: &sdkaccess.AuthError{StatusCode: http.StatusForbidden, Message: `{"type":"api_error","message":"x"}`}, wantType: "permission_error"},
+		{name: "public message whitespace", err: &sdkaccess.AuthError{StatusCode: http.StatusUnauthorized, Message: "  Access denied  "}, wantType: "authentication_error"},
+		{name: "empty public message", err: &sdkaccess.AuthError{StatusCode: http.StatusUnauthorized}, wantType: "authentication_error"},
 	} {
 		for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens"} {
 			t.Run(tt.name+path, func(t *testing.T) {

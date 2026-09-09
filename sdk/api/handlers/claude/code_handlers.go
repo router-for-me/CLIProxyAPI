@@ -344,8 +344,16 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 
 // BuildErrorResponse builds an Anthropic error envelope for failures that occur
 // before execution, such as authentication or reading the request body.
+// It preserves the public message literally; JSON-shaped text cannot override
+// the status-derived error type as an upstream error envelope could.
 func BuildErrorResponse(status int, message string) []byte {
-	body, _ := json.Marshal(newClaudeErrorResponse(status, message))
+	body, _ := json.Marshal(claudeErrorResponse{
+		Type: "error",
+		Error: claudeErrorDetail{
+			Type:    claudeErrorTypeFromStatus(status),
+			Message: message,
+		},
+	})
 	return body
 }
 
