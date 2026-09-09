@@ -28,10 +28,10 @@ func writeResponsesWebsocketSyntheticPrewarm(
 	requestJSON []byte,
 	wsTimelineLog websocketTimelineAppender,
 	sessionID string,
-) error {
+) (string, error) {
 	payloads, errPayloads := syntheticResponsesWebsocketPrewarmPayloads(requestJSON)
 	if errPayloads != nil {
-		return errPayloads
+		return "", errPayloads
 	}
 	for i := 0; i < len(payloads); i++ {
 		markAPIResponseTimestamp(c)
@@ -49,10 +49,10 @@ func writeResponsesWebsocketSyntheticPrewarm(
 				websocketPayloadEventType(payloads[i]),
 				errWrite,
 			)
-			return errWrite
+			return "", errWrite
 		}
 	}
-	return nil
+	return gjson.GetBytes(payloads[0], "response.id").String(), nil
 }
 
 func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, error) {

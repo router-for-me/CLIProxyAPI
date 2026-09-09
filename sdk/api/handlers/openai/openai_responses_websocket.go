@@ -328,6 +328,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	lastResponseID := ""
+	localPrewarmResponseID := ""
 	var lastResponsePendingToolCallIDs []string
 	pinnedAuthID := ""
 	// Preserve independent upstream auth affinity when a downstream session switches providers.
@@ -495,7 +496,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var requestJSON []byte
 		var updatedLastRequest []byte
 		var errMsg *interfaces.ErrorMessage
-		if nativeWebsocketPassthrough {
+		previousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
+		if localPrewarmResponseID != "" && previousResponseID == localPrewarmResponseID && lastResponseID != localPrewarmResponseID {
+			// A consumed local ID cannot refer to a later HTTP transcript or an upstream socket.
+			errMsg = responsesWebsocketPreviousResponseNotFoundError()
+		} else if nativeWebsocketPassthrough {
 			requestJSON, errMsg = normalizeResponsesWebsocketPassthroughRequest(payload, requestModelName)
 		} else if len(lastRequest) == 0 && strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" {
 			errMsg = responsesWebsocketPreviousResponseNotFoundError()
@@ -506,6 +511,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				lastResponseOutput,
 				lastResponseID,
 				lastResponsePendingToolCallIDs,
+				localPrewarmResponseID,
 				false,
 				allowCompactionReplayBypass,
 			)
@@ -545,12 +551,19 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			lastRequest = updatedLastRequest
 			lastResponseOutput = []byte("[]")
-			lastResponseID = ""
 			lastResponsePendingToolCallIDs = nil
-			if errWrite := writeResponsesWebsocketSyntheticPrewarm(c, writer, requestJSON, wsTimelineLog, passthroughSessionID); errWrite != nil {
+			responseID, errWrite := writeResponsesWebsocketSyntheticPrewarm(c, writer, requestJSON, wsTimelineLog, passthroughSessionID)
+			if errWrite != nil {
 				wsTerminateErr = errWrite
 				return
 			}
+			localPrewarmResponseID = responseID
+			lastResponseID = responseID
+			// Local prewarm replaces any previous native response chain. Rebuild its
+			// continuation before establishing the next upstream transport.
+			upstreamMode = responsesWebsocketUpstreamModeHTTP
+			upstreamWebsocketAuthID = ""
+			passthroughModelName = ""
 			continue
 		}
 

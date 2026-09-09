@@ -258,7 +258,7 @@ func TestNormalizeResponseSubsequentRequestDetachesSourceBuffers(t *testing.T) {
 	lastResponseOutput := []byte(`[{"type":"message","id":"msg-2","role":"assistant","content":[{"type":"output_text","text":"response sentinel"}]}]`)
 	raw := []byte(`{"type":"response.create","input":[{"type":"message","id":"msg-3","role":"user","content":"append sentinel"}]}`)
 
-	normalized, next, errMessage := normalizeResponseSubsequentRequest(raw, lastRequest, lastResponseOutput, "", nil, false, false)
+	normalized, next, errMessage := normalizeResponseSubsequentRequest(raw, lastRequest, lastResponseOutput, "", nil, "", false, false)
 	if errMessage != nil {
 		t.Fatalf("normalizeResponseSubsequentRequest() error = %v", errMessage.Error)
 	}
@@ -349,7 +349,7 @@ func BenchmarkNormalizeResponseSubsequentRequestTranscripts(b *testing.B) {
 			b.SetBytes(int64(len(lastRequest) + len(lastResponseOutput) + len(raw)))
 			b.ReportAllocs()
 			for b.Loop() {
-				normalized, _, errMessage := normalizeResponseSubsequentRequest(raw, lastRequest, lastResponseOutput, "", nil, false, false)
+				normalized, _, errMessage := normalizeResponseSubsequentRequest(raw, lastRequest, lastResponseOutput, "", nil, "", false, false)
 				if errMessage != nil {
 					b.Fatalf("normalizeResponseSubsequentRequest() error = %v", errMessage.Error)
 				}
