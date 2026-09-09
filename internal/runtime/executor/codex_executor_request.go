@@ -141,6 +141,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
 	}
 	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
+	rawJSON = sanitizeCodexUpstreamBody(rawJSON)
 	var identityState codexIdentityConfuseState
 	rawJSON, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, rawJSON)
 	if identityState.promptCacheKey != "" {
@@ -154,6 +155,17 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		httpReq.Header.Set("Session-Id", cache.ID)
 	}
 	return httpReq, rawJSON, identityState, nil
+}
+
+func sanitizeCodexUpstreamBody(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	updated, errDelete := sjson.DeleteBytes(body, "metadata")
+	if errDelete != nil || len(updated) == 0 {
+		return body
+	}
+	return updated
 }
 
 func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, userPayload []byte, rawJSON []byte) ([]byte, codexIdentityConfuseState) {
