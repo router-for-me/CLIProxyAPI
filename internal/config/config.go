@@ -72,7 +72,7 @@ type Config struct {
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
-	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
+	// AuthAutoRefreshWorkers limits the core auth auto-refresh pool and each manual refresh-all batch.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
 

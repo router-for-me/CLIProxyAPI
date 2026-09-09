@@ -55,11 +55,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	}
 
 	ctx, cancelCtx := context.WithCancel(parent)
-	workers := refreshMaxConcurrency
-	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
-		workers = cfg.AuthAutoRefreshWorkers
-	}
-	loop := newAuthAutoRefreshLoop(m, interval, workers)
+	loop := newAuthAutoRefreshLoop(m, interval, m.authRefreshWorkers())
 
 	m.mu.Lock()
 	m.refreshCancel = cancelCtx
@@ -68,6 +64,13 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 
 	loop.rebuild(time.Now())
 	go loop.run(ctx)
+}
+
+func (m *Manager) authRefreshWorkers() int {
+	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
+		return cfg.AuthAutoRefreshWorkers
+	}
+	return refreshMaxConcurrency
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
@@ -593,9 +596,13 @@ type ForceRefreshResult struct {
 }
 
 // ForceRefreshAll triggers an immediate refresh for all credentials that have refresh tokens or custom refresh evaluators.
+// Each batch uses the configured auth refresh worker count and skips queued refreshes after cancellation.
 func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
 	if m == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	m.mu.RLock()
 	ids := make([]string, 0, len(m.auths))
@@ -607,19 +614,29 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
 	m.mu.RUnlock()
 
 	results := make([]ForceRefreshResult, len(ids))
+	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for i, id := range ids {
+	for range min(m.authRefreshWorkers(), len(ids)) {
 		wg.Add(1)
-		go func(index int, authID string) {
+		go func() {
 			defer wg.Done()
-			_, err := m.ForceRefreshAuth(ctx, authID)
-			res := ForceRefreshResult{ID: authID, Success: err == nil}
-			if err != nil {
-				res.Error = err.Error()
+			for index := range jobs {
+				errRefresh := ctx.Err()
+				if errRefresh == nil {
+					_, errRefresh = m.ForceRefreshAuth(ctx, ids[index])
+				}
+				res := ForceRefreshResult{ID: ids[index], Success: errRefresh == nil}
+				if errRefresh != nil {
+					res.Error = errRefresh.Error()
+				}
+				results[index] = res
 			}
-			results[index] = res
-		}(i, id)
+		}()
 	}
+	for index := range ids {
+		jobs <- index
+	}
+	close(jobs)
 	wg.Wait()
 	return results
 }
