@@ -13,22 +13,67 @@ import (
 // history from native Kimi Responses requests, retaining discovered tools.
 func NormalizeKimiResponsesTools(body []byte) []byte {
 	body = normalizeKimiResponsesToolSearchHistory(body)
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.IsArray() {
-		return body
+	removedNamespaces := make(map[string]bool)
+	retainedNamespaces := make(map[string]bool)
+	hasTools := false
+	filterTools := func(tools []gjson.Result) ([]string, bool) {
+		collectKimiNamespaces(tools, removedNamespaces)
+		kept, removed := filterKimiToolSearchDeclarations(tools)
+		for _, raw := range kept {
+			collectKimiNamespaces([]gjson.Result{gjson.Parse(raw)}, retainedNamespaces)
+		}
+		hasTools = hasTools || len(kept) > 0
+		return kept, removed
 	}
-	kept, removed := filterKimiToolSearchDeclarations(tools.Array())
+	out := body
+	removed := false
+	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
+		if kept, removedTools := filterTools(tools.Array()); removedTools {
+			var errSet error
+			out, errSet = sjson.SetRawBytes(out, "tools", JoinRawJSONStrings(kept))
+			if errSet != nil {
+				return body
+			}
+			removed = true
+		}
+	}
+	// Responses Lite can declare tools in input items as well. Keep surviving
+	// declarations in their original channel and preserve unrelated history.
+	if input := gjson.GetBytes(body, "input"); input.IsArray() {
+		var keptInput []string
+		removedInput := false
+		for _, item := range input.Array() {
+			if item.Get("type").String() != "additional_tools" || !item.Get("tools").IsArray() {
+				keptInput = append(keptInput, item.Raw)
+				continue
+			}
+			kept, removedTools := filterTools(item.Get("tools").Array())
+			if !removedTools {
+				keptInput = append(keptInput, item.Raw)
+				continue
+			}
+			removedInput = true
+			if len(kept) == 0 {
+				continue
+			}
+			updated, errSet := sjson.SetRaw(item.Raw, "tools", string(JoinRawJSONStrings(kept)))
+			if errSet != nil {
+				return body
+			}
+			keptInput = append(keptInput, updated)
+		}
+		if removedInput {
+			var errSet error
+			out, errSet = sjson.SetRawBytes(out, "input", JoinRawJSONStrings(keptInput))
+			if errSet != nil {
+				return body
+			}
+			removed = true
+		}
+	}
 	if !removed {
 		return body
 	}
-	out, errSet := sjson.SetRawBytes(body, "tools", JoinRawJSONStrings(kept))
-	if errSet != nil {
-		return body
-	}
-	removedNamespaces := make(map[string]bool)
-	collectKimiNamespaces(tools.Array(), removedNamespaces)
-	retainedNamespaces := make(map[string]bool)
-	collectKimiNamespaces(gjson.GetBytes(out, "tools").Array(), retainedNamespaces)
 	for name := range retainedNamespaces {
 		delete(removedNamespaces, name)
 	}
@@ -50,7 +95,7 @@ func NormalizeKimiResponsesTools(body []byte) []byte {
 			out = updated
 		}
 	}
-	if choice.Get("type").String() == "tool_search" || (len(kept) == 0 && choice.String() == "required") {
+	if choice.Get("type").String() == "tool_search" || (!hasTools && choice.String() == "required") {
 		if updated, errChoice := sjson.SetBytes(out, "tool_choice", "auto"); errChoice == nil {
 			out = updated
 		}

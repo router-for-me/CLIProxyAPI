@@ -30,6 +30,9 @@ func TestKimiExecutorResponsesReplaysDiscoveredTools(t *testing.T) {
 	output := func(tools string) string {
 		return `{"type":"tool_search_output","execution":"client","call_id":"s1","status":"completed","tools":[` + tools + `]}`
 	}
+	additional := func(tools string) string {
+		return `{"type":"additional_tools","tools":[` + tools + `]}`
+	}
 	tests := []struct {
 		name, input, tools, choice, wantInput, wantTools, wantChoice string
 	}{
@@ -50,6 +53,19 @@ func TestKimiExecutorResponsesReplaysDiscoveredTools(t *testing.T) {
 		{name: "discovered namespace search is removed", input: output(namespace("workspace", search+","+ping)) + "," + user, wantInput: user, wantTools: "[" + namespace("workspace", ping) + "]"},
 		{name: "required uses discovered function", input: output(ping) + "," + user, tools: "[" + search + "]", choice: `"required"`, wantInput: user, wantTools: "[" + ping + "]", wantChoice: `"required"`},
 		{name: "forced search resets after discovery", input: output(ping) + "," + user, tools: "[" + search + "]", choice: search, wantInput: user, wantTools: "[" + ping + "]", wantChoice: `"auto"`},
+		{name: "additional search without top-level tools", input: additional(search) + "," + user, choice: `"required"`, wantInput: user, wantChoice: `"auto"`},
+		{name: "additional mixed tools preserve history", input: user + "," + additional(search+","+ping) + "," + history, wantInput: user + "," + additional(ping) + "," + history},
+		{name: "additional nested search", input: additional(namespace("workspace", search+","+ping)) + "," + user, wantInput: additional(namespace("workspace", ping)) + "," + user},
+		{name: "additional emptied namespace", input: additional(namespace("workspace", namespace("discovery", search))) + "," + user, choice: `"required"`, wantInput: user, wantChoice: `"auto"`},
+		{name: "additional function keeps required choice", input: additional(ping) + "," + user, tools: "[" + search + "]", choice: `"required"`, wantInput: additional(ping) + "," + user, wantTools: "[]", wantChoice: `"required"`},
+		{name: "top-level function keeps required choice", input: additional(search) + "," + user, tools: "[" + ping + "]", choice: `"required"`, wantInput: user, wantTools: "[" + ping + "]", wantChoice: `"required"`},
+		{name: "removed additional namespace choice", input: additional(namespace("workspace", namespace("discovery", search)+","+ping)) + "," + user, choice: `{"type":"allowed_tools","tools":[{"type":"namespace","name":"discovery"}]}`, wantInput: additional(namespace("workspace", ping)) + "," + user, wantChoice: `"auto"`},
+		{name: "top-level namespace preserves additional choice", input: additional(namespace("workspace", search)) + "," + user, tools: "[" + namespace("workspace", ping) + "]", choice: `{"type":"allowed_tools","tools":[{"type":"namespace","name":"workspace"}]}`, wantInput: user, wantTools: "[" + namespace("workspace", ping) + "]", wantChoice: `{"type":"allowed_tools","tools":[{"type":"namespace","name":"workspace"}]}`},
+		{name: "additional namespace preserves top-level choice", input: additional(namespace("workspace", ping)) + "," + user, tools: "[" + namespace("workspace", search) + "]", choice: `{"type":"allowed_tools","tools":[{"type":"namespace","name":"workspace"}]}`, wantInput: additional(namespace("workspace", ping)) + "," + user, wantTools: "[]", wantChoice: `{"type":"allowed_tools","tools":[{"type":"namespace","name":"workspace"}]}`},
+		{name: "all additional items removed", input: additional(search) + "," + additional(namespace("discovery", search)), choice: search, wantInput: "", wantChoice: `"auto"`},
+		{name: "discovered function with additional search", input: output(ping) + "," + additional(search) + "," + user, choice: `"required"`, wantInput: user, wantTools: "[" + ping + "]", wantChoice: `"required"`},
+		{name: "supported additional items unchanged", input: additional(ping) + "," + user, wantInput: additional(ping) + "," + user},
+		{name: "original empty additional item unchanged", input: additional("") + "," + user, wantInput: additional("") + "," + user},
 		{name: "no search history is untouched", input: user + "," + history, tools: "[" + ping + "]", wantInput: user + "," + history, wantTools: "[" + ping + "]"},
 	}
 	for _, streaming := range []bool{false, true} {
@@ -67,7 +83,7 @@ func TestKimiExecutorResponsesReplaysDiscoveredTools(t *testing.T) {
 						return nil, errRead
 					}
 					for _, item := range gjson.GetBytes(upstreamBody, "input").Array() {
-						if kind := item.Get("type").String(); kind == "tool_search_call" || kind == "tool_search_output" {
+						if kind := item.Get("type").String(); kind == "tool_search_call" || kind == "tool_search_output" || (kind == "additional_tools" && kimiTestContainsToolSearch(item.Get("tools"))) {
 							return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"type":"invalid_request_error","message":"Invalid request Error"}}`))}, nil
 						}
 					}
