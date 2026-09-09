@@ -395,11 +395,17 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 			}
 		}
 		body := bytes.Clone(msg.Body)
-		requestID := claudeRequestIDFromText(string(body))
+		bodyRequestID := claudeRequestIDFromText(string(body))
+		requestID := bodyRequestID
 		if requestID == "" {
 			requestID = filteredHeaders.Get(claudeRequestIDHeader)
 		}
-		setClaudeRequestID(c, requestID)
+		wireRequestID := setClaudeRequestID(c, requestID)
+		if bodyRequestID != "" && bodyRequestID != wireRequestID {
+			// A non-stream keep-alive may have committed the local ID before
+			// this native Claude error arrived. Reconcile only the ID field.
+			body, _ = sjson.SetBytes(body, "request_id", wireRequestID)
+		}
 		appendClaudeAPIResponse(c, body)
 		if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
 			c.Writer.Header().Set("Content-Type", "application/json")

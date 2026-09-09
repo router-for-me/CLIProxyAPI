@@ -80,6 +80,45 @@ func TestClaudeDirectErrorPreservesRequestIDAndBody(t *testing.T) {
 	}
 }
 
+func TestClaudeCommittedDirectErrorUsesWireRequestID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tt := range []struct {
+		name    string
+		body    string
+		rewrite bool
+	}{
+		{name: "Claude error", body: `{ "type": "error", "error": {"type":"rate_limit_error","message":"wait"}, "request_id": "req_direct", "extra": true }`, rewrite: true},
+		{name: "opaque response", body: `{"message":"custom response","request_id":"opaque"}`},
+		{name: "matching ID", body: `{ "type": "error", "error": {"message":"wait"}, "request_id": "req_abc12345" }`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			logging.SetGinRequestID(c, "abc12345")
+			EnsureRequestID(c)
+			// Model the header commitment performed by non-stream keep-alive.
+			c.Writer.Flush()
+			handler := NewClaudeCodeAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+			handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+				StatusCode: http.StatusTooManyRequests, DirectResponse: true, Body: []byte(tt.body),
+				Headers: http.Header{"Request-Id": {"req_upstream_header"}},
+			})
+			if recorder.Code != http.StatusOK || recorder.Result().Header.Get("Request-Id") != "req_abc12345" {
+				t.Fatalf("committed response changed: %d %v", recorder.Code, recorder.Result().Header)
+			}
+			body := recorder.Body.String()
+			if tt.rewrite {
+				if gjson.Get(body, "request_id").String() != "req_abc12345" || !gjson.Get(body, "extra").Bool() || gjson.Get(body, "error.message").String() != "wait" {
+					t.Errorf("direct error did not retain wire ID and error details: %s", body)
+				}
+			} else if body != tt.body {
+				t.Errorf("direct body changed: %s", body)
+			}
+		})
+	}
+}
+
 type claudeRequestIDExecutor struct {
 	mode    string
 	flushed <-chan struct{}
