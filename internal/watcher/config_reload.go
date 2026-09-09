@@ -136,9 +136,16 @@ func (w *Watcher) reloadConfig() bool {
 
 	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir
 	retryConfigChanged := oldConfig != nil && (oldConfig.RequestRetry != newConfig.RequestRetry || oldConfig.MaxRetryInterval != newConfig.MaxRetryInterval || oldConfig.MaxRetryCredentials != newConfig.MaxRetryCredentials)
-	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || retryConfigChanged)
+	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || listUnprefixedModelsChanged(oldConfig, newConfig) || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || retryConfigChanged)
 
 	log.Infof("config successfully reloaded, triggering client reload")
 	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
 	return true
+}
+
+func listUnprefixedModelsChanged(oldConfig, newConfig *config.Config) bool {
+	if oldConfig == nil || newConfig == nil {
+		return false
+	}
+	return oldConfig.EffectiveListUnprefixedModels() != newConfig.EffectiveListUnprefixedModels()
 }

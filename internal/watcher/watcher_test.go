@@ -229,6 +229,54 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestListUnprefixedModelsChangedUsesEffectiveValues(t *testing.T) {
+	zeroValue := &config.Config{}
+	explicitFalse := &config.Config{}
+	explicitFalse.SetListUnprefixedModels(false)
+	explicitTrue := &config.Config{}
+	explicitTrue.SetListUnprefixedModels(true)
+
+	if !listUnprefixedModelsChanged(zeroValue, explicitFalse) {
+		t.Fatal("effective true to false change was not detected")
+	}
+	if listUnprefixedModelsChanged(zeroValue, explicitTrue) {
+		t.Fatal("two effective true configurations were reported as changed")
+	}
+	if !listUnprefixedModelsChanged(explicitFalse, &config.Config{}) {
+		t.Fatal("effective false to true change was not detected")
+	}
+}
+
+func TestSetConfigSnapshotPreservesEffectiveListUnprefixedModels(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{name: "default", cfg: &config.Config{}, want: true},
+		{name: "explicit false", cfg: explicitListUnprefixedModelsConfig(false), want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			w := &Watcher{}
+			w.SetConfig(testCase.cfg)
+
+			var snapshot config.Config
+			if errUnmarshal := yaml.Unmarshal(w.oldConfigYaml, &snapshot); errUnmarshal != nil {
+				t.Fatalf("yaml.Unmarshal() error = %v", errUnmarshal)
+			}
+			if got := snapshot.EffectiveListUnprefixedModels(); got != testCase.want {
+				t.Fatalf("snapshot effective value = %t, want %t", got, testCase.want)
+			}
+		})
+	}
+}
+
+func explicitListUnprefixedModelsConfig(enabled bool) *config.Config {
+	cfg := &config.Config{}
+	cfg.SetListUnprefixedModels(enabled)
+	return cfg
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
