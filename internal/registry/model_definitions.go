@@ -7,14 +7,16 @@ import (
 )
 
 const (
-	codexBuiltinImage15ModelID    = "gpt-image-1.5"
-	codexBuiltinImageModelID      = "gpt-image-2"
-	xaiBuiltinImageModelID        = "grok-imagine-image"
-	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
-	xaiBuiltinImage20ModelID      = "grok-imagine-image-2.0"
-	xaiBuiltinVideoModelID        = "grok-imagine-video"
-	xaiBuiltinVideo15ModelID      = "grok-imagine-video-1.5"
-	xaiBuiltinVideo15PreviewID    = "grok-imagine-video-1.5-preview"
+	codexBuiltinImage15ModelID       = "gpt-image-1.5"
+	codexBuiltinImageModelID         = "gpt-image-2"
+	codexBuiltinImageFlareModelID    = "gpt-image-2.5-flare"
+	codexBuiltinImageSunburstModelID = "gpt-image-2.5-sunburst"
+	xaiBuiltinImageModelID           = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID    = "grok-imagine-image-quality"
+	xaiBuiltinImage20ModelID         = "grok-imagine-image-2.0"
+	xaiBuiltinVideoModelID           = "grok-imagine-video"
+	xaiBuiltinVideo15ModelID         = "grok-imagine-video-1.5"
+	xaiBuiltinVideo15PreviewID       = "grok-imagine-video-1.5-preview"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -116,7 +118,7 @@ func GetXAIModels() []*ModelInfo {
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
+	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo(), codexBuiltinImageFlareModelInfo(), codexBuiltinImageSunburstModelInfo())
 }
 
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
@@ -154,6 +156,30 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func codexBuiltinImageFlareModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImageFlareModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.5 Flare",
+		Version:     codexBuiltinImageFlareModelID,
+	}
+}
+
+func codexBuiltinImageSunburstModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImageSunburstModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.5 Sunburst",
+		Version:     codexBuiltinImageSunburstModelID,
 	}
 }
 

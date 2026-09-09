@@ -38,6 +38,14 @@ func codexOpenAIImageTestOptions(path string, stream bool) cliproxyexecutor.Opti
 	}
 }
 
+func TestCodexDirectOpenAIImageModelsIncludeImage25(t *testing.T) {
+	for _, model := range []string{"gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"} {
+		if !codexIsDirectOpenAIImageModel(model) {
+			t.Fatalf("codexIsDirectOpenAIImageModel(%q) = false, want true", model)
+		}
+	}
+}
+
 func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T) {
 	var gotPath string
 	var gotAuth string

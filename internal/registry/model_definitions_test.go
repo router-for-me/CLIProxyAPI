@@ -55,6 +55,26 @@ func TestWithXAIBuiltinsIncludesImage20(t *testing.T) {
 	t.Fatalf("expected xAI builtin model %s", xaiBuiltinImage20ModelID)
 }
 
+func TestWithCodexBuiltinsIncludesImage25Models(t *testing.T) {
+	models := WithCodexBuiltins(nil)
+	want := map[string]bool{
+		"gpt-image-2.5-flare":    false,
+		"gpt-image-2.5-sunburst": false,
+	}
+	for _, model := range models {
+		if model != nil {
+			if _, ok := want[model.ID]; ok {
+				want[model.ID] = true
+			}
+		}
+	}
+	for modelID, found := range want {
+		if !found {
+			t.Fatalf("expected Codex builtin model %s", modelID)
+		}
+	}
+}
+
 func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	foundGA := false
