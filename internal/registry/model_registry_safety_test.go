@@ -56,6 +56,29 @@ func TestGetModelsForClientReturnsClones(t *testing.T) {
 	}
 }
 
+func TestGetModelForClientIsIsolatedAndReturnsClone(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("first", "github-copilot", []*ModelInfo{{ID: "shared", UpstreamEndpoint: "/responses", Thinking: &ThinkingSupport{Levels: []string{"high"}}}})
+	r.RegisterClient("second", "github-copilot", []*ModelInfo{{ID: "shared", UpstreamEndpoint: "/chat/completions"}})
+	first := r.GetModelForClient("first", "shared")
+	if first == nil || first.UpstreamEndpoint != "/responses" {
+		t.Fatalf("wrong client metadata: %+v", first)
+	}
+	first.UpstreamEndpoint = "changed"
+	first.Thinking.Levels[0] = "changed"
+	again := r.GetModelForClient("first", "shared")
+	if again.UpstreamEndpoint != "/responses" || again.Thinking.Levels[0] != "high" {
+		t.Fatal("caller mutated registered metadata")
+	}
+	if r.GetModelForClient("missing", "shared") != nil || r.GetModelForClient("first", "missing") != nil {
+		t.Fatal("unknown client or model inherited another registration")
+	}
+	r.UnregisterClient("first")
+	if r.GetModelForClient("first", "shared") != nil {
+		t.Fatal("removed client inherited another registration")
+	}
+}
+
 func TestGetAvailableModelsByProviderReturnsClones(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "gemini", []*ModelInfo{{

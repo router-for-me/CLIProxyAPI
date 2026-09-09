@@ -27,8 +27,21 @@ type CopilotExecutor struct {
 func NewCopilotExecutor(cfg *config.Config) *CopilotExecutor { return &CopilotExecutor{cfg: cfg} }
 func (*CopilotExecutor) Identifier() string                  { return copilot.Provider }
 
-func (e *CopilotExecutor) RequestToFormat(req exec.Request, _ exec.Options) translator.Format {
-	if model := registry.LookupModelInfo(thinking.ParseSuffix(req.Model).ModelName, copilot.Provider); model != nil {
+func (e *CopilotExecutor) RequestToFormat(req exec.Request, opts exec.Options) translator.Format {
+	authID, _ := opts.Metadata[exec.SelectedAuthMetadataKey].(string)
+	return e.requestToFormatForClient(authID, req, opts)
+}
+
+func (*CopilotExecutor) requestToFormatForClient(authID string, req exec.Request, opts exec.Options) translator.Format {
+	r := registry.GetGlobalRegistry()
+	// The registry contains public aliases and prefixes, while req.Model has
+	// already been resolved to the upstream name by the scheduler.
+	requestedModel, _ := opts.Metadata[exec.RequestedModelMetadataKey].(string)
+	model := r.GetModelForClient(authID, thinking.ParseSuffix(requestedModel).ModelName)
+	if model == nil {
+		model = r.GetModelForClient(authID, thinking.ParseSuffix(req.Model).ModelName)
+	}
+	if model != nil {
 		switch model.UpstreamEndpoint {
 		case "/responses":
 			return translator.FormatOpenAIResponse
@@ -73,8 +86,8 @@ func (e *CopilotExecutor) preparedAuth(ctx context.Context, auth *coreauth.Auth)
 	return prepared, nil
 }
 
-func (e *CopilotExecutor) delegate(req exec.Request, opts exec.Options) coreauth.ProviderExecutor {
-	format := e.RequestToFormat(req, opts)
+func (e *CopilotExecutor) delegate(auth *coreauth.Auth, req exec.Request, opts exec.Options) coreauth.ProviderExecutor {
+	format := e.requestToFormatForClient(auth.ID, req, opts)
 	if format == translator.FormatClaude {
 		return &ClaudeExecutor{cfg: e.cfg, provider: copilot.Provider, requestLogProvider: copilot.Provider}
 	}
@@ -89,7 +102,7 @@ func (e *CopilotExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if err != nil {
 		return exec.Response{}, err
 	}
-	response, err := e.delegate(req, opts).Execute(ctx, prepared, req, opts)
+	response, err := e.delegate(auth, req, opts).Execute(ctx, prepared, req, opts)
 	return response, helps.CopilotQuotaError(err)
 }
 
@@ -101,7 +114,7 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if err != nil {
 		return nil, err
 	}
-	response, err := e.delegate(req, opts).ExecuteStream(ctx, prepared, req, opts)
+	response, err := e.delegate(auth, req, opts).ExecuteStream(ctx, prepared, req, opts)
 	return response, helps.CopilotQuotaError(err)
 }
 

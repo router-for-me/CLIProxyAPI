@@ -45,6 +45,13 @@ func TestCopilotProtocolRoutingAndCredentialIsolation(t *testing.T) {
 			e, auth := newTestCopilot()
 			registry.GetGlobalRegistry().RegisterClient(auth.ID, copilot.Provider, []*registry.ModelInfo{{ID: "test-model", UpstreamEndpoint: tc.endpoint}})
 			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+			otherEndpoint := "/chat/completions"
+			if tc.endpoint == otherEndpoint {
+				otherEndpoint = "/responses"
+			}
+			otherID := auth.ID + "-other"
+			registry.GetGlobalRegistry().RegisterClient(otherID, copilot.Provider, []*registry.ModelInfo{{ID: "test-model", UpstreamEndpoint: otherEndpoint}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(otherID) })
 			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", copilotRoundTripper(func(r *http.Request) (*http.Response, error) {
 				if r.URL.Host != "api.githubcopilot.com" || r.URL.Path != tc.endpoint {
 					t.Errorf("wrong endpoint: %s", r.URL)
@@ -65,8 +72,11 @@ func TestCopilotProtocolRoutingAndCredentialIsolation(t *testing.T) {
 				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(tc.response))}, nil
 			}))
 			req := exec.Request{Model: "test-model", Payload: []byte(tc.payload)}
-			opts := exec.Options{SourceFormat: tc.format, OriginalRequest: req.Payload}
-			if got := e.delegate(req, opts).Identifier(); got != copilot.Provider {
+			opts := exec.Options{SourceFormat: tc.format, OriginalRequest: req.Payload, Metadata: map[string]any{exec.SelectedAuthMetadataKey: auth.ID}}
+			if got := e.RequestToFormat(req, opts); got != tc.format {
+				t.Errorf("selected account format = %q, want %q", got, tc.format)
+			}
+			if got := e.delegate(auth, req, opts).Identifier(); got != copilot.Provider {
 				t.Errorf("usage attributed to %s", got)
 			}
 			resp, err := e.Execute(ctx, auth, req, opts)
@@ -90,6 +100,9 @@ func TestCopilotResponsesStreamTerminalAndUsage(t *testing.T) {
 			e, auth := newTestCopilot()
 			registry.GetGlobalRegistry().RegisterClient(auth.ID, copilot.Provider, []*registry.ModelInfo{{ID: "test-response", UpstreamEndpoint: "/responses"}})
 			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+			otherID := auth.ID + "-other"
+			registry.GetGlobalRegistry().RegisterClient(otherID, copilot.Provider, []*registry.ModelInfo{{ID: "test-response", UpstreamEndpoint: "/chat/completions"}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(otherID) })
 			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", copilotRoundTripper(func(r *http.Request) (*http.Response, error) {
 				body, _ := io.ReadAll(r.Body)
 				if r.URL.Path != "/responses" || gjson.GetBytes(body, "stream_options").Exists() {
@@ -137,5 +150,26 @@ func TestCopilotQuotaFailureUsesAccountFailover(t *testing.T) {
 	})
 	if !ok || status.StatusCode() != 429 || !status.IsCredentialScoped() {
 		t.Fatalf("quota error=%v", err)
+	}
+}
+
+func TestCopilotFormatUsesSelectedAccountAlias(t *testing.T) {
+	e, auth := newTestCopilot()
+	r := registry.GetGlobalRegistry()
+	r.RegisterClient(auth.ID, copilot.Provider, []*registry.ModelInfo{{ID: "team/public-model", UpstreamEndpoint: "/responses"}})
+	otherID := auth.ID + "-other"
+	r.RegisterClient(otherID, copilot.Provider, []*registry.ModelInfo{{ID: "team/public-model", UpstreamEndpoint: "/chat/completions"}})
+	t.Cleanup(func() { r.UnregisterClient(auth.ID); r.UnregisterClient(otherID) })
+	req := exec.Request{Model: "upstream-model(high)"}
+	opts := exec.Options{Metadata: map[string]any{
+		exec.SelectedAuthMetadataKey:   auth.ID,
+		exec.RequestedModelMetadataKey: "team/public-model(high)",
+	}}
+	if got := e.RequestToFormat(req, opts); got != translator.FormatOpenAIResponse {
+		t.Fatalf("aliased account format = %q, want Responses", got)
+	}
+	opts.Metadata[exec.SelectedAuthMetadataKey] = otherID
+	if got := e.RequestToFormat(req, opts); got != translator.FormatOpenAI {
+		t.Fatalf("other account format = %q, want Chat Completions", got)
 	}
 }

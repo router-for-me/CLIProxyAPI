@@ -8,11 +8,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (s *Service) fetchCopilotModels(ctx context.Context, auth *coreauth.Auth) []*ModelInfo {
+func (s *Service) fetchCopilotModels(ctx context.Context, auth *coreauth.Auth) ([]*ModelInfo, error) {
 	models, err := executor.NewCopilotExecutor(s.cfg).Models(ctx, auth)
 	if err != nil {
 		log.WithError(err).WithField("provider", "github-copilot").Warn("could not refresh account models")
-		return GlobalModelRegistry().GetModelsForClient(auth.ID)
 	}
-	return models
+	return models, err
 }

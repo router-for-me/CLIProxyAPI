@@ -1643,6 +1643,14 @@ func (r *ModelRegistry) ClientRegistrationEpoch(clientID string) uint64 {
 	return r.clientEpochs[clientID]
 }
 
+// GetModelForClient returns a copy of the client's own model metadata, without
+// falling back to another client's definition of the same model.
+func (r *ModelRegistry) GetModelForClient(clientID, modelID string) *ModelInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return cloneModelInfo(r.clientModelInfos[clientID][modelID])
+}
+
 // GetModelsForClient returns the models registered for a specific client.
 // Parameters:
 //   - clientID: The client identifier (typically auth file name or auth ID)
