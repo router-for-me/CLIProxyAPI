@@ -30,8 +30,9 @@ func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
 }
 
-// SetTransientErrorCooldownSeconds configures cooldowns for 408/500/502/503/504.
-// 0 keeps the legacy default; negative values disable transient error cooldowns.
+// SetTransientErrorCooldownSeconds configures transient upstream cooldowns.
+// 0 keeps the 60s default (10s for ordinary Cloudflare HTML 5xx pages);
+// negative values disable transient error cooldowns.
 func SetTransientErrorCooldownSeconds(seconds int) {
 	transientErrorCooldownSeconds.Store(int64(seconds))
 }
@@ -819,6 +820,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							NextRecoverAt: next,
 							BackoffLevel:  backoffLevel,
 						})
+					} else if isCloudflareOriginResultError(result.Error) {
+						state.NextRetryAfter = cloudflareOriginRetryAfter(now, disableCooling)
+						state.Unavailable = !state.NextRetryAfter.IsZero()
 					} else if isInvalidGrantResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
@@ -1673,7 +1677,7 @@ func isCloudflareChallengeErrorMessage(message string) bool {
 	return strings.Contains(lower, "challenge-platform") ||
 		strings.Contains(lower, "cf-mitigated") ||
 		strings.Contains(lower, "cloudflare challenge") ||
-		(strings.Contains(lower, "cloudflare") && strings.Contains(lower, "<html"))
+		(strings.Contains(lower, "cloudflare") && strings.Contains(lower, "just a moment"))
 }
 
 func isCloudflareChallengeError(err error) bool {
@@ -1688,6 +1692,29 @@ func isCloudflareChallengeResultError(err *Error) bool {
 		return false
 	}
 	return isCloudflareChallengeErrorMessage(err.Message)
+}
+
+// Cloudflare's ordinary HTML 5xx pages describe upstream failures, not an
+// authentication challenge. Explicit challenge evidence always takes priority.
+func isCloudflareOriginResultError(err *Error) bool {
+	if err == nil || err.HTTPStatus < 500 || err.HTTPStatus > 599 || isCloudflareChallengeResultError(err) {
+		return false
+	}
+	lower := strings.ToLower(err.Message)
+	return strings.Contains(lower, "cloudflare") && strings.Contains(lower, "<html")
+}
+
+func cloudflareOriginRetryAfter(now time.Time, disableCooling bool) time.Time {
+	seconds := transientErrorCooldownSeconds.Load()
+	if disableCooling || seconds < 0 {
+		return time.Time{}
+	}
+	if seconds > 0 {
+		return now.Add(time.Duration(seconds) * time.Second)
+	}
+	// Keep the former initial 10s delay without entering the challenge/quota
+	// backoff ladder or falling through to the generic 60s transient default.
+	return now.Add(10 * time.Second)
 }
 
 func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time) (time.Time, int) {
@@ -2035,6 +2062,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			BackoffLevel:  backoffLevel,
 		})
 		auth.NextRetryAfter = next
+	} else if isCloudflareOriginResultError(resultErr) {
+		auth.NextRetryAfter = cloudflareOriginRetryAfter(now, disableCooling)
+		auth.Unavailable = !auth.NextRetryAfter.IsZero()
 	} else if isInvalidGrantResultError(resultErr) {
 		auth.StatusMessage = "invalid_grant"
 		if disableCooling {
