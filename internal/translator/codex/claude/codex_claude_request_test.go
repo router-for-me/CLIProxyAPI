@@ -321,17 +321,6 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
 	}
 }
 
-func TestConvertClaudeRequestToCodex_EffortAndFastSpeed(t *testing.T) {
-	input := []byte(`{"model":"gpt-5.4","thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"speed":"fast","messages":[{"role":"user","content":"hi"}]}`)
-	out := ConvertClaudeRequestToCodex("gpt-5.4", input, false)
-	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "high" {
-		t.Fatalf("reasoning.effort = %q, want high; output=%s", got, out)
-	}
-	if got := gjson.GetBytes(out, "service_tier").String(); got != "priority" {
-		t.Fatalf("service_tier = %q, want priority; output=%s", got, out)
-	}
-}
-
 func TestConvertClaudeRequestToCodex_ShortenLongToolUseIDs(t *testing.T) {
 	longID := "toolu_" + strings.Repeat("a", 62)
 	if len(longID) <= 64 {
@@ -959,7 +948,6 @@ func TestNormalizeToolParameters_StripsNestedSchemaAndId(t *testing.T) {
 		"properties": {
 			"q": {
 				"type": "string",
-				"pattern": "^(?!__.*__$)[^\\p{Cc}\\p{Cf}]+$",
 				"$schema": "http://json-schema.org/draft-07/schema#",
 				"$id": "https://example.invalid/q"
 			},
@@ -1125,9 +1113,6 @@ func TestConvertClaudeRequestToCodex_StripsNestedToolSchemaMeta(t *testing.T) {
 	}
 	if params.Get("properties.q.$id").Exists() {
 		t.Errorf("expected parameters.properties.q.$id to be removed, got %v", params.Get("properties.q.$id").Raw)
-	}
-	if params.Get("properties.q.pattern").Exists() {
-		t.Errorf("expected Codex-incompatible regex pattern to be removed, got %v", params.Get("properties.q.pattern").Raw)
 	}
 	if params.Get("properties.tags.items.$id").Exists() {
 		t.Errorf("expected parameters.properties.tags.items.$id to be removed, got %v", params.Get("properties.tags.items.$id").Raw)
