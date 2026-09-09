@@ -746,6 +746,7 @@ type sseJSONValidationState struct {
 	pending          []byte
 	pendingErr       error
 	lastChunkEndedCR bool
+	forwarded        bool
 }
 
 func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
@@ -791,11 +792,17 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 			return nil, errValidate
 		}
 		output = append(output, frame...)
+		s.forwarded = true
 		copy(s.pending, s.pending[frameEnd:])
 		s.pending = s.pending[:len(s.pending)-frameEnd]
 	}
 
 	if len(bytes.TrimSpace(s.pending)) == 0 {
+		// Once part of a frame has been forwarded, a whitespace-only chunk may
+		// contain its remaining line ending or blank-line delimiter.
+		if s.forwarded {
+			output = append(output, s.pending...)
+		}
 		s.pending = s.pending[:0]
 		return output, nil
 	}
@@ -803,6 +810,7 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	payload = bytes.TrimSpace(payload)
 	if !found || len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || json.Valid(payload) {
 		output = append(output, s.pending...)
+		s.forwarded = true
 		s.pending = s.pending[:0]
 	}
 	return output, nil
@@ -810,6 +818,7 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 
 func (s *sseJSONValidationState) Finish() error {
 	s.lastChunkEndedCR = false
+	s.forwarded = false
 	if s.pendingErr != nil {
 		errPending := s.pendingErr
 		s.pendingErr = nil
