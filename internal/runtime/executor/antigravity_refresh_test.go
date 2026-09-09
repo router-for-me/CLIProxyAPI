@@ -120,9 +120,15 @@ func TestAntigravityRefresh_DeduplicatesConcurrentRefresh(t *testing.T) {
 				"token_type":"Bearer",
 				"expires_in":3600
 			}`)
+		case "/v1beta:fetchLicenses":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"licenses":[]}`)
 		case "/v1internal:loadCodeAssist":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"paidTier":{"id":"tier","availableCredits":[]}}`)
+		case "/v1internal:onboardUser":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"project":"project-a"}`)
 		default:
 			t.Errorf("unexpected antigravity test request path: %s", r.URL.Path)
 			http.Error(w, "unexpected path", http.StatusNotFound)

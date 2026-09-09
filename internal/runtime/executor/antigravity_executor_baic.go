@@ -169,6 +169,7 @@ func (e *AntigravityExecutor) executeBAIC(ctx context.Context, auth *cliproxyaut
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = setBAICModelExperience(body, baseModel)
+	body, _ = sjson.DeleteBytes(body, "session_id")
 	body = helps.StripVertexOpenAIResponsesToolCallIDs(body, from.String())
 	body = internalsignature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
@@ -286,6 +287,7 @@ func (e *AntigravityExecutor) executeStreamBAIC(ctx context.Context, auth *clipr
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = setBAICModelExperience(body, baseModel)
+	body, _ = sjson.DeleteBytes(body, "session_id")
 	body = helps.StripVertexOpenAIResponsesToolCallIDs(body, from.String())
 	body = internalsignature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 	body = helps.EnsureGeminiBoundaryUserContent(body, "contents")
@@ -378,20 +380,21 @@ func (e *AntigravityExecutor) executeStreamBAIC(ctx context.Context, auth *clipr
 				}
 			}
 		}
-		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param, claudeInputTokens)
-		for i := range lines {
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
-			case <-ctx.Done():
-				return
-			}
-		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
+			}
+		} else {
+			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param, claudeInputTokens)
+			for i := range lines {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()

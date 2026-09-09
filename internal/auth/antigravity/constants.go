@@ -3,9 +3,11 @@ package antigravity
 
 // OAuth client credentials and configuration
 const (
-	ClientID     = "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com"
-	ClientSecret = "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"
-	CallbackPort = 51121
+	ClientID           = "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com"
+	ClientSecret       = "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"
+	LegacyClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	LegacyClientSecret = "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"
+	CallbackPort       = 51121
 )
 
 // Scopes defines the OAuth scopes required for Antigravity authentication

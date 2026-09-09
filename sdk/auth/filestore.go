@@ -310,7 +310,10 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		if projectID == "" || userTier == "" {
 			accessToken := extractAccessToken(metadata)
 			if accessToken != "" {
-				result, errFetch := FetchAntigravityProjectIDWithTier(context.Background(), accessToken, http.DefaultClient)
+				fetchCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				httpClient := &http.Client{Timeout: 10 * time.Second}
+				result, errFetch := FetchAntigravityProjectIDWithTier(fetchCtx, accessToken, httpClient)
+				cancel()
 				if errFetch == nil && strings.TrimSpace(result.ProjectID) != "" {
 					metadata["project_id"] = strings.TrimSpace(result.ProjectID)
 					tier := strings.TrimSpace(result.Tier)

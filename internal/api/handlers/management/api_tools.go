@@ -277,9 +277,18 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	if tokenURL == "" {
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
+	clientID := antigravityauth.ClientID
+	clientSecret := antigravityauth.ClientSecret
+	if cid := stringValue(metadata, "client_id"); cid != "" {
+		clientID = cid
+	}
+	if csec := stringValue(metadata, "client_secret"); csec != "" {
+		clientSecret = csec
+	}
+
 	form := url.Values{}
-	form.Set("client_id", antigravityauth.ClientID)
-	form.Set("client_secret", antigravityauth.ClientSecret)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -306,6 +315,28 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	bodyBytes, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
 		return "", errRead
+	}
+	if (resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) && clientID != antigravityauth.LegacyClientID {
+		// If current client fails with client mismatch, retry with legacy credentials
+		errMsg := strings.ToLower(string(bodyBytes))
+		if strings.Contains(errMsg, "unauthorized_client") || strings.Contains(errMsg, "invalid_client") {
+			legacyForm := url.Values{}
+			legacyForm.Set("client_id", antigravityauth.LegacyClientID)
+			legacyForm.Set("client_secret", antigravityauth.LegacyClientSecret)
+			legacyForm.Set("grant_type", "refresh_token")
+			legacyForm.Set("refresh_token", refreshToken)
+
+			if legacyReq, errLegacyReq := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(legacyForm.Encode())); errLegacyReq == nil {
+				legacyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				if legacyResp, errLegacyDo := httpClient.Do(legacyReq); errLegacyDo == nil {
+					defer func() { _ = legacyResp.Body.Close() }()
+					if legacyBytes, errLegacyRead := io.ReadAll(legacyResp.Body); errLegacyRead == nil && legacyResp.StatusCode >= http.StatusOK && legacyResp.StatusCode < http.StatusMultipleChoices {
+						resp = legacyResp
+						bodyBytes = legacyBytes
+					}
+				}
+			}
+		}
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return "", fmt.Errorf("antigravity oauth token refresh failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))

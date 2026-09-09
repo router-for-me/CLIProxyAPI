@@ -4,6 +4,7 @@ package antigravity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -298,8 +299,9 @@ type EnterpriseLicense struct {
 // fetchEnterpriseLicenses queries businessaicode's fetchLicenses endpoint, which reports any
 // Gemini Enterprise (BAIC) licenses assigned to the authenticated user along with the GCP
 // project/region generation traffic must be routed to. Individual/free accounts return an
-// empty licenses array (or a non-2xx error); callers should treat both as "no enterprise
-// license" and fall back to loadCodeAssist/onboardUser project discovery.
+// empty licenses array (or a non-2xx error); callers should treat expected non-enterprise
+// errors (400, 403, 404) as "no enterprise license" and fall back to loadCodeAssist/onboardUser
+// project discovery, while propagating transient errors (e.g. 5xx, timeouts).
 func (o *AntigravityAuth) fetchEnterpriseLicenses(ctx context.Context, accessToken string) ([]EnterpriseLicense, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, BAICLicensesEndpoint, nil)
 	if err != nil {
@@ -339,6 +341,22 @@ func (o *AntigravityAuth) fetchEnterpriseLicenses(ctx context.Context, accessTok
 	return parsed.Licenses, nil
 }
 
+// isNonEnterpriseLicenseError returns true if the error from fetchLicenses is an expected
+// non-enterprise response (e.g. API disabled, permission denied, or endpoint not found)
+// rather than a transient failure (e.g. network timeout, 5xx server error).
+func isNonEnterpriseLicenseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *HTTPStatusError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCodeValue == http.StatusForbidden ||
+			httpErr.StatusCodeValue == http.StatusNotFound ||
+			httpErr.StatusCodeValue == http.StatusBadRequest
+	}
+	return false
+}
+
 // FetchProjectIDWithTier behaves like FetchProjectID but also returns the resolved tier ID so
 // callers can route enterprise-tier ("gcp-ge-*") accounts to the BAIC generation backend.
 func (o *AntigravityAuth) FetchProjectIDWithTier(ctx context.Context, accessToken string) (ProjectDiscoveryResult, error) {
@@ -347,7 +365,11 @@ func (o *AntigravityAuth) FetchProjectIDWithTier(ctx context.Context, accessToke
 	// authoritative source for the enterprise project ID and required region.
 	licenses, errLicenses := o.fetchEnterpriseLicenses(ctx, accessToken)
 	if errLicenses != nil {
-		log.Debugf("antigravity: fetchLicenses check failed (likely not an enterprise account): %v", errLicenses)
+		if isNonEnterpriseLicenseError(errLicenses) {
+			log.Debugf("antigravity: fetchLicenses check returned non-enterprise error (likely not an enterprise account): %v", errLicenses)
+		} else {
+			return ProjectDiscoveryResult{}, fmt.Errorf("fetch enterprise licenses: %w", errLicenses)
+		}
 	} else if len(licenses) > 0 {
 		license := licenses[0]
 		projectID := strings.TrimSpace(license.ProjectID)
