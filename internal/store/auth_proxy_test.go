@@ -26,7 +26,7 @@ func TestStoresRestoreAccountProxyBeforeWatcherStarts(t *testing.T) {
 			{name: "HTTP proxy", value: "http://proxy.example:8080", present: true, want: "http://proxy.example:8080"},
 			{name: "SOCKS proxy", value: "socks5://proxy.example:1080", present: true, want: "socks5://proxy.example:1080"},
 			{name: "direct override", value: "direct", present: true, want: "direct"},
-			{name: "whitespace preserved", value: "  direct  ", present: true, want: "  direct  "},
+			{name: "whitespace trimmed", value: "  direct  ", present: true, want: "direct"},
 			{name: "absent"},
 			{name: "empty", value: "", present: true},
 			{name: "null", present: true},

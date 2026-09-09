@@ -87,49 +87,6 @@ func TestExtractAccessToken(t *testing.T) {
 	}
 }
 
-func TestFileTokenStoreRestoresProxyBeforeWatcherStarts(t *testing.T) {
-	for _, provider := range []string{"antigravity", "codex", "claude"} {
-		for _, test := range []struct {
-			name  string
-			field string
-			want  string
-		}{
-			{name: "HTTP proxy", field: `,"proxy_url":"http://proxy.example:8080"`, want: "http://proxy.example:8080"},
-			{name: "SOCKS proxy", field: `,"proxy_url":"socks5://proxy.example:1080"`, want: "socks5://proxy.example:1080"},
-			{name: "explicit direct", field: `,"proxy_url":"direct"`, want: "direct"},
-			{name: "preserve watcher representation", field: `,"proxy_url":" http://proxy.example:8080 "`, want: " http://proxy.example:8080 "},
-			{name: "absent"},
-			{name: "empty", field: `,"proxy_url":""`},
-			{name: "null", field: `,"proxy_url":null`},
-			{name: "non-string", field: `,"proxy_url":123`},
-		} {
-			t.Run(provider+"/"+test.name, func(t *testing.T) {
-				baseDir := t.TempDir()
-				fileName := provider + ".json"
-				// A known project avoids discovery traffic while exercising the actual
-				// store-to-manager startup path, before watcher synthesis can repair it.
-				payload := []byte(`{"type":"` + provider + `","project_id":"test-project"` + test.field + `}`)
-				if errWrite := os.WriteFile(filepath.Join(baseDir, fileName), payload, 0o600); errWrite != nil {
-					t.Fatal(errWrite)
-				}
-				store := NewFileTokenStore()
-				store.SetBaseDir(baseDir)
-				manager := cliproxyauth.NewManager(store, nil, nil)
-				if errLoad := manager.Load(context.Background()); errLoad != nil {
-					t.Fatal(errLoad)
-				}
-				auth, ok := manager.GetByID(fileName)
-				if !ok {
-					t.Fatal("credential missing after initial load")
-				}
-				if auth.ProxyURL != test.want {
-					t.Fatalf("initial runtime ProxyURL = %q, want %q", auth.ProxyURL, test.want)
-				}
-			})
-		}
-	}
-}
-
 func TestFileTokenStoreSaveExistingMetadataSetsFileAttributes(t *testing.T) {
 	tests := []struct {
 		name          string

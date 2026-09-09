@@ -343,7 +343,7 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 		auth := &cliproxyauth.Auth{
 			ID:               normalizeAuthID(id),
 			Provider:         provider,
-			ProxyURL:         proxyURL,
+			ProxyURL:         strings.TrimSpace(proxyURL),
 			FileName:         normalizeAuthID(id),
 			Label:            labelFor(metadata),
 			Status:           cliproxyauth.StatusActive,
