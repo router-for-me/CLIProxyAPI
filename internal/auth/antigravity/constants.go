@@ -3,9 +3,11 @@ package antigravity
 
 // OAuth client credentials and configuration
 const (
-	ClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	ClientSecret = "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"
-	CallbackPort = 51121
+	ClientID           = "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com"
+	ClientSecret       = "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"
+	LegacyClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	LegacyClientSecret = "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"
+	CallbackPort       = 51121
 )
 
 // Scopes defines the OAuth scopes required for Antigravity authentication
@@ -30,3 +32,8 @@ const (
 	DailyAPIEndpoint = "https://daily-cloudcode-pa.googleapis.com"
 	APIVersion       = "v1internal"
 )
+
+// BAICLicensesEndpoint reports Gemini Enterprise (Business AI Code) licenses assigned to the
+// authenticated user, including the GCP project/region generation traffic must route to.
+// Individual/free accounts have no licenses and get an empty "licenses" array here.
+const BAICLicensesEndpoint = "https://businessaicode.googleapis.com/v1beta:fetchLicenses"

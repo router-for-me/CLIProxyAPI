@@ -217,10 +217,10 @@ func TestRegisterModelsUsesModelProviderStaticModels(t *testing.T) {
 		},
 		AuthDir: "/tmp/plugin-auth",
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
-			"plugin-provider": []config.OAuthModelAlias{{Name: "upstream-model", Alias: "alias-model"}},
+			"plugin-provider": {{Name: "upstream-model", Alias: "alias-model"}},
 		},
 		OAuthExcludedModels: map[string][]string{
-			"plugin-provider": []string{"hidden-model"},
+			"plugin-provider": {"hidden-model"},
 		},
 	}
 
@@ -1894,7 +1894,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			"bytes":     []byte("original"),
 			"labels":    map[string]string{"name": "original"},
 			"values":    url.Values{"name": []string{"original"}},
-			"mapSlice":  map[string][]string{"name": []string{"original"}},
+			"mapSlice":  map[string][]string{"name": {"original"}},
 			"sliceMap":  []map[string]string{{"name": "original"}},
 			"aliasMap":  stringSliceAlias{"original"},
 			"aliasList": mapSliceAlias{{"name": "original"}},
@@ -1967,7 +1967,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			"bytes":     []byte("original"),
 			"labels":    map[string]string{"name": "original"},
 			"values":    url.Values{"name": []string{"original"}},
-			"mapSlice":  map[string][]string{"name": []string{"original"}},
+			"mapSlice":  map[string][]string{"name": {"original"}},
 			"sliceMap":  []map[string]string{{"name": "original"}},
 			"aliasMap":  stringSliceAlias{"original"},
 			"aliasList": mapSliceAlias{{"name": "original"}},
@@ -2057,7 +2057,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			"bytes":     []byte("original"),
 			"labels":    map[string]string{"name": "original"},
 			"values":    url.Values{"name": []string{"original"}},
-			"mapSlice":  map[string][]string{"name": []string{"original"}},
+			"mapSlice":  map[string][]string{"name": {"original"}},
 			"sliceMap":  []map[string]string{{"name": "original"}},
 			"aliasMap":  stringSliceAlias{"original"},
 			"aliasList": mapSliceAlias{{"name": "original"}},
@@ -2145,7 +2145,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 		}
 
 		structValue := &pointerMetadata{Value: "original", Items: []string{"original"}}
-		mapValue := &map[string][]string{"names": []string{"original"}}
+		mapValue := &map[string][]string{"names": {"original"}}
 		sliceValue := &[]string{"original"}
 		aliasMapValue := &mapSliceAlias{{"name": "original"}}
 		var ifaceValue any = &pointerMetadata{Value: "original", Items: []string{"original"}}

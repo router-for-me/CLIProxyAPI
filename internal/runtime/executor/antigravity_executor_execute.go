@@ -43,6 +43,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return e.executeCompaction(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if isAntigravityEnterpriseTier(auth) {
+		return e.executeBAIC(ctx, auth, req, opts)
+	}
 	if !antigravityCoolingDisabled(auth, e.cfg) {
 		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
 			return resp, homeKVUnavailableStatusErr(errCooldown)

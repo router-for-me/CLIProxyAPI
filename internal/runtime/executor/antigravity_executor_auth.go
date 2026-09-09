@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -33,7 +34,10 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func (e *AntigravityExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
-	return antigravityProjectIDFromAuth(auth) == ""
+	if auth == nil {
+		return false
+	}
+	return antigravityProjectIDFromAuth(auth) == "" || antigravityEnterpriseTier(auth) == ""
 }
 
 func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -49,15 +53,22 @@ func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *clip
 	if refreshedAuth != nil {
 		updated = refreshedAuth
 	}
-	if antigravityProjectIDFromAuth(updated) != "" {
+	if !e.ShouldPrepareRequestAuth(updated) {
 		return updated, nil
 	}
 
 	projectID, errProject := e.fetchAntigravityProjectID(ctx, updated, token)
 	if errProject != nil {
+		if antigravityProjectIDFromAuth(updated) != "" {
+			log.Warnf("antigravity executor: fetch project id/tier failed, keeping existing project_id %s: %v", antigravityProjectIDFromAuth(updated), errProject)
+			return updated, nil
+		}
 		return nil, missingAntigravityProjectIDError(errProject)
 	}
 	if projectID == "" {
+		if antigravityProjectIDFromAuth(updated) != "" {
+			return updated, nil
+		}
 		return nil, missingAntigravityProjectIDError(nil)
 	}
 	if updated.Metadata == nil {
@@ -138,7 +149,12 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	auth.Metadata["timestamp"] = now.UnixMilli()
 	auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
 	auth.Metadata["type"] = antigravityAuthType
-	if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
+	// On refresh, periodically re-check license/project discovery if not an enterprise tier yet
+	if !isAntigravityEnterpriseTier(auth) {
+		if _, errFetch := e.fetchAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errFetch != nil {
+			log.Warnf("antigravity executor: refresh project id/tier check failed: %v", errFetch)
+		}
+	} else if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
 		log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
 	}
 	e.updateAntigravityCreditsBalance(ctx, auth, tokenResp.AccessToken)
@@ -146,9 +162,44 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 }
 
 func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth *cliproxyauth.Auth, refreshToken string) (*antigravityTokenRefreshData, error) {
+	clientID := antigravityauth.ClientID
+	clientSecret := antigravityauth.ClientSecret
+	if auth != nil && auth.Metadata != nil {
+		if cid, ok := auth.Metadata["client_id"].(string); ok && strings.TrimSpace(cid) != "" {
+			clientID = strings.TrimSpace(cid)
+		}
+		if csec, ok := auth.Metadata["client_secret"].(string); ok && strings.TrimSpace(csec) != "" {
+			clientSecret = strings.TrimSpace(csec)
+		}
+	}
+
+	tokenResp, err := e.doRefreshTokenRequest(ctx, auth, refreshToken, clientID, clientSecret)
+	if err == nil {
+		return tokenResp, nil
+	}
+
+	// If the refresh token was issued by the legacy client, retry with legacy credentials
+	if clientID != antigravityauth.LegacyClientID && isOAuthClientMismatchError(err) {
+		legacyResp, errLegacy := e.doRefreshTokenRequest(ctx, auth, refreshToken, antigravityauth.LegacyClientID, antigravityauth.LegacyClientSecret)
+		if errLegacy == nil {
+			if auth != nil {
+				if auth.Metadata == nil {
+					auth.Metadata = make(map[string]any)
+				}
+				auth.Metadata["client_id"] = antigravityauth.LegacyClientID
+				auth.Metadata["client_secret"] = antigravityauth.LegacyClientSecret
+			}
+			return legacyResp, nil
+		}
+	}
+
+	return nil, err
+}
+
+func (e *AntigravityExecutor) doRefreshTokenRequest(ctx context.Context, auth *cliproxyauth.Auth, refreshToken, clientID, clientSecret string) (*antigravityTokenRefreshData, error) {
 	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -195,17 +246,31 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	return &tokenResp, nil
 }
 
+func isOAuthClientMismatchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unauthorized_client") ||
+		strings.Contains(msg, "invalid_client") ||
+		strings.Contains(msg, "invalid_grant") ||
+		strings.Contains(msg, "the oauth client was not found")
+}
+
 func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {
 	if auth == nil {
 		return nil
 	}
 
-	if antigravityProjectIDFromAuth(auth) != "" {
+	if !e.ShouldPrepareRequestAuth(auth) {
 		return nil
 	}
 
 	projectID, errFetch := e.fetchAntigravityProjectID(ctx, auth, accessToken)
 	if errFetch != nil {
+		if antigravityProjectIDFromAuth(auth) != "" {
+			return nil
+		}
 		return errFetch
 	}
 	if projectID == "" {
@@ -219,6 +284,9 @@ func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, au
 	return nil
 }
 
+// fetchAntigravityProjectID resolves the account's GCP project ID (and, for Gemini Enterprise
+// (BAIC) accounts, its onboarded tier and required region), persisting the tier/region onto
+// auth.Metadata so BAIC generation requests get routed correctly.
 func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (string, error) {
 	token := strings.TrimSpace(accessToken)
 	if token == "" {
@@ -229,11 +297,24 @@ func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, aut
 	}
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(ctx, token, httpClient)
+	result, errFetch := sdkAuth.FetchAntigravityProjectIDWithTier(ctx, token, httpClient)
 	if errFetch != nil {
 		return "", errFetch
 	}
-	return strings.TrimSpace(projectID), nil
+	if auth != nil {
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		tier := strings.TrimSpace(result.Tier)
+		if tier == "" {
+			tier = "free-tier"
+		}
+		auth.Metadata["user_tier"] = tier
+		if region := strings.TrimSpace(result.Region); region != "" {
+			auth.Metadata["region"] = region
+		}
+	}
+	return strings.TrimSpace(result.ProjectID), nil
 }
 
 func (e *AntigravityExecutor) projectIDForRequest(_ context.Context, auth *cliproxyauth.Auth, _ string) (string, error) {

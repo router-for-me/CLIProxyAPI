@@ -303,16 +303,39 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		if pid, ok := metadata["project_id"].(string); ok {
 			projectID = strings.TrimSpace(pid)
 		}
-		if projectID == "" {
+		userTier := ""
+		if ut, ok := metadata["user_tier"].(string); ok {
+			userTier = strings.TrimSpace(ut)
+		}
+		if projectID == "" || userTier == "" {
 			accessToken := extractAccessToken(metadata)
 			if accessToken != "" {
-				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, http.DefaultClient)
-				if errFetch == nil && strings.TrimSpace(fetchedProjectID) != "" {
-					metadata["project_id"] = strings.TrimSpace(fetchedProjectID)
+				fetchCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				httpClient := &http.Client{Timeout: 10 * time.Second}
+				result, errFetch := FetchAntigravityProjectIDWithTier(fetchCtx, accessToken, httpClient)
+				cancel()
+				if errFetch == nil && strings.TrimSpace(result.ProjectID) != "" {
+					metadata["project_id"] = strings.TrimSpace(result.ProjectID)
+					tier := strings.TrimSpace(result.Tier)
+					if tier == "" {
+						tier = "free-tier"
+					}
+					metadata["user_tier"] = tier
+					if region := strings.TrimSpace(result.Region); region != "" {
+						metadata["region"] = region
+					}
 					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
-						if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
-							_, _ = file.Write(raw)
-							_ = file.Close()
+						tmpFile, errTemp := os.CreateTemp(filepath.Dir(path), ".auth-*.tmp")
+						if errTemp == nil {
+							tmpPath := tmpFile.Name()
+							_, errWrite := tmpFile.Write(raw)
+							errClose := tmpFile.Close()
+							if errWrite == nil && errClose == nil {
+								_ = os.Chmod(tmpPath, 0o600)
+								_ = os.Rename(tmpPath, path)
+							} else {
+								_ = os.Remove(tmpPath)
+							}
 						}
 					}
 				}

@@ -44,6 +44,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		return e.executeCompactionStream(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if isAntigravityEnterpriseTier(auth) {
+		return e.executeStreamBAIC(ctx, auth, req, opts)
+	}
 
 	ctx = context.WithValue(ctx, "alt", "")
 	if !antigravityCoolingDisabled(auth, e.cfg) {

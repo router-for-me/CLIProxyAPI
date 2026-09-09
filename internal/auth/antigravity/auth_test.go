@@ -16,6 +16,9 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestFetchProjectIDFromLoadCodeAssist(t *testing.T) {
 	auth := NewAntigravityAuth(nil, &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() == BAICLicensesEndpoint {
+			return jsonResponse(`{"licenses":[]}`), nil
+		}
 		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected request URL: %s", req.URL.String())
 		}
@@ -33,10 +36,35 @@ func TestFetchProjectIDFromLoadCodeAssist(t *testing.T) {
 	}
 }
 
+func TestFetchProjectIDFromEnterpriseLicense(t *testing.T) {
+	auth := NewAntigravityAuth(nil, &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != BAICLicensesEndpoint {
+			t.Fatalf("unexpected request URL: %s", req.URL.String())
+		}
+		return jsonResponse(`{"licenses":[{"userTier":"gcp-ge-standard-tier","tierDisplayName":"Gemini Enterprise Standard","projectId":"seegrid-gemini-enterprise","location":"us"}]}`), nil
+	})})
+
+	result, err := auth.FetchProjectIDWithTier(context.Background(), "access-token")
+	if err != nil {
+		t.Fatalf("FetchProjectIDWithTier error: %v", err)
+	}
+	if result.ProjectID != "seegrid-gemini-enterprise" {
+		t.Fatalf("projectID = %q", result.ProjectID)
+	}
+	if result.Tier != "gcp-ge-standard-tier" {
+		t.Fatalf("tier = %q", result.Tier)
+	}
+	if result.Region != "us" {
+		t.Fatalf("region = %q", result.Region)
+	}
+}
+
 func TestFetchProjectIDFallsBackToDailyOnboardUser(t *testing.T) {
 	var sawOnboard bool
 	auth := NewAntigravityAuth(nil, &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.String() {
+		case BAICLicensesEndpoint:
+			return jsonResponse(`{"licenses":[]}`), nil
 		case "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist":
 			assertLoadCodeAssistHeaders(t, req)
 			return jsonResponse(`{"allowedTiers":[{"id":"free-tier","isDefault":true}]}`), nil

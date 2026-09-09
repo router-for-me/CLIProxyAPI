@@ -66,7 +66,10 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	}()
 
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", port)
-	authURL := authSvc.BuildAuthURL(state, redirectURI)
+	authURL, codeVerifier, errAuthURL := authSvc.BuildAuthURL(state, redirectURI)
+	if errAuthURL != nil {
+		return nil, fmt.Errorf("antigravity: failed to build auth URL: %w", errAuthURL)
+	}
 
 	if !opts.NoBrowser {
 		fmt.Println("Opening browser for antigravity authentication")
@@ -153,7 +156,7 @@ waitForCallback:
 		return nil, fmt.Errorf("antigravity: missing authorization code")
 	}
 
-	tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, cbRes.Code, redirectURI)
+	tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, cbRes.Code, redirectURI, codeVerifier)
 	if errToken != nil {
 		return nil, fmt.Errorf("antigravity: token exchange failed: %w", errToken)
 	}
@@ -172,18 +175,22 @@ waitForCallback:
 		return nil, fmt.Errorf("antigravity: empty email returned from user info")
 	}
 
-	// Fetch project ID via loadCodeAssist.
+	// Use an explicitly provided project ID as a hint to onboardUser, otherwise let
+	// loadCodeAssist/onboardUser discover (and license) the project automatically.
 	projectID := ""
+	tier := ""
+	region := ""
 	if accessToken != "" {
-		fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
+		result, errProject := authSvc.FetchProjectIDWithTier(ctx, accessToken)
 		if errProject != nil {
 			return nil, fmt.Errorf("antigravity: failed to fetch project ID: %w", errProject)
-		} else {
-			projectID = fetchedProjectID
-			log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
 		}
+		projectID = strings.TrimSpace(result.ProjectID)
+		tier = strings.TrimSpace(result.Tier)
+		region = strings.TrimSpace(result.Region)
+		log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
 	}
-	if strings.TrimSpace(projectID) == "" {
+	if projectID == "" {
 		return nil, fmt.Errorf("antigravity: project ID discovery returned empty project")
 	}
 
@@ -191,12 +198,24 @@ waitForCallback:
 	if projectID != "" {
 		fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
 	}
-	return BuildAntigravityAuth(&AntigravityTokenResponse{
+	authRecord := BuildAntigravityAuth(&AntigravityTokenResponse{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		ExpiresIn:    tokenResp.ExpiresIn,
 		TokenType:    tokenResp.TokenType,
-	}, email, projectID), nil
+	}, email, projectID)
+	if authRecord != nil {
+		if authRecord.Metadata == nil {
+			authRecord.Metadata = make(map[string]any)
+		}
+		if tier != "" {
+			authRecord.Metadata["user_tier"] = tier
+		}
+		if region != "" {
+			authRecord.Metadata["region"] = region
+		}
+	}
+	return authRecord, nil
 }
 
 type callbackResult struct {
@@ -245,9 +264,16 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 
 // FetchAntigravityProjectID exposes project discovery for external callers.
 func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
+	result, err := FetchAntigravityProjectIDWithTier(ctx, accessToken, httpClient)
+	return result.ProjectID, err
+}
+
+// FetchAntigravityProjectIDWithTier behaves like FetchAntigravityProjectID but also returns the
+// resolved tier ID and BAIC region, needed to route enterprise-licensed accounts correctly.
+func FetchAntigravityProjectIDWithTier(ctx context.Context, accessToken string, httpClient *http.Client) (antigravity.ProjectDiscoveryResult, error) {
 	cfg := &config.Config{}
 	authSvc := antigravity.NewAntigravityAuth(cfg, httpClient)
-	return authSvc.FetchProjectID(ctx, accessToken)
+	return authSvc.FetchProjectIDWithTier(ctx, accessToken)
 }
 
 // AntigravityDefaultCallbackPort is the default local port used for Antigravity OAuth loopback callbacks.
@@ -271,20 +297,22 @@ func AntigravityUserAgent() string {
 	return misc.AntigravityUserAgent()
 }
 
-// BuildAntigravityAuthURL generates the OAuth authorization URL for Antigravity.
+// BuildAntigravityAuthURL generates the OAuth authorization URL for Antigravity along with the
+// PKCE code verifier that must be passed to ExchangeAntigravityCode for the same login attempt.
 // If redirectURI is empty, the default loopback callback URI is used.
-func BuildAntigravityAuthURL(state, redirectURI string) string {
+func BuildAntigravityAuthURL(state, redirectURI string) (authURL, codeVerifier string, err error) {
 	authSvc := antigravity.NewAntigravityAuth(nil, nil)
 	return authSvc.BuildAuthURL(state, redirectURI)
 }
 
 // ExchangeAntigravityCode exchanges an authorization code for access and refresh tokens.
-func ExchangeAntigravityCode(ctx context.Context, code, redirectURI string, httpClient *http.Client) (*AntigravityTokenResponse, error) {
+// codeVerifier is the PKCE verifier returned by BuildAntigravityAuthURL for the same login attempt.
+func ExchangeAntigravityCode(ctx context.Context, code, redirectURI, codeVerifier string, httpClient *http.Client) (*AntigravityTokenResponse, error) {
 	if strings.TrimSpace(redirectURI) == "" {
 		redirectURI = AntigravityDefaultCallbackURI()
 	}
 	authSvc := antigravity.NewAntigravityAuth(nil, httpClient)
-	tokenResp, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI)
+	tokenResp, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI, codeVerifier)
 	if errExchange != nil {
 		return nil, errExchange
 	}
@@ -345,8 +373,9 @@ func BuildAntigravityAuth(tokenResp *AntigravityTokenResponse, email, projectID 
 
 // CompleteAntigravityOAuth performs code exchange, user identity retrieval, and GCP project discovery
 // using an injected HTTP client, returning an assembled *coreauth.Auth without touching the filesystem.
-func CompleteAntigravityOAuth(ctx context.Context, code, redirectURI string, httpClient *http.Client) (*coreauth.Auth, error) {
-	tokenResp, errExchange := ExchangeAntigravityCode(ctx, code, redirectURI, httpClient)
+// codeVerifier is the PKCE verifier returned by BuildAntigravityAuthURL for the same login attempt.
+func CompleteAntigravityOAuth(ctx context.Context, code, redirectURI, codeVerifier string, httpClient *http.Client) (*coreauth.Auth, error) {
+	tokenResp, errExchange := ExchangeAntigravityCode(ctx, code, redirectURI, codeVerifier, httpClient)
 	if errExchange != nil {
 		return nil, fmt.Errorf("antigravity: token exchange failed: %w", errExchange)
 	}
@@ -365,14 +394,26 @@ func CompleteAntigravityOAuth(ctx context.Context, code, redirectURI string, htt
 		return nil, fmt.Errorf("antigravity: empty email returned from user info")
 	}
 
-	projectID, errProject := FetchAntigravityProjectID(ctx, accessToken, httpClient)
+	result, errProject := FetchAntigravityProjectIDWithTier(ctx, accessToken, httpClient)
 	if errProject != nil {
 		return nil, fmt.Errorf("antigravity: failed to fetch project ID: %w", errProject)
 	}
-	projectID = strings.TrimSpace(projectID)
+	projectID := strings.TrimSpace(result.ProjectID)
 	if projectID == "" {
 		return nil, fmt.Errorf("antigravity: project ID discovery returned empty project")
 	}
 
-	return BuildAntigravityAuth(tokenResp, email, projectID), nil
+	authRecord := BuildAntigravityAuth(tokenResp, email, projectID)
+	if authRecord != nil {
+		if authRecord.Metadata == nil {
+			authRecord.Metadata = make(map[string]any)
+		}
+		if tier := strings.TrimSpace(result.Tier); tier != "" {
+			authRecord.Metadata["user_tier"] = tier
+		}
+		if region := strings.TrimSpace(result.Region); region != "" {
+			authRecord.Metadata["region"] = region
+		}
+	}
+	return authRecord, nil
 }

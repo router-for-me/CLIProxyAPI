@@ -180,7 +180,7 @@ func TestPickNextViaHomeDoesNotReusePinnedNonWebsocketAuth(t *testing.T) {
 
 	manager.mu.Lock()
 	manager.homeRuntimeAuths["session-1"] = map[string]*Auth{
-		"home-auth-1": &Auth{
+		"home-auth-1": {
 			ID:       "home-auth-1",
 			Provider: "test",
 			Status:   StatusActive,
