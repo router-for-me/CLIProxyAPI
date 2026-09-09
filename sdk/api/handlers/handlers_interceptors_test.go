@@ -33,6 +33,20 @@ type handlerInterceptorTestHost struct {
 	includeStreamChunkHistory bool
 }
 
+func TestRestoreVoiceContentTypePreservesUpstreamMIME(t *testing.T) {
+	raw := http.Header{"Content-Type": {"audio/mpeg"}}
+	if got := restoreVoiceContentType("voice/tts", raw, nil).Get("Content-Type"); got != "audio/mpeg" {
+		t.Fatalf("restored Content-Type = %q, want audio/mpeg", got)
+	}
+	pluginHeaders := http.Header{"Content-Type": {"audio/wav"}}
+	if got := restoreVoiceContentType("voice/tts", raw, pluginHeaders).Get("Content-Type"); got != "audio/wav" {
+		t.Fatalf("plugin Content-Type = %q, want audio/wav", got)
+	}
+	if got := restoreVoiceContentType("chat", raw, nil); got != nil {
+		t.Fatalf("non-voice headers = %#v, want nil", got)
+	}
+}
+
 type handlerInterceptorNoStreamTestHost struct {
 	*handlerInterceptorTestHost
 }

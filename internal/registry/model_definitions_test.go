@@ -80,6 +80,39 @@ func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {
 	}
 }
 
+func TestWithXAIBuiltinsIncludesVoiceRoutingModels(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	seen := make(map[string]bool, len(models))
+	for _, model := range models {
+		if model != nil {
+			seen[model.ID] = true
+		}
+	}
+	for _, id := range []string{xaiBuiltinTTSModelID, xaiBuiltinSTTModelID} {
+		if !seen[id] {
+			t.Fatalf("expected xAI builtin voice model %s", id)
+		}
+	}
+}
+
+func TestWithXAIVoiceBuiltinsPreservesCustomModels(t *testing.T) {
+	models := WithXAIVoiceBuiltins([]*ModelInfo{{ID: "custom-grok-model"}})
+	seen := make(map[string]bool, len(models))
+	for _, model := range models {
+		if model != nil {
+			seen[model.ID] = true
+		}
+	}
+	for _, id := range []string{"custom-grok-model", xaiBuiltinTTSModelID, xaiBuiltinSTTModelID} {
+		if !seen[id] {
+			t.Fatalf("missing xAI model %s", id)
+		}
+	}
+	if seen[xaiBuiltinImageModelID] {
+		t.Fatalf("voice builtins unexpectedly added image model %s", xaiBuiltinImageModelID)
+	}
+}
+
 func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {
 	registryRef := GetGlobalRegistry()
 	registryRef.RegisterClient("test-antigravity-websearch-route", "antigravity", []*ModelInfo{

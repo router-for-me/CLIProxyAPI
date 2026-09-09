@@ -96,6 +96,35 @@ func TestRegisterModelsForAuthCodexAPIKeyModels(t *testing.T) {
 	}
 }
 
+func TestRegisterModelsForAuthXAIConfiguredModelsRetainsVoiceRoutes(t *testing.T) {
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	authID := "xai-configured-voice-models"
+	modelRegistry.UnregisterClient(authID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(authID) })
+
+	service := &Service{cfg: &config.Config{XAIKey: []config.XAIKey{{
+		APIKey: "configured-xai-key",
+		Models: []internalconfig.XAIModel{{Name: "grok-4.5", Alias: "configured-grok"}},
+	}}}}
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			coreauth.AttributeAPIKey:      "configured-xai-key",
+			coreauth.AttributeConfigIndex: "0",
+		},
+	}
+
+	service.registerModelsForAuth(context.Background(), auth)
+	gotIDs := codexModelIDSet(modelRegistry.GetModelsForClient(authID))
+	for _, modelID := range []string{"configured-grok", "grok-tts", "grok-stt"} {
+		if _, ok := gotIDs[modelID]; !ok {
+			t.Errorf("missing registered xAI model %q: got %#v", modelID, gotIDs)
+		}
+	}
+}
+
 func TestRegisterModelsForAuthCodexAPIKeyDefaultRequiresConfigMatch(t *testing.T) {
 	defaultIDs := codexModelIDSet(internalregistry.GetCodexProModels())
 	tests := []struct {

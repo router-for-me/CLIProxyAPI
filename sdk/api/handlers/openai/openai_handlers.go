@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 
@@ -132,6 +133,43 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		h.handleNonStreamingResponse(c, rawJSON)
 	}
 
+}
+
+// GrokTTS forwards a Grok Voice text-to-speech request and preserves the
+// upstream audio response instead of wrapping it as JSON.
+// The routing model is only used to select the xAI account pool; Voice
+// requests do not require a text model in their upstream payload.
+func (h *OpenAIAPIHandler) GrokTTS(c *gin.Context) {
+	h.handleGrokVoice(c, "voice/tts", "grok-tts")
+}
+
+// GrokSTT forwards a Grok Voice speech-to-text multipart request.
+func (h *OpenAIAPIHandler) GrokSTT(c *gin.Context) {
+	h.handleGrokVoice(c, "voice/stt", "grok-stt")
+}
+
+func (h *OpenAIAPIHandler) handleGrokVoice(c *gin.Context, alt, model string) {
+	raw, errRead := io.ReadAll(c.Request.Body)
+	if errRead != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: errRead.Error(), Type: "invalid_request_error"}})
+		return
+	}
+	ctx, cancel := h.GetContextWithCancel(h, c, context.Background())
+	defer cancel()
+	body, headers, errMsg := h.ExecuteWithAuthManager(ctx, h.HandlerType(), model, raw, alt)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), headers)
+	if c.Writer.Header().Get("Content-Type") == "" {
+		contentType := "application/octet-stream"
+		if alt == "voice/stt" {
+			contentType = "application/json"
+		}
+		c.Header("Content-Type", contentType)
+	}
+	_, _ = c.Writer.Write(body)
 }
 
 // shouldTreatAsResponsesFormat detects OpenAI Responses-style payloads that are

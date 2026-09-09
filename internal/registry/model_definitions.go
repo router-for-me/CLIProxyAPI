@@ -15,6 +15,9 @@ const (
 	xaiBuiltinVideoModelID        = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID      = "grok-imagine-video-1.5"
 	xaiBuiltinVideo15PreviewID    = "grok-imagine-video-1.5-preview"
+	// Voice entries are routing-only models for the native Grok Voice endpoints.
+	xaiBuiltinTTSModelID = "grok-tts"
+	xaiBuiltinSTTModelID = "grok-stt"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -119,10 +122,16 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
 }
 
-// WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
+// WithXAIBuiltins injects hard-coded xAI image/video/voice model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinTTSModelInfo(), xaiBuiltinSTTModelInfo())
+}
+
+// WithXAIVoiceBuiltins adds the routing-only model definitions required by the
+// native Grok Voice endpoints without changing an operator's custom model list.
+func WithXAIVoiceBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, xaiBuiltinTTSModelInfo(), xaiBuiltinSTTModelInfo())
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -232,6 +241,34 @@ func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
 		DisplayName: "Grok Imagine Video 1.5 Preview",
 		Name:        xaiBuiltinVideo15PreviewID,
 		Description: "Compatibility alias for the xAI Grok video generation model.",
+	}
+}
+
+func xaiBuiltinTTSModelInfo() *ModelInfo {
+	// This model identifies the xAI account pool; the upstream TTS payload may omit model.
+	return &ModelInfo{
+		ID:          xaiBuiltinTTSModelID,
+		Object:      "model",
+		Created:     1735689600,
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Text to Speech",
+		Name:        xaiBuiltinTTSModelID,
+		Description: "xAI Grok text-to-speech voice endpoint routing model.",
+	}
+}
+
+func xaiBuiltinSTTModelInfo() *ModelInfo {
+	// This model identifies the xAI account pool; the upstream STT payload may omit model.
+	return &ModelInfo{
+		ID:          xaiBuiltinSTTModelID,
+		Object:      "model",
+		Created:     1735689600,
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Speech to Text",
+		Name:        xaiBuiltinSTTModelID,
+		Description: "xAI Grok speech-to-text voice endpoint routing model.",
 	}
 }
 
