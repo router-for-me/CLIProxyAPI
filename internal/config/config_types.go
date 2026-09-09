@@ -11,6 +11,7 @@ import (
 // RequestScopedErrorRule configures custom classification and handling for upstream errors.
 type RequestScopedErrorRule struct {
 	// Status matches the HTTP status code of the upstream response (e.g. 400).
+	// Zero or omitted matches any status, so the rule is evaluated by body patterns only.
 	Status int `yaml:"status,omitempty" json:"status,omitempty"`
 	// Match matches substrings in the upstream error body.
 	Match []string `yaml:"match,omitempty" json:"match,omitempty"`
