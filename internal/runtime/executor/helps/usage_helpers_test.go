@@ -200,6 +200,42 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageSGLangFlatReasoningTokens(t *testing.T) {
+	// SGLang-style gateways report reasoning tokens as a flat top-level usage field.
+	data := []byte(`{"usage":{"prompt_tokens":18,"total_tokens":243,"completion_tokens":225,"prompt_tokens_details":null,"reasoning_tokens":162}}`)
+	detail := ParseOpenAIUsage(data)
+	if detail.InputTokens != 18 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 18)
+	}
+	if detail.OutputTokens != 225 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 225)
+	}
+	if detail.TotalTokens != 243 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 243)
+	}
+	if detail.ReasoningTokens != 162 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 162)
+	}
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Output.ReasoningTokens != 162 {
+		t.Fatalf("token breakdown = %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestStreamUsageBufferObservesSGLangFlatReasoningTokens(t *testing.T) {
+	var buffer StreamUsageBuffer
+	buffer.ObserveOpenAIStream([]byte(`data: {"id":"e2f091d1086a4f5bb62594d402a894c9","object":"chat.completion.chunk","created":1788265038,"model":"glm-5.3-flash","choices":[],"usage":{"prompt_tokens":18,"total_tokens":243,"completion_tokens":225,"prompt_tokens_details":null,"reasoning_tokens":162}}`))
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("StreamUsageBuffer.Detail() ok = false, want true")
+	}
+	if detail.InputTokens != 18 || detail.OutputTokens != 225 || detail.TotalTokens != 243 {
+		t.Fatalf("detail = %+v", detail)
+	}
+	if detail.ReasoningTokens != 162 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 162)
+	}
+}
+
 func TestStreamUsageBufferKeepsLastUsage(t *testing.T) {
 	var buffer StreamUsageBuffer
 	buffer.Observe(usage.Detail{}, true)

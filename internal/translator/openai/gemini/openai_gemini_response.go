@@ -642,6 +642,10 @@ func reasoningTokensFromUsage(usage gjson.Result) int64 {
 		if v := usage.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
 			return v.Int()
 		}
+		// SGLang-style gateways emit a flat top-level reasoning_tokens field.
+		if v := usage.Get("reasoning_tokens"); v.Exists() {
+			return v.Int()
+		}
 	}
 	return 0
 }
