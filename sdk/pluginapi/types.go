@@ -448,6 +448,11 @@ type FrontendAuthRequest struct {
 	Body []byte
 }
 
+// ModelListAllowedIDsMetadataKey optionally restricts discovery to exact model IDs.
+// The value is a JSON string array; absent means unrestricted and [] means empty.
+// It affects model-list responses only, not execution authorization.
+const ModelListAllowedIDsMetadataKey = "model_list_allowed_ids"
+
 // FrontendAuthResponse reports the authentication decision and identity metadata.
 type FrontendAuthResponse struct {
 	// Authenticated reports whether the request was accepted.
