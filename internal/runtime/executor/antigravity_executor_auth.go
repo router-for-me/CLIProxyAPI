@@ -34,6 +34,9 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 }
 
 func (e *AntigravityExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
 	return antigravityProjectIDFromAuth(auth) == ""
 }
 
@@ -50,7 +53,7 @@ func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *clip
 	if refreshedAuth != nil {
 		updated = refreshedAuth
 	}
-	if antigravityProjectIDFromAuth(updated) != "" {
+	if !e.ShouldPrepareRequestAuth(updated) {
 		return updated, nil
 	}
 
@@ -148,8 +151,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 
 func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth *cliproxyauth.Auth, refreshToken string) (*antigravityTokenRefreshData, error) {
 	form := url.Values{}
-	form.Set("client_id", antigravityauth.OAuthClientID())
-	form.Set("client_secret", antigravityauth.OAuthClientSecret())
+	form.Set("client_id", antigravityauth.ClientID)
+	form.Set("client_secret", antigravityauth.ClientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -201,7 +204,7 @@ func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, au
 		return nil
 	}
 
-	if antigravityProjectIDFromAuth(auth) != "" {
+	if !e.ShouldPrepareRequestAuth(auth) {
 		return nil
 	}
 
@@ -241,9 +244,11 @@ func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, aut
 		if auth.Metadata == nil {
 			auth.Metadata = make(map[string]any)
 		}
-		if tier := strings.TrimSpace(result.Tier); tier != "" {
-			auth.Metadata["user_tier"] = tier
+		tier := strings.TrimSpace(result.Tier)
+		if tier == "" {
+			tier = "free-tier"
 		}
+		auth.Metadata["user_tier"] = tier
 		if region := strings.TrimSpace(result.Region); region != "" {
 			auth.Metadata["region"] = region
 		}

@@ -278,8 +278,8 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	form := url.Values{}
-	form.Set("client_id", antigravityauth.OAuthClientID())
-	form.Set("client_secret", antigravityauth.OAuthClientSecret())
+	form.Set("client_id", antigravityauth.ClientID)
+	form.Set("client_secret", antigravityauth.ClientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 

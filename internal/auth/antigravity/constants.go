@@ -1,28 +1,12 @@
 // Package antigravity provides OAuth2 authentication functionality for the Antigravity provider.
 package antigravity
 
-import (
-	"os"
-	"strings"
-)
-
-// OAuth client credentials and configuration.
-// These must match the real Antigravity IDE plugin's registered OAuth client, since
-// businessaicode.googleapis.com attributes API quota/enablement to the token's client
-// project - a different (e.g. CLI-only) client project may not have that API enabled.
+// OAuth client credentials and configuration
 const (
-	CallbackPort    = 51121
-	ClientIDEnv     = "ANTIGRAVITY_CLIENT_ID"
-	ClientSecretEnv = "ANTIGRAVITY_CLIENT_SECRET"
+	ClientID     = "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com"
+	ClientSecret = "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"
+	CallbackPort = 51121
 )
-
-func OAuthClientID() string {
-	return strings.TrimSpace(os.Getenv(ClientIDEnv))
-}
-
-func OAuthClientSecret() string {
-	return strings.TrimSpace(os.Getenv(ClientSecretEnv))
-}
 
 // Scopes defines the OAuth scopes required for Antigravity authentication
 var Scopes = []string{

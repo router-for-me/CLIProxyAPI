@@ -162,7 +162,7 @@ func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) (authURL, code
 	}
 	params := url.Values{}
 	params.Set("access_type", "offline")
-	params.Set("client_id", OAuthClientID())
+	params.Set("client_id", ClientID)
 	params.Set("code_challenge", pkce.CodeChallenge)
 	params.Set("code_challenge_method", "S256")
 	params.Set("prompt", "consent")
@@ -179,8 +179,8 @@ func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) (authURL, code
 func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI, codeVerifier string) (*TokenResponse, error) {
 	data := url.Values{}
 	data.Set("code", code)
-	data.Set("client_id", OAuthClientID())
-	data.Set("client_secret", OAuthClientSecret())
+	data.Set("client_id", ClientID)
+	data.Set("client_secret", ClientSecret)
 	data.Set("redirect_uri", redirectURI)
 	data.Set("grant_type", "authorization_code")
 	if codeVerifier != "" {
@@ -421,6 +421,10 @@ func (o *AntigravityAuth) FetchProjectIDWithTier(ctx context.Context, accessToke
 			return ProjectDiscoveryResult{}, fmt.Errorf("project id not found in loadCodeAssist or onboardUser response")
 		}
 		return ProjectDiscoveryResult{ProjectID: projectID, Tier: tier}, nil
+	}
+
+	if tier == "" {
+		tier = defaultAntigravityTierID(loadResp)
 	}
 
 	return ProjectDiscoveryResult{ProjectID: projectID, Tier: tier}, nil

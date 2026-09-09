@@ -300,6 +300,9 @@ func TestAntigravityPrepareRequestAuth_FetchesMissingProjectID(t *testing.T) {
 	if got, ok := updated.Metadata["project_id"].(string); !ok || got != "fetched-project" {
 		t.Fatalf("updated auth metadata project_id = %v, want fetched-project", updated.Metadata["project_id"])
 	}
+	if got, ok := updated.Metadata["user_tier"].(string); !ok || got != "free-tier" {
+		t.Fatalf("updated auth metadata user_tier = %v, want free-tier", updated.Metadata["user_tier"])
+	}
 }
 
 func TestAntigravityPrepareRequestAuth_UpstreamForbiddenPreserves403(t *testing.T) {

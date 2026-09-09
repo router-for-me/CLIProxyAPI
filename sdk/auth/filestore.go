@@ -303,15 +303,21 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		if pid, ok := metadata["project_id"].(string); ok {
 			projectID = strings.TrimSpace(pid)
 		}
-		if projectID == "" {
+		userTier := ""
+		if ut, ok := metadata["user_tier"].(string); ok {
+			userTier = strings.TrimSpace(ut)
+		}
+		if projectID == "" || userTier == "" {
 			accessToken := extractAccessToken(metadata)
 			if accessToken != "" {
 				result, errFetch := FetchAntigravityProjectIDWithTier(context.Background(), accessToken, http.DefaultClient)
 				if errFetch == nil && strings.TrimSpace(result.ProjectID) != "" {
 					metadata["project_id"] = strings.TrimSpace(result.ProjectID)
-					if tier := strings.TrimSpace(result.Tier); tier != "" {
-						metadata["user_tier"] = tier
+					tier := strings.TrimSpace(result.Tier)
+					if tier == "" {
+						tier = "free-tier"
 					}
+					metadata["user_tier"] = tier
 					if region := strings.TrimSpace(result.Region); region != "" {
 						metadata["region"] = region
 					}
