@@ -115,6 +115,32 @@ test('ProviderEditorForm renders the TestPanel in edit mode (entry-bearing provi
   assert.ok(html.includes('test-panel-run'), 'run button renders');
 });
 
+test('ProviderEditorForm renders the TestPanel entry dropdown for opencode-go', () => {
+  // Regression: opencode-go rows are entry-bearing (schema renders the
+  // multi-row api_key_entries editor and the server resolves entry-level
+  // probes via "<routing-key>:key-<entryID>"), but isEntryBearing previously
+  // listed only openai-compatibility and claude-api-key — so the Test
+  // panel's Entry dropdown never appeared for OpenCode Go rows.
+  const provider = {
+    id: 95,
+    provider_type: 'opencode-go',
+    name: 'ocg',
+    base_url: 'https://opencode.ai/zen/go/v1',
+    models: [{ name: 'glm-5.2' }],
+    api_key_entries: [
+      { id: 33, api_key: 'FAKE-SECRET-ONE', name: 'semutsshopus5' },
+      { id: 34, api_key: 'FAKE-SECRET-TWO', name: '', disabled: true },
+    ],
+  };
+  const html = renderEditor(provider);
+  assert.ok(html.includes('provider-test-panel'), 'test panel renders');
+  assert.ok(html.includes('test-panel-entry'), 'entry dropdown renders for opencode-go');
+  assert.ok(html.includes('(provider-level)'), 'provider-level option present');
+  assert.ok(html.includes('semutsshopus5'), 'named entry label visible');
+  assert.ok(html.includes('key-34 (disabled)'), 'unnamed disabled entry falls back to key-<id> with suffix');
+  assert.ok(html.includes('glm-5.2'), 'model dropdown populated from form.models');
+});
+
 test('ProviderEditorForm omits the TestPanel in create mode', () => {
   const html = renderToString(
     <MemoryRouter initialEntries={['/upstream-providers/new']}>

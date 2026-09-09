@@ -732,10 +732,11 @@ test('TestPanel: describeResult maps ok/mismatch/error states', async () => {
   assert.equal(failed.title, '✗ 401 Unauthorized');
 });
 
-test('TestPanel: isEntryBearing matches openai-compat and claude only', async () => {
+test('TestPanel: isEntryBearing matches openai-compat, claude, and opencode-go', async () => {
   const { isEntryBearing } = await import('./TestPanel.jsx');
   assert.equal(isEntryBearing('openai-compatibility'), true);
   assert.equal(isEntryBearing('claude-api-key'), true);
+  assert.equal(isEntryBearing('opencode-go'), true);
   assert.equal(isEntryBearing('gemini-api-key'), false);
   assert.equal(isEntryBearing('oauth:claude'), false);
 });

@@ -75,9 +75,11 @@ function latencyText(res) {
 }
 
 // isEntryBearing reports whether the provider type uses the multi-row
-// entries editor (openai-compatibility + claude-api-key).
+// entries editor (openai-compatibility, claude-api-key, and opencode-go).
 export function isEntryBearing(providerType) {
-  return providerType === 'openai-compatibility' || providerType === 'claude-api-key';
+  return providerType === 'openai-compatibility'
+    || providerType === 'claude-api-key'
+    || providerType === 'opencode-go';
 }
 
 export default function TestPanel({ provider, form }) {
