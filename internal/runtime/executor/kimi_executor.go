@@ -1131,6 +1131,11 @@ func normalizeKimiTools(body []byte) []byte {
 	}
 	body = normalizeKimiToolList(body, "tools", true)
 	body = normalizeKimiToolList(body, "functions", false)
+	for index, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == "additional_tools" {
+			body = normalizeKimiToolList(body, fmt.Sprintf("input.%d.tools", index), true)
+		}
+	}
 	return body
 }
 

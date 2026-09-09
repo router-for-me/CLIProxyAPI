@@ -176,48 +176,104 @@ func normalizeKimiResponsesToolSearchHistory(body []byte) []byte {
 	if len(discovered) == 0 {
 		return out
 	}
-	merged := mergeKimiDiscoveredTools(gjson.GetBytes(out, "tools").Array(), discovered)
-	if updated, errTools := sjson.SetRawBytes(out, "tools", JoinRawJSONStrings(merged)); errTools == nil {
-		return updated
+	current := [][]gjson.Result{gjson.GetBytes(out, "tools").Array()}
+	var additionalIndices []int
+	for index, raw := range kept {
+		item := gjson.Parse(raw)
+		if item.Get("type").String() == "additional_tools" && item.Get("tools").IsArray() {
+			current = append(current, item.Get("tools").Array())
+			additionalIndices = append(additionalIndices, index)
+		}
 	}
-	return body
+	merged := mergeKimiDiscoveredToolChannels(current, discovered)
+	if merged[0].changed {
+		var errTools error
+		out, errTools = sjson.SetRawBytes(out, "tools", JoinRawJSONStrings(merged[0].tools))
+		if errTools != nil {
+			return body
+		}
+	}
+	changedInput := false
+	for channel, index := range additionalIndices {
+		if !merged[channel+1].changed {
+			continue
+		}
+		updated, errTools := sjson.SetRaw(kept[index], "tools", string(JoinRawJSONStrings(merged[channel+1].tools)))
+		if errTools != nil {
+			return body
+		}
+		kept[index] = updated
+		changedInput = true
+	}
+	if changedInput {
+		if updated, errInput := sjson.SetRawBytes(out, "input", JoinRawJSONStrings(kept)); errInput == nil {
+			return updated
+		}
+		return body
+	}
+	return out
 }
 
-// mergeKimiDiscoveredTools keeps existing definitions and appends newly found
-// tools. Namespaces merge by member name without flattening their call identity.
-func mergeKimiDiscoveredTools(existing, discovered []gjson.Result) []string {
+type kimiToolChannel struct {
+	tools   []string
+	changed bool
+}
+
+// mergeKimiDiscoveredToolChannels retains every current declaration in its
+// original channel. Missing namespace members go to the first matching
+// namespace, considering all current members before historical discoveries.
+// The first channel receives tools that have no current declaration.
+func mergeKimiDiscoveredToolChannels(existing [][]gjson.Result, discovered []gjson.Result) []kimiToolChannel {
 	type toolKey struct {
 		kind string
 		name string
 	}
-	indices := make(map[toolKey]int, len(existing)+len(discovered))
-	out := make([]string, 0, len(existing)+len(discovered))
+	type location struct {
+		channel int
+		index   int
+	}
 	keyFor := func(tool gjson.Result) toolKey {
 		return toolKey{kind: tool.Get("type").String(), name: tool.Get("name").String()}
 	}
-	for _, tool := range existing {
-		key := keyFor(tool)
-		if _, found := indices[key]; !found {
-			indices[key] = len(out)
+	channels := make([]kimiToolChannel, len(existing))
+	locations := make(map[toolKey][]location)
+	for channel, tools := range existing {
+		for index, tool := range tools {
+			key := keyFor(tool)
+			locations[key] = append(locations[key], location{channel: channel, index: index})
+			channels[channel].tools = append(channels[channel].tools, tool.Raw)
 		}
-		out = append(out, tool.Raw)
 	}
 	for _, tool := range discovered {
 		key := keyFor(tool)
-		if index, found := indices[key]; found {
-			if key.kind == "namespace" {
-				current := gjson.Parse(out[index])
-				members := mergeKimiDiscoveredTools(current.Get("tools").Array(), tool.Get("tools").Array())
-				if updated, errMembers := sjson.SetRaw(out[index], "tools", string(JoinRawJSONStrings(members))); errMembers == nil {
-					out[index] = updated
-				}
-			}
+		matches := locations[key]
+		if len(matches) == 0 {
+			locations[key] = []location{{channel: 0, index: len(channels[0].tools)}}
+			channels[0].tools = append(channels[0].tools, tool.Raw)
+			channels[0].changed = true
 			continue
 		}
-		indices[key] = len(out)
-		out = append(out, tool.Raw)
+		if key.kind != "namespace" {
+			continue
+		}
+		var memberChannels [][]gjson.Result
+		for _, match := range matches {
+			current := gjson.Parse(channels[match.channel].tools[match.index])
+			memberChannels = append(memberChannels, current.Get("tools").Array())
+		}
+		members := mergeKimiDiscoveredToolChannels(memberChannels, tool.Get("tools").Array())
+		for index, match := range matches {
+			if !members[index].changed {
+				continue
+			}
+			channel := &channels[match.channel]
+			if updated, errMembers := sjson.SetRaw(channel.tools[match.index], "tools", string(JoinRawJSONStrings(members[index].tools))); errMembers == nil {
+				channel.tools[match.index] = updated
+				channel.changed = true
+			}
+		}
 	}
-	return out
+	return channels
 }
 
 // ResolveKimiResponsesURL resolves the upstream URL for Kimi Responses API requests.
