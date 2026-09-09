@@ -103,6 +103,13 @@ func testCodexNativeStreamFidelity(t *testing.T, source sdktranslator.Format) {
 					upstreamHeaders := <-capturedHeaders
 					native := lite != "" && (source == sdktranslator.FormatCodex || source == sdktranslator.FormatOpenAIResponse)
 					if transport == "websocket" {
+						wantLiteHeader := ""
+						if native && lite == "header" {
+							wantLiteHeader = "true"
+						}
+						if got := upstreamHeaders.Get(codexResponsesLiteHeader); got != wantLiteHeader {
+							t.Errorf("upstream Lite header = %q, want %q", got, wantLiteHeader)
+						}
 						alias := headerValueCaseInsensitive(upstreamHeaders, "session_id")
 						t.Logf("upstream session alias: %q", alias)
 						if (alias == "") != native {
@@ -125,6 +132,24 @@ func testCodexNativeStreamFidelity(t *testing.T, source sdktranslator.Format) {
 						t.Errorf("compatibility normalization/backfill lost: %s; %s", body, terminal)
 					}
 				})
+			}
+		}
+	}
+}
+
+func TestCodexWebsocketLiteHeaderWithoutSessionHeaders(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		for _, disableCloaking := range []bool{false, true} {
+			cfg := &config.Config{Codex: config.CodexConfig{DisableCodexCloaking: disableCloaking}}
+			headers := http.Header{}
+			headers.Set(codexResponsesLiteHeader, "true")
+			got := applyCodexWebsocketHeaders(context.Background(), nil, nil, "fixture-token", cfg, native, headers)
+			want := ""
+			if native {
+				want = "true"
+			}
+			if value := got.Get(codexResponsesLiteHeader); value != want {
+				t.Errorf("native=%t disableCloaking=%t: Lite header = %q, want %q", native, disableCloaking, value, want)
 			}
 		}
 	}
