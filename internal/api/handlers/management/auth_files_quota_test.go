@@ -29,8 +29,8 @@ func TestModelQuotaObservationPayloadOmitsUnsupportedProviders(t *testing.T) {
 func TestModelQuotaObservationPayloadSkipsNilAndEmptyStates(t *testing.T) {
 	states := map[string]*coreauth.ModelState{
 		"nil":   nil,
-		"empty": &coreauth.ModelState{},
-		"observed": &coreauth.ModelState{Quota: coreauth.QuotaState{
+		"empty": {},
+		"observed": {Quota: coreauth.QuotaState{
 			ObservedAt: time.Unix(10, 0),
 			Signals:    map[string]string{"X-Codex-Plan-Type": "pro"},
 		}},

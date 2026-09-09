@@ -2452,10 +2452,10 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	errLog := fileLogger.LogRequestWithOptions(
 		"/v1/chat/completions",
 		http.MethodPost,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"input":"hello"}`),
 		http.StatusBadGateway,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"error":"upstream failure"}`),
 		nil,
 		nil,

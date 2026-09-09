@@ -328,7 +328,7 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 		Model:     "gpt-test",
 		Stream:    true,
 		Options: SchedulerOptions{
-			Headers:  map[string][]string{"X-Test": []string{"1"}},
+			Headers:  map[string][]string{"X-Test": {"1"}},
 			Metadata: map[string]any{"tenant": "demo"},
 		},
 		Candidates: []SchedulerAuthCandidate{{
