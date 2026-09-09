@@ -653,9 +653,11 @@ func TestHandlerProvidersForExecutionRejectsImageOnlyModelOnProviderRoute(t *tes
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, errMsg := handler.providersForExecution("ignored", tc.originalModel, false, tc.decision, modelExecutionOptions{})
-			if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
-				t.Fatalf("providersForExecution() error = %+v, want image-only service unavailable", errMsg)
+			model := tc.decision.Model
+			if model == "" {
+				model = tc.originalModel
 			}
+			assertImageOnlyModelClientError(t, errMsg, model)
 		})
 	}
 }

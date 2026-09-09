@@ -11,7 +11,10 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -160,10 +163,21 @@ func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
 	}
 }
 
-func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
+func TestGetRequestDetails_ImageModelReturns400(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	modelRegistry := registry.GetGlobalRegistry()
+	const dynamicImageModelClientID = "test-request-details-dynamic-image-client"
+	const dynamicImageModelID = "test-request-details-dynamic-image-model"
+	modelRegistry.RegisterClient(dynamicImageModelClientID, "openai-compatibility", []*registry.ModelInfo{{
+		ID:   dynamicImageModelID,
+		Type: registry.OpenAIImageModelType,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(dynamicImageModelClientID)
+	})
 
 	imageOnlyModels := []string{
+		dynamicImageModelID,
 		"gpt-image-1.5",
 		"gpt-image-2",
 		"codex/gpt-image-2",
@@ -177,19 +191,7 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	for _, model := range imageOnlyModels {
 		t.Run(model, func(t *testing.T) {
 			_, _, errMsg := handler.getRequestDetails(model)
-			if errMsg == nil {
-				t.Fatalf("expected error for %s, got nil", model)
-			}
-			if errMsg.StatusCode != http.StatusServiceUnavailable {
-				t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
-			}
-			if errMsg.Error == nil {
-				t.Fatalf("expected error message, got nil")
-			}
-			msg := errMsg.Error.Error()
-			if !strings.Contains(msg, "/v1/images/generations") || !strings.Contains(msg, "/v1/images/edits") {
-				t.Fatalf("unexpected error message: %q", msg)
-			}
+			assertImageOnlyModelClientError(t, errMsg, model)
 		})
 	}
 }
@@ -213,11 +215,7 @@ func TestValidateImageOnlyModel_AllowsImageEndpoints(t *testing.T) {
 			if errMsg := handler.validateImageOnlyModel(model, true); errMsg != nil {
 				t.Fatalf("validateImageOnlyModel(%q, true) = %+v, want nil", model, errMsg)
 			}
-			if errMsg := handler.validateImageOnlyModel(model, false); errMsg == nil {
-				t.Fatalf("validateImageOnlyModel(%q, false) = nil, want image-only error", model)
-			} else if errMsg.StatusCode != http.StatusServiceUnavailable {
-				t.Fatalf("unexpected status code: got %d want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
-			}
+			assertImageOnlyModelClientError(t, handler.validateImageOnlyModel(model, false), model)
 		})
 	}
 }
@@ -277,12 +275,46 @@ func TestExecuteImageWithAuthManager_AllowsImageOnlyModels(t *testing.T) {
 			}
 
 			_, _, errMsg = handler.ExecuteWithAuthManager(context.Background(), "openai-image", model, body, "")
-			if errMsg == nil {
-				t.Fatal("expected image-only rejection for non-image execution path, got nil")
-			}
-			if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "only supported on /v1/images/generations") {
-				t.Fatalf("unexpected non-image execution error: %+v", errMsg)
-			}
+			assertImageOnlyModelClientError(t, errMsg, model)
 		})
+	}
+}
+
+func assertImageOnlyModelClientError(t *testing.T, errMsg *interfaces.ErrorMessage, requestedModel string) {
+	t.Helper()
+	if errMsg == nil || errMsg.Error == nil {
+		t.Fatal("expected image-only error")
+	}
+	if errMsg.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusBadRequest)
+	}
+	body := errMsg.Error.Error()
+	if !json.Valid([]byte(body)) {
+		t.Fatalf("error body is not valid JSON: %s", body)
+	}
+	if got := gjson.Get(body, "error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error; body=%s", got, body)
+	}
+	if got := gjson.Get(body, "error.code").String(); got != "unsupported_value" {
+		t.Fatalf("error.code = %q, want unsupported_value; body=%s", got, body)
+	}
+	// Emitting model_not_supported would make an upstream-facing proxy suspend the
+	// (credential, model) pair for hours over a client mistake.
+	if strings.Contains(body, "model_not_supported") {
+		t.Fatalf("body must not contain model_not_supported; body=%s", body)
+	}
+	if got := gjson.Get(body, "error.param").String(); got != "model" {
+		t.Fatalf("error.param = %q, want model; body=%s", got, body)
+	}
+	base := strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName)
+	if base == "" {
+		base = strings.TrimSpace(requestedModel)
+	}
+	wantMsg := "model " + routeModelBaseName(base) + " is only supported on /v1/images/generations and /v1/images/edits"
+	if got := gjson.Get(body, "error.message").String(); got != wantMsg {
+		t.Fatalf("error.message = %q, want %q", got, wantMsg)
+	}
+	if !clienterror.IsRequestFault(errMsg.StatusCode, errMsg.Error) {
+		t.Fatalf("image-only mismatch must be a request fault; status=%d body=%s", errMsg.StatusCode, body)
 	}
 }

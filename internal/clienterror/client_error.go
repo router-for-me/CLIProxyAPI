@@ -95,7 +95,7 @@ func IsRequestFault(status int, err error) bool {
 	if hasRequestFaultBody(err) {
 		return true
 	}
-	if err != nil && IsItemNotPersisted(err.Error()) {
+	if err != nil && (IsItemNotPersisted(err.Error()) || isImageOnlyModelEndpointMismatch(err.Error())) {
 		return true
 	}
 	switch status {
@@ -122,6 +122,22 @@ func IsItemNotPersisted(message string) bool {
 	return strings.Contains(lower, "item with id") &&
 		strings.Contains(lower, "not found") &&
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
+}
+
+// isImageOnlyModelEndpointMismatch recognizes an image-only model rejected on a
+// non-image endpoint when the message arrives as plain text, which is how an
+// upstream CLIProxyAPI node that predates the structured body reports it. This
+// proxy's own rejection is a JSON body already covered by hasRequestFaultBody,
+// so only the forwarded plain-text form needs matching here. All three markers
+// are required so that an unrelated failure whose message happens to mention an
+// image route is not reclassified: the fault belongs to the request, so the
+// local credential must not be penalized for it, and the client must call
+// /v1/images/generations or /v1/images/edits instead.
+func isImageOnlyModelEndpointMismatch(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "model") &&
+		strings.Contains(lower, "only supported on") &&
+		(strings.Contains(lower, "/v1/images/generations") || strings.Contains(lower, "/v1/images/edits"))
 }
 
 func hasAuthenticationErrorBody(err error) bool {
