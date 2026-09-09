@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func performImagesEndpointRequest(t *testing.T, endpointPath string, contentType string, body io.Reader, handler gin.HandlerFunc) *httptest.ResponseRecorder {
@@ -46,7 +47,7 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 	}
 
 	message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String()
-	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
+	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + gptImage25FlareModel + ", " + gptImage25SunburstModel + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
 	if message != expectedMessage {
 		t.Fatalf("error message = %q, want %q", message, expectedMessage)
 	}
@@ -56,7 +57,7 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 }
 
 func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
-	for _, model := range []string{"gpt-image-1.5", "codex/gpt-image-1.5", "gpt-image-2", "codex/gpt-image-2", "grok-imagine-image", "xai/grok-imagine-image", "grok-imagine-image-quality", "xai/grok-imagine-image-quality", "grok-imagine-image-2.0", "xai/grok-imagine-image-2.0"} {
+	for _, model := range []string{"gpt-image-1.5", "codex/gpt-image-1.5", "gpt-image-2", "codex/gpt-image-2", "gpt-image-2.5-flare", "codex/gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "codex/gpt-image-2.5-sunburst", "grok-imagine-image", "xai/grok-imagine-image", "grok-imagine-image-quality", "xai/grok-imagine-image-quality", "grok-imagine-image-2.0", "xai/grok-imagine-image-2.0"} {
 		if !isSupportedImagesModel(model) {
 			t.Fatalf("expected %s to be supported", model)
 		}
@@ -66,6 +67,27 @@ func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
 	}
 	if isSupportedImagesModel("codex/grok-imagine-image") {
 		t.Fatal("expected codex/grok-imagine-image to be rejected")
+	}
+}
+
+func TestImage25ModelsUseResponsesToolPath(t *testing.T) {
+	for _, model := range []string{gptImage25FlareModel, gptImage25SunburstModel, "codex/" + gptImage25FlareModel, "codex/" + gptImage25SunburstModel} {
+		if isCodexImagesToolModel(model) {
+			t.Fatalf("expected %s to use the Responses image tool path", model)
+		}
+		tool := []byte(`{"type":"image_generation","action":"generate"}`)
+		tool, _ = sjson.SetBytes(tool, "model", model)
+		req := buildImagesResponsesRequest("draw a square", nil, tool)
+		if got := gjson.GetBytes(req, "tools.0.model").String(); got != imagesModelBase(model) {
+			t.Fatalf("tool model = %q, want %q", got, imagesModelBase(model))
+		}
+		wantMainModel := defaultImagesMainModel
+		if strings.HasPrefix(model, "codex/") {
+			wantMainModel = "codex/" + defaultImagesMainModel
+		}
+		if got := gjson.GetBytes(req, "model").String(); got != wantMainModel {
+			t.Fatalf("main model = %q, want %q", got, wantMainModel)
+		}
 	}
 }
 

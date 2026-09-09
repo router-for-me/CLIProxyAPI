@@ -26,9 +26,11 @@ import (
 )
 
 const (
-	defaultImagesMainModel      = "gpt-5.4-mini"
+	defaultImagesMainModel      = "gpt-5.5"
 	gptImage15Model             = "gpt-image-1.5"
 	defaultImagesToolModel      = "gpt-image-2"
+	gptImage25FlareModel        = "gpt-image-2.5-flare"
+	gptImage25SunburstModel     = "gpt-image-2.5-sunburst"
 	defaultXAIImagesModel       = "grok-imagine-image"
 	xaiImagesQualityModel       = "grok-imagine-image-quality"
 	xaiImages20Model            = "grok-imagine-image-2.0"
@@ -231,10 +233,19 @@ func isXAIImagesModel(model string) bool {
 }
 
 func isSupportedImagesModel(model string) bool {
-	if isCodexImagesToolModel(model) {
+	if isCodexImagesModel(model) {
 		return true
 	}
 	return isXAIImagesModel(model) || isOpenAICompatImagesModel(model)
+}
+
+func isCodexImagesModel(model string) bool {
+	switch imagesModelBase(model) {
+	case gptImage15Model, defaultImagesToolModel, gptImage25FlareModel, gptImage25SunburstModel:
+		return true
+	default:
+		return false
+	}
 }
 
 func isCodexImagesToolModel(model string) bool {
@@ -258,7 +269,7 @@ func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
 
 	c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 		Error: handlers.ErrorDetail{
-			Message: fmt.Sprintf("Model %s is not supported on %s or %s. Use %s, %s, %s, %s, %s, or a configured openai-compatibility image model.", model, imagesGenerationsPath, imagesEditsPath, gptImage15Model, defaultImagesToolModel, defaultXAIImagesModel, xaiImagesQualityModel, xaiImages20Model),
+			Message: fmt.Sprintf("Model %s is not supported on %s or %s. Use %s, %s, %s, %s, %s, %s, %s, or a configured openai-compatibility image model.", model, imagesGenerationsPath, imagesEditsPath, gptImage15Model, defaultImagesToolModel, gptImage25FlareModel, gptImage25SunburstModel, defaultXAIImagesModel, xaiImagesQualityModel, xaiImages20Model),
 			Type:    "invalid_request_error",
 		},
 	})
@@ -1030,11 +1041,9 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 	mainModel := defaultImagesMainModel
 	if len(toolJSON) > 0 && json.Valid(toolJSON) {
 		toolModel := strings.TrimSpace(gjson.GetBytes(toolJSON, "model").String())
-		if idx := strings.LastIndex(toolModel, "/"); idx > 0 && idx < len(toolModel)-1 {
-			prefix := strings.TrimSpace(toolModel[:idx])
-			if prefix != "" {
-				mainModel = prefix + "/" + defaultImagesMainModel
-			}
+		if prefix, baseModel := imagesModelParts(toolModel); prefix != "" && baseModel != "" {
+			mainModel = prefix + "/" + defaultImagesMainModel
+			toolJSON, _ = sjson.SetBytes(toolJSON, "model", baseModel)
 		}
 	}
 	req, _ = sjson.SetBytes(req, "model", mainModel)
