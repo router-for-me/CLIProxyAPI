@@ -16,6 +16,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	exec "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
 )
 
 // CopilotExecutor supplies Copilot credentials to the existing protocol executors.
@@ -132,6 +133,10 @@ func (e *CopilotExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*co
 	token, err := e.copilotToken(ctx, auth, true)
 	if err != nil {
 		return nil, err
+	}
+	githubToken, _ := auth.Metadata["access_token"].(string)
+	if _, errQuota := copilot.NewClient(e.cfg, auth.ProxyURL).Quota(ctx, githubToken); errQuota != nil {
+		log.WithError(errQuota).Debugf("github-copilot: quota refresh failed for auth %s", auth.ID)
 	}
 	updated := auth.Clone()
 	updated.Metadata["expired"] = time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339)
