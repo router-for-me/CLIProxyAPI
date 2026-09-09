@@ -324,6 +324,7 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		return nil, fmt.Errorf("stat file: %w", errStat)
 	}
 	id := s.idFor(path, baseDir)
+	proxyURL, _ := metadata["proxy_url"].(string)
 	disabled, _ := metadata["disabled"].(bool)
 	status := cliproxyauth.StatusActive
 	if disabled {
@@ -336,6 +337,7 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 		Label:    s.labelFor(metadata),
 		Status:   status,
 		Disabled: disabled,
+		ProxyURL: proxyURL,
 		Attributes: map[string]string{
 			cliproxyauth.AttributePath:          path,
 			cliproxyauth.AttributeSource:        path,
