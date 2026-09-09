@@ -21,21 +21,16 @@ func NormalizeKimiResponsesTools(body []byte) []byte {
 	if !removed {
 		return body
 	}
-	removedNamespaces := make(map[string]bool)
-	for _, tool := range tools.Array() {
-		if tool.Get("type").String() == "namespace" {
-			removedNamespaces[tool.Get("name").String()] = true
-		}
-	}
-	for _, raw := range kept {
-		tool := gjson.Parse(raw)
-		if tool.Get("type").String() == "namespace" {
-			delete(removedNamespaces, tool.Get("name").String())
-		}
-	}
 	out, errSet := sjson.SetRawBytes(body, "tools", JoinRawJSONStrings(kept))
 	if errSet != nil {
 		return body
+	}
+	removedNamespaces := make(map[string]bool)
+	collectKimiNamespaces(tools.Array(), removedNamespaces)
+	retainedNamespaces := make(map[string]bool)
+	collectKimiNamespaces(gjson.GetBytes(out, "tools").Array(), retainedNamespaces)
+	for name := range retainedNamespaces {
+		delete(removedNamespaces, name)
 	}
 
 	// Do not force a removed tool, or require a tool when none remain.
@@ -61,6 +56,15 @@ func NormalizeKimiResponsesTools(body []byte) []byte {
 		}
 	}
 	return out
+}
+
+func collectKimiNamespaces(tools []gjson.Result, names map[string]bool) {
+	for _, tool := range tools {
+		if tool.Get("type").String() == "namespace" {
+			names[tool.Get("name").String()] = true
+			collectKimiNamespaces(tool.Get("tools").Array(), names)
+		}
+	}
 }
 
 func filterKimiToolSearchDeclarations(tools []gjson.Result) ([]string, bool) {
