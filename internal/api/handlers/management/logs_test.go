@@ -179,17 +179,17 @@ func TestGetLogsTailLimitDoesNotScanOlderFilesForLineCount(t *testing.T) {
 	}
 }
 
-func TestGetLogsNoLimitKeepsFullScanBehavior(t *testing.T) {
+func TestGetLogsDefaultTailSkipsTrailingPartial(t *testing.T) {
 	dir := t.TempDir()
 	writeMainLog(t, dir, "complete\npartial")
 
 	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs")
-	wantLines := []string{"complete", "partial"}
+	wantLines := []string{"complete"}
 	if !reflect.DeepEqual(resp.Lines, wantLines) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
-	if resp.LineCount != 2 {
-		t.Fatalf("line-count = %d, want full scan count 2", resp.LineCount)
+	if resp.LineCount != 1 {
+		t.Fatalf("line-count = %d, want complete line count 1", resp.LineCount)
 	}
 	if resp.NextCursor == "" {
 		t.Fatal("next-cursor is empty")
@@ -200,6 +200,54 @@ func TestGetLogsNoLimitKeepsFullScanBehavior(t *testing.T) {
 	}
 	if cursor.Offset != int64(len("complete\n")) {
 		t.Fatalf("cursor offset = %d, want complete-line boundary", cursor.Offset)
+	}
+
+	appendMainLog(t, dir, "\n")
+	completed := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(resp.NextCursor))
+	if !reflect.DeepEqual(completed.Lines, []string{"partial"}) {
+		t.Fatalf("completed lines = %#v, want partial exactly once after newline", completed.Lines)
+	}
+	next := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?cursor="+url.QueryEscape(completed.NextCursor))
+	if len(next.Lines) != 0 {
+		t.Fatalf("next lines = %#v, want no duplicate partial line", next.Lines)
+	}
+}
+
+func TestGetLogsNoLimitUsesBoundedTail(t *testing.T) {
+	dir := t.TempDir()
+	rotatedPath := filepath.Join(dir, defaultLogFileName+".1")
+	if err := os.WriteFile(rotatedPath, []byte(strings.Repeat("x", logScannerMaxBuffer+1)+"\n"), 0o644); err != nil {
+		t.Fatalf("write rotated log: %v", err)
+	}
+	mainLines := make([]string, defaultLogLimit)
+	for i := range mainLines {
+		mainLines[i] = "current-" + strconv.Itoa(i)
+	}
+	writeMainLog(t, dir, strings.Join(mainLines, "\n")+"\n")
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs")
+	if len(resp.Lines) != defaultLogLimit {
+		t.Fatalf("line count = %d, want default limit %d", len(resp.Lines), defaultLogLimit)
+	}
+	if resp.Lines[0] != mainLines[0] || resp.Lines[len(resp.Lines)-1] != mainLines[len(mainLines)-1] {
+		t.Fatalf("unexpected bounded tail: first=%q last=%q", resp.Lines[0], resp.Lines[len(resp.Lines)-1])
+	}
+}
+
+func TestGetLogsClampsOversizedLimit(t *testing.T) {
+	dir := t.TempDir()
+	mainLines := make([]string, maxLogLimit+1)
+	for i := range mainLines {
+		mainLines[i] = "line-" + strconv.Itoa(i)
+	}
+	writeMainLog(t, dir, strings.Join(mainLines, "\n")+"\n")
+
+	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs?limit=999999")
+	if len(resp.Lines) != maxLogLimit {
+		t.Fatalf("line count = %d, want hard maximum %d", len(resp.Lines), maxLogLimit)
+	}
+	if resp.Lines[0] != mainLines[1] || resp.Lines[len(resp.Lines)-1] != mainLines[len(mainLines)-1] {
+		t.Fatalf("unexpected clamped tail: first=%q last=%q", resp.Lines[0], resp.Lines[len(resp.Lines)-1])
 	}
 }
 

@@ -28,6 +28,10 @@ const (
 	logScannerMaxBuffer     = 8 * 1024 * 1024
 	logCursorVersion        = 1
 	logCursorFingerprintMax = 4 * 1024
+	// Keep accidental legacy /logs requests bounded. Callers that need more
+	// data can page with the returned cursor.
+	defaultLogLimit = 1000
+	maxLogLimit     = 5000
 )
 
 // GetLogs returns log lines with optional incremental loading.
@@ -603,14 +607,19 @@ func readTailLogLines(path string, limit int) (completeLogRead, error) {
 	if errBoundary != nil {
 		return completeLogRead{}, errBoundary
 	}
-	if boundary == 0 {
-		return completeLogRead{lines: []string{}}, nil
+	result := completeLogRead{lines: []string{}, endOffset: boundary}
+	if boundary > 0 {
+		start, errStart := tailStartOffset(path, boundary, limit)
+		if errStart != nil {
+			return completeLogRead{}, errStart
+		}
+		read, errRead := readCompleteLogLines(path, start, boundary, limit)
+		if errRead != nil {
+			return completeLogRead{}, errRead
+		}
+		result = read
 	}
-	start, errStart := tailStartOffset(path, boundary, limit)
-	if errStart != nil {
-		return completeLogRead{}, errStart
-	}
-	return readCompleteLogLines(path, start, boundary, limit)
+	return result, nil
 }
 
 func tailStartOffset(path string, boundary int64, limit int) (int64, error) {
@@ -1217,7 +1226,7 @@ func parseCutoff(raw string) int64 {
 func parseLimit(raw string) (int, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return 0, nil
+		return defaultLogLimit, nil
 	}
 	limit, err := strconv.Atoi(value)
 	if err != nil {
@@ -1225,6 +1234,9 @@ func parseLimit(raw string) (int, error) {
 	}
 	if limit <= 0 {
 		return 0, fmt.Errorf("must be greater than zero")
+	}
+	if limit > maxLogLimit {
+		return maxLogLimit, nil
 	}
 	return limit, nil
 }
