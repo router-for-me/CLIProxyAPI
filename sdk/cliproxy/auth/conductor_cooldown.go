@@ -1766,13 +1766,18 @@ func isResponsesCompactRequest(opts cliproxyexecutor.Options) bool {
 	return opts.Alt == "responses/compact"
 }
 
-func isResponsesCompactRequestFaultError(opts cliproxyexecutor.Options, err error) bool {
+func isResponsesCompactRequestFaultError(opts cliproxyexecutor.Options, err error, responseHeaders ...http.Header) bool {
 	if !isResponsesCompactRequest(opts) || err == nil {
 		return false
 	}
 	if isCredentialScopedError(err) || isCloudflareChallengeError(err) || isInvalidGrantError(err) {
 		return false
 	}
+	resultErr := resultErrorFromError(err)
+	if isCloudflareOriginResultError(resultErr) || isCloudflareChallengeResultError(resultErr, responseHeaders...) {
+		return false
+	}
+
 	status := statusCodeFromError(err)
 	if clienterror.IsRequestFault(status, err) {
 		return true
@@ -1791,7 +1796,7 @@ func isResponsesCompactRequestFaultError(opts cliproxyexecutor.Options, err erro
 	}
 }
 
-func isResponsesCompactAvailabilityNeutralError(opts cliproxyexecutor.Options, err error, resultErr *Error) bool {
+func isResponsesCompactAvailabilityNeutralError(opts cliproxyexecutor.Options, err error, resultErr *Error, responseHeaders ...http.Header) bool {
 	if !isResponsesCompactRequest(opts) {
 		return false
 	}
@@ -1801,7 +1806,7 @@ func isResponsesCompactAvailabilityNeutralError(opts cliproxyexecutor.Options, e
 	if isCredentialScopedError(err) || isCloudflareChallengeError(err) || isInvalidGrantError(err) {
 		return false
 	}
-	if resultErr != nil && (isCloudflareChallengeResultError(resultErr) || isInvalidGrantResultError(resultErr)) {
+	if resultErr != nil && (isCloudflareChallengeResultError(resultErr, responseHeaders...) || isCloudflareOriginResultError(resultErr) || isInvalidGrantResultError(resultErr)) {
 		return false
 	}
 	status := statusCodeFromError(err)
