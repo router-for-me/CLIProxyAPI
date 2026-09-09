@@ -477,7 +477,8 @@ func isCodexOverloadBootstrapFailure(body []byte) bool {
 		return true
 	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
 		return true
-	case (errorType == "server_error" || errorCode == "server_error") && strings.Contains(errorMessage, "you can retry your request"):
+	case (errorType == "server_error" || errorCode == "server_error") &&
+		(strings.Contains(errorMessage, "you can retry your request") || isCodexModelCapacityError(body)):
 		return true
 	default:
 		return false
