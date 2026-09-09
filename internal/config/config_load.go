@@ -89,6 +89,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	cfg.PreCompact = cfg.PreCompact.WithDefaults()
+	if errValidate := cfg.PreCompact.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
 		return nil, errValidate
 	}

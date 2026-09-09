@@ -492,7 +492,7 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 }
 
 func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCapture, requestID, skipPluginID string) coreexecutor.RequestAfterAuthInterceptor {
-	if !requestInterceptorsEnabled(h.interceptorHost()) {
+	if !requestInterceptorsEnabled(h.interceptorHost()) && !h.precompactEnabled() {
 		return nil
 	}
 	return func(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest) coreexecutor.RequestAfterAuthInterceptResponse {
@@ -546,9 +546,14 @@ func (h *BaseAPIHandler) webSocketResponseObserver(requestID, skipPluginID strin
 }
 
 func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest, requestID, skipPluginID string) coreexecutor.RequestAfterAuthInterceptResponse {
+	// Pre-compaction runs first so plugins see the body that will be sent upstream.
+	compacted := h.applyPreCompact(ctx, req)
+	if len(compacted) > 0 {
+		req.Body = compacted
+	}
 	host := h.interceptorHost()
 	if !requestInterceptorsEnabled(host) {
-		return coreexecutor.RequestAfterAuthInterceptResponse{}
+		return coreexecutor.RequestAfterAuthInterceptResponse{Body: compacted}
 	}
 	resp := interceptRequestAfterAuth(ctx, host, pluginapi.RequestInterceptRequest{
 		RequestID:      requestID,
@@ -562,9 +567,13 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		Body:           cloneBytes(req.Body),
 		Metadata:       req.Metadata,
 	}, skipPluginID)
+	outBody := resp.Body
+	if len(outBody) == 0 {
+		outBody = compacted
+	}
 	return coreexecutor.RequestAfterAuthInterceptResponse{
 		Headers:         resp.Headers,
-		Body:            resp.Body,
+		Body:            outBody,
 		ClearHeaders:    resp.ClearHeaders,
 		Terminate:       resp.Terminate,
 		StatusCode:      normalizedTerminationStatus(resp.StatusCode),
