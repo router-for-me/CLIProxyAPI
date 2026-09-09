@@ -294,7 +294,7 @@ func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtoco
 }
 
 func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx context.Context, host PluginExecutorHost, executorPluginID, entryProtocol, originalRequestedModel, requestID string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
-	if !requestInterceptorsEnabled(h.interceptorHost()) {
+	if !requestInterceptorsEnabled(h.interceptorHost()) && !h.precompactEnabled() {
 		return req, opts, nil
 	}
 	toFormat := sdktranslator.FromString(entryProtocol)
