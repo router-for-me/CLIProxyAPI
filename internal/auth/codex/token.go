@@ -67,7 +67,7 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.OpenFile(authFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
@@ -76,6 +76,9 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 			log.Errorf("codex token storage: close token file error: %v", errClose)
 		}
 	}()
+	if errChmod := f.Chmod(0o600); errChmod != nil {
+		return fmt.Errorf("failed to restrict token file permissions: %w", errChmod)
+	}
 
 	if err = json.NewEncoder(f).Encode(data); err != nil {
 		return fmt.Errorf("failed to write token to file: %w", err)
