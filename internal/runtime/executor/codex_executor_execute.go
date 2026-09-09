@@ -19,6 +19,17 @@ import (
 )
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if fallback := e.codexFallbackCompactionExecutor(auth); fallback != nil {
+		fallbackAuth := codexFallbackCompactionAuth(auth, fallback)
+		if opts.Alt == "responses/compact" {
+			return fallback.executeFallbackCompaction(ctx, fallbackAuth, req, opts)
+		}
+		expanded, errExpand := fallback.expandFallbackCompactionCapsules(fallbackAuth, req.Payload)
+		if errExpand != nil {
+			return resp, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+		}
+		req.Payload = expanded
+	}
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
 	}

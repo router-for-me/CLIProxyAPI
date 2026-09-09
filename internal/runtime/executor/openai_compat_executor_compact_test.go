@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
@@ -18,6 +19,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
@@ -1202,5 +1204,123 @@ func TestOpenAICompatExecutorStreamDropsChunksAfterDone(t *testing.T) {
 	}
 	if gjson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
 		t.Fatalf("second chunk = %s", payloads[1])
+	}
+}
+
+func TestOpenAICompatExecutorFallbackCompactionRoundTripAcrossKeys(t *testing.T) {
+	var requests [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests = append(requests, body)
+		w.Header().Set("Content-Type", "application/json")
+		if len(requests) == 1 {
+			_, _ = w.Write([]byte(`{"id":"chatcmpl_summary","choices":[{"message":{"role":"assistant","content":"user needs the migration completed; tests remain"}}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_next","choices":[{"message":{"role":"assistant","content":"continued"}}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+		Name:               "deepseek",
+		FallbackCompaction: true,
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+			{APIKey: "old-key"},
+			{APIKey: "new-key"},
+		},
+	}}}
+	executor := NewOpenAICompatExecutor("openai-compatibility:deepseek", cfg)
+	oldAuth := &cliproxyauth.Auth{Provider: "openai-compatibility", Attributes: map[string]string{
+		"base_url": server.URL + "/v1", "api_key": "old-key", "compat_name": "deepseek",
+	}}
+	compactResponse, errCompact := executor.Execute(context.Background(), oldAuth, cliproxyexecutor.Request{
+		Model:   "deepseek-chat",
+		Payload: []byte(`{"model":"deepseek-chat","input":[{"type":"message","role":"user","content":"finish migration"},{"type":"compaction_trigger"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Alt: "responses/compact"})
+	if errCompact != nil {
+		t.Fatalf("compact: %v", errCompact)
+	}
+	if got := gjson.GetBytes(requests[0], "messages.0.content").String(); got != "finish migration" {
+		t.Fatalf("first message = %q; request=%s", got, requests[0])
+	}
+	if got := gjson.GetBytes(requests[0], "messages.1.content").String(); !strings.Contains(got, "compact continuation summary") {
+		t.Fatalf("summary instruction = %q", got)
+	}
+	capsule := gjson.GetBytes(compactResponse.Payload, "output.0.encrypted_content").String()
+	if !strings.HasPrefix(capsule, openAICompatFallbackCapsulePrefix) || strings.Contains(capsule, "tests remain") {
+		t.Fatalf("invalid capsule %q", capsule)
+	}
+	if got := gjson.GetBytes(compactResponse.Payload, "usage.total_tokens").Int(); got != 18 {
+		t.Fatalf("total_tokens = %d", got)
+	}
+
+	newAuth := &cliproxyauth.Auth{Provider: "openai-compatibility", Attributes: map[string]string{
+		"base_url": server.URL + "/v1", "api_key": "new-key", "compat_name": "deepseek",
+	}}
+	nextPayload := []byte(`{"model":"deepseek-chat","input":[{"type":"compaction","encrypted_content":""},{"type":"message","role":"user","content":"continue"}]}`)
+	nextPayload, _ = sjson.SetBytes(nextPayload, "input.0.encrypted_content", capsule)
+	_, errNext := executor.Execute(context.Background(), newAuth, cliproxyexecutor.Request{Model: "deepseek-chat", Payload: nextPayload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if errNext != nil {
+		t.Fatalf("next request: %v", errNext)
+	}
+	if got := gjson.GetBytes(requests[1], "messages.0.content").String(); got != "user needs the migration completed; tests remain" {
+		t.Fatalf("expanded summary = %q; request=%s", got, requests[1])
+	}
+	if got := gjson.GetBytes(requests[1], "messages.1.content").String(); got != "continue" {
+		t.Fatalf("continuation = %q", got)
+	}
+}
+
+func TestOpenAICompatFallbackCompactionRejectsTamperedCapsule(t *testing.T) {
+	cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{Name: "compat", FallbackCompaction: true, APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "key"}}}}}
+	executor := NewOpenAICompatExecutor("openai-compatibility:compat", cfg)
+	auth := &cliproxyauth.Auth{Provider: "openai-compatibility", Attributes: map[string]string{"api_key": "key", "compat_name": "compat"}}
+	capsule, errSeal := executor.sealFallbackCompactionCapsule(auth, "model", "summary")
+	if errSeal != nil {
+		t.Fatal(errSeal)
+	}
+	raw, errDecode := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(capsule, openAICompatFallbackCapsulePrefix))
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	raw[len(raw)-1] ^= 0x01
+	capsule = openAICompatFallbackCapsulePrefix + base64.RawURLEncoding.EncodeToString(raw)
+	payload := []byte(`{"input":[{"type":"compaction","encrypted_content":""}]}`)
+	payload, _ = sjson.SetBytes(payload, "input.0.encrypted_content", capsule)
+	if _, errExpand := executor.expandFallbackCompactionCapsules(auth, payload); errExpand == nil {
+		t.Fatal("tampered capsule accepted")
+	}
+}
+
+func TestCodexExecutorFallbackCompactionUsesChatCompletions(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"compact summary"}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{CodexKey: []config.CodexKey{{
+		APIKey:             "deepseek-key",
+		BaseURL:            server.URL + "/v1",
+		FallbackCompaction: true,
+	}}}
+	executor := NewCodexExecutor(cfg)
+	auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{
+		"api_key": "deepseek-key", "base_url": server.URL + "/v1",
+	}}
+	resp, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: []byte(`{"model":"deepseek-v4-flash","input":"preserve this context"}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Alt: "responses/compact"})
+	if errExecute != nil {
+		t.Fatalf("Execute: %v", errExecute)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.0.type").String(); got != "compaction" {
+		t.Fatalf("output type = %q; payload=%s", got, resp.Payload)
 	}
 }
