@@ -13,6 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -58,6 +59,7 @@ type authSelectionEligibility struct {
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
+	allowedPrefixes  []string
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -77,7 +79,7 @@ func credentialPolicyFromContext(ctx context.Context) string {
 }
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
-	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
+	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata), allowedPrefixes: sdkaccess.AllowedPrefixes(ctx)}
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
@@ -88,6 +90,18 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if auth == nil {
 		return false
+	}
+	if len(e.allowedPrefixes) > 0 {
+		allowed := false
+		for _, prefix := range e.allowedPrefixes {
+			if strings.Trim(strings.TrimSpace(prefix), "/") != "" && strings.Trim(strings.TrimSpace(prefix), "/") == auth.Prefix {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
 	}
 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
 		return false

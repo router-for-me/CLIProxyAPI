@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -61,12 +62,16 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
 		clientVersion := c.Query("client_version")
-		c.JSON(http.StatusOK, h.codexClientModelsResponse(clientVersion))
+		if len(sdkaccess.AllowedPrefixes(c.Request.Context())) == 0 {
+			c.JSON(http.StatusOK, h.codexClientModelsResponse(clientVersion))
+			return
+		}
+		c.JSON(http.StatusOK, CodexClientModelsResponseForClient(sdkaccess.FilterModels(c.Request.Context(), h.Models()), clientVersion, h.Cfg != nil && h.Cfg.CodexOptimizeMultiAgentV2))
 		return
 	}
 
 	// Get all available models
-	allModels := h.Models()
+	allModels := sdkaccess.FilterModels(c.Request.Context(), h.Models())
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
 	filteredModels := make([]map[string]any, len(allModels))

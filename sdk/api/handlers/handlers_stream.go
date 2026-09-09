@@ -8,6 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -295,6 +296,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	if !sdkaccess.AllowsModel(ctx, modelName) {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- ModelPrefixAccessError()
+		close(errChan)
+		return nil, nil, errChan
+	}
 	originalRequestedModel := modelName
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
 	if !preparedRoute {
@@ -308,6 +315,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	if routeDecision.ExecutorPluginID != "" {
+		if len(sdkaccess.AllowedPrefixes(ctx)) > 0 {
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			errChan <- ModelPrefixAccessError()
+			close(errChan)
+			return nil, nil, errChan
+		}
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)

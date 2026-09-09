@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -166,8 +167,23 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {
 			if result != nil {
+				initialRequest := c.Request.Clone(c.Request.Context())
+				accessContext := sdkaccess.WithAccessRefresh(c.Request.Context(), func(ctx context.Context) ([]string, *sdkaccess.AuthError) {
+					current, errRefresh := manager.Authenticate(ctx, initialRequest.Clone(ctx))
+					if errRefresh != nil {
+						return nil, errRefresh
+					}
+					if current == nil || current.Principal != result.Principal || current.Provider != result.Provider {
+						return nil, sdkaccess.NewInvalidCredentialError()
+					}
+					return current.AllowedPrefixes, nil
+				})
+				c.Request = c.Request.WithContext(sdkaccess.WithAllowedPrefixes(accessContext, result.AllowedPrefixes))
 				c.Set("userApiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
+				if !authorizePrefixRequest(c) {
+					return
+				}
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
@@ -225,8 +241,23 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 			provider = "realtime-client-secret"
 		}
 		c.Set("userApiKey", principal)
-		c.Set("accessProvider", provider)
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
+		if authorization.IssuerPrincipal != "" && manager != nil {
+			issuerRequest := c.Request.Clone(c.Request.Context())
+			issuerRequest.Header = make(http.Header)
+			issuerRequest.Header.Set("Authorization", "Bearer "+authorization.IssuerPrincipal)
+			issuerRequest.URL.RawQuery = ""
+			result, errIssuer := manager.Authenticate(issuerRequest.Context(), issuerRequest)
+			if errIssuer != nil || result == nil || result.Principal != authorization.IssuerPrincipal {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "client secret issuer is no longer authorized"})
+				return
+			}
+			c.Request = c.Request.WithContext(sdkaccess.WithAllowedPrefixes(c.Request.Context(), result.AllowedPrefixes))
+			if !authorizePrefixRequest(c) {
+				return
+			}
+		}
+		c.Set("accessProvider", provider)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)
 		c.Next()
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -43,6 +44,9 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 }
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if !sdkaccess.AllowsModel(ctx, modelName) {
+		return nil, nil, ModelPrefixAccessError()
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
@@ -50,6 +54,9 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		return nil, nil, errMsg
 	}
 	if routeDecision.ExecutorPluginID != "" {
+		if len(sdkaccess.AllowedPrefixes(ctx)) > 0 {
+			return nil, nil, ModelPrefixAccessError()
+		}
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
@@ -117,9 +124,15 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if !sdkaccess.AllowsModel(ctx, modelName) {
+		return nil, nil, ModelPrefixAccessError()
+	}
 	originalRequestedModel := modelName
 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
 	if routeDecision.ExecutorPluginID != "" {
+		if len(sdkaccess.AllowedPrefixes(ctx)) > 0 {
+			return nil, nil, ModelPrefixAccessError()
+		}
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)

@@ -146,14 +146,70 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	h.putStringList(c, func(v []string) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
 		h.cfg.APIKeys = append([]string(nil), v...)
+		h.pruneAPIKeyPrefixes()
 	}, nil)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	var body struct {
+		Old   *string `json:"old"`
+		New   *string `json:"new"`
+		Index *int    `json:"index"`
+		Value *string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	index, value := -1, ""
+	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(h.cfg.APIKeys) {
+		index, value = *body.Index, strings.TrimSpace(*body.Value)
+	} else if body.Old != nil && body.New != nil {
+		value = strings.TrimSpace(*body.New)
+		for i, key := range h.cfg.APIKeys {
+			if strings.TrimSpace(key) == strings.TrimSpace(*body.Old) {
+				index = i
+				break
+			}
+		}
+	} else {
+		c.JSON(400, gin.H{"error": "missing fields"})
+		return
+	}
+	if value == "" {
+		c.JSON(400, gin.H{"error": "API key must not be empty"})
+		return
+	}
+	for i, key := range h.cfg.APIKeys {
+		if strings.TrimSpace(key) == value && i != index {
+			c.JSON(400, gin.H{"error": "API key already exists"})
+			return
+		}
+	}
+	if index < 0 {
+		h.cfg.APIKeys = append(h.cfg.APIKeys, value)
+	} else {
+		old := strings.TrimSpace(h.cfg.APIKeys[index])
+		h.cfg.APIKeys[index] = value
+		if old != value {
+			if prefixes, exists := h.cfg.APIKeyPrefixes[old]; exists {
+				h.cfg.APIKeyPrefixes[value] = prefixes
+				delete(h.cfg.APIKeyPrefixes, old)
+			}
+		}
+	}
+	h.persistLocked(c)
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.pruneAPIKeyPrefixes()
+	})
 }
 
 // gemini-api-key: []GeminiKey

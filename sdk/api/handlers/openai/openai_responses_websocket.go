@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -384,6 +385,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		pinnedAuthID = ""
 	}
 
+	accessContext := c.Request.Context()
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
 		if errReadMessage != nil {
@@ -407,6 +409,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		// )
 		wsTimelineLog.BeginRequest()
 		wsTimelineLog.Append("request", payload, time.Now())
+		requestContext, errRefresh := sdkaccess.RefreshAccess(accessContext)
+		if errRefresh != nil {
+			_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
+				StatusCode: errRefresh.HTTPStatusCode(), Error: errRefresh,
+			})
+			return
+		}
+		c.Request = c.Request.WithContext(requestContext)
 
 		explicitRequestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
 		requestModelName := explicitRequestModelName
@@ -415,6 +425,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		if requestModelName == "" {
 			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+		}
+		if !sdkaccess.AllowsModel(c.Request.Context(), requestModelName) {
+			errMsg := handlers.ModelPrefixAccessError()
+			if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg); errWrite != nil {
+				return
+			}
+			continue
 		}
 		executionParent := context.WithValue(c.Request.Context(), "gin", c)
 		executionParent, routeOverridesModelResolution := h.PrepareStreamModelRoute(

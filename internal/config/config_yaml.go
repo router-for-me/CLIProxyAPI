@@ -53,6 +53,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	removeLegacyGenerativeLanguageKeys(original.Content[0])
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-prefixes")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-request-scoped-errors")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "plugins", "configs")
