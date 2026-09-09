@@ -171,7 +171,7 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 	} else if body.Old != nil && body.New != nil {
 		value = strings.TrimSpace(*body.New)
 		for i, key := range h.cfg.APIKeys {
-			if key == *body.Old {
+			if strings.TrimSpace(key) == strings.TrimSpace(*body.Old) {
 				index = i
 				break
 			}
@@ -185,7 +185,7 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 		return
 	}
 	for i, key := range h.cfg.APIKeys {
-		if key == value && i != index {
+		if strings.TrimSpace(key) == value && i != index {
 			c.JSON(400, gin.H{"error": "API key already exists"})
 			return
 		}
@@ -193,7 +193,7 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 	if index < 0 {
 		h.cfg.APIKeys = append(h.cfg.APIKeys, value)
 	} else {
-		old := h.cfg.APIKeys[index]
+		old := strings.TrimSpace(h.cfg.APIKeys[index])
 		h.cfg.APIKeys[index] = value
 		if old != value {
 			if prefixes, exists := h.cfg.APIKeyPrefixes[old]; exists {

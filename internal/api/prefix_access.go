@@ -73,6 +73,12 @@ func authorizePrefixRequest(c *gin.Context) bool {
 			}
 		}
 	}
+	if path == "/v1beta/interactions" {
+		model = strings.TrimSpace(model)
+		if strings.HasPrefix(model, "models/") && len(model) > len("models/") {
+			model = strings.TrimPrefix(model, "models/")
+		}
+	}
 	if sdkaccess.AllowsModel(c.Request.Context(), model) {
 		return true
 	}
