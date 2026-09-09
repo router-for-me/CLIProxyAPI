@@ -743,8 +743,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 }
 
 type sseJSONValidationState struct {
-	pending    []byte
-	pendingErr error
+	pending          []byte
+	pendingErr       error
+	lastChunkEndedCR bool
 }
 
 func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
@@ -755,6 +756,13 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	}
 	if len(chunk) == 0 {
 		return nil, nil
+	}
+	// A CR already normalized by the previous chunk and this LF are one
+	// line ending, not the blank line that terminates an SSE frame.
+	skipLF := s.lastChunkEndedCR && chunk[0] == '\n'
+	s.lastChunkEndedCR = chunk[len(chunk)-1] == '\r'
+	if skipLF {
+		chunk = chunk[1:]
 	}
 	chunk = bytes.ReplaceAll(chunk, []byte("\r\n"), []byte("\n"))
 	chunk = bytes.ReplaceAll(chunk, []byte("\r"), []byte("\n"))
@@ -801,6 +809,7 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 }
 
 func (s *sseJSONValidationState) Finish() error {
+	s.lastChunkEndedCR = false
 	if s.pendingErr != nil {
 		errPending := s.pendingErr
 		s.pendingErr = nil
