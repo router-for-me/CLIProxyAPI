@@ -75,6 +75,38 @@ func TestSessionAffinitySelector_LookupAffinity(t *testing.T) {
 	})
 }
 
+func TestManagerLookupAffinityWithInactivePluginSchedulerDoesNotRefreshTTL(t *testing.T) {
+	selector := NewSessionAffinitySelector(nil)
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	scheduler := &inactivePluginScheduler{}
+	manager.SetPluginScheduler(scheduler)
+	auth := &Auth{ID: "observer-auth", Provider: "codex", Status: StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	const key = "codex::codex:observer-session::test-model"
+	selector.cache.Set(key, auth.ID)
+	selector.cache.mu.RLock()
+	expiresAt := selector.cache.entries[key].expiresAt
+	selector.cache.mu.RUnlock()
+	for i := 0; i < 5; i++ {
+		found, status := manager.LookupSessionAffinity("codex", "test-model", "observer-session")
+		if status != "bound" || found == nil || found.ID != auth.ID {
+			t.Fatalf("lookup = %v, %q; want bound auth", found, status)
+		}
+	}
+	selector.cache.mu.RLock()
+	after := selector.cache.entries[key].expiresAt
+	selector.cache.mu.RUnlock()
+	if !after.Equal(expiresAt) {
+		t.Errorf("lookup extended TTL: %v -> %v", expiresAt, after)
+	}
+	if scheduler.calls != 0 {
+		t.Errorf("lookup selected a credential %d times", scheduler.calls)
+	}
+}
+
 func TestManager_LookupSessionAffinity_RemovedAuth(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	selector := NewSessionAffinitySelector(nil)

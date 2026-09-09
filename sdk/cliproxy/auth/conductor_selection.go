@@ -422,14 +422,12 @@ func (m *Manager) Selector() Selector {
 // LookupSessionAffinity observes the current session affinity binding without side effects.
 // It returns (auth, status) where status can be "bound", "unbound", "ambiguous", or "unsupported".
 func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Auth, string) {
-	if m == nil {
+	// The standard service always attaches a plugin host. Native affinity
+	// remains authoritative unless that host has an active scheduler capability.
+	if m == nil || m.hasPluginScheduler() {
 		return nil, "unsupported"
 	}
 	m.mu.RLock()
-	if m.pluginScheduler != nil {
-		m.mu.RUnlock()
-		return nil, "unsupported"
-	}
 	sel := m.selector
 	authProviderMap := make(map[string]string, len(m.auths))
 	for id, a := range m.auths {
