@@ -1611,6 +1611,120 @@ func TestNormalizeResponsesWebsocketRequestReplacesCodexLocalCompactionTranscrip
 	}
 }
 
+func TestNormalizeResponsesWebsocketRequestInheritsPrewarmToolsOnTranscriptReplacement(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.6-sol","stream":true,"instructions":"be helpful","input":[
+		{"type":"additional_tools","role":"developer","tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]}]},
+		{"type":"message","role":"user","id":"prewarm","content":""}
+	]}`)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-prewarm","input":[
+		{"type":"message","role":"user","id":"old-user","content":"old prompt"},
+		{"type":"custom_tool_call","id":"old-call","call_id":"call-1","name":"functions.exec","input":"text(true)"},
+		{"type":"custom_tool_call_output","id":"old-output","call_id":"call-1","output":"true"},
+		{"type":"compaction","id":"compact-1","encrypted_content":"summary"},
+		{"type":"message","role":"user","id":"new-user","content":"list files"}
+	]}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, nil, false, true)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if gjson.GetBytes(normalized, "previous_response_id").Exists() {
+		t.Fatalf("replacement request must not include previous_response_id: %s", normalized)
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 6 {
+		t.Fatalf("replacement input len = %d, want 6: %s", len(input), normalized)
+	}
+	if got := input[0].Get("type").String(); got != "additional_tools" {
+		t.Fatalf("input[0].type = %q, want additional_tools: %s", got, normalized)
+	}
+	if got := input[0].Get("tools.0.tools.0.name").String(); got != "exec" {
+		t.Fatalf("inherited tool name = %q, want exec: %s", got, normalized)
+	}
+	if got := input[1].Get("id").String(); got != "old-user" {
+		t.Fatalf("input[1].id = %q, want old-user: %s", got, normalized)
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match replacement request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestInheritsPrewarmToolsOnUnpinnedReplacement(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.6-sol","stream":true,"input":[
+		{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},
+		{"type":"message","role":"user","id":"prewarm","content":""}
+	]}`)
+	raw := []byte(`{"type":"response.create","input":[
+		{"type":"message","role":"assistant","id":"assistant-1","content":"prior reply"},
+		{"type":"message","role":"user","id":"user-1","content":"continue"}
+	]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, nil)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("replacement input len = %d, want 3: %s", len(input), normalized)
+	}
+	if got := input[0].Get("type").String(); got != "additional_tools" {
+		t.Fatalf("input[0].type = %q, want additional_tools: %s", got, normalized)
+	}
+	if got := input[0].Get("tools.0.name").String(); got != "exec" {
+		t.Fatalf("inherited tool name = %q, want exec: %s", got, normalized)
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestInheritsPrewarmToolsOnCompactReplayBypass(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.6-sol","stream":true,"input":[
+		{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},
+		{"type":"message","role":"user","id":"prewarm","content":""}
+	]}`)
+	raw := []byte(`{"type":"response.append","input":[
+		{"type":"message","role":"user","id":"retained-user","content":"retained context"},
+		{"type":"compaction","id":"compact-1","encrypted_content":"summary"},
+		{"type":"message","role":"user","id":"new-user","content":"continue"}
+	]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, nil, false, true)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 4 {
+		t.Fatalf("compact replay input len = %d, want 4: %s", len(input), normalized)
+	}
+	if got := input[0].Get("type").String(); got != "additional_tools" {
+		t.Fatalf("input[0].type = %q, want additional_tools: %s", got, normalized)
+	}
+	if got := input[0].Get("tools.0.name").String(); got != "exec" {
+		t.Fatalf("inherited tool name = %q, want exec: %s", got, normalized)
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestPrefersReplacementTools(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.6-sol","stream":true,"input":[
+		{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"old_exec"}]}
+	]}`)
+	raw := []byte(`{"type":"response.create","input":[
+		{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"new_exec"}]},
+		{"type":"message","role":"assistant","id":"assistant-1","content":"prior reply"},
+		{"type":"message","role":"user","id":"user-1","content":"continue"}
+	]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, nil)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("replacement input len = %d, want 3: %s", len(input), normalized)
+	}
+	if got := input[0].Get("tools.0.name").String(); got != "new_exec" {
+		t.Fatalf("replacement tool name = %q, want new_exec: %s", got, normalized)
+	}
+}
+
 func TestShouldReplaceWebsocketTranscriptCodexLocalCompactionSemantics(t *testing.T) {
 	compactedInput := gjson.Parse(fmt.Sprintf(`[
 		{"type":"message","role":"developer","content":[{"type":"input_text","text":"initial context"}]},

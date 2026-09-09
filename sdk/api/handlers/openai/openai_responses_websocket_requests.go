@@ -134,7 +134,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	var mergedInput []byte
 	if allowCompactionReplayBypass && inputContainsFullTranscript(nextInput) {
 		log.Infof("responses websocket: full transcript detected, skipping stale merge (input items=%d)", len(nextInput.Array()))
-		mergedInput = []byte(nextInput.Raw)
+		mergedInput = responsesWebsocketInputWithInheritedAdditionalTools(nextInput, lastRequest)
 	} else {
 		appendInputRaw := nextInput.Raw
 		if inputContainsFullTranscript(nextInput) {
@@ -310,8 +310,48 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 			normalized, _ = sjson.SetRawBytes(normalized, "instructions", []byte(instructions.Raw))
 		}
 	}
+	input := gjson.GetBytes(normalized, "input")
+	if input.IsArray() {
+		normalized, _ = sjson.SetRawBytes(normalized, "input", responsesWebsocketInputWithInheritedAdditionalTools(input, lastRequest))
+	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
 	return bytes.Clone(normalized)
+}
+
+// responsesWebsocketInputWithInheritedAdditionalTools keeps the current
+// connection's tool declarations when a client replaces the incremental
+// response state with a full transcript. Codex sends those declarations in
+// the prewarm request and omits them from later requests that reference the
+// prewarm response ID. HTTP upstreams cannot retain that response ID, so the
+// replacement transcript must carry the declarations explicitly.
+func responsesWebsocketInputWithInheritedAdditionalTools(input gjson.Result, lastRequest []byte) []byte {
+	if !input.IsArray() {
+		return []byte(input.Raw)
+	}
+	for _, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) == "additional_tools" {
+			return []byte(input.Raw)
+		}
+	}
+
+	previousInput := gjson.GetBytes(lastRequest, "input")
+	if !previousInput.IsArray() {
+		return []byte(input.Raw)
+	}
+
+	items := make([]string, 0, len(previousInput.Array())+len(input.Array()))
+	for _, item := range previousInput.Array() {
+		if strings.TrimSpace(item.Get("type").String()) == "additional_tools" {
+			items = append(items, item.Raw)
+		}
+	}
+	if len(items) == 0 {
+		return []byte(input.Raw)
+	}
+	for _, item := range input.Array() {
+		items = append(items, item.Raw)
+	}
+	return []byte("[" + strings.Join(items, ",") + "]")
 }
 
 type responsesWebsocketInputItem struct {
