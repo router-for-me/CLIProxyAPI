@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -136,5 +137,58 @@ func TestOpenAICompatNativeResponsesRejectsEOFBeforeTerminalEvent(t *testing.T) 
 	}
 	if streamErr == nil || !strings.Contains(streamErr.Error(), "terminal event") {
 		t.Fatalf("stream error = %v, want missing terminal event", streamErr)
+	}
+}
+
+func TestOpenAICompatNativeResponsesUsesRequestedStreamMode(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, field := range []string{"", `,"stream":false`, `,"stream":true`} {
+			t.Run(fmt.Sprintf("stream=%t/field=%s", stream, field), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, _ := io.ReadAll(r.Body)
+					upstreamStream := gjson.GetBytes(body, "stream").Bool()
+					if upstreamStream != stream {
+						t.Errorf("upstream stream = %t, want %t; body=%s", upstreamStream, stream, body)
+					}
+					if upstreamStream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[]}}\n\n")
+					} else {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, `{"id":"r1","object":"response","status":"completed","output":[]}`)
+					}
+				}))
+				defer server.Close()
+				executor, auth := nativeResponsesExecutor(server.URL)
+				req, opts := nativeResponsesRequest(stream)
+				req.Payload = []byte(`{"model":"deepseek-v4-flash","input":"hello"` + field + `}`)
+				opts.OriginalRequest = req.Payload
+				original := string(req.Payload)
+				if stream {
+					result, err := executor.ExecuteStream(t.Context(), auth, req, opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var output strings.Builder
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatal(chunk.Err)
+						}
+						output.Write(chunk.Payload)
+					}
+					if !strings.Contains(output.String(), `"type":"response.completed"`) {
+						t.Fatalf("missing terminal event: %s", output.String())
+					}
+				} else {
+					response, err := executor.Execute(t.Context(), auth, req, opts)
+					if err != nil || !gjson.ValidBytes(response.Payload) || gjson.GetBytes(response.Payload, "id").String() != "r1" {
+						t.Fatalf("expected JSON response: error=%v payload=%s", err, response.Payload)
+					}
+				}
+				if string(req.Payload) != original {
+					t.Fatal("caller payload was mutated")
+				}
+			})
+		}
 	}
 }

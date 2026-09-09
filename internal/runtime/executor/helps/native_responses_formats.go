@@ -37,7 +37,8 @@ func TranslateNativeResponsesRequest(from sdktranslator.Format, model string, pa
 	if !handled {
 		return nil, cliproxyauth.NewRequestScopedError(fmt.Sprintf("native Responses provider has no request translator from %s to %s", from, to), http.StatusBadRequest)
 	}
-	return out, nil
+	// An identity route does not otherwise apply the executor's stream mode.
+	return SetBoolIfDifferent(out, "stream", stream), nil
 }
 
 // NativeResponsesTranslationError identifies a declined response translation route.
