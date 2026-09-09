@@ -241,6 +241,7 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 			provider = "realtime-client-secret"
 		}
 		c.Set("userApiKey", principal)
+		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		if authorization.IssuerPrincipal != "" && manager != nil {
 			issuerRequest := c.Request.Clone(c.Request.Context())
 			issuerRequest.Header = make(http.Header)
@@ -257,7 +258,6 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 			}
 		}
 		c.Set("accessProvider", provider)
-		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)
 		c.Next()
 	}

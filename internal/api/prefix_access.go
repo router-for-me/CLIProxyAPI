@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
@@ -38,7 +39,12 @@ func authorizePrefixRequest(c *gin.Context) bool {
 	}
 	model := ""
 	liveSession := path == "/v1/live" || path == "/v1/realtime" || path == "/v1/realtime/calls"
-	if strings.HasPrefix(path, "/v1beta/models/") {
+	storedSession, _ := c.Get(codexlive.ClientSecretSessionContextKey)
+	session, _ := storedSession.(json.RawMessage)
+	if liveSession && c.Request.Method == http.MethodPost && len(session) > 0 {
+		// The Live handler replaces the HTTP call's session with the authenticated secret's session.
+		model = prefixLiveModel(session)
+	} else if strings.HasPrefix(path, "/v1beta/models/") {
 		model = strings.TrimPrefix(path, "/v1beta/models/")
 		model, _, _ = strings.Cut(model, ":")
 	} else if c.Request.Method == http.MethodGet && path == "/v1/realtime" {
