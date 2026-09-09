@@ -2,6 +2,26 @@
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
 host: ""
 
+# ── Remote model catalog sources (env-based) ───────────────────────────────
+# The catalogs that feed model routing and /v1/models are refreshed from
+# remote URLs. Custom URLs set via these environment variables are tried FIRST,
+# official mirrors follow as fallback (comma-separated list, whitespace trimmed):
+#
+#   CPA_REMOTE_MODELS_URL                models.json            (provider routing)
+#   CPA_REMOTE_CODEX_CLIENT_MODELS_URL   codex_client_models.json (client view)
+#
+# Discovering correct model slugs for your account:
+#   - Official Codex CLI cache lists every slot your account can see:
+#       PowerShell: Select-String 'slug' "$env:USERPROFILE\.codex\models_cache.json"
+#   - Once a slug is routed, the active catalog is visible at:
+#       curl http://127.0.0.1:8317/v1/models -H "Authorization: Bearer <api-key>"
+#
+# Example — serve a newer/patched catalog without waiting for upstream releases:
+#   PowerShell: $env:CPA_REMOTE_MODELS_URL = 'https://raw.githubusercontent.com/<user>/models/main/models.json'
+#   bash:       export CPA_REMOTE_MODELS_URL='https://raw.githubusercontent.com/<user>/models/main/models.json'
+# (.env files in the working directory are loaded automatically, so the value
+#  may also be placed there instead of being exported in the shell.)
+
 # Server port
 port: 8317
 
