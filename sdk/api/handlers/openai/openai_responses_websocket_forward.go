@@ -22,9 +22,10 @@ import (
 )
 
 type responsesWebsocketForwardOptions struct {
-	toolCacheTurn     *responsesWebsocketToolCacheTurn
-	suppressError     func(*interfaces.ErrorMessage) bool
-	keepAliveInterval *time.Duration
+	preserveCompletionOutput func() bool
+	toolCacheTurn            *responsesWebsocketToolCacheTurn
+	suppressError            func(*interfaces.ErrorMessage) bool
+	keepAliveInterval        *time.Duration
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
@@ -141,7 +142,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			for i := range payloads {
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				eventType := gjson.GetBytes(payloads[i], "type").String()
-				if isResponsesWebsocketCompletionEvent(eventType) {
+				if isResponsesWebsocketCompletionEvent(eventType) && (opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
 					payloads[i] = restoreResponsesWebsocketCompletionOutput(payloads[i], outputItemsByIndex, outputItemsFallback)
 				}
 				if toolCacheTurn != nil {
