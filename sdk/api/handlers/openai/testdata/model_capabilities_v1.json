@@ -27,7 +27,14 @@
       "max_output_tokens": 32000,
       "input_modalities": ["text"],
       "output_modalities": ["text"],
-      "reasoning": null,
+      "reasoning": {
+        "supported": false,
+        "levels": [],
+        "min_tokens": null,
+        "max_tokens": null,
+        "zero_allowed": false,
+        "dynamic_allowed": false
+      },
       "supported_parameters": [],
       "unsupported_parameters": []
     },

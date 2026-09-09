@@ -233,6 +233,20 @@ func TestGetAvailableModelCapabilitiesUsesNullForUnknownValues(t *testing.T) {
 	}
 }
 
+func TestStaticKnownNonReasoningCapabilityIsExplicitFalse(t *testing.T) {
+	info := LookupStaticModelInfo("claude-3-5-haiku-20241022")
+	if info == nil {
+		t.Fatal("expected static Claude Haiku model")
+	}
+	capability := modelCapabilityFromInfo(info, "claude")
+	if capability.Reasoning == nil || capability.Reasoning.Supported {
+		t.Fatalf("reasoning = %#v, want explicit supported=false", capability.Reasoning)
+	}
+	if capability.Reasoning.Levels == nil || len(capability.Reasoning.Levels) != 0 {
+		t.Fatalf("reasoning levels = %#v, want known-empty []", capability.Reasoning.Levels)
+	}
+}
+
 func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	first := LookupModelInfo("claude-sonnet-4-6")
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {

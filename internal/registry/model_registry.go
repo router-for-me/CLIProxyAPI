@@ -71,6 +71,8 @@ type ModelInfo struct {
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
+	// ReasoningSupported distinguishes known support from unknown metadata.
+	ReasoningSupported *bool `json:"reasoning_supported,omitempty"`
 
 	// Config holds model-specific runtime overrides loaded from models.json.
 	Config *ModelConfig `json:"config,omitempty"`
@@ -669,6 +671,10 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 			copyThinking.Levels = append([]string(nil), model.Thinking.Levels...)
 		}
 		copyModel.Thinking = &copyThinking
+	}
+	if model.ReasoningSupported != nil {
+		reasoningSupported := *model.ReasoningSupported
+		copyModel.ReasoningSupported = &reasoningSupported
 	}
 	if model.Config != nil {
 		copyConfig := *model.Config
@@ -1312,18 +1318,25 @@ func modelCapabilityFromInfo(info *ModelInfo, provider string) ModelCapability {
 		capability.MaxOutputTokens = intPointer(maxOutputTokens)
 	}
 
-	if info.Thinking != nil {
+	if info.ReasoningSupported != nil || info.Thinking != nil {
+		supported := info.Thinking != nil
+		if info.ReasoningSupported != nil {
+			supported = *info.ReasoningSupported
+		}
 		capability.Reasoning = &ModelReasoningCapability{
-			Supported:      true,
-			Levels:         normalizedCapabilityStrings(info.Thinking.Levels),
-			ZeroAllowed:    info.Thinking.ZeroAllowed,
-			DynamicAllowed: info.Thinking.DynamicAllowed,
+			Supported: supported,
+			Levels:    []string{},
 		}
-		if info.Thinking.Min > 0 {
-			capability.Reasoning.MinTokens = intPointer(info.Thinking.Min)
-		}
-		if info.Thinking.Max > 0 {
-			capability.Reasoning.MaxTokens = intPointer(info.Thinking.Max)
+		if info.Thinking != nil {
+			capability.Reasoning.Levels = normalizedCapabilityStrings(info.Thinking.Levels)
+			capability.Reasoning.ZeroAllowed = info.Thinking.ZeroAllowed
+			capability.Reasoning.DynamicAllowed = info.Thinking.DynamicAllowed
+			if info.Thinking.Min > 0 {
+				capability.Reasoning.MinTokens = intPointer(info.Thinking.Min)
+			}
+			if info.Thinking.Max > 0 {
+				capability.Reasoning.MaxTokens = intPointer(info.Thinking.Max)
+			}
 		}
 	}
 	return capability

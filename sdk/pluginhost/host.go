@@ -311,6 +311,7 @@ func registryModelToPluginModel(model *internalregistry.ModelInfo) ModelInfo {
 		SupportedInputModalities:   cloneStringSlice(model.SupportedInputModalities),
 		SupportedOutputModalities:  cloneStringSlice(model.SupportedOutputModalities),
 		Thinking:                   thinkingSupportToPlugin(model.Thinking),
+		ReasoningSupported:         cloneBoolPointer(model.ReasoningSupported),
 		UserDefined:                model.UserDefined,
 	}
 }
@@ -333,6 +334,14 @@ func cloneStringSlice(in []string) []string {
 		return nil
 	}
 	return append([]string{}, in...)
+}
+
+func cloneBoolPointer(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func cloneStringSliceMap(in map[string][]string) map[string][]string {

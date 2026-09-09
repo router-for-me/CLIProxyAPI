@@ -394,7 +394,14 @@
       "type": "claude",
       "display_name": "Claude 3.5 Haiku",
       "context_length": 128000,
-      "max_completion_tokens": 8192
+      "max_completion_tokens": 8192,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "gemini": [
@@ -3871,7 +3878,14 @@
       "name": "grok-composer-2.5-fast",
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
       "context_length": 200000,
-      "max_completion_tokens": 32768
+      "max_completion_tokens": 32768,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ]
 }

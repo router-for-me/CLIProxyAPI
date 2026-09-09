@@ -176,6 +176,8 @@ type ModelInfo struct {
 	SupportedOutputModalities []string
 	// Thinking describes optional reasoning controls for the model.
 	Thinking *ThinkingSupport
+	// ReasoningSupported distinguishes known support from unknown metadata.
+	ReasoningSupported *bool
 	// UserDefined reports whether the model was provided by user configuration.
 	UserDefined bool
 }

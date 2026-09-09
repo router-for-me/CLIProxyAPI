@@ -179,6 +179,7 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 			log.Warnf("models parse failed from %s: %v", url, err)
 			continue
 		}
+		normalizeStaticReasoningCapabilities(&parsed)
 		if err := validateModelsCatalog(&parsed); err != nil {
 			log.Warnf("models validate failed from %s: %v", url, err)
 			continue
@@ -300,6 +301,7 @@ func loadModelsFromBytes(data []byte, source string) error {
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return fmt.Errorf("%s: decode models catalog: %w", source, err)
 	}
+	normalizeStaticReasoningCapabilities(&parsed)
 	if err := validateModelsCatalog(&parsed); err != nil {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)
 	}
@@ -308,6 +310,26 @@ func loadModelsFromBytes(data []byte, source string) error {
 	modelsCatalogStore.data = &parsed
 	modelsCatalogStore.mu.Unlock()
 	return nil
+}
+
+func normalizeStaticReasoningCapabilities(data *staticModelsJSON) {
+	if data == nil {
+		return
+	}
+	sections := [][]*ModelInfo{
+		data.Claude, data.Gemini, data.Vertex, data.AIStudio,
+		data.CodexFree, data.CodexTeam, data.CodexPlus, data.CodexPro,
+		data.Kimi, data.Antigravity, data.XAI,
+	}
+	for _, models := range sections {
+		for _, model := range models {
+			if model == nil || model.ReasoningSupported != nil {
+				continue
+			}
+			supported := model.Thinking != nil
+			model.ReasoningSupported = &supported
+		}
+	}
 }
 
 func getModels() *staticModelsJSON {

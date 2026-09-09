@@ -76,9 +76,13 @@ func TestModelCapabilitiesV1FixtureDefinesSharedAndUnknownSemantics(t *testing.T
 	}
 	sharedProviders := map[string]bool{}
 	unknownFound := false
+	knownNonReasoningFound := false
 	for _, model := range response.Data {
 		if model.ID == "shared/example-model" {
 			sharedProviders[model.Provider] = true
+			if model.Provider == "provider-a" {
+				knownNonReasoningFound = model.Reasoning != nil && !model.Reasoning.Supported && model.Reasoning.Levels != nil && len(model.Reasoning.Levels) == 0
+			}
 		}
 		if model.ID == "unknown/example-model" {
 			unknownFound = model.ContextWindow == nil && model.MaxOutputTokens == nil && model.InputModalities == nil && model.OutputModalities == nil && model.Reasoning == nil && model.SupportedParameters == nil && model.UnsupportedParameters == nil
@@ -89,5 +93,8 @@ func TestModelCapabilitiesV1FixtureDefinesSharedAndUnknownSemantics(t *testing.T
 	}
 	if !unknownFound {
 		t.Fatal("fixture must represent unknown capability fields as null")
+	}
+	if !knownNonReasoningFound {
+		t.Fatal("fixture must represent known non-reasoning as supported=false with empty levels")
 	}
 }

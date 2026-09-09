@@ -138,6 +138,7 @@ func pluginModelInfoToRegistryModelInfo(model pluginapi.ModelInfo) *registry.Mod
 		SupportedInputModalities:   cloneStringSlice(model.SupportedInputModalities),
 		SupportedOutputModalities:  cloneStringSlice(model.SupportedOutputModalities),
 		Thinking:                   pluginThinkingSupportToRegistryThinkingSupport(model.Thinking),
+		ReasoningSupported:         cloneBoolPointer(model.ReasoningSupported),
 		UserDefined:                model.UserDefined,
 	}
 }
@@ -179,6 +180,7 @@ func registryModelInfoToPluginModelInfo(model *registry.ModelInfo) pluginapi.Mod
 		SupportedInputModalities:   cloneStringSlice(model.SupportedInputModalities),
 		SupportedOutputModalities:  cloneStringSlice(model.SupportedOutputModalities),
 		Thinking:                   registryThinkingSupportToPluginThinkingSupport(model.Thinking),
+		ReasoningSupported:         cloneBoolPointer(model.ReasoningSupported),
 		UserDefined:                model.UserDefined,
 	}
 }
@@ -203,6 +205,14 @@ func cloneStringSlice(in []string) []string {
 	return append([]string{}, in...)
 }
 
+func cloneBoolPointer(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
 func cloneRegistryModels(in []*registry.ModelInfo) []*registry.ModelInfo {
 	if len(in) == 0 {
 		return nil
@@ -223,6 +233,7 @@ func cloneRegistryModels(in []*registry.ModelInfo) []*registry.ModelInfo {
 			thinking.Levels = cloneStringSlice(model.Thinking.Levels)
 			copyModel.Thinking = &thinking
 		}
+		copyModel.ReasoningSupported = cloneBoolPointer(model.ReasoningSupported)
 		out = append(out, &copyModel)
 	}
 	return out

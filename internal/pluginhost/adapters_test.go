@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -92,6 +93,26 @@ func TestPluginModelInfoToRegistryModelInfoPreservesKnownEmptySlices(t *testing.
 	if got.SupportedParameters == nil || got.UnsupportedParameters == nil || got.SupportedInputModalities == nil || got.SupportedOutputModalities == nil {
 		t.Fatalf("known-empty slices became unknown: %#v", got)
 	}
+}
+
+func TestPluginModelInfoTransportsExplicitNonReasoningCapability(t *testing.T) {
+	var model pluginapi.ModelInfo
+	if err := json.Unmarshal([]byte(`{"ID":"plugin/non-reasoning","ReasoningSupported":false}`), &model); err != nil {
+		t.Fatal(err)
+	}
+	got := pluginModelInfoToRegistryModelInfo(model)
+	capability := registry.GetGlobalRegistry()
+	capability.RegisterClient("plugin-explicit-non-reasoning", "plugin", []*registry.ModelInfo{got})
+	t.Cleanup(func() { capability.UnregisterClient("plugin-explicit-non-reasoning") })
+	for _, info := range capability.GetAvailableModelCapabilities() {
+		if info.ID == model.ID && info.Provider == "plugin" {
+			if info.Reasoning == nil || info.Reasoning.Supported {
+				t.Fatalf("reasoning support = %#v, want explicit false", info.Reasoning)
+			}
+			return
+		}
+	}
+	t.Fatal("registered plugin capability missing")
 }
 
 func TestCloneRegistryModelsClonesUnsupportedParameters(t *testing.T) {
