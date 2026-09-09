@@ -523,7 +523,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			dataPayload := bytes.TrimSpace(bytes.Join(dataLines, []byte("\n")))
 			isDone := bytes.Equal(dataPayload, []byte("[DONE]"))
 			if nativeResponses && isDone {
-				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream Responses stream ended with [DONE] before a terminal event"}, false)
+				publishStreamError(cliproxyauth.NewRequestScopedError("upstream Responses stream ended with [DONE] before a terminal event", http.StatusBadGateway), false)
 				return true
 			}
 			if isDone && openAICompatErrorEvent(eventName) {
@@ -612,14 +612,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			case <-ctx.Done():
 			}
 		} else if !seenDone {
+			if nativeResponses {
+				// A missing terminal event does not establish a credential failure.
+				publishStreamError(cliproxyauth.NewRequestScopedError("upstream Responses stream closed before a terminal event", http.StatusBadGateway), false)
+				return
+			}
 			// Responses clients require an explicit terminal event. Treat a clean
 			// upstream EOF without [DONE] as a failed stream instead of completing it.
-			if nativeResponses || responseFormat == sdktranslator.FormatOpenAIResponse {
-				missingTerminal := "upstream stream closed before [DONE]"
-				if nativeResponses {
-					missingTerminal = "upstream Responses stream closed before a terminal event"
-				}
-				streamErr := statusErr{code: http.StatusBadGateway, msg: missingTerminal}
+			if responseFormat == sdktranslator.FormatOpenAIResponse {
+				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				reporter.PublishFailure(ctx, streamErr)
 				select {
