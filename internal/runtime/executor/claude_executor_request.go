@@ -895,7 +895,8 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 		// Measured Haiku helper requests already carry the exact credential
 		// beta profile and intentionally omit extended-cache-ttl.
-		// Native Claude Code subagents and probes also omit extended-cache-ttl.
+		// Native subagents omit extended-cache-ttl by default; preserve an explicit
+		// caller choice below without adding it to the default subagent profile.
 		if useOAuthBetas && !helperProfile {
 			if countTokens {
 				baseBetas = withClaudeCountTokensOAuthBeta(baseBetas)
@@ -970,7 +971,8 @@ func applyClaudeHeadersWithNativeProfile(
 		if reqThinkingType == "disabled" {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeThinkingDisplayUpdatesBeta)
 		}
-		if helps.IsClaudeSubagentRequest(nil, body) {
+		preserveSubagentTTL := confirmedClaudeCode && helps.ClaudeRequestsExtendedCacheTTL(incomingHeaders, body)
+		if helps.IsClaudeSubagentRequest(incomingHeaders, body) && !preserveSubagentTTL {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
 		}
 		reqModel := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))

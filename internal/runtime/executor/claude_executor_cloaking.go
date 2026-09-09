@@ -1402,8 +1402,8 @@ func applyCloakingInternal(
 		}
 	}
 
-	// Probes and subagents never use 1h cache in native Claude Code; ensure any
-	// caller-supplied 1h ttl is stripped to match extended-cache-ttl beta suppression.
+	// Cloaked subagents use the default 5m TTL. Confirmed native clients bypass
+	// cloaking and can explicitly opt in to 1h through subagentPromptCacheTtl.
 	if isSubagent || isProbeOrHelper {
 		payload = stripClaudeCacheControlTTL(payload)
 	}
