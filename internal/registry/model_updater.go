@@ -323,10 +323,10 @@ func normalizeStaticReasoningCapabilities(data *staticModelsJSON) {
 	}
 	for _, models := range sections {
 		for _, model := range models {
-			if model == nil || model.ReasoningSupported != nil {
+			if model == nil || model.ReasoningSupported != nil || model.Thinking == nil {
 				continue
 			}
-			supported := model.Thinking != nil
+			supported := true
 			model.ReasoningSupported = &supported
 		}
 	}

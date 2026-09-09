@@ -1328,7 +1328,9 @@ func modelCapabilityFromInfo(info *ModelInfo, provider string) ModelCapability {
 			Levels:    []string{},
 		}
 		if info.Thinking != nil {
-			capability.Reasoning.Levels = normalizedCapabilityStrings(info.Thinking.Levels)
+			if levels := normalizedCapabilityStrings(info.Thinking.Levels); len(levels) > 0 {
+				capability.Reasoning.Levels = levels
+			}
 			capability.Reasoning.ZeroAllowed = info.Thinking.ZeroAllowed
 			capability.Reasoning.DynamicAllowed = info.Thinking.DynamicAllowed
 			if info.Thinking.Min > 0 {

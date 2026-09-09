@@ -395,6 +395,7 @@
       "display_name": "Claude 3.5 Haiku",
       "context_length": 128000,
       "max_completion_tokens": 8192,
+      "reasoning_supported": false,
       "supportedInputModalities": [
         "text",
         "image"
@@ -3610,6 +3611,13 @@
       "description": "GPT-OSS 120B (Medium)",
       "context_length": 114000,
       "max_completion_tokens": 32768,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
       "supportedInputModalities": [
         "text"
       ],
@@ -3691,6 +3699,13 @@
       "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
       "context_length": 256000,
       "max_completion_tokens": 256000,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
       "supportedInputModalities": [
         "text",
         "image"
@@ -3765,6 +3780,7 @@
       "description": "xAI Grok 4.20 0309 reasoning model for the Responses API.",
       "context_length": 2000000,
       "max_completion_tokens": 65536,
+      "reasoning_supported": true,
       "supportedInputModalities": [
         "text",
         "image"
@@ -3784,6 +3800,7 @@
       "description": "xAI Grok 4.20 0309 non-reasoning model for the Responses API.",
       "context_length": 2000000,
       "max_completion_tokens": 65536,
+      "reasoning_supported": false,
       "supportedInputModalities": [
         "text",
         "image"
@@ -3879,6 +3896,7 @@
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
       "context_length": 200000,
       "max_completion_tokens": 32768,
+      "reasoning_supported": false,
       "supportedInputModalities": [
         "text",
         "image"

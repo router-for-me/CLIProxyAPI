@@ -247,6 +247,44 @@ func TestStaticKnownNonReasoningCapabilityIsExplicitFalse(t *testing.T) {
 	}
 }
 
+func TestBudgetOnlyReasoningCapabilityUsesKnownEmptyLevels(t *testing.T) {
+	capability := modelCapabilityFromInfo(&ModelInfo{
+		ID:       "budget-only",
+		Thinking: &ThinkingSupport{Min: 1024, Max: 64000},
+	}, "test")
+	if capability.Reasoning == nil || !capability.Reasoning.Supported {
+		t.Fatalf("reasoning = %#v, want supported", capability.Reasoning)
+	}
+	if capability.Reasoning.Levels == nil || len(capability.Reasoning.Levels) != 0 {
+		t.Fatalf("reasoning levels = %#v, want known-empty []", capability.Reasoning.Levels)
+	}
+}
+
+func TestStaticReasoningNormalizationPreservesUnknown(t *testing.T) {
+	known := &ModelInfo{ID: "known", Thinking: &ThinkingSupport{Levels: []string{"low"}}}
+	unknown := &ModelInfo{ID: "unknown"}
+	data := &staticModelsJSON{XAI: []*ModelInfo{known, unknown}}
+	normalizeStaticReasoningCapabilities(data)
+	if known.ReasoningSupported == nil || !*known.ReasoningSupported {
+		t.Fatalf("known reasoning = %#v, want true", known.ReasoningSupported)
+	}
+	if unknown.ReasoningSupported != nil {
+		t.Fatalf("unknown reasoning = %#v, want nil", unknown.ReasoningSupported)
+	}
+}
+
+func TestStaticFixedReasoningModelsAreExplicit(t *testing.T) {
+	for id, want := range map[string]bool{
+		"grok-4.20-0309-reasoning":     true,
+		"grok-4.20-0309-non-reasoning": false,
+	} {
+		info := LookupStaticModelInfo(id)
+		if info == nil || info.ReasoningSupported == nil || *info.ReasoningSupported != want {
+			t.Fatalf("model %q reasoning = %#v, want %t", id, info, want)
+		}
+	}
+}
+
 func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	first := LookupModelInfo("claude-sonnet-4-6")
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {
