@@ -40,13 +40,18 @@ const (
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
 type OpenAICompatExecutor struct {
-	provider string
-	cfg      *config.Config
+	provider      string
+	cfg           *config.Config
+	responseCache *helps.ResponseCacheRegistry
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
-	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
+	return &OpenAICompatExecutor{
+		provider:      provider,
+		cfg:           cfg,
+		responseCache: helps.NewResponseCacheRegistry(),
+	}
 }
 
 // Identifier implements cliproxyauth.ProviderExecutor.
@@ -164,6 +169,22 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
+
+	// Serve byte-identical repeats from the provider response cache when enabled.
+	// Upstream aggregators without prompt caching bill every retry at full price.
+	responseCache, cacheKey, _ := e.responseCache.Lookup(e.resolveCompatConfig(auth), e.responseCacheProviderKey(auth), authID, url, baseModel, responseFormat.String(), false, httpReq.Header, translated)
+	if responseCache != nil {
+		if entry, ok := responseCache.Get(cacheKey); ok && !entry.Stream {
+			helps.LogWithRequestID(ctx).Debugf("openai compat executor: response cache hit for model %s", baseModel)
+			var cachedParam any
+			cachedOut := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, entry.Payload, &cachedParam)
+			if responseFormat == sdktranslator.FormatOpenAIResponse {
+				cachedOut = helps.EnsureResponsesUsageDetails(cachedOut)
+			}
+			return cliproxyexecutor.Response{Payload: cachedOut, Headers: entry.Headers.Clone()}, nil
+		}
+	}
+
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
@@ -202,6 +223,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	if responseCache != nil {
+		responseCache.Store(cacheKey, body, httpResp.Header, false)
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -251,7 +275,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -378,6 +402,18 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
+
+	// Replay byte-identical streaming repeats from the provider response cache.
+	// Cached frames are the raw upstream SSE payloads, so they flow through the same
+	// translator pipeline that produced the original downstream output.
+	responseCache, cacheKey, cacheSettings := e.responseCache.Lookup(e.resolveCompatConfig(auth), e.responseCacheProviderKey(auth), authID, url, baseModel, responseFormat.String(), true, httpReq.Header, translated)
+	if responseCache != nil {
+		if entry, ok := responseCache.Get(cacheKey); ok && entry.Stream {
+			helps.LogWithRequestID(ctx).Debugf("openai compat executor: response cache hit for streaming model %s", baseModel)
+			return e.replayCachedStream(ctx, reporter, entry.Payload, entry.Headers, to, responseFormat, req, opts, translated, originalPayload), nil
+		}
+	}
+
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
@@ -426,6 +462,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var streamAborted bool
 		var upstreamEvent string
 		var frameData [][]byte
+		var cachedStream []byte
+		var cacheOversized bool
+		maxEntryBytes := cacheSettings.MaxEntryBytes
 		defer streamUsage.Publish(ctx, reporter)
 
 		publishStreamError := func(streamErr statusErr, containsPayload bool) {
@@ -481,6 +520,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			streamLine := append([]byte("data: "), dataPayload...)
+			if responseCache != nil && !cacheOversized {
+				var cached bool
+				cachedStream, cached = helps.AppendCachedStreamFrame(cachedStream, dataPayload, maxEntryBytes)
+				if !cached {
+					cacheOversized = true
+					cachedStream = nil
+				}
+			}
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
 			for i := range chunks {
 				select {
@@ -566,8 +613,39 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		// Ensure we record the request if no usage chunk was ever seen.
 		streamUsage.Publish(ctx, reporter)
 		reporter.EnsurePublished(ctx)
+		// Only complete, uninterrupted streams within configured size bounds are cacheable;
+		// a partial replay would otherwise be served as if it were a finished response.
+		if responseCache != nil && !cacheOversized && seenDone && !streamFailed && !streamAborted && errScan == nil && len(cachedStream) > 0 {
+			responseCache.Store(cacheKey, cachedStream, httpResp.Header, true)
+		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// replayCachedStream feeds cached upstream SSE frames through the normal
+// translation pipeline so a cache hit is indistinguishable from a live stream.
+func (e *OpenAICompatExecutor) replayCachedStream(ctx context.Context, reporter *helps.UsageReporter, cached []byte, headers http.Header, to, responseFormat sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, translated, originalPayload []byte) *cliproxyexecutor.StreamResult {
+	from := opts.SourceFormat
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+		var param any
+		var streamUsage helps.StreamUsageBuffer
+		for _, frame := range helps.DecodeCachedStreamFrames(cached) {
+			streamLine := append([]byte("data: "), frame...)
+			streamUsage.ObserveOpenAIStream(streamLine)
+			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
+			for i := range chunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{Headers: headers.Clone(), Chunks: out}
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -608,7 +686,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -924,6 +1002,16 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
 	}
 	return
+}
+
+func (e *OpenAICompatExecutor) responseCacheProviderKey(auth *cliproxyauth.Auth) string {
+	key := e.Identifier()
+	if auth != nil && auth.Attributes != nil {
+		if configIndex := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex]); configIndex != "" {
+			key += "|config:" + configIndex
+		}
+	}
+	return key
 }
 
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
