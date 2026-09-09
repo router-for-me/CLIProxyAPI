@@ -666,7 +666,7 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 }
 
 // normalizeToolParameters ensures object schemas contain at least an empty properties map
-// and strips dialect keywords ($schema, $id) from schema objects.
+// and strips schema keywords that Codex's function-schema validator does not accept.
 func normalizeToolParameters(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" || !gjson.Valid(raw) {
@@ -721,6 +721,11 @@ func stripDialectKeywordsFromSchema(v any) {
 	case map[string]any:
 		delete(schema, "$schema")
 		delete(schema, "$id")
+		// Claude Code may emit PCRE patterns (for example, negative lookahead
+		// and Unicode property escapes) that OpenAI's schema validator rejects.
+		// Tool argument validation remains the client's responsibility, so omit
+		// the constraint when translating to Codex.
+		delete(schema, "pattern")
 
 		for _, mapKey := range codexSchemaMapKeywords {
 			if subMap, ok := schema[mapKey].(map[string]any); ok {

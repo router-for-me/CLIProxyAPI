@@ -315,6 +315,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 				budget := int(b.Int())
 				out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingBudget", budget)
 			}
+		case "disabled":
+			// Preserve explicit Claude disable semantics for the downstream thinking applier.
+			out, _ = sjson.SetBytes(out, "generationConfig.thinkingConfig.thinkingLevel", "none")
 		case "adaptive", "auto":
 			// For adaptive thinking:
 			// - If output_config.effort is explicitly present, pass through as thinkingLevel.
