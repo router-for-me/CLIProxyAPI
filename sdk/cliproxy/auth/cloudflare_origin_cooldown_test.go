@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 )
 
 const cloudflareOriginPage = `<html><body><h1>Web server is returning an unknown error</h1><p>There is an unknown connection issue between Cloudflare and the origin web server.</p></body></html>`
@@ -108,5 +110,47 @@ func TestCloudflareOriginRetainsLongerExistingCooldown(t *testing.T) {
 	applyAuthFailureState(credential, &Error{HTTPStatus: 520, Message: cloudflareOriginPage}, nil, now, false)
 	if !credential.NextRetryAfter.Equal(deadline) {
 		t.Fatalf("existing cooldown shortened: %v", credential.NextRetryAfter)
+	}
+}
+
+func TestManagerCloudflareChallengeResponseHeader(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+	for _, model := range []string{"", "gpt-header-challenge"} {
+		for _, status := range []int{http.StatusForbidden, 520} {
+			for _, tt := range []struct {
+				value string
+				want  bool
+			}{
+				{"challenge", true},
+				{" CHALLENGE ", true},
+				{"", false},
+				{"other", false},
+			} {
+				t.Run(fmt.Sprintf("model=%s/status=%d/header=%q", model, status, tt.value), func(t *testing.T) {
+					manager := NewManager(nil, nil, nil)
+					credential := &Auth{ID: t.Name(), Provider: "codex"}
+					if _, err := manager.Register(t.Context(), credential); err != nil {
+						t.Fatal(err)
+					}
+					ctx := internallogging.WithResponseHeadersHolder(t.Context())
+					headers := make(http.Header)
+					if tt.value != "" {
+						headers.Set("Cf-Mitigated", tt.value)
+					}
+					internallogging.SetResponseHeaders(ctx, headers)
+					manager.MarkResult(ctx, Result{AuthID: credential.ID, Provider: "codex", Model: model, Error: &Error{HTTPStatus: status, Message: `<html><body>blocked</body></html>`}})
+					updated, _ := manager.GetByID(credential.ID)
+					quota, message := updated.Quota, updated.StatusMessage
+					if model != "" {
+						quota, message = updated.ModelStates[model].Quota, updated.ModelStates[model].StatusMessage
+					}
+					if got := quota.Exceeded && quota.Reason == "cloudflare challenge" && message == "cloudflare challenge"; got != tt.want {
+						t.Errorf("challenge = %t, want %t; quota=%+v message=%q", got, tt.want, quota, message)
+					}
+				})
+			}
+		}
 	}
 }

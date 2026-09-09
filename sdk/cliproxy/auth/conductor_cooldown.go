@@ -807,7 +807,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
-					} else if isCloudflareChallengeResultError(result.Error) {
+					} else if isCloudflareChallengeResultError(result.Error, responseHeaders) {
 						next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)
 						state.NextRetryAfter = next
 						state.StatusMessage = "cloudflare challenge"
@@ -934,7 +934,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, responseHeaders)
 			}
 		}
 
@@ -1687,9 +1687,14 @@ func isCloudflareChallengeError(err error) bool {
 	return isCloudflareChallengeErrorMessage(err.Error())
 }
 
-func isCloudflareChallengeResultError(err *Error) bool {
+func isCloudflareChallengeResultError(err *Error, responseHeaders ...http.Header) bool {
 	if err == nil {
 		return false
+	}
+	for _, headers := range responseHeaders {
+		if strings.EqualFold(strings.TrimSpace(headers.Get("Cf-Mitigated")), "challenge") {
+			return true
+		}
 	}
 	return isCloudflareChallengeErrorMessage(err.Message)
 }
@@ -2028,7 +2033,7 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool, responseHeaders ...http.Header) {
 	if auth == nil {
 		return
 	}
@@ -2052,7 +2057,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
-	if isCloudflareChallengeResultError(resultErr) {
+	if isCloudflareChallengeResultError(resultErr, responseHeaders...) {
 		auth.StatusMessage = "cloudflare challenge"
 		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, disableCooling, now)
 		applyCooldownFields(&auth.Quota, QuotaState{
