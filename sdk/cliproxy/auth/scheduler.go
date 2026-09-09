@@ -532,6 +532,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	now := time.Now()
 	total := 0
 	cooldownCount := 0
+	terminalRefreshCount := 0
 	earliest := time.Time{}
 
 	var latestModelTime time.Time
@@ -554,6 +555,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		localTotal, localCooldownCount, localEarliest := shard.availabilitySummaryLocked(predicate)
 		total += localTotal
 		cooldownCount += localCooldownCount
+		terminalRefreshCount += shard.terminalRefreshFailureCountLocked(predicate, now)
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
@@ -583,6 +585,9 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 
 	if total == 0 {
 		return WithCause(&Error{Code: "auth_not_found", Message: "no auth available"}, lastCandidateErr)
+	}
+	if terminalRefreshCount == total {
+		return newUpstreamAuthenticationRequiredError(lastCandidateErr)
 	}
 	if cooldownCount == total && !earliest.IsZero() {
 		resetIn := earliest.Sub(now)
@@ -1239,6 +1244,9 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 	lastCandidateErr, _, _ := m.latestCandidateErrorWithTimeLocked(model, predicate)
 	if total == 0 {
 		return WithCause(&Error{Code: "auth_not_found", Message: "no auth available"}, lastCandidateErr)
+	}
+	if m.terminalRefreshFailureCountLocked(predicate, now) == total {
+		return newUpstreamAuthenticationRequiredError(lastCandidateErr)
 	}
 	if cooldownCount == total && !earliest.IsZero() {
 		providerForError := provider

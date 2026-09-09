@@ -527,6 +527,9 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 
 	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
 	if len(availableByPriority) == 0 {
+		if allAuthsRequireReauthentication(auths, now) {
+			return nil, newUpstreamAuthenticationRequiredError(latestCandidateErrorForModel(auths, func(*Auth) string { return model }))
+		}
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
