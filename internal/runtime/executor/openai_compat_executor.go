@@ -108,6 +108,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if nativeResponses {
 		to = sdktranslator.FormatOpenAIResponse
 		endpoint = "/responses"
+		if err = helps.ValidateNativeResponsesFormats(from, responseFormat, false); err != nil {
+			return resp, err
+		}
 	}
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
@@ -130,9 +133,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
-	if nativeResponses {
-		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat native responses executor", translated)
-	} else if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
+	if !nativeResponses && helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
 	if opts.Alt != "responses/compact" {
@@ -145,7 +146,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
 		}
-		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
+		if !nativeResponses {
+			translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
+		}
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -337,6 +340,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if nativeResponses {
 		to = sdktranslator.FormatOpenAIResponse
 		endpoint = "/responses"
+		if err = helps.ValidateNativeResponsesFormats(from, responseFormat, true); err != nil {
+			return nil, err
+		}
 	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -355,9 +361,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
-	if nativeResponses {
-		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat native responses executor", translated)
-	} else if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
+	if !nativeResponses && helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
 	if opts.Alt != "responses/compact" {
@@ -487,9 +491,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				}
 			}
 			dataPayload := bytes.TrimSpace(bytes.Join(dataLines, []byte("\n")))
-			eventType := gjson.GetBytes(dataPayload, "type").String()
-			isResponsesTerminal := nativeResponses && (eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.failed")
-			isDone := bytes.Equal(dataPayload, []byte("[DONE]")) || isResponsesTerminal
+			isDone := bytes.Equal(dataPayload, []byte("[DONE]"))
+			if nativeResponses && isDone {
+				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream Responses stream ended with [DONE] before a terminal event"}, false)
+				return true
+			}
 			if isDone && openAICompatErrorEvent(eventName) {
 				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream error event ended before [DONE]"}, false)
 				return true
@@ -504,6 +510,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					return true
 				}
 			}
+			eventType := gjson.GetBytes(dataPayload, "type").String()
+			isResponsesTerminal := nativeResponses && (eventType == "response.completed" || eventType == "response.incomplete")
+			isDone = isDone || isResponsesTerminal
 			if isResponsesTerminal {
 				if detail, ok := helps.ParseCodexUsage(dataPayload); ok {
 					reporter.Publish(ctx, detail)
