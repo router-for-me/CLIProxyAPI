@@ -233,6 +233,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if nativeResponses && !handled {
 		return resp, helps.NativeResponsesTranslationError(responseFormat)
 	}
+	if nativeResponses && responseFormat == sdktranslator.FormatInteractions && gjson.GetBytes(body, "status").String() == "incomplete" && gjson.GetBytes(out, "status").String() != "incomplete" {
+		return resp, helps.NativeResponsesIncompleteTranslationError(responseFormat)
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	reporter.EnsurePublished(ctx)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
@@ -547,6 +550,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			chunks, handled := helps.TranslateStreamWithClaudeInputTokensChecked(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
 			if nativeResponses && !handled {
 				publishStreamError(helps.NativeResponsesTranslationError(responseFormat), false)
+				return true
+			}
+			if nativeResponses && responseFormat == sdktranslator.FormatInteractions && eventType == "response.incomplete" && len(chunks) == 0 {
+				publishStreamError(helps.NativeResponsesIncompleteTranslationError(responseFormat), false)
 				return true
 			}
 			if isResponsesTerminal {

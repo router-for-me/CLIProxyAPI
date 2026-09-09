@@ -45,3 +45,9 @@ func TranslateNativeResponsesRequest(from sdktranslator.Format, model string, pa
 func NativeResponsesTranslationError(responseFormat sdktranslator.Format) error {
 	return cliproxyauth.NewRequestScopedError(fmt.Sprintf("native Responses provider has no response translator from %s to %s", sdktranslator.FormatOpenAIResponse, responseFormat), http.StatusBadRequest)
 }
+
+// NativeResponsesIncompleteTranslationError rejects a translation that would
+// silently report a truncated response as completed or omit its terminal event.
+func NativeResponsesIncompleteTranslationError(responseFormat sdktranslator.Format) error {
+	return cliproxyauth.NewRequestScopedError(fmt.Sprintf("native Responses translator did not preserve the incomplete outcome for %s", responseFormat), http.StatusBadGateway)
+}
