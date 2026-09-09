@@ -68,11 +68,12 @@ func (h *ClaudeCodeAPIHandler) Models() []map[string]any {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
+	requestID := EnsureRequestID(c)
 	// Extract raw JSON data from the incoming request
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.Data(http.StatusBadRequest, "application/json", BuildErrorResponse(http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err)))
+		c.Data(http.StatusBadRequest, "application/json", BuildErrorResponse(http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err), requestID))
 		return
 	}
 
@@ -95,11 +96,12 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
+	requestID := EnsureRequestID(c)
 	// Extract raw JSON data from the incoming request
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.Data(http.StatusBadRequest, "application/json", BuildErrorResponse(http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err)))
+		c.Data(http.StatusBadRequest, "application/json", BuildErrorResponse(http.StatusBadRequest, fmt.Sprintf("Invalid request: %v", err), requestID))
 		return
 	}
 
@@ -309,7 +311,9 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			}
 			c.Status(status)
 
-			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+			response := h.toClaudeError(errMsg)
+			response.RequestID = setClaudeRequestID(c, response.RequestID)
+			errorBytes, _ := json.Marshal(response)
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 	})
@@ -321,8 +325,9 @@ type claudeErrorDetail struct {
 }
 
 type claudeErrorResponse struct {
-	Type  string            `json:"type"`
-	Error claudeErrorDetail `json:"error"`
+	Type      string            `json:"type"`
+	Error     claudeErrorDetail `json:"error"`
+	RequestID string            `json:"request_id,omitempty"`
 }
 
 func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
@@ -346,21 +351,26 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 // before execution, such as authentication or reading the request body.
 // It preserves the public message literally; JSON-shaped text cannot override
 // the status-derived error type as an upstream error envelope could.
-func BuildErrorResponse(status int, message string) []byte {
-	body, _ := json.Marshal(claudeErrorResponse{
+func BuildErrorResponse(status int, message string, requestID ...string) []byte {
+	response := claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
 			Type:    claudeErrorTypeFromStatus(status),
 			Message: message,
 		},
-	})
+	}
+	if len(requestID) > 0 {
+		response.RequestID = requestID[0]
+	}
+	body, _ := json.Marshal(response)
 	return body
 }
 
 func newClaudeErrorResponse(status int, errText string) claudeErrorResponse {
 	errType, message := claudeErrorDetailFromText(status, errText)
 	return claudeErrorResponse{
-		Type: "error",
+		Type:      "error",
+		RequestID: claudeRequestIDFromText(errText),
 		Error: claudeErrorDetail{
 			Type:    errType,
 			Message: message,
@@ -374,8 +384,9 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		status = msg.StatusCode
 	}
 	if msg != nil && msg.DirectResponse {
-		for key, values := range handlers.FilterUpstreamHeaders(msg.Headers) {
-			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
+		filteredHeaders := handlers.FilterUpstreamHeaders(msg.Headers)
+		for key, values := range filteredHeaders {
+			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) || strings.EqualFold(key, claudeRequestIDHeader) {
 				continue
 			}
 			c.Writer.Header().Del(key)
@@ -384,6 +395,11 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 			}
 		}
 		body := bytes.Clone(msg.Body)
+		requestID := claudeRequestIDFromText(string(body))
+		if requestID == "" {
+			requestID = filteredHeaders.Get(claudeRequestIDHeader)
+		}
+		setClaudeRequestID(c, requestID)
 		appendClaudeAPIResponse(c, body)
 		if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
 			c.Writer.Header().Set("Content-Type", "application/json")
@@ -399,7 +415,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
-			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
+			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) || strings.EqualFold(key, claudeRequestIDHeader) {
 				continue
 			}
 			c.Writer.Header().Del(key)
@@ -409,7 +425,9 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
-	body, err := json.Marshal(h.toClaudeError(msg))
+	response := h.toClaudeError(msg)
+	response.RequestID = setClaudeRequestID(c, response.RequestID)
+	body, err := json.Marshal(response)
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
 	}

@@ -36,6 +36,9 @@ func TestClaudeRequestReadErrorsUseClaudeEnvelope(t *testing.T) {
 			c.Request.Body = claudeFailingRequestBody{}
 			handle(c)
 			body := recorder.Body.Bytes()
+			if id := recorder.Result().Header.Get("Request-Id"); id == "" || gjson.GetBytes(body, "request_id").String() != id {
+				t.Errorf("inconsistent request ID: headers=%v body=%s", recorder.Result().Header, body)
+			}
 			if recorder.Code != http.StatusBadRequest || gjson.GetBytes(body, "type").String() != "error" || gjson.GetBytes(body, "error.type").String() != "invalid_request_error" {
 				t.Fatalf("expected Anthropic request error, got %d %s", recorder.Code, body)
 			}
@@ -99,6 +102,9 @@ func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 	body := recorder.Body.Bytes()
+	if id := recorder.Result().Header.Get("Request-Id"); id == "" || gjson.GetBytes(body, "request_id").String() != id {
+		t.Errorf("inconsistent request ID: headers=%v body=%s", recorder.Result().Header, body)
+	}
 	if got := gjson.GetBytes(body, "type").String(); got != "error" {
 		t.Fatalf("type = %q, want error; body=%s", got, body)
 	}

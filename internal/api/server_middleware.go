@@ -27,6 +27,7 @@ var corsExposedResponseHeaders = []string{
 	"X-SERVER-BUILD-DATE",
 	"Location",
 	"Retry-After",
+	"Request-Id",
 	"X-Request-Id",
 	"OpenAI-Request-Id",
 }
@@ -197,7 +198,7 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 			return
 		}
 		if c.Request.URL.Path == "/v1/messages" || c.Request.URL.Path == "/v1/messages/count_tokens" {
-			c.Data(statusCode, "application/json", claude.BuildErrorResponse(statusCode, err.Message))
+			c.Data(statusCode, "application/json", claude.BuildErrorResponse(statusCode, err.Message, claude.EnsureRequestID(c)))
 			c.Abort()
 			return
 		}

@@ -28,8 +28,18 @@ func TestClaudeRoutesUseStructuredAuthErrors(t *testing.T) {
 					t.Fatalf("status = %d, want 401", recorder.Code)
 				}
 				body := recorder.Body.Bytes()
+				if id := recorder.Result().Header.Get("Request-Id"); !strings.HasPrefix(id, "req_") || gjson.GetBytes(body, "request_id").String() != id {
+					t.Errorf("inconsistent request ID: headers=%v body=%s", recorder.Result().Header, body)
+				}
 				if gjson.GetBytes(body, "type").String() != "error" || gjson.GetBytes(body, "error.type").String() != "authentication_error" {
 					t.Fatalf("expected Anthropic authentication error, got %s", body)
+				}
+				exposesRequestID := false
+				for _, header := range strings.Split(recorder.Header().Get("Access-Control-Expose-Headers"), ",") {
+					exposesRequestID = exposesRequestID || strings.EqualFold(strings.TrimSpace(header), "Request-Id")
+				}
+				if !exposesRequestID {
+					t.Error("request-id is not exposed through CORS")
 				}
 				wantMessage := "Missing API key"
 				if key != "" {
@@ -80,6 +90,9 @@ func TestClaudeAuthErrorsPreserveStatusAndSafeMessage(t *testing.T) {
 					t.Fatalf("status = %d, want %d", recorder.Code, tt.err.HTTPStatusCode())
 				}
 				body := recorder.Body.Bytes()
+				if id := recorder.Result().Header.Get("Request-Id"); !strings.HasPrefix(id, "req_") || gjson.GetBytes(body, "request_id").String() != id {
+					t.Errorf("inconsistent request ID: headers=%v body=%s", recorder.Result().Header, body)
+				}
 				if gjson.GetBytes(body, "type").String() != "error" || gjson.GetBytes(body, "error.type").String() != tt.wantType {
 					t.Fatalf("expected %s error, got %s", tt.wantType, body)
 				}
