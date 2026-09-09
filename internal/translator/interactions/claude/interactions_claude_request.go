@@ -127,22 +127,54 @@ func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, prese
 		return out
 	}
 	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
+	var pendingToolUseIDs []string
+	var pendingSystemReminders [][]byte
+
 	messages.ForEach(func(_, message gjson.Result) bool {
-		appendClaudeMessageToInteractions(&inputItems, message, preserveEmptyThinkingBlocks)
+		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
+		content := message.Get("content")
+		if role == "system" {
+			if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(content); ok {
+				step := []byte(`{"type":"user_input","content":[{"type":"text","text":""}]}`)
+				step, _ = sjson.SetBytes(step, "content.0.text", reminderText)
+				if len(pendingToolUseIDs) > 0 {
+					pendingSystemReminders = append(pendingSystemReminders, step)
+				} else {
+					inputItems = append(inputItems, step)
+				}
+			}
+			return true
+		}
+
+		if role == "user" && len(pendingToolUseIDs) > 0 && content.IsArray() {
+			content = translatorcommon.AlignClaudeToolResults(content, pendingToolUseIDs)
+		}
+		pendingToolUseIDs = nil
+
+		appendClaudeMessageToInteractions(&inputItems, &pendingToolUseIDs, &pendingSystemReminders, role, content, preserveEmptyThinkingBlocks)
+		if len(pendingSystemReminders) > 0 {
+			inputItems = append(inputItems, pendingSystemReminders...)
+			pendingSystemReminders = nil
+		}
 		return true
 	})
+	if len(pendingSystemReminders) > 0 {
+		inputItems = append(inputItems, pendingSystemReminders...)
+	}
 	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
 	return out
 }
 
-func appendClaudeMessageToInteractions(items *[][]byte, message gjson.Result, preserveEmptyThinkingBlocks bool) {
-	role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
+func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]string, pendingSystemReminders *[][]byte, role string, content gjson.Result, preserveEmptyThinkingBlocks bool) {
 	defaultStepType := "user_input"
 	if role == "assistant" {
 		defaultStepType = "model_output"
 	}
-	content := message.Get("content")
 	if content.Type == gjson.String {
+		if pendingSystemReminders != nil && len(*pendingSystemReminders) > 0 {
+			*items = append(*items, *pendingSystemReminders...)
+			*pendingSystemReminders = nil
+		}
 		step := []byte(`{"type":"","content":[{"type":"text","text":""}]}`)
 		step, _ = sjson.SetBytes(step, "type", defaultStepType)
 		step, _ = sjson.SetBytes(step, "content.0.text", content.String())
@@ -168,6 +200,11 @@ func appendClaudeMessageToInteractions(items *[][]byte, message gjson.Result, pr
 		switch partType {
 		case "text":
 			if text := part.Get("text").String(); text != "" {
+				if pendingSystemReminders != nil && len(*pendingSystemReminders) > 0 {
+					flushContent()
+					*items = append(*items, *pendingSystemReminders...)
+					*pendingSystemReminders = nil
+				}
 				contentPart := []byte(`{"type":"text","text":""}`)
 				contentPart, _ = sjson.SetBytes(contentPart, "text", text)
 				stepContent = append(stepContent, contentPart)
@@ -182,10 +219,18 @@ func appendClaudeMessageToInteractions(items *[][]byte, message gjson.Result, pr
 			}
 		case "image", "document":
 			if mediaPart, ok := claudeMediaPartToInteractions(part, partType); ok {
+				if pendingSystemReminders != nil && len(*pendingSystemReminders) > 0 {
+					flushContent()
+					*items = append(*items, *pendingSystemReminders...)
+					*pendingSystemReminders = nil
+				}
 				stepContent = append(stepContent, mediaPart)
 			}
 		case "tool_use":
 			flushContent()
+			if id := part.Get("id").String(); id != "" && pendingToolUseIDs != nil {
+				*pendingToolUseIDs = append(*pendingToolUseIDs, id)
+			}
 			*items = append(*items, claudeToolUseToInteractions(part))
 		case "tool_result":
 			flushContent()

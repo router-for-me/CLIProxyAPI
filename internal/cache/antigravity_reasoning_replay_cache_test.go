@@ -259,6 +259,12 @@ func TestAntigravityReasoningReplayUnrelatedEvictionDoesNotBlockAbsentSnapshot(t
 	if !CacheAntigravityReasoningReplayItems(model, "older-live-entry", [][]byte{liveItem}) {
 		t.Fatal("live entry write failed")
 	}
+	antigravityReasoningReplayMu.Lock()
+	if entry, ok := antigravityReasoningReplayEntries[antigravityReasoningReplayCacheKey(model, "older-live-entry")]; ok {
+		entry.Timestamp = time.Now().Add(-time.Minute)
+		antigravityReasoningReplayEntries[antigravityReasoningReplayCacheKey(model, "older-live-entry")] = entry
+	}
+	antigravityReasoningReplayMu.Unlock()
 	_, snapshot, found, errGet := GetAntigravityReasoningReplayItemsWithSnapshotRequired(context.Background(), model, "untouched-absent-session")
 	if errGet != nil || found {
 		t.Fatalf("initial absent snapshot = found %v, err %v", found, errGet)

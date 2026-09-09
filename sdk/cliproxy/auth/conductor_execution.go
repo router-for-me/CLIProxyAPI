@@ -1421,6 +1421,7 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 	if generate, ok := generateFromOptions(opts); ok {
 		ctx = coreusage.WithGenerate(ctx, generate)
 	}
+	ctx = coreusage.WithStream(ctx, opts.Stream)
 	return ctx
 }
 

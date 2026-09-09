@@ -478,6 +478,10 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 	}
 
 	if len(availableByPriority) == 0 {
+		lastCandidateErr := latestCandidateErrorForModel(auths, func(candidate *Auth) string {
+			return m.selectionModelForAuth(candidate, routeModel)
+		})
+
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
 			if providerForError == "mixed" {
@@ -487,9 +491,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownError(routeModel, providerForError, resetIn)
+			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
 		}
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+		return nil, WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
 	}
 
 	return availableAuthsFromPriorityBuckets(availableByPriority, allPriorities), nil
@@ -535,7 +539,84 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownError(requestedModel, cooldownErr.provider, cooldownErr.resetIn)
+	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
+}
+
+func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) string) error {
+	var latestModelTime time.Time
+	var latestModelAuthID string
+	var latestModelErr error
+
+	var latestAuthTime time.Time
+	var latestAuthID string
+	var latestAuthErr error
+
+	for _, candidate := range auths {
+		if candidate == nil {
+			continue
+		}
+		checkModel := candidate.ID
+		if selectionModelFunc != nil {
+			checkModel = selectionModelFunc(candidate)
+		}
+		var modelErr error
+		var modelTime time.Time
+		if len(candidate.ModelStates) > 0 {
+			if state, ok := candidate.ModelStates[checkModel]; ok && state != nil {
+				if state.LastError != nil {
+					modelErr = state.LastError
+					modelTime = state.UpdatedAt
+				} else if strings.TrimSpace(state.StatusMessage) != "" {
+					modelErr = errors.New(state.StatusMessage)
+					modelTime = state.UpdatedAt
+				}
+			} else if state, ok := candidate.ModelStates[canonicalModelKey(checkModel)]; ok && state != nil {
+				if state.LastError != nil {
+					modelErr = state.LastError
+					modelTime = state.UpdatedAt
+				} else if strings.TrimSpace(state.StatusMessage) != "" {
+					modelErr = errors.New(state.StatusMessage)
+					modelTime = state.UpdatedAt
+				}
+			}
+		}
+
+		if modelErr != nil {
+			if modelTime.IsZero() {
+				modelTime = candidate.UpdatedAt
+			}
+			if latestModelErr == nil || modelTime.After(latestModelTime) || (modelTime.Equal(latestModelTime) && candidate.ID > latestModelAuthID) {
+				latestModelTime = modelTime
+				latestModelAuthID = candidate.ID
+				latestModelErr = modelErr
+			}
+		} else {
+			var authErr error
+			var authTime time.Time
+			if candidate.LastError != nil {
+				authErr = candidate.LastError
+				authTime = candidate.UpdatedAt
+			} else if strings.TrimSpace(candidate.StatusMessage) != "" {
+				authErr = errors.New(candidate.StatusMessage)
+				authTime = candidate.UpdatedAt
+			}
+			if authErr != nil {
+				if authTime.IsZero() {
+					authTime = candidate.UpdatedAt
+				}
+				if latestAuthErr == nil || authTime.After(latestAuthTime) || (authTime.Equal(latestAuthTime) && candidate.ID > latestAuthID) {
+					latestAuthTime = authTime
+					latestAuthID = candidate.ID
+					latestAuthErr = authErr
+				}
+			}
+		}
+	}
+
+	if latestModelErr != nil {
+		return latestModelErr
+	}
+	return latestAuthErr
 }
 
 func schedulerAttributeSensitive(key string) bool {
@@ -1325,7 +1406,7 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
-	return isBuiltInSelector(m.selector)
+	return isBuiltInSelector(m.Selector())
 }
 
 func shouldRetrySchedulerPick(err error) bool {
@@ -1358,13 +1439,13 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
-	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 
 	m.mu.RLock()
 	selector := m.selector
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
 	pluginScheduler := m.pluginScheduler
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
@@ -1674,7 +1755,6 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
-	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)
 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
@@ -1693,6 +1773,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 	m.mu.RLock()
 	selector := m.selector
+	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(selector, model)
 	pluginScheduler := m.pluginScheduler
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
@@ -1871,12 +1952,15 @@ func isAuthUnavailableError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var cooldownErr *modelCooldownError
+	if errors.As(err, &cooldownErr) && cooldownErr != nil {
+		return true
+	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil {
 		return authErr.Code == "auth_unavailable" || authErr.Code == "model_cooldown"
 	}
-	var cooldownErr *modelCooldownError
-	return errors.As(err, &cooldownErr) && cooldownErr != nil
+	return false
 }
 
 func authCoolingSummary(auth *Auth, model string, next time.Time, now time.Time) string {

@@ -1,12 +1,16 @@
 package auth
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
-const maxStableSessionAliases = 64
+const (
+	maxStableSessionAliases  = 64
+	defaultMaxSessionEntries = 65536
+)
 
 // sessionEntry stores an auth binding, its identifier aliases, and expiration.
 type sessionEntry struct {
@@ -17,23 +21,33 @@ type sessionEntry struct {
 
 // SessionCache provides TTL-based session to auth mapping with automatic cleanup.
 type SessionCache struct {
-	mu       sync.RWMutex
-	entries  map[string]sessionEntry
-	ttl      time.Duration
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	mu         sync.RWMutex
+	entries    map[string]sessionEntry
+	maxEntries int
+	ttl        time.Duration
+	stopCh     chan struct{}
+	stopOnce   sync.Once
 }
 
 // NewSessionCache creates a cache with the specified TTL.
 // A background goroutine periodically cleans expired entries.
 func NewSessionCache(ttl time.Duration) *SessionCache {
+	return NewSessionCacheWithCapacity(ttl, defaultMaxSessionEntries)
+}
+
+// NewSessionCacheWithCapacity creates a cache with the specified TTL and max entries limit.
+func NewSessionCacheWithCapacity(ttl time.Duration, maxEntries int) *SessionCache {
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
+	if maxEntries <= 0 {
+		maxEntries = defaultMaxSessionEntries
+	}
 	c := &SessionCache{
-		entries: make(map[string]sessionEntry),
-		ttl:     ttl,
-		stopCh:  make(chan struct{}),
+		entries:    make(map[string]sessionEntry),
+		maxEntries: maxEntries,
+		ttl:        ttl,
+		stopCh:     make(chan struct{}),
 	}
 	go c.cleanupLoop()
 	return c
@@ -136,6 +150,42 @@ func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Ti
 	entry := sessionEntry{authID: authID, expiresAt: expiresAt, aliases: aliases}
 	for _, alias := range aliases {
 		c.entries[alias] = entry
+	}
+	if c.maxEntries > 0 && len(c.entries) > c.maxEntries {
+		c.evictExcessLocked()
+	}
+}
+
+func (c *SessionCache) evictExcessLocked() {
+	now := time.Now()
+	for _, entry := range c.entries {
+		if !now.Before(entry.expiresAt) {
+			c.removeAliasGroupLocked(entry)
+		}
+	}
+	if len(c.entries) > c.maxEntries {
+		// Collect unique groups to sort deterministically by expiresAt (earliest expiring first)
+		seen := make(map[string]struct{})
+		groups := make([]sessionEntry, 0)
+		for _, entry := range c.entries {
+			if len(entry.aliases) == 0 {
+				continue
+			}
+			primaryKey := entry.aliases[0]
+			if _, ok := seen[primaryKey]; !ok {
+				seen[primaryKey] = struct{}{}
+				groups = append(groups, entry)
+			}
+		}
+		sort.Slice(groups, func(i, j int) bool {
+			return groups[i].expiresAt.Before(groups[j].expiresAt)
+		})
+		for _, group := range groups {
+			c.removeAliasGroupLocked(group)
+			if len(c.entries) <= c.maxEntries {
+				break
+			}
+		}
 	}
 }
 
@@ -252,21 +302,19 @@ func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 		return false
 	}
 	delete(c.entries, sessionID)
+
+	surviving := make([]string, 0, len(entry.aliases))
 	for _, alias := range entry.aliases {
-		if alias == sessionID {
-			continue
+		if alias != sessionID {
+			surviving = append(surviving, alias)
 		}
+	}
+	for _, alias := range surviving {
 		current, exists := c.entries[alias]
 		if !exists || current.authID != entry.authID {
 			continue
 		}
-		filtered := make([]string, 0, len(current.aliases))
-		for _, candidate := range current.aliases {
-			if candidate != sessionID {
-				filtered = append(filtered, candidate)
-			}
-		}
-		current.aliases = filtered
+		current.aliases = append([]string(nil), surviving...)
 		c.entries[alias] = current
 	}
 	return true
@@ -282,21 +330,18 @@ func (c *SessionCache) Invalidate(sessionID string) {
 	entry, ok := c.entries[sessionID]
 	delete(c.entries, sessionID)
 	if ok {
+		surviving := make([]string, 0, len(entry.aliases))
 		for _, alias := range entry.aliases {
-			if alias == sessionID {
-				continue
+			if alias != sessionID {
+				surviving = append(surviving, alias)
 			}
+		}
+		for _, alias := range surviving {
 			current, exists := c.entries[alias]
 			if !exists || current.authID != entry.authID {
 				continue
 			}
-			filtered := make([]string, 0, len(current.aliases))
-			for _, candidate := range current.aliases {
-				if candidate != sessionID {
-					filtered = append(filtered, candidate)
-				}
-			}
-			current.aliases = filtered
+			current.aliases = append([]string(nil), surviving...)
 			c.entries[alias] = current
 		}
 	}
@@ -329,7 +374,11 @@ func (c *SessionCache) Stop() {
 }
 
 func (c *SessionCache) cleanupLoop() {
-	ticker := time.NewTicker(c.ttl / 2)
+	interval := c.ttl / 2
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -341,12 +390,22 @@ func (c *SessionCache) cleanupLoop() {
 	}
 }
 
+// Len returns the current count of tracked session aliases.
+func (c *SessionCache) Len() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.entries)
+}
+
 func (c *SessionCache) cleanup() {
 	now := time.Now()
 	c.mu.Lock()
-	for sid, entry := range c.entries {
+	for _, entry := range c.entries {
 		if !now.Before(entry.expiresAt) {
-			delete(c.entries, sid)
+			c.removeAliasGroupLocked(entry)
 		}
 	}
 	c.mu.Unlock()

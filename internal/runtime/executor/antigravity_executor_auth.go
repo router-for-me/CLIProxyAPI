@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -254,10 +255,28 @@ func antigravityProjectIDFromAuth(auth *cliproxyauth.Auth) string {
 
 func missingAntigravityProjectIDError(cause error) statusErr {
 	msg := "antigravity auth missing project_id"
+	statusCode := http.StatusBadRequest
+	var retryAfter *time.Duration
 	if cause != nil {
 		msg = fmt.Sprintf("%s: %v", msg, cause)
+		type statusCoder interface {
+			StatusCode() int
+		}
+		var sc statusCoder
+		if errors.As(cause, &sc) && sc != nil {
+			if code := sc.StatusCode(); code > 0 {
+				statusCode = code
+			}
+		}
+		type retryAfterProvider interface {
+			RetryAfter() *time.Duration
+		}
+		var rap retryAfterProvider
+		if errors.As(cause, &rap) && rap != nil {
+			retryAfter = rap.RetryAfter()
+		}
 	}
-	return statusErr{code: http.StatusBadRequest, msg: msg}
+	return statusErr{code: statusCode, msg: msg, retryAfter: retryAfter}
 }
 
 func metaStringValue(metadata map[string]any, key string) string {

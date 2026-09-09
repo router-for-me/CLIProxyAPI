@@ -233,11 +233,57 @@ func homeSessionAliasTTL(cfg *internalconfig.Config) time.Duration {
 	return parsed
 }
 
-func (m *Manager) homeDispatchSessionID(opts cliproxyexecutor.Options) string {
-	primary, fallback := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
-	if primary == "" || m == nil {
-		return primary
+func isHierarchyParent(primary, fallback string) bool {
+	if fallback == "" || primary == "" || primary == fallback {
+		return false
 	}
+	if strings.Contains(primary, ":agent:") {
+		return true
+	}
+	for _, prefix := range []string{"codex:", "header:", "affinity:", "slot:", "thread:", "conv:", "session:", "claude:", "agy:", "geminicache:"} {
+		if strings.HasPrefix(primary, prefix) && strings.HasPrefix(fallback, prefix) && primary != fallback {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string, string) {
+	primary, fallback := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primary == "" {
+		if canonicalID, ok := opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string); ok && strings.TrimSpace(canonicalID) != "" {
+			primary = strings.TrimSpace(canonicalID)
+		} else if lcpID, ok := opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey].(string); ok && strings.TrimSpace(lcpID) != "" {
+			primary = strings.TrimSpace(lcpID)
+		} else {
+			primary, fallback = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+		}
+	}
+	if primary == "" || m == nil {
+		return primary, ""
+	}
+
+	var parentSessionID string
+	var aliasFallback string
+	if fallback != "" && fallback != primary {
+		if isHierarchyParent(primary, fallback) {
+			parentSessionID = fallback
+		} else {
+			aliasFallback = fallback
+		}
+	}
+
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	return m.homeSessionAliases.canonical(primary, fallback, homeSessionAliasTTL(cfg), time.Now())
+	ttl := homeSessionAliasTTL(cfg)
+	now := time.Now()
+	canonical := m.homeSessionAliases.canonical(primary, aliasFallback, ttl, now)
+	if parentSessionID != "" {
+		parentSessionID = m.homeSessionAliases.canonical(parentSessionID, "", ttl, now)
+	}
+	return canonical, parentSessionID
+}
+
+func (m *Manager) homeDispatchSessionID(opts cliproxyexecutor.Options) string {
+	sessionID, _ := m.homeDispatchSessionIDs(opts)
+	return sessionID
 }

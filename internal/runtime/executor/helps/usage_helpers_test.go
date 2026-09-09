@@ -789,6 +789,35 @@ func TestUsageReporterBuildRecordIncludesGenerateFalse(t *testing.T) {
 	}
 }
 
+func TestUsageReporterBuildRecordDefaultsStreamFalse(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Stream {
+		t.Fatalf("stream = %v, want false", record.Stream)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesStreamTrue(t *testing.T) {
+	ctx := usage.WithStream(context.Background(), true)
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if !record.Stream {
+		t.Fatalf("stream = %v, want true", record.Stream)
+	}
+}
+
+func TestUsageReporterSetStream(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+	reporter.SetStream(true)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if !record.Stream {
+		t.Fatalf("stream = %v, want true", record.Stream)
+	}
+}
+
 func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *testing.T) {
 	ctx := usage.WithServiceTier(context.Background(), "auto")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)

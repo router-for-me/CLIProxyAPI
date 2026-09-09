@@ -353,6 +353,10 @@ type homeAuthDispatchResponse struct {
 	Auth          Auth   `json:"auth"`
 }
 
+type homeDispatchSessionHierarchyDispatcher interface {
+	RPopAuthWithSessionHierarchy(ctx context.Context, requestedModel string, sessionID string, parentSessionID string, headers http.Header, count int, credentialPolicy string, retryRound *int, excludedAuthIDs []string, pinnedAuthID string) ([]byte, error)
+}
+
 type homeAuthDispatcher interface {
 	HeartbeatOK() bool
 	RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error)
@@ -964,12 +968,18 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 
-	sessionID := m.homeDispatchSessionID(opts)
+	sessionID, parentSessionID := m.homeDispatchSessionIDs(opts)
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
-	if credentialPolicy == "" {
+	if hierarchyClient, okHierarchy := client.(homeDispatchSessionHierarchyDispatcher); okHierarchy {
+		var retryRoundPtr *int
+		if retryRound >= 0 {
+			retryRoundPtr = &retryRound
+		}
+		raw, errRPop = hierarchyClient.RPopAuthWithSessionHierarchy(ctx, requestedModel, sessionID, parentSessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), credentialPolicy, retryRoundPtr, excludedAuthIDList, pinnedAuthID)
+	} else if credentialPolicy == "" {
 		if retryRoundClient, okRetryRound := client.(homeDispatchRetryRoundConstraintsDispatcher); okRetryRound {
 			raw, errRPop = retryRoundClient.RPopAuthWithRetryRoundConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), retryRound, excludedAuthIDList, pinnedAuthID)
 		} else if constrainedClient, okConstraints := client.(homeDispatchConstraintsDispatcher); okConstraints {
