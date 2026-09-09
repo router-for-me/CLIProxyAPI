@@ -271,10 +271,12 @@ func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, 
 		return
 	}
 	effort := thinking.ExtractReasoningEffort(rawJSON, handlerType, model)
-	if effort == "" {
-		return
+	if effort != "" {
+		meta[coreexecutor.ReasoningEffortMetadataKey] = effort
 	}
-	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
+	if rawEffort := thinking.ExtractRawReasoningEffort(rawJSON, handlerType, model); rawEffort != "" {
+		meta[coreexecutor.RequestedEffortMetadataKey] = rawEffort
+	}
 }
 
 func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {

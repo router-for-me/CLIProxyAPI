@@ -36,6 +36,9 @@ type Record struct {
 	Source            string
 	// ReasoningEffort stores the translated upstream thinking level for request event logs.
 	ReasoningEffort string
+	// RequestedEffort and AppliedEffort preserve levels and exact token budgets.
+	RequestedEffort string
+	AppliedEffort   string
 	// ServiceTier stores the client-requested service tier.
 	ServiceTier string
 	// RequestServiceTier is a deprecated input-only alias retained for existing
@@ -80,6 +83,7 @@ type Detail struct {
 
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
+type requestedEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
 type streamContextKey struct{}
@@ -138,6 +142,26 @@ func ReasoningEffortFromContext(ctx context.Context) string {
 	default:
 		return ""
 	}
+}
+
+// WithRequestedEffort stores the raw client-requested effort for usage sinks.
+func WithRequestedEffort(ctx context.Context, effort string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if effort = strings.TrimSpace(effort); effort != "" {
+		return context.WithValue(ctx, requestedEffortContextKey{}, effort)
+	}
+	return ctx
+}
+
+// RequestedEffortFromContext returns the raw client-requested effort.
+func RequestedEffortFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	effort, _ := ctx.Value(requestedEffortContextKey{}).(string)
+	return strings.TrimSpace(effort)
 }
 
 // WithServiceTier stores the client-requested service tier for usage sinks.

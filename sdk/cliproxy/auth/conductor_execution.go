@@ -1541,6 +1541,9 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 	if effort != "" {
 		ctx = coreusage.WithReasoningEffort(ctx, effort)
 	}
+	if rawEffort := stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestedEffortMetadataKey); rawEffort != "" {
+		ctx = coreusage.WithRequestedEffort(ctx, rawEffort)
+	}
 	serviceTier := serviceTierFromOptions(opts)
 	if serviceTier != "" {
 		ctx = coreusage.WithServiceTier(ctx, serviceTier)
