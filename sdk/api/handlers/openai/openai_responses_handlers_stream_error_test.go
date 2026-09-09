@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -176,6 +177,53 @@ func TestResponsesStreamErrorPreservesExtensions(t *testing.T) {
 			}
 			if strings.Contains(text, "private-key") || strings.Contains(text, "private-token") || !strings.Contains(text, "[REDACTED]") {
 				t.Errorf("extension credentials were not redacted: %s", text)
+			}
+		})
+	}
+}
+
+func TestResponsesStreamErrorRedactsSensitiveExtensions(t *testing.T) {
+	for _, key := range []string{"client_secret", "clientSecret", "password", "passwd", "cookie", "Set-Cookie", "Proxy-Authorization", "X-Api-Key", "private_key", "id_token", "authToken", "credentials"} {
+		for _, value := range []any{"fixture-sensitive-value", []any{"fixture-sensitive-value"}, map[string]any{"value": "fixture-sensitive-value"}} {
+			body, err := json.Marshal(map[string]any{"error": map[string]any{"message": "failed", "future": []any{map[string]any{key: value, "retry": true}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := responsesStreamErrorText(&interfaces.ErrorMessage{Error: errors.New(string(body))}, http.StatusBadGateway)
+			if strings.Contains(text, "fixture-sensitive-value") || !strings.Contains(text, "[REDACTED]") || !gjson.Get(text, "error.future.0.retry").Bool() {
+				t.Errorf("sensitive field %q not safely preserved: %s", key, text)
+			}
+		}
+	}
+}
+
+func TestResponsesStreamErrorBoundsExtensions(t *testing.T) {
+	wideObject := make(map[string]any)
+	for i := 0; i < 600; i++ {
+		wideObject[fmt.Sprintf("field_%d", i)] = false
+	}
+	wideJSON, err := json.Marshal(wideObject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, extension := range map[string]string{
+		"long key":     `{"` + strings.Repeat("k", 20000) + `":true}`,
+		"wide object":  string(wideJSON),
+		"wide array":   `[` + strings.Repeat(`null,`, 599) + `null]`,
+		"deep object":  strings.Repeat(`{"next":`, 40) + `null` + strings.Repeat(`}`, 40),
+		"deep array":   strings.Repeat(`[`, 40) + `null` + strings.Repeat(`]`, 40),
+		"long number":  `1` + strings.Repeat(`0`, 20000),
+		"escaped keys": `{"` + strings.Repeat("<", 4000) + `":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"error":{"message":"failed","future":` + extension + `}}`
+			text := responsesStreamErrorText(&interfaces.ErrorMessage{Error: errors.New(body)}, http.StatusBadGateway)
+			if text != http.StatusText(http.StatusBadGateway) {
+				t.Fatalf("oversized error was not replaced by bounded fallback: %d bytes", len(text))
+			}
+			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(http.StatusBadGateway, text, 1)
+			if !json.Valid(chunk) || len(chunk) > 16384 || gjson.GetBytes(chunk, "response.error.message").String() != text {
+				t.Fatalf("invalid terminal fallback: %s", chunk)
 			}
 		})
 	}

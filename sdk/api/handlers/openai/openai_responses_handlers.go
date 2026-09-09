@@ -793,12 +793,16 @@ func isCodexResponsesClientRequest(c *gin.Context) bool {
 const (
 	responsesStreamErrorMessageLimit = 2048
 	responsesStreamErrorFieldLimit   = 256
+	responsesStreamErrorSizeLimit    = 16 * 1024
+	responsesStreamErrorDepthLimit   = 16
+	responsesStreamErrorNodeLimit    = 256
+	responsesStreamSensitiveKeys     = `(?:x[_-]?)?api[_-]?key|(?:access|refresh|id|auth|session)[_-]?token|token|(?:proxy[_-]?)?authorization|(?:client[_-]?)?secret|password|passwd|(?:set[_-]?)?cookies?|credentials?|private[_-]?key`
 )
 
 var (
-	responsesStreamSensitiveValuePattern = regexp.MustCompile(`(?i)((?:"?(?:api[_-]?key|access[_-]?token|token|authorization|secret)"?)\s*[=:]\s*"?)([^\s"&,;}]+)`)
+	responsesStreamSensitiveValuePattern = regexp.MustCompile(`(?i)((?:"?(?:` + responsesStreamSensitiveKeys + `)"?)\s*[=:]\s*"?)([^\s"&,;}]+)`)
 	responsesStreamBearerPattern         = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
-	responsesStreamSensitiveKeyPattern   = regexp.MustCompile(`(?i)^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|authorization|secret)$`)
+	responsesStreamSensitiveKeyPattern   = regexp.MustCompile(`(?i)^(?:` + responsesStreamSensitiveKeys + `)$`)
 )
 
 func truncateResponsesStreamErrorText(text string, limit int) string {
@@ -818,40 +822,53 @@ func sanitizeResponsesStreamEventName(eventName string) string {
 	return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(strings.TrimSpace(eventName)), responsesStreamErrorFieldLimit)
 }
 
-func sanitizeResponsesStreamErrorValue(value gjson.Result, field string) any {
-	if responsesStreamSensitiveKeyPattern.MatchString(field) {
-		return "[REDACTED]"
+func sanitizeResponsesStreamErrorValue(value gjson.Result, field string, depth int, remaining *int) (any, bool) {
+	if depth >= responsesStreamErrorDepthLimit || *remaining <= 0 {
+		return nil, false
+	}
+	*remaining -= 1
+	if responsesStreamSensitiveKeyPattern.MatchString(strings.TrimSpace(field)) {
+		return "[REDACTED]", true
 	}
 	if value.IsObject() {
 		safe := make(map[string]any)
+		ok := true
 		value.ForEach(func(key, child gjson.Result) bool {
-			safe[key.String()] = sanitizeResponsesStreamErrorValue(child, key.String())
-			return true
+			safe[key.String()], ok = sanitizeResponsesStreamErrorValue(child, key.String(), depth+1, remaining)
+			return ok
 		})
-		return safe
+		return safe, ok
 	}
 	if value.IsArray() {
 		safe := make([]any, 0)
+		ok := true
 		value.ForEach(func(_, child gjson.Result) bool {
-			safe = append(safe, sanitizeResponsesStreamErrorValue(child, field))
-			return true
+			var sanitized any
+			sanitized, ok = sanitizeResponsesStreamErrorValue(child, field, depth+1, remaining)
+			if ok {
+				safe = append(safe, sanitized)
+			}
+			return ok
 		})
-		return safe
+		return safe, ok
 	}
 	if value.Type == gjson.String {
 		limit := responsesStreamErrorFieldLimit
 		if field == "message" {
 			limit = responsesStreamErrorMessageLimit
 		}
-		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(value.String()), limit)
+		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(value.String()), limit), true
 	}
-	return json.RawMessage(value.Raw)
+	return json.RawMessage(value.Raw), true
 }
 
 func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) string {
 	text := http.StatusText(status)
 	if errMsg != nil && errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 		text = strings.TrimSpace(errMsg.Error.Error())
+	}
+	if len(text) > responsesStreamErrorSizeLimit {
+		return http.StatusText(status)
 	}
 	if !json.Valid([]byte(text)) {
 		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(text), responsesStreamErrorMessageLimit)
@@ -862,19 +879,31 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 	if !errorNode.Exists() || !errorNode.IsObject() {
 		errorNode = root.Get("response.error")
 	}
-	if errorNode.Exists() && errorNode.IsObject() {
-		safe, _ := json.Marshal(map[string]any{"error": sanitizeResponsesStreamErrorValue(errorNode, "error")})
-		return string(safe)
+	if errorNode.IsObject() {
+		root = errorNode
+	} else if !root.Get("code").Exists() && !root.Get("message").Exists() && !root.Get("param").Exists() {
+		return http.StatusText(status)
 	}
 
-	for _, field := range []string{"code", "message", "param"} {
-		if root.Get(field).Exists() {
-			safe, _ := json.Marshal(sanitizeResponsesStreamErrorValue(root, ""))
-			safe, _ = sjson.SetBytes(safe, "type", "error")
-			return string(safe)
-		}
+	remaining := responsesStreamErrorNodeLimit
+	sanitized, ok := sanitizeResponsesStreamErrorValue(root, "", 0, &remaining)
+	if !ok {
+		return http.StatusText(status)
 	}
-	return http.StatusText(status)
+	if errorNode.IsObject() {
+		sanitized = map[string]any{"error": sanitized}
+	}
+	safe, errMarshal := json.Marshal(sanitized)
+	if errMarshal != nil {
+		return http.StatusText(status)
+	}
+	if !errorNode.IsObject() {
+		safe, _ = sjson.SetBytes(safe, "type", "error")
+	}
+	if len(safe) > responsesStreamErrorSizeLimit {
+		return http.StatusText(status)
+	}
+	return string(safe)
 }
 
 type responsesStreamSanitizedError struct {
