@@ -47,8 +47,20 @@ func isUserTurn(format sdktranslator.Format, msg gjson.Result) bool {
 }
 
 // SplitMessages splits body.messages so the last keepTurns user turns stay
-// verbatim. ok is false when there is nothing to summarize.
+// verbatim. ok is false when there is nothing to summarize. It applies no
+// token limit; see SplitMessagesBudget.
 func SplitMessages(format sdktranslator.Format, body []byte, keepTurns int) (Split, bool) {
+	return SplitMessagesBudget(format, body, keepTurns, 0, nil)
+}
+
+// SplitMessagesBudget splits body.messages keeping the most recent turns
+// verbatim until both limits are reached: at most keepTurns user turns, and
+// stop earlier once the kept tail exceeds keepTokens (0 = no token limit).
+// At least one full turn (the last user turn and everything after it, so a
+// tool_use is never separated from its tool_result) is always kept.
+// tokens estimates the token count of one raw message; nil disables the
+// token limit. ok is false when nothing would be left to summarize.
+func SplitMessagesBudget(format sdktranslator.Format, body []byte, keepTurns, keepTokens int, tokens func(raw string) int) (Split, bool) {
 	var out Split
 	msgs := gjson.GetBytes(body, "messages")
 	if !msgs.IsArray() {
@@ -68,16 +80,29 @@ func SplitMessages(format sdktranslator.Format, body []byte, keepTurns int) (Spl
 			start++
 		}
 	}
-	// Find the cut: the keepTurns-th user turn counted from the end.
+	if keepTurns < 1 {
+		keepTurns = 1
+	}
+	limitTokens := keepTokens > 0 && tokens != nil
+	// Walk back over user-turn boundaries. The first boundary is always kept;
+	// each further one only while both limits still hold.
 	cut := -1
 	seen := 0
+	kept := 0
 	for i := len(raw) - 1; i >= start; i-- {
-		if isUserTurn(format, gjson.Parse(raw[i])) {
-			seen++
-			if seen == keepTurns {
-				cut = i
-				break
-			}
+		if limitTokens {
+			kept += tokens(raw[i])
+		}
+		if !isUserTurn(format, gjson.Parse(raw[i])) {
+			continue
+		}
+		if seen > 0 && limitTokens && kept > keepTokens {
+			break
+		}
+		seen++
+		cut = i
+		if seen >= keepTurns {
+			break
 		}
 	}
 	if cut <= start {
@@ -87,6 +112,58 @@ func SplitMessages(format sdktranslator.Format, body []byte, keepTurns int) (Spl
 	out.Middle = raw[start:cut]
 	out.Recent = raw[cut:]
 	return out, true
+}
+
+// ChunkTurns groups msgs into consecutive chunks that each fit within budget
+// tokens, cutting only at user-turn boundaries so a tool_use always stays in
+// the same chunk as its tool_result. A single turn larger than budget forms
+// its own chunk. budget <= 0 or a nil counter returns one chunk.
+func ChunkTurns(format sdktranslator.Format, msgs []string, budget int, tokens func(raw string) int) [][]string {
+	if len(msgs) == 0 {
+		return nil
+	}
+	if budget <= 0 || tokens == nil {
+		return [][]string{msgs}
+	}
+	var chunks [][]string
+	chunkStart, chunkTokens := 0, 0
+	turnStart, turnTokens := 0, 0
+	flushTurn := func(end int) {
+		if turnStart > chunkStart && chunkTokens+turnTokens > budget {
+			chunks = append(chunks, msgs[chunkStart:turnStart])
+			chunkStart = turnStart
+			chunkTokens = 0
+		}
+		chunkTokens += turnTokens
+		turnStart = end
+		turnTokens = 0
+	}
+	for i, raw := range msgs {
+		if i > 0 && isUserTurn(format, gjson.Parse(raw)) {
+			flushTurn(i)
+		}
+		turnTokens += tokens(raw)
+	}
+	flushTurn(len(msgs))
+	chunks = append(chunks, msgs[chunkStart:])
+	return chunks
+}
+
+// ScaledEstimator returns a per-message token estimator calibrated on the
+// real count of the whole body: each message gets its byte share of total.
+// It never re-tokenizes, so splitting and chunking stay cheap.
+func ScaledEstimator(totalTokens, totalBytes int) func(raw string) int {
+	ratio := 0.25
+	if totalTokens > 0 && totalBytes > 0 {
+		ratio = float64(totalTokens) / float64(totalBytes)
+	}
+	return func(raw string) int {
+		n := int(float64(len(raw)) * ratio)
+		if n < 1 {
+			n = 1
+		}
+		return n
+	}
 }
 
 // Rebuild writes a compacted messages array back into body. Everything outside
