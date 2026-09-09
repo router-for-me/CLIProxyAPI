@@ -2,6 +2,7 @@ package precompact
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -46,7 +47,10 @@ type Result struct {
 	ToTokens   int
 	CacheHit   bool
 	AuxMillis  int64
+	AuxCalls   int
 }
+
+var errEmptySummary = errors.New("aux call returned an empty summary")
 
 // Apply returns a replacement body when the request exceeds the model budget.
 // Any failure returns nil (forward the original) and is logged; it never blocks.
@@ -73,9 +77,10 @@ func (i *Interceptor) Apply(ctx context.Context, cfgIn config.PreCompactConfig, 
 	if count <= budget {
 		return nil, res
 	}
-	sp, ok := SplitMessages(req.SourceFormat, req.Body, cfg.KeepRecentTurns)
+	tokens := ScaledEstimator(count, len(req.Body))
+	sp, ok := SplitMessagesBudget(req.SourceFormat, req.Body, cfg.KeepRecentTurns, cfg.KeepRecentTokens, tokens)
 	if !ok {
-		log.Warnf("precompact: %d tokens > budget %d for %s but fewer than %d turns to keep; forwarding original", count, budget, req.Model, cfg.KeepRecentTurns)
+		log.Warnf("precompact: %d tokens > budget %d for %s but no complete turn left to summarize after keeping the recent tail (keep-recent-turns=%d keep-recent-tokens=%d); forwarding original", count, budget, req.Model, cfg.KeepRecentTurns, cfg.KeepRecentTokens)
 		return nil, res
 	}
 	session := sessionKey(ctx, req)
@@ -91,14 +96,30 @@ func (i *Interceptor) Apply(ctx context.Context, cfgIn config.PreCompactConfig, 
 		if i.summarizer == nil {
 			return nil, res
 		}
+		// The aux model has its own window: chunk the new part so every aux
+		// prompt (instruction + previous summary + transcript) fits, and roll
+		// the summary forward chunk by chunk.
+		auxBudget := AuxBudget(i.reg, cfg.AuxModel)
+		chunks := ChunkTurns(req.SourceFormat, newPart, auxBudget, tokens)
 		start := time.Now()
-		out, errSum := i.summarizer.Summarize(ctx, cfg.AuxModel, previous, Transcript(newPart))
+		var errSum error
+		for idx, chunk := range chunks {
+			var out string
+			out, errSum = i.summarizer.Summarize(ctx, cfg.AuxModel, summary, Transcript(chunk))
+			if errSum != nil || strings.TrimSpace(out) == "" {
+				if errSum == nil {
+					errSum = errEmptySummary
+				}
+				log.WithError(errSum).Warnf("precompact: summary failed for session=%s model=%s aux=%s chunk=%d/%d; forwarding original", session, req.Model, cfg.AuxModel, idx+1, len(chunks))
+				break
+			}
+			summary = out
+		}
 		res.AuxMillis = time.Since(start).Milliseconds()
-		if errSum != nil || strings.TrimSpace(out) == "" {
-			log.WithError(errSum).Warnf("precompact: summary failed for session=%s model=%s; forwarding original", session, req.Model)
+		res.AuxCalls = len(chunks)
+		if errSum != nil {
 			return nil, res
 		}
-		summary = out
 		i.cache.Put(session, Entry{Covered: len(sp.Middle), PrefixHash: HashMessages(sp.Middle), Summary: summary})
 	}
 	body, errBuild := Rebuild(req.SourceFormat, req.Body, sp, summary)
@@ -109,8 +130,8 @@ func (i *Interceptor) Apply(ctx context.Context, cfgIn config.PreCompactConfig, 
 	to, _ := Count(req.SourceFormat, req.Model, body)
 	res.ToTokens = to
 	res.Compacted = true
-	log.Infof("precompact: session=%s model=%s from_tokens=%d to_tokens=%d budget=%d window=%d aux_ms=%d cache_hit=%t middle_msgs=%d",
-		session, req.Model, res.FromTokens, res.ToTokens, budget, window, res.AuxMillis, res.CacheHit, len(sp.Middle))
+	log.Infof("precompact: session=%s model=%s from_tokens=%d to_tokens=%d budget=%d window=%d aux_ms=%d aux_calls=%d cache_hit=%t middle_msgs=%d recent_msgs=%d",
+		session, req.Model, res.FromTokens, res.ToTokens, budget, window, res.AuxMillis, res.AuxCalls, res.CacheHit, len(sp.Middle), len(sp.Recent))
 	setResponseHeader(ctx, res)
 	return body, res
 }

@@ -92,8 +92,10 @@ func TestApplyCompactsOverBudgetAndCachesSummary(t *testing.T) {
 	if !res.Compacted {
 		t.Fatal("expected Compacted=true")
 	}
-	if sum.calls != 1 {
-		t.Fatalf("expected exactly one aux call, got %d", sum.calls)
+	// The middle block (~300k tokens) exceeds the aux model's 140k budget, so
+	// the summary is rolled over several chunks.
+	if sum.calls < 1 || sum.calls != res.AuxCalls {
+		t.Fatalf("expected aux calls to match AuxCalls=%d, got %d", res.AuxCalls, sum.calls)
 	}
 	if res.CacheHit {
 		t.Fatal("first call must not be a cache hit")
@@ -108,8 +110,8 @@ func TestApplyCompactsOverBudgetAndCachesSummary(t *testing.T) {
 	if !res2.CacheHit {
 		t.Fatal("expected cache hit on identical follow-up request")
 	}
-	if sum.calls != 1 {
-		t.Fatalf("expected summarizer not to be called again on cache hit, calls=%d", sum.calls)
+	if sum.calls != res.AuxCalls {
+		t.Fatalf("expected summarizer not to be called again on cache hit, calls=%d first=%d", sum.calls, res.AuxCalls)
 	}
 }
 
