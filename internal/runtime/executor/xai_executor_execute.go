@@ -157,6 +157,9 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		prepared.body, _ = sjson.DeleteBytes(prepared.body, field)
 	}
 	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
+	if previousResponseID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()); previousResponseID != "" {
+		prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", previousResponseID)
+	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)

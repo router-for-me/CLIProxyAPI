@@ -98,19 +98,24 @@ const (
 	// it only causes pool thrashing.
 	antigravityTransportCacheCapacity = 8192
 
-	// antigravityMaxIdleConnsPerHost mirrors the value that
-	// cloud.google.com/go/auth/httptransport and google.golang.org/api/transport/http
-	// set on their base transport, which is the stack the native Antigravity client
-	// uses. Both raise Go's DefaultMaxIdleConnsPerHost of 2 to 100 because the low
-	// default forces concurrent requests to re-handshake instead of reusing pooled
-	// connections.
-	antigravityMaxIdleConnsPerHost = 100
+	// antigravityDefaultMaxIdleConnsPerHost sets the default number of idle connections
+	// to retain per host per credential when connection pooling is enabled.
+	// Matches Go's DefaultMaxIdleConnsPerHost (2) and the native Antigravity binary.
+	antigravityDefaultMaxIdleConnsPerHost = 2
 
-	// antigravityIdleConnTimeout keeps pooled connections usable far longer than Go's
-	// 90s default. Captured native traffic reuses a connection after idle gaps with a
-	// p90 of roughly six minutes, and a 90s timeout would discard about an eighth of
-	// the reuses the native client actually performs.
-	antigravityIdleConnTimeout = 10 * time.Minute
+	// antigravityMaxAllowedMaxIdleConnsPerHost is the hard upper bound on MaxIdleConnsPerHost (100).
+	// Prevents unbounded connection pool expansion in multi-credential environments.
+	antigravityMaxAllowedMaxIdleConnsPerHost = 100
+
+	// antigravityDefaultIdleConnTimeout is the default idle connection timeout (30 seconds).
+	// Kept strictly far below Google Frontend (GFE / ESF) 240-second cutoff to prevent
+	// client-side reuse of half-closed connections that cause connection resets.
+	antigravityDefaultIdleConnTimeout = 30 * time.Second
+
+	// antigravityMaxAllowedIdleConnTimeout is the hard upper bound on IdleConnTimeout (210 seconds).
+	// Kept strictly below Google Frontend (GFE / ESF) 240.0-second HTTP/1.1 idle keep-alive cutoff
+	// with a 30-second safety margin to eliminate timer race conditions.
+	antigravityMaxAllowedIdleConnTimeout = 210 * time.Second
 
 	// antigravityAnonymousTransportScope is the pool scope for auth objects that carry
 	// no identity at all. Reaching it means the auth has no ID, no source path and no
@@ -120,13 +125,109 @@ const (
 	antigravityAnonymousTransportScope = "anonymous"
 )
 
+type antigravityPoolSettings struct {
+	shortMode           bool
+	idleConnTimeout     time.Duration
+	maxIdleConnsPerHost int
+}
+
+func resolveAntigravityPoolSettings(cfg *config.Config) antigravityPoolSettings {
+	// By default, upstream connection pooling is disabled (shortMode = true, maxIdleConnsPerHost = -1)
+	// to prevent socket buildup and stale connection errors across rotating credentials.
+	settings := antigravityPoolSettings{
+		shortMode:           true,
+		maxIdleConnsPerHost: -1,
+		idleConnTimeout:     0,
+	}
+	if cfg == nil {
+		return settings
+	}
+
+	// Pooling is active ONLY when explicitly enabled: true
+	if cfg.Antigravity.ConnectionPool.Enabled == nil || !*cfg.Antigravity.ConnectionPool.Enabled {
+		return settings
+	}
+
+	// Enabled is true: initialize default pool settings
+	settings.shortMode = false
+	settings.idleConnTimeout = antigravityDefaultIdleConnTimeout
+	settings.maxIdleConnsPerHost = antigravityDefaultMaxIdleConnsPerHost
+
+	rawTimeout := strings.TrimSpace(cfg.Antigravity.ConnectionPool.IdleConnTimeout)
+	if rawTimeout != "" {
+		d, err := time.ParseDuration(rawTimeout)
+		if err != nil {
+			log.Warnf("antigravity executor: invalid idle-conn-timeout %q: %v, using default %v", rawTimeout, err, antigravityDefaultIdleConnTimeout)
+		} else {
+			if d <= 0 {
+				settings.shortMode = true
+				settings.maxIdleConnsPerHost = -1
+				return settings
+			}
+			if d > antigravityMaxAllowedIdleConnTimeout {
+				d = antigravityMaxAllowedIdleConnTimeout
+			}
+			settings.idleConnTimeout = d
+		}
+	}
+
+	if cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost != nil {
+		val := *cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost
+		if val < 0 {
+			settings.shortMode = true
+			settings.maxIdleConnsPerHost = -1
+			return settings
+		}
+		if val > antigravityMaxAllowedMaxIdleConnsPerHost {
+			val = antigravityMaxAllowedMaxIdleConnsPerHost
+		}
+		settings.maxIdleConnsPerHost = val
+	}
+
+	if settings.maxIdleConnsPerHost < 0 {
+		settings.shortMode = true
+	}
+
+	return settings
+}
+
+// ResetAntigravityTransports purges all cached Antigravity connection pools and closes their idle connections.
+// Used during configuration hot-reloads to ensure updated pool parameters apply immediately.
+func ResetAntigravityTransports() {
+	antigravityTransports.Purge()
+}
+
+// AntigravityTransportsLen reports the current number of cached Antigravity transports.
+func AntigravityTransportsLen() int {
+	return antigravityTransports.Len()
+}
+
+// closeAntigravityAuthIdleTransports closes and removes all idle connections for the given auth.
+func closeAntigravityAuthIdleTransports(auth *cliproxyauth.Auth) {
+	if auth == nil {
+		return
+	}
+	scope := antigravityTransportScope(auth)
+	if scope == "" || scope == antigravityAnonymousTransportScope {
+		return
+	}
+	antigravityTransports.CloseMatching(func(key antigravityTransportKey) bool {
+		return key.credential == scope
+	})
+}
+
 // antigravityTransportKey identifies one connection pool. At most one of proxy and
 // base is set: proxy for a credential-scoped proxy pool, base for a transport handed
 // in through the request context, and neither for a direct pool.
+// Resolved pool settings (shortMode, idleConnTimeout, maxIdleConnsPerHost) are included
+// in the key to prevent stale transport reuse across configuration hot-reloads under load.
 type antigravityTransportKey struct {
-	credential string
-	proxy      string
-	base       *http.Transport
+	credential          string
+	proxy               string
+	base                *http.Transport
+	shortMode           bool
+	idleConnTimeout     time.Duration
+	maxIdleConnsPerHost int
 }
 
 func defaultAntigravityBaseTransport() *http.Transport {
@@ -136,7 +237,7 @@ func defaultAntigravityBaseTransport() *http.Transport {
 	return &http.Transport{}
 }
 
-func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
+func cloneTransportWithHTTP11(base *http.Transport, cfgs ...*config.Config) *http.Transport {
 	if base == nil {
 		return nil
 	}
@@ -153,55 +254,93 @@ func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
 	// Native Antigravity sends no ALPN extension. With HTTP/2 disabled above,
 	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
 	clone.TLSClientConfig.NextProtos = nil
-	applyAntigravityPoolLimits(clone)
+	applyAntigravityPoolLimits(clone, cfgs...)
 	return clone
 }
 
-// applyAntigravityPoolLimits widens the connection pool so keep-alive actually
-// survives concurrency and idle periods. Limits are only ever raised, so an
-// operator-supplied base transport with a larger pool keeps its own settings.
-func applyAntigravityPoolLimits(transport *http.Transport) {
+// applyAntigravityPoolLimits configures connection pool parameters for Antigravity.
+// Default: IdleConnTimeout=30s, MaxIdleConnsPerHost=2.
+// IdleConnTimeout is strictly capped at 240s (antigravityMaxAllowedIdleConnTimeout)
+// matching the Google Frontend (GFE / ESF) HTTP/1.1 idle cutoff.
+// If short-lived connection mode is configured, MaxIdleConnsPerHost is set to -1
+// so idle connections are closed immediately upon request completion.
+func applyAntigravityPoolLimits(transport *http.Transport, cfgs ...*config.Config) {
 	if transport == nil {
 		return
 	}
-	// Go treats 0 as DefaultMaxIdleConnsPerHost (2) and a negative value as "never pool
-	// an idle connection". Raise the default and smaller positive values, but leave a
-	// negative value alone so an operator can still disable pooling outright.
-	if transport.MaxIdleConnsPerHost >= 0 && transport.MaxIdleConnsPerHost < antigravityMaxIdleConnsPerHost {
-		transport.MaxIdleConnsPerHost = antigravityMaxIdleConnsPerHost
+	var cfg *config.Config
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
 	}
-	// MaxIdleConns caps the pool across all hosts. Leaving it below the per-host limit
-	// would silently throttle Antigravity, which talks to a single host at a time.
-	// Zero means unlimited, so it must not be lowered.
+	settings := resolveAntigravityPoolSettings(cfg)
+	if settings.shortMode {
+		transport.MaxIdleConnsPerHost = -1
+		transport.DisableKeepAlives = false
+		transport.IdleConnTimeout = 0
+		return
+	}
+
+	// If the operator base transport already disabled pooling (< 0), honor it.
+	if transport.MaxIdleConnsPerHost < 0 {
+		return
+	}
+
+	// Go treats 0 as DefaultMaxIdleConnsPerHost (2). Ensure at least configured/default limit.
+	if transport.MaxIdleConnsPerHost < settings.maxIdleConnsPerHost {
+		transport.MaxIdleConnsPerHost = settings.maxIdleConnsPerHost
+	}
+
+	// MaxIdleConns caps the pool across all hosts.
 	if transport.MaxIdleConns > 0 && transport.MaxIdleConns < transport.MaxIdleConnsPerHost {
 		transport.MaxIdleConns = transport.MaxIdleConnsPerHost
 	}
-	// Zero already means "never expire idle connections", which is strictly longer.
-	if transport.IdleConnTimeout > 0 && transport.IdleConnTimeout < antigravityIdleConnTimeout {
-		transport.IdleConnTimeout = antigravityIdleConnTimeout
+
+	// Apply IdleConnTimeout:
+	// If the config explicitly specified a timeout, apply settings.idleConnTimeout.
+	// If config did not specify a timeout:
+	// - if base transport already has a timeout > 0, preserve it (capped at 240s).
+	// - otherwise, apply default 30s.
+	rawTimeout := ""
+	if cfg != nil {
+		rawTimeout = strings.TrimSpace(cfg.Antigravity.ConnectionPool.IdleConnTimeout)
+	}
+	if rawTimeout != "" {
+		transport.IdleConnTimeout = settings.idleConnTimeout
+	} else if transport.IdleConnTimeout == 0 || transport.IdleConnTimeout == 90*time.Second {
+		transport.IdleConnTimeout = settings.idleConnTimeout
+	} else if transport.IdleConnTimeout > antigravityMaxAllowedIdleConnTimeout {
+		transport.IdleConnTimeout = antigravityMaxAllowedIdleConnTimeout
 	}
 }
 
 // antigravityHTTP11Transport returns the HTTP/1.1 pool shared by every request that
 // uses the same credential and the same base transport. The base is either the
 // process default or a transport provided through the request context.
-func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport) *http.Transport {
+func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport, cfgs ...*config.Config) *http.Transport {
 	if base == nil {
 		return nil
 	}
+	var cfg *config.Config
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
+	settings := resolveAntigravityPoolSettings(cfg)
 	key := antigravityTransportKey{
-		credential: antigravityTransportScope(auth),
-		base:       base,
+		credential:          antigravityTransportScope(auth),
+		base:                base,
+		shortMode:           settings.shortMode,
+		idleConnTimeout:     settings.idleConnTimeout,
+		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
 	}
 	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
-		return cloneTransportWithHTTP11(base), nil
+		return cloneTransportWithHTTP11(base, cfgs...), nil
 	})
 	if errGet != nil {
 		// Defensive only: the builder above cannot fail. Never return nil here, because a
 		// nil Transport makes http.Client fall back to http.DefaultTransport, which
 		// advertises h2 over ALPN and would break the Antigravity wire fingerprint.
 		log.Debugf("antigravity executor: cache HTTP/1.1 transport failed: %v", errGet)
-		return cloneTransportWithHTTP11(base)
+		return cloneTransportWithHTTP11(base, cfgs...)
 	}
 	return transport
 }
@@ -210,14 +349,22 @@ func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport) *
 // one proxy setting, or nil when the proxy setting cannot be turned into a
 // transport. Keying on the normalized proxy string rather than on a prebuilt
 // transport keeps one pool per credential and proxy instead of one per request.
-func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string) *http.Transport {
+func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string, cfgs ...*config.Config) *http.Transport {
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL == "" {
 		return nil
 	}
+	var cfg *config.Config
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
+	settings := resolveAntigravityPoolSettings(cfg)
 	key := antigravityTransportKey{
-		credential: antigravityTransportScope(auth),
-		proxy:      proxyURL,
+		credential:          antigravityTransportScope(auth),
+		proxy:               proxyURL,
+		shortMode:           settings.shortMode,
+		idleConnTimeout:     settings.idleConnTimeout,
+		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
 	}
 	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
 		base, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
@@ -227,7 +374,7 @@ func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string)
 		if base == nil {
 			return nil, fmt.Errorf("antigravity executor: proxy setting produced no transport")
 		}
-		return cloneTransportWithHTTP11(base), nil
+		return cloneTransportWithHTTP11(base, cfgs...), nil
 	})
 	if errGet != nil {
 		// The caller falls back to NewProxyAwareHTTPClient, which reports the failure
@@ -293,7 +440,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	// credential-scoped proxy transport only here so other providers keep their
 	// existing lifecycle and different OAuth identities remain isolated.
 	if proxyURL := antigravityProxyURL(cfg, auth); proxyURL != "" {
-		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL); transport != nil {
+		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL, cfg); transport != nil {
 			return &http.Client{Transport: transport, Timeout: timeout}
 		}
 		// Fall through so NewProxyAwareHTTPClient reports the failure and applies the
@@ -303,7 +450,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	// Direct requests share an HTTP/1.1 pool only within the selected credential.
 	if client.Transport == nil {
-		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport)
+		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)
 		return client
 	}
 
@@ -321,7 +468,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		// Antigravity fingerprint, so substitute the process base transport.
 		transport = antigravityBaseTransport
 	}
-	client.Transport = antigravityHTTP11Transport(auth, transport)
+	client.Transport = antigravityHTTP11Transport(auth, transport, cfg)
 	return client
 }
 
@@ -355,8 +502,28 @@ func ensureAntigravityGeminiLeadingUserContent(modelName string, payload []byte)
 	return helps.EnsureGeminiLeadingUserContent(payload, "request.contents")
 }
 
+// ensureAntigravityGeminiTrailingUserContent appends a synthetic empty user turn
+// if the final turn is a model turn. Claude targets are left unchanged because
+// the adapter rejects empty text parts.
+func ensureAntigravityGeminiTrailingUserContent(modelName string, payload []byte) []byte {
+	if strings.Contains(strings.ToLower(modelName), "claude") {
+		return payload
+	}
+	return helps.EnsureGeminiTrailingUserContent(payload, "request.contents")
+}
+
+// ensureAntigravityGeminiBoundaryUserContent normalizes both leading and trailing
+// turns for Gemini targets. Claude targets are left unchanged.
+func ensureAntigravityGeminiBoundaryUserContent(modelName string, payload []byte) []byte {
+	if strings.Contains(strings.ToLower(modelName), "claude") {
+		return payload
+	}
+	return helps.EnsureGeminiBoundaryUserContent(payload, "request.contents")
+}
+
 type antigravityContentEdit struct {
 	index       int64
+	path        string
 	start       int
 	end         int
 	replacement []byte
@@ -485,6 +652,13 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 		})
 		return true
 	})
+	return applyAntigravityIndexedEdits(rawJSON, edits, validOffsets)
+}
+
+// applyAntigravityIndexedEdits splices collected JSON fragments into the original
+// request with one body copy. Applying SJSON once per field made large histories
+// scale with history size multiplied by the number of edits.
+func applyAntigravityIndexedEdits(rawJSON []byte, edits []antigravityContentEdit, validOffsets bool) []byte {
 	if len(edits) == 0 {
 		return rawJSON
 	}
@@ -519,7 +693,10 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 func applyAntigravityContentEditsWithSJSON(rawJSON []byte, edits []antigravityContentEdit) []byte {
 	out := rawJSON
 	for _, edit := range edits {
-		path := fmt.Sprintf("request.contents.%d", edit.index)
+		path := edit.path
+		if path == "" {
+			path = fmt.Sprintf("request.contents.%d", edit.index)
+		}
 		if updated, errSet := sjson.SetRawBytes(out, path, edit.replacement); errSet == nil {
 			out = updated
 		}
@@ -527,6 +704,9 @@ func applyAntigravityContentEditsWithSJSON(rawJSON []byte, edits []antigravityCo
 	return out
 }
 
+// repairAntigravityGeminiFunctionResponseNames copies missing or placeholder
+// functionResponse names from the matching functionCall. Edits are applied to
+// each part in isolation, then spliced into the request with one body copy.
 func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 	contents := util.GetGJSONBytesNoCopy(rawJSON, "request.contents")
 	if !contents.IsArray() {
@@ -555,7 +735,8 @@ func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 		return rawJSON
 	}
 
-	out := rawJSON
+	edits := make([]antigravityContentEdit, 0)
+	validOffsets := true
 	contents.ForEach(func(contentIdx, content gjson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
@@ -563,23 +744,39 @@ func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 		}
 		parts.ForEach(func(partIdx, part gjson.Result) bool {
 			fr := part.Get("functionResponse")
-			if fr.Exists() {
-				id := strings.TrimSpace(fr.Get("id").String())
-				name := strings.TrimSpace(fr.Get("name").String())
-				if id != "" && (name == "" || name == "unknown") {
-					if realName, ok := callIDToName[id]; ok {
-						path := fmt.Sprintf("request.contents.%d.parts.%d.functionResponse.name", contentIdx.Int(), partIdx.Int())
-						if updated, errSet := sjson.SetBytes(out, path, realName); errSet == nil {
-							out = updated
-						}
-					}
-				}
+			if !fr.Exists() {
+				return true
 			}
+			id := strings.TrimSpace(fr.Get("id").String())
+			name := strings.TrimSpace(fr.Get("name").String())
+			if id == "" || (name != "" && name != "unknown") {
+				return true
+			}
+			realName, ok := callIDToName[id]
+			if !ok {
+				return true
+			}
+			updatedPart, errSet := sjson.SetBytes([]byte(part.Raw), "functionResponse.name", realName)
+			if errSet != nil {
+				return true
+			}
+			start := part.Index
+			end := start + len(part.Raw)
+			if start < 0 || end < start || end > len(rawJSON) || !bytes.Equal(rawJSON[start:end], []byte(part.Raw)) {
+				validOffsets = false
+			}
+			edits = append(edits, antigravityContentEdit{
+				index:       contentIdx.Int(),
+				path:        fmt.Sprintf("request.contents.%d.parts.%d", contentIdx.Int(), partIdx.Int()),
+				start:       start,
+				end:         end,
+				replacement: updatedPart,
+			})
 			return true
 		})
 		return true
 	})
-	return out
+	return applyAntigravityIndexedEdits(rawJSON, edits, validOffsets)
 }
 
 func validateAntigravityRequestSignatures(ctx context.Context, modelName string, from sdktranslator.Format, rawJSON []byte) ([]byte, error) {

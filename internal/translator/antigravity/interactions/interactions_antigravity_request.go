@@ -25,6 +25,9 @@ func ConvertInteractionsRequestToAntigravity(modelName string, inputRawJSON []by
 	appendInteractionsInputToAntigravity(&contentItems, root.Get("input"))
 	out = translatorcommon.SetRawArrayItems(out, "request.contents", contentItems)
 	out = copyInteractionsToolsToAntigravity(out, root, functionNameMap)
+	if gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String() == "NONE" {
+		out, _ = sjson.DeleteBytes(out, "request.tools")
+	}
 	out = rewriteInteractionsFunctionNames(out, functionNameMap)
 	out = attachDefaultAntigravitySafetySettings(out)
 	return out
@@ -514,6 +517,10 @@ func appendInteractionsFunctionResultToAntigravity(items *[][]byte, step gjson.R
 }
 
 func copyInteractionsToolsToAntigravity(out []byte, root gjson.Result, functionNameMap map[string]string) []byte {
+	if gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String() == "NONE" {
+		out, _ = sjson.DeleteBytes(out, "request.tools")
+		return out
+	}
 	tools := root.Get("tools")
 	if !tools.Exists() {
 		return out

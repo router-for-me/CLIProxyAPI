@@ -8,6 +8,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 )
 
 const (
@@ -240,16 +241,20 @@ func isHierarchyParent(primary, fallback string) bool {
 	if strings.Contains(primary, ":agent:") {
 		return true
 	}
-	for _, prefix := range []string{"codex:", "header:", "affinity:", "slot:", "thread:", "conv:", "session:", "claude:", "agy:", "geminicache:"} {
-		if strings.HasPrefix(primary, prefix) && strings.HasPrefix(fallback, prefix) && primary != fallback {
-			return true
-		}
+	idx1 := strings.Index(primary, ":")
+	idx2 := strings.Index(fallback, ":")
+	if idx1 > 0 && idx2 > 0 && primary[:idx1] == fallback[:idx2] {
+		return true
+	}
+	if idx1 == -1 && idx2 == -1 {
+		return true
 	}
 	return false
 }
 
 func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string, string) {
 	primary, fallback := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	hasAuthoritativeInput := primary != ""
 	if primary == "" {
 		if canonicalID, ok := opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string); ok && strings.TrimSpace(canonicalID) != "" {
 			primary = strings.TrimSpace(canonicalID)
@@ -257,6 +262,7 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 			primary = strings.TrimSpace(lcpID)
 		} else {
 			primary, fallback = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+			hasAuthoritativeInput = primary != ""
 		}
 	}
 	if primary == "" || m == nil {
@@ -272,13 +278,32 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 			aliasFallback = fallback
 		}
 	}
+	if !hasAuthoritativeInput && parentSessionID == "" && opts.Metadata != nil {
+		if metaParent, ok := opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey].(string); ok && strings.TrimSpace(metaParent) != "" {
+			parentSessionID = strings.TrimSpace(metaParent)
+		}
+	}
 
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	ttl := homeSessionAliasTTL(cfg)
 	now := time.Now()
 	canonical := m.homeSessionAliases.canonical(primary, aliasFallback, ttl, now)
 	if parentSessionID != "" {
-		parentSessionID = m.homeSessionAliases.canonical(parentSessionID, "", ttl, now)
+		if parentSessionID == canonical || parentSessionID == primary || (aliasFallback != "" && parentSessionID == aliasFallback) {
+			parentSessionID = ""
+		} else {
+			parentSessionID = m.homeSessionAliases.canonical(parentSessionID, "", ttl, now)
+			if parentSessionID == canonical {
+				parentSessionID = ""
+			}
+		}
+	}
+	canonical = cliproxysession.BoundSessionIdentity(canonical)
+	if parentSessionID != "" {
+		parentSessionID = cliproxysession.BoundSessionIdentity(parentSessionID)
+	}
+	if canonical == parentSessionID {
+		parentSessionID = ""
 	}
 	return canonical, parentSessionID
 }

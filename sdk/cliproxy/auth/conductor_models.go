@@ -252,6 +252,13 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 			suspendReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
 		}
 	}
+	if len(auth.ModelStates) == 0 && auth.Unavailable && auth.NextRetryAfter.After(now) {
+		// With no per-model states, scheduling falls back to the credential-wide
+		// cooldown (isAuthBlockedForModel); the projection must agree with it.
+		// When states exist, unmatched models stay schedulable by design, so the
+		// credential-wide fields must not suspend them here either.
+		isSuspended = true
+	}
 	if isSuspended && suspendReason == "" {
 		suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
 	}

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -832,5 +833,56 @@ func TestObservePluginExecutorStreamTTFT_Antigravity(t *testing.T) {
 	helps.ObservePluginExecutorStreamTTFT("antigravity", reporter, antigravityChunk)
 	if !reporter.IsTTFTSet() {
 		t.Errorf("ObservePluginExecutorStreamTTFT for antigravity should set TTFT on token event")
+	}
+}
+
+type capturingUsagePlugin struct {
+	captured chan pluginapi.UsageRecord
+}
+
+func (p *capturingUsagePlugin) HandleUsage(_ context.Context, record pluginapi.UsageRecord) {
+	p.captured <- record
+}
+
+func TestUsageAdapterRecoversSessionHierarchyFromContext(t *testing.T) {
+	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 1)}
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-session",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-session",
+	}
+
+	ctx := logging.WithClientRequestMetadata(context.Background(), logging.ClientRequestMetadata{
+		SessionID:       "sess-ctx-1",
+		ParentSessionID: "parent-ctx-1",
+	})
+
+	// 1. Record has empty session fields, should recover from context
+	adapter.HandleUsage(ctx, coreusage.Record{
+		Provider: "test-provider",
+		Model:    "test-model",
+	})
+	rec := <-plugin.captured
+	if rec.SessionID != "sess-ctx-1" || rec.ParentSessionID != "parent-ctx-1" {
+		t.Fatalf("recovered session = (%q, %q), want (sess-ctx-1, parent-ctx-1)", rec.SessionID, rec.ParentSessionID)
+	}
+
+	// 2. Self-referential loop protection in context
+	ctxLoop := logging.WithClientRequestMetadata(context.Background(), logging.ClientRequestMetadata{
+		SessionID:       "loop-sess",
+		ParentSessionID: "loop-sess",
+	})
+	adapter.HandleUsage(ctxLoop, coreusage.Record{
+		Provider: "test-provider",
+		Model:    "test-model",
+	})
+	recLoop := <-plugin.captured
+	if recLoop.SessionID != "loop-sess" || recLoop.ParentSessionID != "" {
+		t.Fatalf("loop protection = (%q, %q), want (loop-sess, empty)", recLoop.SessionID, recLoop.ParentSessionID)
 	}
 }

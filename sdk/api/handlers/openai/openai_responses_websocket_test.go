@@ -5801,3 +5801,330 @@ func TestNormalizeSubsequentRequestAssistantInputTriggersTranscriptReplacement(t
 		t.Fatalf("input[0].id = %q, want %q", input[0].Get("id").String(), "msg-3")
 	}
 }
+
+func TestForwardResponsesWebsocketEmitsPeriodicPingControlFrames(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	data := make(chan []byte)
+	errCh := make(chan *interfaces.ErrorMessage)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		cfg := &sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				KeepAliveSeconds: 1,
+			},
+		}
+		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(cfg, nil))
+
+		_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(
+			ctx,
+			newResponsesWebsocketWriter(conn),
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-keepalive-test",
+		)
+		if errMsg != nil {
+			serverErrCh <- fmt.Errorf("unexpected error message: %v", errMsg.Error)
+			return
+		}
+		if errForward != nil {
+			serverErrCh <- fmt.Errorf("unexpected forward error: %v", errForward)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	pingReceived := make(chan struct{}, 1)
+	clientConn.SetPingHandler(func(appData string) error {
+		select {
+		case pingReceived <- struct{}{}:
+		default:
+		}
+		return clientConn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+	})
+
+	clientDone := make(chan struct{})
+	go func() {
+		defer close(clientDone)
+		for {
+			_, _, errRead := clientConn.ReadMessage()
+			if errRead != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-pingReceived:
+		// Received expected Ping control frame while upstream is waiting.
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("expected websocket Ping control frame during upstream wait, got none")
+	}
+
+	// Unblock forwardResponsesWebsocket with terminal completion.
+	data <- []byte(`{"type":"response.done","response":{"id":"resp-ping-1","output":[]}}`)
+	close(data)
+	close(errCh)
+
+	select {
+	case serverErr := <-serverErrCh:
+		if serverErr != nil {
+			t.Fatalf("server error: %v", serverErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server timed out completing forwardResponsesWebsocket")
+	}
+
+	<-clientDone
+}
+
+func TestForwardResponsesWebsocketPingKeepAliveOptionsOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	data := make(chan []byte)
+	errCh := make(chan *interfaces.ErrorMessage)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		interval := 20 * time.Millisecond
+		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+
+		_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(
+			ctx,
+			newResponsesWebsocketWriter(conn),
+			func(...interface{}) {},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-keepalive-override",
+			responsesWebsocketForwardOptions{
+				keepAliveInterval: &interval,
+			},
+		)
+		if errMsg != nil {
+			serverErrCh <- fmt.Errorf("unexpected error message: %v", errMsg.Error)
+			return
+		}
+		if errForward != nil {
+			serverErrCh <- fmt.Errorf("unexpected forward error: %v", errForward)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	pingReceived := make(chan struct{}, 1)
+	clientConn.SetPingHandler(func(appData string) error {
+		select {
+		case pingReceived <- struct{}{}:
+		default:
+		}
+		return clientConn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+	})
+
+	clientDone := make(chan struct{})
+	go func() {
+		defer close(clientDone)
+		for {
+			_, _, errRead := clientConn.ReadMessage()
+			if errRead != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-pingReceived:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected websocket Ping control frame via option override, got none")
+	}
+
+	data <- []byte(`{"type":"response.done","response":{"id":"resp-override","output":[]}}`)
+	close(data)
+	close(errCh)
+
+	select {
+	case serverErr := <-serverErrCh:
+		if serverErr != nil {
+			t.Fatalf("server error: %v", serverErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server timed out completing forwardResponsesWebsocket")
+	}
+
+	<-clientDone
+}
+
+func TestResponsesWebsocketWriterWritePing(t *testing.T) {
+	// Nil writer check
+	var nilWriter *responsesWebsocketWriter
+	if err := nilWriter.writePing(); err == nil {
+		t.Fatal("expected error on nil writer.writePing(), got nil")
+	}
+
+	// Active connection and closed writer checks
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		writer := newResponsesWebsocketWriter(conn)
+		if errPing := writer.writePing(); errPing != nil {
+			t.Errorf("writePing() error = %v, want nil", errPing)
+		}
+
+		writer.closing.Store(true)
+		if errPing := writer.writePing(); !errors.Is(errPing, websocket.ErrCloseSent) {
+			t.Errorf("writePing() after closing = %v, want ErrCloseSent", errPing)
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	pingReceived := make(chan struct{}, 1)
+	clientConn.SetPingHandler(func(string) error {
+		select {
+		case pingReceived <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+
+	go func() {
+		for {
+			if _, _, errRead := clientConn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-pingReceived:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected ping from writer.writePing(), got none")
+	}
+}
+
+func TestForwardResponsesWebsocketPingWriteFailureAbortsSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	cancelledCh := make(chan error, 1)
+	data := make(chan []byte)
+	errCh := make(chan *interfaces.ErrorMessage)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		interval := 10 * time.Millisecond
+		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+
+		_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(
+			ctx,
+			newResponsesWebsocketWriter(conn),
+			func(errs ...interface{}) {
+				if len(errs) > 0 {
+					if errVal, ok := errs[0].(error); ok {
+						cancelledCh <- errVal
+						return
+					}
+				}
+				cancelledCh <- nil
+			},
+			data,
+			errCh,
+			newInMemoryWebsocketTimelineLog(),
+			"session-ping-fail",
+			responsesWebsocketForwardOptions{
+				keepAliveInterval: &interval,
+			},
+		)
+		if errMsg != nil {
+			serverErrCh <- fmt.Errorf("unexpected error message: %v", errMsg.Error)
+			return
+		}
+		serverErrCh <- errForward
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+
+	// Close client connection immediately so the next server Ping write fails.
+	_ = clientConn.Close()
+
+	select {
+	case serverErr := <-serverErrCh:
+		if serverErr == nil {
+			t.Fatal("expected error on server ping write failure, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server timed out awaiting ping write abort")
+	}
+
+	select {
+	case cancelErr := <-cancelledCh:
+		if cancelErr == nil {
+			t.Fatal("expected cancel callback to be invoked with ping error, got nil")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out awaiting cancel callback on ping write failure")
+	}
+}

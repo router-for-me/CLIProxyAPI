@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -45,11 +46,14 @@ func (m *Manager) reportHomeUnauthorized(ctx context.Context, auth *Auth, provid
 	if alias == "" {
 		alias = model
 	}
+	clientMeta := logging.GetClientRequestMetadata(ctx)
 	coreusage.PublishRecord(ctx, coreusage.Record{
 		Provider:          provider,
 		ExecutorType:      homeResultExecutorType,
 		Model:             model,
 		Alias:             alias,
+		SessionID:         clientMeta.SessionID,
+		ParentSessionID:   clientMeta.ParentSessionID,
 		AuthID:            auth.ID,
 		AuthIndex:         authIndex,
 		AccessTokenSHA256: accessTokenSHA256,
