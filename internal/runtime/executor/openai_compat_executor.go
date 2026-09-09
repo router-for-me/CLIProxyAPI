@@ -122,8 +122,20 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	originalPayload := originalPayloadSource
 	isCompat := helps.APIKeyModelIsCompat(req)
-	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, opts.Stream, isCompat)
-	translated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, opts.Stream, isCompat)
+	var originalTranslated, translated []byte
+	if nativeResponses {
+		originalTranslated, err = helps.TranslateNativeResponsesRequest(from, baseModel, originalPayload, opts.Stream)
+		if err != nil {
+			return resp, err
+		}
+		translated, err = helps.TranslateNativeResponsesRequest(from, baseModel, req.Payload, opts.Stream)
+		if err != nil {
+			return resp, err
+		}
+	} else {
+		originalTranslated = helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, opts.Stream, isCompat)
+		translated = helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, opts.Stream, isCompat)
+	}
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -215,12 +227,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
-	// Ensure we at least record the request even if upstream doesn't return usage
-	reporter.EnsurePublished(ctx)
-	// Translate response back to source format when needed
+	// Translate before publishing success so a declined plugin route records a failure.
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
+	out, handled := sdktranslator.TranslateNonStreamChecked(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
+	if nativeResponses && !handled {
+		return resp, helps.NativeResponsesTranslationError(responseFormat)
+	}
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
+	reporter.EnsurePublished(ctx)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
@@ -350,8 +364,20 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 	originalPayload := originalPayloadSource
 	isCompat := helps.APIKeyModelIsCompat(req)
-	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true, isCompat)
-	translated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true, isCompat)
+	var originalTranslated, translated []byte
+	if nativeResponses {
+		originalTranslated, err = helps.TranslateNativeResponsesRequest(from, baseModel, originalPayload, true)
+		if err != nil {
+			return nil, err
+		}
+		translated, err = helps.TranslateNativeResponsesRequest(from, baseModel, req.Payload, true)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		originalTranslated = helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true, isCompat)
+		translated = helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true, isCompat)
+	}
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -455,10 +481,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var frameData [][]byte
 		defer streamUsage.Publish(ctx, reporter)
 
-		publishStreamError := func(streamErr statusErr, containsPayload bool) {
+		publishStreamError := func(streamErr error, containsPayload bool) {
 			loggedErr := streamErr
 			if containsPayload {
-				loggedErr = statusErr{code: streamErr.code, msg: "upstream stream returned an error payload"}
+				code := http.StatusBadGateway
+				if status, ok := streamErr.(interface{ StatusCode() int }); ok {
+					code = status.StatusCode()
+				}
+				loggedErr = statusErr{code: code, msg: "upstream stream returned an error payload"}
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, loggedErr)
 			reporter.PublishFailure(ctx, loggedErr)
@@ -513,14 +543,17 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			eventType := gjson.GetBytes(dataPayload, "type").String()
 			isResponsesTerminal := nativeResponses && (eventType == "response.completed" || eventType == "response.incomplete")
 			isDone = isDone || isResponsesTerminal
+			streamLine := append([]byte("data: "), dataPayload...)
+			chunks, handled := helps.TranslateStreamWithClaudeInputTokensChecked(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
+			if nativeResponses && !handled {
+				publishStreamError(helps.NativeResponsesTranslationError(responseFormat), false)
+				return true
+			}
 			if isResponsesTerminal {
 				if detail, ok := helps.ParseCodexUsage(dataPayload); ok {
 					reporter.Publish(ctx, detail)
 				}
 			}
-
-			streamLine := append([]byte("data: "), dataPayload...)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -581,7 +614,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		} else if !seenDone {
 			// Responses clients require an explicit terminal event. Treat a clean
 			// upstream EOF without [DONE] as a failed stream instead of completing it.
-			if responseFormat == sdktranslator.FormatOpenAIResponse {
+			if nativeResponses || responseFormat == sdktranslator.FormatOpenAIResponse {
 				missingTerminal := "upstream stream closed before [DONE]"
 				if nativeResponses {
 					missingTerminal = "upstream Responses stream closed before a terminal event"

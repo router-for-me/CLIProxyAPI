@@ -11,6 +11,11 @@ import (
 // ValidateNativeResponsesFormats prevents an unregistered translation from
 // silently sending or returning a payload in the wrong protocol.
 func ValidateNativeResponsesFormats(from, responseFormat sdktranslator.Format, stream bool) error {
+	// Plugins decide whether to translate using the actual payload. Checked
+	// translation below rejects their declined routes without protocol passthrough.
+	if sdktranslator.HasPluginHooks() {
+		return nil
+	}
 	to := sdktranslator.FormatOpenAIResponse
 	if from != to && !sdktranslator.HasRequestTransformer(from, to) {
 		return cliproxyauth.NewRequestScopedError(fmt.Sprintf("native Responses provider has no request translator from %s to %s", from, to), http.StatusBadRequest)
@@ -23,4 +28,19 @@ func ValidateNativeResponsesFormats(from, responseFormat sdktranslator.Format, s
 		return cliproxyauth.NewRequestScopedError(fmt.Sprintf("native Responses provider has no response translator from %s to %s", to, responseFormat), http.StatusBadRequest)
 	}
 	return nil
+}
+
+// TranslateNativeResponsesRequest requires an actual request translation or identity route.
+func TranslateNativeResponsesRequest(from sdktranslator.Format, model string, payload []byte, stream bool) ([]byte, error) {
+	to := sdktranslator.FormatOpenAIResponse
+	out, handled := sdktranslator.TranslateRequestChecked(from, to, model, payload, stream)
+	if !handled {
+		return nil, cliproxyauth.NewRequestScopedError(fmt.Sprintf("native Responses provider has no request translator from %s to %s", from, to), http.StatusBadRequest)
+	}
+	return out, nil
+}
+
+// NativeResponsesTranslationError identifies a declined response translation route.
+func NativeResponsesTranslationError(responseFormat sdktranslator.Format) error {
+	return cliproxyauth.NewRequestScopedError(fmt.Sprintf("native Responses provider has no response translator from %s to %s", sdktranslator.FormatOpenAIResponse, responseFormat), http.StatusBadRequest)
 }
