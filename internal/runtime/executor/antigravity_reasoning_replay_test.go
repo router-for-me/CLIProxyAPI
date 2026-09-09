@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -1817,6 +1818,59 @@ func TestDegradeAntigravityClaudeToolProvenanceIDs_AllCallsSigned_OnlyFirstGetsB
 	}
 	if errSig := internalsignature.ValidateGeminiThoughtSignatures(out, internalsignature.GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true}); errSig != nil {
 		t.Fatalf("ValidateGeminiThoughtSignatures failed: %v\noutput: %s", errSig, out)
+	}
+}
+
+func TestDegradeAntigravityClaudeToolProvenanceIDs_StrictMonotonicOffsets(t *testing.T) {
+	id := util.GeminiClaudeToolUseID("native-1", "Read", `{"file_path":"/tmp/a"}`)
+	payload := []byte(fmt.Sprintf(`{"request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"sig-1","functionCall":{"id":"%s","name":"Read","args":{"file_path":"/tmp/a"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"%s","name":"Read","response":{"result":"ok"}}}]}]}}`, id, id))
+
+	out, degraded := degradeAntigravityClaudeToolProvenanceIDs(payload)
+	if degraded != 2 {
+		t.Fatalf("degraded = %d, want 2", degraded)
+	}
+	if bytes.Equal(out, payload) {
+		t.Fatal("expected payload to be modified")
+	}
+	if strings.Contains(string(out), id) {
+		t.Fatalf("expected reserved ID %s to be replaced", id)
+	}
+
+	syntheticID := antigravitySyntheticToolCallID(id)
+	if !strings.Contains(string(out), syntheticID) {
+		t.Fatalf("expected synthetic ID %s in output, got: %s", syntheticID, string(out))
+	}
+}
+
+var antigravityDegradeBenchmarkOutput []byte
+
+func BenchmarkDegradeAntigravityClaudeToolProvenanceIDs(b *testing.B) {
+	const calls = 217
+	var payload strings.Builder
+	payload.Grow(1<<20 + calls*512)
+	payload.WriteString(`{"request":{"contents":[{"role":"user","parts":[{"text":"`)
+	payload.WriteString(strings.Repeat("x", 1<<20))
+	payload.WriteString(`"}]}`)
+	for i := range calls {
+		id := util.GeminiClaudeToolUseID(fmt.Sprintf("native-%d", i), "Read", `{"file_path":"/tmp/a"}`)
+		fmt.Fprintf(&payload, `,{"role":"model","parts":[{"thoughtSignature":"signature-%d","functionCall":{"id":"%s","name":"Read","args":{"file_path":"/tmp/a"}}}]}`, i, id)
+		fmt.Fprintf(&payload, `,{"role":"user","parts":[{"functionResponse":{"id":"%s","name":"Read","response":{"result":"ok"}}}]}`, id)
+	}
+	payload.WriteString(`]}}`)
+	input := []byte(payload.String())
+	if _, degraded := degradeAntigravityClaudeToolProvenanceIDs(input); degraded != calls*2 {
+		b.Fatalf("degraded = %d, want %d", degraded, calls*2)
+	}
+
+	b.SetBytes(int64(len(input)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		var degraded int
+		antigravityDegradeBenchmarkOutput, degraded = degradeAntigravityClaudeToolProvenanceIDs(input)
+		if degraded != calls*2 {
+			b.Fatalf("degraded = %d, want %d", degraded, calls*2)
+		}
 	}
 }
 

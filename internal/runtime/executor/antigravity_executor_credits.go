@@ -282,7 +282,7 @@ func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	antigravityCreditsFailureByAuth.Delete(strings.TrimSpace(auth.ID))
 }
 func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
-	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" || antigravityCoolingDisabled(auth, nil) {
 		return
 	}
 	authID := strings.TrimSpace(auth.ID)
@@ -343,7 +343,7 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	return err
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
-	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) {
+	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
 		return
 	}
 	if ctx != nil && ctx.Err() != nil {
@@ -561,6 +561,10 @@ func antigravityShortCooldownKVKey(auth *cliproxyauth.Auth, modelName string) st
 	return "cpa:antigravity:short-cooldown:" + authID + ":" + homekv.HashKeyPart(modelName)
 }
 
+func antigravityCoolingDisabled(auth *cliproxyauth.Auth, cfg *config.Config) bool {
+	return cliproxyauth.QuotaCooldownDisabledForAuthWithConfig(auth, cfg)
+}
+
 func antigravityIsInShortCooldown(auth *cliproxyauth.Auth, modelName string, now time.Time) (bool, time.Duration) {
 	inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(context.Background(), auth, modelName, now)
 	if errCooldown != nil {
@@ -571,6 +575,9 @@ func antigravityIsInShortCooldown(auth *cliproxyauth.Auth, modelName string, now
 }
 
 func antigravityIsInShortCooldownRequired(ctx context.Context, auth *cliproxyauth.Auth, modelName string, now time.Time) (bool, time.Duration, error) {
+	if antigravityCoolingDisabled(auth, nil) {
+		return false, 0, nil
+	}
 	kvKey := antigravityShortCooldownKVKey(auth, modelName)
 	client, homeMode, errClient := currentAntigravityKVClient()
 	if homeMode {
@@ -626,6 +633,9 @@ func markAntigravityShortCooldown(auth *cliproxyauth.Auth, modelName string, now
 }
 
 func markAntigravityShortCooldownRequired(ctx context.Context, auth *cliproxyauth.Auth, modelName string, now time.Time, duration time.Duration) error {
+	if antigravityCoolingDisabled(auth, nil) {
+		return nil
+	}
 	kvKey := antigravityShortCooldownKVKey(auth, modelName)
 	client, homeMode, errClient := currentAntigravityKVClient()
 	if homeMode {

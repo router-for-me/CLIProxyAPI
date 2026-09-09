@@ -88,20 +88,20 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 			}
 			originalRole := roleResult.String()
 			var precedingToolUseIDs []string
-			if originalRole != "system" {
+			if originalRole != "system" && originalRole != "developer" {
 				precedingToolUseIDs = pendingToolUseIDs
 				pendingToolUseIDs = nil
 			}
 			role := originalRole
 			if role == "assistant" {
 				role = "model"
-			} else if role == "system" {
+			} else if role == "system" || role == "developer" {
 				role = "user"
 			}
 
 			partItems := make([][]byte, 0, 4)
 			contentsResult := messageResult.Get("content")
-			if roleResult.String() == "system" {
+			if roleResult.String() == "system" || roleResult.String() == "developer" {
 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
 					part := []byte(`{"text":""}`)
 					part, _ = sjson.SetBytes(part, "text", reminderText)
@@ -205,6 +205,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 					}
 					return true
 				})
+				if role == "user" {
+					partItems = translatorcommon.ReorderGeminiUserParts(partItems)
+				}
 				contentItems = append(contentItems, geminiContentWithParts(role, partItems))
 			} else if contentsResult.Type == gjson.String {
 				part := []byte(`{"text":""}`)

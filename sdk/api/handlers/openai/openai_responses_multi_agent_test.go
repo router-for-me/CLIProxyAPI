@@ -197,3 +197,93 @@ func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundarySkipsOtherClients(t *te
 		t.Fatal("other client unexpectedly received prepared marker")
 	}
 }
+
+func newResponsesOrphanDelegationTestHandler(t *testing.T, executor *responsesMultiAgentCaptureExecutor) (*OpenAIResponsesAPIHandler, string) {
+	t.Helper()
+
+	modelID := "responses-orphan-test-model"
+	authID := "responses-orphan-test-auth"
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, ProxyURL: "direct"}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, auth.Provider, []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{CodexOrphanDelegationCompatibility: true}, manager)
+	return NewOpenAIResponsesAPIHandler(base), modelID
+}
+
+func TestResponsesOrphanCodexDelegationCompatibility(t *testing.T) {
+	t.Parallel()
+
+	executor := &responsesMultiAgentCaptureExecutor{}
+	handler, modelID := newResponsesOrphanDelegationTestHandler(t, executor)
+
+	router := gin.New()
+	router.POST("/v1/responses", handler.Responses)
+
+	payload := fmt.Sprintf(`{
+		"model": %q,
+		"stream": false,
+		"input": [
+			{
+				"type": "function_call_output",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "<codex_delegation>msg</codex_delegation>"
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "continue"}]
+			}
+		]
+	}`, modelID)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
+	request.Header.Set("X-Openai-Subagent", "collab_spawn")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	payloads := executor.Payloads()
+	if len(payloads) != 1 {
+		t.Fatalf("captured payload count = %d, want 1", len(payloads))
+	}
+	captured := payloads[0]
+	parsed := gjson.ParseBytes(captured)
+	if itemType := parsed.Get("input.0.type").String(); itemType != "message" {
+		t.Fatalf("input.0.type = %q, want message; captured=%s", itemType, captured)
+	}
+	if role := parsed.Get("input.0.role").String(); role != "user" {
+		t.Fatalf("input.0.role = %q, want user", role)
+	}
+	wantText := "Tool output from codex_app__create_thread:\n<codex_delegation>msg</codex_delegation>"
+	if text := parsed.Get("input.0.content.0.text").String(); text != wantText {
+		t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
+	}
+
+	// Without X-Openai-Subagent header, payload should remain function_call_output
+	requestNoHeader := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
+	recorderNoHeader := httptest.NewRecorder()
+	router.ServeHTTP(recorderNoHeader, requestNoHeader)
+	if recorderNoHeader.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorderNoHeader.Code, recorderNoHeader.Body.String())
+	}
+	payloads = executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("captured payload count = %d, want 2", len(payloads))
+	}
+	capturedNoHeader := payloads[1]
+	parsedNoHeader := gjson.ParseBytes(capturedNoHeader)
+	if itemType := parsedNoHeader.Get("input.0.type").String(); itemType != "function_call_output" {
+		t.Fatalf("input.0.type = %q, want function_call_output without header; captured=%s", itemType, capturedNoHeader)
+	}
+}

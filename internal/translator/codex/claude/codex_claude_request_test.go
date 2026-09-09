@@ -876,4 +876,251 @@ func TestConvertClaudeRequestToCodex_OutputConfigFormat(t *testing.T) {
 			t.Errorf("expected reasoning.effort to be 'high', got %q", got)
 		}
 	})
+
+	t.Run("json_schema with optional property downgrades strict", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"messages": [
+				{"role": "user", "content": "hello"}
+			],
+			"output_config": {
+				"format": {
+					"type": "json_schema",
+					"name": "cli_proxy_structured_output",
+					"strict": true,
+					"schema": {
+						"type": "object",
+						"properties": {
+							"answer": {"type": "string"},
+							"impossible": {"type": "string"}
+						},
+						"required": ["answer"],
+						"additionalProperties": false
+					}
+				}
+			}
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+		if got := root.Get("text.format.strict").Bool(); got != false {
+			t.Errorf("expected text.format.strict to be false for non-strict-compatible schema, got %v (%s)", got, translated)
+		}
+		if got := root.Get("text.format.name").String(); got != "cli_proxy_structured_output" {
+			t.Errorf("expected text.format.name to be preserved, got %q", got)
+		}
+	})
+
+	t.Run("json_schema fully required keeps strict", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "gpt-5.4",
+			"messages": [
+				{"role": "user", "content": "hello"}
+			],
+			"output_config": {
+				"format": {
+					"type": "json_schema",
+					"schema": {
+						"type": "object",
+						"properties": {
+							"answer": {"type": "string"}
+						},
+						"required": ["answer"],
+						"additionalProperties": false
+					}
+				}
+			}
+		}`)
+
+		translated := ConvertClaudeRequestToCodex("gpt-5.4", payload, false)
+		root := gjson.ParseBytes(translated)
+		if got := root.Get("text.format.strict").Bool(); !got {
+			t.Errorf("expected text.format.strict to stay true for strict-compatible schema, got %v (%s)", got, translated)
+		}
+	})
+}
+
+func TestNormalizeToolParameters_StripsNestedSchemaAndId(t *testing.T) {
+	input := `{
+		"type": "object",
+		"$schema": "http://json-schema.org/draft-07/schema#",
+		"$id": "https://example.invalid/root",
+		"properties": {
+			"q": {
+				"type": "string",
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"$id": "https://example.invalid/q"
+			},
+			"tags": {
+				"type": "array",
+				"items": {"type": "string", "$id": "https://example.invalid/tag"}
+			},
+			"mode": {
+				"anyOf": [
+					{"type": "string", "$schema": "http://json-schema.org/draft-07/schema#"},
+					{"type": "null"}
+				]
+			},
+			"refField": {
+				"$ref": "#/$defs/hint"
+			}
+		},
+		"$defs": {
+			"hint": {"type": "string", "$id": "https://example.invalid/hint"}
+		},
+		"required": ["q"]
+	}`
+
+	got := normalizeToolParameters(input)
+	parsed := gjson.Parse(got)
+
+	if parsed.Get("$schema").Exists() {
+		t.Errorf("expected root $schema to be removed, got %v", parsed.Get("$schema").Raw)
+	}
+	if parsed.Get("$id").Exists() {
+		t.Errorf("expected root $id to be removed, got %v", parsed.Get("$id").Raw)
+	}
+	if parsed.Get("properties.q.$schema").Exists() {
+		t.Errorf("expected properties.q.$schema to be removed, got %v", parsed.Get("properties.q.$schema").Raw)
+	}
+	if parsed.Get("properties.q.$id").Exists() {
+		t.Errorf("expected properties.q.$id to be removed, got %v", parsed.Get("properties.q.$id").Raw)
+	}
+	if parsed.Get("properties.tags.items.$id").Exists() {
+		t.Errorf("expected properties.tags.items.$id to be removed, got %v", parsed.Get("properties.tags.items.$id").Raw)
+	}
+	if parsed.Get("properties.mode.anyOf.0.$schema").Exists() {
+		t.Errorf("expected properties.mode.anyOf.0.$schema to be removed, got %v", parsed.Get("properties.mode.anyOf.0.$schema").Raw)
+	}
+	if parsed.Get("$defs.hint.$id").Exists() {
+		t.Errorf("expected $defs.hint.$id to be removed, got %v", parsed.Get("$defs.hint.$id").Raw)
+	}
+	if parsed.Get("properties.refField.$ref").String() != "#/$defs/hint" {
+		t.Errorf("expected $ref to be preserved, got %v", parsed.Get("properties.refField.$ref").Raw)
+	}
+	if parsed.Get("properties.q.type").String() != "string" {
+		t.Errorf("expected properties.q.type to be 'string', got %v", parsed.Get("properties.q.type").Raw)
+	}
+}
+
+func TestNormalizeToolParameters_PreservesPropertyNamesAndLiteralData(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"$schema": {
+				"type": "string",
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"$id": "https://example.invalid/sub-schema"
+			},
+			"$id": {
+				"type": "string"
+			},
+			"config": {
+				"type": "object",
+				"default": {
+					"$id": "default-id-123"
+				}
+			}
+		}
+	}`
+
+	got := normalizeToolParameters(input)
+	parsed := gjson.Parse(got)
+
+	if !parsed.Get("properties.$schema").Exists() {
+		t.Errorf("expected property named '$schema' to be preserved")
+	}
+	if parsed.Get("properties.$schema.$schema").Exists() {
+		t.Errorf("expected properties.$schema.$schema dialect keyword to be removed")
+	}
+	if parsed.Get("properties.$schema.$id").Exists() {
+		t.Errorf("expected properties.$schema.$id dialect keyword to be removed")
+	}
+	if !parsed.Get("properties.$id").Exists() {
+		t.Errorf("expected property named '$id' to be preserved")
+	}
+	if gotDefaultID := parsed.Get("properties.config.default.$id").String(); gotDefaultID != "default-id-123" {
+		t.Errorf("expected literal default.$id to be preserved, got %q", gotDefaultID)
+	}
+
+	// Test empty / null / invalid fallback
+	if emptyGot := normalizeToolParameters(""); emptyGot != `{"type":"object","properties":{}}` {
+		t.Errorf("expected empty string to normalize to empty object schema, got %s", emptyGot)
+	}
+	if nullGot := normalizeToolParameters("null"); nullGot != `{"type":"object","properties":{}}` {
+		t.Errorf("expected null to normalize to empty object schema, got %s", nullGot)
+	}
+
+	// Test array union type preservation (e.g. ["object", "null"])
+	unionInput := `{"type": ["object", "null"]}`
+	unionGot := normalizeToolParameters(unionInput)
+	unionParsed := gjson.Parse(unionGot)
+	typeArr := unionParsed.Get("type").Array()
+	if len(typeArr) != 2 || typeArr[0].String() != "object" || typeArr[1].String() != "null" {
+		t.Errorf("expected union type array to be preserved, got %s", unionParsed.Get("type").Raw)
+	}
+	if !unionParsed.Get("properties").Exists() {
+		t.Errorf("expected properties to be added when object is part of union type")
+	}
+}
+
+func TestConvertClaudeRequestToCodex_StripsNestedToolSchemaMeta(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-5",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [{
+			"name": "lookup",
+			"description": "Lookup",
+			"input_schema": {
+				"type": "object",
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"properties": {
+					"q": {
+						"type": "string",
+						"$schema": "http://json-schema.org/draft-07/schema#",
+						"$id": "https://example.invalid/q"
+					},
+					"tags": {
+						"type": "array",
+						"items": {"type": "string", "$id": "https://example.invalid/tag"}
+					},
+					"mode": {
+						"anyOf": [
+							{"type": "string", "$schema": "http://json-schema.org/draft-07/schema#"},
+							{"type": "null"}
+						]
+					}
+				},
+				"$defs": {
+					"hint": {"type": "string", "$id": "https://example.invalid/hint"}
+				},
+				"required": ["q"]
+			}
+		}]
+	}`
+
+	translated := ConvertClaudeRequestToCodex("gpt-5", []byte(inputJSON), false)
+	tools := gjson.GetBytes(translated, "tools").Array()
+	if len(tools) == 0 {
+		t.Fatalf("expected tools in translated payload, got: %s", translated)
+	}
+	params := tools[0].Get("parameters")
+	if params.Get("$schema").Exists() {
+		t.Errorf("expected root parameters.$schema to be removed, got %v", params.Get("$schema").Raw)
+	}
+	if params.Get("properties.q.$schema").Exists() {
+		t.Errorf("expected parameters.properties.q.$schema to be removed, got %v", params.Get("properties.q.$schema").Raw)
+	}
+	if params.Get("properties.q.$id").Exists() {
+		t.Errorf("expected parameters.properties.q.$id to be removed, got %v", params.Get("properties.q.$id").Raw)
+	}
+	if params.Get("properties.tags.items.$id").Exists() {
+		t.Errorf("expected parameters.properties.tags.items.$id to be removed, got %v", params.Get("properties.tags.items.$id").Raw)
+	}
+	if params.Get("properties.mode.anyOf.0.$schema").Exists() {
+		t.Errorf("expected parameters.properties.mode.anyOf.0.$schema to be removed, got %v", params.Get("properties.mode.anyOf.0.$schema").Raw)
+	}
+	if params.Get("$defs.hint.$id").Exists() {
+		t.Errorf("expected parameters.$defs.hint.$id to be removed, got %v", params.Get("$defs.hint.$id").Raw)
+	}
 }

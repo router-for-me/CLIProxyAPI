@@ -870,23 +870,52 @@ func (e *XAIWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(ctx
 		return nil, statusErr{code: http.StatusBadRequest, msg: "xai websocket compaction context is unavailable"}
 	}
 	transcriptInput := idMapper.state.snapshotTranscriptInput()
-	if len(transcriptInput) == 0 {
-		return nil, statusErr{code: http.StatusBadRequest, msg: "xai websocket compaction context is empty"}
+	var compactPayload []byte
+	var inputItemsCount int
+	keepPreviousResponseID := false
+	if len(transcriptInput) > 0 {
+		var errBuild error
+		compactPayload, errBuild = buildXAIWebsocketCompactionPayload(req.Payload, transcriptInput)
+		if errBuild != nil {
+			return nil, errBuild
+		}
+		inputItemsCount = len(gjson.ParseBytes(transcriptInput).Array())
+	} else {
+		filteredPayload := xaiRemoveInputItemsByType(req.Payload, "compaction_trigger")
+		payloadInput := gjson.GetBytes(filteredPayload, "input")
+		if payloadInput.IsArray() && len(payloadInput.Array()) > 0 {
+			var errBuild error
+			compactPayload, errBuild = buildXAIWebsocketCompactionPayload(filteredPayload, []byte(payloadInput.Raw))
+			if errBuild != nil {
+				return nil, errBuild
+			}
+			inputItemsCount = len(payloadInput.Array())
+		} else {
+			prevID := idMapper.upstreamPreviousID
+			if prevID == "" {
+				prevID = strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String())
+			}
+			if prevID != "" {
+				keepPreviousResponseID = true
+				compactPayload = bytes.Clone(req.Payload)
+				compactPayload = xaiRemoveInputItemsByType(compactPayload, "compaction_trigger")
+				compactPayload, _ = sjson.SetBytes(compactPayload, "previous_response_id", prevID)
+			} else {
+				return nil, statusErr{code: http.StatusBadRequest, msg: "xai websocket compaction context is empty"}
+			}
+		}
 	}
 	authID := ""
 	if auth != nil {
 		authID = auth.ID
 	}
 	log.Infof(
-		"xai websockets: compact fallback session=%s auth=%s input_items=%d",
+		"xai websockets: compact fallback session=%s auth=%s input_items=%d keep_previous_response_id=%t",
 		xaiExecutionSessionID(req, opts),
 		strings.TrimSpace(authID),
-		len(gjson.ParseBytes(transcriptInput).Array()),
+		inputItemsCount,
+		keepPreviousResponseID,
 	)
-	compactPayload, err := buildXAIWebsocketCompactionPayload(req.Payload, transcriptInput)
-	if err != nil {
-		return nil, err
-	}
 	compactReq := req
 	compactReq.Payload = compactPayload
 

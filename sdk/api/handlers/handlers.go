@@ -108,7 +108,7 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 	return payload
 }
 
-// StreamingKeepAliveInterval returns the SSE keep-alive interval for this server.
+// StreamingKeepAliveInterval returns the streaming keep-alive interval for this server (SSE heartbeats and WebSocket Ping frames).
 // Returning 0 disables keep-alives (default when unset).
 func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := defaultStreamingKeepAliveSeconds
@@ -208,6 +208,40 @@ func requestClientIP(request *http.Request) string {
 		return strings.TrimSpace(host)
 	}
 	return remoteAddr
+}
+
+func extractSessionIDsFromRequest(request *http.Request) (string, string) {
+	if request == nil || request.Header == nil {
+		return "", ""
+	}
+	if info, ok := coresession.ExtractSessionInfo(request.Header, nil, nil); ok {
+		return info.SessionID, info.ParentSessionID
+	}
+	return "", ""
+}
+
+// EnrichContextWithSessionHierarchy extracts canonical session and parent session identities
+// from headers, payload, and metadata and records them in ClientRequestMetadata.
+func EnrichContextWithSessionHierarchy(ctx context.Context, headers http.Header, payload []byte, metadata map[string]any) context.Context {
+	meta := logging.GetClientRequestMetadata(ctx)
+	if info, ok := coresession.ExtractSessionInfo(headers, payload, metadata); ok {
+		meta.SessionID = info.SessionID
+		meta.ParentSessionID = info.ParentSessionID
+		if meta.SessionID != "" && meta.SessionID == meta.ParentSessionID {
+			meta.ParentSessionID = ""
+		}
+		return logging.WithClientRequestMetadata(ctx, meta)
+	}
+	if meta.SessionID != "" || meta.ParentSessionID != "" {
+		meta.SessionID = ""
+		meta.ParentSessionID = ""
+		return logging.WithClientRequestMetadata(ctx, meta)
+	}
+	return ctx
+}
+
+func enrichContextWithSessionHierarchy(ctx context.Context, headers http.Header, payload []byte, metadata map[string]any) context.Context {
+	return EnrichContextWithSessionHierarchy(ctx, headers, payload, metadata)
 }
 
 func requestCallerScope(ginCtx *gin.Context) string {
@@ -431,10 +465,13 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		newCtx = logging.WithEndpoint(newCtx, endpoint)
 	}
 	if c != nil && c.Request != nil {
+		sessionID, parentSessionID := extractSessionIDsFromRequest(c.Request)
 		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ClientRequestMetadata{
-			ClientIP:      requestClientIP(c.Request),
-			XForwardedFor: strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
-			UserAgent:     strings.TrimSpace(c.Request.UserAgent()),
+			ClientIP:        requestClientIP(c.Request),
+			XForwardedFor:   strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
+			UserAgent:       strings.TrimSpace(c.Request.UserAgent()),
+			SessionID:       sessionID,
+			ParentSessionID: parentSessionID,
 		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)

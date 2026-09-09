@@ -6,8 +6,10 @@
 package claude
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -438,6 +440,12 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 		if s := format.Get("strict"); s.Exists() && s.Type == gjson.False {
 			strict = false
 		}
+		// OpenAI strict mode requires every declared property to be listed
+		// in required. Downgrade instead of emitting an unsatisfiable
+		// strict schema that strict backends reject with HTTP 400.
+		if strict && codexSchemaMissesRequired(format.Get("schema")) {
+			strict = false
+		}
 		translatedFormat := []byte(`{"type":"json_schema","name":"","strict":true,"schema":{}}`)
 		translatedFormat, _ = sjson.SetBytes(translatedFormat, "name", name)
 		translatedFormat, _ = sjson.SetBytes(translatedFormat, "strict", strict)
@@ -657,21 +665,178 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 	return m
 }
 
-// normalizeToolParameters ensures object schemas contain at least an empty properties map.
+// normalizeToolParameters ensures object schemas contain at least an empty properties map
+// and strips dialect keywords ($schema, $id) from schema objects.
 func normalizeToolParameters(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" || !gjson.Valid(raw) {
 		return `{"type":"object","properties":{}}`
 	}
-	result := gjson.Parse(raw)
-	schema := []byte(raw)
-	schemaType := result.Get("type").String()
-	if schemaType == "" {
-		schema, _ = sjson.SetBytes(schema, "type", "object")
-		schemaType = "object"
+	var root map[string]any
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if errDecode := decoder.Decode(&root); errDecode != nil || root == nil {
+		return `{"type":"object","properties":{}}`
 	}
-	if schemaType == "object" && !result.Get("properties").Exists() {
-		schema, _ = sjson.SetRawBytes(schema, "properties", []byte(`{}`))
+
+	stripDialectKeywordsFromSchema(root)
+
+	typeVal, typeExists := root["type"]
+	isObject := false
+	if !typeExists || typeVal == nil || typeVal == "" {
+		root["type"] = "object"
+		isObject = true
+	} else {
+		switch t := typeVal.(type) {
+		case string:
+			if t == "object" {
+				isObject = true
+			}
+		case []any:
+			for _, elem := range t {
+				if elemStr, ok := elem.(string); ok && elemStr == "object" {
+					isObject = true
+					break
+				}
+			}
+		}
 	}
-	return string(schema)
+	if isObject {
+		if props, ok := root["properties"]; !ok || props == nil {
+			root["properties"] = map[string]any{}
+		}
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if errEncode := enc.Encode(root); errEncode != nil {
+		return `{"type":"object","properties":{}}`
+	}
+	return strings.TrimSpace(buf.String())
+}
+
+func stripDialectKeywordsFromSchema(v any) {
+	switch schema := v.(type) {
+	case map[string]any:
+		delete(schema, "$schema")
+		delete(schema, "$id")
+
+		for _, mapKey := range codexSchemaMapKeywords {
+			if subMap, ok := schema[mapKey].(map[string]any); ok {
+				for _, subSchema := range subMap {
+					stripDialectKeywordsFromSchema(subSchema)
+				}
+			}
+		}
+
+		for _, valKey := range codexSchemaValueKeywords {
+			if val, exists := schema[valKey]; exists {
+				switch sub := val.(type) {
+				case map[string]any:
+					stripDialectKeywordsFromSchema(sub)
+				case []any:
+					for _, item := range sub {
+						stripDialectKeywordsFromSchema(item)
+					}
+				}
+			}
+		}
+	case []any:
+		for _, item := range schema {
+			stripDialectKeywordsFromSchema(item)
+		}
+	}
+}
+
+// codexSchemaMapKeywords holds JSON Schema keywords whose values are maps of
+// subschemas; codexSchemaValueKeywords holds keywords with a single nested
+// schema or a list of schemas.
+var codexSchemaMapKeywords = [...]string{
+	"properties",
+	"$defs",
+	"definitions",
+	"patternProperties",
+	"dependentSchemas",
+	"dependencies",
+}
+
+var codexSchemaValueKeywords = [...]string{
+	"items",
+	"prefixItems",
+	"contains",
+	"additionalProperties",
+	"propertyNames",
+	"unevaluatedProperties",
+	"unevaluatedItems",
+	"additionalItems",
+	"contentSchema",
+	"anyOf",
+	"oneOf",
+	"allOf",
+	"not",
+	"if",
+	"then",
+	"else",
+}
+
+// codexSchemaMissesRequired reports whether a JSON Schema has any declared
+// property missing from its sibling required list (recursively). OpenAI
+// strict mode rejects such schemas with HTTP 400, so callers downgrade
+// text.format.strict instead of emitting an unsatisfiable schema.
+func codexSchemaMissesRequired(schema gjson.Result) bool {
+	if !schema.IsObject() {
+		if schema.IsArray() {
+			miss := false
+			schema.ForEach(func(_, child gjson.Result) bool {
+				if codexSchemaMissesRequired(child) {
+					miss = true
+					return false
+				}
+				return true
+			})
+			return miss
+		}
+		return false
+	}
+	if properties := schema.Get("properties"); properties.IsObject() {
+		required := schema.Get("required")
+		if !required.IsArray() {
+			return len(properties.Map()) > 0
+		}
+		names := make(map[string]struct{}, len(required.Array()))
+		for _, item := range required.Array() {
+			if item.Type == gjson.String {
+				names[item.String()] = struct{}{}
+			}
+		}
+		for name := range properties.Map() {
+			if _, ok := names[name]; !ok {
+				return true
+			}
+		}
+	}
+	for _, keyword := range codexSchemaMapKeywords {
+		children := schema.Get(keyword)
+		if !children.IsObject() {
+			continue
+		}
+		miss := false
+		children.ForEach(func(_, child gjson.Result) bool {
+			if codexSchemaMissesRequired(child) {
+				miss = true
+				return false
+			}
+			return true
+		})
+		if miss {
+			return true
+		}
+	}
+	for _, keyword := range codexSchemaValueKeywords {
+		if child := schema.Get(keyword); child.Exists() && codexSchemaMissesRequired(child) {
+			return true
+		}
+	}
+	return false
 }

@@ -976,3 +976,44 @@ func TestConvertClaudeRequestToOpenAI_StopSequences(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_ToolWithoutInputSchemaDefaultsParameters(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-opus-5",
+		"tools": [
+			{
+				"type": "web_search_20250305",
+				"name": "web_search",
+				"max_uses": 8
+			},
+			{
+				"name": "no_schema_custom"
+			},
+			{
+				"name": "null_schema_custom",
+				"input_schema": null
+			}
+		],
+		"messages": [{"role": "user", "content": "hello"}]
+	}`)
+
+	output := ConvertClaudeRequestToOpenAI("test-model", inputJSON, false)
+	outputJSON := gjson.ParseBytes(output)
+
+	for i, toolName := range []string{"web_search", "no_schema_custom", "null_schema_custom"} {
+		path := fmt.Sprintf("tools.%d.function", i)
+		if got := outputJSON.Get(path + ".name").String(); got != toolName {
+			t.Fatalf("tool %d name = %q, want %q", i, got, toolName)
+		}
+		params := outputJSON.Get(path + ".parameters")
+		if !params.Exists() {
+			t.Fatalf("tool %d function.parameters missing: %s", i, outputJSON.Get(path).Raw)
+		}
+		if got := params.Get("type").String(); got != "object" {
+			t.Fatalf("tool %d function.parameters.type = %q, want object", i, got)
+		}
+		if got := params.Get("properties"); !got.Exists() || !got.IsObject() {
+			t.Fatalf("tool %d function.parameters.properties missing or not object: %s", i, params.Raw)
+		}
+	}
+}
