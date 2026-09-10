@@ -203,6 +203,7 @@ disable-image-generation: false
 video-result-auth-cache-ttl: "3h"
 
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
+# Also limits concurrent refreshes within each management refresh-all batch.
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
 
