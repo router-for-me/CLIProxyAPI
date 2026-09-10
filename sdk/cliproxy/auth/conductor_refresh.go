@@ -538,7 +538,9 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		updated.Runtime = auth.Runtime
 	}
 	updated.LastRefreshedAt = now
-	updated.NextRefreshAfter = time.Time{}
+	if !updated.NextRefreshAfter.After(now) {
+		updated.NextRefreshAfter = time.Time{}
+	}
 	updated.LastError = nil
 	updated.StatusMessage = ""
 	updated.Unavailable = false
