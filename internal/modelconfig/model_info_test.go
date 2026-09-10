@@ -55,7 +55,11 @@ func TestResolveModelInfoUnknownModelKeepsMissingCapability(t *testing.T) {
 	if info.Thinking != nil {
 		t.Fatalf("unknown model thinking = %+v, want nil", info.Thinking)
 	}
-	if info.UserDefined {
-		t.Fatal("unknown configured model must use its exact bound capability")
+	// A model the bundled catalog does not carry has unknown — not proven absent —
+	// reasoning capability, so the snapshot stays user-defined and the caller's
+	// thinking configuration reaches the upstream for validation. See
+	// model_info_unknown_thinking_test.go for the end-to-end guarantee.
+	if !info.UserDefined {
+		t.Fatal("unknown configured model must keep unknown capability semantics")
 	}
 }
