@@ -113,6 +113,26 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 	if errBegin != nil {
 		t.Fatal(errBegin)
 	}
+	t.Cleanup(pending.End)
+	// A bound resource signals the actual start of Drain without creating
+	// unresolved dispatch tokens while polling for the registry's state.
+	observerPending, errObserver := registry.BeginDispatch()
+	if errObserver != nil {
+		t.Fatal(errObserver)
+	}
+	observer, errInstall := registry.Install(observerPending, executionregistry.ScopeSpec{RequestID: "drain-observer"})
+	if errInstall != nil {
+		observerPending.End()
+		t.Fatal(errInstall)
+	}
+	t.Cleanup(func() { observer.End("test-cleanup") })
+	drainStarted := make(chan struct{})
+	if errBind := observer.Bind(func() error {
+		close(drainStarted)
+		return nil
+	}); errBind != nil {
+		t.Fatal(errBind)
+	}
 	_, oldCancel := context.WithCancel(context.Background())
 	t.Cleanup(oldCancel)
 	cfg := &config.Config{}
@@ -130,16 +150,12 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 		service.startHomeSubscriber(ctx)
 		close(firstReturned)
 	}()
-	deadline := time.Now().Add(time.Second)
-	for {
-		if _, errLate := registry.BeginDispatch(); errLate != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("first replacement did not begin draining")
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case <-drainStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first replacement did not begin draining")
 	}
+	observer.End("drain-observed")
 
 	secondReturned := make(chan struct{})
 	go func() {
@@ -157,6 +173,12 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 	case <-firstReturned:
 	case <-time.After(time.Second):
 		t.Fatal("first replacement did not complete after its drain")
+	}
+	// A replacement must drain successfully, not merely return after its timeout.
+	checkCtx, cancelCheck := context.WithCancel(context.Background())
+	cancelCheck()
+	if errClosed := registry.Drain(checkCtx); !errors.Is(errClosed, executionregistry.ErrRegistryClosed) {
+		t.Fatalf("replacement returned without closing the registry: %v", errClosed)
 	}
 	select {
 	case <-secondReturned:
