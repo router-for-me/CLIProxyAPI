@@ -246,6 +246,9 @@ func isHierarchyParent(primary, fallback string) bool {
 	if idx1 > 0 && idx2 > 0 && primary[:idx1] == fallback[:idx2] {
 		return true
 	}
+	if idx1 == -1 && idx2 == -1 {
+		return true
+	}
 	return false
 }
 

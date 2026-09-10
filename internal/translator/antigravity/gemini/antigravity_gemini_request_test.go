@@ -1177,3 +1177,92 @@ func TestNormalizeRoles_InvalidRoleWithFunctionResponseNormalizesToUser(t *testi
 		}
 	}
 }
+
+func TestConvertGeminiRequestToAntigravity_TranslatesResponseJsonSchemaToResponseSchema(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputJSON string
+	}{
+		{
+			name: "camelCase responseJsonSchema",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generationConfig": {
+					"responseMimeType": "application/json",
+					"responseJsonSchema": {
+						"type": "OBJECT",
+						"properties": {"message": {"type": "STRING"}},
+						"required": ["message"]
+					}
+				}
+			}`,
+		},
+		{
+			name: "snake_case response_json_schema",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generationConfig": {
+					"responseMimeType": "application/json",
+					"response_json_schema": {
+						"type": "OBJECT",
+						"properties": {"message": {"type": "STRING"}},
+						"required": ["message"]
+					}
+				}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertGeminiRequestToAntigravity("gemini-3-flash", []byte(tt.inputJSON), false)
+
+			schema := gjson.GetBytes(out, "request.generationConfig.responseSchema")
+			if !schema.Exists() {
+				t.Fatalf("request.generationConfig.responseSchema missing. Output: %s", out)
+			}
+			if got := schema.Get("properties.message.type").String(); got != "STRING" {
+				t.Fatalf("responseSchema.properties.message.type = %q, want STRING. Output: %s", got, out)
+			}
+			if gjson.GetBytes(out, "request.generationConfig.responseJsonSchema").Exists() {
+				t.Fatalf("request.generationConfig.responseJsonSchema should have been removed. Output: %s", out)
+			}
+			if gjson.GetBytes(out, "request.generationConfig.response_json_schema").Exists() {
+				t.Fatalf("request.generationConfig.response_json_schema should have been removed. Output: %s", out)
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_PreservesExistingResponseSchema(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"generationConfig": {
+			"responseMimeType": "application/json",
+			"responseSchema": {
+				"type": "OBJECT",
+				"properties": {"name": {"type": "STRING"}},
+				"required": ["name"]
+			},
+			"responseJsonSchema": {
+				"type": "OBJECT",
+				"properties": {"stale": {"type": "STRING"}}
+			}
+		}
+	}`)
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+
+	schema := gjson.GetBytes(out, "request.generationConfig.responseSchema")
+	if !schema.Exists() {
+		t.Fatalf("request.generationConfig.responseSchema missing. Output: %s", out)
+	}
+	if got := schema.Get("properties.name.type").String(); got != "STRING" {
+		t.Fatalf("responseSchema.properties.name.type = %q, want STRING. Output: %s", got, out)
+	}
+	if schema.Get("properties.stale").Exists() {
+		t.Fatalf("stale properties survived. Output: %s", out)
+	}
+	if gjson.GetBytes(out, "request.generationConfig.responseJsonSchema").Exists() {
+		t.Fatalf("request.generationConfig.responseJsonSchema should have been removed. Output: %s", out)
+	}
+}

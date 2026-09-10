@@ -29,6 +29,7 @@ type pendingRequest struct {
 	done       chan struct{}
 	reqCtx     context.Context
 	stopCancel func() bool
+	onBlocked  func()
 }
 
 func newPendingRequest(ctx context.Context) *pendingRequest {
@@ -67,6 +68,12 @@ func (pr *pendingRequest) deliver(sessClosed <-chan struct{}, msg Message) bool 
 		ctxDone = pr.reqCtx.Done()
 	}
 
+	if pr.onBlocked != nil && len(pr.ch) == cap(pr.ch) {
+		fn := pr.onBlocked
+		pr.onBlocked = nil
+		fn()
+	}
+
 	select {
 	case <-pr.done:
 		return false
@@ -86,26 +93,41 @@ func (pr *pendingRequest) deliverTerminal(sessClosed <-chan struct{}, msg Messag
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	pr.ensureInitializedLocked(nil)
-	if pr.closed {
+	if pr.closed || pr.terminal {
 		return false
 	}
-	pr.terminal = true
+
+	var ctxDone <-chan struct{}
+	if pr.reqCtx != nil {
+		ctxDone = pr.reqCtx.Done()
+	}
+
+	if pr.onBlocked != nil && len(pr.ch) == cap(pr.ch) {
+		fn := pr.onBlocked
+		pr.onBlocked = nil
+		fn()
+	}
 
 	select {
+	case <-pr.done:
+		return false
+	case <-sessClosed:
+		return false
+	case <-ctxDone:
+		return false
 	case pr.ch <- msg:
+		pr.terminal = true
 		return true
-	default:
-		select {
-		case <-pr.ch:
-		default:
-		}
-		select {
-		case pr.ch <- msg:
-			return true
-		default:
-			return false
-		}
 	}
+}
+
+func (pr *pendingRequest) setOnBlocked(fn func()) {
+	if pr == nil {
+		return
+	}
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	pr.onBlocked = fn
 }
 
 func (pr *pendingRequest) setStopCancel(stop func() bool) {
@@ -267,10 +289,33 @@ func (s *session) dispatch(msg Message) {
 		req := value.(*pendingRequest)
 		isTerminal := msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd
 		if isTerminal {
-			req.deliverTerminal(s.closed, msg)
+			delivered := req.deliverTerminal(s.closed, msg)
 			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
 				actualReq := actual.(*pendingRequest)
-				actualReq.close()
+				if delivered {
+					actualReq.close()
+				} else {
+					var cause error
+					select {
+					case <-s.closed:
+						cause = errClosed
+					default:
+						if actualReq.reqCtx != nil && actualReq.reqCtx.Err() != nil {
+							cause = actualReq.reqCtx.Err()
+						} else if msg.Type == MessageTypeError {
+							if errMsg, ok := msg.Payload["error"].(string); ok && errMsg != "" {
+								cause = errors.New(errMsg)
+							} else {
+								cause = errors.New("wsrelay: upstream error")
+							}
+						}
+					}
+					if cause != nil {
+						actualReq.cancelWithError(cause)
+					} else {
+						actualReq.cancel()
+					}
+				}
 			}
 		} else {
 			req.deliver(s.closed, msg)

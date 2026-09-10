@@ -301,3 +301,52 @@ func assertCodexSpawnAgentOptimization(t *testing.T, payload []byte, modelID str
 		t.Fatalf("disabled optimization removed message encrypted: %s", encrypted.Raw)
 	}
 }
+
+func TestCodexExecutorOptimizeMultiAgentV2RestoresDottedFlatToolName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		completed := `data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"function_call","name":"collaboration-optimize.spawn_agent","namespace":null,"arguments":"{}","call_id":"call_1"}]}}` + "\n\n"
+		_, _ = w.Write([]byte(completed))
+	}))
+	defer server.Close()
+
+	payload := codexSpawnAgentTestPayload()
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}})
+	ctx := codexSpawnAgentTestContext()
+	headers := http.Header{"User-Agent": []string{"overridden-client/1.0"}}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Headers: headers}
+
+	// Test streaming execution
+	result, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	var streamClientPayload []byte
+	for chunk := range result.Chunks {
+		streamClientPayload = append(streamClientPayload, chunk.Payload...)
+	}
+	assertCodexSpawnAgentClientNamespace(t, streamClientPayload)
+	if name := gjson.GetBytes(streamClientPayload, "response.output.0.name").String(); name != "spawn_agent" {
+		t.Fatalf("stream output name = %q, want spawn_agent", name)
+	}
+
+	// Test non-streaming execution
+	response, errExecute := executor.Execute(ctx, auth, req, opts)
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	assertCodexSpawnAgentClientNamespace(t, response.Payload)
+	executeName := gjson.GetBytes(response.Payload, "output.0.name").String()
+	if executeName == "" {
+		executeName = gjson.GetBytes(response.Payload, "response.output.0.name").String()
+	}
+	if executeName != "spawn_agent" {
+		t.Fatalf("execute output name = %q, want spawn_agent; payload=%s", executeName, response.Payload)
+	}
+}

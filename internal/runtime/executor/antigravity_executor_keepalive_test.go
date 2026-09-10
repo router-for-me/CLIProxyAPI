@@ -63,7 +63,15 @@ func TestAntigravityExecuteStreamReusesUpstreamConnection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	enabledPool := true
+	exec := NewAntigravityExecutor(&config.Config{
+		RequestRetry: 1,
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabledPool,
+			},
+		},
+	})
 	auth := &cliproxyauth.Auth{
 		ID:         "antigravity-keepalive-auth",
 		Provider:   "antigravity",
@@ -135,7 +143,15 @@ func TestAntigravityCountTokensReusesUpstreamConnection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	enabledCountPool := true
+	exec := NewAntigravityExecutor(&config.Config{
+		RequestRetry: 1,
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabledCountPool,
+			},
+		},
+	})
 	auth := &cliproxyauth.Auth{
 		ID:         "antigravity-counttokens-auth",
 		Provider:   "antigravity",
@@ -198,7 +214,14 @@ func TestAntigravityHTTPRequestReusesUpstreamConnection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	exec := NewAntigravityExecutor(&config.Config{})
+	enabledHTTPPool := true
+	exec := NewAntigravityExecutor(&config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabledHTTPPool,
+			},
+		},
+	})
 	auth := &cliproxyauth.Auth{
 		ID:       "antigravity-http-request-auth",
 		Provider: "antigravity",
@@ -339,6 +362,66 @@ func TestAntigravityHTTPRequestConcurrentSessionsStayIsolated(t *testing.T) {
 	for err := range errs {
 		if err != nil {
 			t.Error(err)
+		}
+	}
+}
+
+// TestAntigravityDefaultConfigDisablesPoolingAndClosesConnections verifies that by default
+// (no connection-pool configuration, or enabled: false), connection pooling is disabled.
+// Every request uses a new connection, and the wire request never emits Connection: close.
+func TestAntigravityDefaultConfigDisablesPoolingAndClosesConnections(t *testing.T) {
+	var mu sync.Mutex
+	remotes := map[string]int{}
+	var connectionHeaders []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		remotes[r.RemoteAddr]++
+		connectionHeaders = append(connectionHeaders, r.Header.Get("Connection"))
+		mu.Unlock()
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	// Default config has ConnectionPool.Enabled = nil, which defaults to false (disabled)
+	exec := NewAntigravityExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "antigravity-default-short-auth",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	const requests = 4
+	for i := 0; i < requests; i++ {
+		req, errRequest := http.NewRequest(http.MethodPost, server.URL, nil)
+		if errRequest != nil {
+			t.Fatalf("request %d: NewRequest() error = %v", i, errRequest)
+		}
+		resp, errDo := exec.HttpRequest(context.Background(), auth, req)
+		if errDo != nil {
+			t.Fatalf("request %d: HttpRequest() error = %v", i, errDo)
+		}
+		_ = resp.Body.Close()
+	}
+
+	mu.Lock()
+	distinct := len(remotes)
+	headers := append([]string(nil), connectionHeaders...)
+	mu.Unlock()
+
+	// With pooling disabled by default, every request opens a fresh connection
+	if distinct != requests {
+		t.Fatalf("default disabled pool: expected %d distinct connections, got %d", requests, distinct)
+	}
+
+	// Must never leak Connection: close header to upstream
+	for i, h := range headers {
+		if strings.Contains(strings.ToLower(h), "close") {
+			t.Fatalf("request %d leaked Connection: close header: %q", i, h)
 		}
 	}
 }

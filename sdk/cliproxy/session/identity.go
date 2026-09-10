@@ -40,6 +40,94 @@ type canonicalPart struct {
 	Value string `json:"value"`
 }
 
+var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// CandidateSessionPrefixes lists recognized protocol-specific session prefixes used in affinity lookup and routing.
+var CandidateSessionPrefixes = []string{
+	"lcp:v1:", "lcp:",
+	"codex:", "claude:", "header:", "session:",
+	"affinity:", "slot:", "task:", "conv:",
+	"thread:", "clientreq:", "geminicache:",
+	"pck:", "user:", "execution:", "agy:", "derived:",
+}
+
+// knownSessionPrefixes tracks legacy protocol-specific session prefixes that need to be
+// unwrapped before projecting to canonical UUIDv8.
+// Deprecated: This transitional table and string-stripping mechanism are scheduled to be
+// removed once session extraction directly produces canonical UUIDv8s at ingress.
+var knownSessionPrefixes = []string{
+	"lcp:v1:", "lcp:",
+	"ctx:v1:", "ctx:",
+	"codex:", "claude:", "header:", "session:",
+	"affinity:", "slot:", "task:", "conv:",
+	"thread:", "clientreq:", "geminicache:",
+	"pck:", "user:", "execution:", "agy:", "derived:",
+}
+
+// NormalizeToCanonicalUUID deterministically normalizes any session identifier to a
+// canonical 36-character lowercase UUID (RFC 4122 / RFC 9562 compliant):
+//  1. If rawID (or rawID without known protocol prefix) is already a standard UUID (e.g. Codex UUIDv7,
+//     Claude UUIDv4, Header UUID), it strips the prefix and returns the lowercase UUID.
+//  2. If rawID has known protocol prefixes, they are stripped iteratively (supporting chained
+//     wrappers such as "derived:ctx:v1:"). If no identifier remains after stripping, it returns empty.
+//  3. If rawID is not a standard UUID (e.g. LCP 64-hex hash, subagent hierarchy, or custom string),
+//     it deterministically projects it to an RFC 9562 UUIDv8 using SHA-256 with domain separation.
+//  4. Idempotent: NormalizeToCanonicalUUID(NormalizeToCanonicalUUID(x)) == NormalizeToCanonicalUUID(x).
+func NormalizeToCanonicalUUID(rawID string) string {
+	clean := strings.TrimSpace(rawID)
+	if clean == "" {
+		return ""
+	}
+
+	// 1. Direct UUID match (already clean UUID)
+	if canonicalUUIDPattern.MatchString(clean) {
+		return strings.ToLower(clean)
+	}
+
+	// 2. Strip known protocol prefixes iteratively to unwrap layered prefixes (e.g., "derived:ctx:v1:...").
+	// TODO: Deprecate and remove this legacy prefix stripping once all session extractors
+	// natively emit canonical UUIDv8 at the protocol ingress boundary.
+	for {
+		stripped := false
+		for _, p := range knownSessionPrefixes {
+			if strings.HasPrefix(clean, p) {
+				clean = strings.TrimPrefix(clean, p)
+				clean = strings.TrimSpace(clean)
+				stripped = true
+				break
+			}
+		}
+		if !stripped {
+			break
+		}
+	}
+	// If only prefix was provided without an identifier body (e.g. "slot:", "task:"), return empty
+	// rather than projecting empty string into a shared ghost UUIDv8.
+	if clean == "" {
+		return ""
+	}
+	if canonicalUUIDPattern.MatchString(clean) {
+		return strings.ToLower(clean)
+	}
+
+	// 3. Check if any generic prefix "prefix:<uuid>" exists
+	if idx := strings.Index(clean, ":"); idx > 0 {
+		candidate := strings.TrimSpace(clean[idx+1:])
+		if canonicalUUIDPattern.MatchString(candidate) {
+			return strings.ToLower(candidate)
+		}
+	}
+
+	// 4. Deterministic projection to RFC 9562 UUIDv8 for LCP hashes and arbitrary non-UUID strings
+	sum := sha256.Sum256([]byte("cpa:canonical-uuid:v1\x00" + clean))
+	u := [16]byte(sum[:16])
+	u[6] = (u[6] & 0x0f) | 0x80 // RFC 9562 Version 8
+	u[8] = (u[8] & 0x3f) | 0x80 // RFC 4122 / RFC 9562 Variant
+
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
 // NormalizeExplicitID validates an explicit client-provided session identifier.
 // It preserves opaque printable values while rejecting oversized or control-bearing IDs.
 func NormalizeExplicitID(raw string) string {
@@ -75,11 +163,32 @@ func ClaudeMetadataIdentities(payload []byte) (sessionID, parentSessionID, agent
 		parsed := gjson.Parse(userID)
 		sessionID = NormalizeExplicitID(parsed.Get("session_id").String())
 		parentSessionID = NormalizeExplicitID(parsed.Get("parent_session_id").String())
+		if parentSessionID == "" {
+			parentSessionID = NormalizeExplicitID(parsed.Get("parent_agent_id").String())
+		}
+		if parentSessionID == "" {
+			parentSessionID = NormalizeExplicitID(parsed.Get("parent_id").String())
+		}
 		agentID = NormalizeExplicitID(parsed.Get("agent_id").String())
+		if agentID == "" {
+			agentID = NormalizeExplicitID(parsed.Get("subagent_id").String())
+		}
 		return sessionID, parentSessionID, agentID
 	}
 	if matches := legacyClaudeSessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
-		return NormalizeExplicitID(matches[1]), "", ""
+		sid := NormalizeExplicitID(matches[1])
+		pAgent := NormalizeExplicitID(root.Get("metadata.parent_agent_id").String())
+		if pAgent == "" {
+			pAgent = NormalizeExplicitID(root.Get("metadata.parent_session_id").String())
+		}
+		if pAgent == "" {
+			pAgent = NormalizeExplicitID(root.Get("metadata.parent_id").String())
+		}
+		ag := NormalizeExplicitID(root.Get("metadata.agent_id").String())
+		if ag == "" {
+			ag = NormalizeExplicitID(root.Get("metadata.subagent_id").String())
+		}
+		return sid, pAgent, ag
 	}
 	return "", "", ""
 }
@@ -240,17 +349,30 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 		"Session_id",
 		"x-codex-parent-thread-id",
 		"X-Codex-Parent-Thread-Id",
+		"X-Codex-Turn-Metadata",
+		"X-Openai-Subagent",
 		"X-Http-Session-Id",
 		"X-Session-ID",
 		"X-Session-Affinity",
 		"X-Parent-Session-ID",
 		"X-Parent-Session-Id",
 		"X-Parent-Session-Affinity",
+		"X-Parent-ID",
+		"X-Parent-Id",
 		"X-Slot-Session-Id",
+		"X-Parent-Slot-Session-Id",
+		"X-Task-ID",
+		"X-Task-Id",
+		"X-Parent-Task-ID",
+		"X-Parent-Task-Id",
 		"X-Conversation-Id",
 		"X-Conversation-ID",
+		"X-Parent-Conversation-Id",
+		"X-Parent-Conversation-ID",
 		"X-Thread-Id",
 		"X-Thread-ID",
+		"X-Parent-Thread-Id",
+		"X-Parent-Thread-ID",
 		"Thread-Id",
 		"X-Client-Request-Id",
 	} {
@@ -274,6 +396,13 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 		"session_id",
 		"sessionId",
 		"sessionID",
+		"child_session_id",
+		"childSessionId",
+		"task_id",
+		"taskId",
+		"taskID",
+		"action_id",
+		"actionId",
 		"cachedContent",
 		"cached_content",
 		"thread_id",
@@ -288,12 +417,33 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 		"parentSessionId",
 		"parent_thread_id",
 		"parentThreadId",
+		"parent_id",
+		"parentId",
+		"parentID",
+		"parent_task_id",
+		"parentTaskId",
+		"parent_action_id",
+		"parentActionId",
+		"parent_session",
+		"parentSession",
+		"parent_subagent_id",
+		"forkSource.sessionId",
+		"previousSessionId",
 		"forked_from_thread_id",
 		"forked_from_id",
 		"metadata.session_id",
+		"metadata.sessionId",
+		"metadata.task_id",
+		"metadata.taskId",
 		"metadata.thread_id",
 		"metadata.conversation_id",
+		"metadata.parent_id",
+		"metadata.parent_task_id",
+		"metadata.parent_agent_id",
 		"extra_body.session_id",
+		"extra_body.task_id",
+		"extra_body.parent_id",
+		"extra_body.parent_task_id",
 	} {
 		if NormalizeExplicitID(root.Get(path).String()) != "" {
 			return true

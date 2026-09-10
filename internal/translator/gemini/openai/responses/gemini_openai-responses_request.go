@@ -50,10 +50,11 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Convert input messages to Gemini contents format
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		inputItems, hasGeminiCarrier := normalizeGeminiResponsesCarriers(input.Array())
+		inputItems, hasGeminiCarrier := normalizeGeminiResponsesCarriers(restoreGeminiResponsesTextSignatures(modelName, input.Array()))
 		if hasGeminiCarrier {
 			useGeminiNativeReasoningLayout = true
 		}
+		inputItems = translatorcommon.NormalizeResponsesToolCallOutputs(inputItems)
 		items := pairOpenAIResponsesReasoningWithFunctionCalls(inputItems)
 		contentItems := make([][]byte, 0, len(items))
 		functionNamesByCallID := make(map[string]string)
@@ -61,7 +62,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		for _, item := range items {
 			itemType := item.Get("type").String()
 			if itemType == "function_call" || itemType == "custom_tool_call" {
-				callID := item.Get("call_id").String()
+				callID := extractOpenAIResponsesCallID(item)
 				if _, exists := functionNamesByCallID[callID]; !exists {
 					name := item.Get("name").String()
 					if ns := item.Get("namespace").String(); ns != "" {
@@ -279,7 +280,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				} else {
 					contentItems = append(contentItems, buildOpenAIResponsesFunctionCallModelContent(item, signature, forwardMap))
 				}
-				if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+				if callID := extractOpenAIResponsesCallID(item); callID != "" {
 					pendingFunctionCallIDs = append(pendingFunctionCallIDs, callID)
 				}
 
@@ -327,7 +328,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						i++
 					} else if (next.Get("type").String() == "function_call" || next.Get("type").String() == "custom_tool_call") && canBindFunction && strings.TrimSpace(next.Get("_cpa_reasoning_signature").String()) == "" && signature != geminiResponsesThoughtSignature {
 						contentItems = append(contentItems, buildOpenAIResponsesReasoningFunctionCallModelContent(thoughtText, next, signature, forwardMap))
-						if callID := strings.TrimSpace(next.Get("call_id").String()); callID != "" {
+						if callID := extractOpenAIResponsesCallID(next); callID != "" {
 							pendingFunctionCallIDs = append(pendingFunctionCallIDs, callID)
 						}
 						i++
@@ -623,12 +624,12 @@ func pairOpenAIResponsesReasoningWithFunctionCalls(items []gjson.Result) []gjson
 					postCallCarrier[carrierEnd] = true
 					carrierEnd++
 				}
-				callID := strings.TrimSpace(item.Get("call_id").String())
+				callID := extractOpenAIResponsesCallID(item)
 				if callID == "" {
 					continue
 				}
 				for outputIndex := groupEnd; outputIndex < outputEnd; outputIndex++ {
-					if strings.TrimSpace(items[outputIndex].Get("call_id").String()) == callID {
+					if extractOpenAIResponsesCallID(items[outputIndex]) == callID {
 						postCallSignature[callIndex] = strings.TrimSpace(items[callIndex+1].Get("encrypted_content").String())
 						consumedPostCallCarrier[callIndex+1] = true
 						break
@@ -742,7 +743,7 @@ func buildOpenAIResponsesFunctionCallPart(item gjson.Result, signature string, f
 	functionCall := []byte(`{"functionCall":{"name":"","args":{}}}`)
 	functionCall, _ = sjson.SetBytes(functionCall, "functionCall.name", name)
 	functionCall, _ = sjson.SetBytes(functionCall, "thoughtSignature", signature)
-	functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", item.Get("call_id").String())
+	functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", extractOpenAIResponsesCallID(item))
 
 	if item.Get("type").String() == "custom_tool_call" {
 		inputVal := item.Get("input")
@@ -903,11 +904,17 @@ func parseOpenAIResponsesArrayOutput(outputResult gjson.Result) (result string, 
 	}
 }
 
+func extractOpenAIResponsesCallID(node gjson.Result) string {
+	return translatorcommon.ExtractResponsesCallID(node)
+}
+
 func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesByCallID map[string]string) [][]byte {
-	callID := item.Get("call_id").String()
+	callID := extractOpenAIResponsesCallID(item)
 	functionName := "unknown"
 	if matchedName, ok := functionNamesByCallID[callID]; ok {
 		functionName = matchedName
+	} else if name := strings.TrimSpace(item.Get("name").String()); name != "" {
+		functionName = name
 	}
 	functionResponse := []byte(`{"functionResponse":{"name":"","response":{}}}`)
 	functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.name", util.SanitizeFunctionName(functionName))
@@ -976,7 +983,7 @@ func orderOpenAIResponsesFunctionCallOutputs(outputs []gjson.Result, pendingCall
 	for _, pendingID := range pendingCallIDs {
 		match := -1
 		for outputIndex, output := range outputs {
-			if !used[outputIndex] && output.Get("call_id").String() == pendingID {
+			if !used[outputIndex] && extractOpenAIResponsesCallID(output) == pendingID {
 				match = outputIndex
 				break
 			}

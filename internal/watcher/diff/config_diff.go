@@ -108,6 +108,31 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !reflect.DeepEqual(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: %d -> %d", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
 	}
+	oldEnabled := "<nil>"
+	if oldCfg.Antigravity.ConnectionPool.Enabled != nil {
+		oldEnabled = fmt.Sprintf("%t", *oldCfg.Antigravity.ConnectionPool.Enabled)
+	}
+	newEnabled := "<nil>"
+	if newCfg.Antigravity.ConnectionPool.Enabled != nil {
+		newEnabled = fmt.Sprintf("%t", *newCfg.Antigravity.ConnectionPool.Enabled)
+	}
+	if oldEnabled != newEnabled {
+		changes = append(changes, fmt.Sprintf("antigravity.connection-pool.enabled: %s -> %s", oldEnabled, newEnabled))
+	}
+	if oldCfg.Antigravity.ConnectionPool.IdleConnTimeout != newCfg.Antigravity.ConnectionPool.IdleConnTimeout {
+		changes = append(changes, fmt.Sprintf("antigravity.connection-pool.idle-conn-timeout: %q -> %q", oldCfg.Antigravity.ConnectionPool.IdleConnTimeout, newCfg.Antigravity.ConnectionPool.IdleConnTimeout))
+	}
+	oldMaxIdle := "<nil>"
+	if oldCfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost != nil {
+		oldMaxIdle = fmt.Sprintf("%d", *oldCfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost)
+	}
+	newMaxIdle := "<nil>"
+	if newCfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost != nil {
+		newMaxIdle = fmt.Sprintf("%d", *newCfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost)
+	}
+	if oldMaxIdle != newMaxIdle {
+		changes = append(changes, fmt.Sprintf("antigravity.connection-pool.max-idle-conns-per-host: %s -> %s", oldMaxIdle, newMaxIdle))
+	}
 
 	if oldCfg.Codex.IdentityConfuse != newCfg.Codex.IdentityConfuse {
 		changes = append(changes, fmt.Sprintf("codex.identity-confuse: %t -> %t", oldCfg.Codex.IdentityConfuse, newCfg.Codex.IdentityConfuse))

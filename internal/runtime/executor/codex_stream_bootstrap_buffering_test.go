@@ -19,6 +19,7 @@ import (
 
 const (
 	codexOverloadEvent      = `{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2}`
+	codexCapacityEvent      = `{"type":"error","error":{"message":"Selected model is at capacity. Please try a different model."},"sequence_number":2}`
 	codexInvalidEvent       = `{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid input."},"sequence_number":2}`
 	codexCreatedEvent       = `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-terra"}}`
 	codexInProgressEvent    = `{"type":"response.in_progress","response":{"id":"resp_1"}}`
@@ -123,6 +124,24 @@ func TestCodexExecutor_BootstrapBuffering_OverloadFailsAttemptWithoutLeakingHand
 	}
 	if got := statusCodeFromTestError(t, err); got != http.StatusServiceUnavailable {
 		t.Fatalf("status code = %d, want %d (upstream hides 503 behind HTTP 200)", got, http.StatusServiceUnavailable)
+	}
+}
+
+func TestCodexExecutor_BootstrapBuffering_CapacityFailsAttemptWithoutLeakingHandshake(t *testing.T) {
+	server := codexSSEServer(codexCreatedEvent, codexInProgressEvent, codexCapacityEvent)
+	defer server.Close()
+
+	req, opts := codexTestRequest()
+	result, err := NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+
+	if err == nil {
+		t.Fatal("expected ExecuteStream to fail the attempt on a capacity rejection")
+	}
+	if result != nil {
+		t.Fatal("expected nil result so no buffered handshake chunk can reach the client")
+	}
+	if got := statusCodeFromTestError(t, err); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }
 
@@ -267,6 +286,24 @@ func TestCodexWebsocketsExecutor_BootstrapBuffering_OverloadFailsAttempt(t *test
 	}
 }
 
+func TestCodexWebsocketsExecutor_BootstrapBuffering_CapacityFailsAttempt(t *testing.T) {
+	server := codexWebsocketServer(t, codexCreatedEvent, codexInProgressEvent, codexCapacityEvent)
+	defer server.Close()
+
+	req, opts := codexWebsocketRequest()
+	result, err := NewCodexWebsocketsExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+
+	if err == nil {
+		t.Fatal("expected ExecuteStream to fail the attempt on a websocket capacity rejection")
+	}
+	if result != nil {
+		t.Fatal("expected nil result so no buffered frame can reach the client")
+	}
+	if got := statusCodeFromTestError(t, err); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
 // The websocket transport prefixes response events with private metadata frames. Frame order
 // below matches live wire capture: codex.rate_limits and codex.response.metadata both arrive
 // *before* response.created, making the first generated event the fifth frame. They must be
@@ -375,6 +412,7 @@ func TestIsCodexOverloadBootstrapFailureRejectsRequestFaults(t *testing.T) {
 		`{"error":{"type":"invalid_request_error","code":"invalid_value"}}`,
 		`{"error":{"type":"authentication_error","code":"invalid_api_key"}}`,
 		`{"error":{"type":"upstream_error","code":"unknown"}}`,
+		`{"error":{"type":"server_error","code":"server_error","message":"An internal error occurred without retry advice"}}`,
 	}
 	for _, body := range notOverload {
 		if isCodexOverloadBootstrapFailure([]byte(body)) {
@@ -383,6 +421,22 @@ func TestIsCodexOverloadBootstrapFailureRejectsRequestFaults(t *testing.T) {
 	}
 	if !isCodexOverloadBootstrapFailure([]byte(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}`)) {
 		t.Fatal("rate limit rejections should be eligible for bootstrap failover")
+	}
+	serverErrorFull := `{"error":{"type":"server_error","code":"server_error","message":"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID 2f5014c9-7cfe-4fb7-813e-ecb447da3edd in your message."}}`
+	if !isCodexOverloadBootstrapFailure([]byte(serverErrorFull)) {
+		t.Fatal("server_error with 'You can retry your request' should be eligible for bootstrap failover")
+	}
+	serverErrorShort := `{"error":{"type":"server_error","code":"server_error","message":"You can retry your request"}}`
+	if !isCodexOverloadBootstrapFailure([]byte(serverErrorShort)) {
+		t.Fatal("short server_error with 'You can retry your request' should be eligible for bootstrap failover")
+	}
+	capacityError := `{"error":{"message":"Selected model is at capacity. Please try a different model."}}`
+	if !isCodexOverloadBootstrapFailure([]byte(capacityError)) {
+		t.Fatal("model capacity error should be eligible for bootstrap failover")
+	}
+	capacityErrorShort := `{"error":{"message":"Selected Model is at capacity"}}`
+	if !isCodexOverloadBootstrapFailure([]byte(capacityErrorShort)) {
+		t.Fatal("short model capacity error should be eligible for bootstrap failover")
 	}
 }
 

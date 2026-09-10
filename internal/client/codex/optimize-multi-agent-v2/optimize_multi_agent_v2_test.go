@@ -248,6 +248,21 @@ func TestOptimizeCodexMultiAgentV2RequestSkipsNamespaceConflict(t *testing.T) {
 	}
 }
 
+func TestOptimizeCodexMultiAgentV2RequestSkipsDotPrefixConflict(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent"}]},{"type":"function","name":"collaboration-optimize.tool"}]}`)
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.153.3"}}
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
+	if optimized {
+		t.Fatal("dot prefix conflict unexpectedly enabled optimization")
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("dot prefix conflict changed payload: %s", got)
+	}
+}
+
 func TestOptimizeCodexCollaborationNamespaceWithoutModels(t *testing.T) {
 	t.Parallel()
 
@@ -453,6 +468,41 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	}
 	if unchanged := RestoreCodexMultiAgentV2Response(payload, false); string(unchanged) != string(payload) {
 		t.Fatalf("inactive restore changed payload: %s", unchanged)
+	}
+}
+
+func TestRestoreCodexMultiAgentV2ResponseRestoresDottedFlatToolName(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"output":[{
+				"type":"function_call",
+				"name":"collaboration-optimize.spawn_agent",
+				"namespace":null,
+				"arguments":"{}",
+				"call_id":"call_1"
+			},{
+				"type":"custom_tool_call",
+				"name":"collaboration-optimize.list_agents",
+				"input":"{}",
+				"call_id":"call_2"
+			}]
+		}
+	}`)
+	got := RestoreCodexMultiAgentV2Response(payload, true)
+	if namespace := gjson.GetBytes(got, "response.output.0.namespace").String(); namespace != codexCollaborationNamespace {
+		t.Fatalf("output 0 namespace = %q, want %q", namespace, codexCollaborationNamespace)
+	}
+	if name := gjson.GetBytes(got, "response.output.0.name").String(); name != "spawn_agent" {
+		t.Fatalf("output 0 name = %q, want spawn_agent", name)
+	}
+	if namespace := gjson.GetBytes(got, "response.output.1.namespace").String(); namespace != codexCollaborationNamespace {
+		t.Fatalf("output 1 namespace = %q, want %q", namespace, codexCollaborationNamespace)
+	}
+	if name := gjson.GetBytes(got, "response.output.1.name").String(); name != "list_agents" {
+		t.Fatalf("output 1 name = %q, want list_agents", name)
 	}
 }
 
