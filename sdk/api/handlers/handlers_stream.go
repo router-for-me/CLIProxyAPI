@@ -512,10 +512,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 		if retryErr != nil {
 			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
-			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
+			if (isAuthSelectionUnavailable(retryErr) || isCredentialSelectionCooldown(retryErr)) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
 				bootstrapErr = originalBootstrapErr
 			} else {
-				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(h, ctx, retryErr, providers, normalizedModel))
+				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(h, ctx, cooldownSelectionToAuthError(retryErr), providers, normalizedModel))
 			}
 			break
 		}

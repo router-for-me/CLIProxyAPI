@@ -135,6 +135,12 @@ func newModelCooldownError(model, provider string, resetIn time.Duration) *model
 	}
 }
 
+// ModelCooldownError is the exported view of the cooldown error returned
+// when every credential for a model is cooling down. HTTP handlers need it
+// to recognize credential-selection cooldowns without depending on the
+// unexported concrete type.
+type ModelCooldownError = modelCooldownError
+
 func (e *modelCooldownError) Error() string {
 	modelName := e.model
 	if modelName == "" {
@@ -607,10 +613,13 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 		}
 	}
 	if !next.IsZero() {
-		if quotaExceeded {
-			return true, blockReasonCooldown, next
-		}
-		return true, blockReasonOther, next
+		// A block with a future recovery deadline IS a cooldown regardless of
+		// which flag set it: 429 quota stamps Quota.Exceeded, while 401/403/404
+		// upstream answers stamp only Unavailable+NextRetryAfter. Treating the
+		// latter as a generic block hid the reset time behind a context-free
+		// "auth_unavailable" error (Run Test on OpenAI-compat rows reported
+		// GROUP_NOT_ALLOWED cooldowns as "no auth available").
+		return true, blockReasonCooldown, next
 	}
 	if hasRecoveryTime {
 		return false, blockReasonNone, time.Time{}

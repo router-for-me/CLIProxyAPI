@@ -29,6 +29,33 @@ func isAuthSelectionUnavailable(err error) bool {
 	return code == "auth_not_found" || code == "auth_unavailable"
 }
 
+// isCredentialSelectionCooldown reports a bootstrap retry that failed
+// credential selection because every candidate is cooling down
+// (model_cooldown, 429 + Retry-After). Like isAuthSelectionUnavailable, this
+// means the executor never ran for the retry, so the original bootstrap
+// error must not be masked by it.
+func isCredentialSelectionCooldown(err error) bool {
+	var cooldownErr *coreauth.ModelCooldownError
+	return errors.As(err, &cooldownErr) && cooldownErr != nil
+}
+
+// cooldownSelectionToAuthError converts a credential-selection cooldown into
+// the auth_unavailable coreauth.Error shape so enrichAuthSelectionError can
+// attach the (providers, model) context. The cooldown's reset details are
+// preserved in the message; the HTTP status is normalized to 503 to match
+// the other pre-execution selection failures.
+func cooldownSelectionToAuthError(err error) error {
+	var cooldownErr *coreauth.ModelCooldownError
+	if !errors.As(err, &cooldownErr) || cooldownErr == nil {
+		return err
+	}
+	return &coreauth.Error{
+		Code:       "auth_unavailable",
+		Message:    cooldownErr.Error(),
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
+}
+
 func enrichAuthSelectionError(h *BaseAPIHandler, ctx context.Context, err error, providers []string, model string) error {
 	if err == nil {
 		return nil

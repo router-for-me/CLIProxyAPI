@@ -558,6 +558,87 @@ func TestIsAuthBlockedForModel_ExpiredRecoveryIsAvailable(t *testing.T) {
 	}
 }
 
+// TestIsAuthBlockedForModel_UnavailableWithFutureRetryIsCooldown pins the
+// classification contract that makes Run-Test failures actionable: an auth
+// blocked with a concrete recovery deadline (e.g. a 403 GROUP_NOT_ALLOWED
+// upstream answer stamps Unavailable + NextRetryAfter=+30m but no quota flag)
+// is a COOLDOWN, not a generic "other" block. Without this, the scheduler
+// counts zero cooldowns, falls back to the context-free
+// "auth_unavailable: no auth available", and hides both the reason and the
+// reset time from the operator.
+func TestIsAuthBlockedForModel_UnavailableWithFutureRetryIsCooldown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID:             "a",
+		Unavailable:    true,
+		NextRetryAfter: now.Add(30 * time.Minute),
+	}
+	blocked, reason, next := isAuthBlockedForModel(auth, "", now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v (future retry deadline = cooldown)", reason, blockReasonCooldown)
+	}
+	if next.Before(now) {
+		t.Fatalf("next = %v, want at/after now", next)
+	}
+}
+
+// TestSelectorPick_UnavailableWithRetryReturnsModelCooldown reproduces the
+// Run-Test "auth_unavailable: no auth available" regression on OpenAI
+// compatibility rows: a 403 GROUP_NOT_ALLOWED upstream answer stamps the
+// model state Unavailable with NextRetryAfter=+30m but NO quota flag, so
+// availabilityBlock classified it blockReasonOther. The scheduler then
+// counted zero cooldowns and returned the context-free auth_unavailable
+// error instead of the actionable model_cooldown payload (reset time,
+// Retry-After). All candidates blocked with a future recovery deadline must
+// yield model_cooldown.
+func TestSelectorPick_UnavailableWithRetryReturnsModelCooldown(t *testing.T) {
+	t.Parallel()
+
+	model := "test-model"
+	now := time.Now()
+	auths := []*Auth{
+		{
+			ID: "a",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusActive,
+					Unavailable:    true,
+					NextRetryAfter: now.Add(30 * time.Minute),
+				},
+			},
+		},
+	}
+
+	selector := &FillFirstSelector{}
+	_, err := selector.Pick(context.Background(), "openai-compatibility", model, cliproxyexecutor.Options{}, auths)
+	if err == nil {
+		t.Fatalf("Pick() error = nil, want modelCooldownError")
+	}
+	var mce *modelCooldownError
+	if !errors.As(err, &mce) {
+		t.Fatalf("Pick() error = %T (%v), want *modelCooldownError", err, err)
+	}
+	if mce.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %d, want %d", mce.StatusCode(), http.StatusTooManyRequests)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(mce.Error()), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(Error()) error = %v", err)
+	}
+	rawErr, ok := payload["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("Error() payload missing error object: %v", payload)
+	}
+	if got, _ := rawErr["code"].(string); got != "model_cooldown" {
+		t.Fatalf("Error().error.code = %q, want %q", got, "model_cooldown")
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 
