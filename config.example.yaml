@@ -172,6 +172,16 @@ disable-cooling: false
 # Default is false; when false, cooldown status is kept in memory only.
 save-cooldown-status: false
 
+# Limit a provider usage-limit rejection to the model that produced it.
+# Codex reports usage_limit_reached without naming the exhausted quota bucket, and
+# ChatGPT plans meter several independent buckets per account (per-model 5-hour,
+# per-model weekly, account-wide weekly). Cooling the whole credential therefore parks
+# models whose own bucket still has quota. When true, the credential-wide cooldown is
+# applied only after a second distinct model on that credential also reports a live
+# quota cooldown, which costs at most one extra upstream rejection per model for a
+# genuinely account-wide limit. Default false keeps the previous behaviour.
+model-scoped-quota-cooldown: false
+
 # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504).
 # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
 transient-error-cooldown-seconds: 0

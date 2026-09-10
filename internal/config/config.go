@@ -68,6 +68,17 @@ type Config struct {
 	// SaveCooldownStatus persists runtime cooldown status next to auth files when true.
 	SaveCooldownStatus bool `yaml:"save-cooldown-status" json:"save-cooldown-status"`
 
+	// ModelScopedQuotaCooldown limits a provider usage-limit rejection to the model that
+	// produced it instead of cooling the whole credential.
+	//
+	// Codex reports usage_limit_reached without naming the exhausted quota bucket, and
+	// ChatGPT plans meter several independent buckets per account (per-model 5-hour,
+	// per-model weekly, account-wide weekly). Cooling the credential therefore parks
+	// models whose own bucket still has quota. When true, the credential-wide cooldown is
+	// only applied once a second distinct model on that credential also reports a live
+	// quota cooldown. Default false preserves the existing behaviour.
+	ModelScopedQuotaCooldown bool `yaml:"model-scoped-quota-cooldown" json:"model-scoped-quota-cooldown"`
+
 	// TransientErrorCooldownSeconds controls cooldowns for transient upstream errors.
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`

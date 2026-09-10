@@ -25,9 +25,17 @@ var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
 
+var modelScopedQuotaCooldown atomic.Bool
+
 // SetQuotaCooldownDisabled toggles auth/model cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
+}
+
+// SetModelScopedQuotaCooldown toggles whether a provider usage-limit rejection cools
+// only the model that produced it. See config.ModelScopedQuotaCooldown.
+func SetModelScopedQuotaCooldown(enabled bool) {
+	modelScopedQuotaCooldown.Store(enabled)
 }
 
 // SetTransientErrorCooldownSeconds configures cooldowns for 408/500/502/503/504.
@@ -551,6 +559,37 @@ func modelsForRegisteredAuth(authID string) []string {
 	return models
 }
 
+// quotaCredentialEscalationWarranted reports whether a usage-limit failure on one
+// model should be propagated to the whole credential.
+//
+// Codex reports usage_limit_reached with no indication of which quota bucket was
+// exhausted; the body carries only plan_type and the reset timing. ChatGPT plans meter
+// several independent buckets per account (a per-model 5-hour window, a per-model
+// weekly window, an account-wide weekly window), so a usage limit on one model does
+// not imply the credential is out of quota for a different model.
+//
+// Treating every usage limit as credential-wide parks models whose own bucket is
+// untouched, and that state is unrecoverable until the deadline elapses. Escalating
+// only once a second distinct model on the credential has also reported a live quota
+// cooldown converges on the same end state for a genuinely account-wide limit, at a
+// cost of one extra upstream rejection per model, while a model-scoped limit leaves the
+// other models serving.
+func quotaCredentialEscalationWarranted(auth *Auth, current *ModelState, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	for _, state := range auth.ModelStates {
+		if state == nil || state == current {
+			continue
+		}
+		if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) {
+			return true
+		}
+	}
+	// A credential-wide quota already recorded on the auth itself is also evidence.
+	return auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)
+}
+
 func (m *Manager) persistCooldownStates(ctx context.Context) {
 	if m == nil {
 		return
@@ -869,7 +908,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
 							})
-							if result.CredentialScope && !disableCooling {
+							if result.CredentialScope && !disableCooling && (!modelScopedQuotaCooldown.Load() || quotaCredentialEscalationWarranted(auth, state, now)) {
 								for _, otherState := range auth.ModelStates {
 									if otherState != nil && otherState != state {
 										otherState.Unavailable = true
