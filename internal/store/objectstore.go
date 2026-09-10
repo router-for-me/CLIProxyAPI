@@ -602,9 +602,11 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
 		attr["email"] = email
 	}
+	proxyURL, _ := metadata["proxy_url"].(string)
 	auth := &cliproxyauth.Auth{
 		ID:               rel,
 		Provider:         provider,
+		ProxyURL:         strings.TrimSpace(proxyURL),
 		FileName:         rel,
 		Label:            labelFor(metadata),
 		Status:           cliproxyauth.StatusActive,
