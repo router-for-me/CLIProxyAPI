@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -290,6 +291,48 @@ func TestHostModelExecuteCallback(t *testing.T) {
 	}
 	if got.Alt != "raw" {
 		t.Fatalf("alt = %q, want raw", got.Alt)
+	}
+}
+
+func TestHostModelExecuteCallbackPreservesErrorStatus(t *testing.T) {
+	host := New()
+	errSentinel := errors.New("usage limit reached")
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			return handlers.ModelExecutionResponse{}, &interfaces.ErrorMessage{
+				StatusCode: http.StatusTooManyRequests,
+				Error:      errSentinel,
+			}
+		},
+	})
+
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         "model-1",
+			Body:          []byte(`{"request":true}`),
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	_, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawReq)
+	if errCall == nil {
+		t.Fatal("callFromPlugin returned nil error")
+	}
+	if got := errCall.Error(); got != "usage limit reached" {
+		t.Fatalf("error = %q, want original message", got)
+	}
+	if !errors.Is(errCall, errSentinel) {
+		t.Fatalf("error does not preserve original cause: %v", errCall)
+	}
+	statusProvider, ok := errCall.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error %T does not expose StatusCode", errCall)
+	}
+	if got := statusProvider.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }
 

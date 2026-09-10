@@ -366,7 +366,7 @@ func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, req
 	ctx := withHostCallbackPluginID(context.Background(), entry.pluginID)
 	resp, errCall := entry.host.callFromPlugin(ctx, windowsString(methodPtr), request)
 	if errCall != nil {
-		resp = marshalRPCError("host_call_failed", errCall.Error())
+		resp = marshalRPCError("host_call_failed", errCall.Error(), statusCodeFromError(errCall))
 	}
 	if len(resp) == 0 || responsePtr == 0 {
 		return 0
