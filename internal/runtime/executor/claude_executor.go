@@ -111,6 +111,60 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 		return
 	}
 
+	logger := helps.LogWithRequestID(ctx)
+	type unknownGenerationDrop struct {
+		reason           string
+		firstOccurrence  string
+		blockKind        sigcompat.SignatureBlockKind
+		detectedProvider sigcompat.SignatureProvider
+		signatureAction  sigcompat.SignatureCompatibilityAction
+		count            int
+	}
+	var unknownGenerationDrops []unknownGenerationDrop
+	unknownGenerationDropIndex := make(map[string]int)
+	for _, decision := range report.Decisions {
+		// Only a dropped block can be an unknown-generation drop. A preserved
+		// decision's reason (claudeCompatibleSignatureReason) echoes the
+		// signature's own attacker-controlled model_text, which can contain
+		// this marker's prose as a substring; classifying before this filter
+		// would misreport that preserved block as dropped.
+		if decision.Action != sigcompat.SignatureActionDropBlock {
+			continue
+		}
+		reason, ok := sigcompat.ClassifyUnknownCAISGeneration(decision.Reason)
+		if !ok {
+			continue
+		}
+		if index, ok := unknownGenerationDropIndex[reason]; ok {
+			unknownGenerationDrops[index].count++
+			continue
+		}
+		unknownGenerationDropIndex[reason] = len(unknownGenerationDrops)
+		unknownGenerationDrops = append(unknownGenerationDrops, unknownGenerationDrop{
+			reason:           reason,
+			firstOccurrence:  decision.Reason,
+			blockKind:        decision.BlockKind,
+			detectedProvider: decision.DetectedProvider,
+			signatureAction:  decision.Action,
+			count:            1,
+		})
+	}
+	for _, drop := range unknownGenerationDrops {
+		logger.WithFields(log.Fields{
+			"component":           "signature_sanitizer",
+			"executor":            "claude",
+			"action":              "drop_unknown_claude_cais_generation",
+			"target_provider":     string(report.TargetProvider),
+			"target_model":        baseModel,
+			"block_kind":          string(drop.blockKind),
+			"detected_provider":   string(drop.detectedProvider),
+			"signature_action":    string(drop.signatureAction),
+			"reason":              drop.reason,
+			"first_occurrence":    drop.firstOccurrence,
+			"dropped_block_count": drop.count,
+		}).Warn("claude executor: dropped signed history for unknown CAIS generation")
+	}
+
 	fields := log.Fields{
 		"component":           "signature_sanitizer",
 		"executor":            "claude",
@@ -129,7 +183,7 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 		fields["first_reason"] = decision.Reason
 	}
 
-	helps.LogWithRequestID(ctx).WithFields(fields).Debug("claude executor: sanitized signature history before upstream")
+	logger.WithFields(fields).Debug("claude executor: sanitized signature history before upstream")
 }
 
 // Anthropic-compatible upstreams may reject or even crash when Claude models

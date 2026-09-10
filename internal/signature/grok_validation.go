@@ -77,7 +77,7 @@ func InspectGrokEncryptedContent(raw string) (*GrokEncryptedContentInfo, error) 
 		if IsValidClaudeThinkingSignature(sig, ClaudeSignatureValidationOptions{Strict: true}) {
 			return nil, fmt.Errorf("Grok encrypted_content looks like Claude thinking signature")
 		}
-		if IsValidClaudeCAISSignature(sig) {
+		if IsStructurallyCompleteClaudeCAISEnvelope(sig) {
 			return nil, fmt.Errorf("Grok encrypted_content looks like Claude CAIS thinking signature")
 		}
 		if _, err := InspectGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil {

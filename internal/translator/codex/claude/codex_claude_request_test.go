@@ -6,8 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
@@ -661,6 +663,35 @@ func TestConvertClaudeRequestToCodex_PreservesContentOrderAcrossToolAndReasoning
 	}
 }
 
+func TestConvertClaudeRequestToCodex_OmitsClaudeCAISForGrokTarget(t *testing.T) {
+	tests := []struct {
+		name                string
+		envelopeVersion     uint64
+		wantAllowlistedCAIS bool
+	}{
+		{name: "known generation unchanged", envelopeVersion: 4, wantAllowlistedCAIS: true},
+		{name: "unknown generation", envelopeVersion: 5},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			signature := testModelFreeClaudeCAISSignature(tc.envelopeVersion)
+			if got := sigcompat.IsValidClaudeCAISSignature(signature); got != tc.wantAllowlistedCAIS {
+				t.Fatalf("IsValidClaudeCAISSignature() = %t, want %t", got, tc.wantAllowlistedCAIS)
+			}
+			payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
+			payload, _ = sjson.SetBytes(payload, "messages.0.content.0.signature", signature)
+
+			out := ConvertClaudeRequestToCodex("grok-4.5", payload, false)
+			if got := countRequestInputItemsByType(out, "reasoning"); got != 0 {
+				t.Fatalf("got %d reasoning items, want Claude CAIS omitted; output=%s", got, out)
+			}
+			if got := gjson.GetBytes(out, "input.0.content.0.text").String(); got != "answer" {
+				t.Fatalf("assistant output text = %q, want unchanged answer; output=%s", got, out)
+			}
+		})
+	}
+}
+
 func TestConvertClaudeRequestToCodex_AssistantGrokSignatureToReasoningItem(t *testing.T) {
 	signature := "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X"
 	payload := []byte(`{"model":"grok-4.5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
@@ -761,6 +792,44 @@ func countRequestInputItemsByType(result []byte, itemType string) int {
 		return true
 	})
 	return count
+}
+
+func testModelFreeClaudeCAISSignature(envelopeVersion uint64) string {
+	appendBytesField := func(dst []byte, number protowire.Number, value []byte) []byte {
+		dst = protowire.AppendTag(dst, number, protowire.BytesType)
+		return protowire.AppendBytes(dst, value)
+	}
+	synthetic := func(length int, salt byte) []byte {
+		value := make([]byte, length)
+		for i := range value {
+			value[i] = byte(i*73 + int(salt))
+		}
+		return value
+	}
+
+	var channel []byte
+	channel = protowire.AppendTag(channel, 1, protowire.VarintType)
+	channel = protowire.AppendVarint(channel, 17)
+	channel = protowire.AppendTag(channel, 3, protowire.VarintType)
+	channel = protowire.AppendVarint(channel, 2)
+	channel = protowire.AppendTag(channel, 7, protowire.VarintType)
+	channel = protowire.AppendVarint(channel, 1)
+	channel = appendBytesField(channel, 8, []byte("thinking"))
+
+	var container []byte
+	container = appendBytesField(container, 1, channel)
+	container = appendBytesField(container, 2, synthetic(12, 0x21))
+	container = appendBytesField(container, 3, synthetic(12, 0x43))
+	container = appendBytesField(container, 4, synthetic(48, 0x65))
+	container = appendBytesField(container, 5, synthetic(96, 0x87))
+
+	var payload []byte
+	payload = protowire.AppendTag(payload, 1, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, envelopeVersion)
+	payload = appendBytesField(payload, 2, container)
+	payload = protowire.AppendTag(payload, 3, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, 1)
+	return base64.StdEncoding.EncodeToString(payload)
 }
 
 func validCodexReasoningSignature() string {
