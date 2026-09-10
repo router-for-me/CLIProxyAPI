@@ -768,10 +768,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 					statusCode := statusCodeFromResult(result.Error)
 					if isModelSupportResultError(result.Error) {
-						next := now.Add(12 * time.Hour)
-						state.NextRetryAfter = next
-						suspendReason = "model_not_supported"
-						shouldSuspendModel = true
+						if disableCooling {
+							// Honor the credential's disable-cooling setting:
+							// the 12h model_not_supported cooldown below used
+							// to bypass it, so a disable-cooling auth that hit
+							// a "model not supported" upstream answer stayed
+							// unavailable and surfaced as auth_unavailable.
+							state.NextRetryAfter = time.Time{}
+						} else {
+							next := now.Add(12 * time.Hour)
+							state.NextRetryAfter = next
+							suspendReason = "model_not_supported"
+							shouldSuspendModel = true
+						}
 					} else if isCloudflareChallengeResultError(result.Error) {
 						next, backoffLevel := nextCloudflareCooldown(state.Quota.BackoffLevel, disableCooling, now)
 						state.NextRetryAfter = next
