@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -156,6 +157,43 @@ func TestStreamBridgeCloseDeliversTerminalError(t *testing.T) {
 	}
 	if _, ok = <-chunks; ok {
 		t.Fatal("stream remains open after terminal error")
+	}
+}
+
+func TestStreamBridgeClosePreservesHTTPStatus(t *testing.T) {
+	bridge := newStreamBridge()
+	streamID, chunks, _ := bridge.open(context.Background())
+
+	bridge.close(streamID, "Cursor quota exhausted", http.StatusTooManyRequests)
+
+	chunk, ok := <-chunks
+	if !ok || chunk.Err == nil {
+		t.Fatal("stream closed before terminal status error")
+	}
+	if got := chunk.Err.Error(); got != "Cursor quota exhausted" {
+		t.Fatalf("terminal error = %q, want Cursor quota exhausted", got)
+	}
+	statusErr, ok := chunk.Err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("terminal error %T does not preserve StatusCode", chunk.Err)
+	}
+	if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("terminal status = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
+func TestStreamBridgeCloseDefaultsStatusForLegacyError(t *testing.T) {
+	bridge := newStreamBridge()
+	streamID, chunks, _ := bridge.open(context.Background())
+	bridge.close(streamID, "legacy stream failure")
+
+	chunk := <-chunks
+	statusErr, ok := chunk.Err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("legacy terminal error %T does not implement StatusCode", chunk.Err)
+	}
+	if got := statusErr.StatusCode(); got != 0 {
+		t.Fatalf("legacy terminal status = %d, want omitted status 0", got)
 	}
 }
 
