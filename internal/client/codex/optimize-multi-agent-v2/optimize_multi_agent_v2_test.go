@@ -44,6 +44,11 @@ func TestIsCodexMultiAgentClient(t *testing.T) {
 			want:      true,
 		},
 		{
+			name:      "codex exec",
+			userAgent: "codex_exec/0.153.2 (Mac OS 26.6.2; arm64) unknown (codex_exec; 0.153.2)",
+			want:      true,
+		},
+		{
 			name:      "other client",
 			userAgent: "curl/8.7.1",
 			want:      false,
