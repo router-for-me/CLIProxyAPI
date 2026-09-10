@@ -2,10 +2,12 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -73,6 +75,71 @@ func TestSessionAffinitySelector_LookupAffinity(t *testing.T) {
 			t.Fatalf("expected unbound for expired entry, got status=%s authID=%s", status, authID)
 		}
 	})
+}
+
+func TestManagerLookupAffinityWithInactivePluginSchedulerDoesNotRefreshTTL(t *testing.T) {
+	selector := NewSessionAffinitySelector(nil)
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	scheduler := &inactivePluginScheduler{}
+	manager.SetPluginScheduler(scheduler)
+	auth := &Auth{ID: "observer-auth", Provider: "codex", Status: StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	const key = "codex::codex:observer-session::test-model"
+	selector.cache.Set(key, auth.ID)
+	selector.cache.mu.RLock()
+	expiresAt := selector.cache.entries[key].expiresAt
+	selector.cache.mu.RUnlock()
+	for i := 0; i < 5; i++ {
+		found, status := manager.LookupSessionAffinity("codex", "test-model", "observer-session")
+		if status != "bound" || found == nil || found.ID != auth.ID {
+			t.Fatalf("lookup = %v, %q; want bound auth", found, status)
+		}
+	}
+	selector.cache.mu.RLock()
+	after := selector.cache.entries[key].expiresAt
+	selector.cache.mu.RUnlock()
+	if !after.Equal(expiresAt) {
+		t.Errorf("lookup extended TTL: %v -> %v", expiresAt, after)
+	}
+	if scheduler.calls != 0 {
+		t.Errorf("lookup selected a credential %d times", scheduler.calls)
+	}
+}
+
+func TestManagerLookupAffinityIsUnsupportedWhileHomeOwnsRouting(t *testing.T) {
+	selector := NewSessionAffinitySelector(nil)
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	manager.SetPluginScheduler(&inactivePluginScheduler{})
+	auth := &Auth{ID: "local-affinity-auth", Provider: "codex", Status: StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	selector.cache.Set("codex::codex:known-session::test-model", auth.ID)
+	for _, enabled := range []bool{true, false} {
+		cfg := &internalconfig.Config{}
+		cfg.Home.Enabled = enabled
+		manager.SetConfig(cfg)
+		for _, sessionID := range []string{"known-session", "unknown-session"} {
+			t.Run(fmt.Sprintf("home=%t/%s", enabled, sessionID), func(t *testing.T) {
+				found, status := manager.LookupSessionAffinity("codex", "test-model", sessionID)
+				if enabled {
+					if status != "unsupported" || found != nil {
+						t.Errorf("Home lookup = %v, %q; want unsupported", found, status)
+					}
+				} else if sessionID == "known-session" {
+					if status != "bound" || found == nil || found.ID != auth.ID {
+						t.Errorf("native lookup = %v, %q; want bound auth", found, status)
+					}
+				} else if status != "unbound" || found != nil {
+					t.Errorf("native absent lookup = %v, %q; want unbound", found, status)
+				}
+			})
+		}
+	}
 }
 
 func TestManager_LookupSessionAffinity_RemovedAuth(t *testing.T) {
