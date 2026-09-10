@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,171 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
+}
+
+func TestManager_TerminalOAuthFailure_ReturnsTerminalAuthError(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name     string
+		selector Selector
+	}{
+		{name: "fast_path_round_robin", selector: &RoundRobinSelector{}},
+		{name: "legacy_path_nil_selector", selector: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, tc.selector, nil)
+			manager.RegisterExecutor(unauthorizedRefreshTestExecutor{
+				schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "codex"},
+			})
+
+			authID := "unauthorized-terminal-" + tc.name
+			healthyID := "healthy-" + tc.name
+			auth := &Auth{
+				ID:       authID,
+				Provider: "codex",
+				Metadata: map[string]any{
+					"email": "x@example.com",
+				},
+			}
+			if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "any-model"}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(authID)
+				registry.GetGlobalRegistry().UnregisterClient(healthyID)
+			})
+
+			manager.refreshAuth(ctx, auth.ID)
+
+			_, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "any-model", cliproxyexecutor.Options{}, nil)
+			if errPick == nil {
+				t.Fatal("expected pick error for terminal unauthorized auth")
+			}
+			if !IsTerminalAuthError(errPick) {
+				t.Fatalf("expected IsTerminalAuthError to be true, got %T: %v", errPick, errPick)
+			}
+			var authErr *Error
+			if !errors.As(errPick, &authErr) || authErr == nil {
+				t.Fatalf("expected *Error, got %T: %v", errPick, errPick)
+			}
+			if authErr.Retryable {
+				t.Fatal("expected Retryable to be false for terminal unauthorized auth")
+			}
+			if authErr.StatusCode() != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", authErr.StatusCode(), http.StatusServiceUnavailable)
+			}
+
+			// Negative case: adding a healthy credential allows selection to succeed.
+			healthy := &Auth{ID: healthyID, Provider: "codex", Status: StatusActive}
+			if _, errRegisterHealthy := manager.Register(ctx, healthy); errRegisterHealthy != nil {
+				t.Fatalf("register healthy auth: %v", errRegisterHealthy)
+			}
+			registry.GetGlobalRegistry().RegisterClient(healthyID, "codex", []*registry.ModelInfo{{ID: "any-model"}})
+			picked, _, _, errPickHealthy := manager.pickNextMixed(ctx, []string{"codex"}, "any-model", cliproxyexecutor.Options{}, nil)
+			if errPickHealthy != nil {
+				t.Fatalf("expected healthy pick to succeed, got: %v", errPickHealthy)
+			}
+			if picked == nil || picked.ID != healthyID {
+				t.Fatalf("expected picked auth %q, got: %v", healthyID, picked)
+			}
+		})
+	}
+}
+
+func TestManager_QuotaCooldown_DoesNotClassifyAsTerminalAuth(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "codex"})
+
+	auth := &Auth{
+		ID:          "quota-cooldown-auth",
+		Provider:    "codex",
+		Unavailable: true,
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "credential_quota",
+			NextRecoverAt: time.Now().Add(time.Minute),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "model-cooldown"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	_, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "model-cooldown", cliproxyexecutor.Options{}, nil)
+	if errPick == nil {
+		t.Fatal("expected pick error for cooling auth")
+	}
+	if IsTerminalAuthError(errPick) {
+		t.Fatalf("expected IsTerminalAuthError to be false for quota cooldown, got true")
+	}
+}
+
+func TestManager_TerminalOAuthFailure_OverridesPreexistingModelStateError(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name     string
+		selector Selector
+	}{
+		{name: "fast_path_round_robin", selector: &RoundRobinSelector{}},
+		{name: "legacy_path_nil_selector", selector: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, tc.selector, nil)
+			manager.RegisterExecutor(unauthorizedRefreshTestExecutor{
+				schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "codex"},
+			})
+
+			authID := "unauthorized-stale-model-" + tc.name
+			auth := &Auth{
+				ID:       authID,
+				Provider: "codex",
+				ModelStates: map[string]*ModelState{
+					"any-model": {
+						LastError: &Error{Code: "rate_limit_exceeded", Message: "historical rate limit", HTTPStatus: http.StatusTooManyRequests},
+						UpdatedAt: time.Now().Add(-10 * time.Minute),
+					},
+				},
+				Metadata: map[string]any{
+					"email": "x@example.com",
+				},
+			}
+			if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "any-model"}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(authID)
+			})
+
+			// Trigger unauthorized refresh failure.
+			manager.refreshAuth(ctx, auth.ID)
+
+			_, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "any-model", cliproxyexecutor.Options{}, nil)
+			if errPick == nil {
+				t.Fatal("expected pick error for terminal unauthorized auth")
+			}
+			if !IsTerminalAuthError(errPick) {
+				t.Fatalf("expected IsTerminalAuthError to be true, got %T: %v", errPick, errPick)
+			}
+			cause := errors.Unwrap(errPick)
+			if cause == nil {
+				t.Fatal("expected non-nil cause")
+			}
+			if !strings.Contains(cause.Error(), "unauthorized") {
+				t.Fatalf("expected cause to contain unauthorized OAuth error, got: %v", cause)
+			}
+			if strings.Contains(cause.Error(), "historical rate limit") {
+				t.Fatalf("expected cause NOT to be masked by historical model error, got: %v", cause)
+			}
+		})
 	}
 }
 

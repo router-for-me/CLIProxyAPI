@@ -186,16 +186,16 @@ func codexTerminalFailureStatus(body []byte) int {
 	switch {
 	case errorCode == "cyber_policy":
 		return http.StatusBadRequest
-	case errorType == "invalid_request_error", errorType == "bad_request_error":
-		return http.StatusBadRequest
+	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
+		return http.StatusNotFound
 	case errorType == "authentication_error", errorCode == "invalid_api_key", errorCode == "unauthorized":
 		return http.StatusUnauthorized
 	case errorType == "permission_error", errorCode == "forbidden", errorCode == "permission_denied":
 		return http.StatusForbidden
-	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
-		return http.StatusNotFound
 	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
 		return http.StatusTooManyRequests
+	case errorType == "invalid_request_error", errorType == "bad_request_error":
+		return http.StatusBadRequest
 	default:
 		return http.StatusBadGateway
 	}
@@ -220,6 +220,9 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 	}
 	if len(body) == 0 {
 		body = []byte(`{"error":{"message":"upstream stream failed without error details"}}`)
+	}
+	if seq := gjson.GetBytes(eventData, "sequence_number"); seq.Exists() {
+		body, _ = sjson.SetBytes(body, "sequence_number", seq.Int())
 	}
 	return body, true
 }
@@ -385,8 +388,10 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 		if lower == "" {
 			continue
 		}
-		if strings.Contains(lower, "selected model is at capacity") ||
-			strings.Contains(lower, "model is at capacity. please try a different model") {
+		if strings.Contains(lower, "model is at capacity") ||
+			strings.Contains(lower, "model_at_capacity") ||
+			strings.Contains(lower, "model_is_at_capacity") ||
+			(strings.Contains(lower, "model") && strings.Contains(lower, "at capacity")) {
 			return true
 		}
 	}
@@ -479,6 +484,9 @@ func newCodexBootstrapOverloadErr(body []byte) statusErr {
 // Only these failures justify replacing the whole attempt during bootstrap; every other terminal
 // failure keeps the original in-stream delivery semantics so downstream behaviour is unchanged.
 func isCodexOverloadBootstrapFailure(body []byte) bool {
+	if isCodexModelCapacityError(body) {
+		return true
+	}
 	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
 	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
 	errorMessage := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))

@@ -9132,7 +9132,7 @@ func TestClaudeExecutor_ProbeStripsCaller1hTTLAndBetas(t *testing.T) {
 	}
 }
 
-func TestClaudeExecutor_SubagentStripsCaller1hTTLAndExtendedCacheBeta(t *testing.T) {
+func TestClaudeExecutor_SubagentPreservesCaller1hTTLAndExtendedCacheBeta(t *testing.T) {
 	var seenHeaders http.Header
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -9182,16 +9182,16 @@ func TestClaudeExecutor_SubagentStripsCaller1hTTLAndExtendedCacheBeta(t *testing
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	// 1. Verify body cache_control does not have ttl: "1h"
+	// 1. Verify body cache_control preserves ttl: "1h"
 	rawBody := string(seenBody)
-	if strings.Contains(rawBody, `"ttl":"1h"`) || strings.Contains(rawBody, `"ttl": "1h"`) {
-		t.Fatalf("subagent body must have ttl stripped, got: %s", rawBody)
+	if !strings.Contains(rawBody, `"ttl":"1h"`) && !strings.Contains(rawBody, `"ttl": "1h"`) {
+		t.Fatalf("subagent body must preserve ttl: 1h when requested, got: %s", rawBody)
 	}
 
-	// 2. Verify extended-cache-ttl beta is stripped from header
+	// 2. Verify extended-cache-ttl beta is preserved in header
 	betas := seenHeaders.Get("Anthropic-Beta")
-	if strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
-		t.Errorf("subagent Anthropic-Beta must not contain extended-cache-ttl, got: %s", betas)
+	if !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
+		t.Errorf("subagent Anthropic-Beta must preserve extended-cache-ttl when requested, got: %s", betas)
 	}
 }
 

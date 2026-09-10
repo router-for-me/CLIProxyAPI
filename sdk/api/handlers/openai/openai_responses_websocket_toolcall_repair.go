@@ -532,7 +532,12 @@ func repairResponsesToolCallItems(
 	for _, item := range items {
 		if isResponsesToolCallOutputType(item.itemType) {
 			if item.callID == "" {
-				// Upstream rejects tool outputs without a call_id; drop it.
+				// Codex sends standalone named results for heartbeat and delegation
+				// input. These intentionally have no preceding call or call_id.
+				name := gjson.GetBytes(item.raw, "name")
+				if item.itemType == "function_call_output" && name.Type == gjson.String && strings.TrimSpace(name.String()) != "" {
+					filtered = append(filtered, item)
+				}
 				continue
 			}
 
