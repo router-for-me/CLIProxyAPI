@@ -1943,3 +1943,31 @@ func TestPrepareAntigravityGeminiReasoningReplayStillRejectsBrokenPairing(t *tes
 		t.Fatalf("error = %v, want structural pairing rejection", errPrepare)
 	}
 }
+
+func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.6-flash-high"
+	const args = `{"file_path":"/tmp/a"}`
+	payload := []byte(`{"sessionId":"sess-pairing-break","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload = normalizeAntigravityGeminiFunctionResponseRoles(payload)
+	if err := internalsignature.ValidateGeminiFunctionCallPairing(payload); err != nil {
+		t.Fatalf("original payload pairing invalid: %v", err)
+	}
+
+	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Write","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
+		t.Fatal("failed to cache replay item")
+	}
+	opts := cliproxyexecutor.Options{}
+
+	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload)
+	if errPrepare != nil {
+		t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v, want graceful degradation to original payload", errPrepare)
+	}
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("out = %s, want original payload %s", out, payload)
+	}
+}
