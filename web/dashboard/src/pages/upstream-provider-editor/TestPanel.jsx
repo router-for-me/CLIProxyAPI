@@ -35,14 +35,18 @@ export function entryOptions(form) {
   return opts;
 }
 
-// modelOptions builds the Model dropdown from the form's model rows:
-// name first, then alias, deduplicated, empties dropped.
+// modelOptions builds the Model dropdown from the form's model rows. The
+// registry registers the ALIAS as the model id (buildConfiguredModelInfo:
+// ID = alias, falling back to the upstream name), and the selection gate
+// rejects probes naming an unregistered id — so the dropdown must offer the
+// same id the pipeline knows: alias when set, upstream name otherwise.
+// Deduplicated, empties dropped.
 export function modelOptions(form) {
   const rows = Array.isArray(form?.models) ? form.models : [];
   const seen = new Set();
   const out = [];
   for (const r of rows) {
-    const m = (r && (r.name || r.alias) || '').trim();
+    const m = (r && (r.alias || r.name) || '').trim();
     if (!m || seen.has(m)) continue;
     seen.add(m);
     out.push(m);

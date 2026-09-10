@@ -690,18 +690,26 @@ test('TestPanel: entryOptions filters unsaved rows and includes provider-level',
   assert.deepEqual(entryOptions(null), [{ value: '', label: '(provider-level)' }]);
 });
 
-test('TestPanel: modelOptions dedupes name/alias and drops empties', async () => {
+test('TestPanel: modelOptions prefers the alias (the registered model id)', async () => {
   const { modelOptions } = await import('./TestPanel.jsx');
+  // The in-memory registry registers the ALIAS as the model id
+  // (buildConfiguredModelInfo: ID = alias, falling back to name), and the
+  // selection gate rejects probes naming an unregistered id. The dropdown
+  // must therefore offer the same id the pipeline knows — alias first,
+  // upstream name only as the fallback — or a Run Test on an aliased row
+  // (e.g. upstream "glm-5.2-flex" registered as "glm-5.2") always fails
+  // with auth_unavailable/auth_not_found while a hand-typed alias works.
   assert.deepEqual(
     modelOptions({
       models: [
-        { name: 'gpt-4o', alias: 'fast' },
-        { name: '', alias: 'gpt-4o' },
+        { name: 'glm-5.2-flex', alias: 'glm-5.2' },
+        { name: '', alias: 'solo-alias' },
         { name: '', alias: '' },
         { name: 'claude-4', alias: '' },
+        { name: 'gpt-4o', alias: 'gpt-4o' },
       ],
     }),
-    ['gpt-4o', 'claude-4'],
+    ['glm-5.2', 'solo-alias', 'claude-4', 'gpt-4o'],
   );
   assert.deepEqual(modelOptions({ models: [] }), []);
   assert.deepEqual(modelOptions(null), []);
