@@ -8,6 +8,37 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 )
 
+func TestCodexClientModelsResponseIncludesVirtualModels(t *testing.T) {
+	virtualName := "codex-client-virtual-test"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient("codex-client-virtual-test-client", "openai-compatibility", []*registry.ModelInfo{
+		{ID: "codex-client-virtual-test-real"},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("codex-client-virtual-test-client")
+	})
+
+	cfg := &config.SDKConfig{
+		VirtualModels: []config.VirtualModel{{Name: virtualName}},
+	}
+	base := handlers.NewBaseAPIHandlers(cfg, nil)
+	handler := NewOpenAIAPIHandler(base)
+
+	response := handler.codexClientModelsResponse()
+	models, ok := response["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", response["models"])
+	}
+
+	for _, model := range models {
+		slug, _ := model["slug"].(string)
+		if slug == virtualName {
+			return
+		}
+	}
+	t.Fatalf("virtual model %q missing from codex client response; got %d models", virtualName, len(models))
+}
+
 func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
 	modelID := "codex-client-multi-agent-v2-test"
 	clientID := "codex-client-multi-agent-v2-test-client"
