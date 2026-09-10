@@ -743,8 +743,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 }
 
 type sseJSONValidationState struct {
-	pending    []byte
-	pendingErr error
+	pending          []byte
+	pendingErr       error
+	lastChunkEndedCR bool
+	forwarded        bool
 }
 
 func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
@@ -755,6 +757,13 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	}
 	if len(chunk) == 0 {
 		return nil, nil
+	}
+	// A CR already normalized by the previous chunk and this LF are one
+	// line ending, not the blank line that terminates an SSE frame.
+	skipLF := s.lastChunkEndedCR && chunk[0] == '\n'
+	s.lastChunkEndedCR = chunk[len(chunk)-1] == '\r'
+	if skipLF {
+		chunk = chunk[1:]
 	}
 	chunk = bytes.ReplaceAll(chunk, []byte("\r\n"), []byte("\n"))
 	chunk = bytes.ReplaceAll(chunk, []byte("\r"), []byte("\n"))
@@ -783,11 +792,17 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 			return nil, errValidate
 		}
 		output = append(output, frame...)
+		s.forwarded = true
 		copy(s.pending, s.pending[frameEnd:])
 		s.pending = s.pending[:len(s.pending)-frameEnd]
 	}
 
 	if len(bytes.TrimSpace(s.pending)) == 0 {
+		// Once part of a frame has been forwarded, a whitespace-only chunk may
+		// contain its remaining line ending or blank-line delimiter.
+		if s.forwarded {
+			output = append(output, s.pending...)
+		}
 		s.pending = s.pending[:0]
 		return output, nil
 	}
@@ -795,12 +810,15 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	payload = bytes.TrimSpace(payload)
 	if !found || len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || json.Valid(payload) {
 		output = append(output, s.pending...)
+		s.forwarded = true
 		s.pending = s.pending[:0]
 	}
 	return output, nil
 }
 
 func (s *sseJSONValidationState) Finish() error {
+	s.lastChunkEndedCR = false
+	s.forwarded = false
 	if s.pendingErr != nil {
 		errPending := s.pendingErr
 		s.pendingErr = nil
