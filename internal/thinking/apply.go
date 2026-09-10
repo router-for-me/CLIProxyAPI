@@ -581,6 +581,22 @@ func ExtractReasoningEffort(body []byte, provider, model string) string {
 // setting as a canonical reasoning_effort label for usage logging.
 func ExtractTranslatedReasoningEffort(body []byte, provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "codex" || provider == "openai-response" {
+		// Usage follows in-band updates without rewriting the cached prompt's baseline effort.
+		effort := ""
+		gjson.GetBytes(body, `input.#(type=="configuration_update")#.reasoning.effort`).ForEach(func(_, value gjson.Result) bool {
+			if value.Type == gjson.String {
+				if level := strings.ToLower(strings.TrimSpace(value.Str)); level != "" {
+					effort = level
+				}
+			}
+			return true
+		})
+		if effort != "" {
+			return effort
+		}
+	}
+
 	config := extractThinkingConfig(body, provider)
 	if !hasThinkingConfig(config) {
 		switch provider {
