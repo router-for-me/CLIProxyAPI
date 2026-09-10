@@ -162,6 +162,9 @@ func TestGeneratedMediaBuiltinsDeclareOutputModalities(t *testing.T) {
 		want  string
 	}{
 		{name: "codex image", model: codexBuiltinImageModelInfo(), want: "image"},
+		{name: "codex image 2.5 flare", model: codexBuiltinImage25FlareModelInfo(), want: "image"},
+		{name: "codex image 2.5 sunburst", model: codexBuiltinImage25SunburstModelInfo(), want: "image"},
+		{name: "codex image 2.5", model: codexBuiltinImage25ModelInfo(), want: "image"},
 		{name: "xai image", model: xaiBuiltinImageModelInfo(), want: "image"},
 		{name: "xai video", model: xaiBuiltinVideoModelInfo(), want: "video"},
 	}
