@@ -170,7 +170,7 @@ func normalizeInteractionsLevel(level string, modelInfo *registry.ModelInfo) str
 		return strings.ToLower(modelInfo.Thinking.Levels[len(modelInfo.Thinking.Levels)-1])
 	}
 	switch level {
-	case string(thinking.LevelMax), string(thinking.LevelXHigh):
+	case string(thinking.LevelUltra), string(thinking.LevelMax), string(thinking.LevelXHigh):
 		return string(thinking.LevelHigh)
 	default:
 		return level

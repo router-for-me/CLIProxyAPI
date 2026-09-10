@@ -375,6 +375,8 @@ func mapConfiguredHighIntent(level ThinkingLevel, modelInfo *registry.ModelInfo)
 		candidates = []ThinkingLevel{LevelXHigh, LevelMax, LevelHigh}
 	case LevelMax:
 		candidates = []ThinkingLevel{LevelMax, LevelXHigh, LevelHigh}
+	case LevelUltra:
+		candidates = []ThinkingLevel{LevelUltra, LevelMax, LevelXHigh, LevelHigh}
 	default:
 		return level
 	}
