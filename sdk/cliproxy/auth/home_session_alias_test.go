@@ -545,6 +545,30 @@ func TestHomeDispatchSessionIDsExtractsParentFromHeaderPlusBody(t *testing.T) {
 		t.Fatalf("lcpParentID = %q, want empty", lcpParentID)
 	}
 
+	// 3b. LCP with metadata parent
+	lcpForkOpts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "lcp:v1:fork-child-xyz",
+			cliproxyexecutor.ParentSessionIDMetadataKey:    "lcp:v1:parent-root-abc",
+		},
+	}
+	lcpForkSessionID, lcpForkParentID := manager.homeDispatchSessionIDs(lcpForkOpts)
+	if lcpForkSessionID != "lcp:v1:fork-child-xyz" || lcpForkParentID != "lcp:v1:parent-root-abc" {
+		t.Fatalf("lcpFork = (%q, %q), want (lcp:v1:fork-child-xyz, lcp:v1:parent-root-abc)", lcpForkSessionID, lcpForkParentID)
+	}
+
+	// 3c. Self-referential parent is suppressed
+	lcpSelfParentOpts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "lcp:v1:same-session",
+			cliproxyexecutor.ParentSessionIDMetadataKey:    "lcp:v1:same-session",
+		},
+	}
+	selfSessionID, selfParentID := manager.homeDispatchSessionIDs(lcpSelfParentOpts)
+	if selfSessionID != "lcp:v1:same-session" || selfParentID != "" {
+		t.Fatalf("self-referential parent = (%q, %q), want (%q, empty)", selfSessionID, selfParentID, "lcp:v1:same-session")
+	}
+
 	// 4. Antigravity hierarchy
 	agyOpts := cliproxyexecutor.Options{
 		Headers: http.Header{

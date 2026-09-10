@@ -2,8 +2,11 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -20,6 +23,8 @@ type SessionInfo struct {
 	AuthID          string         `json:"auth_id,omitempty"`
 	Provider        string         `json:"provider,omitempty"`
 	Model           string         `json:"model,omitempty"`
+	IsFork          bool           `json:"is_fork,omitempty"`
+	IsSubagent      bool           `json:"is_subagent,omitempty"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
@@ -62,12 +67,44 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			reqRoot = req
 		}
 		for _, p := range []string{
-			"parent_session_id", "parentSessionId",
-			"parent_thread_id", "parentThreadId",
+			// Standard session / thread parent keys
+			"parent_session_id", "parentSessionId", "parentSessionID",
+			"parent_thread_id", "parentThreadId", "parentThreadID",
 			"forked_from_thread_id", "forked_from_id",
-			"parent_conversation_id", "parentConversationId",
-			"metadata.parent_session_id", "metadata.parent_thread_id",
-			"extra_body.parent_session_id", "extra_body.parent_thread_id",
+			"parent_conversation_id", "parentConversationId", "parentConversationID",
+			// OpenCode / generic parent ID keys
+			"parent_id", "parentId", "parentID",
+			// Roo Code / Cline task delegation keys
+			"parent_task_id", "parentTaskId", "parentTaskID",
+			// OpenHands action tree keys
+			"parent_action_id", "parentActionId", "parentActionID",
+			// Pi session keys
+			"parent_session", "parentSession",
+			// Hermes subagent keys
+			"parent_subagent_id", "parentSubagentId",
+			// OpenClaw fork sources
+			"forkSource.sessionId", "fork_source.session_id",
+			"previousSessionId", "previous_session_id",
+			// Metadata nested keys
+			"metadata.parent_session_id", "metadata.parentSessionId", "metadata.parentSessionID",
+			"metadata.parent_thread_id", "metadata.parentThreadId",
+			"metadata.forked_from_thread_id", "metadata.forked_from_id",
+			"metadata.parent_id", "metadata.parentId", "metadata.parentID",
+			"metadata.parent_task_id", "metadata.parentTaskId", "metadata.parentTaskID",
+			"metadata.parent_action_id", "metadata.parentActionId",
+			"metadata.parent_subagent_id", "metadata.parentSubagentId",
+			"metadata.parent_session", "metadata.parentSession",
+			"metadata.parent_agent_id", "metadata.parentAgentId",
+			"metadata.forkSource.sessionId", "metadata.previousSessionId",
+			// Extra body nested keys
+			"extra_body.parent_session_id", "extra_body.parentSessionId", "extra_body.parentSessionID",
+			"extra_body.parent_thread_id", "extra_body.parentThreadId",
+			"extra_body.forked_from_thread_id", "extra_body.forked_from_id",
+			"extra_body.parent_id", "extra_body.parentId", "extra_body.parentID",
+			"extra_body.parent_task_id", "extra_body.parentTaskId",
+			"extra_body.parent_action_id", "extra_body.parentActionId",
+			"extra_body.parent_subagent_id", "extra_body.parentSubagentId",
+			"extra_body.parent_session", "extra_body.parentSession",
 		} {
 			if val := normalizedSessionCandidate(root.Get(p).String()); val != "" {
 				parentCandidate = val
@@ -105,6 +142,18 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			_, _, agentID = ClaudeMetadataIdentities(payload)
 		}
 		parentAgentID := sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id")
+		if parentAgentID == "" && root.Exists() {
+			parentAgentID = normalizedSessionCandidate(root.Get("metadata.parent_agent_id").String())
+			if parentAgentID == "" {
+				parentAgentID = normalizedSessionCandidate(root.Get("metadata.parentAgentId").String())
+			}
+			if parentAgentID == "" && hasNestedReq {
+				parentAgentID = normalizedSessionCandidate(reqRoot.Get("metadata.parent_agent_id").String())
+				if parentAgentID == "" {
+					parentAgentID = normalizedSessionCandidate(reqRoot.Get("metadata.parentAgentId").String())
+				}
+			}
+		}
 		if agentID != "" && agentID != "main" {
 			info.AgentName = agentID
 			info.ParentSessionID = "claude:" + sid
@@ -145,6 +194,18 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 				}
 			}
 			parentAgentID := sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id")
+			if parentAgentID == "" && root.Exists() {
+				parentAgentID = normalizedSessionCandidate(root.Get("metadata.parent_agent_id").String())
+				if parentAgentID == "" {
+					parentAgentID = normalizedSessionCandidate(root.Get("metadata.parentAgentId").String())
+				}
+				if parentAgentID == "" && hasNestedReq {
+					parentAgentID = normalizedSessionCandidate(reqRoot.Get("metadata.parent_agent_id").String())
+					if parentAgentID == "" {
+						parentAgentID = normalizedSessionCandidate(reqRoot.Get("metadata.parentAgentId").String())
+					}
+				}
+			}
 			if agentID != "" && agentID != "main" {
 				info.SessionID = "claude:" + sid + ":agent:" + agentID
 				info.ParentSessionID = "claude:" + sid
@@ -173,37 +234,164 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	}
 
 	// 3. OpenAI / Codex CLI Headers
-	if sid := sessionHeaderValue(headers, "Session-Id"); sid != "" {
-		info.ClientType = "codex"
-		info.SessionID = "codex:" + sid
-		parentThread := sessionHeaderValue(headers, "x-codex-parent-thread-id")
-		if parentThread == "" {
-			parentThread = sessionHeaderValue(headers, "X-Codex-Parent-Thread-Id")
-		}
-		if parentThread != "" && parentThread != sid {
-			info.ParentSessionID = "codex:" + parentThread
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "codex:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
+	sid := sessionHeaderValue(headers, "Session-Id")
+	if sid == "" {
+		sid = sessionHeaderValue(headers, "Session_id")
 	}
-	if sid := sessionHeaderValue(headers, "Session_id"); sid != "" {
+	tid := sessionHeaderValue(headers, "Thread-Id")
+	if tid == "" {
+		tid = sessionHeaderValue(headers, "Thread_id")
+	}
+
+	var codexTurnMeta string
+	for k, v := range headers {
+		if strings.EqualFold(k, "X-Codex-Turn-Metadata") && len(v) > 0 {
+			codexTurnMeta = strings.TrimSpace(v[0])
+			break
+		}
+	}
+	var codexTurnMetaJSON gjson.Result
+	if codexTurnMeta != "" {
+		codexTurnMetaJSON = gjson.Parse(codexTurnMeta)
+	}
+
+	if sid == "" && codexTurnMetaJSON.Exists() {
+		sid = normalizedSessionCandidate(codexTurnMetaJSON.Get("session_id").String())
+	}
+	if tid == "" && codexTurnMetaJSON.Exists() {
+		tid = normalizedSessionCandidate(codexTurnMetaJSON.Get("thread_id").String())
+	}
+	if tid == "" && sid != "" && root.Exists() {
+		for _, path := range []string{"thread_id", "threadId", "metadata.thread_id"} {
+			if tid = normalizedSessionCandidate(root.Get(path).String()); tid != "" {
+				break
+			}
+			if hasNestedReq {
+				if tid = normalizedSessionCandidate(reqRoot.Get(path).String()); tid != "" {
+					break
+				}
+			}
+		}
+	}
+
+	if sid != "" || tid != "" {
 		info.ClientType = "codex"
-		info.SessionID = "codex:" + sid
 		parentThread := sessionHeaderValue(headers, "x-codex-parent-thread-id")
 		if parentThread == "" {
 			parentThread = sessionHeaderValue(headers, "X-Codex-Parent-Thread-Id")
 		}
-		if parentThread != "" && parentThread != sid {
+		if parentThread == "" && codexTurnMetaJSON.Exists() {
+			parentThread = normalizedSessionCandidate(codexTurnMetaJSON.Get("parent_thread_id").String())
+		}
+
+		forkedFrom := ""
+		if codexTurnMetaJSON.Exists() {
+			forkedFrom = normalizedSessionCandidate(codexTurnMetaJSON.Get("forked_from_thread_id").String())
+			if forkedFrom == "" {
+				forkedFrom = normalizedSessionCandidate(codexTurnMetaJSON.Get("forked_from_id").String())
+			}
+		}
+		if forkedFrom == "" && root.Exists() {
+			for _, forkPath := range []string{
+				"forked_from_thread_id", "forked_from_id",
+				"metadata.forked_from_thread_id", "metadata.forked_from_id",
+				"extra_body.forked_from_thread_id", "extra_body.forked_from_id",
+			} {
+				if forkedFrom = normalizedSessionCandidate(root.Get(forkPath).String()); forkedFrom != "" {
+					break
+				}
+				if hasNestedReq {
+					if forkedFrom = normalizedSessionCandidate(reqRoot.Get(forkPath).String()); forkedFrom != "" {
+						break
+					}
+				}
+			}
+		}
+
+		cleanAgentName := ""
+		if codexTurnMetaJSON.Exists() {
+			rawName := codexTurnMetaJSON.Get("agent_name").String()
+			rawName = strings.TrimPrefix(rawName, "/root/")
+			rawName = strings.TrimPrefix(rawName, "/")
+			rawName = strings.TrimSpace(rawName)
+			rawName = normalizedSessionCandidate(rawName)
+			if rawName != "" && rawName != "root" && rawName != "main" {
+				cleanAgentName = rawName
+			}
+		}
+
+		subVal := sessionHeaderValue(headers, "X-Openai-Subagent")
+		subagentSignal := subVal != "" && !strings.EqualFold(subVal, "false") && subVal != "0"
+		if codexTurnMetaJSON.Exists() && codexTurnMetaJSON.Get("subagent_kind").String() == "thread_spawn" {
+			subagentSignal = true
+		}
+
+		// 1. Fork detection
+		if forkedFrom != "" {
+			forkSessionID := tid
+			if forkSessionID == "" {
+				forkSessionID = sid
+			}
+			if forkSessionID == forkedFrom && sid != "" && sid != forkedFrom {
+				forkSessionID = sid
+			}
+			info.SessionID = "codex:" + forkSessionID
+			info.ParentSessionID = "codex:" + forkedFrom
+			info.AgentName = "main"
+			info.IsFork = true
+			info.IsSubagent = false
+			return finalizeSessionInfo(info)
+		}
+
+		// 2. Subagent detection (Multi-Agent v2)
+		if subagentSignal || (tid != "" && sid != "" && tid != sid) || (parentThread != "" && parentThread != tid && parentThread != sid) {
+			childSessionID := tid
+			if childSessionID == "" {
+				childSessionID = sid
+			}
+			parentSID := parentThread
+			if parentSID == "" {
+				parentSID = sid
+			}
+			if cleanAgentName != "" && sid != "" {
+				info.SessionID = "codex:" + sid + ":agent:" + cleanAgentName
+				info.AgentName = cleanAgentName
+				if parentSID != "" {
+					info.ParentSessionID = "codex:" + parentSID
+				} else if parentCandidate != "" && parentCandidate != sid {
+					info.ParentSessionID = "codex:" + parentCandidate
+				}
+			} else {
+				info.SessionID = "codex:" + childSessionID
+				if cleanAgentName != "" {
+					info.AgentName = cleanAgentName
+				} else {
+					info.AgentName = "subagent"
+				}
+				if parentSID != "" && parentSID != childSessionID {
+					info.ParentSessionID = "codex:" + parentSID
+				} else if parentCandidate != "" && parentCandidate != childSessionID {
+					info.ParentSessionID = "codex:" + parentCandidate
+				}
+			}
+			info.IsSubagent = true
+			return finalizeSessionInfo(info)
+		}
+
+		// 3. Normal interactive session
+		sessionID := sid
+		if sessionID == "" {
+			sessionID = tid
+		}
+		info.SessionID = "codex:" + sessionID
+		if parentThread != "" && parentThread != sessionID {
 			info.ParentSessionID = "codex:" + parentThread
 			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
+			info.IsSubagent = true
+		} else if parentCandidate != "" && parentCandidate != sessionID {
 			info.ParentSessionID = "codex:" + parentCandidate
 			info.AgentName = "subagent"
+			info.IsSubagent = true
 		} else {
 			info.AgentName = "main"
 		}
@@ -218,6 +406,12 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		if parentSID == "" {
 			parentSID = sessionHeaderValue(headers, "X-Parent-Session-Id")
 		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
+		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
+		}
 		if parentSID != "" && parentSID != sid {
 			info.ParentSessionID = "agy:" + parentSID
 			info.AgentName = "subagent"
@@ -230,13 +424,19 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		return finalizeSessionInfo(info)
 	}
 
-	// 5. OpenCode / Pi Slot / Generic Headers
+	// 5. OpenCode / Pi Slot / Task / Generic Headers
 	if sid := sessionHeaderValue(headers, "X-Session-ID"); sid != "" {
 		info.ClientType = "generic"
 		info.SessionID = "header:" + sid
 		parentSID := sessionHeaderValue(headers, "X-Parent-Session-ID")
 		if parentSID == "" {
 			parentSID = sessionHeaderValue(headers, "X-Parent-Session-Id")
+		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
+		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
 		}
 		if parentSID != "" && parentSID != sid {
 			info.ParentSessionID = "header:" + parentSID
@@ -256,6 +456,12 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		if parentAffinity == "" {
 			parentAffinity = sessionHeaderValue(headers, "X-Parent-Session-ID")
 		}
+		if parentAffinity == "" {
+			parentAffinity = sessionHeaderValue(headers, "X-Parent-ID")
+		}
+		if parentAffinity == "" {
+			parentAffinity = sessionHeaderValue(headers, "X-Parent-Id")
+		}
 		if parentAffinity != "" && parentAffinity != sid {
 			info.ParentSessionID = "affinity:" + parentAffinity
 			info.AgentName = "subagent"
@@ -270,9 +476,18 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	if sid := sessionHeaderValue(headers, "X-Slot-Session-Id"); sid != "" {
 		info.ClientType = "pi"
 		info.SessionID = "slot:" + sid
-		parentSID := sessionHeaderValue(headers, "X-Parent-Session-ID")
+		parentSID := sessionHeaderValue(headers, "X-Parent-Slot-Session-Id")
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-Session-ID")
+		}
 		if parentSID == "" {
 			parentSID = sessionHeaderValue(headers, "X-Parent-Session-Id")
+		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
+		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
 		}
 		if parentSID != "" && parentSID != sid {
 			info.ParentSessionID = "slot:" + parentSID
@@ -285,21 +500,54 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 		return finalizeSessionInfo(info)
 	}
-	if sid := sessionHeaderValue(headers, "X-Conversation-Id"); sid != "" {
-		info.ClientType = "conv"
-		info.SessionID = "conv:" + sid
-		if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "conv:" + parentCandidate
+	taskID := sessionHeaderValue(headers, "X-Task-ID")
+	if taskID == "" {
+		taskID = sessionHeaderValue(headers, "X-Task-Id")
+	}
+	if taskID == "" {
+		taskID = sessionHeaderValue(headers, "X-Task_ID")
+	}
+	if taskID != "" {
+		info.ClientType = "task"
+		info.SessionID = "task:" + taskID
+		parentTaskID := sessionHeaderValue(headers, "X-Parent-Task-ID")
+		if parentTaskID == "" {
+			parentTaskID = sessionHeaderValue(headers, "X-Parent-Task-Id")
+		}
+		if parentTaskID == "" {
+			parentTaskID = sessionHeaderValue(headers, "X-Parent-Session-ID")
+		}
+		if parentTaskID == "" {
+			parentTaskID = sessionHeaderValue(headers, "X-Parent-Session-Id")
+		}
+		if parentTaskID == "" {
+			parentTaskID = sessionHeaderValue(headers, "X-Parent-ID")
+		}
+		if parentTaskID == "" {
+			parentTaskID = sessionHeaderValue(headers, "X-Parent-Id")
+		}
+		if parentTaskID != "" && parentTaskID != taskID {
+			info.ParentSessionID = "task:" + parentTaskID
+			info.AgentName = "subagent"
+		} else if parentCandidate != "" && parentCandidate != taskID {
+			info.ParentSessionID = "task:" + parentCandidate
 			info.AgentName = "subagent"
 		} else {
 			info.AgentName = "main"
 		}
 		return finalizeSessionInfo(info)
 	}
-	if sid := sessionHeaderValue(headers, "X-Conversation-ID"); sid != "" {
+	if sid := sessionHeaderValue(headers, "X-Conversation-Id"); sid != "" {
 		info.ClientType = "conv"
 		info.SessionID = "conv:" + sid
-		if parentCandidate != "" && parentCandidate != sid {
+		parentCID := sessionHeaderValue(headers, "X-Parent-Conversation-Id")
+		if parentCID == "" {
+			parentCID = sessionHeaderValue(headers, "X-Parent-ID")
+		}
+		if parentCID != "" && parentCID != sid {
+			info.ParentSessionID = "conv:" + parentCID
+			info.AgentName = "subagent"
+		} else if parentCandidate != "" && parentCandidate != sid {
 			info.ParentSessionID = "conv:" + parentCandidate
 			info.AgentName = "subagent"
 		} else {
@@ -310,29 +558,14 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	if sid := sessionHeaderValue(headers, "X-Thread-Id"); sid != "" {
 		info.ClientType = "openai-thread"
 		info.SessionID = "thread:" + sid
-		if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "thread:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
+		parentTID := sessionHeaderValue(headers, "X-Parent-Thread-Id")
+		if parentTID == "" {
+			parentTID = sessionHeaderValue(headers, "X-Parent-ID")
 		}
-		return finalizeSessionInfo(info)
-	}
-	if sid := sessionHeaderValue(headers, "X-Thread-ID"); sid != "" {
-		info.ClientType = "openai-thread"
-		info.SessionID = "thread:" + sid
-		if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "thread:" + parentCandidate
+		if parentTID != "" && parentTID != sid {
+			info.ParentSessionID = "thread:" + parentTID
 			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
-	}
-	if sid := sessionHeaderValue(headers, "Thread-Id"); sid != "" {
-		info.ClientType = "openai-thread"
-		info.SessionID = "thread:" + sid
-		if parentCandidate != "" && parentCandidate != sid {
+		} else if parentCandidate != "" && parentCandidate != sid {
 			info.ParentSessionID = "thread:" + parentCandidate
 			info.AgentName = "subagent"
 		} else {
@@ -343,7 +576,22 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	if sid := sessionHeaderValue(headers, "X-Client-Request-Id"); sid != "" {
 		info.ClientType = "generic"
 		info.SessionID = "clientreq:" + sid
-		info.AgentName = "main"
+		parentSID := sessionHeaderValue(headers, "X-Parent-Session-ID")
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
+		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
+		}
+		if parentSID != "" && parentSID != sid {
+			info.ParentSessionID = "clientreq:" + parentSID
+			info.AgentName = "subagent"
+		} else if parentCandidate != "" && parentCandidate != sid {
+			info.ParentSessionID = "clientreq:" + parentCandidate
+			info.AgentName = "subagent"
+		} else {
+			info.AgentName = "main"
+		}
 		return finalizeSessionInfo(info)
 	}
 
@@ -379,7 +627,14 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 				info.SessionID = "thread:" + tid
 				if parentCandidate != "" && parentCandidate != tid {
 					info.ParentSessionID = "thread:" + parentCandidate
-					info.AgentName = "subagent"
+					if isBodyForkCandidate(root, reqRoot, hasNestedReq) {
+						info.IsFork = true
+						info.IsSubagent = false
+						info.AgentName = "main"
+					} else {
+						info.AgentName = "subagent"
+						info.IsSubagent = true
+					}
 				} else {
 					info.AgentName = "main"
 				}
@@ -405,7 +660,13 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 		}
 
-		for _, path := range []string{"session_id", "sessionId", "sessionID", "metadata.session_id", "extra_body.session_id"} {
+		for _, path := range []string{
+			"session_id", "sessionId", "sessionID",
+			"child_session_id", "childSessionId",
+			"metadata.session_id", "metadata.sessionId", "metadata.sessionID",
+			"metadata.child_session_id",
+			"extra_body.session_id", "extra_body.sessionId", "extra_body.sessionID",
+		} {
 			sid := normalizedSessionCandidate(root.Get(path).String())
 			if sid == "" && hasNestedReq {
 				sid = normalizedSessionCandidate(reqRoot.Get(path).String())
@@ -423,10 +684,49 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 					info.SessionID = "session:" + sid
 					if parentCandidate != "" && parentCandidate != sid {
 						info.ParentSessionID = "session:" + parentCandidate
-						info.AgentName = "subagent"
+						if isBodyForkCandidate(root, reqRoot, hasNestedReq) {
+							info.IsFork = true
+							info.IsSubagent = false
+							info.AgentName = "main"
+						} else {
+							info.AgentName = "subagent"
+							info.IsSubagent = true
+						}
 					} else {
 						info.AgentName = "main"
 					}
+				}
+				return finalizeSessionInfo(info)
+			}
+		}
+
+		// Task / Action in payload (Roo Code, Cline, OpenHands)
+		for _, path := range []string{
+			"task_id", "taskId", "taskID",
+			"action_id", "actionId", "actionID",
+			"metadata.task_id", "metadata.taskId", "metadata.taskID",
+			"metadata.action_id", "metadata.actionId", "metadata.actionID",
+			"extra_body.task_id", "extra_body.taskId", "extra_body.taskID",
+		} {
+			tid := normalizedSessionCandidate(root.Get(path).String())
+			if tid == "" && hasNestedReq {
+				tid = normalizedSessionCandidate(reqRoot.Get(path).String())
+			}
+			if tid != "" {
+				info.ClientType = "task"
+				info.SessionID = "task:" + tid
+				if parentCandidate != "" && parentCandidate != tid {
+					info.ParentSessionID = "task:" + parentCandidate
+					if isBodyForkCandidate(root, reqRoot, hasNestedReq) {
+						info.IsFork = true
+						info.IsSubagent = false
+						info.AgentName = "main"
+					} else {
+						info.AgentName = "subagent"
+						info.IsSubagent = true
+					}
+				} else {
+					info.AgentName = "main"
 				}
 				return finalizeSessionInfo(info)
 			}
@@ -458,8 +758,8 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		if pck != "" {
 			info.ClientType = "generic"
 			info.SessionID = "pck:" + pck
-			if conversationID != "" {
-				info.ParentSessionID = conversationID
+			if parentCandidate != "" && parentCandidate != pck {
+				info.ParentSessionID = "pck:" + parentCandidate
 				info.AgentName = "subagent"
 			} else {
 				info.AgentName = "main"
@@ -520,12 +820,80 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 	}
 
+	// 8. LCPAffinitySessionIDMetadataKey
+	if lcpID, ok := metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey].(string); ok {
+		if lcpID = normalizedSessionCandidate(lcpID); lcpID != "" {
+			info.ClientType = "lcp"
+			info.SessionID = lcpID
+			if parentID, okParent := metadata[cliproxyexecutor.ParentSessionIDMetadataKey].(string); okParent {
+				if parentID = normalizedSessionCandidate(parentID); parentID != "" && parentID != lcpID {
+					info.ParentSessionID = parentID
+					info.AgentName = "subagent"
+					info.IsFork = true
+				} else {
+					info.AgentName = "main"
+				}
+			} else {
+				info.AgentName = "main"
+			}
+			return finalizeSessionInfo(info)
+		}
+	}
+
 	return SessionInfo{}, false
+}
+
+func isBodyForkCandidate(root, reqRoot gjson.Result, hasNestedReq bool) bool {
+	if !root.Exists() {
+		return false
+	}
+	for _, k := range []string{
+		"forked_from_thread_id", "forked_from_id",
+		"forkSource.sessionId", "fork_source.session_id",
+		"previousSessionId", "previous_session_id",
+		"metadata.forked_from_thread_id", "metadata.forked_from_id",
+		"metadata.forkSource.sessionId", "metadata.previousSessionId",
+		"extra_body.forked_from_thread_id", "extra_body.forked_from_id",
+		"extra_body.forkSource.sessionId", "extra_body.previousSessionId",
+	} {
+		if val := normalizedSessionCandidate(root.Get(k).String()); val != "" {
+			return true
+		}
+		if hasNestedReq {
+			if val := normalizedSessionCandidate(reqRoot.Get(k).String()); val != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// BoundSessionIdentity bounds an identifier to <= 256 bytes safely,
+// preserving uniqueness via SHA256 and guarding against splitting multibyte UTF-8 characters.
+func BoundSessionIdentity(id string) string {
+	if len(id) <= 256 {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	hashHex := hex.EncodeToString(sum[:]) // 64 bytes
+	prefixLen := 255 - 1 - len(hashHex)   // 190 bytes
+	if prefixLen > len(id) {
+		prefixLen = len(id)
+	}
+	prefix := id[:prefixLen]
+	for !utf8.ValidString(prefix) && len(prefix) > 0 {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return prefix + "#" + hashHex
 }
 
 func finalizeSessionInfo(info SessionInfo) (SessionInfo, bool) {
 	if info.SessionID == "" {
 		return SessionInfo{}, false
+	}
+	info.SessionID = BoundSessionIdentity(info.SessionID)
+	if info.ParentSessionID != "" {
+		info.ParentSessionID = BoundSessionIdentity(info.ParentSessionID)
 	}
 	if info.AgentName == "" {
 		info.AgentName = "main"

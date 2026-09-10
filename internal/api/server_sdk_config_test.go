@@ -14,3 +14,12 @@ func TestEffectiveSDKConfigCopiesCodexOptimizeMultiAgentV2(t *testing.T) {
 		t.Fatalf("CodexOptimizeMultiAgentV2 = false, want true")
 	}
 }
+
+func TestEffectiveSDKConfigCopiesCodexOrphanDelegationCompatibility(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{OrphanDelegationCompatibility: true}}
+
+	sdkCfg := effectiveSDKConfig(cfg)
+	if sdkCfg == nil || !sdkCfg.CodexOrphanDelegationCompatibility {
+		t.Fatalf("CodexOrphanDelegationCompatibility = false, want true")
+	}
+}

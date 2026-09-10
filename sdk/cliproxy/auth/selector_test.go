@@ -2552,3 +2552,151 @@ func TestManagerSetSelectorConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestSessionAffinitySelector_LongCompositeIDBoundConsistency(t *testing.T) {
+	t.Parallel()
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelector(fallback)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-1"}}
+	longSession := strings.Repeat("s", 200)
+	longAgent := strings.Repeat("a", 100)
+
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Claude-Code-Session-Id": []string{longSession},
+			"X-Claude-Code-Agent-Id":   []string{longAgent},
+		},
+		Metadata: make(map[string]any),
+	}
+
+	auth, err := selector.Pick(context.Background(), "claude", "claude-3-7-sonnet", opts, auths)
+	if err != nil || auth == nil {
+		t.Fatalf("selector.Pick failed: %v", err)
+	}
+
+	canonicalID, ok := opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+	if !ok || canonicalID == "" {
+		t.Fatalf("canonical session ID not set in metadata")
+	}
+	if len(canonicalID) > 256 {
+		t.Fatalf("canonical ID length = %d, want <= 256", len(canonicalID))
+	}
+	if !strings.Contains(canonicalID, "#") {
+		t.Fatalf("canonical ID %q missing hash separator", canonicalID)
+	}
+
+	// Verify CanonicalSessionID helper returns the same bounded identity
+	resolvedID := CanonicalSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if resolvedID != canonicalID {
+		t.Fatalf("CanonicalSessionID %q != metadata canonical %q", resolvedID, canonicalID)
+	}
+}
+
+func TestSessionAffinitySelector_DerivedIDBoundConsistencyOnResult(t *testing.T) {
+	t.Parallel()
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelector(fallback)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	longDerivedRaw := strings.Repeat("d", 250)
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.DerivedSessionIDMetadataKey: longDerivedRaw,
+		},
+	}
+
+	// 1. Pick establishes initial binding
+	pickedAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", opts, auths)
+	if err != nil || pickedAuth == nil {
+		t.Fatalf("Pick failed: %v", err)
+	}
+
+	// 2. OnResult records success under bounded derived key
+	res := Result{
+		AuthID:   pickedAuth.ID,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Success:  true,
+		Options:  opts,
+	}
+	selector.OnResult(res)
+
+	// 3. Next Pick with reverse candidates must hit the same bound credential
+	reverseAuths := []*Auth{{ID: "auth-b"}, {ID: "auth-a"}}
+	secondPicked, err := selector.Pick(context.Background(), "openai", "gpt-5.4", opts, reverseAuths)
+	if err != nil || secondPicked == nil {
+		t.Fatalf("second Pick failed: %v", err)
+	}
+	if secondPicked.ID != pickedAuth.ID {
+		t.Fatalf("affinity failed: got auth %s, want %s", secondPicked.ID, pickedAuth.ID)
+	}
+}
+
+func TestExtractExplicitSessionIDs_EnhancedHarnesses(t *testing.T) {
+	t.Parallel()
+
+	// 1. Roo Code / Cline task headers
+	rooHeaders := http.Header{}
+	rooHeaders.Set("X-Task-ID", "task-abc-1")
+	rooHeaders.Set("X-Parent-Task-ID", "task-root-1")
+	meta := map[string]any{}
+	primary, fallback := extractExplicitSessionIDs(rooHeaders, nil, meta)
+	if primary != "task:task-abc-1" || fallback != "task:task-root-1" {
+		t.Fatalf("Roo Code extractExplicitSessionIDs() = (%q, %q), want (task:task-abc-1, task:task-root-1)", primary, fallback)
+	}
+	if meta[cliproxyexecutor.ParentSessionIDMetadataKey] != "task:task-root-1" {
+		t.Fatalf("ParentSessionIDMetadataKey = %v, want task:task-root-1", meta[cliproxyexecutor.ParentSessionIDMetadataKey])
+	}
+
+	// 2. OpenClaw forkSource sets IsForkMetadataKey
+	clawPayload := []byte(`{"sessionId":"claw-c-1","forkSource":{"sessionId":"claw-p-1"}}`)
+	metaClaw := map[string]any{}
+	primary, fallback = extractExplicitSessionIDs(nil, clawPayload, metaClaw)
+	if primary != "session:claw-c-1" || fallback != "session:claw-p-1" {
+		t.Fatalf("OpenClaw extractExplicitSessionIDs() = (%q, %q), want (session:claw-c-1, session:claw-p-1)", primary, fallback)
+	}
+	if isFork, ok := metaClaw[cliproxyexecutor.IsForkMetadataKey].(bool); !ok || !isFork {
+		t.Fatalf("OpenClaw IsForkMetadataKey = %v, want true", metaClaw[cliproxyexecutor.IsForkMetadataKey])
+	}
+
+	// 3. Roo Code subagent task inherits parent credential via affinity selector
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-1"}, {ID: "auth-2"}}
+
+	parentOpts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Task-ID": []string{"task-parent-100"}},
+	}
+	parentAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", parentOpts, auths)
+	if err != nil || parentAuth == nil {
+		t.Fatalf("parent Pick() failed: %v", err)
+	}
+	selector.OnResult(Result{
+		AuthID:   parentAuth.ID,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Success:  true,
+		Options:  parentOpts,
+	})
+
+	// Subagent task request specifying parent task
+	subagentOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Task-ID":        []string{"task-child-101"},
+			"X-Parent-Task-ID": []string{"task-parent-100"},
+		},
+	}
+	// Reverse candidate order to prove affinity, not order
+	reverseAuths := []*Auth{{ID: "auth-2"}, {ID: "auth-1"}}
+	subagentAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", subagentOpts, reverseAuths)
+	if err != nil || subagentAuth == nil {
+		t.Fatalf("subagent Pick() failed: %v", err)
+	}
+	if subagentAuth.ID != parentAuth.ID {
+		t.Fatalf("subagent did not inherit parent task credential: got %s, want %s", subagentAuth.ID, parentAuth.ID)
+	}
+}

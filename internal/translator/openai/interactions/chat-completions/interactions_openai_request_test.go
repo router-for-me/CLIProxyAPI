@@ -156,3 +156,63 @@ func TestConvertOpenAIRequestToInteractions_PreservesEnvironmentIDAndPreviousInt
 		t.Fatalf("environment_id = %q, want env_456. Output: %s", got, string(out))
 	}
 }
+
+func TestConvertOpenAIRequestToInteractionsRenamesConflictingAntigravityTools(t *testing.T) {
+	raw := []byte(`{"model":"antigravity-preview-05-2026","messages":[{"role":"user","content":"read it"}],"tools":[
+		{"type":"function","function":{"name":"read_file","description":"r","parameters":{"type":"object"}}},
+		{"type":"function","function":{"name":"write_file","description":"w","parameters":{"type":"object"}}},
+		{"type":"function","function":{"name":"execute_code","description":"e","parameters":{"type":"object"}}},
+		{"type":"function","function":{"name":"web_search","description":"s","parameters":{"type":"object"}}}
+	]}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "external_read_file" {
+		t.Fatalf("tools.0.name = %q, want external_read_file. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "external_write_file" {
+		t.Fatalf("tools.1.name = %q, want external_write_file. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.2.name").String(); got != "external_execute_code" {
+		t.Fatalf("tools.2.name = %q, want external_execute_code. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.3.name").String(); got != "web_search" {
+		t.Fatalf("tools.3.name = %q, want web_search (unchanged). Output: %s", got, string(out))
+	}
+	outNonAnti := ConvertOpenAIRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	if got := gjson.GetBytes(outNonAnti, "tools.0.name").String(); got != "read_file" {
+		t.Fatalf("gemini tools.0.name = %q, want read_file (no rename). Output: %s", got, string(outNonAnti))
+	}
+}
+
+func TestConvertOpenAIRequestToInteractionsRenamesConflictingAntigravityToolCallsAndResultsInHistory(t *testing.T) {
+	raw := []byte(`{"model":"antigravity-preview-05-2026","messages":[
+		{"role":"user","content":"read it"},
+		{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"/tmp/x\"}"}}]},
+		{"role":"tool","name":"read_file","tool_call_id":"call_1","content":"hello file"}
+	],"tools":[
+		{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}
+	]}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "input.1.name").String(); got != "external_read_file" {
+		t.Fatalf("input.1.name (function_call) = %q, want external_read_file. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.2.name").String(); got != "external_read_file" {
+		t.Fatalf("input.2.name (function_result) = %q, want external_read_file. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToInteractionsRenamesConflictingToolChoice(t *testing.T) {
+	raw := []byte(`{
+		"model":"antigravity-preview-05-2026",
+		"messages":[{"role":"user","content":"read it"}],
+		"tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}],
+		"tool_choice":{"type":"function","function":{"name":"read_file"}}
+	}`)
+	out := ConvertOpenAIRequestToInteractions("antigravity-preview-05-2026", raw, false)
+	if got := gjson.GetBytes(out, "generation_config.tool_choice.function.name").String(); got != "external_read_file" {
+		t.Fatalf("generation_config.tool_choice.function.name = %q, want external_read_file. Output: %s", got, string(out))
+	}
+	outNonAnti := ConvertOpenAIRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	if got := gjson.GetBytes(outNonAnti, "generation_config.tool_choice.function.name").String(); got != "read_file" {
+		t.Fatalf("gemini tool_choice.function.name = %q, want read_file (no rename). Output: %s", got, string(outNonAnti))
+	}
+}

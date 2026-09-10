@@ -26,7 +26,7 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 		callbackCtx = context.Background()
 	}
 	// Detach request cancellation while preserving callback values; callback cleanup owns the model stream lifetime.
-	streamCtx, cancel := context.WithCancel(context.WithoutCancel(callbackCtx))
+	streamCtx, cancel := newStreamContext(context.WithoutCancel(callbackCtx))
 	stream, errMsg := executor.ExecuteModelStream(streamCtx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID))
 	if errMsg != nil {
 		cancel()

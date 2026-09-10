@@ -50,10 +50,11 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Convert input messages to Gemini contents format
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		inputItems, hasGeminiCarrier := normalizeGeminiResponsesCarriers(input.Array())
+		inputItems, hasGeminiCarrier := normalizeGeminiResponsesCarriers(restoreGeminiResponsesTextSignatures(modelName, input.Array()))
 		if hasGeminiCarrier {
 			useGeminiNativeReasoningLayout = true
 		}
+		inputItems = translatorcommon.NormalizeResponsesToolCallOutputs(inputItems)
 		items := pairOpenAIResponsesReasoningWithFunctionCalls(inputItems)
 		contentItems := make([][]byte, 0, len(items))
 		functionNamesByCallID := make(map[string]string)
@@ -61,7 +62,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		for _, item := range items {
 			itemType := item.Get("type").String()
 			if itemType == "function_call" || itemType == "custom_tool_call" {
-				callID := item.Get("call_id").String()
+				callID := extractOpenAIResponsesCallID(item)
 				if _, exists := functionNamesByCallID[callID]; !exists {
 					name := item.Get("name").String()
 					if ns := item.Get("namespace").String(); ns != "" {
@@ -77,6 +78,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			normalized = reorderOpenAIResponsesDetachedReasoning(normalized)
 		}
 		consumedFunctionOutputIndexes := make(map[int]bool)
+		hasEncounteredConversation := false
+		var pendingDeveloperParts [][]byte
 		for i := 0; i < len(normalized); i++ {
 			if consumedFunctionOutputIndexes[i] {
 				continue
@@ -91,25 +94,59 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			switch itemType {
 			case "message":
 				if strings.EqualFold(itemRole, "system") || strings.EqualFold(itemRole, "developer") {
-					pendingFunctionCallIDs = nil
+					if !hasEncounteredConversation {
+						pendingFunctionCallIDs = nil
+						if contentArray := item.Get("content"); contentArray.Exists() {
+							if contentArray.IsArray() {
+								contentArray.ForEach(func(_, contentItem gjson.Result) bool {
+									part := []byte(`{"text":""}`)
+									part, _ = sjson.SetBytes(part, "text", contentItem.Get("text").String())
+									systemParts = append(systemParts, part)
+									return true
+								})
+							} else if contentArray.Type == gjson.String {
+								part := []byte(`{"text":""}`)
+								part, _ = sjson.SetBytes(part, "text", contentArray.String())
+								systemParts = append(systemParts, part)
+							}
+						}
+						continue
+					}
+
+					var devParts [][]byte
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						if contentArray.IsArray() {
 							contentArray.ForEach(func(_, contentItem gjson.Result) bool {
-								part := []byte(`{"text":""}`)
-								part, _ = sjson.SetBytes(part, "text", contentItem.Get("text").String())
-								systemParts = append(systemParts, part)
+								text := contentItem.Get("text").String()
+								if text != "" {
+									part := []byte(`{"text":""}`)
+									part, _ = sjson.SetBytes(part, "text", text)
+									devParts = append(devParts, part)
+								}
 								return true
 							})
-						} else if contentArray.Type == gjson.String {
+						} else if contentArray.Type == gjson.String && contentArray.String() != "" {
 							part := []byte(`{"text":""}`)
 							part, _ = sjson.SetBytes(part, "text", contentArray.String())
-							systemParts = append(systemParts, part)
+							devParts = append(devParts, part)
+						}
+					}
+					if len(devParts) > 0 {
+						if len(pendingFunctionCallIDs) > 0 {
+							pendingDeveloperParts = append(pendingDeveloperParts, devParts...)
+						} else {
+							contentItems = append(contentItems, geminiContent("user", devParts))
 						}
 					}
 					continue
 				}
 
+				hasEncounteredConversation = true
 				if _, isAssistantOutput := openAIResponsesAssistantVisibleText(item); !isAssistantOutput {
+					if len(pendingDeveloperParts) > 0 {
+						contentItems = append(contentItems, geminiContent("user", pendingDeveloperParts))
+						pendingDeveloperParts = nil
+					}
 					pendingFunctionCallIDs = nil
 				}
 
@@ -231,6 +268,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 
 			case "function_call", "custom_tool_call":
+				hasEncounteredConversation = true
 				signature := geminiResponsesThoughtSignature
 				if rawSignature := strings.TrimSpace(item.Get("_cpa_reasoning_signature").String()); rawSignature != "" {
 					signature = openAIResponsesGeminiThoughtSignature(rawSignature)
@@ -242,11 +280,12 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				} else {
 					contentItems = append(contentItems, buildOpenAIResponsesFunctionCallModelContent(item, signature, forwardMap))
 				}
-				if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+				if callID := extractOpenAIResponsesCallID(item); callID != "" {
 					pendingFunctionCallIDs = append(pendingFunctionCallIDs, callID)
 				}
 
 			case "function_call_output", "custom_tool_call_output":
+				hasEncounteredConversation = true
 				orderedOutputs, consumedIndexes, remainingPending := collectOpenAIResponsesFunctionCallOutputs(normalized, i, pendingFunctionCallIDs)
 				pendingFunctionCallIDs = remainingPending
 				for consumedIndex := range consumedIndexes {
@@ -259,8 +298,13 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				if len(responseParts) > 0 {
 					contentItems = append(contentItems, geminiContent("user", responseParts))
 				}
+				if len(pendingFunctionCallIDs) == 0 && len(pendingDeveloperParts) > 0 {
+					contentItems = append(contentItems, geminiContent("user", pendingDeveloperParts))
+					pendingDeveloperParts = nil
+				}
 
 			case "reasoning":
+				hasEncounteredConversation = true
 				thoughtText := item.Get("summary.0.text").String()
 				rawSignature := item.Get("encrypted_content").String()
 				carrierDirection := geminiResponsesCarrierDirection(item)
@@ -284,7 +328,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						i++
 					} else if (next.Get("type").String() == "function_call" || next.Get("type").String() == "custom_tool_call") && canBindFunction && strings.TrimSpace(next.Get("_cpa_reasoning_signature").String()) == "" && signature != geminiResponsesThoughtSignature {
 						contentItems = append(contentItems, buildOpenAIResponsesReasoningFunctionCallModelContent(thoughtText, next, signature, forwardMap))
-						if callID := strings.TrimSpace(next.Get("call_id").String()); callID != "" {
+						if callID := extractOpenAIResponsesCallID(next); callID != "" {
 							pendingFunctionCallIDs = append(pendingFunctionCallIDs, callID)
 						}
 						i++
@@ -297,7 +341,12 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 			}
 		}
+		if len(pendingDeveloperParts) > 0 {
+			contentItems = append(contentItems, geminiContent("user", pendingDeveloperParts))
+			pendingDeveloperParts = nil
+		}
 		contentItems = coalesceAdjacentOpenAIResponsesModelContents(contentItems)
+		contentItems = translatorcommon.MergeAdjacentGeminiUserContents(contentItems)
 		out = translatorcommon.SetRawArrayItems(out, "contents", contentItems)
 	} else if input.Exists() && input.Type == gjson.String {
 		// Simple string input conversion to user message.
@@ -575,12 +624,12 @@ func pairOpenAIResponsesReasoningWithFunctionCalls(items []gjson.Result) []gjson
 					postCallCarrier[carrierEnd] = true
 					carrierEnd++
 				}
-				callID := strings.TrimSpace(item.Get("call_id").String())
+				callID := extractOpenAIResponsesCallID(item)
 				if callID == "" {
 					continue
 				}
 				for outputIndex := groupEnd; outputIndex < outputEnd; outputIndex++ {
-					if strings.TrimSpace(items[outputIndex].Get("call_id").String()) == callID {
+					if extractOpenAIResponsesCallID(items[outputIndex]) == callID {
 						postCallSignature[callIndex] = strings.TrimSpace(items[callIndex+1].Get("encrypted_content").String())
 						consumedPostCallCarrier[callIndex+1] = true
 						break
@@ -694,7 +743,7 @@ func buildOpenAIResponsesFunctionCallPart(item gjson.Result, signature string, f
 	functionCall := []byte(`{"functionCall":{"name":"","args":{}}}`)
 	functionCall, _ = sjson.SetBytes(functionCall, "functionCall.name", name)
 	functionCall, _ = sjson.SetBytes(functionCall, "thoughtSignature", signature)
-	functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", item.Get("call_id").String())
+	functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", extractOpenAIResponsesCallID(item))
 
 	if item.Get("type").String() == "custom_tool_call" {
 		inputVal := item.Get("input")
@@ -855,11 +904,17 @@ func parseOpenAIResponsesArrayOutput(outputResult gjson.Result) (result string, 
 	}
 }
 
+func extractOpenAIResponsesCallID(node gjson.Result) string {
+	return translatorcommon.ExtractResponsesCallID(node)
+}
+
 func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesByCallID map[string]string) [][]byte {
-	callID := item.Get("call_id").String()
+	callID := extractOpenAIResponsesCallID(item)
 	functionName := "unknown"
 	if matchedName, ok := functionNamesByCallID[callID]; ok {
 		functionName = matchedName
+	} else if name := strings.TrimSpace(item.Get("name").String()); name != "" {
+		functionName = name
 	}
 	functionResponse := []byte(`{"functionResponse":{"name":"","response":{}}}`)
 	functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.name", util.SanitizeFunctionName(functionName))
@@ -898,10 +953,13 @@ func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesB
 		functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", outputResult.String())
 	}
 
-	parts := make([][]byte, 0, 1+len(imageParts))
-	parts = append(parts, functionResponse)
-	parts = append(parts, imageParts...)
-	return parts
+	for _, imagePart := range imageParts {
+		inlineData := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
+		inlineData, _ = sjson.SetBytes(inlineData, "inlineData.mimeType", gjson.GetBytes(imagePart, "inline_data.mime_type").String())
+		inlineData, _ = sjson.SetBytes(inlineData, "inlineData.data", gjson.GetBytes(imagePart, "inline_data.data").String())
+		functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.parts.-1", inlineData)
+	}
+	return [][]byte{functionResponse}
 }
 
 func collectOpenAIResponsesFunctionCallOutputs(items []gjson.Result, start int, pendingCallIDs []string) ([]gjson.Result, map[int]bool, []string) {
@@ -925,7 +983,7 @@ func orderOpenAIResponsesFunctionCallOutputs(outputs []gjson.Result, pendingCall
 	for _, pendingID := range pendingCallIDs {
 		match := -1
 		for outputIndex, output := range outputs {
-			if !used[outputIndex] && output.Get("call_id").String() == pendingID {
+			if !used[outputIndex] && extractOpenAIResponsesCallID(output) == pendingID {
 				match = outputIndex
 				break
 			}

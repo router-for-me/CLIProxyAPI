@@ -1522,3 +1522,232 @@ func TestConvertCodexResponseToClaudeNonStream_PreservesCacheWriteUsage(t *testi
 		})
 	}
 }
+
+func TestConvertCodexResponseToClaude_PreservesReasoningUsage(t *testing.T) {
+	tests := []struct {
+		name                string
+		terminalUsageJSON   string
+		wantOutputTokens    int64
+		wantReasoningExist  bool
+		wantReasoningTokens int64
+	}{
+		{
+			name:                "preserves positive reasoning tokens",
+			terminalUsageJSON:   `{"input_tokens":420,"output_tokens":518,"output_tokens_details":{"reasoning_tokens":163},"total_tokens":938}`,
+			wantOutputTokens:    518,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 163,
+		},
+		{
+			name:                "preserves explicit zero reasoning tokens",
+			terminalUsageJSON:   `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":0}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 0,
+		},
+		{
+			name:               "omits reasoning detail when absent",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:                "clamps oversized reasoning tokens to output tokens",
+			terminalUsageJSON:   `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":999}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 50,
+		},
+		{
+			name:               "rejects negative reasoning tokens",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":-5}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "rejects negative float reasoning tokens",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":-0.5}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:                "clamps oversized int64 overflow reasoning tokens to output tokens",
+			terminalUsageJSON:   `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":9223372036854775808}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 50,
+		},
+		{
+			name:               "omits string reasoning detail",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":"163"}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "omits boolean reasoning detail",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":true}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "omits null reasoning detail",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":null}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"messages":[]}`)
+			var param any
+
+			chunks := [][]byte{
+				[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+				[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`),
+				[]byte(fmt.Sprintf(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":%s}}`, tt.terminalUsageJSON)),
+			}
+
+			var outputs [][]byte
+			for _, chunk := range chunks {
+				outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+			}
+
+			delta, ok := findClaudeStreamMessageDelta(outputs)
+			if !ok {
+				t.Fatalf("missing message_delta event; outputs=%q", outputs)
+			}
+
+			usage := delta.Get("usage")
+			if got := usage.Get("output_tokens").Int(); got != tt.wantOutputTokens {
+				t.Fatalf("output_tokens = %d, want %d", got, tt.wantOutputTokens)
+			}
+			thinkingNode := usage.Get("output_tokens_details.thinking_tokens")
+			if tt.wantReasoningExist {
+				if !thinkingNode.Exists() {
+					t.Fatalf("expected output_tokens_details.thinking_tokens to exist, got none in %s", usage.Raw)
+				}
+				if got := thinkingNode.Int(); got != tt.wantReasoningTokens {
+					t.Fatalf("thinking_tokens = %d, want %d", got, tt.wantReasoningTokens)
+				}
+			} else {
+				if thinkingNode.Exists() {
+					t.Fatalf("expected output_tokens_details.thinking_tokens to be absent, got %v", thinkingNode.Raw)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_PreservesReasoningUsage(t *testing.T) {
+	tests := []struct {
+		name                string
+		usageJSON           string
+		wantOutputTokens    int64
+		wantReasoningExist  bool
+		wantReasoningTokens int64
+	}{
+		{
+			name:                "preserves positive reasoning tokens",
+			usageJSON:           `{"input_tokens":420,"output_tokens":518,"output_tokens_details":{"reasoning_tokens":163},"total_tokens":938}`,
+			wantOutputTokens:    518,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 163,
+		},
+		{
+			name:                "preserves explicit zero reasoning tokens",
+			usageJSON:           `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":0}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 0,
+		},
+		{
+			name:               "omits reasoning detail when absent",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:                "clamps oversized reasoning tokens to output tokens",
+			usageJSON:           `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":999}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 50,
+		},
+		{
+			name:               "rejects negative reasoning tokens",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":-5}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "rejects negative float reasoning tokens",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":-0.5}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:                "clamps oversized int64 overflow reasoning tokens to output tokens",
+			usageJSON:           `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":9223372036854775808}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 50,
+		},
+		{
+			name:               "omits string reasoning detail",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":"163"}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "omits boolean reasoning detail",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":true}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "omits null reasoning detail",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":null}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"messages":[]}`)
+			responseJSON := fmt.Sprintf(`{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":%s,
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`, tt.usageJSON)
+			out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, []byte(responseJSON), nil)
+			parsed := gjson.ParseBytes(out)
+
+			usage := parsed.Get("usage")
+			if got := usage.Get("output_tokens").Int(); got != tt.wantOutputTokens {
+				t.Fatalf("output_tokens = %d, want %d", got, tt.wantOutputTokens)
+			}
+			thinkingNode := usage.Get("output_tokens_details.thinking_tokens")
+			if tt.wantReasoningExist {
+				if !thinkingNode.Exists() {
+					t.Fatalf("expected output_tokens_details.thinking_tokens to exist, got none in %s", usage.Raw)
+				}
+				if got := thinkingNode.Int(); got != tt.wantReasoningTokens {
+					t.Fatalf("thinking_tokens = %d, want %d", got, tt.wantReasoningTokens)
+				}
+			} else {
+				if thinkingNode.Exists() {
+					t.Fatalf("expected output_tokens_details.thinking_tokens to be absent, got %v", thinkingNode.Raw)
+				}
+			}
+		})
+	}
+}

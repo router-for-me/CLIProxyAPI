@@ -11,7 +11,6 @@ import (
 type SessionTreeNode struct {
 	SessionID       string         `json:"session_id"`
 	ParentSessionID string         `json:"parent_session_id,omitempty"`
-	RootSessionID   string         `json:"root_session_id"`
 	TreePath        string         `json:"tree_path"`
 	TreeDepth       int            `json:"tree_depth"`
 	AgentName       string         `json:"agent_name,omitempty"`
@@ -83,7 +82,6 @@ func (s *InMemorySessionTreeStore) RecordNode(info SessionTreeInfo) *SessionTree
 	node := &SessionTreeNode{
 		SessionID:       info.SessionID,
 		ParentSessionID: info.ParentSessionID,
-		RootSessionID:   info.SessionID,
 		TreePath:        info.SessionID,
 		TreeDepth:       0,
 		AgentName:       info.AgentName,
@@ -97,7 +95,6 @@ func (s *InMemorySessionTreeStore) RecordNode(info SessionTreeInfo) *SessionTree
 		Metadata:        info.Metadata,
 	}
 	if info.ParentSessionID != "" {
-		node.RootSessionID = info.ParentSessionID
 		node.TreePath = info.ParentSessionID + "/" + info.SessionID
 		node.TreeDepth = 1
 	}
@@ -130,7 +127,7 @@ func (s *InMemorySessionTreeStore) GetTree(rootSessionID string) []*SessionTreeN
 	defer s.mu.RUnlock()
 	var res []*SessionTreeNode
 	for _, n := range s.nodes {
-		if n.RootSessionID == rootSessionID || n.SessionID == rootSessionID {
+		if n.ParentSessionID == rootSessionID || n.SessionID == rootSessionID {
 			res = append(res, n.Clone())
 		}
 	}

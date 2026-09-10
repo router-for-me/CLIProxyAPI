@@ -185,3 +185,63 @@ func TestNextRefreshCheckAt_RefreshEvaluatorFallback(t *testing.T) {
 		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
 	}
 }
+
+func TestAuthAutoRefreshLoop_TimerWaitClampedForLongNextExpiry(t *testing.T) {
+	loop := newAuthAutoRefreshLoop(nil, 5*time.Second, 1)
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	loop.upsert("a1", now.Add(time.Hour))
+
+	got, ok := loop.nextWait(now)
+	if !ok {
+		t.Fatalf("nextWait() ok = false, want true")
+	}
+	if got > maxRefreshTimerWait {
+		t.Fatalf("nextWait() = %v, want <= %v", got, maxRefreshTimerWait)
+	}
+	if got != maxRefreshTimerWait {
+		t.Fatalf("nextWait() = %v, want exactly %v", got, maxRefreshTimerWait)
+	}
+
+	// Short wait should not be clamped
+	shortNext := now.Add(10 * time.Second)
+	loop.upsert("a2", shortNext)
+	gotShort, okShort := loop.nextWait(now)
+	if !okShort || gotShort != 10*time.Second {
+		t.Fatalf("nextWait() short = (%v, %t), want (10s, true)", gotShort, okShort)
+	}
+}
+
+func TestAuthAutoRefreshLoop_PopDue_AfterSystemSuspendResume(t *testing.T) {
+	loop := newAuthAutoRefreshLoop(nil, 5*time.Second, 1)
+	beforeSleep := time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC)
+
+	// Credential scheduled to refresh 50 minutes later
+	scheduledRefresh := beforeSleep.Add(50 * time.Minute)
+	loop.upsert("gemini-oauth", scheduledRefresh)
+
+	// Before sleep, wait is clamped to maxRefreshTimerWait
+	wait, ok := loop.nextWait(beforeSleep)
+	if !ok || wait != maxRefreshTimerWait {
+		t.Fatalf("nextWait() before sleep = (%v, %t), want (%v, true)", wait, ok, maxRefreshTimerWait)
+	}
+
+	// Not due yet before sleep
+	dueBefore := loop.popDue(beforeSleep)
+	if len(dueBefore) != 0 {
+		t.Fatalf("popDue() before sleep = %v, want empty", dueBefore)
+	}
+
+	// System resumes 2 hours later (monotonic clock froze, but wall clock jumped)
+	afterResume := beforeSleep.Add(2 * time.Hour)
+
+	// Upon wake, the clamped timer fires within maxRefreshTimerWait and checks with current wall clock
+	waitAfter, okAfter := loop.nextWait(afterResume)
+	if !okAfter || waitAfter != 0 {
+		t.Fatalf("nextWait() after resume = (%v, %t), want (0, true)", waitAfter, okAfter)
+	}
+
+	dueAfter := loop.popDue(afterResume)
+	if len(dueAfter) != 1 || dueAfter[0] != "gemini-oauth" {
+		t.Fatalf("popDue() after resume = %v, want [gemini-oauth]", dueAfter)
+	}
+}
