@@ -96,6 +96,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	if MethodHostAuthSave != "host.auth.save" {
 		t.Fatalf("MethodHostAuthSave = %q", MethodHostAuthSave)
 	}
+	if MethodHostAffinityLookup != "host.affinity.lookup" {
+		t.Fatalf("MethodHostAffinityLookup = %q", MethodHostAffinityLookup)
+	}
 	if MethodExecutorExecuteStream != "executor.execute_stream" {
 		t.Fatalf("MethodExecutorExecuteStream = %q", MethodExecutorExecuteStream)
 	}

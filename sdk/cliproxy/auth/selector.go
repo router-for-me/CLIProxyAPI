@@ -827,6 +827,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
+	if hasUnauthorizedAuthFailure(auth) {
+		return true, blockReasonOther, time.Time{}
+	}
 	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
@@ -1212,6 +1215,24 @@ func lcpAffinityNamespace(provider, model string, metadata map[string]any) strin
 	return strings.Join([]string{"lcp:v1", provider, model, callerScope}, "::")
 }
 
+func parseLCPNamespace(ns string) (provider, model, callerScope string, ok bool) {
+	if !strings.HasPrefix(ns, "lcp:v1::") {
+		return "", "", "", false
+	}
+	rest := strings.TrimPrefix(ns, "lcp:v1::")
+	nsProvider, rest, found := strings.Cut(rest, "::")
+	if !found {
+		return "", "", "", false
+	}
+	lastIdx := strings.LastIndex(rest, "::")
+	if lastIdx < 0 {
+		return nsProvider, rest, "", true
+	}
+	nsModel := rest[:lastIdx]
+	nsCallerScope := rest[lastIdx+2:]
+	return nsProvider, nsModel, nsCallerScope, true
+}
+
 func lcpFingerprintsFromMetadata(metadata map[string]any) ([]string, int) {
 	if metadata == nil {
 		return nil, 0
@@ -1289,6 +1310,104 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	if s.matcher != nil {
 		s.matcher.InvalidateAuth(authID)
 	}
+}
+
+// LookupAffinity observes the current session affinity binding without side effects.
+// It never selects a credential, creates a binding, rebinds, or refreshes TTL.
+// Optional authFilters allow callers (such as Manager) to exclude credentials that do not match the requested provider.
+func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID string, authFilters ...func(authID string) bool) (string, string) {
+	if s == nil || s.cache == nil {
+		return "", "unsupported"
+	}
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	sessionID = strings.TrimSpace(sessionID)
+	if provider == "" || model == "" || sessionID == "" {
+		return "", "unbound"
+	}
+
+	var authFilter func(authID string) bool
+	if len(authFilters) > 0 {
+		authFilter = authFilters[0]
+	}
+
+	modelKey := canonicalModelKey(model)
+	if modelKey == "" {
+		modelKey = model
+	}
+
+	providers := []string{provider}
+	if provider != "mixed" {
+		providers = append(providers, "mixed")
+	}
+
+	candidatePrefixes := cliproxysession.CandidateSessionPrefixes
+	hasKnownPrefix := false
+	for _, p := range candidatePrefixes {
+		if strings.HasPrefix(sessionID, p) {
+			hasKnownPrefix = true
+			break
+		}
+	}
+
+	var candidates []string
+	if hasKnownPrefix {
+		candidates = []string{sessionID}
+	} else {
+		candidates = make([]string, 0, len(candidatePrefixes)+1)
+		candidates = append(candidates, sessionID)
+		for _, p := range candidatePrefixes {
+			candidates = append(candidates, p+sessionID)
+		}
+	}
+
+	foundAuths := make(map[string]struct{})
+	for _, candProvider := range providers {
+		for _, cand := range candidates {
+			bounded := cliproxysession.BoundSessionIdentity(cand)
+			key := candProvider + "::" + bounded + "::" + modelKey
+			if authID, ok := s.cache.Get(key); ok && authID != "" {
+				if authFilter != nil && !authFilter(authID) {
+					continue
+				}
+				foundAuths[authID] = struct{}{}
+			}
+		}
+	}
+
+	if s.matcher != nil {
+		for _, cand := range candidates {
+			if authIDs, ns, ok := s.matcher.LookupSession(cand); ok && len(authIDs) > 0 {
+				nsProvider, nsModel, _, okParse := parseLCPNamespace(ns)
+				matchesNS := true
+				if okParse {
+					if (provider != "mixed" && nsProvider != "mixed" && nsProvider != strings.ToLower(provider)) ||
+						(modelKey != "" && nsModel != modelKey) {
+						matchesNS = false
+					}
+				}
+				if matchesNS {
+					for _, aID := range authIDs {
+						if authFilter != nil && !authFilter(aID) {
+							continue
+						}
+						foundAuths[aID] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+
+	if len(foundAuths) == 0 {
+		return "", "unbound"
+	}
+	if len(foundAuths) > 1 {
+		return "", "ambiguous"
+	}
+	for authID := range foundAuths {
+		return authID, "bound"
+	}
+	return "", "unbound"
 }
 
 // OnResult handles session affinity binding or release based on execution outcome.

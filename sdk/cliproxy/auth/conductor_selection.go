@@ -419,6 +419,71 @@ func (m *Manager) Selector() Selector {
 	return m.selector
 }
 
+// LookupSessionAffinity observes the current session affinity binding without side effects.
+// It returns (auth, status) where status can be "bound", "unbound", "ambiguous", or "unsupported".
+func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Auth, string) {
+	if m == nil {
+		return nil, "unsupported"
+	}
+	m.mu.RLock()
+	if m.pluginScheduler != nil {
+		m.mu.RUnlock()
+		return nil, "unsupported"
+	}
+	sel := m.selector
+	authProviderMap := make(map[string]string, len(m.auths))
+	for id, a := range m.auths {
+		if a != nil {
+			authProviderMap[id] = a.Provider
+		}
+	}
+	m.mu.RUnlock()
+
+	if sel == nil {
+		return nil, "unsupported"
+	}
+
+	authFilter := func(authID string) bool {
+		if provider == "mixed" {
+			return true
+		}
+		p, ok := authProviderMap[authID]
+		return ok && p == provider
+	}
+
+	var authID, status string
+	if observerWithFilter, ok := sel.(interface {
+		LookupAffinity(provider, model, sessionID string, authFilters ...func(authID string) bool) (string, string)
+	}); ok && observerWithFilter != nil {
+		authID, status = observerWithFilter.LookupAffinity(provider, model, sessionID, authFilter)
+	} else if observer, ok := sel.(interface {
+		LookupAffinity(provider, model, sessionID string) (string, string)
+	}); ok && observer != nil {
+		authID, status = observer.LookupAffinity(provider, model, sessionID)
+	} else {
+		return nil, "unsupported"
+	}
+
+	if status != "bound" || authID == "" {
+		return nil, status
+	}
+
+	m.mu.RLock()
+	auth, okAuth := m.auths[authID]
+	if !okAuth || auth == nil {
+		m.mu.RUnlock()
+		return nil, "unbound"
+	}
+	snapshot := auth.Clone()
+	m.mu.RUnlock()
+
+	if provider != "mixed" && snapshot.Provider != provider {
+		return nil, "unbound"
+	}
+	snapshot.EnsureIndex()
+	return snapshot, "bound"
+}
+
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()
@@ -460,6 +525,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 
 	availableByPriority := make(map[int][]*Auth)
 	cooldownCount := 0
+	unauthorizedCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
@@ -474,6 +540,10 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
 				earliest = next
 			}
+			continue
+		}
+		if hasUnauthorizedAuthFailure(candidate) {
+			unauthorizedCount++
 		}
 	}
 
@@ -492,6 +562,18 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 				resetIn = 0
 			}
 			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
+		}
+		if unauthorizedCount == len(auths) && len(auths) > 0 {
+			terminalCause := latestUnauthorizedCandidateError(auths)
+			if terminalCause == nil {
+				terminalCause = lastCandidateErr
+			}
+			return nil, NewTerminalAuthError(&Error{
+				Code:       "auth_unavailable",
+				Message:    "no auth available",
+				Retryable:  false,
+				HTTPStatus: http.StatusServiceUnavailable,
+			}, terminalCause)
 		}
 		return nil, WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
 	}
@@ -555,6 +637,27 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
 }
 
+func latestUnauthorizedCandidateError(auths []*Auth) error {
+	var latestTime time.Time
+	var latestAuthID string
+	var latestErr error
+
+	for _, candidate := range auths {
+		if candidate == nil || !hasUnauthorizedAuthFailure(candidate) {
+			continue
+		}
+		curTime := candidate.UpdatedAt
+		if candidate.LastError != nil {
+			if latestErr == nil || curTime.After(latestTime) || (curTime.Equal(latestTime) && candidate.ID > latestAuthID) {
+				latestTime = curTime
+				latestAuthID = candidate.ID
+				latestErr = candidate.LastError
+			}
+		}
+	}
+	return latestErr
+}
+
 func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) string) error {
 	var latestModelTime time.Time
 	var latestModelAuthID string
@@ -603,25 +706,25 @@ func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) 
 				latestModelAuthID = candidate.ID
 				latestModelErr = modelErr
 			}
-		} else {
-			var authErr error
-			var authTime time.Time
-			if candidate.LastError != nil {
-				authErr = candidate.LastError
-				authTime = candidate.UpdatedAt
-			} else if strings.TrimSpace(candidate.StatusMessage) != "" {
-				authErr = errors.New(candidate.StatusMessage)
+		}
+
+		var authErr error
+		var authTime time.Time
+		if candidate.LastError != nil {
+			authErr = candidate.LastError
+			authTime = candidate.UpdatedAt
+		} else if strings.TrimSpace(candidate.StatusMessage) != "" {
+			authErr = errors.New(candidate.StatusMessage)
+			authTime = candidate.UpdatedAt
+		}
+		if authErr != nil {
+			if authTime.IsZero() {
 				authTime = candidate.UpdatedAt
 			}
-			if authErr != nil {
-				if authTime.IsZero() {
-					authTime = candidate.UpdatedAt
-				}
-				if latestAuthErr == nil || authTime.After(latestAuthTime) || (authTime.Equal(latestAuthTime) && candidate.ID > latestAuthID) {
-					latestAuthTime = authTime
-					latestAuthID = candidate.ID
-					latestAuthErr = authErr
-				}
+			if latestAuthErr == nil || authTime.After(latestAuthTime) || (authTime.Equal(latestAuthTime) && candidate.ID > latestAuthID) {
+				latestAuthTime = authTime
+				latestAuthID = candidate.ID
+				latestAuthErr = authErr
 			}
 		}
 	}

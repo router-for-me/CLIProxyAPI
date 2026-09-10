@@ -774,6 +774,38 @@ type HostAuthSaveResponse struct {
 	Path string `json:"path"`
 }
 
+// Host affinity lookup status outcomes.
+const (
+	HostAffinityStatusBound       = "bound"
+	HostAffinityStatusUnbound     = "unbound"
+	HostAffinityStatusAmbiguous   = "ambiguous"
+	HostAffinityStatusUnsupported = "unsupported"
+)
+
+// HostAffinityLookupRequest asks the host to observe the current affinity binding for a session.
+type HostAffinityLookupRequest struct {
+	// Provider identifies the model provider (e.g., "anthropic", "openai").
+	Provider string `json:"provider"`
+	// Model identifies the requested model.
+	Model string `json:"model"`
+	// SessionID identifies the client session.
+	SessionID string `json:"session_id"`
+}
+
+// HostAffinityLookupResponse describes the observed affinity binding state for a session.
+type HostAffinityLookupResponse struct {
+	// Status reports the observation outcome ("bound", "unbound", "ambiguous", "unsupported").
+	Status string `json:"status"`
+	// AuthIndex identifies the bound credential index usable with host.auth.get_runtime when Status is "bound".
+	AuthIndex string `json:"auth_index,omitempty"`
+	// ObservedAt reports the observation timestamp.
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+	// Disabled reports whether the bound credential is known to be disabled.
+	Disabled bool `json:"disabled,omitempty"`
+	// Unavailable reports whether the bound credential is currently unavailable.
+	Unavailable bool `json:"unavailable,omitempty"`
+}
+
 // HTTPWireProfile configures transport-level wire representation for plugin HTTP requests.
 type HTTPWireProfile struct {
 	// HTTP1Only forces the transport to use HTTP/1.1 and disables HTTP/2 negotiation.

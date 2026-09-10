@@ -65,6 +65,53 @@ func TestCodexQuotaErrorCredentialScope(t *testing.T) {
 	}
 }
 
+func TestCodexQuotaErrorModelLevelCooling(t *testing.T) {
+	quota := `{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":3600}`
+	for _, test := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "http usage limit", path: "http", body: `{"error":` + quota + `}`},
+		{name: "http top-level usage limit", path: "http", body: quota},
+		{name: "http usage limit without reset", path: "http", body: `{"error":{"type":"usage_limit_reached"}}`},
+		{name: "sse error", path: "terminal", body: `{"type":"error","error":` + quota + `}`},
+		{name: "sse response failed", path: "terminal", body: `{"type":"response.failed","response":{"error":` + quota + `}}`},
+		{name: "websocket error", path: "websocket", body: `{"type":"error","status":429,"error":` + quota + `}`},
+		{name: "websocket body error", path: "websocket", body: `{"type":"error","status":429,"body":{"error":` + quota + `}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var err error
+			switch test.path {
+			case "http":
+				err = newCodexStatusErrWithCooling(http.StatusTooManyRequests, []byte(test.body), true)
+			case "terminal":
+				terminalErr, _, ok := codexTerminalStreamErrWithCooling([]byte(test.body), true)
+				if !ok {
+					t.Fatal("terminal error was not recognized")
+				}
+				err = terminalErr
+			case "websocket":
+				var ok bool
+				err, ok = parseCodexWebsocketErrorWithCooling([]byte(test.body), true)
+				if !ok {
+					t.Fatal("websocket error was not recognized")
+				}
+			}
+			var scoped interface{ IsCredentialScoped() bool }
+			if errors.As(err, &scoped) && scoped.IsCredentialScoped() {
+				t.Errorf("expected credential scope = false for model-level cooling, got true; err = %v", err)
+			}
+			if strings.Contains(test.body, "resets_in_seconds") {
+				var retry interface{ RetryAfter() *time.Duration }
+				if !errors.As(err, &retry) || retry.RetryAfter() == nil || *retry.RetryAfter() != time.Hour {
+					t.Errorf("model-level quota error must still preserve its retry reset: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestParseCodexRetryAfterQuotaLayouts(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	for _, layout := range []string{"nested", "top-level"} {

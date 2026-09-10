@@ -42,6 +42,15 @@ type canonicalPart struct {
 
 var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
+// CandidateSessionPrefixes lists recognized protocol-specific session prefixes used in affinity lookup and routing.
+var CandidateSessionPrefixes = []string{
+	"lcp:v1:", "lcp:",
+	"codex:", "claude:", "header:", "session:",
+	"affinity:", "slot:", "task:", "conv:",
+	"thread:", "clientreq:", "geminicache:",
+	"pck:", "user:", "execution:", "agy:", "derived:",
+}
+
 // knownSessionPrefixes tracks legacy protocol-specific session prefixes that need to be
 // unwrapped before projecting to canonical UUIDv8.
 // Deprecated: This transitional table and string-stripping mechanism are scheduled to be

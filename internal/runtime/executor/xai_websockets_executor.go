@@ -507,7 +507,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
-	wsHeaders := applyXAIWebsocketHeaders(http.Header{}, auth, token, prepared.sessionID, opts.Headers)
+	wsHeaders := applyXAIWebsocketHeaders(ctx, http.Header{}, auth, token, prepared.sessionID, opts.Headers)
 	wsReqBody := buildXAIWebsocketRequestBody(prepared.body)
 	requestType := strings.TrimSpace(gjson.GetBytes(req.Payload, "type").String())
 	transcriptReset := strings.TrimSpace(gjson.GetBytes(wsReqBody, "previous_response_id").String()) == "" &&
@@ -1478,7 +1478,7 @@ func buildXAIResponsesWebsocketURL(httpURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func applyXAIWebsocketHeaders(headers http.Header, auth *cliproxyauth.Auth, token string, sessionID string, clientHeaders ...http.Header) http.Header {
+func applyXAIWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, sessionID string, clientHeaders ...http.Header) http.Header {
 	if headers == nil {
 		headers = http.Header{}
 	}
@@ -1495,7 +1495,13 @@ func applyXAIWebsocketHeaders(headers http.Header, auth *cliproxyauth.Auth, toke
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs, clientHeaders...)
+	var req *http.Request
+	if ctx != nil {
+		req = (&http.Request{Header: headers}).WithContext(ctx)
+	} else {
+		req = &http.Request{Header: headers}
+	}
+	util.ApplyCustomHeadersFromAttrs(req, attrs, clientHeaders...)
 	return headers
 }
 

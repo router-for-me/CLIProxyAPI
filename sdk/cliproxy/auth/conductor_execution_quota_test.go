@@ -8,6 +8,7 @@ import (
 
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	internalutil "github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 )
@@ -248,10 +249,14 @@ func TestApplyRequestAfterAuthInterceptorSessionClearing(t *testing.T) {
 		SessionID:       "session:initial-session",
 		ParentSessionID: "session:initial-parent",
 	})
+	ctxWithSession = internalutil.WithSessionID(ctxWithSession, "session:initial-session")
 	syncedCtx := syncMetadataSessionToContext(ctxWithSession, finalOpts.Metadata)
 	meta := internallogging.GetClientRequestMetadata(syncedCtx)
 	if meta.SessionID != "" || meta.ParentSessionID != "" {
 		t.Fatalf("context retained stale session after interceptor cleared headers: (%q, %q)", meta.SessionID, meta.ParentSessionID)
+	}
+	if sid := internalutil.SessionIDFromContext(syncedCtx); sid != "" {
+		t.Fatalf("context retained stale SessionIDFromContext: %q", sid)
 	}
 	_ = finalReq
 }
