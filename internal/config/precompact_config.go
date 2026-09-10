@@ -7,12 +7,12 @@ import (
 )
 
 const (
-	DefaultPreCompactAuxModel        = "bedrock/claude-haiku-4-5-20251001"
-	DefaultPreCompactThreshold       = 0.85
-	DefaultPreCompactKeepRecentTurns = 6
+	DefaultPreCompactAuxModel         = "claude-haiku-4-5-20251001"
+	DefaultPreCompactThreshold        = 0.85
+	DefaultPreCompactKeepRecentTurns  = 6
 	DefaultPreCompactKeepRecentTokens = 40000
-	DefaultPreCompactCacheTTL        = "2h"
-	DefaultPreCompactCacheMaxSess    = 2000
+	DefaultPreCompactCacheTTL         = "2h"
+	DefaultPreCompactCacheMaxSess     = 2000
 )
 
 // PreCompactConfig controls server-side pre-compaction: when a request does not
