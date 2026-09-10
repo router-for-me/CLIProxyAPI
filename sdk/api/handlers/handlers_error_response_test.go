@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -288,7 +289,52 @@ func TestEnrichAuthSelectionError_IgnoresOtherErrors(t *testing.T) {
 	}
 }
 
-func TestEnrichAuthSelectionError_IncludesUpstreamErrorFromCause(t *testing.T) {
+func TestEnrichAuthSelectionError_PromotesUpstreamOverloadCause(t *testing.T) {
+	in := coreauth.WithCause(&coreauth.Error{
+		Code:    "auth_unavailable",
+		Message: "no auth available",
+	}, &coreauth.Error{
+		Code:       "server_is_overloaded",
+		Message:    `{"type":"error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","sequence_number":0}`,
+		HTTPStatus: http.StatusServiceUnavailable,
+	})
+	out := enrichAuthSelectionError(in, []string{"codex"}, "gpt-5.6-sol")
+
+	var got *coreauth.Error
+	if !errors.As(out, &got) || got == nil {
+		t.Fatalf("expected coreauth.Error, got %T", out)
+	}
+	if got.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", got.StatusCode(), http.StatusServiceUnavailable)
+	}
+	if got.Code != "server_is_overloaded" {
+		t.Fatalf("code = %q, want %q", got.Code, "server_is_overloaded")
+	}
+	if !got.Retryable {
+		t.Fatal("retryable = false, want true")
+	}
+	if got.Message != "Our servers are currently overloaded. Please try again later." {
+		t.Fatalf("message = %q", got.Message)
+	}
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	NewBaseAPIHandlers(nil, nil).WriteErrorResponse(c, executionErrorMessage(out))
+	var response ErrorResponse
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("decode response: %v", errUnmarshal)
+	}
+	if response.Error.Code != "server_is_overloaded" {
+		t.Fatalf("response code = %q, want %q", response.Error.Code, "server_is_overloaded")
+	}
+	if response.Error.Message != "Our servers are currently overloaded. Please try again later." {
+		t.Fatalf("response message = %q", response.Error.Message)
+	}
+}
+
+func TestEnrichAuthSelectionError_PromotesUntypedUpstreamOverloadCause(t *testing.T) {
 	in := coreauth.WithCause(&coreauth.Error{
 		Code:    "auth_unavailable",
 		Message: "no auth available",
@@ -299,17 +345,11 @@ func TestEnrichAuthSelectionError_IncludesUpstreamErrorFromCause(t *testing.T) {
 	if !errors.As(out, &got) || got == nil {
 		t.Fatalf("expected coreauth.Error, got %T", out)
 	}
-	if got.StatusCode() != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", got.StatusCode(), http.StatusServiceUnavailable)
+	if got.Code != "server_is_overloaded" {
+		t.Fatalf("code = %q, want %q", got.Code, "server_is_overloaded")
 	}
-	if !strings.Contains(got.Message, "providers=codex") {
-		t.Fatalf("message missing provider context: %q", got.Message)
-	}
-	if !strings.Contains(got.Message, "model=gpt-5.6-sol") {
-		t.Fatalf("message missing model context: %q", got.Message)
-	}
-	if !strings.Contains(got.Message, "Our servers are currently overloaded. Please try again later.") && !strings.Contains(got.Message, "server_is_overloaded") {
-		t.Fatalf("message missing upstream error details: %q", got.Message)
+	if got.Message != "Our servers are currently overloaded. Please try again later." {
+		t.Fatalf("message = %q", got.Message)
 	}
 }
 
