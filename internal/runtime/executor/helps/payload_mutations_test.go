@@ -92,6 +92,48 @@ func TestApplyPayloadConfigReusesCanonicalOverrides(t *testing.T) {
 	}
 }
 
+func TestApplyPayloadConfigParameterOrderDeterministic(t *testing.T) {
+	t.Run("positive_control", func(t *testing.T) {
+		cfg := &config.Config{Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "gpt-test", Protocol: "openai"}},
+				Params: map[string]any{"model": "gpt-test"},
+			}},
+		}}
+		input := []byte(`{"model":"original"}`)
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", bytes.Clone(input), nil, "", "")
+		t.Logf("positive control: input=%s override=model:gpt-test output=%s", input, output)
+		if string(output) != `{"model":"gpt-test"}` {
+			t.Fatalf("positive control output = %s, want {\"model\":\"gpt-test\"}", output)
+		}
+	})
+
+	cfg := &config.Config{Payload: config.PayloadConfig{
+		Override: []config.PayloadRule{{
+			Models: []config.PayloadModelRule{{Name: "gpt-test", Protocol: "openai"}},
+			Params: map[string]any{
+				"messages.0.role":                  "system",
+				`messages.#(role=="user").content`: "changed",
+			},
+		}},
+	}}
+	input := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+	distinctOutputs := make(map[string]int)
+	for range 512 {
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", bytes.Clone(input), nil, "", "")
+		distinctOutputs[string(output)]++
+	}
+	for output, count := range distinctOutputs {
+		t.Logf("output=%s count=%d", output, count)
+	}
+	if len(distinctOutputs) != 1 {
+		t.Fatalf("distinct outputs = %d across 512 calls, want 1", len(distinctOutputs))
+	}
+	if want := `{"messages":[{"role":"system","content":"changed"}]}`; distinctOutputs[want] == 0 {
+		t.Fatalf("outputs = %v, want %s", distinctOutputs, want)
+	}
+}
+
 func TestApplyPayloadConfigWithRequestTrackedReportsContextManagementTouches(t *testing.T) {
 	const automatic = `{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`
 	modelRules := []config.PayloadModelRule{{Name: "claude-opus-5", Protocol: "claude"}}
