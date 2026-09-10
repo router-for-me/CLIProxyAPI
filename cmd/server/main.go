@@ -189,6 +189,11 @@ func main() {
 			log.WithError(errLoad).Warn("failed to load .env file")
 		}
 	}
+	// Registry package init runs before .env loading; refresh the opt-in Codex
+	// CLI cache overlay now so --local-model/offline starts honor .env too.
+	if added := registry.RefreshCodexCacheOverlay(); len(added) > 0 {
+		log.Infof("codex-cache import: registered %d new model slug(s): %v", len(added), added)
+	}
 
 	lookupEnv := func(keys ...string) (string, bool) {
 		for _, key := range keys {
