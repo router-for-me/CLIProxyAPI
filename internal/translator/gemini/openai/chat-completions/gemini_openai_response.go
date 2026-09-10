@@ -168,6 +168,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 					if !inlineDataResult.Exists() {
 						inlineDataResult = partResult.Get("inline_data")
 					}
+					// Speech-to-text models (gemini-3.5-transcribe) deliver the
+					// transcript in an audioTranscription part instead of text.
+					audioTranscriptionResult := partResult.Get("audioTranscription")
+					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
+						partTextResult = audioTranscriptionResult.Get("text")
+					}
 					thoughtSignatureResult := partResult.Get("thoughtSignature")
 					if !thoughtSignatureResult.Exists() {
 						thoughtSignatureResult = partResult.Get("thought_signature")
@@ -367,6 +373,12 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 					inlineDataResult := partResult.Get("inlineData")
 					if !inlineDataResult.Exists() {
 						inlineDataResult = partResult.Get("inline_data")
+					}
+					// Speech-to-text models (gemini-3.5-transcribe) deliver the
+					// transcript in an audioTranscription part instead of text.
+					audioTranscriptionResult := partResult.Get("audioTranscription")
+					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
+						partTextResult = audioTranscriptionResult.Get("text")
 					}
 
 					if partTextResult.Exists() {
