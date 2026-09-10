@@ -15,7 +15,7 @@ type invalidRefreshTokenExecutor struct {
 }
 
 func (e invalidRefreshTokenExecutor) Refresh(context.Context, *Auth) (*Auth, error) {
-	return nil, errors.New(`token refresh failed with status 400: {"error":"invalid_refresh_token"}`)
+	return nil, errors.New(`token refresh failed with status 400: {"error":"invalid_refresh_token","error_description":"secret-refresh-detail-should-not-log"}`)
 }
 
 func TestManager_RefreshAuthLogsAuthFileBasenameOnInvalidRefreshToken(t *testing.T) {

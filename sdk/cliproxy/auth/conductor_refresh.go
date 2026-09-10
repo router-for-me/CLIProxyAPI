@@ -12,6 +12,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
@@ -677,7 +678,7 @@ func logCredentialRefreshFailure(auth *Auth, err error, retainedUnexpired bool) 
 	if file == "" {
 		file = "unknown"
 	}
-	diagnostic := safeErrorDiagnosticForLog(err)
+	diagnostic := logging.SafeErrorDiagnostic(err)
 	if retainedUnexpired {
 		log.Warnf("credential refresh failed for %s (auth_file=%s): %s; retaining active credential as access token is unexpired", auth.Provider, file, diagnostic)
 		return
