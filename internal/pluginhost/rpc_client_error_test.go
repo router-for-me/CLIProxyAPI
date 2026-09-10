@@ -19,6 +19,34 @@ func (c staticEnvelopePluginClient) Call(context.Context, string, []byte) ([]byt
 
 func (c staticEnvelopePluginClient) Shutdown() {}
 
+type rpcTestStatusError struct {
+	message string
+	status  int
+}
+
+func (e rpcTestStatusError) Error() string   { return e.message }
+func (e rpcTestStatusError) StatusCode() int { return e.status }
+
+func TestMarshalRPCErrorFromErrorPreservesHTTPStatus(t *testing.T) {
+	raw := marshalRPCErrorFromError("host_call_failed", rpcTestStatusError{
+		message: "upstream timed out",
+		status:  http.StatusGatewayTimeout,
+	})
+	var envelope pluginabi.Envelope
+	if errUnmarshal := json.Unmarshal(raw, &envelope); errUnmarshal != nil {
+		t.Fatalf("unmarshal envelope: %v", errUnmarshal)
+	}
+	if envelope.OK || envelope.Error == nil {
+		t.Fatalf("envelope = %#v, want RPC error", envelope)
+	}
+	if envelope.Error.Message != "upstream timed out" {
+		t.Fatalf("message = %q, want upstream timed out", envelope.Error.Message)
+	}
+	if envelope.Error.HTTPStatus != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want %d", envelope.Error.HTTPStatus, http.StatusGatewayTimeout)
+	}
+}
+
 func TestDecodeEnvelopeResultPreservesPluginHTTPStatus(t *testing.T) {
 	_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](pluginabi.Envelope{
 		OK: false,

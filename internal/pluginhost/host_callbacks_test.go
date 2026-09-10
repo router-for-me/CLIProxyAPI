@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -290,6 +291,47 @@ func TestHostModelExecuteCallback(t *testing.T) {
 	}
 	if got.Alt != "raw" {
 		t.Fatalf("alt = %q, want raw", got.Alt)
+	}
+}
+
+func TestHostModelExecuteCallbackPreservesErrorStatus(t *testing.T) {
+	host := New()
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			return handlers.ModelExecutionResponse{}, &interfaces.ErrorMessage{
+				StatusCode: http.StatusServiceUnavailable,
+				Error:      errors.New("routing unavailable"),
+			}
+		},
+	})
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         "model-1",
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+
+	_, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawReq)
+	if errCall == nil {
+		t.Fatal("callFromPlugin() returned nil error")
+	}
+	rawResp := marshalRPCErrorFromError("host_call_failed", errCall)
+	var envelope pluginabi.Envelope
+	if errUnmarshal := json.Unmarshal(rawResp, &envelope); errUnmarshal != nil {
+		t.Fatalf("unmarshal envelope: %v", errUnmarshal)
+	}
+	if envelope.OK || envelope.Error == nil {
+		t.Fatalf("envelope = %#v, want RPC error", envelope)
+	}
+	if envelope.Error.Message != "routing unavailable" {
+		t.Fatalf("message = %q, want routing unavailable", envelope.Error.Message)
+	}
+	if envelope.Error.HTTPStatus != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", envelope.Error.HTTPStatus, http.StatusServiceUnavailable)
 	}
 }
 
