@@ -1,6 +1,7 @@
 package chat_completions
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -842,5 +843,134 @@ func TestConvertOpenAIRequestToClaude_DeterministicWithoutSessionKey(t *testing.
 	}
 	if idFirst != idSecond {
 		t.Fatalf("turn growth changed derived user_id: %q vs %q", idFirst, idSecond)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatJSONSchema(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Extract facts from: Yesterday it rained in Beijing."}],
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"name": "extracted_facts",
+				"strict": true,
+				"schema": {
+					"type": "object",
+					"properties": {
+						"facts": {
+							"type": "array",
+							"items": { "type": "string" }
+						}
+					},
+					"required": ["facts"]
+				}
+			}
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	system := gjson.GetBytes(out, "system")
+	if !system.Exists() || !system.IsArray() || len(system.Array()) == 0 {
+		t.Fatalf("system blocks missing or empty. Output: %s", string(out))
+	}
+
+	foundSchemaInstruction := false
+	for _, block := range system.Array() {
+		text := block.Get("text").String()
+		if strings.Contains(text, "JSON") && strings.Contains(text, "facts") {
+			foundSchemaInstruction = true
+			break
+		}
+	}
+	if !foundSchemaInstruction {
+		t.Fatalf("expected structured output instructions containing schema in system prompt. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatJSONObject(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Return a JSON object."}],
+		"response_format": {
+			"type": "json_object"
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	system := gjson.GetBytes(out, "system")
+	if !system.Exists() || !system.IsArray() || len(system.Array()) == 0 {
+		t.Fatalf("system blocks missing or empty. Output: %s", string(out))
+	}
+
+	foundJSONInstruction := false
+	for _, block := range system.Array() {
+		text := block.Get("text").String()
+		if strings.Contains(text, "JSON object") {
+			foundJSONInstruction = true
+			break
+		}
+	}
+	if !foundJSONInstruction {
+		t.Fatalf("expected JSON object instruction in system prompt. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatPreservesExistingSystem(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{"role": "system", "content": "Custom operator instruction."},
+			{"role": "user", "content": "Extract facts."}
+		],
+		"response_format": {
+			"type": "json_object"
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	system := gjson.GetBytes(out, "system")
+	if !system.Exists() || !system.IsArray() || len(system.Array()) < 2 {
+		t.Fatalf("expected at least 2 system blocks (original + response_format). Output: %s", string(out))
+	}
+
+	hasOriginal := false
+	hasResponseFormat := false
+	for _, block := range system.Array() {
+		text := block.Get("text").String()
+		if strings.Contains(text, "Custom operator instruction.") {
+			hasOriginal = true
+		}
+		if strings.Contains(text, "JSON object") {
+			hasResponseFormat = true
+		}
+	}
+	if !hasOriginal || !hasResponseFormat {
+		t.Fatalf("expected both original system and response_format instruction. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatAbsentOrTextNoOp(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "absent",
+			body: `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"plain text"}]}`,
+		},
+		{
+			name: "type text",
+			body: `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"plain text"}],"response_format":{"type":"text"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(tt.body), false)
+			if gjson.GetBytes(out, "system").Exists() {
+				t.Fatalf("system blocks should not be created when response_format is absent or text. Output: %s", string(out))
+			}
+		})
 	}
 }

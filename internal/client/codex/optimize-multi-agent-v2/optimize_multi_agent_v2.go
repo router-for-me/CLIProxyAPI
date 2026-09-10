@@ -26,6 +26,7 @@ const (
 	codexCollaborationNamespace           = "collaboration"
 	codexOptimizedCollaborationNamespace  = "collaboration-optimize"
 	codexOptimizedCollaborationNamePrefix = codexOptimizedCollaborationNamespace + "__"
+	codexOptimizedCollaborationDotPrefix  = codexOptimizedCollaborationNamespace + "."
 )
 
 // CodexMultiAgentV2ToolsPreparedContextKey marks a request whose collaboration
@@ -664,7 +665,7 @@ func codexToolsHaveOptimizedCollaborationConflict(tools gjson.Result) bool {
 	}
 	for _, tool := range tools.Array() {
 		name := strings.TrimSpace(tool.Get("name").String())
-		if name == codexOptimizedCollaborationNamespace || strings.HasPrefix(name, codexOptimizedCollaborationNamePrefix) {
+		if name == codexOptimizedCollaborationNamespace || strings.HasPrefix(name, codexOptimizedCollaborationNamePrefix) || strings.HasPrefix(name, codexOptimizedCollaborationDotPrefix) {
 			return true
 		}
 		if strings.TrimSpace(tool.Get("type").String()) == "namespace" && codexToolsHaveOptimizedCollaborationConflict(tool.Get("tools")) {
@@ -743,6 +744,13 @@ func restoreCodexCollaborationValue(value any) bool {
 			case name == codexOptimizedCollaborationNamespace && itemType == "namespace":
 				typed["name"] = codexCollaborationNamespace
 				changed = true
+			case isToolCall && strings.HasPrefix(name, codexOptimizedCollaborationDotPrefix):
+				toolName := strings.TrimPrefix(name, codexOptimizedCollaborationDotPrefix)
+				if toolName != "" {
+					typed["namespace"] = codexCollaborationNamespace
+					typed["name"] = toolName
+					changed = true
+				}
 			case isToolCall && strings.HasPrefix(name, codexOptimizedCollaborationNamePrefix):
 				typed["name"] = codexCollaborationNamespace + "__" + strings.TrimPrefix(name, codexOptimizedCollaborationNamePrefix)
 				changed = true

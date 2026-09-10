@@ -268,6 +268,10 @@ codex:
   # into standard user messages across Responses and non-Codex protocols when the request
   # header contains X-Openai-Subagent: collab_spawn.
   orphan-delegation-compatibility: false
+  # When true, scope Codex usage_limit_reached quota cooldowns to the requested model rather
+  # than cooling down the entire credential across all sibling models.
+  # Default: false
+  model-level-cooling: false
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
   # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
   live-media-relay:
@@ -300,6 +304,10 @@ codex:
 #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions
 #     - "API"
 #     - "proxy"
+#   connection-pool:             # optional: upstream HTTP connection pool settings
+#     enabled: false             # whether to enable connection pooling (default: false; set to true to enable connection pooling)
+#     idle-conn-timeout: "30s"   # idle keep-alive timeout (default: 30s, capped at 210s)
+#     max-idle-conns-per-host: 2 # max idle connections per host per credential (default: 2)
 
 # xAI provider behavior.
 xai:
@@ -588,7 +596,8 @@ nonstream-keepalive-interval: 0
 # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
 # Claude Code: context-1m sits right after claude-code, mid-conversation-system
 # is added only for models that accept a role=system turn, advanced-tool-use only when
-# the request declares tools, and server-side-fallback / fallback-credit /
+# the request uses tool search (deferred tools) or another advanced tool-use feature,
+# afk-mode sits between fast-mode and extended-cache-ttl, and server-side-fallback / fallback-credit /
 # structured-outputs trail effort. On direct api.anthropic.com a caller may only ask for
 # betas real Claude Code also sends, and they are placed at their observed positions;
 # anything else is dropped so the outgoing set stays one a real client could produce.

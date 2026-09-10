@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,10 +9,9 @@ import (
 )
 
 type openAIResponsesStreamErrorChunk struct {
-	Type           string `json:"type"`
-	Code           string `json:"code"`
-	Message        string `json:"message"`
-	SequenceNumber int    `json:"sequence_number"`
+	Type           string         `json:"type"`
+	Error          map[string]any `json:"error"`
+	SequenceNumber int            `json:"sequence_number"`
 }
 
 type openAIResponsesStreamFailedChunk struct {
@@ -48,11 +48,14 @@ func openAIResponsesStreamErrorCode(status int) string {
 	}
 }
 
+func unmarshalJSONWithNumber(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
 // BuildOpenAIResponsesStreamErrorChunk builds an OpenAI Responses streaming error chunk.
-//
-// Important: OpenAI's HTTP error bodies are shaped like {"error":{...}}; those are valid for
-// non-streaming responses, but streaming clients validate SSE `data:` payloads against a union
-// of chunks that requires a top-level `type` field.
+// It matches the official responses streaming event shape where the error details are nested.
 func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNumber int) []byte {
 	if status <= 0 {
 		status = http.StatusInternalServerError
@@ -71,32 +74,15 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 	trimmed := strings.TrimSpace(errText)
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
 		var payload map[string]any
-		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-			if t, ok := payload["type"].(string); ok && strings.TrimSpace(t) == "error" {
-				if m, ok := payload["message"].(string); ok && strings.TrimSpace(m) != "" {
-					message = strings.TrimSpace(m)
-				}
-				if v, ok := payload["code"]; ok && v != nil {
-					if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
-						code = strings.TrimSpace(c)
-					} else {
-						code = strings.TrimSpace(fmt.Sprint(v))
+		if errUnmarshal := unmarshalJSONWithNumber([]byte(trimmed), &payload); errUnmarshal == nil {
+			if v, ok := payload["sequence_number"]; ok {
+				switch n := v.(type) {
+				case json.Number:
+					if seqInt, err := n.Int64(); err == nil {
+						sequenceNumber = int(seqInt)
 					}
-				}
-				if v, ok := payload["sequence_number"].(float64); ok && sequenceNumber == 0 {
-					sequenceNumber = int(v)
-				}
-			}
-			if e, ok := payload["error"].(map[string]any); ok {
-				if m, ok := e["message"].(string); ok && strings.TrimSpace(m) != "" {
-					message = strings.TrimSpace(m)
-				}
-				if v, ok := e["code"]; ok && v != nil {
-					if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
-						code = strings.TrimSpace(c)
-					} else {
-						code = strings.TrimSpace(fmt.Sprint(v))
-					}
+				case float64:
+					sequenceNumber = int(n)
 				}
 			}
 		}
@@ -106,38 +92,57 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 		code = "unknown_error"
 	}
 
-	data, err := json.Marshal(openAIResponsesStreamErrorChunk{
+	errorDetail := openAIResponsesStreamErrorDetail(status, errText, code, message)
+
+	data, errMarshal := json.Marshal(openAIResponsesStreamErrorChunk{
 		Type:           "error",
-		Code:           code,
-		Message:        message,
+		Error:          errorDetail,
 		SequenceNumber: sequenceNumber,
 	})
-	if err == nil {
+	if errMarshal == nil {
 		return data
 	}
 
 	// Extremely defensive fallback.
+	fallbackDetail := map[string]any{
+		"type":    "server_error",
+		"code":    "internal_server_error",
+		"message": message,
+		"param":   nil,
+	}
 	data, _ = json.Marshal(openAIResponsesStreamErrorChunk{
 		Type:           "error",
-		Code:           "internal_server_error",
-		Message:        message,
+		Error:          fallbackDetail,
 		SequenceNumber: sequenceNumber,
 	})
 	if len(data) > 0 {
 		return data
 	}
-	return []byte(`{"type":"error","code":"internal_server_error","message":"internal error","sequence_number":0}`)
+	return []byte(`{"type":"error","error":{"type":"server_error","code":"internal_server_error","message":"internal error","param":null},"sequence_number":0}`)
 }
 
-func openAIResponsesStreamFailedErrorDetail(status int, errText, code, message string) map[string]any {
+func openAIResponsesStreamErrorDetail(status int, errText, code, message string) map[string]any {
 	var payload map[string]any
-	if errUnmarshal := json.Unmarshal([]byte(strings.TrimSpace(errText)), &payload); errUnmarshal == nil {
-		if errorDetail, ok := payload["error"].(map[string]any); ok {
-			return errorDetail
-		}
-		if response, ok := payload["response"].(map[string]any); ok {
-			if errorDetail, ok := response["error"].(map[string]any); ok {
+	trimmed := strings.TrimSpace(errText)
+	if trimmed != "" && json.Valid([]byte(trimmed)) {
+		if errUnmarshal := unmarshalJSONWithNumber([]byte(trimmed), &payload); errUnmarshal == nil {
+			if errorDetail, ok := payload["error"].(map[string]any); ok {
 				return errorDetail
+			}
+			if response, ok := payload["response"].(map[string]any); ok {
+				if errorDetail, ok := response["error"].(map[string]any); ok {
+					return errorDetail
+				}
+			}
+			if m, ok := payload["message"].(string); ok && strings.TrimSpace(m) != "" {
+				message = strings.TrimSpace(m)
+			}
+			if v, ok := payload["code"]; ok && v != nil {
+				if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
+					code = strings.TrimSpace(c)
+				} else {
+					code = strings.TrimSpace(fmt.Sprint(v))
+				}
 			}
 		}
 	}
@@ -146,11 +151,25 @@ func openAIResponsesStreamFailedErrorDetail(status int, errText, code, message s
 	if status >= http.StatusInternalServerError {
 		errorType = "server_error"
 	}
-	return map[string]any{
+	detail := map[string]any{
 		"type":    errorType,
 		"code":    code,
 		"message": message,
+		"param":   nil,
 	}
+	if payload != nil {
+		if t, ok := payload["type"].(string); ok && strings.TrimSpace(t) != "" && strings.TrimSpace(t) != "error" {
+			detail["type"] = strings.TrimSpace(t)
+		}
+		if paramVal, exists := payload["param"]; exists {
+			detail["param"] = paramVal
+		}
+	}
+	return detail
+}
+
+func openAIResponsesStreamFailedErrorDetail(status int, errText, code, message string) map[string]any {
+	return openAIResponsesStreamErrorDetail(status, errText, code, message)
 }
 
 // BuildOpenAIResponsesStreamFailedChunk builds the terminal Responses event used by official Codex clients.
@@ -163,15 +182,19 @@ func BuildOpenAIResponsesStreamFailedChunk(status int, errText string, sequenceN
 		sequenceNumber = 0
 	}
 
-	legacyChunk := BuildOpenAIResponsesStreamErrorChunk(status, errText, sequenceNumber)
-	var legacyPayload openAIResponsesStreamErrorChunk
-	if errUnmarshal := json.Unmarshal(legacyChunk, &legacyPayload); errUnmarshal != nil {
-		legacyPayload.Code = openAIResponsesStreamErrorCode(status)
-		legacyPayload.Message = http.StatusText(status)
-		legacyPayload.SequenceNumber = sequenceNumber
-	}
-	if sequenceNumber == 0 && legacyPayload.SequenceNumber > 0 {
-		sequenceNumber = legacyPayload.SequenceNumber
+	errorChunkBytes := BuildOpenAIResponsesStreamErrorChunk(status, errText, sequenceNumber)
+	var errorChunk openAIResponsesStreamErrorChunk
+	_ = unmarshalJSONWithNumber(errorChunkBytes, &errorChunk)
+	sequenceNumber = errorChunk.SequenceNumber
+
+	errorDetail := errorChunk.Error
+	if errorDetail == nil {
+		code := openAIResponsesStreamErrorCode(status)
+		message := strings.TrimSpace(errText)
+		if message == "" {
+			message = http.StatusText(status)
+		}
+		errorDetail = openAIResponsesStreamErrorDetail(status, errText, code, message)
 	}
 
 	data, errMarshal := json.Marshal(openAIResponsesStreamFailedChunk{
@@ -179,7 +202,7 @@ func BuildOpenAIResponsesStreamFailedChunk(status int, errText string, sequenceN
 		SequenceNumber: sequenceNumber,
 		Response: openAIResponsesStreamFailedResponse{
 			Status: "failed",
-			Error:  openAIResponsesStreamFailedErrorDetail(status, errText, legacyPayload.Code, legacyPayload.Message),
+			Error:  errorDetail,
 		},
 	})
 	if errMarshal == nil {

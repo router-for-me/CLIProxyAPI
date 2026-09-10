@@ -572,3 +572,54 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	}
 	return saved.Clone(), nil
 }
+
+// ForceRefreshAuth triggers an immediate synchronous refresh for the credential.
+func (m *Manager) ForceRefreshAuth(ctx context.Context, id string) (*Auth, error) {
+	if m == nil {
+		return nil, errors.New("auth manager is nil")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("auth id is empty")
+	}
+	return m.refreshAuthForRequest(ctx, id, "")
+}
+
+// ForceRefreshResult records the outcome of a forced refresh for one credential.
+type ForceRefreshResult struct {
+	ID      string `json:"id"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ForceRefreshAll triggers an immediate refresh for all credentials that have refresh tokens or custom refresh evaluators.
+func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.auths))
+	for id, auth := range m.auths {
+		if auth != nil && !auth.Disabled && (authHasRefreshCredential(auth) || auth.Runtime != nil) {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.RUnlock()
+
+	results := make([]ForceRefreshResult, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func(index int, authID string) {
+			defer wg.Done()
+			_, err := m.ForceRefreshAuth(ctx, authID)
+			res := ForceRefreshResult{ID: authID, Success: err == nil}
+			if err != nil {
+				res.Error = err.Error()
+			}
+			results[index] = res
+		}(i, id)
+	}
+	wg.Wait()
+	return results
+}

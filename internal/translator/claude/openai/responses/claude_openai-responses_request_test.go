@@ -1728,3 +1728,328 @@ func TestConvertOpenAIResponsesRequestToClaude_StripsTrailingThinkingBlocksFromA
 		}
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToClaudeKeepsAgentMessageText(t *testing.T) {
+	in := []byte(`{"model":"claude-fable-5-1","input":[
+		{"type":"agent_message","content":[{"type":"input_text","text":"do X"}]},
+		{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"secret task"}]},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"plain"}]}]}`)
+
+	for _, tc := range []struct {
+		name string
+		fn   func(string, []byte, bool) []byte
+	}{
+		{"standard", ConvertOpenAIResponsesRequestToClaude},
+		{"compat", ConvertOpenAIResponsesRequestToClaudeWithCompat},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := tc.fn("claude-fable-5-1", in, false)
+			root := gjson.ParseBytes(out)
+			messages := root.Get("messages").Array()
+			if len(messages) != 1 {
+				t.Fatalf("messages count = %d, want 1; output=%s", len(messages), string(out))
+			}
+			if got := messages[0].Get("role").String(); got != "user" {
+				t.Fatalf("messages[0].role = %q, want user", got)
+			}
+			parts := messages[0].Get("content").Array()
+			if len(parts) != 3 {
+				t.Fatalf("parts count = %d, want 3; output=%s", len(parts), string(out))
+			}
+			wantTexts := []string{"do X", "secret task", "plain"}
+			for i, want := range wantTexts {
+				if got := parts[i].Get("text").String(); got != want {
+					t.Errorf("parts[%d].text = %q, want %q", i, got, want)
+				}
+			}
+		})
+	}
+
+	t.Run("mixed_content_in_single_agent_message", func(t *testing.T) {
+		mixedIn := []byte(`{"model":"claude-fable-5-1","input":[
+			{"type":"agent_message","content":[
+				{"type":"input_text","text":"step 1"},
+				{"type":"encrypted_content","encrypted_content":"step 2"}
+			]}
+		]}`)
+		out := ConvertOpenAIResponsesRequestToClaude("claude-fable-5-1", mixedIn, false)
+		root := gjson.ParseBytes(out)
+		parts := root.Get("messages.0.content").Array()
+		if len(parts) != 2 {
+			t.Fatalf("parts count = %d, want 2; output=%s", len(parts), string(out))
+		}
+		if got := parts[0].Get("text").String(); got != "step 1" {
+			t.Errorf("parts[0].text = %q, want step 1", got)
+		}
+		if got := parts[1].Get("text").String(); got != "step 2" {
+			t.Errorf("parts[1].text = %q, want step 2", got)
+		}
+	})
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_TextFormatStructuredOutput(t *testing.T) {
+	t.Run("json_schema", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"input": "Extract facts.",
+			"text": {
+				"format": {
+					"type": "json_schema",
+					"name": "extracted_facts",
+					"schema": {
+						"type": "object",
+						"properties": {
+							"facts": {
+								"type": "array",
+								"items": {"type": "string"}
+							}
+						},
+						"required": ["facts"]
+					}
+				}
+			}
+		}`)
+		out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", input, false)
+		system := gjson.GetBytes(out, "system")
+		if !system.Exists() || len(system.Array()) == 0 {
+			t.Fatalf("system blocks missing. Output: %s", string(out))
+		}
+		found := false
+		for _, block := range system.Array() {
+			if strings.Contains(block.Get("text").String(), "facts") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected structured schema instruction in system prompt. Output: %s", string(out))
+		}
+	})
+
+	t.Run("json_object", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"input": "Return JSON.",
+			"text": {
+				"format": {
+					"type": "json_object"
+				}
+			}
+		}`)
+		out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", input, false)
+		system := gjson.GetBytes(out, "system")
+		if !system.Exists() || len(system.Array()) == 0 {
+			t.Fatalf("system blocks missing. Output: %s", string(out))
+		}
+		found := false
+		for _, block := range system.Array() {
+			if strings.Contains(block.Get("text").String(), "JSON object") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected JSON object instruction in system prompt. Output: %s", string(out))
+		}
+	})
+
+	t.Run("preserves_existing_instructions_and_precedence", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"instructions": "Be concise.",
+			"input": "Extract facts.",
+			"text": {
+				"format": {
+					"type": "json_schema",
+					"name": "winning_schema",
+					"description": "Primary facts",
+					"schema": {"type": "object", "properties": {"item": {"type": "string"}}}
+				}
+			},
+			"response_format": {
+				"type": "json_object"
+			}
+		}`)
+		out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", input, false)
+		system := gjson.GetBytes(out, "system")
+		if !system.Exists() || len(system.Array()) < 2 {
+			t.Fatalf("expected at least 2 system blocks. Output: %s", string(out))
+		}
+		hasInstructions := false
+		hasWinningSchema := false
+		hasFallbackObject := false
+		for _, block := range system.Array() {
+			text := block.Get("text").String()
+			if strings.Contains(text, "Be concise.") {
+				hasInstructions = true
+			}
+			if strings.Contains(text, "winning_schema") && strings.Contains(text, "Primary facts") && strings.Contains(text, "item") {
+				hasWinningSchema = true
+			}
+			if strings.Contains(text, "valid JSON object") {
+				hasFallbackObject = true
+			}
+		}
+		if !hasInstructions || !hasWinningSchema || hasFallbackObject {
+			t.Fatalf("expected instructions and winning schema without fallback. Output: %s", string(out))
+		}
+	})
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_FunctionCallOutputAlternateIDsAndQueueFallback(t *testing.T) {
+	testCases := []struct {
+		name        string
+		outputField string
+		wantToolUse string
+	}{
+		{
+			name:        "call_id standard",
+			outputField: `"call_id":"call_123"`,
+			wantToolUse: "call_123",
+		},
+		{
+			name:        "tool_call_id alternate field",
+			outputField: `"tool_call_id":"call_123"`,
+			wantToolUse: "call_123",
+		},
+		{
+			name:        "callId alternate field",
+			outputField: `"callId":"call_123"`,
+			wantToolUse: "call_123",
+		},
+		{
+			name:        "id alternate field",
+			outputField: `"id":"call_123"`,
+			wantToolUse: "call_123",
+		},
+		{
+			name:        "missing call_id completely fallback to pending queue",
+			outputField: ``,
+			wantToolUse: "call_123",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			outputJSON := `{"type":"function_call_output","output":"tool_result_ok"`
+			if tc.outputField != "" {
+				outputJSON += `,` + tc.outputField
+			}
+			outputJSON += `}`
+
+			inputJSON := []byte(`{
+				"model": "claude-sonnet-4-6",
+				"input": [
+					{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+					{"type":"function_call","call_id":"call_123","name":"Bash","arguments":"{\"command\":\"ls\"}"},
+					` + outputJSON + `
+				]
+			}`)
+
+			out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+			messages := gjson.GetBytes(out, "messages").Array()
+			if len(messages) != 3 {
+				t.Fatalf("expected 3 messages (user, assistant, user), got %d; output=%s", len(messages), string(out))
+			}
+
+			// Assistant message has tool_use with id call_123
+			toolUse := messages[1].Get("content.0")
+			if toolUse.Get("type").String() != "tool_use" {
+				t.Fatalf("expected tool_use, got %s", toolUse.Raw)
+			}
+			if gotID := toolUse.Get("id").String(); gotID != "call_123" {
+				t.Fatalf("tool_use.id = %q, want call_123", gotID)
+			}
+
+			// User message has tool_result with tool_use_id matching tool_use.id
+			toolResult := messages[2].Get("content.0")
+			if toolResult.Get("type").String() != "tool_result" {
+				t.Fatalf("expected tool_result, got %s", toolResult.Raw)
+			}
+			if gotID := toolResult.Get("tool_use_id").String(); gotID != tc.wantToolUse {
+				t.Fatalf("tool_result.tool_use_id = %q, want %q; output=%s", gotID, tc.wantToolUse, string(out))
+			}
+			if gotContent := toolResult.Get("content").String(); gotContent != "tool_result_ok" {
+				t.Fatalf("tool_result.content = %q, want tool_result_ok", gotContent)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MixedMissingAndExplicitParallelOutputs(t *testing.T) {
+	// Call A, Call B.
+	// Output 1 has NO ID (result B).
+	// Output 2 explicitly has call_id: call_a (result A).
+	// Call A must NOT be stolen by Output 1; Output 1 must get Call B.
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","output":"result_b"},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d; output=%s", len(messages), string(out))
+	}
+
+	results := messages[2].Get("content").Array()
+	if len(results) != 2 {
+		t.Fatalf("expected 2 tool_results, got %d; output=%s", len(results), string(out))
+	}
+
+	resultMap := make(map[string]string)
+	for _, r := range results {
+		resultMap[r.Get("tool_use_id").String()] = r.Get("content").String()
+	}
+
+	if got := resultMap["call_a"]; got != "result_a" {
+		t.Fatalf("result for call_a = %q, want result_a", got)
+	}
+	if got := resultMap["call_b"]; got != "result_b" {
+		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MixedMissingAndExplicitParallelOutputsAcrossUserMessage(t *testing.T) {
+	// Call A, Call B.
+	// Output 1 has NO ID (result B).
+	// Intervening user message.
+	// Output 2 explicitly has call_id: call_a (result A).
+	// Call A must NOT be stolen by Output 1; Output 1 must get Call B.
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","output":"result_b"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"status?"}]},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	resultMap := make(map[string]string)
+	for _, m := range messages {
+		if m.Get("role").String() == "user" {
+			for _, part := range m.Get("content").Array() {
+				if part.Get("type").String() == "tool_result" {
+					resultMap[part.Get("tool_use_id").String()] = part.Get("content").String()
+				}
+			}
+		}
+	}
+
+	if got := resultMap["call_a"]; got != "result_a" {
+		t.Fatalf("result for call_a = %q, want result_a", got)
+	}
+	if got := resultMap["call_b"]; got != "result_b" {
+		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}

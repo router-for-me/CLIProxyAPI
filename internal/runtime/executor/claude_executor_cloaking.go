@@ -305,6 +305,13 @@ func checkSystemInstructionsWithSigningModeAt(
 	if len(forwardedSystemBlocks) == 0 {
 		return injectClaudeCodeCurrentDate(payload, now)
 	}
+	if claudeHistoryHasAdvisorCallOrResult(payload) {
+		for _, block := range forwardedSystemBlocks {
+			systemBlocks = append(systemBlocks, buildTextBlock(block, nil))
+		}
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
+		return injectClaudeCodeCurrentDate(payload, now)
+	}
 	if claudeUsesLegacySystemReminder(payload) {
 		payload = prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
 	} else {
@@ -334,14 +341,27 @@ func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool) [
 	if !strictMode {
 		forwardedSystemBlocks = collectForwardedClaudeSystemPromptBlocks(system)
 	}
+	if len(forwardedSystemBlocks) == 0 {
+		updated, _ := sjson.DeleteBytes(payload, "system")
+		return updated
+	}
+	if claudeHistoryHasAdvisorCallOrResult(payload) {
+		// When an advisor call or result is present, the Messages path preserves
+		// caller system blocks in top-level system to prevent shifting message
+		// positions. Keep them in top-level system here as well so token counting
+		// remains aligned with the Messages path without splicing messages[].
+		blocks := make([]string, 0, len(forwardedSystemBlocks))
+		for _, block := range forwardedSystemBlocks {
+			blocks = append(blocks, buildTextBlock(block, nil))
+		}
+		updated, _ := sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(blocks, ",")+"]"))
+		return updated
+	}
 	updated, errDelete := sjson.DeleteBytes(payload, "system")
 	if errDelete != nil {
 		return payload
 	}
 	payload = updated
-	if len(forwardedSystemBlocks) == 0 {
-		return payload
-	}
 	if claudeUsesLegacySystemReminder(payload) {
 		return prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
 	}
@@ -619,6 +639,53 @@ func claudeCallerSystemReminder(text string) string {
 	}
 	reminder.WriteString("</system-reminder>")
 	return reminder.String()
+}
+
+// claudeHistoryHasAdvisorCallOrResult reports whether messages contains an advisor
+// tool invocation (server_tool_use / tool_use) or advisor result (advisor_tool_result /
+// advisor_redacted_result). Anthropic cryptographically binds the encrypted
+// advisor result to the conversation layout; any mid-conversation system splice
+// shifts message indices and causes upstream 400 errors.
+func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return false
+	}
+	for _, msg := range messages.Array() {
+		content := msg.Get("content")
+		if content.IsArray() {
+			for _, block := range content.Array() {
+				blockType := block.Get("type").String()
+				switch blockType {
+				case "advisor_tool_result", "advisor_redacted_result":
+					return true
+				case "server_tool_use", "tool_use":
+					if block.Get("name").String() == "advisor" {
+						return true
+					}
+				case "tool_result":
+					inner := block.Get("content")
+					if inner.IsArray() {
+						for _, b := range inner.Array() {
+							if b.Get("type").String() == "advisor_redacted_result" {
+								return true
+							}
+						}
+					} else if inner.IsObject() {
+						if inner.Get("type").String() == "advisor_redacted_result" {
+							return true
+						}
+					}
+				}
+			}
+		} else if content.IsObject() {
+			blockType := content.Get("type").String()
+			if blockType == "advisor_tool_result" || blockType == "advisor_redacted_result" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) []byte {
@@ -1270,8 +1337,9 @@ func applyCloakingInternal(
 	isSubagent := false
 	prevReq := ""
 	promptID := ""
+	var incomingHeaders http.Header
 	if !isProbeOrHelper {
-		incomingHeaders := resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
+		incomingHeaders = resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
 		isSubagent = helps.IsClaudeSubagentRequest(incomingHeaders, payload)
 		existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(payload)
 
@@ -1335,9 +1403,10 @@ func applyCloakingInternal(
 		}
 	}
 
-	// Probes and subagents never use 1h cache in native Claude Code; ensure any
-	// caller-supplied 1h ttl is stripped to match extended-cache-ttl beta suppression.
-	if isSubagent || isProbeOrHelper {
+	// Probes never use 1h cache in native Claude Code; ensure any caller-supplied
+	// 1h ttl is stripped to match extended-cache-ttl beta suppression. Subagents
+	// preserve caller-requested 1h cache TTL (e.g. subagentPromptCacheTtl: 1h).
+	if isProbeOrHelper || (isSubagent && !helps.ClaudeSubagentRequests1h(incomingHeaders, payload)) {
 		payload = stripClaudeCacheControlTTL(payload)
 	}
 
