@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -10,6 +11,105 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+func TestManagerAliasQuotaFailoverWithUnobservedTargetModel(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	for name, newSelector := range map[string]func() Selector{
+		"round-robin":          func() Selector { return &RoundRobinSelector{} },
+		"weighted-round-robin": func() Selector { return &WeightedRoundRobinSelector{} },
+		"fill-first":           func() Selector { return &FillFirstSelector{} },
+	} {
+		for _, path := range []string{"select", "execute", "stream"} {
+			t.Run(name+"/"+path, func(t *testing.T) {
+				const routeModel, targetModel, otherModel = "quota-route", "quota-target", "quota-other"
+				manager := NewManager(nil, newSelector(), nil)
+				manager.SetRetryConfig(3, 30*time.Second, 0)
+				manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+					"codex": {{Name: targetModel, Alias: routeModel, Fork: true}},
+				})
+				highID, lowID := "alias-quota-high-"+t.Name(), "alias-quota-low-"+t.Name()
+				for _, candidate := range []*Auth{
+					{ID: highID, Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "4", AttributeWeight: "1"}},
+					{ID: lowID, Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "3", AttributeWeight: "1"}},
+				} {
+					registry.GetGlobalRegistry().RegisterClient(candidate.ID, "codex", []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}, {ID: otherModel}})
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(candidate.ID) })
+					if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+						t.Fatal(errRegister)
+					}
+				}
+				retryAfter := time.Hour
+				manager.MarkResult(context.Background(), Result{
+					AuthID: highID, Provider: "codex", Model: otherModel,
+					Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "other model rate limit"}, RetryAfter: &retryAfter,
+				})
+				high, _ := manager.GetByID(highID)
+				if !high.Unavailable || high.ModelStates[targetModel] != nil {
+					t.Fatal("expected aggregate cooldown with no state yet for the requested target")
+				}
+				var attempts []string
+				execute := func(_ context.Context, selected *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+					attempts = append(attempts, selected.ID)
+					if req.Model != targetModel {
+						t.Errorf("upstream model = %s, want %s", req.Model, targetModel)
+					}
+					if selected.ID == highID {
+						return cliproxyexecutor.Response{}, streamQuotaError{
+							customStatusError: customStatusError{code: http.StatusTooManyRequests, msg: "account quota exhausted", retryAfter: &retryAfter},
+							credentialScoped:  true,
+						}
+					}
+					return cliproxyexecutor.Response{Payload: []byte(lowID)}, nil
+				}
+				manager.RegisterExecutor(&customStreamMockExecutor{
+					identifier: "codex", mockCustomErrorExecutor: mockCustomErrorExecutor{executeFn: execute},
+					streamFn: func(ctx context.Context, selected *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+						response, errExecute := execute(ctx, selected, req, opts)
+						if errExecute != nil {
+							return nil, errExecute
+						}
+						chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+						chunks <- cliproxyexecutor.StreamChunk{Payload: response.Payload}
+						close(chunks)
+						return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+					},
+				})
+				switch path {
+				case "select":
+					selected, errSelect := manager.SelectAuth(context.Background(), "codex", routeModel, cliproxyexecutor.Options{})
+					if errSelect != nil {
+						t.Fatal(errSelect)
+					}
+					if selected.ID != highID || !selected.Unavailable || !selected.Quota.Exceeded {
+						t.Fatalf("selection must preserve the selected auth's actual state: %+v", selected)
+					}
+					return
+				case "execute":
+					response, errExecute := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{})
+					if errExecute != nil {
+						t.Fatal(errExecute)
+					}
+					if string(response.Payload) != lowID {
+						t.Fatalf("response = %s, want healthy lower-priority account", response.Payload)
+					}
+				case "stream":
+					result, errStream := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{Stream: true})
+					if errStream != nil {
+						t.Fatal(errStream)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil || string(chunk.Payload) != lowID {
+							t.Fatalf("chunk = %+v, want healthy lower-priority account", chunk)
+						}
+					}
+				}
+				if len(attempts) != 2 || attempts[0] != highID || attempts[1] != lowID {
+					t.Fatalf("attempts = %v, want exhausted account then healthy account", attempts)
+				}
+			})
+		}
+	}
+}
 
 func TestManagerExecute_ModelAliasRequestNotBlockedByOtherModelQuotaCooldown(t *testing.T) {
 	const (

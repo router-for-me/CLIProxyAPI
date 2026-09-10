@@ -301,6 +301,7 @@ func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 		pluginStoreRegistryURL: "https://registry.example/registry.json",
 		pluginStoreHTTPClient:  httpClient,
 	}
+	h.cfg.Plugins.Dir = writeManagementPluginFile(t, "sample-provider")
 
 	listOnce := func() pluginStoreListResponse {
 		rec := httptest.NewRecorder()
@@ -457,10 +458,10 @@ func TestListPluginStoreMatchesInstalledStatusToManifestSource(t *testing.T) {
 			},
 		},
 		configFilePath: writeTestConfigFile(t),
-		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+		pluginStoreHTTPClient: &countingPluginStoreHTTPClient{responses: fakePluginStoreHTTPClient{
 			pluginstore.DefaultRegistryURL: registryJSON(t),
 			communityURL:                   thirdPartySampleRegistryJSON(t),
-		},
+		}},
 	}
 
 	rec := httptest.NewRecorder()
@@ -505,6 +506,13 @@ func TestListPluginStoreMatchesInstalledStatusToManifestSource(t *testing.T) {
 	community := entries[communitySourceID]
 	if community.InstalledSourceID != pluginstore.DefaultSourceID || community.InstallSourceStatus != "different" || community.UpdateAvailable {
 		t.Fatalf("community entry = %#v, want different source without update", community)
+	}
+	httpClient := h.pluginStoreHTTPClient.(*countingPluginStoreHTTPClient)
+	if calls := httpClient.count("https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest"); calls != 1 {
+		t.Fatalf("installed source release calls = %d, want 1", calls)
+	}
+	if calls := httpClient.count("https://api.github.com/repos/community/cliproxy-sample-provider-plugin/releases/latest"); calls != 0 {
+		t.Fatalf("different source release calls = %d, want 0", calls)
 	}
 }
 

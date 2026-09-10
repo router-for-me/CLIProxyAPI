@@ -187,39 +187,16 @@ waitForCallback:
 		return nil, fmt.Errorf("antigravity: project ID discovery returned empty project")
 	}
 
-	now := time.Now()
-	metadata := map[string]any{
-		"type":          "antigravity",
-		"access_token":  tokenResp.AccessToken,
-		"refresh_token": tokenResp.RefreshToken,
-		"expires_in":    tokenResp.ExpiresIn,
-		"timestamp":     now.UnixMilli(),
-		"expired":       now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
-	}
-	if email != "" {
-		metadata["email"] = email
-	}
-	if projectID != "" {
-		metadata["project_id"] = projectID
-	}
-
-	fileName := antigravity.CredentialFileName(email)
-	label := email
-	if label == "" {
-		label = "antigravity"
-	}
-
 	fmt.Println("Antigravity authentication successful")
 	if projectID != "" {
 		fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
 	}
-	return &coreauth.Auth{
-		ID:       fileName,
-		Provider: "antigravity",
-		FileName: fileName,
-		Label:    label,
-		Metadata: metadata,
-	}, nil
+	return BuildAntigravityAuth(&AntigravityTokenResponse{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		ExpiresIn:    tokenResp.ExpiresIn,
+		TokenType:    tokenResp.TokenType,
+	}, email, projectID), nil
 }
 
 type callbackResult struct {
@@ -271,4 +248,131 @@ func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClie
 	cfg := &config.Config{}
 	authSvc := antigravity.NewAntigravityAuth(cfg, httpClient)
 	return authSvc.FetchProjectID(ctx, accessToken)
+}
+
+// AntigravityDefaultCallbackPort is the default local port used for Antigravity OAuth loopback callbacks.
+const AntigravityDefaultCallbackPort = antigravity.CallbackPort
+
+// AntigravityTokenResponse captures the tokens returned by Antigravity OAuth exchange.
+type AntigravityTokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
+	TokenType    string `json:"token_type"`
+}
+
+// AntigravityDefaultCallbackURI returns the default loopback redirect URI for Antigravity OAuth.
+func AntigravityDefaultCallbackURI() string {
+	return fmt.Sprintf("http://localhost:%d/oauth-callback", AntigravityDefaultCallbackPort)
+}
+
+// AntigravityUserAgent returns the canonical User-Agent string used by the Antigravity Hub family.
+func AntigravityUserAgent() string {
+	return misc.AntigravityUserAgent()
+}
+
+// BuildAntigravityAuthURL generates the OAuth authorization URL for Antigravity.
+// If redirectURI is empty, the default loopback callback URI is used.
+func BuildAntigravityAuthURL(state, redirectURI string) string {
+	authSvc := antigravity.NewAntigravityAuth(nil, nil)
+	return authSvc.BuildAuthURL(state, redirectURI)
+}
+
+// ExchangeAntigravityCode exchanges an authorization code for access and refresh tokens.
+func ExchangeAntigravityCode(ctx context.Context, code, redirectURI string, httpClient *http.Client) (*AntigravityTokenResponse, error) {
+	if strings.TrimSpace(redirectURI) == "" {
+		redirectURI = AntigravityDefaultCallbackURI()
+	}
+	authSvc := antigravity.NewAntigravityAuth(nil, httpClient)
+	tokenResp, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI)
+	if errExchange != nil {
+		return nil, errExchange
+	}
+	if tokenResp == nil {
+		return nil, fmt.Errorf("antigravity: empty token response")
+	}
+	return &AntigravityTokenResponse{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		ExpiresIn:    tokenResp.ExpiresIn,
+		TokenType:    tokenResp.TokenType,
+	}, nil
+}
+
+// FetchAntigravityUserInfo retrieves the user email address using the given access token.
+func FetchAntigravityUserInfo(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
+	authSvc := antigravity.NewAntigravityAuth(nil, httpClient)
+	return authSvc.FetchUserInfo(ctx, accessToken)
+}
+
+// BuildAntigravityAuth constructs an in-memory *coreauth.Auth object from token credentials and metadata.
+func BuildAntigravityAuth(tokenResp *AntigravityTokenResponse, email, projectID string) *coreauth.Auth {
+	if tokenResp == nil {
+		return nil
+	}
+	now := time.Now()
+	metadata := map[string]any{
+		"type":          "antigravity",
+		"access_token":  tokenResp.AccessToken,
+		"refresh_token": tokenResp.RefreshToken,
+		"expires_in":    tokenResp.ExpiresIn,
+		"timestamp":     now.UnixMilli(),
+		"expired":       now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+	}
+	email = strings.TrimSpace(email)
+	if email != "" {
+		metadata["email"] = email
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID != "" {
+		metadata["project_id"] = projectID
+	}
+
+	fileName := antigravity.CredentialFileName(email)
+	label := email
+	if label == "" {
+		label = "antigravity"
+	}
+
+	return &coreauth.Auth{
+		ID:       fileName,
+		Provider: "antigravity",
+		FileName: fileName,
+		Label:    label,
+		Metadata: metadata,
+	}
+}
+
+// CompleteAntigravityOAuth performs code exchange, user identity retrieval, and GCP project discovery
+// using an injected HTTP client, returning an assembled *coreauth.Auth without touching the filesystem.
+func CompleteAntigravityOAuth(ctx context.Context, code, redirectURI string, httpClient *http.Client) (*coreauth.Auth, error) {
+	tokenResp, errExchange := ExchangeAntigravityCode(ctx, code, redirectURI, httpClient)
+	if errExchange != nil {
+		return nil, fmt.Errorf("antigravity: token exchange failed: %w", errExchange)
+	}
+
+	accessToken := strings.TrimSpace(tokenResp.AccessToken)
+	if accessToken == "" {
+		return nil, fmt.Errorf("antigravity: token exchange returned empty access token")
+	}
+
+	email, errUserInfo := FetchAntigravityUserInfo(ctx, accessToken, httpClient)
+	if errUserInfo != nil {
+		return nil, fmt.Errorf("antigravity: fetch user info failed: %w", errUserInfo)
+	}
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil, fmt.Errorf("antigravity: empty email returned from user info")
+	}
+
+	projectID, errProject := FetchAntigravityProjectID(ctx, accessToken, httpClient)
+	if errProject != nil {
+		return nil, fmt.Errorf("antigravity: failed to fetch project ID: %w", errProject)
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, fmt.Errorf("antigravity: project ID discovery returned empty project")
+	}
+
+	return BuildAntigravityAuth(tokenResp, email, projectID), nil
 }

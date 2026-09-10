@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -218,6 +219,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		Headers:         liveSelectionHeaders(c),
 		OriginalRequest: body,
 	}
+	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionOpts.Headers, body, nil)
 	selection, selected, errSelect := h.selectOAuth(ctx, model, selectionOpts)
 	if errSelect != nil {
 		writeSelectionError(c, errSelect)
@@ -229,6 +231,19 @@ func (h *Handler) Handle(c *gin.Context) {
 		}
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
 		return
+	}
+	if selection != nil && selection.CanonicalSessionID != "" {
+		meta := logging.GetClientRequestMetadata(ctx)
+		meta.SessionID = selection.CanonicalSessionID
+		if selection.ParentSessionID != "" {
+			meta.ParentSessionID = selection.ParentSessionID
+		} else {
+			meta.ParentSessionID = ""
+		}
+		if meta.SessionID == meta.ParentSessionID {
+			meta.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, meta)
 	}
 
 	if selection != nil {
@@ -401,7 +416,14 @@ func (h *Handler) Handle(c *gin.Context) {
 	sessionStored := false
 	if success && h.sessions != nil {
 		if callID != "" {
-			session := liveSession{authID: selected.ID, model: model, media: mediaSession}
+			clientMeta := logging.GetClientRequestMetadata(ctx)
+			session := liveSession{
+				authID:          selected.ID,
+				model:           model,
+				media:           mediaSession,
+				sessionID:       clientMeta.SessionID,
+				parentSessionID: clientMeta.ParentSessionID,
+			}
 			session.ownerPrincipal, session.ownerProvider = requestOwner(c)
 			if principal, ok := c.Get(ClientSecretPrincipalContextKey); ok {
 				session.clientSecretPrincipal, _ = principal.(string)

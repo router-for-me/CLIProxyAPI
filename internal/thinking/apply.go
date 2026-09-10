@@ -195,7 +195,7 @@ func ApplyThinkingWithModelInfoAndSummary(body, sourceBody []byte, model string,
 
 func applyThinking(body, sourceBody []byte, model string, fromFormat string, toFormat string, providerKey string, resolvedModelInfo *registry.ModelInfo, modelInfoResolved bool, summaryConfig SummaryConfig) ([]byte, error) {
 	providerFormat := strings.ToLower(strings.TrimSpace(toFormat))
-	if modelInfoResolved && providerFormat == "openai-response" {
+	if providerFormat == "openai-response" {
 		providerFormat = "codex"
 	}
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))

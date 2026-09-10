@@ -510,3 +510,276 @@ func TestConvertOpenAIResponsesRequestToAntigravity_InterveningDeveloperMessageP
 		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity request: %v; output=%s", errPair, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToAntigravity_ReasoningSummaries(t *testing.T) {
+	tests := []struct {
+		name       string
+		inputJSON  string
+		wantExists bool
+		wantVal    bool
+	}{
+		{
+			name:       "effort alone enables includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high"},"input":"hello"}`,
+			wantExists: true,
+			wantVal:    true,
+		},
+		{
+			name:       "effort none does not enable includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"none"},"input":"hello"}`,
+			wantExists: false,
+		},
+		{
+			name:       "effort empty does not enable includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"  "},"input":"hello"}`,
+			wantExists: false,
+		},
+		{
+			name:       "missing effort does not enable includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{},"input":"hello"}`,
+			wantExists: false,
+		},
+		{
+			name:       "non-string effort does not enable includeThoughts",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":10},"input":"hello"}`,
+			wantExists: false,
+		},
+		{
+			name:       "explicit summary preserved without overriding",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","summary":"auto"},"input":"hello"}`,
+			wantExists: false, // ConvertOpenAIResponsesRequestToAntigravity leaves explicit summary to ApplySummaryConfig downstream
+		},
+		{
+			name:       "explicit null summary preserved without enabling",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","summary":null},"input":"hello"}`,
+			wantExists: false, // ConvertOpenAIResponsesRequestToAntigravity does not enable includeThoughts on null summary
+		},
+		{
+			name:       "explicit generate_summary preserved",
+			inputJSON:  `{"model":"gemini-3-flash","reasoning":{"effort":"high","generate_summary":"detailed"},"input":"hello"}`,
+			wantExists: false, // ConvertOpenAIResponsesRequestToAntigravity leaves explicit summary to ApplySummaryConfig downstream
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(tc.inputJSON), false)
+			res := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
+			if res.Exists() != tc.wantExists {
+				t.Fatalf("includeThoughts exists = %v, want %v; out=%s", res.Exists(), tc.wantExists, out)
+			}
+			if tc.wantExists && res.Bool() != tc.wantVal {
+				t.Fatalf("includeThoughts = %v, want %v; out=%s", res.Bool(), tc.wantVal, out)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_FunctionCallOutputAlternateIDs(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"role":"user","content":"run command"},
+			{"type":"function_call","call_id":"call_bash_1","name":"Bash","arguments":"{\"command\":\"ls\"}"},
+			{"type":"function_call_output","id":"call_bash_1","output":"main.go"}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.7-flash-high", []byte(inputJSON), false)
+	rawRequest := gjson.GetBytes(out, "request").Raw
+	if errPair := sigcompat.ValidateGeminiFunctionCallPairing([]byte(rawRequest)); errPair != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity request: %v; output=%s", errPair, out)
+	}
+
+	responseID := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.id").String()
+	if responseID != "call_bash_1" {
+		t.Fatalf("functionResponse.id = %q, want call_bash_1", responseID)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_InterruptedFunctionCallPreservesPairing(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"List the files."}]},
+			{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"command\":[\"ls\"]}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Stop, do something else instead."}]},
+			{"type":"function_call","call_id":"c2","name":"shell","arguments":"{\"command\":[\"pwd\"]}"},
+			{"type":"function_call_output","call_id":"c2","output":"/tmp\n"}
+		],
+		"tools": [{"type":"function","name":"shell","description":"Runs a shell command.","strict":false,
+			"parameters":{"type":"object","properties":{"command":{"type":"array","items":{"type":"string"}}},
+			"required":["command"],"additionalProperties":false}}],
+		"tool_choice": "auto",
+		"parallel_tool_calls": false,
+		"store": false,
+		"stream": false
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.8-flash-high", []byte(inputJSON), false)
+	rawRequest := gjson.GetBytes(out, "request").Raw
+	if errPair := sigcompat.ValidateGeminiFunctionCallPairing([]byte(rawRequest)); errPair != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity request: %v; output=%s", errPair, out)
+	}
+
+	c1Resp := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
+	}
+	c2Resp := gjson.GetBytes(out, "request.contents.5.parts.0.functionResponse")
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_ParallelInterruptedFunctionCallPreservesPairingAndOrder(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"List and print."}]},
+			{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"command\":[\"ls\"]}"},
+			{"type":"function_call","call_id":"c2","name":"shell","arguments":"{\"command\":[\"pwd\"]}"},
+			{"type":"function_call_output","call_id":"c2","output":"/tmp\n"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Stop, do something else instead."}]},
+			{"type":"function_call","call_id":"c3","name":"shell","arguments":"{\"command\":[\"whoami\"]}"},
+			{"type":"function_call_output","call_id":"c3","output":"root\n"}
+		],
+		"tools": [{"type":"function","name":"shell","description":"Runs a shell command.","strict":false,
+			"parameters":{"type":"object","properties":{"command":{"type":"array","items":{"type":"string"}}},
+			"required":["command"],"additionalProperties":false}}],
+		"tool_choice": "auto",
+		"parallel_tool_calls": false,
+		"store": false,
+		"stream": false
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.8-flash-high", []byte(inputJSON), false)
+	rawRequest := gjson.GetBytes(out, "request").Raw
+	if errPair := sigcompat.ValidateGeminiFunctionCallPairing([]byte(rawRequest)); errPair != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity request: %v; output=%s", errPair, out)
+	}
+
+	c1Resp := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
+	}
+	c2Resp := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse")
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_TrailingPartialParallelCallsPreservesPairingAndOrder(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"List and print."}]},
+			{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"command\":[\"ls\"]}"},
+			{"type":"function_call","call_id":"c2","name":"shell","arguments":"{\"command\":[\"pwd\"]}"},
+			{"type":"function_call_output","call_id":"c2","output":"/tmp\n"}
+		],
+		"tools": [{"type":"function","name":"shell","description":"Runs a shell command.","strict":false,
+			"parameters":{"type":"object","properties":{"command":{"type":"array","items":{"type":"string"}}},
+			"required":["command"],"additionalProperties":false}}],
+		"tool_choice": "auto",
+		"parallel_tool_calls": false,
+		"store": false,
+		"stream": false
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.8-flash-high", []byte(inputJSON), false)
+	rawRequest := gjson.GetBytes(out, "request").Raw
+	if errPair := sigcompat.ValidateGeminiFunctionCallPairing([]byte(rawRequest)); errPair != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity trailing partial parallel request: %v; output=%s", errPair, out)
+	}
+
+	c1Resp := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
+	}
+	c2Resp := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse")
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_InterruptedMessageBeforeRealOutputPreservesPairingAndOrder(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"List and print."}]},
+			{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"command\":[\"ls\"]}"},
+			{"type":"function_call","call_id":"c2","name":"shell","arguments":"{\"command\":[\"pwd\"]}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Stop, do something else instead."}]},
+			{"type":"function_call_output","call_id":"c2","output":"/tmp\n"}
+		],
+		"tools": [{"type":"function","name":"shell","description":"Runs a shell command.","strict":false,
+			"parameters":{"type":"object","properties":{"command":{"type":"array","items":{"type":"string"}}},
+			"required":["command"],"additionalProperties":false}}],
+		"tool_choice": "auto",
+		"parallel_tool_calls": false,
+		"store": false,
+		"stream": false
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.8-flash-high", []byte(inputJSON), false)
+	rawRequest := gjson.GetBytes(out, "request").Raw
+	if errPair := sigcompat.ValidateGeminiFunctionCallPairing([]byte(rawRequest)); errPair != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity interrupted message before real output request: %v; output=%s", errPair, out)
+	}
+
+	// The user message precedes the completed tool response turn
+	stopText := gjson.GetBytes(out, "request.contents.2.parts.0.text").String()
+	if stopText != "Stop, do something else instead." {
+		t.Fatalf("unexpected text in request.contents[2]: %q", stopText)
+	}
+	c1Resp := gjson.GetBytes(out, "request.contents.3.parts.0.functionResponse")
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
+	}
+	c2Resp := gjson.GetBytes(out, "request.contents.3.parts.1.functionResponse")
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_FunctionCallOutputWithFCOItemID(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run command"}]},
+			{"type":"function_call","call_id":"call_1788961125480214178_817","name":"Bash","arguments":"{\"command\":\"pwd\"}"},
+			{"type":"function_call_output","id":"fco_01a08664-2d16-7a91-8ab2-2eccd49e4c3e","output":"/tmp"}
+		],
+		"tools": [{"type":"function","name":"Bash","description":"Runs Bash command.","strict":false,
+			"parameters":{"type":"object","properties":{"command":{"type":"string"}},
+			"required":["command"],"additionalProperties":false}}],
+		"tool_choice": "auto",
+		"parallel_tool_calls": false,
+		"store": false,
+		"stream": false
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.7-flash-high", []byte(inputJSON), false)
+	rawRequest := gjson.GetBytes(out, "request").Raw
+	if errPair := sigcompat.ValidateGeminiFunctionCallPairing([]byte(rawRequest)); errPair != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity fco item ID request: %v; output=%s", errPair, out)
+	}
+
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents, got %d; output=%s", len(contents), string(out))
+	}
+
+	responses := contents[2].Get("parts").Array()
+	if len(responses) != 1 {
+		t.Fatalf("expected 1 response part, got %d; output=%s", len(responses), string(out))
+	}
+
+	if gotID := responses[0].Get("functionResponse.id").String(); gotID != "call_1788961125480214178_817" {
+		t.Fatalf("response id = %q, want call_1788961125480214178_817", gotID)
+	}
+	if gotName := responses[0].Get("functionResponse.name").String(); gotName != "Bash" {
+		t.Fatalf("response name = %q, want Bash", gotName)
+	}
+}

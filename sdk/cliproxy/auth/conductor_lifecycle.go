@@ -41,10 +41,20 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	}
 
 	var replaced ProviderExecutor
+	var toReschedule []string
 	m.mu.Lock()
 	replaced = m.executors[provider]
 	m.executors[provider] = executor
+	for id, auth := range m.auths {
+		if auth != nil && strings.EqualFold(executorKeyFromAuth(auth), provider) {
+			toReschedule = append(toReschedule, id)
+		}
+	}
 	m.mu.Unlock()
+
+	for _, id := range toReschedule {
+		m.queueRefreshReschedule(id)
+	}
 
 	if replaced == nil || replaced == executor {
 		return

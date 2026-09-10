@@ -14,7 +14,10 @@ const (
 	// Version 5 omits HistoryChunks on payload stream chunks (ChunkIndex >= 0);
 	// those fields remain on StreamChunkHeaderInitIndex only. Plugins that still need
 	// per-chunk history chunks should keep schema_version < 5.
-	SchemaVersion uint32 = 5
+	// Version 6 preserves raw JSON bodies for plugin management responses.
+	// Plugins that still require HTML entity escaping on JSON response strings
+	// should keep schema_version < 6.
+	SchemaVersion uint32 = 6
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
@@ -24,6 +27,9 @@ const (
 	// SchemaVersionStreamChunkOmitHistory is the first schema version that omits
 	// history chunks on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitHistory uint32 = 5
+	// SchemaVersionRawManagementResponse is the first schema version where plugin
+	// management JSON responses are preserved without HTML-escaping strings.
+	SchemaVersionRawManagementResponse uint32 = 6
 )
 
 const (
@@ -96,6 +102,7 @@ const (
 	MethodHostAuthGet            = "host.auth.get"
 	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
 	MethodHostAuthSave           = "host.auth.save"
+	MethodHostAffinityLookup     = "host.affinity.lookup"
 )
 
 type Envelope struct {

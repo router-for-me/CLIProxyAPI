@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
 	log "github.com/sirupsen/logrus"
@@ -15,7 +16,31 @@ func ConvertOpenAIResponsesRequestToAntigravity(modelName string, inputRawJSON [
 	rawJSON := inputRawJSON
 	rawJSON = ConvertOpenAIResponsesRequestToGemini(modelName, rawJSON, stream)
 	rawJSON = rewriteOpenAIResponsesReasoningForAntigravityClaude(modelName, inputRawJSON, rawJSON)
-	return ConvertGeminiRequestToAntigravity(modelName, rawJSON, stream)
+	rawJSON = ConvertGeminiRequestToAntigravity(modelName, rawJSON, stream)
+	return enableAntigravityResponsesThinkingSummary(inputRawJSON, rawJSON)
+}
+
+// OpenAI Responses separates reasoning effort from reasoning summary visibility.
+// Antigravity needs includeThoughts to emit thought parts, so effort alone would
+// otherwise spend thinking tokens without returning a visible summary.
+func enableAntigravityResponsesThinkingSummary(inputRawJSON, translated []byte) []byte {
+	effort := gjson.GetBytes(inputRawJSON, "reasoning.effort")
+	if effort.Type != gjson.String {
+		return translated
+	}
+	effortVal := strings.ToLower(strings.TrimSpace(effort.String()))
+	if effortVal == "" || effortVal == "none" {
+		return translated
+	}
+	for _, path := range []string{"reasoning.summary", "reasoning.generate_summary"} {
+		if value := gjson.GetBytes(inputRawJSON, path); value.Raw != "" {
+			return translated
+		}
+	}
+	return thinking.ApplySummaryConfig(translated, "antigravity", thinking.SummaryConfig{
+		Mode:   thinking.SummaryEnabled,
+		Detail: "auto",
+	})
 }
 
 type antigravityClaudeReasoningSignature struct {

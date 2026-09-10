@@ -48,6 +48,14 @@ func normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON []byte, last
 }
 
 func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
+	input := gjson.GetBytes(rawJSON, "input")
+	if input.Exists() && !input.IsArray() {
+		return nil, nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("websocket request requires array field: input"),
+		}
+	}
+
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
 		normalized = bytes.Clone(rawJSON)

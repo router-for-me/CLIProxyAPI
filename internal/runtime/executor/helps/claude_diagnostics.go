@@ -476,6 +476,62 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 	return false
 }
 
+// ClaudePayloadHas1hTTL reports whether the request payload contains any cache_control
+// block with ttl set to "1h".
+func ClaudePayloadHas1hTTL(payload []byte) bool {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+	has1h := false
+	checkBlock := func(item gjson.Result) bool {
+		cc := item.Get("cache_control")
+		if cc.IsObject() && cc.Get("ttl").String() == "1h" {
+			has1h = true
+			return false
+		}
+		return true
+	}
+	if tools := gjson.GetBytes(payload, "tools"); tools.IsArray() {
+		tools.ForEach(func(_, item gjson.Result) bool {
+			return checkBlock(item)
+		})
+		if has1h {
+			return true
+		}
+	}
+	if system := gjson.GetBytes(payload, "system"); system.IsArray() {
+		system.ForEach(func(_, item gjson.Result) bool {
+			return checkBlock(item)
+		})
+		if has1h {
+			return true
+		}
+	}
+	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if content.IsArray() {
+				content.ForEach(func(_, item gjson.Result) bool {
+					return checkBlock(item)
+				})
+			}
+			return !has1h
+		})
+	}
+	return has1h
+}
+
+// ClaudeSubagentRequests1h reports whether a subagent request explicitly requests
+// 1h cache TTL either via a cache_control block with ttl="1h" in the payload or via
+// extended-cache-ttl-2025-04-11 in incoming Anthropic-Beta headers.
+func ClaudeSubagentRequests1h(headers http.Header, body []byte) bool {
+	if ClaudePayloadHas1hTTL(body) {
+		return true
+	}
+	betas := strings.Join(HeaderValuesCaseInsensitive(headers, "Anthropic-Beta"), ",")
+	return strings.Contains(betas, "extended-cache-ttl-2025-04-11")
+}
+
 // StripClaudeBillingTags removes cc_prev_req and cc_prompt_id from the billing header in body.
 func StripClaudeBillingTags(body []byte) []byte {
 	system := gjson.GetBytes(body, "system")
