@@ -376,7 +376,16 @@ func TestResponsesOrphanCodexDelegationCompatibility(t *testing.T) {
 	if len(payloads) != 3 {
 		t.Fatalf("captured payload count = %d, want 3", len(payloads))
 	}
-	if itemType := gjson.GetBytes(payloads[2], "input.0.type").String(); itemType != "function_call_output" {
-		t.Fatalf("ordinary incremental output was rewritten: %s", payloads[2])
+	capturedIncremental := payloads[2]
+	parsedIncremental := gjson.ParseBytes(capturedIncremental)
+	if itemType := parsedIncremental.Get("input.0.type").String(); itemType != "message" {
+		t.Fatalf("ordinary incremental input.0.type = %q, want message; captured=%s", itemType, capturedIncremental)
+	}
+	if role := parsedIncremental.Get("input.0.role").String(); role != "user" {
+		t.Fatalf("ordinary incremental input.0.role = %q, want user; captured=%s", role, capturedIncremental)
+	}
+	wantIncrementalText := "Tool output from codex_app__create_thread:\ncompleted"
+	if text := parsedIncremental.Get("input.0.content.0.text").String(); text != wantIncrementalText {
+		t.Fatalf("ordinary incremental input.0.content.0.text = %q, want %q; captured=%s", text, wantIncrementalText, capturedIncremental)
 	}
 }

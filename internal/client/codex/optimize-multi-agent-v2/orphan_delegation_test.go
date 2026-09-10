@@ -203,7 +203,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		}
 	})
 
-	t.Run("ordinary request preserves unknown call id with previous response", func(t *testing.T) {
+	t.Run("ordinary request rewrites unknown call id with previous response", func(t *testing.T) {
 		payload := []byte(`{
 			"previous_response_id": "resp_previous",
 			"input": [{
@@ -215,8 +215,37 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			}]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
-			t.Fatalf("ordinary incremental output was rewritten: %s", got)
+		parsed := gjson.ParseBytes(got)
+		item0 := parsed.Get("input.0")
+		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
+			t.Fatalf("ordinary incremental unknown call should be rewritten: %s", item0.Raw)
+		}
+		wantText := "Tool output from codex_app__create_thread:\ncompleted"
+		if text := item0.Get("content.0.text").String(); text != wantText {
+			t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
+		}
+	})
+
+	t.Run("ordinary request rewrites previous_response_id with stale non-empty call_id", func(t *testing.T) {
+		payload := []byte(`{
+			"previous_response_id": "resp_previous",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_stale_123",
+				"name": "send_message_to_thread",
+				"namespace": "codex_app",
+				"output": "<codex_delegation>msg</codex_delegation>"
+			}]
+		}`)
+		got := testRewriteCodexOrphan(payload, true)
+		parsed := gjson.ParseBytes(got)
+		item0 := parsed.Get("input.0")
+		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
+			t.Fatalf("stale call_id with previous_response_id should be rewritten: %s", item0.Raw)
+		}
+		wantText := "Tool output from codex_app__send_message_to_thread:\n<codex_delegation>msg</codex_delegation>"
+		if text := item0.Get("content.0.text").String(); text != wantText {
+			t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
 		}
 	})
 
@@ -604,6 +633,48 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 			t.Fatalf("messages.0.role = %q, want user (should not be tool message with empty id)", msg0.Get("role").String())
 		}
 		wantText := "Tool output from codex_app__create_thread:\n<codex_delegation><message>handoff</message></codex_delegation>"
+		var text string
+		if msg0.Get("content").IsArray() {
+			text = msg0.Get("content.0.text").String()
+		} else {
+			text = msg0.Get("content").String()
+		}
+		if text != wantText {
+			t.Fatalf("messages.0.content = %q, want %q", text, wantText)
+		}
+	})
+
+	t.Run("enabled translates previous_response_id unknown call_id to chat user message without empty tool_call_id", func(t *testing.T) {
+		cfg := &config.Config{
+			Codex: config.CodexConfig{
+				OrphanDelegationCompatibility: true,
+			},
+		}
+		incremental := []byte(`{
+			"model": "test-model",
+			"previous_response_id": "resp_previous",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_unknown",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "completed"
+			}]
+		}`)
+		got := TranslateRequestWithCodexMultiAgentV2(context.Background(), collabHeaders, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "test-model", incremental, false)
+		parsed := gjson.ParseBytes(got)
+		messages := parsed.Get("messages").Array()
+		if len(messages) != 1 {
+			t.Fatalf("expected 1 message, got %d: %s", len(messages), string(got))
+		}
+		msg0 := messages[0]
+		if msg0.Get("role").String() != "user" {
+			t.Fatalf("messages.0.role = %q, want user (should not remain a tool message)", msg0.Get("role").String())
+		}
+		if toolCallID := msg0.Get("tool_call_id"); toolCallID.Exists() {
+			t.Fatalf("messages.0.tool_call_id = %q, want absent", toolCallID.String())
+		}
+		wantText := "Tool output from codex_app__create_thread:\ncompleted"
 		var text string
 		if msg0.Get("content").IsArray() {
 			text = msg0.Get("content.0.text").String()

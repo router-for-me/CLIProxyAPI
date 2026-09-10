@@ -53,7 +53,6 @@ func RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(ctx context.Context
 			pendingCalls[callID]++
 		}
 	}
-	hasPreviousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != ""
 
 	updated := payload
 	for itemIndex, item := range inputItems {
@@ -75,10 +74,6 @@ func RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(ctx context.Context
 
 		toolLabel, isTarget := matchCodexDelegationTool(item)
 		if !isTarget {
-			continue
-		}
-		if hasPreviousResponseID && strings.TrimSpace(callID) != "" {
-			// Without response state, a non-empty call_id may still be a valid continuation.
 			continue
 		}
 
