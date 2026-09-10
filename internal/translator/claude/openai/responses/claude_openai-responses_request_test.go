@@ -11,6 +11,55 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestUnwrapCustomToolInput_TruncatedFallbackSurrogateHandling(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments string
+		want      string
+	}{
+		{
+			// 😀 is a valid UTF-16 surrogate pair encoding U+1F600
+			// (grinning face). Written as literal \u escapes, not the raw UTF-8
+			// bytes, so the assertion exercises the surrogate-decode branch
+			// rather than the plain byte-copy branch.
+			name:      "valid supplementary pair",
+			arguments: "{\"input\":\"\\ud83d\\ude00",
+			want:      "\U0001F600",
+		},
+		{
+			// \ud800 is an unpaired high surrogate; A is an ordinary
+			// escaped letter (A), not a low surrogate, so it must not be
+			// consumed as part of a (nonexistent) pair — the letter must
+			// survive alongside the replacement character for \ud800.
+			name:      "unpaired surrogate followed by ordinary escaped letter",
+			arguments: "{\"input\":\"\\ud800\\u0041",
+			want:      "�A",
+		},
+		{
+			// \ud800 and \ud801 are both high surrogates; neither forms a valid
+			// pair with the other, so each must decode independently to its own
+			// replacement character.
+			name:      "two unpaired surrogates",
+			arguments: `{"input":"\ud800\ud801`,
+			want:      "��",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trimmed := strings.TrimSpace(tt.arguments)
+			if v := gjson.Get(trimmed, "input"); v.Exists() {
+				t.Fatalf("COULD-NOT-DETERMINE: gjson resolved %q via structured lookup (%q); this case exercises the primary path, not the truncated fallback", tt.arguments, v.String())
+			}
+			got := unwrapCustomToolInput(tt.arguments)
+			t.Logf("input=%s actual=%q want=%q", tt.arguments, got, tt.want)
+			if got != tt.want {
+				t.Fatalf("unwrapCustomToolInput(%q) = %q, want %q", tt.arguments, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
