@@ -166,6 +166,8 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 	imageOnlyModels := []string{
 		"gpt-image-1.5",
 		"gpt-image-2",
+		"gpt-image-2.5-flare",
+		"gpt-image-2.5-sunburst",
 		"codex/gpt-image-2",
 		"grok-imagine-image",
 		"xai/grok-imagine-image",
@@ -200,6 +202,8 @@ func TestValidateImageOnlyModel_AllowsImageEndpoints(t *testing.T) {
 	imageOnlyModels := []string{
 		"gpt-image-1.5",
 		"gpt-image-2",
+		"gpt-image-2.5-flare",
+		"gpt-image-2.5-sunburst",
 		"codex/gpt-image-2",
 		"grok-imagine-image",
 		"xai/grok-imagine-image",
@@ -229,6 +233,8 @@ func TestIsOpenAIImageOnlyModel(t *testing.T) {
 	}{
 		{model: "gpt-image-1.5", want: true},
 		{model: "gpt-image-2", want: true},
+		{model: "gpt-image-2.5-flare", want: true},
+		{model: "gpt-image-2.5-sunburst", want: true},
 		{model: "codex/gpt-image-1.5", want: true},
 		{model: "grok-imagine-image", want: true},
 		{model: "xai/grok-imagine-image", want: true},
@@ -255,6 +261,8 @@ func TestExecuteImageWithAuthManager_AllowsImageOnlyModels(t *testing.T) {
 	imageOnlyModels := []string{
 		"gpt-image-1.5",
 		"gpt-image-2",
+		"gpt-image-2.5-flare",
+		"gpt-image-2.5-sunburst",
 		"grok-imagine-image",
 		"grok-imagine-image-quality",
 		"xai/grok-imagine-image-quality",
