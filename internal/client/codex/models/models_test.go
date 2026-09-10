@@ -506,16 +506,6 @@ func TestCodexClientModelsResponseDoesNotInheritUnsupportedReasoningLevels(t *te
 		{name: "modern client", version: "0.144.0", thinking: registry.ThinkingSupport{Levels: []string{"max", "ultra"}}, wantEfforts: []string{"max", "ultra"}, wantDefault: "max"},
 		{name: "legacy client with no compatible level", version: "0.143.9", thinking: registry.ThinkingSupport{Levels: []string{"max", "ultra"}}},
 		{name: "legacy client with one compatible level", version: "0.143.9", thinking: registry.ThinkingSupport{Levels: []string{"high", "max"}}, wantEfforts: []string{"high"}, wantDefault: "high"},
-		{
-			name:    "budget-only model",
-			version: "0.153.3",
-			thinking: registry.ThinkingSupport{
-				Min:            1024,
-				Max:            64000,
-				ZeroAllowed:    true,
-				DynamicAllowed: true,
-			},
-		},
 		{name: "empty levels", version: "0.153.3", thinking: registry.ThinkingSupport{Levels: []string{}}},
 	}
 
@@ -587,6 +577,79 @@ func TestSanitizeCodexClientReasoningMetadataPreservesEmptyArray(t *testing.T) {
 			}
 			if got, want := string(encodedEntry), `{"supported_reasoning_levels":[]}`; got != want {
 				t.Fatalf("model metadata JSON = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestCodexClientModelsResponseKeepsTemplateReasoningLevelsWhenModelDeclaresNone(t *testing.T) {
+	// Models such as Antigravity's claude-sonnet-4-6 advertise thinking as a token
+	// budget ({"min":1024,"max":64000}) without a level list. They still support
+	// reasoning, so the entry keeps the default template's levels instead of
+	// reporting none. A support block that declares no budget at all reports an
+	// empty array, matching detectModelCapability's CapabilityNone.
+	//
+	// wantEfforts is asserted exactly: inheriting a level the client cannot use
+	// (say "ultra" on a legacy client) is the failure this test exists to catch, so
+	// it must not pass merely because some levels are present.
+	templateEfforts := []string{"low", "medium", "high", "xhigh"}
+	tests := []struct {
+		name        string
+		version     string
+		thinking    *registry.ThinkingSupport
+		wantEfforts []string
+		wantDefault string
+	}{
+		{name: "budget only modern client", version: "0.153.0", thinking: &registry.ThinkingSupport{Min: 1024, Max: 64000}, wantEfforts: templateEfforts, wantDefault: "medium"},
+		{name: "budget only legacy client", version: "0.143.9", thinking: &registry.ThinkingSupport{Min: 1024, Max: 64000}, wantEfforts: templateEfforts, wantDefault: "medium"},
+		{name: "min only budget", version: "0.153.0", thinking: &registry.ThinkingSupport{Min: 1024}, wantEfforts: templateEfforts, wantDefault: "medium"},
+		{name: "max only budget", version: "0.153.0", thinking: &registry.ThinkingSupport{Max: 64000}, wantEfforts: templateEfforts, wantDefault: "medium"},
+		{name: "zero and dynamic allowed budget", version: "0.153.3", thinking: &registry.ThinkingSupport{Min: 1024, Max: 64000, ZeroAllowed: true, DynamicAllowed: true}, wantEfforts: templateEfforts, wantDefault: "medium"},
+		{name: "empty thinking support", version: "0.153.0", thinking: &registry.ThinkingSupport{}},
+		{name: "negative budget", version: "0.153.0", thinking: &registry.ThinkingSupport{Min: -1, Max: -5}},
+		{name: "flags only without budget", version: "0.153.0", thinking: &registry.ThinkingSupport{ZeroAllowed: true, DynamicAllowed: true}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := BuildResponseForClient([]map[string]any{{
+				"id":       "home-budget-thinking-model-test",
+				"thinking": tt.thinking,
+			}}, nil, false, tt.version)
+			models, ok := resp["models"].([]map[string]any)
+			if !ok || len(models) != 1 {
+				t.Fatalf("models = %#v, want one model", resp["models"])
+			}
+			model := models[0]
+
+			rawLevels, ok := model["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("supported_reasoning_levels = %#v, want an array", model["supported_reasoning_levels"])
+			}
+
+			if len(tt.wantEfforts) == 0 {
+				// No declared budget: the required field stays present but empty, and
+				// the optional default is omitted.
+				if len(rawLevels) != 0 {
+					t.Fatalf("supported_reasoning_levels = %#v, want an empty array", rawLevels)
+				}
+				if _, exists := model["default_reasoning_level"]; exists {
+					t.Fatalf("default_reasoning_level = %#v, want absent", model["default_reasoning_level"])
+				}
+				return
+			}
+
+			if len(rawLevels) != len(tt.wantEfforts) {
+				t.Fatalf("supported_reasoning_levels = %#v, want %v", rawLevels, tt.wantEfforts)
+			}
+			for index, want := range tt.wantEfforts {
+				level, okLevel := rawLevels[index].(map[string]any)
+				if !okLevel || stringModelValue(level, "effort") != want {
+					t.Fatalf("supported_reasoning_levels[%d] = %#v, want %q", index, rawLevels[index], want)
+				}
+			}
+			if got := stringModelValue(model, "default_reasoning_level"); got != tt.wantDefault {
+				t.Fatalf("default_reasoning_level = %q, want %q", got, tt.wantDefault)
 			}
 		})
 	}

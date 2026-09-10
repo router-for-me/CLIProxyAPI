@@ -377,6 +377,19 @@ func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.T
 	if thinking == nil {
 		return
 	}
+	// Models that support thinking as a token budget without declaring discrete
+	// levels (for example {"min":1024,"max":64000}) still support reasoning, they
+	// just have no level list to apply. Keep the default template's reasoning
+	// metadata instead of reporting no levels at all. The template is guaranteed to
+	// carry a non-empty list: ValidateCodexClientModelsJSON rejects any catalog
+	// whose entries lack one.
+	//
+	// An entirely empty ThinkingSupport declares no capability at all
+	// (detectModelCapability reports CapabilityNone for it) and is excluded here, so
+	// it falls through to the empty-array path below.
+	if len(thinking.Levels) == 0 && (thinking.Min > 0 || thinking.Max > 0) {
+		return
+	}
 
 	levels := make([]any, 0, len(thinking.Levels))
 	defaultLevel := ""
@@ -398,6 +411,9 @@ func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.T
 		})
 	}
 	if len(levels) == 0 {
+		// Every declared level was filtered out for this client version, so the
+		// template's levels do not apply either. Keep the required field as an
+		// empty array rather than dropping it.
 		entry["supported_reasoning_levels"] = levels
 		delete(entry, "default_reasoning_level")
 		return
