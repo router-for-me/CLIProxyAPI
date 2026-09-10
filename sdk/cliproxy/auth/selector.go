@@ -659,10 +659,13 @@ func (s *RoundRobinSelector) ensureRotationKey(key string, limit int) {
 	}
 }
 
-func positiveWeightAuths(auths []*Auth) []*Auth {
+// positiveWeightAuths keeps the credentials whose routing weight for model is positive.
+// A credential whose model_weights table pins this model to zero is excluded for this
+// model only; credentials without a table use their account-level weight.
+func positiveWeightAuths(auths []*Auth, model string) []*Auth {
 	weightedCandidates := make([]*Auth, 0, len(auths))
 	for _, auth := range auths {
-		if authWeight(auth) > 0 {
+		if authWeightForModel(auth, model) > 0 {
 			weightedCandidates = append(weightedCandidates, auth)
 		}
 	}
@@ -672,12 +675,12 @@ func positiveWeightAuths(auths []*Auth) []*Auth {
 // Pick selects the next available auth using smooth weighted round-robin.
 func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
-	available, errAvailable := getSelectorAvailableAuths(ctx, positiveWeightAuths(auths), provider, model, time.Now())
+	stateModel := weightedSelectorStateModel(ctx, model)
+	available, errAvailable := getSelectorAvailableAuths(ctx, positiveWeightAuths(auths, stateModel), provider, model, time.Now())
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	stateModel := weightedSelectorStateModel(ctx, model)
 	key := provider + ":" + canonicalModelKey(stateModel)
 
 	s.mu.Lock()
@@ -697,9 +700,9 @@ func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model s
 		state = &smoothWeightedState{}
 		s.states[key] = state
 	}
-	weights := authWeightVector(available)
+	weights := authWeightVector(available, stateModel)
 	state.prepare(weights)
-	picked := pickSmoothWeightedAuth(available, state.current)
+	picked := pickSmoothWeightedAuth(available, state.current, weights)
 	if picked == nil {
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
 	}
@@ -762,26 +765,33 @@ func weightsConfigChanged(left, right map[string]int64) bool {
 	return false
 }
 
-func authWeightVector(auths []*Auth) map[string]int64 {
+// authWeightVector resolves each credential's routing weight for model (per-model
+// override first, account-level weight otherwise) and drops non-positive entries.
+func authWeightVector(auths []*Auth, model string) map[string]int64 {
 	weights := make(map[string]int64, len(auths))
 	for _, auth := range auths {
 		if auth == nil {
 			continue
 		}
-		if weight := authWeight(auth); weight > 0 {
+		if weight := authWeightForModel(auth, model); weight > 0 {
 			weights[auth.ID] = weight
 		}
 	}
 	return weights
 }
 
-func pickSmoothWeightedAuth(auths []*Auth, current map[string]int64) *Auth {
+// pickSmoothWeightedAuth runs one smooth weighted round-robin step over auths using the
+// resolved weight vector; credentials absent from weights are skipped.
+func pickSmoothWeightedAuth(auths []*Auth, current map[string]int64, weights map[string]int64) *Auth {
 	var picked *Auth
 	var pickedCurrent int64
 	var totalWeight int64
 	for _, auth := range auths {
-		weight := authWeight(auth)
-		if auth == nil || weight <= 0 {
+		if auth == nil {
+			continue
+		}
+		weight := weights[auth.ID]
+		if weight <= 0 {
 			continue
 		}
 		current[auth.ID] = saturatingAddInt64(current[auth.ID], weight)
@@ -1014,7 +1024,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	now := time.Now()
 	availabilityCandidates := auths
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
-		availabilityCandidates = positiveWeightAuths(auths)
+		availabilityCandidates = positiveWeightAuths(auths, model)
 	}
 	if primaryID == "" {
 		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
@@ -1132,7 +1142,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 
 	availabilityCandidates := auths
 	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
-		availabilityCandidates = positiveWeightAuths(auths)
+		availabilityCandidates = positiveWeightAuths(auths, model)
 	}
 	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, time.Now())
 	if errAvailable != nil {

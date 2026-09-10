@@ -209,7 +209,7 @@ func TestPickSmoothWeightedAuth_SaturatesCorruptState(t *testing.T) {
 	t.Parallel()
 
 	current := map[string]int64{"a": math.MaxInt64, "b": math.MinInt64}
-	picked := pickSmoothWeightedAuth([]*Auth{{ID: "a"}, {ID: "b"}}, current)
+	picked := pickSmoothWeightedAuth([]*Auth{{ID: "a"}, {ID: "b"}}, current, map[string]int64{"a": 1, "b": 1})
 	if picked == nil {
 		t.Fatal("pickSmoothWeightedAuth() returned nil")
 	}

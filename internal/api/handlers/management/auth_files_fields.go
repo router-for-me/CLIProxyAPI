@@ -310,6 +310,28 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "weight does not support nested fields"})
 			return
+		} else if fieldPath == coreauth.AttributeModelWeights {
+			if value == nil {
+				delete(targetAuth.Metadata, coreauth.AttributeModelWeights)
+			} else {
+				modelWeights, errModelWeights := coreauth.ParseModelWeights(value)
+				if errModelWeights != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": errModelWeights.Error()})
+					return
+				}
+				if len(modelWeights) == 0 {
+					delete(targetAuth.Metadata, coreauth.AttributeModelWeights)
+				} else {
+					normalized := make(map[string]any, len(modelWeights))
+					for model, weight := range modelWeights {
+						normalized[model] = weight
+					}
+					targetAuth.Metadata[coreauth.AttributeModelWeights] = normalized
+				}
+			}
+		} else if rootAuthFileField(fieldPath) == coreauth.AttributeModelWeights {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "model_weights does not support nested fields; send the whole object"})
+			return
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
@@ -559,6 +581,9 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots[coreauth.AttributeWeight]; ok {
 		syncAuthFileWeightAttribute(auth)
 	}
+	if _, ok := touchedRoots[coreauth.AttributeModelWeights]; ok {
+		syncAuthFileModelWeightsAttribute(auth)
+	}
 	if _, ok := touchedRoots["note"]; ok {
 		syncAuthFileNoteAttribute(auth)
 	}
@@ -619,6 +644,26 @@ func syncAuthFileWeightAttribute(auth *coreauth.Auth) {
 		return
 	}
 	auth.Attributes[coreauth.AttributeWeight] = strconv.FormatInt(weight, 10)
+}
+
+func syncAuthFileModelWeightsAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	rawModelWeights, ok := auth.Metadata[coreauth.AttributeModelWeights]
+	if !ok || rawModelWeights == nil {
+		delete(auth.Attributes, coreauth.AttributeModelWeights)
+		return
+	}
+	modelWeights, errParse := coreauth.ParseModelWeights(rawModelWeights)
+	if errParse != nil || len(modelWeights) == 0 {
+		delete(auth.Attributes, coreauth.AttributeModelWeights)
+		return
+	}
+	auth.Attributes[coreauth.AttributeModelWeights] = coreauth.EncodeModelWeights(modelWeights)
 }
 
 func authFileIntValue(value any) (int, bool) {
