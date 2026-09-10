@@ -17,6 +17,15 @@ type statusError struct {
 func (e statusError) Error() string   { return e.body }
 func (e statusError) StatusCode() int { return e.status }
 
+type responseBodyStatusError struct {
+	status int
+	body   string
+}
+
+func (e responseBodyStatusError) Error() string        { return "upstream request failed" }
+func (e responseBodyStatusError) StatusCode() int      { return e.status }
+func (e responseBodyStatusError) ResponseBody() []byte { return []byte(e.body) }
+
 func TestHTTPStatusFromError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -209,6 +218,42 @@ func TestIsRequestFault(t *testing.T) {
 			err:    errors.New(`{"error":{"message":"Rate Limit Reached","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),
 			want:   false,
 		},
+		{
+			name:   "claude extra-usage 400 is credential quota not request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"You're out of extra usage. Add more at claude.ai/settings/usage and keep going."}}`),
+			want:   false,
+		},
+		{
+			name:   "claude extra-usage 400 is case-insensitive",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"YOU'RE OUT OF EXTRA USAGE"}}`),
+			want:   false,
+		},
+		{
+			name:   "you're-less extra-usage billing period is not request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"out of extra usage for this billing period"}}`),
+			want:   false,
+		},
+		{
+			name:   "generic invalid_request_error 400 remains request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"Invalid request parameter"}}`),
+			want:   true,
+		},
+		{
+			name:   "unexpected extra field 400 remains request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"Unexpected extra field 'foo' in request"}}`),
+			want:   true,
+		},
+		{
+			name:   "extra field not allowed remains request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"extra field not allowed"}}`),
+			want:   true,
+		},
 		{name: "quota", status: http.StatusTooManyRequests, err: errors.New("quota")},
 		{name: "transport", status: http.StatusBadGateway, err: errors.New("unexpected EOF")},
 		{name: "invalid JSON body", status: http.StatusBadGateway, err: errors.New(`{"error":`)},
@@ -219,6 +264,93 @@ func TestIsRequestFault(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := IsRequestFault(tc.status, tc.err); got != tc.want {
 				t.Fatalf("IsRequestFault(%d, %v) = %t, want %t", tc.status, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsOutOfExtraUsage(t *testing.T) {
+	extraUsageJSON := `{"type":"error","error":{"type":"invalid_request_error","message":"You're out of extra usage. Add more at claude.ai/settings/usage and keep going."}}`
+	tests := []struct {
+		name   string
+		status int
+		err    error
+		want   bool
+	}{
+		{
+			name:   "anthropic extra-usage json",
+			status: http.StatusBadRequest,
+			err:    errors.New(extraUsageJSON),
+			want:   true,
+		},
+		{
+			name:   "exact astergate message",
+			status: http.StatusBadRequest,
+			err:    errors.New("You're out of extra usage. Add more at claude.ai/settings/usage and keep going."),
+			want:   true,
+		},
+		{
+			name:   "you're-less billing period variant",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"out of extra usage for this billing period"}}`),
+			want:   true,
+		},
+		{
+			name: "status from error",
+			err:  statusError{status: http.StatusBadRequest, body: extraUsageJSON},
+			want: true,
+		},
+		{
+			name: "response body provider",
+			err: responseBodyStatusError{
+				status: http.StatusBadRequest,
+				body:   extraUsageJSON,
+			},
+			want: true,
+		},
+		{
+			name:   "nested body type is not masked by envelope type",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","body":{"error":{"type":"invalid_request_error","message":"You're out of extra usage"}}}`),
+			want:   true,
+		},
+		{
+			name:   "nested body with unrelated type is not extra usage",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","body":{"error":{"type":"overloaded_error","message":"You're out of extra usage"}}}`),
+		},
+		{
+			name:   "generic invalid request is not extra usage",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"Invalid request parameter"}}`),
+		},
+		{
+			name:   "unexpected extra field is not extra usage",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"Unexpected extra field"}}`),
+		},
+		{
+			name:   "extra field not allowed is not extra usage",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","message":"extra field not allowed"}}`),
+		},
+		{
+			name:   "needle without invalid_request_error type is not extra usage",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"overloaded_error","message":"You're out of extra usage"}}`),
+		},
+		{
+			name:   "extra-usage wording on 429 is not this classifier",
+			status: http.StatusTooManyRequests,
+			err:    errors.New(extraUsageJSON),
+		},
+		{name: "nil", status: http.StatusBadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsOutOfExtraUsage(tc.status, tc.err); got != tc.want {
+				t.Fatalf("IsOutOfExtraUsage(%d, %v) = %t, want %t", tc.status, tc.err, got, tc.want)
 			}
 		})
 	}
