@@ -315,3 +315,30 @@ func TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForMultipart(t 
 		t.Fatalf("mask.image_url = %q, want mask-data data URL; body=%s", maskURL, string(gotBody))
 	}
 }
+
+func TestCodexImage25PreservesRequestedToolModel(t *testing.T) {
+	for _, model := range []string{"gpt-image-2.5-sunburst", "gpt-image-2.5-flare"} {
+		for _, action := range []string{"generate", "edit"} {
+			t.Run(model+"/"+action, func(t *testing.T) {
+				payload := []byte(`{"model":"` + model + `","prompt":"blue circle","quality":"low","images":[{"image_url":"data:image/png;base64,AA=="}]}`)
+				prepare := codexPrepareOpenAIImageGenerationJSON
+				if action == "edit" {
+					prepare = codexPrepareOpenAIImageEditJSON
+				}
+				result, err := prepare(payload, "gpt-image-2")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := gjson.GetBytes(result.Body, "tools.0.model").String(); got != model {
+					t.Fatalf("tool model = %q, want %q", got, model)
+				}
+				if got := gjson.GetBytes(result.Body, "tools.0.action").String(); got != action {
+					t.Fatalf("action = %q, want %q", got, action)
+				}
+				if got := gjson.GetBytes(result.Body, "tools.0.quality").String(); got != "low" {
+					t.Fatalf("quality = %q, want low", got)
+				}
+			})
+		}
+	}
+}
