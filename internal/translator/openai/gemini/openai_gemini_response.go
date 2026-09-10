@@ -201,7 +201,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 			}
 
 			// Handle finish reason
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+			if finishReason := choice.Get("finish_reason"); finishReason.Type == gjson.String && finishReason.String() != "" {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
 				template, _ = sjson.SetBytes(template, "candidates.0.finishReason", geminiFinishReason)
 
@@ -606,7 +606,7 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 			}
 
 			// Handle finish reason
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+			if finishReason := choice.Get("finish_reason"); finishReason.Type == gjson.String && finishReason.String() != "" {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
 				out, _ = sjson.SetBytes(out, "candidates.0.finishReason", geminiFinishReason)
 			}
