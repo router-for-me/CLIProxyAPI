@@ -11,7 +11,11 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 		version = clientVersion[0]
 	}
 	optimizeMultiAgentV2 := h != nil && h.Cfg != nil && h.Cfg.CodexOptimizeMultiAgentV2
-	return codexmodels.BuildResponseForClient(h.Models(), registry.GetGlobalRegistry().GetModelProviders, optimizeMultiAgentV2, version)
+	models := h.Models()
+	if h.BaseAPIHandler != nil {
+		models = h.AppendVirtualModels(models, "openai")
+	}
+	return codexmodels.BuildResponseForClient(models, registry.GetGlobalRegistry().GetModelProviders, optimizeMultiAgentV2, version)
 }
 
 // CodexClientModelsResponse builds a Codex client model response.
