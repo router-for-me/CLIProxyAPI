@@ -142,6 +142,28 @@ var staticDevinModels = []*ModelInfo{
 			Levels: []string{"low", "high", "max"},
 		},
 	},
+	{
+		ID:                  "devin/gemini-3-8-flash",
+		Type:                "devin",
+		OwnedBy:             "google",
+		DisplayName:         "Gemini 3.8 Flash",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "medium", "high"},
+		},
+	},
+	{
+		ID:                  "devin/grok-4-6",
+		Type:                "devin",
+		OwnedBy:             "xai",
+		DisplayName:         "Grok 4.6",
+		ContextLength:       500000,
+		MaxCompletionTokens: 131072,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "medium", "high", "xhigh"},
+		},
+	},
 }
 
 // GetDevinModels returns the standard Devin/Cognition model definitions.

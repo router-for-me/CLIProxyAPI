@@ -8,10 +8,12 @@ import (
 
 // Family effort configurations extracted from GetCliModelConfigs (215 models).
 var (
-	swe2Efforts    = []string{"medium", "high", "max"}
-	fable51Efforts = []string{"low", "medium", "high", "xhigh", "max"}
-	astraEfforts   = []string{"low", "medium", "high", "xhigh", "max"}
-	glm53Efforts   = []string{"low", "high", "max"}
+	swe2Efforts     = []string{"medium", "high", "max"}
+	fable51Efforts  = []string{"low", "medium", "high", "xhigh", "max"}
+	astraEfforts    = []string{"low", "medium", "high", "xhigh", "max"}
+	glm53Efforts    = []string{"low", "high", "max"}
+	gemini38Efforts = []string{"low", "medium", "high"}
+	grok46Efforts   = []string{"low", "medium", "high", "xhigh"}
 )
 
 // knownDevinSuffixes lists recognized model uid suffixes.
@@ -94,6 +96,9 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	baseModel := strings.TrimSpace(parsedSuffix.ModelName)
 	if parsedSuffix.HasSuffix {
 		thinkingLevel = parsedSuffix.RawSuffix
+	} else if colonIdx := strings.LastIndex(cleanModel, ":"); colonIdx != -1 {
+		baseModel = strings.TrimSpace(cleanModel[:colonIdx])
+		thinkingLevel = strings.TrimSpace(cleanModel[colonIdx+1:])
 	}
 
 	// 3. Normalize requested effort
@@ -126,6 +131,14 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	case strings.Contains(lowerBase, "glm-5-3") || strings.Contains(lowerBase, "glm-5.3"):
 		clamped := clampEffort(effort, glm53Efforts, "high")
 		return "glm-5-3-" + clamped
+
+	case strings.Contains(lowerBase, "gemini-3-8-flash") || strings.Contains(lowerBase, "gemini-3.8-flash"):
+		clamped := clampEffort(effort, gemini38Efforts, "high")
+		return "gemini-3-8-flash-" + clamped
+
+	case strings.Contains(lowerBase, "grok-4-6") || strings.Contains(lowerBase, "grok-4.6"):
+		clamped := clampEffort(effort, grok46Efforts, "high")
+		return "grok-4-6-" + clamped
 
 	default:
 		// Default generic fallback: append effort if present, else return base

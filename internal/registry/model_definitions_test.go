@@ -163,6 +163,8 @@ func TestGetDevinModelsFallback(t *testing.T) {
 
 	foundSWE2 := false
 	foundFable := false
+	foundGemini38 := false
+	foundGrok46 := false
 	for _, m := range devinModels {
 		if m != nil && m.ID == "devin/swe-2" {
 			foundSWE2 = true
@@ -173,12 +175,30 @@ func TestGetDevinModelsFallback(t *testing.T) {
 		if m != nil && m.ID == "devin/claude-fable-5-1" {
 			foundFable = true
 		}
+		if m != nil && m.ID == "devin/gemini-3-8-flash" {
+			foundGemini38 = true
+			if m.OwnedBy != "google" {
+				t.Errorf("devin/gemini-3-8-flash OwnedBy = %q, want google", m.OwnedBy)
+			}
+		}
+		if m != nil && m.ID == "devin/grok-4-6" {
+			foundGrok46 = true
+			if m.OwnedBy != "xai" {
+				t.Errorf("devin/grok-4-6 OwnedBy = %q, want xai", m.OwnedBy)
+			}
+		}
 	}
 	if !foundSWE2 {
 		t.Error("expected devin/swe-2 in GetDevinModels()")
 	}
 	if !foundFable {
 		t.Error("expected devin/claude-fable-5-1 in GetDevinModels()")
+	}
+	if !foundGemini38 {
+		t.Error("expected devin/gemini-3-8-flash in GetDevinModels()")
+	}
+	if !foundGrok46 {
+		t.Error("expected devin/grok-4-6 in GetDevinModels()")
 	}
 
 	byChannel := GetStaticModelDefinitionsByChannel("devin")

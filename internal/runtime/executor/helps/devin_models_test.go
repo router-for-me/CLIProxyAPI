@@ -130,6 +130,30 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			thinkingLevel: "",
 			want:          "swe-2-high",
 		},
+		{
+			name:          "devin prefix gemini-3-8-flash default high",
+			rawModel:      "devin/gemini-3-8-flash",
+			thinkingLevel: "",
+			want:          "gemini-3-8-flash-high",
+		},
+		{
+			name:          "devin prefix gemini-3.8-flash with low suffix",
+			rawModel:      "devin/gemini-3.8-flash(low)",
+			thinkingLevel: "",
+			want:          "gemini-3-8-flash-low",
+		},
+		{
+			name:          "devin prefix grok-4-6 default high",
+			rawModel:      "devin/grok-4-6",
+			thinkingLevel: "",
+			want:          "grok-4-6-high",
+		},
+		{
+			name:          "devin prefix grok-4.6 with xhigh suffix",
+			rawModel:      "devin/grok-4.6:xhigh",
+			thinkingLevel: "",
+			want:          "grok-4-6-xhigh",
+		},
 	}
 
 	for _, tt := range tests {

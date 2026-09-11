@@ -1216,6 +1216,9 @@ func parseSignatureBytes(sigStr string) ([]byte, string) {
 	if strings.HasPrefix(s, "sealed.v1.") {
 		return []byte(s), "sealed"
 	}
+	if strings.HasPrefix(s, "AY") {
+		return []byte(s), "gemini"
+	}
 	if decoded, err := base64.StdEncoding.DecodeString(s); err == nil && len(decoded) > 0 {
 		decStr := string(decoded)
 		if strings.HasPrefix(decStr, "sealed.v1.") {
@@ -1226,6 +1229,9 @@ func parseSignatureBytes(sigStr string) ([]byte, string) {
 		}
 		if strings.HasPrefix(decStr, "gAAAA") {
 			return decoded, "openai"
+		}
+		if decoded[0] == 0x01 {
+			return []byte(s), "gemini"
 		}
 	}
 	return []byte(s), detectSignatureType(s)
@@ -1241,6 +1247,9 @@ func detectSignatureType(sig string) string {
 	}
 	if strings.HasPrefix(s, "gAAAA") {
 		return "openai"
+	}
+	if strings.HasPrefix(s, "AY") {
+		return "gemini"
 	}
 	return "sealed"
 }
