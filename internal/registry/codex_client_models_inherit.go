@@ -259,6 +259,14 @@ func (r *codexClientModelsInheritance) resolve(slug, fieldPath string) (any, boo
 		current, found = object, true
 	}
 
+	// A local patch that deletes or replaces an ancestor with something that cannot
+	// contain this path removes the whole subtree, so neither base nor inherited
+	// values below it may survive. The exact-path lookup below cannot see such an
+	// ancestor patch on its own.
+	if codexClientModelsPatchBlocksPath(localPatch, segments) {
+		current, found = nil, false
+	}
+
 	if localValue, okLocal := lookupCodexClientModelsPath(localPatch, segments); okLocal {
 		switch {
 		case localValue == nil:
@@ -335,6 +343,31 @@ func codexClientModelsPathHasPrefix(fieldPath, prefix []string) bool {
 
 func codexClientModelsPathsOverlap(a, b []string) bool {
 	return codexClientModelsPathHasPrefix(a, b) || codexClientModelsPathHasPrefix(b, a)
+}
+
+// codexClientModelsPatchBlocksPath reports whether the patch deletes or replaces an
+// ancestor of segments with a value that cannot contain the path: an explicit null
+// deletion or a non-object value. Both remove everything below that ancestor.
+func codexClientModelsPatchBlocksPath(patch map[string]any, segments []string) bool {
+	var current any = patch
+	for index := 0; index < len(segments)-1; index++ {
+		object, okObject := current.(map[string]any)
+		if !okObject {
+			return false
+		}
+		value, exists := object[segments[index]]
+		if !exists {
+			return false
+		}
+		if value == nil {
+			return true
+		}
+		if _, okValue := value.(map[string]any); !okValue {
+			return true
+		}
+		current = value
+	}
+	return false
 }
 
 func codexClientModelsPathSuffix(fieldPath, prefix []string) []string {
