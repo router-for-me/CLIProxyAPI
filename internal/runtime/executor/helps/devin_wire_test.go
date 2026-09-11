@@ -141,14 +141,14 @@ func TestBuildDevinGetChatMessageRequest_SensitiveWordsOnlyInSystemPrompt(t *tes
 
 func TestSanitizeDevinSystemPrompt_AndSensitiveWords(t *testing.T) {
 	matcher := BuildSensitiveWordMatcher([]string{"API", "proxy"})
-	rawPrompt := "x-anthropic-billing-header: cc_version=2.1.260;\nYou are Claude Code, Anthropic's official CLI for Claude.\nHelp the project with API and proxy."
+	rawPrompt := "x-anthropic-billing-header: cc_version=2.1.260;\nYou are Claude Code, Anthropic's official CLI for Claude.\nYou are a Claude agent, built on Anthropic's Claude Agent SDK.\n- For clear communication with the user the assistant MUST avoid using emojis.\nHelp the project with API and proxy."
 	sanitized := SanitizeDevinSystemPrompt(rawPrompt, matcher)
 
 	if strings.Contains(sanitized, "x-anthropic-billing-header") {
 		t.Errorf("sanitized prompt still contains billing header: %s", sanitized)
 	}
-	if strings.Contains(sanitized, "You are Claude Code") {
-		t.Errorf("sanitized prompt still contains Claude Code identity: %s", sanitized)
+	if strings.Contains(sanitized, "You are Claude Code") || strings.Contains(sanitized, "Claude Agent SDK") || strings.Contains(sanitized, "avoid using emojis") {
+		t.Errorf("sanitized prompt still contains blocked Claude subagent phrases: %s", sanitized)
 	}
 	if strings.Contains(sanitized, "API") && !strings.Contains(sanitized, zeroWidthSpace) {
 		t.Errorf("API was not obfuscated with zero-width space")
