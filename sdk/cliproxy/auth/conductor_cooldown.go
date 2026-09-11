@@ -792,6 +792,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					if statusCode == http.StatusForbidden && reclassifyQuota403.Load() && looksLikeQuotaForbidden(result.Error) {
+						// Quota-shaped 403s take the retry-eligible 429 quota
+						// ladder instead of the 30-minute payment-required
+						// cooldown. Only future selection/cooldown behavior
+						// changes; the client still sees the original error.
+						statusCode = http.StatusTooManyRequests
+					}
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
 							// Honor the credential's disable-cooling setting:
@@ -1414,6 +1421,27 @@ func retryAfterFromError(err error) *time.Duration {
 	}
 	value := *retryAfter
 	return &value
+}
+
+// quota403BodyPatterns is the narrow whitelist for reclassifying a 403 as a
+// quota error (OmniRoute-style status restatement). "billing" is explicitly
+// excluded: billing-shaped 403s stay in the payment-required class.
+var quota403BodyPatterns = []string{"quota", "rate limit", "exceeded", "resource_exhausted"}
+
+func looksLikeQuotaForbidden(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusForbidden {
+		return false
+	}
+	msg := strings.ToLower(err.Code + " " + err.Message)
+	if strings.Contains(msg, "billing") {
+		return false
+	}
+	for _, pattern := range quota403BodyPatterns {
+		if strings.Contains(msg, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func statusCodeFromResult(err *Error) int {
