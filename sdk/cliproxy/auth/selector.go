@@ -819,12 +819,14 @@ func (s *SessionAffinitySelector) Stop() {
 	}
 }
 
-// InvalidateAuth removes all session bindings for a specific auth.
+// InvalidateAuth removes all session bindings for a specific auth and returns
+// how many bindings were dropped.
 // Called when an auth becomes rate-limited or unavailable.
-func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
-	if s.cache != nil {
-		s.cache.InvalidateAuth(authID)
+func (s *SessionAffinitySelector) InvalidateAuth(authID string) int {
+	if s == nil || s.cache == nil {
+		return 0
 	}
+	return s.cache.InvalidateAuth(authID)
 }
 
 // Snapshot returns the live session→auth bindings for observability.

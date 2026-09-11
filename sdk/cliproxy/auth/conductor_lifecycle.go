@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // SetRetryConfig updates retry attempts, credential retry limit and cooldown wait interval.
@@ -207,8 +208,10 @@ func (m *Manager) invalidateSessionAffinity(authID string) {
 	if m == nil || authID == "" {
 		return
 	}
-	if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
-		invalidator.InvalidateAuth(authID)
+	if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) int }); ok && invalidator != nil {
+		if removed := invalidator.InvalidateAuth(authID); removed > 0 {
+			log.Warnf("session-affinity: invalidated %d binding(s) for auth %s", removed, authID)
+		}
 	}
 }
 

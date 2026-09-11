@@ -334,19 +334,23 @@ func (c *SessionCache) Invalidate(sessionID string) {
 	c.mu.Unlock()
 }
 
-// InvalidateAuth removes all sessions bound to a specific auth ID.
-// Used when an auth becomes unavailable.
-func (c *SessionCache) InvalidateAuth(authID string) {
+// InvalidateAuth removes all sessions bound to a specific auth ID and returns
+// how many cache keys were deleted. Used when an auth becomes unavailable or
+// is removed; the count lets callers report the blast radius.
+func (c *SessionCache) InvalidateAuth(authID string) int {
 	if authID == "" {
-		return
+		return 0
 	}
 	c.mu.Lock()
+	deleted := 0
 	for sid, entry := range c.entries {
 		if entry.authID == authID {
 			delete(c.entries, sid)
+			deleted++
 		}
 	}
 	c.mu.Unlock()
+	return deleted
 }
 
 // invalidateSessionID removes every binding whose session-ID component matches

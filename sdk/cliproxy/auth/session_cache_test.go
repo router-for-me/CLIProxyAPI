@@ -157,3 +157,23 @@ func TestSessionAffinitySelector_SnapshotNilWhenNoCache(t *testing.T) {
 	s.InvalidateSession("sess-A") // must not panic
 	s.InvalidateAuth("auth-g0")   // must not panic
 }
+
+// TestInvalidateAuthReturnsDeletedCount verifies that InvalidateAuth reports
+// how many cache keys it dropped, so callers can log the blast radius, and
+// that unrelated bindings survive.
+func TestInvalidateAuthReturnsDeletedCount(t *testing.T) {
+	c := NewSessionCache(time.Hour)
+	defer c.Stop()
+	c.Set("mixed::s1::m", "auth-a")
+	c.Set("mixed::s2::m", "auth-a")
+	c.Set("mixed::s3::m", "auth-b")
+	if got := c.InvalidateAuth("auth-a"); got != 2 {
+		t.Fatalf("InvalidateAuth = %d, want 2", got)
+	}
+	if got := c.InvalidateAuth("auth-a"); got != 0 {
+		t.Fatalf("second InvalidateAuth = %d, want 0", got)
+	}
+	if _, ok := c.Get("mixed::s3::m"); !ok {
+		t.Fatal("unrelated binding was removed")
+	}
+}

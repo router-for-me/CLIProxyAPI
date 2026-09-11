@@ -90,7 +90,7 @@ type SessionAffinityView interface {
 	Selector
 	Snapshot() []SessionAffinityBinding
 	InvalidateSession(sessionID string)
-	InvalidateAuth(authID string)
+	InvalidateAuth(authID string) int
 }
 
 // Hook captures lifecycle callbacks for observing auth changes.
