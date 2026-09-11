@@ -14,13 +14,19 @@ import (
 // Handlers copy it to clients even when passthrough-headers is false.
 const TokensPerSecondHeader = "X-CLIProxyAPI-Tokens-Per-Second"
 
+// TokensPerSecondGatewayMarker marks that TokensPerSecondHeader was set by the
+// gateway (not an upstream). Handlers only forward TPS when this marker is present.
+const TokensPerSecondGatewayMarker = "X-CLIProxyAPI-Gateway-Measured-TPS"
+
 const tokensPerSecondHeader = TokensPerSecondHeader
+const tokensPerSecondGatewayMarker = TokensPerSecondGatewayMarker
 
 var usageObjectPaths = []string{
 	"usage",
 	"response.usage",
 	"usageMetadata",
 	"response.usageMetadata",
+	"interaction.usage",
 }
 
 func reporterTokensPerSecond(reporter *UsageReporter, outputTokens int64) float64 {
@@ -31,7 +37,7 @@ func reporterTokensPerSecond(reporter *UsageReporter, outputTokens int64) float6
 }
 
 func outputTokensFromUsageNode(node gjson.Result) int64 {
-	for _, path := range []string{"completion_tokens", "output_tokens", "candidatesTokenCount"} {
+	for _, path := range []string{"completion_tokens", "output_tokens", "total_output_tokens", "candidatesTokenCount"} {
 		value := node.Get(path)
 		if value.Exists() && value.Type != gjson.Null {
 			return value.Int()
@@ -66,9 +72,7 @@ func attachTokensPerSecondAt(jsonBody []byte, path string, tps float64) []byte {
 	if !node.Exists() || !node.IsObject() {
 		return jsonBody
 	}
-	if node.Get("tokens_per_second").Exists() {
-		return jsonBody
-	}
+	// Always overwrite upstream-supplied tokens_per_second with the gateway measurement.
 	updated, err := sjson.SetBytes(jsonBody, path+".tokens_per_second", tps)
 	if err != nil {
 		return jsonBody
@@ -130,7 +134,9 @@ func setTokensPerSecondHeader(headers map[string][]string, tps float64) {
 	if headers == nil || tps <= 0 {
 		return
 	}
-	http.Header(headers).Set(tokensPerSecondHeader, fmt.Sprintf("%.3f", tps))
+	h := http.Header(headers)
+	h.Set(tokensPerSecondHeader, fmt.Sprintf("%.3f", tps))
+	h.Set(tokensPerSecondGatewayMarker, "1")
 }
 
 // AttachTokensPerSecondHeader writes X-CLIProxyAPI-Tokens-Per-Second when TTFT is known.

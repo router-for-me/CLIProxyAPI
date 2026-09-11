@@ -307,29 +307,35 @@ func downstreamHeadersAfterInterceptors(baseRaw, finalRaw http.Header, passthrou
 
 // mergeGatewayTelemetryHeaders copies gateway-owned inference telemetry
 // (generation tok/s) even when passthrough-headers is false. Upstream
-// headers stay filtered.
+// headers stay filtered. Only forward TPS when the gateway marker is present
+// so an upstream-supplied X-CLIProxyAPI-Tokens-Per-Second is never trusted.
 func mergeGatewayTelemetryHeaders(dst, src http.Header) http.Header {
 	if src == nil {
 		return dst
 	}
 	const name = "X-CLIProxyAPI-Tokens-Per-Second"
-	canonical := http.CanonicalHeaderKey(name)
-	tps := src.Get(name)
-	if tps == "" {
-		for key, values := range src {
-			if http.CanonicalHeaderKey(key) == canonical && len(values) > 0 && values[0] != "" {
-				tps = values[0]
-				break
-			}
+	const marker = "X-CLIProxyAPI-Gateway-Measured-TPS"
+	markerCanonical := http.CanonicalHeaderKey(marker)
+	nameCanonical := http.CanonicalHeaderKey(name)
+	hasMarker := false
+	tps := ""
+	for key, values := range src {
+		canonical := http.CanonicalHeaderKey(key)
+		if canonical == markerCanonical && len(values) > 0 && values[0] != "" {
+			hasMarker = true
+		}
+		if canonical == nameCanonical && len(values) > 0 && values[0] != "" && tps == "" {
+			tps = values[0]
 		}
 	}
-	if tps == "" {
+	if !hasMarker || tps == "" {
 		return dst
 	}
 	if dst == nil {
 		dst = make(http.Header)
 	}
 	dst.Set(name, tps)
+	dst.Del(marker)
 	return dst
 }
 
