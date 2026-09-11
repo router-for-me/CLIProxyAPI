@@ -1144,16 +1144,60 @@ func (e *DevinExecutor) getSensitiveWords(auth *cliproxyauth.Auth) []string {
 	if e != nil && e.cfg != nil && len(e.cfg.Devin.SensitiveWords) > 0 {
 		words = append(words, e.cfg.Devin.SensitiveWords...)
 	}
-	if auth != nil && auth.Attributes != nil {
-		attrStr := firstNonEmpty(auth.Attributes["sensitive_words"], auth.Attributes["sensitive-words"], auth.Attributes["cloak_sensitive_words"])
-		if attrStr != "" {
-			for _, w := range strings.Split(attrStr, ",") {
-				if trimmed := strings.TrimSpace(w); trimmed != "" {
-					words = append(words, trimmed)
+	if auth == nil {
+		return words
+	}
+
+	addWord := func(w string) {
+		if trimmed := strings.TrimSpace(w); trimmed != "" {
+			words = append(words, trimmed)
+		}
+	}
+
+	parseWordsVal := func(val any) {
+		if val == nil {
+			return
+		}
+		switch v := val.(type) {
+		case string:
+			for _, w := range strings.Split(v, ",") {
+				addWord(w)
+			}
+		case []string:
+			for _, w := range v {
+				addWord(w)
+			}
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					addWord(s)
 				}
 			}
 		}
 	}
+
+	if auth.Attributes != nil {
+		attrStr := firstNonEmpty(auth.Attributes["sensitive_words"], auth.Attributes["sensitive-words"], auth.Attributes["cloak_sensitive_words"])
+		if attrStr != "" {
+			parseWordsVal(attrStr)
+		}
+	}
+
+	if auth.Metadata != nil {
+		for _, k := range []string{"sensitive_words", "sensitive-words", "cloak_sensitive_words"} {
+			if v, ok := auth.Metadata[k]; ok {
+				parseWordsVal(v)
+			}
+		}
+		if attrs, ok := auth.Metadata["attributes"].(map[string]any); ok {
+			for _, k := range []string{"sensitive_words", "sensitive-words", "cloak_sensitive_words"} {
+				if v, ok := attrs[k]; ok {
+					parseWordsVal(v)
+				}
+			}
+		}
+	}
+
 	return words
 }
 
