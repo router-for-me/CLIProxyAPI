@@ -83,3 +83,50 @@ func TestManager_RefreshAuthLogsAuthFileBasenameOnInvalidRefreshToken(t *testing
 		t.Fatalf("expected credential refresh failed warn, got %#v", hook.AllEntries())
 	}
 }
+
+func TestSanitizeProviderForLogStripsControlCharacters(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: "antigravity", want: "antigravity"},
+		{in: " antigravity\n", want: "antigravity"},
+		{in: "anti\ngravity", want: "antigravity"},
+		{in: "\n\t", want: "unknown"},
+		{in: "", want: "unknown"},
+		{in: "codex\x00", want: "codex"},
+	}
+	for _, tc := range cases {
+		if got := sanitizeProviderForLog(tc.in); got != tc.want {
+			t.Fatalf("sanitizeProviderForLog(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestLogCredentialRefreshFailureEscapesProviderNewline(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	auth := &Auth{
+		ID:       "auth-newline",
+		Provider: "antigravity\n",
+		FileName: "account.json",
+	}
+	logCredentialRefreshFailure(auth, errors.New("token refresh failed with status 400: invalid_refresh_token"), false)
+
+	var saw bool
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.WarnLevel || !strings.Contains(entry.Message, "credential refresh failed") {
+			continue
+		}
+		saw = true
+		got, _ := entry.Data["provider"].(string)
+		if got != "antigravity" {
+			t.Fatalf("provider field = %q, want sanitized antigravity", got)
+		}
+		if strings.ContainsAny(got, "\r\n\x00") {
+			t.Fatalf("provider field still contains control characters: %q", got)
+		}
+	}
+	if !saw {
+		t.Fatalf("expected credential refresh failed warn, got %#v", hook.AllEntries())
+	}
+}

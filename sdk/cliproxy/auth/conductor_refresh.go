@@ -744,7 +744,7 @@ func logCredentialRefreshFailure(auth *Auth, err error, retainedUnexpired bool) 
 	}
 	diagnostic := logging.SafeErrorDiagnostic(err)
 	fields := log.Fields{
-		"provider":   auth.Provider,
+		"provider":   sanitizeProviderForLog(auth.Provider),
 		"auth_file":  file,
 		"diagnostic": diagnostic,
 	}
@@ -753,4 +753,29 @@ func logCredentialRefreshFailure(auth *Auth, err error, retainedUnexpired bool) 
 		return
 	}
 	log.WithFields(fields).Warn("credential refresh failed")
+}
+
+// sanitizeProviderForLog returns a single-line provider label for warning fields.
+// Control characters are stripped so LogFormatter cannot inject forged log lines
+// when an SDK caller registers a provider like "antigravity\n".
+func sanitizeProviderForLog(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return "unknown"
+	}
+	if strings.IndexFunc(provider, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		provider = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return -1
+			}
+			return r
+		}, provider)
+		provider = strings.TrimSpace(provider)
+	}
+	if provider == "" {
+		return "unknown"
+	}
+	return provider
 }
