@@ -28,6 +28,11 @@ type xaiKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type codeBuddyCNKeyWithAuthIndex struct {
+	config.CodeBuddyCNKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -246,6 +251,35 @@ func (h *Handler) xaiKeysWithAuthIndex() []xaiKeyWithAuthIndex {
 		out[i] = xaiKeyWithAuthIndex{
 			XAIKey:    entry,
 			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) codeBuddyCNKeysWithAuthIndex() []codeBuddyCNKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]codeBuddyCNKeyWithAuthIndex, len(h.cfg.CodeBuddyCNKey))
+	for i := range h.cfg.CodeBuddyCNKey {
+		entry := h.cfg.CodeBuddyCNKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next("codebuddy-cn:apikey", key, entry.BaseURL)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = codeBuddyCNKeyWithAuthIndex{
+			CodeBuddyCNKey: entry,
+			AuthIndex:      authIndex,
 		}
 	}
 	return out

@@ -25,6 +25,9 @@ const (
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
 
+	// CodeBuddyCN represents the CodeBuddy CN (Tencent) provider identifier.
+	CodeBuddyCN = "codebuddy-cn"
+
 	// Interactions represents the Google Interactions API format identifier.
 	Interactions = "interactions"
 )
