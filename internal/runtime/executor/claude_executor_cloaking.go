@@ -1190,6 +1190,10 @@ func firstClaudeUserMessageIndex(payload []byte) int {
 	return firstUserIdx
 }
 
+func isClaudeCodeContextReminder(text string) bool {
+	return strings.HasPrefix(text, "<system-reminder>") && strings.Contains(text, "</system-reminder>")
+}
+
 func isClaudeCodeCurrentDateReminder(text string) bool {
 	return strings.HasPrefix(text, "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ")
 }
