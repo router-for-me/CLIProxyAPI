@@ -46,7 +46,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream b
 }
 
 // ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
-// empty signatures for configured compatibility endpoints.
+// empty or unknown-format signatures for configured compatibility endpoints.
 func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
 	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true)
 }
@@ -165,6 +165,11 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 
 				rawSignature := part.Get("signature").String()
 				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
+				if !ok && preserveEmptyThinkingBlocks && part.Get("signature").Type == gjson.String && strings.TrimSpace(rawSignature) != "" &&
+					sigcompat.DetectSignatureProviderForBlock(rawSignature, sigcompat.SignatureBlockKindClaudeThinking) == sigcompat.SignatureProviderUnknown {
+					signature = rawSignature
+					ok = true
+				}
 				if !ok {
 					if preserveEmptyThinkingBlocks && strings.TrimSpace(rawSignature) == "" {
 						signature = rawSignature
