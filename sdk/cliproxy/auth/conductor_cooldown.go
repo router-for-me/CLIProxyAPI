@@ -742,6 +742,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m != nil {
+		if policy := m.ResultPolicy(); policy != nil {
+			result = policy.ApplyResultPolicy(ctx, result)
+			if result.AuthID == "" {
+				return
+			}
+		}
+	}
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth

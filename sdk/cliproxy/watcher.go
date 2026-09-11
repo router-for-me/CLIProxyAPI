@@ -34,6 +34,9 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		dispatchPersistedAuth: func(update watcher.AuthUpdate) bool {
 			return w.DispatchPersistedAuthUpdate(update)
 		},
+		dispatchPersistedAuthWithRev: func(update *watcher.AuthUpdate) (bool, uint64) {
+			return w.DispatchPersistedAuthUpdateWithRevision(update)
+		},
 		setPluginAuthParser: func(parser PluginAuthParser) {
 			w.SetPluginAuthParser(parser)
 		},
