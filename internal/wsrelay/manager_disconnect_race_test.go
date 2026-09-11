@@ -88,9 +88,23 @@ func TestHandleWebsocket_OrdersReplacementConnectAfterDisconnectCallback(t *test
 
 	releaseCh := make(chan struct{})
 	var disconnectOnce sync.Once
+	handlerEntered := make(chan struct{}, 4)
+	var dialMu sync.Mutex
+	dialCount := 0
 
 	relay := NewManager(Options{
-		ProviderFactory: func(*http.Request) (string, error) { return "p", nil },
+		ProviderFactory: func(*http.Request) (string, error) {
+			dialMu.Lock()
+			dialCount++
+			n := dialCount
+			dialMu.Unlock()
+			if n >= 2 {
+				// Deterministic barrier: the replacement handler has entered
+				// handleWebsocket before the test proceeds past its checks.
+				handlerEntered <- struct{}{}
+			}
+			return "p", nil
+		},
 		OnConnected: func(string) {
 			events <- event{kind: "connect"}
 		},
@@ -143,9 +157,15 @@ waitLoop:
 		}
 	}
 
-	// Replacement dials while the disconnect callback is still blocked; its
-	// connect must wait for the callback to finish.
+	// Replacement dials while the disconnect callback is still blocked. The
+	// handler-entry barrier proves the replacement reached handleWebsocket and
+	// is parked on the key lock; its connect must wait for the callback.
 	connB := dial()
+	select {
+	case <-handlerEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the replacement handler to enter")
+	}
 	select {
 	case ev := <-events:
 		t.Fatalf("replacement connected before the disconnect callback finished: %v", ev)
