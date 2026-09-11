@@ -109,6 +109,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
+- Trae CLI support by importing an existing local Trae login
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
 - Multimodal input support (text and images)
@@ -125,6 +126,18 @@ PackyCode provides special discounts for our software users: register using <a h
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+
+### Trae CLI
+
+Import the account already logged in by your local `traecli`, then start the proxy normally:
+
+```bash
+traecli login status
+./CLIProxyAPI --trae-login
+./CLIProxyAPI --config config.yaml
+```
+
+The import stores only references to Trae CLI's local state and its model catalog; it does not copy the access token into CLIProxyAPI's auth file. By default it discovers `traecli` on `PATH` and reads `~/.trae/cli/auth.json`. Custom installations can use `TRAECLI_PATH`, `TRAE_HOME`, `TRAE_AUTH_PATH`, and `TRAE_MODELS_PATH`; `TRAE_API_BASE_URL` overrides the upstream endpoint.
 
 ## Management API
 

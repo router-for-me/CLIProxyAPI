@@ -105,6 +105,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
 - 新增 Grok Build 支持（OAuth 登录）
+- 支持导入本机 Trae CLI 的现有登录状态
 - 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
@@ -121,6 +122,18 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 ## 新手入门
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
+
+### Trae CLI
+
+导入本机 `traecli` 已登录的账号，然后正常启动代理：
+
+```bash
+traecli login status
+./CLIProxyAPI --trae-login
+./CLIProxyAPI --config config.yaml
+```
+
+导入过程只保存 Trae CLI 本地状态文件的引用和模型目录，不会把 access token 复制进 CLIProxyAPI 的认证文件。默认从 `PATH` 查找 `traecli` 并读取 `~/.trae/cli/auth.json`；自定义安装可设置 `TRAECLI_PATH`、`TRAE_HOME`、`TRAE_AUTH_PATH` 和 `TRAE_MODELS_PATH`，也可用 `TRAE_API_BASE_URL` 覆盖上游地址。
 
 ## 管理 API 文档
 
