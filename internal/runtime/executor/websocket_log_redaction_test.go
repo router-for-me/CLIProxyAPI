@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 )
@@ -188,23 +189,23 @@ func TestXAIWebsocketLifecycleLogsOmitSensitiveValues(t *testing.T) {
 }
 
 func TestSafeWebsocketLifecycleReasonRejectsUnlistedValues(t *testing.T) {
-	if got := safeWebsocketLifecycleReason("read_error"); got != "read_error" {
-		t.Fatalf("safeWebsocketLifecycleReason(read_error) = %q, want read_error", got)
+	if got := helps.SafeWebsocketLifecycleReason("read_error"); got != "read_error" {
+		t.Fatalf("helps.SafeWebsocketLifecycleReason(read_error) = %q, want read_error", got)
 	}
-	if got := safeWebsocketLifecycleReason(""); got != absentLogPlaceholder {
-		t.Fatalf("safeWebsocketLifecycleReason(empty) = %q, want %q", got, absentLogPlaceholder)
+	if got := helps.SafeWebsocketLifecycleReason(""); got != "none" {
+		t.Fatalf("helps.SafeWebsocketLifecycleReason(empty) = %q, want %q", got, "none")
 	}
-	if got := safeWebsocketLifecycleReason(sentinelProviderMessage); got != unknownLogPlaceholder {
-		t.Fatalf("safeWebsocketLifecycleReason(sentinel) = %q, want %q", got, unknownLogPlaceholder)
+	if got := helps.SafeWebsocketLifecycleReason(sentinelProviderMessage); got != "other" {
+		t.Fatalf("helps.SafeWebsocketLifecycleReason(sentinel) = %q, want %q", got, "other")
 	}
 }
 
 func TestSafeWebsocketEventTypeRejectsUnlistedValues(t *testing.T) {
-	if got := safeWebsocketEventType("response.completed"); got != "response.completed" {
-		t.Fatalf("safeWebsocketEventType(response.completed) = %q, want response.completed", got)
+	if got := helps.SafeWebsocketEventType("response.completed"); got != "response.completed" {
+		t.Fatalf("helps.SafeWebsocketEventType(response.completed) = %q, want response.completed", got)
 	}
-	if got := safeWebsocketEventType(sentinelProviderMessage); got != unknownLogPlaceholder {
-		t.Fatalf("safeWebsocketEventType(sentinel) = %q, want %q", got, unknownLogPlaceholder)
+	if got := helps.SafeWebsocketEventType(sentinelProviderMessage); got != "other" {
+		t.Fatalf("helps.SafeWebsocketEventType(sentinel) = %q, want %q", got, "other")
 	}
 }
 
@@ -214,8 +215,8 @@ func TestSafeWebsocketErrorDiagnosticReportsStructureOnly(t *testing.T) {
 		err  error
 		want string
 	}{
-		{name: "nil", err: nil, want: absentLogPlaceholder},
-		{name: "opaque", err: errors.New(sentinelProviderMessage), want: redactedLogPlaceholder},
+		{name: "nil", err: nil, want: "none"},
+		{name: "opaque", err: errors.New(sentinelProviderMessage), want: "[redacted]"},
 		{name: "canceled", err: context.Canceled, want: "canceled"},
 		{name: "deadline", err: context.DeadlineExceeded, want: "timeout"},
 		{name: "net closed", err: net.ErrClosed, want: "connection_closed"},
@@ -228,7 +229,7 @@ func TestSafeWebsocketErrorDiagnosticReportsStructureOnly(t *testing.T) {
 		{
 			name: "out of range close code",
 			err:  &websocket.CloseError{Code: 17, Text: sentinelProviderMessage},
-			want: "close_code=" + unknownLogPlaceholder,
+			want: "close_code=" + "other",
 		},
 		{
 			name: "wrapped status",
@@ -238,26 +239,26 @@ func TestSafeWebsocketErrorDiagnosticReportsStructureOnly(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			got := safeWebsocketErrorDiagnostic(testCase.err)
+			got := helps.SafeWebsocketErrorDiagnostic(testCase.err)
 			if got != testCase.want {
-				t.Fatalf("safeWebsocketErrorDiagnostic() = %q, want %q", got, testCase.want)
+				t.Fatalf("helps.SafeWebsocketErrorDiagnostic() = %q, want %q", got, testCase.want)
 			}
 			if strings.Contains(got, sentinelProviderMessage) {
-				t.Fatalf("safeWebsocketErrorDiagnostic() leaked provider text: %q", got)
+				t.Fatalf("helps.SafeWebsocketErrorDiagnostic() leaked provider text: %q", got)
 			}
 		})
 	}
 }
 
 func TestSafeWebsocketModelResolvesThroughRegistry(t *testing.T) {
-	if got := safeWebsocketModel("codex", ""); got != absentLogPlaceholder {
-		t.Fatalf("safeWebsocketModel(codex, empty) = %q, want %q", got, absentLogPlaceholder)
+	if got := helps.SafeWebsocketModel("codex", ""); got != "none" {
+		t.Fatalf("helps.SafeWebsocketModel(codex, empty) = %q, want %q", got, "none")
 	}
-	if got := safeWebsocketModel("codex", sentinelSessionID); got != unknownLogPlaceholder {
-		t.Fatalf("safeWebsocketModel(codex, sentinel) = %q, want %q", got, unknownLogPlaceholder)
+	if got := helps.SafeWebsocketModel("codex", sentinelSessionID); got != "other" {
+		t.Fatalf("helps.SafeWebsocketModel(codex, sentinel) = %q, want %q", got, "other")
 	}
-	if got := safeWebsocketModel("codex", "gpt-5-codex"); strings.Contains(got, sentinelSessionID) {
-		t.Fatalf("safeWebsocketModel() leaked sentinel: %q", got)
+	if got := helps.SafeWebsocketModel("codex", "gpt-5-codex"); strings.Contains(got, sentinelSessionID) {
+		t.Fatalf("helps.SafeWebsocketModel() leaked sentinel: %q", got)
 	}
 }
 
@@ -270,8 +271,8 @@ func TestSafeXAIGenerateModeReportsFixedLiterals(t *testing.T) {
 		{name: "absent", payload: `{}`, want: "default"},
 		{name: "true", payload: `{"generate":true}`, want: "true"},
 		{name: "false", payload: `{"generate":false}`, want: "false"},
-		{name: "string", payload: fmt.Sprintf(`{"generate":%q}`, sentinelAccessToken), want: unknownLogPlaceholder},
-		{name: "object", payload: fmt.Sprintf(`{"generate":{"token":%q}}`, sentinelAccessToken), want: unknownLogPlaceholder},
+		{name: "string", payload: fmt.Sprintf(`{"generate":%q}`, sentinelAccessToken), want: "other"},
+		{name: "object", payload: fmt.Sprintf(`{"generate":{"token":%q}}`, sentinelAccessToken), want: "other"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

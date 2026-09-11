@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -87,8 +87,8 @@ var safeWebsocketCloseStages = []string{
 	"stream_teardown",
 }
 
-// safeWebsocketCloseStage maps a close stage onto the allowlist.
-func safeWebsocketCloseStage(stage string) string {
+// SafeWebsocketCloseStage maps a close stage onto the allowlist.
+func SafeWebsocketCloseStage(stage string) string {
 	trimmed := strings.TrimSpace(stage)
 	if trimmed == "" {
 		return absentLogPlaceholder
@@ -111,8 +111,8 @@ func matchSafeLogLiteral(allowlist []string, value string) string {
 	return ""
 }
 
-// safeWebsocketLifecycleReason maps a lifecycle reason onto the allowlist.
-func safeWebsocketLifecycleReason(reason string) string {
+// SafeWebsocketLifecycleReason maps a lifecycle reason onto the allowlist.
+func SafeWebsocketLifecycleReason(reason string) string {
 	trimmed := strings.TrimSpace(reason)
 	if trimmed == "" {
 		return absentLogPlaceholder
@@ -123,8 +123,8 @@ func safeWebsocketLifecycleReason(reason string) string {
 	return unknownLogPlaceholder
 }
 
-// safeWebsocketEventType maps an upstream event type onto the allowlist.
-func safeWebsocketEventType(eventType string) string {
+// SafeWebsocketEventType maps an upstream event type onto the allowlist.
+func SafeWebsocketEventType(eventType string) string {
 	trimmed := strings.TrimSpace(eventType)
 	if trimmed == "" {
 		return absentLogPlaceholder
@@ -135,12 +135,12 @@ func safeWebsocketEventType(eventType string) string {
 	return unknownLogPlaceholder
 }
 
-// safeWebsocketModel resolves a requested model name to the matching model ID
+// SafeWebsocketModel resolves a requested model name to the matching model ID
 // held in the embedded model catalogue. The returned string is a
 // catalogue-owned literal rather than the client-supplied request value. An
 // unrecognised or dynamically discovered model is reported as
 // unknownLogPlaceholder.
-func safeWebsocketModel(provider string, model string) string {
+func SafeWebsocketModel(provider string, model string) string {
 	trimmed := strings.TrimSpace(model)
 	if trimmed == "" {
 		return absentLogPlaceholder
@@ -173,14 +173,14 @@ func safeWebsocketModel(provider string, model string) string {
 	return unknownLogPlaceholder
 }
 
-// safeWebsocketErrorDiagnostic converts an error into a diagnostic built only
+// SafeWebsocketErrorDiagnostic converts an error into a diagnostic built only
 // from structural properties of the error: sentinel identity, the net.Error
 // timeout flag, the numeric websocket close code and the numeric HTTP status.
 //
 // The error's own message is never read, so provider wording that embeds
 // tokens, account identifiers or URLs cannot reach the log. Numeric codes are
 // rendered from integers rather than from any part of the error string.
-func safeWebsocketErrorDiagnostic(err error) string {
+func SafeWebsocketErrorDiagnostic(err error) string {
 	if err == nil {
 		return absentLogPlaceholder
 	}

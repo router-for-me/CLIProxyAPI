@@ -110,8 +110,8 @@ func TestHandleDirectWebsocketForwardsUnauthorizedHomeHandshakeWithoutRefresh(t 
 			if tc.truncatedResponse {
 				select {
 				case timeline := <-timelineCapture:
-					if !strings.Contains(string(timeline), tc.upstreamBody) {
-						t.Fatalf("API_WEBSOCKET_TIMELINE = %q, want original upstream error", timeline)
+					if strings.Contains(string(timeline), tc.upstreamBody) || !strings.Contains(string(timeline), "Details: redacted") {
+						t.Fatalf("API_WEBSOCKET_TIMELINE = %q, want redacted upstream error", timeline)
 					}
 				case <-time.After(time.Second):
 					t.Fatal("timed out waiting for websocket request-log timeline")
