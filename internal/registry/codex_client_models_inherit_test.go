@@ -498,3 +498,69 @@ func applyResilientOverrideForTest(t *testing.T, base []byte, document map[strin
 	}
 	return bySlug, issues, nil
 }
+func TestCodexClientModelsInheritRemovedSourceAncestor(t *testing.T) {
+	base := testCodexClientCatalog(t,
+		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{
+			"model_messages": map[string]any{
+				"guardian_v2": map[string]any{"enabled": true},
+				"deep":        map[string]any{"a": map[string]any{"b": "kept"}},
+			},
+		}),
+		testCodexClientModel("gpt-5.6-sol", 2),
+	)
+
+	removed := []struct {
+		name  string
+		patch map[string]any
+		leaf  string
+	}{
+		{
+			name:  "null subtree",
+			patch: map[string]any{"model_messages": map[string]any{"guardian_v2": nil}},
+			leaf:  "model_messages.guardian_v2.enabled",
+		},
+		{
+			name:  "replaced ancestor",
+			patch: map[string]any{"model_messages": "replaced"},
+			leaf:  "model_messages.guardian_v2.enabled",
+		},
+		{
+			name:  "null grandparent",
+			patch: map[string]any{"model_messages": map[string]any{"deep": map[string]any{"a": nil}}},
+			leaf:  "model_messages.deep.a.b",
+		},
+	}
+	for _, tc := range removed {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := applyOverrideForTest(t, base, map[string]any{
+				"gpt-5.5": tc.patch,
+				"gpt-5.6-sol": map[string]any{
+					"$inherit": map[string]any{tc.leaf: "gpt-5.5"},
+				},
+			})
+			if err == nil {
+				t.Fatalf("inheriting %s from a source that removed it succeeded, want the source reported as missing", tc.leaf)
+			}
+			if !strings.Contains(err.Error(), "does not define") {
+				t.Fatalf("error = %v, want a missing source value error", err)
+			}
+		})
+	}
+
+	// A removal elsewhere in the source must not stop other fields from inheriting.
+	models, err := applyOverrideForTest(t, base, map[string]any{
+		"gpt-5.5": map[string]any{"model_messages": map[string]any{"guardian_v2": nil}},
+		"gpt-5.6-sol": map[string]any{
+			"$inherit": map[string]any{"model_messages.deep.a.b": "gpt-5.5"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply override: %v", err)
+	}
+	messages, _ := models["gpt-5.6-sol"]["model_messages"].(map[string]any)
+	deep, _ := messages["deep"].(map[string]any)
+	nested, _ := deep["a"].(map[string]any)
+	if nested["b"] != "kept" {
+		t.Fatalf("model_messages.deep.a.b = %v, want the untouched inherited value", nested["b"])
+	}
+}
