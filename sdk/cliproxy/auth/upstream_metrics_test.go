@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -153,5 +154,47 @@ func TestUpstreamMetricsHttpRequest(t *testing.T) {
 	success, failures := SnapshotUpstreamMetrics()
 	if success != 1 || failures["429"] != 1 || failures["502"] != 1 || len(failures) != 2 {
 		t.Fatalf("metrics = %d, %v; want 1 success, 429=1, 502=1", success, failures)
+	}
+}
+
+func TestRecordDirectHttpUpstreamResultWebsocketHandshake(t *testing.T) {
+	ResetUpstreamMetricsForTest()
+	t.Cleanup(ResetUpstreamMetricsForTest)
+
+	authOK := &Auth{ID: "realtime-auth", Provider: "codex"}
+
+	// Successful upgrade (101 Switching Protocols) must count as success.
+	RecordDirectHttpUpstreamResult(authOK, &http.Response{
+		StatusCode: http.StatusSwitchingProtocols,
+		Status:     http.StatusText(http.StatusSwitchingProtocols),
+		Body:       io.NopCloser(strings.NewReader("")),
+		Header:     make(http.Header),
+	}, nil)
+
+	// Rejected handshake: gorilla dial returns err + response; prefer HTTP status.
+	RecordDirectHttpUpstreamResult(authOK, &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Status:     http.StatusText(http.StatusUnauthorized),
+		Body:       io.NopCloser(strings.NewReader(`{"error":"unauthorized"}`)),
+		Header:     make(http.Header),
+	}, errors.New("websocket: bad handshake"))
+
+	RecordDirectHttpUpstreamResult(authOK, &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Status:     http.StatusText(http.StatusTooManyRequests),
+		Body:       io.NopCloser(strings.NewReader(`{"error":"rate_limited"}`)),
+		Header:     make(http.Header),
+	}, errors.New("websocket: bad handshake"))
+
+	// Transport-only failure with no handshake response.
+	RecordDirectHttpUpstreamResult(authOK, nil, &Error{HTTPStatus: http.StatusBadGateway, Message: "dial tcp: connection refused"})
+
+	// Empty auth ID must be ignored.
+	RecordDirectHttpUpstreamResult(&Auth{ID: "  ", Provider: "codex"}, &http.Response{StatusCode: http.StatusOK}, nil)
+	RecordDirectHttpUpstreamResult(nil, &http.Response{StatusCode: http.StatusOK}, nil)
+
+	success, failures := SnapshotUpstreamMetrics()
+	if success != 1 || failures["401"] != 1 || failures["429"] != 1 || failures["502"] != 1 || len(failures) != 3 {
+		t.Fatalf("metrics = %d, %v; want 1 success, 401=1, 429=1, 502=1", success, failures)
 	}
 }
