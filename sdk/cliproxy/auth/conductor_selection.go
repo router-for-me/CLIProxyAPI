@@ -1000,8 +1000,20 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if isRequestInvalidError(err) {
 		return 0, false
 	}
+	// Bounded cooldown wait (G5): the routing.cooldown_wait budget is a total
+	// ceiling across re-dispatches; it only ever tightens the pre-existing
+	// max-retry-interval ceiling, never loosens it.
+	if budget := cooldownWaitBudgetMS.Load(); budget > 0 {
+		budgetWait := time.Duration(budget) * time.Millisecond
+		if maxWait <= 0 || budgetWait < maxWait {
+			maxWait = budgetWait
+		}
+	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
 	if found {
+		if attemptCap := int(cooldownWaitMaxAttempts.Load()); attemptCap > 0 && attempt >= attemptCap {
+			return 0, false
+		}
 		if wait > maxWait {
 			return 0, false
 		}

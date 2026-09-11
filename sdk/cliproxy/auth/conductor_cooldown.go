@@ -797,6 +797,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						// ladder instead of the 30-minute payment-required
 						// cooldown. Only future selection/cooldown behavior
 						// changes; the client still sees the original error.
+						// Deliberate: a provider-supplied Retry-After on a
+						// reclassified 403 still wins over the 1s ladder base.
 						statusCode = http.StatusTooManyRequests
 					}
 					if isModelSupportResultError(result.Error) {
