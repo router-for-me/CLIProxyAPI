@@ -641,7 +641,15 @@ func (s *Server) handleGrokModels(c *gin.Context) {
 	} else {
 		models = grokModelsFromRegistryInfos(registry.GetGlobalRegistry().GetAvailableModelInfos())
 	}
-	c.JSON(http.StatusOK, grokbuild.BuildResponse(models))
+	s.writeModelListResponse(c, "openai", grokbuild.BuildResponse(models))
+}
+
+func (s *Server) writeModelListResponse(c *gin.Context, sourceFormat string, payload any) {
+	if s != nil && s.handlers != nil {
+		s.handlers.WriteModelListResponse(c, sourceFormat, payload)
+		return
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // handleHomeCodexClientModels builds the Codex client catalog from Home model IDs.
@@ -657,7 +665,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 		models = append(models, formatHomeCodexModel(entry))
 	}
 
-	c.JSON(http.StatusOK, codexmodels.BuildResponseForClient(models, nil, s.cfg.Codex.OptimizeMultiAgentV2, clientVersion))
+	s.writeModelListResponse(c, "openai", codexmodels.BuildResponseForClient(models, nil, s.cfg.Codex.OptimizeMultiAgentV2, clientVersion))
 }
 
 func formatHomeCodexModel(entry homeModelEntry) map[string]any {
@@ -729,7 +737,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 
 	if isClaude {
 		disableCloaking := s.cfg != nil && s.cfg.ClaudeCode.DisableCloakingModelList
-		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries), disableCloaking))
+		s.writeModelListResponse(c, "claude", claudemodels.BuildResponse(formatHomeClaudeModels(entries), disableCloaking))
 		return
 	}
 
@@ -747,7 +755,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		}
 		filtered = append(filtered, model)
 	}
-	c.JSON(http.StatusOK, gin.H{
+	s.writeModelListResponse(c, "openai", gin.H{
 		"object": "list",
 		"data":   filtered,
 	})
@@ -795,7 +803,7 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	s.writeModelListResponse(c, "gemini", gin.H{
 		"models": formatHomeGeminiModels(entries),
 	})
 }
