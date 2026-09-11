@@ -226,6 +226,67 @@ func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchToo
 	}
 }
 
+func TestCodexClientModelsResponse_CodexWebSearchOverride(t *testing.T) {
+	trueValue := true
+	falseValue := false
+	tests := []struct {
+		name     string
+		modelID  string
+		override *bool
+		want     bool
+	}{
+		{
+			name:     "explicit true enables synthesized model",
+			modelID:  "custom-search-model",
+			override: &trueValue,
+			want:     true,
+		},
+		{
+			name:     "explicit true overrides template provider restriction",
+			modelID:  "gpt-5.6-sol",
+			override: &trueValue,
+			want:     true,
+		},
+		{
+			name:     "explicit false disables template model",
+			modelID:  "gpt-5.6-sol",
+			override: &falseValue,
+			want:     false,
+		},
+		{
+			name:     "explicit false disables synthesized model",
+			modelID:  "custom-no-search-model",
+			override: &falseValue,
+			want:     false,
+		},
+		{
+			name:    "absent preserves synthesized model behavior",
+			modelID: "custom-default-model",
+			want:    false,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			model := map[string]any{"id": testCase.modelID}
+			if testCase.override != nil {
+				model["codex_web_search"] = *testCase.override
+			}
+
+			resp := BuildResponse([]map[string]any{model}, func(string) []string {
+				return []string{"openai-compatible-test"}
+			}, false)
+			models, ok := resp["models"].([]map[string]any)
+			if !ok || len(models) != 1 {
+				t.Fatalf("models = %#v, want one model", resp["models"])
+			}
+			if got := models[0]["supports_search_tool"]; got != testCase.want {
+				t.Fatalf("supports_search_tool = %#v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {
 	resp := BuildResponse([]map[string]any{{"id": "gpt-5.6-sol"}}, nil, false)
 	models, ok := resp["models"].([]map[string]any)

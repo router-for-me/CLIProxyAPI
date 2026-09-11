@@ -681,6 +681,10 @@ type modelCompatEntry interface {
 	GetIsCompat() bool
 }
 
+type modelCodexWebSearchEntry interface {
+	GetCodexWebSearch() *bool
+}
+
 func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, created int64, fallbackDisplayName string, userDefined bool) *ModelInfo {
 	name := strings.TrimSpace(model.GetName())
 	alias := strings.TrimSpace(model.GetAlias())
@@ -719,6 +723,12 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	}
 	if compatModel, okCompat := any(model).(modelCompatEntry); okCompat {
 		info.IsCompat = compatModel.GetIsCompat()
+	}
+	if searchModel, okSearch := any(model).(modelCodexWebSearchEntry); okSearch {
+		if override := searchModel.GetCodexWebSearch(); override != nil {
+			value := *override
+			info.CodexWebSearch = &value
+		}
 	}
 	return info
 }

@@ -421,6 +421,10 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 	if a == nil || a.ID == "" {
 		return
 	}
+	if a.Disabled || (s.weightedRoutingEnabled() && coreauth.AuthWeight(a) <= 0) {
+		GlobalModelRegistry().UnregisterClient(a.ID)
+		return
+	}
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
 	if providerKey == "" {
 		GlobalModelRegistry().UnregisterClient(a.ID)
@@ -444,6 +448,15 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		return
 	}
 	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
+}
+
+func (s *Service) weightedRoutingEnabled() bool {
+	if s == nil {
+		return false
+	}
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return normalizedRoutingRuntimeState(s.cfg).strategy == "weighted-round-robin"
 }
 
 func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {

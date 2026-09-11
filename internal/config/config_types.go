@@ -469,6 +469,11 @@ type ClaudeModel struct {
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+
+	// CodexWebSearch overrides the Codex client web search capability for this model.
+	// Nil preserves the existing catalog/provider behavior. Explicit false wins
+	// when multiple routable providers supply the model.
+	CodexWebSearch *bool `yaml:"codex-web-search,omitempty" json:"codex-web-search,omitempty"`
 }
 
 func (m ClaudeModel) GetName() string { return m.Name }
@@ -481,6 +486,8 @@ func (m ClaudeModel) GetForceMapping() bool    { return m.ForceMapping }
 func (m ClaudeModel) GetIsCompat() bool        { return m.IsCompat }
 
 func (m ClaudeModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+func (m ClaudeModel) GetCodexWebSearch() *bool { return m.CodexWebSearch }
 
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
@@ -567,6 +574,11 @@ type CodexModel struct {
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+
+	// CodexWebSearch overrides the Codex client web search capability for this model.
+	// Nil preserves the existing catalog/provider behavior. Explicit false wins
+	// when multiple routable providers supply the model.
+	CodexWebSearch *bool `yaml:"codex-web-search,omitempty" json:"codex-web-search,omitempty"`
 }
 
 func (m CodexModel) GetName() string { return m.Name }
@@ -579,6 +591,8 @@ func (m CodexModel) GetForceMapping() bool    { return m.ForceMapping }
 func (m CodexModel) GetIsCompat() bool        { return m.IsCompat }
 
 func (m CodexModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+func (m CodexModel) GetCodexWebSearch() *bool { return m.CodexWebSearch }
 
 // XAIKey uses the Codex API key structure for native xAI execution.
 type XAIKey = CodexKey
@@ -661,6 +675,11 @@ type GeminiModel struct {
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+
+	// CodexWebSearch overrides the Codex client web search capability for this model.
+	// Nil preserves the existing catalog/provider behavior. Explicit false wins
+	// when multiple routable providers supply the model.
+	CodexWebSearch *bool `yaml:"codex-web-search,omitempty" json:"codex-web-search,omitempty"`
 }
 
 func (m GeminiModel) GetName() string { return m.Name }
@@ -673,6 +692,8 @@ func (m GeminiModel) GetForceMapping() bool    { return m.ForceMapping }
 func (m GeminiModel) GetIsCompat() bool        { return m.IsCompat }
 
 func (m GeminiModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+func (m GeminiModel) GetCodexWebSearch() *bool { return m.CodexWebSearch }
 
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
 // with external providers, allowing model aliases to be routed through OpenAI API format.
@@ -765,6 +786,11 @@ type OpenAICompatibilityModel struct {
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+
+	// CodexWebSearch overrides the Codex client web search capability for this model.
+	// Nil preserves the existing catalog/provider behavior. Explicit false wins
+	// when multiple routable providers supply the model.
+	CodexWebSearch *bool `yaml:"codex-web-search,omitempty" json:"codex-web-search,omitempty"`
 }
 
 func (m OpenAICompatibilityModel) GetName() string { return m.Name }
@@ -777,3 +803,5 @@ func (m OpenAICompatibilityModel) GetForceMapping() bool    { return m.ForceMapp
 func (m OpenAICompatibilityModel) GetIsCompat() bool        { return m.IsCompat }
 
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport { return m.Thinking }
+
+func (m OpenAICompatibilityModel) GetCodexWebSearch() *bool { return m.CodexWebSearch }

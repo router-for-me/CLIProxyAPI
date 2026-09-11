@@ -366,6 +366,7 @@ nonstream-keepalive-interval: 0
 #         display-name: "Gemini Flash" # optional catalog display name
 #         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         is-compat: false             # optional: preserve thinking blocks with empty signatures for compatible upstreams
+#         codex-web-search: true       # optional: override Codex client web search advertisement; explicit false wins across providers
 #         thinking:                    # optional: exact thinking capability for this configured model
 #           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
@@ -402,6 +403,7 @@ nonstream-keepalive-interval: 0
 #         alias: "native-gemini-flash" # client alias mapped to the upstream model
 #         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         is-compat: false             # optional: preserve thinking blocks with empty signatures for compatible upstreams
+#         codex-web-search: true       # optional: override Codex client web search advertisement; explicit false wins across providers
 #         thinking:                    # optional: exact thinking capability for this configured model
 #           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
@@ -434,6 +436,7 @@ nonstream-keepalive-interval: 0
 #         display-name: "Codex Latest" # optional catalog display name
 #         max-context-length: 1048576 # optional: override Codex client context window metadata
 #         force-mapping: true    # optional: rewrite response model fields back to the alias
+#         codex-web-search: true # optional: override Codex client web search advertisement; explicit false wins across providers
 #         # When true and codex.optimize-multi-agent-v2 is also true, convert Codex
 #         # MultiAgentV2 agent_message items into portable Responses message/user input
 #         # for third-party Responses-compatible endpoints that reject agent_message.
@@ -511,6 +514,7 @@ nonstream-keepalive-interval: 0
 #         max-context-length: 1048576         # optional: override Codex client context window metadata
 #         force-mapping: true                 # optional: rewrite response model fields back to the alias
 #         is-compat: false                    # optional: preserve thinking blocks with empty signatures for compatible upstreams
+#         codex-web-search: true              # optional: override Codex client web search advertisement; explicit false wins across providers
 #         thinking:                           # optional: exact thinking capability for this configured model
 #           levels: ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
 #     excluded-models:
@@ -667,6 +671,7 @@ nonstream-keepalive-interval: 0
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
+#         codex-web-search: true          # optional: override Codex client web search advertisement; explicit false wins across providers
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
@@ -704,6 +709,7 @@ nonstream-keepalive-interval: 0
 #           levels: ["high", "medium", "low", "none", "auto"]
 #       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
+#         codex-web-search: true # optional: override Codex client web search advertisement; explicit false wins across providers
 #     excluded-models:                            # optional: models to exclude from listing
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
