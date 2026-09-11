@@ -1046,6 +1046,9 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 	if result.AuthID == "" {
 		return
 	}
+	// Availability-neutral paths (e.g. Responses Compact, Claude count_tokens 404)
+	// bypass MarkResult but are still real upstream attempts.
+	recordUpstreamResult(result)
 
 	var authSnapshot *Auth
 	m.mu.Lock()
