@@ -95,6 +95,10 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td width="180"><a href="https://aiberm.com?ref=cpa"><img src="./assets/aiberm.png" alt="Aiberm" width="150"></a></td>
 <td>本プロジェクトは Aiberm のスポンサー支援を受けています。Aiberm は、開発者向けに統合された割引 AI API を提供しています。1つのエンドポイントから Claude、GPT、Grok、DeepSeek、GLM、Kimi、MiniMax を利用でき、Claude は85〜90%割引、GPT は90%割引、Grok は80%割引です。GPT Image 2 と Nano Banana による画像生成にも対応しています。<a href="https://aiberm.com?ref=cpa">Aiberm にアクセス</a>。</td>
 </tr>
+<tr>
+<td width="180"><a href="https://www.rapidproxy.io/?code=KHM9B6E6M"><img src="./assets/rapidproxy.png" alt="RapidProxy" width="150"></a></td>
+<td><a href="https://www.rapidproxy.io/?code=KHM9B6E6M">RapidProxy</a> は、自動化や複数アカウント運用向けに設計された高性能プロキシプロバイダーで、クリーンな住宅プロキシとネイティブ静的 ISP IP を提供しています。世界中に9,000万以上の住宅 IP を保有し、スマートローテーション、安定したセッション、高い同時接続性能に対応しています。Webスクレイピング、ブラウザ自動化、SNSアカウント管理、EC運用、アカウントの一括登録などに最適です。住宅プロキシはわずか &#36;0.55/GB から利用でき、トラフィックに有効期限はありません。コード RAPID10 の使用で10%割引になり、<a href="https://www.rapidproxy.io/?code=KHM9B6E6M">今すぐ無料トライアルを開始できます。</a></td>
+</tr>
 </tbody>
 </table>
 
