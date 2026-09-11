@@ -46,6 +46,7 @@ const (
 	claudeServerSideFallbackBeta     = "server-side-fallback-2026-06-01"
 	claudeFallbackCreditBeta         = "fallback-credit-2026-06-01"
 	claudeStructuredOutputsBeta      = "structured-outputs-2025-12-15"
+	claudeThinkingBindingBeta        = "thinking-binding-controls-2026-08-01"
 	claudeThinkingDisplayUpdatesBeta = "thinking-display-updates-2026-08-18"
 	claudeExtendedCacheTTLBeta       = "extended-cache-ttl-2025-04-11"
 	claudeCacheDiagnosisBeta         = "cache-diagnosis-2026-04-07"
@@ -75,6 +76,7 @@ var claudeCodeTrailingBetas = []string{
 	claudeServerSideFallbackBeta,
 	claudeFallbackCreditBeta,
 	claudeStructuredOutputsBeta,
+	claudeThinkingBindingBeta,
 }
 
 // claudeCodeCLIBetas assembles the Anthropic-Beta baseline the way Claude Code
