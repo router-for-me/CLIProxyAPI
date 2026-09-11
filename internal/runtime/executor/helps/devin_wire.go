@@ -271,9 +271,6 @@ func BuildDevinGetChatMessageRequest(
 		pBytes = protowire.AppendVarint(pBytes, uint64(source))
 
 		content := p.Content
-		if matcher != nil {
-			content = matcher.ObfuscateText(content)
-		}
 		pBytes = protowire.AppendTag(pBytes, 3, protowire.BytesType)
 		pBytes = protowire.AppendString(pBytes, content)
 
@@ -288,12 +285,8 @@ func BuildDevinGetChatMessageRequest(
 				tcBytes = protowire.AppendString(tcBytes, tc.Name)
 			}
 			if tc.Arguments != "" {
-				args := tc.Arguments
-				if matcher != nil {
-					args = matcher.ObfuscateText(args)
-				}
 				tcBytes = protowire.AppendTag(tcBytes, 3, protowire.BytesType)
-				tcBytes = protowire.AppendString(tcBytes, args)
+				tcBytes = protowire.AppendString(tcBytes, tc.Arguments)
 			}
 			pBytes = protowire.AppendTag(pBytes, 6, protowire.BytesType)
 			pBytes = protowire.AppendBytes(pBytes, tcBytes)
@@ -325,12 +318,8 @@ func BuildDevinGetChatMessageRequest(
 		}
 
 		if p.Thinking != "" {
-			thinking := p.Thinking
-			if matcher != nil {
-				thinking = matcher.ObfuscateText(thinking)
-			}
 			pBytes = protowire.AppendTag(pBytes, 11, protowire.BytesType)
-			pBytes = protowire.AppendString(pBytes, thinking)
+			pBytes = protowire.AppendString(pBytes, p.Thinking)
 		}
 
 		if len(p.Signature) > 0 {
@@ -388,9 +377,6 @@ func BuildDevinGetChatMessageRequest(
 		desc := tool.Description
 		if strings.Contains(desc, "Takes a task_id parameter identifying the task") {
 			desc = strings.ReplaceAll(desc, "Takes a task_id parameter identifying the task", "Takes a taskId parameter identifying the task")
-		}
-		if matcher != nil {
-			desc = matcher.ObfuscateText(desc)
 		}
 		if desc != "" {
 			tBytes = protowire.AppendTag(tBytes, 2, protowire.BytesType)

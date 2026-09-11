@@ -108,13 +108,13 @@ func TestBuildDevinGetChatMessageRequest(t *testing.T) {
 	}
 }
 
-func TestBuildDevinGetChatMessageRequest_ObfuscatesToolCallArguments(t *testing.T) {
+func TestBuildDevinGetChatMessageRequest_SensitiveWordsOnlyInSystemPrompt(t *testing.T) {
 	matcher := BuildSensitiveWordMatcher([]string{"SECRET_TOKEN"})
 	prompts := []DevinPrompt{
 		{
 			MessageID: "msg-1",
 			Source:    2,
-			Content:   "calling tool",
+			Content:   "calling tool with SECRET_TOKEN in content",
 			ToolCalls: []DevinToolCall{
 				{
 					ID:        "call-1",
@@ -124,9 +124,18 @@ func TestBuildDevinGetChatMessageRequest_ObfuscatesToolCallArguments(t *testing.
 			},
 		},
 	}
-	req := BuildDevinGetChatMessageRequest("tok", "seed", "swe-2-high", "", prompts, nil, nil, 100, "s", "c", matcher)
-	if bytes.Contains(req, []byte("SECRET_TOKEN")) {
-		t.Fatalf("expected SECRET_TOKEN in tool call arguments to be obfuscated")
+	// Sensitive word in system prompt MUST be obfuscated
+	reqWithSys := BuildDevinGetChatMessageRequest("tok", "seed", "swe-2-high", "System prompt containing SECRET_TOKEN", prompts, nil, nil, 100, "s", "c", matcher)
+	if bytes.Contains(reqWithSys, []byte("System prompt containing SECRET_TOKEN")) {
+		t.Fatalf("expected SECRET_TOKEN in system prompt to be obfuscated")
+	}
+
+	// Tool call arguments and history prompt content MUST NOT be obfuscated
+	if !bytes.Contains(reqWithSys, []byte(`{"key":"SECRET_TOKEN"}`)) {
+		t.Fatalf("tool call arguments should preserve original raw text without obfuscation")
+	}
+	if !bytes.Contains(reqWithSys, []byte("calling tool with SECRET_TOKEN in content")) {
+		t.Fatalf("prompt content should preserve original raw text without obfuscation")
 	}
 }
 
