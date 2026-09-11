@@ -241,7 +241,7 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 
 	chatModelUID := helps.ResolveDevinChatModelUID(req.Model, thinkingLevel, budgetTokens)
 
-	sensitiveWords := e.getSensitiveWords(auth)
+	sensitiveWords := e.getSensitiveWords()
 	var matcher *helps.SensitiveWordMatcher
 	if len(sensitiveWords) > 0 {
 		matcher = helps.BuildSensitiveWordMatcher(sensitiveWords)
@@ -1139,66 +1139,11 @@ func supplementSignaturesFromOriginal(original []byte, prompts []helps.DevinProm
 	}
 }
 
-func (e *DevinExecutor) getSensitiveWords(auth *cliproxyauth.Auth) []string {
-	var words []string
+func (e *DevinExecutor) getSensitiveWords() []string {
 	if e != nil && e.cfg != nil && len(e.cfg.Devin.SensitiveWords) > 0 {
-		words = append(words, e.cfg.Devin.SensitiveWords...)
+		return e.cfg.Devin.SensitiveWords
 	}
-	if auth == nil {
-		return words
-	}
-
-	addWord := func(w string) {
-		if trimmed := strings.TrimSpace(w); trimmed != "" {
-			words = append(words, trimmed)
-		}
-	}
-
-	parseWordsVal := func(val any) {
-		if val == nil {
-			return
-		}
-		switch v := val.(type) {
-		case string:
-			for _, w := range strings.Split(v, ",") {
-				addWord(w)
-			}
-		case []string:
-			for _, w := range v {
-				addWord(w)
-			}
-		case []any:
-			for _, item := range v {
-				if s, ok := item.(string); ok {
-					addWord(s)
-				}
-			}
-		}
-	}
-
-	if auth.Attributes != nil {
-		attrStr := firstNonEmpty(auth.Attributes["sensitive_words"], auth.Attributes["sensitive-words"], auth.Attributes["cloak_sensitive_words"])
-		if attrStr != "" {
-			parseWordsVal(attrStr)
-		}
-	}
-
-	if auth.Metadata != nil {
-		for _, k := range []string{"sensitive_words", "sensitive-words", "cloak_sensitive_words"} {
-			if v, ok := auth.Metadata[k]; ok {
-				parseWordsVal(v)
-			}
-		}
-		if attrs, ok := auth.Metadata["attributes"].(map[string]any); ok {
-			for _, k := range []string{"sensitive_words", "sensitive-words", "cloak_sensitive_words"} {
-				if v, ok := attrs[k]; ok {
-					parseWordsVal(v)
-				}
-			}
-		}
-	}
-
-	return words
+	return nil
 }
 
 func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {

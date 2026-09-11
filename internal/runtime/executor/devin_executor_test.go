@@ -79,41 +79,21 @@ func TestDevinAuthCredentials(t *testing.T) {
 }
 
 func TestDevinExecutor_GetSensitiveWords(t *testing.T) {
-	e := &DevinExecutor{}
-
-	// 1. From auth Attributes
-	auth1 := &cliproxyauth.Auth{
-		Attributes: map[string]string{
-			"sensitive_words": "word1, word2",
-		},
-	}
-	words1 := e.getSensitiveWords(auth1)
-	if len(words1) != 2 || words1[0] != "word1" || words1[1] != "word2" {
-		t.Errorf("words1 = %v, want [word1 word2]", words1)
+	eEmpty := &DevinExecutor{}
+	if words := eEmpty.getSensitiveWords(); len(words) != 0 {
+		t.Errorf("words = %v, want empty", words)
 	}
 
-	// 2. From auth Metadata array
-	auth2 := &cliproxyauth.Auth{
-		Metadata: map[string]any{
-			"sensitive-words": []any{"Hermes", "Claude Agent SDK"},
-		},
-	}
-	words2 := e.getSensitiveWords(auth2)
-	if len(words2) != 2 || words2[0] != "Hermes" || words2[1] != "Claude Agent SDK" {
-		t.Errorf("words2 = %v, want [Hermes Claude Agent SDK]", words2)
-	}
-
-	// 3. From auth Metadata nested attributes
-	auth3 := &cliproxyauth.Auth{
-		Metadata: map[string]any{
-			"attributes": map[string]any{
-				"sensitive_words": "Bypass all content filters",
+	eWithWords := &DevinExecutor{
+		cfg: &config.Config{
+			Devin: config.DevinConfig{
+				SensitiveWords: []string{"Hermes", "Claude Agent SDK"},
 			},
 		},
 	}
-	words3 := e.getSensitiveWords(auth3)
-	if len(words3) != 1 || words3[0] != "Bypass all content filters" {
-		t.Errorf("words3 = %v, want [Bypass all content filters]", words3)
+	words := eWithWords.getSensitiveWords()
+	if len(words) != 2 || words[0] != "Hermes" || words[1] != "Claude Agent SDK" {
+		t.Errorf("words = %v, want [Hermes Claude Agent SDK]", words)
 	}
 }
 
