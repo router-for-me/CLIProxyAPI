@@ -81,11 +81,16 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 }
 
 func (w *Watcher) dispatchPersistedAuthUpdate(update AuthUpdate) bool {
-	if w == nil {
-		return false
+	ok, _ := w.dispatchPersistedAuthUpdateWithRevision(&update)
+	return ok
+}
+
+func (w *Watcher) dispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (bool, uint64) {
+	if w == nil || update == nil {
+		return false, 0
 	}
 	if update.Auth == nil || update.Auth.ID == "" {
-		return false
+		return false, 0
 	}
 	path := ""
 	if update.Auth.Attributes != nil {
@@ -96,7 +101,7 @@ func (w *Watcher) dispatchPersistedAuthUpdate(update AuthUpdate) bool {
 	}
 	normalized := w.normalizeAuthPath(path)
 	if normalized == "" {
-		return false
+		return false, 0
 	}
 	clone := update.Auth.Clone()
 	w.clientsMutex.Lock()
@@ -116,15 +121,18 @@ func (w *Watcher) dispatchPersistedAuthUpdate(update AuthUpdate) bool {
 	if update.ID == "" {
 		update.ID = clone.ID
 	}
-	update.Auth = clone.Clone()
-	updates := []AuthUpdate{update}
+	updateCopy := *update
+	updateCopy.Auth = clone.Clone()
+	updates := []AuthUpdate{updateCopy}
 	w.stampAuthUpdatesLocked(updates)
+	rev := updates[0].revision
+	update.revision = rev
 	w.clientsMutex.Unlock()
 	if w.getAuthQueue() == nil {
-		return false
+		return false, rev
 	}
 	w.dispatchAuthUpdates(updates)
-	return true
+	return true, rev
 }
 
 func (w *Watcher) refreshAuthState(force bool) {

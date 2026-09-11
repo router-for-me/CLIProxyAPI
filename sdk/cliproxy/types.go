@@ -101,13 +101,14 @@ type WatcherWrapper struct {
 	start func(ctx context.Context) error
 	stop  func() error
 
-	setConfig             func(cfg *config.Config)
-	snapshotAuths         func() []*coreauth.Auth
-	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
-	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
-	dispatchPersistedAuth func(update watcher.AuthUpdate) bool
-	setPluginAuthParser   func(parser PluginAuthParser)
-	reloadConfigIfChanged func()
+	setConfig                    func(cfg *config.Config)
+	snapshotAuths                func() []*coreauth.Auth
+	setUpdateQueue               func(queue chan<- watcher.AuthUpdate)
+	dispatchRuntimeUpdate        func(update watcher.AuthUpdate) bool
+	dispatchPersistedAuth        func(update watcher.AuthUpdate) bool
+	dispatchPersistedAuthWithRev func(update *watcher.AuthUpdate) (bool, uint64)
+	setPluginAuthParser          func(parser PluginAuthParser)
+	reloadConfigIfChanged        func()
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -163,10 +164,33 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 
 // DispatchPersistedAuthUpdate forwards already-persisted file auth updates.
 func (w *WatcherWrapper) DispatchPersistedAuthUpdate(update watcher.AuthUpdate) bool {
-	if w == nil || w.dispatchPersistedAuth == nil {
+	if w == nil {
 		return false
 	}
-	return w.dispatchPersistedAuth(update)
+	if w.dispatchPersistedAuthWithRev != nil {
+		ok, _ := w.dispatchPersistedAuthWithRev(&update)
+		return ok
+	}
+	if w.dispatchPersistedAuth != nil {
+		return w.dispatchPersistedAuth(update)
+	}
+	return false
+}
+
+// DispatchPersistedAuthUpdateWithRevision forwards already-persisted file auth updates
+// and returns whether it was enqueued along with its assigned watcher revision.
+func (w *WatcherWrapper) DispatchPersistedAuthUpdateWithRevision(update *watcher.AuthUpdate) (bool, uint64) {
+	if w == nil {
+		return false, 0
+	}
+	if w.dispatchPersistedAuthWithRev != nil {
+		return w.dispatchPersistedAuthWithRev(update)
+	}
+	if w.dispatchPersistedAuth != nil && update != nil {
+		ok := w.dispatchPersistedAuth(*update)
+		return ok, update.Revision()
+	}
+	return false, 0
 }
 
 // SetClients updates the watcher file-backed clients registry.

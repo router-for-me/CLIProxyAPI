@@ -596,6 +596,61 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamSkipsCompletedTextAft
 	}
 }
 
+func TestConvertOpenAIResponsesResponseToInteractionsIncompleteTerminal(t *testing.T) {
+	t.Run("NonStream", func(t *testing.T) {
+		raw := []byte(`{"id":"resp_1","status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
+		out := ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
+		if got := gjson.GetBytes(out, "status").String(); got != "incomplete" {
+			t.Fatalf("status = %q, want incomplete. Output: %s", got, string(out))
+		}
+		if gotText := gjson.GetBytes(out, "steps.0.content.0.text").String(); gotText != "partial" {
+			t.Fatalf("step text = %q, want partial. Output: %s", gotText, string(out))
+		}
+		if gotTokens := gjson.GetBytes(out, "usage.total_tokens").Int(); gotTokens != 3 {
+			t.Fatalf("total_tokens = %d, want 3. Output: %s", gotTokens, string(out))
+		}
+	})
+
+	t.Run("Stream", func(t *testing.T) {
+		var param any
+		raw := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","output":[{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"partial"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+		out := ConvertOpenAIResponsesResponseToInteractions(context.Background(), "gpt-test", nil, nil, raw, &param)
+		if got := countInteractionsEventType(out, "interaction.completed"); got != 1 {
+			t.Fatalf("interaction.completed count = %d, want 1", got)
+		}
+		if got := countInteractionsEventType(out, "done"); got != 1 {
+			t.Fatalf("done count = %d, want 1", got)
+		}
+		deltaPayload := findInteractionsStepDeltaPayload(out)
+		if gotText := gjson.GetBytes(deltaPayload, "delta.text").String(); gotText != "partial" {
+			t.Fatalf("delta.text = %q, want partial. Payload: %s", gotText, string(deltaPayload))
+		}
+		completedPayload := findInteractionsEventPayload(out, "interaction.completed")
+		if got := gjson.GetBytes(completedPayload, "interaction.status").String(); got != "incomplete" {
+			t.Fatalf("interaction.status = %q, want incomplete. Payload: %s", got, string(completedPayload))
+		}
+		if gotTokens := gjson.GetBytes(completedPayload, "interaction.usage.total_tokens").Int(); gotTokens != 3 {
+			t.Fatalf("total_tokens = %d, want 3. Payload: %s", gotTokens, string(completedPayload))
+		}
+
+		doneOut := ConvertOpenAIResponsesResponseToInteractions(context.Background(), "gpt-test", nil, nil, []byte(`data: [DONE]`), &param)
+		if got := countInteractionsEventType(doneOut, "interaction.completed"); got != 0 {
+			t.Fatalf("subsequent done interaction.completed count = %d, want 0", got)
+		}
+		if got := countInteractionsEventType(doneOut, "done"); got != 0 {
+			t.Fatalf("subsequent done event count = %d, want 0", got)
+		}
+	})
+
+	t.Run("CompletedControl", func(t *testing.T) {
+		raw := []byte(`{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
+		out := ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
+		if got := gjson.GetBytes(out, "status").String(); got != "completed" {
+			t.Fatalf("status = %q, want completed. Output: %s", got, string(out))
+		}
+	})
+}
+
 func findInteractionsStepDeltaPayload(events [][]byte) []byte {
 	return findInteractionsEventPayload(events, "step.delta")
 }

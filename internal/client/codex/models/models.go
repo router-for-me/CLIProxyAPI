@@ -73,12 +73,22 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			continue
 		}
 
-		if template, ok := templates[id]; ok {
+		metadataID := codexClientMetadataModelID(id)
+
+		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
+			entry["slug"] = id
+			info := registry.LookupModelInfo(id)
+			applyCodexClientModelCapabilities(entry, id, metadataID, info, providersForModel, clientVersion)
 			applyCodexClientDisplayName(entry, model)
+			applyCodexClientDescription(entry, model)
+			applyCodexClientBaseInstructions(entry, model)
 			applyCodexClientMaxContextLengthOverride(entry, model)
 			applyCodexClientMaxTokens(entry, model)
-			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
+			if thinkingSupport := codexClientThinkingSupport(model); thinkingSupport != nil {
+				applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
+			}
+			applyCodexClientProviderCapabilities(entry, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 			applyCodexClientVisibilityOverride(entry, id)
 			if optimizeMultiAgentV2 {
@@ -91,7 +101,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2, clientVersion)
 		applyCodexClientMaxTokens(entry, model)
-		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
+		applyCodexClientProviderCapabilities(entry, id, false, providersForModel)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 		applyCodexClientVisibilityOverride(entry, id)
 		result = append(result, entry)
@@ -132,7 +142,7 @@ func applyCodexClientNonTemplatePriorities(result []map[string]any, templates ma
 	pending := make([]nonTemplateEntry, 0)
 	for index, entry := range result {
 		slug := stringModelValue(entry, "slug")
-		if _, ok := templates[slug]; ok {
+		if _, ok := templates[codexClientMetadataModelID(slug)]; ok {
 			continue
 		}
 		displayName := stringModelValue(entry, "display_name")
@@ -198,10 +208,187 @@ func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[str
 	return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
 }
 
+func codexClientMetadataModelID(id string) string {
+	id = strings.TrimSpace(id)
+	if info := registry.LookupModelInfo(id); info != nil {
+		if metadataID := strings.TrimSpace(info.MetadataModelID); metadataID != "" {
+			return metadataID
+		}
+	}
+	if idx := strings.Index(id, "/"); idx != -1 {
+		base := strings.TrimSpace(id[idx+1:])
+		if info := registry.LookupModelInfo(base); info != nil && strings.TrimSpace(info.MetadataModelID) != "" {
+			return strings.TrimSpace(info.MetadataModelID)
+		}
+		return base
+	}
+	return id
+}
+
 func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	if displayName := stringModelValue(model, "display_name"); displayName != "" {
 		entry["display_name"] = displayName
 	}
+}
+
+func applyCodexClientDescription(entry map[string]any, model map[string]any) {
+	if description := stringModelValue(model, "description"); description != "" {
+		entry["description"] = description
+	}
+}
+
+func applyCodexClientBaseInstructions(entry map[string]any, model map[string]any) {
+	if baseInstructions := stringModelValue(model, "base_instructions"); baseInstructions != "" {
+		entry["base_instructions"] = baseInstructions
+	}
+}
+
+func applyCodexClientModelCapabilities(entry map[string]any, id, metadataID string, info *registry.ModelInfo, providersForModel ProvidersForModelFunc, clientVersion string) {
+	if info != nil && info.Type == registry.OpenAIImageModelType {
+		entry["visibility"] = "hide"
+		delete(entry, "input_modalities")
+		delete(entry, "supports_image_detail_original")
+		return
+	}
+
+	var providers []string
+	if providersForModel != nil {
+		providers = providersForModel(id)
+		if len(providers) == 0 && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			base := strings.TrimSpace(id[idx+1:])
+			providers = providersForModel(base)
+		}
+	}
+
+	isAlias := metadataID != "" && !strings.EqualFold(id, metadataID)
+
+	var constrainedModalities []string
+	hasModalitiesConstraint := false
+	for _, p := range providers {
+		pInfo := registry.LookupModelInfo(id, p)
+		if pInfo == nil && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			pInfo = registry.LookupModelInfo(strings.TrimSpace(id[idx+1:]), p)
+		}
+		if pInfo == nil {
+			continue
+		}
+		isCodex := strings.EqualFold(strings.TrimSpace(p), "codex")
+		if (!isCodex && isAlias) || pInfo.ExplicitInputModalities {
+			mods := pInfo.SupportedInputModalities
+			if mods == nil {
+				mods = []string{}
+			}
+			if !hasModalitiesConstraint {
+				constrainedModalities = append([]string(nil), mods...)
+				hasModalitiesConstraint = true
+			} else {
+				constrainedModalities = intersectStringSlices(constrainedModalities, mods)
+			}
+		}
+	}
+	if !hasModalitiesConstraint && info != nil && info.ExplicitInputModalities {
+		mods := info.SupportedInputModalities
+		if mods == nil {
+			mods = []string{}
+		}
+		constrainedModalities = append([]string(nil), mods...)
+		hasModalitiesConstraint = true
+	}
+	if hasModalitiesConstraint {
+		codexModalities := filterCodexInputModalities(constrainedModalities)
+		entry["input_modalities"] = codexModalities
+		if hasImageModality(codexModalities) {
+			entry["supports_image_detail_original"] = true
+		} else {
+			delete(entry, "supports_image_detail_original")
+		}
+	}
+
+	var constrainedThinking *registry.ThinkingSupport
+	hasThinkingConstraint := false
+	for _, p := range providers {
+		pInfo := registry.LookupModelInfo(id, p)
+		if pInfo == nil && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			pInfo = registry.LookupModelInfo(strings.TrimSpace(id[idx+1:]), p)
+		}
+		if pInfo == nil {
+			continue
+		}
+		isCodex := strings.EqualFold(strings.TrimSpace(p), "codex")
+		if (!isCodex && isAlias) || pInfo.ExplicitThinking {
+			hasThinkingConstraint = true
+			pThinking := pInfo.Thinking
+			if pThinking == nil {
+				pThinking = &registry.ThinkingSupport{Levels: []string{}}
+			}
+			if constrainedThinking == nil {
+				constrainedThinking = pThinking
+			} else {
+				constrainedThinking = intersectThinkingSupport(constrainedThinking, pThinking)
+			}
+		}
+	}
+	if !hasThinkingConstraint && info != nil && info.ExplicitThinking {
+		pThinking := info.Thinking
+		if pThinking == nil {
+			pThinking = &registry.ThinkingSupport{Levels: []string{}}
+		}
+		constrainedThinking = pThinking
+		hasThinkingConstraint = true
+	}
+	if hasThinkingConstraint && constrainedThinking != nil {
+		applyCodexClientThinkingMetadata(entry, constrainedThinking, clientVersion)
+	}
+}
+
+func intersectThinkingSupport(a, b *registry.ThinkingSupport) *registry.ThinkingSupport {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	levels := intersectStringSlices(a.Levels, b.Levels)
+	min := a.Min
+	if b.Min > min {
+		min = b.Min
+	}
+	max := a.Max
+	if b.Max > 0 && (max == 0 || b.Max < max) {
+		max = b.Max
+	}
+	return &registry.ThinkingSupport{
+		Min:            min,
+		Max:            max,
+		ZeroAllowed:    a.ZeroAllowed && b.ZeroAllowed,
+		DynamicAllowed: a.DynamicAllowed && b.DynamicAllowed,
+		Levels:         levels,
+	}
+}
+
+func intersectStringSlices(a, b []string) []string {
+	if len(a) == 0 || len(b) == 0 {
+		return []string{}
+	}
+	bMap := make(map[string]struct{}, len(b))
+	for _, item := range b {
+		bMap[strings.ToLower(strings.TrimSpace(item))] = struct{}{}
+	}
+	out := make([]string, 0, len(a))
+	seen := make(map[string]struct{}, len(a))
+	for _, item := range a {
+		key := strings.ToLower(strings.TrimSpace(item))
+		if _, inB := bMap[key]; inB {
+			if _, inSeen := seen[key]; !inSeen {
+				seen[key] = struct{}{}
+				out = append(out, item)
+			}
+		}
+	}
+	return out
 }
 
 func applyCodexClientMaxContextLengthOverride(entry map[string]any, model map[string]any) {
@@ -215,6 +402,44 @@ func applyCodexClientMaxTokens(entry map[string]any, model map[string]any) {
 	if maxCompletionTokens := intModelValue(model, "max_completion_tokens"); maxCompletionTokens > 0 {
 		entry["max_tokens"] = maxCompletionTokens
 	}
+}
+
+func applyCodexClientProviderCapabilities(entry map[string]any, id string, isTemplate bool, providersForModel ProvidersForModelFunc) {
+	if !isTemplate {
+		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
+		return
+	}
+	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
+		entry["supports_search_tool"] = false
+		entry["prefer_websockets"] = false
+		delete(entry, "apply_patch_tool_type")
+		entry["service_tiers"] = []any{}
+		delete(entry, "upgrade")
+		delete(entry, "availability_nux")
+		return
+	}
+	applyCodexClientSearchToolSupport(entry, id, isTemplate, providersForModel)
+}
+
+func isPureCodexProvider(id string, providersForModel ProvidersForModelFunc) bool {
+	if providersForModel == nil {
+		return true
+	}
+	providers := providersForModel(id)
+	if len(providers) == 0 && strings.Contains(id, "/") {
+		idx := strings.Index(id, "/")
+		base := strings.TrimSpace(id[idx+1:])
+		providers = providersForModel(base)
+	}
+	if len(providers) == 0 {
+		return false
+	}
+	for _, provider := range providers {
+		if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+			return false
+		}
+	}
+	return true
 }
 
 func applyCodexClientSearchToolSupport(entry map[string]any, id string, templateModel bool, providersForModel ProvidersForModelFunc) {
@@ -233,6 +458,11 @@ func applyCodexClientSearchToolSupport(entry map[string]any, id string, template
 	}
 
 	providers := providersForModel(id)
+	if len(providers) == 0 && strings.Contains(id, "/") {
+		idx := strings.Index(id, "/")
+		base := strings.TrimSpace(id[idx+1:])
+		providers = providersForModel(base)
+	}
 	if len(providers) == 0 {
 		entry["supports_search_tool"] = false
 		return
@@ -335,7 +565,11 @@ func codexClientThinkingSupport(model map[string]any) *registry.ThinkingSupport 
 }
 
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
-	switch strings.TrimSpace(id) {
+	target := strings.TrimSpace(id)
+	if idx := strings.Index(target, "/"); idx != -1 {
+		target = strings.TrimSpace(target[idx+1:])
+	}
+	switch target {
 	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview":
 		entry["visibility"] = "hide"
 	}
@@ -345,10 +579,24 @@ func applyCodexClientInputModalitiesMetadata(entry map[string]any, modalities []
 	if len(modalities) == 0 {
 		return
 	}
-	// Codex client only accepts text/image input modalities.
+	codexModalities := filterCodexInputModalities(modalities)
+	if len(codexModalities) == 0 {
+		return
+	}
+	entry["input_modalities"] = codexModalities
+	if hasImageModality(codexModalities) {
+		entry["supports_image_detail_original"] = true
+	} else {
+		delete(entry, "supports_image_detail_original")
+	}
+}
+
+func filterCodexInputModalities(modalities []string) []any {
+	if len(modalities) == 0 {
+		return []any{}
+	}
 	codexModalities := make([]any, 0, 2)
 	seen := make(map[string]struct{}, 2)
-	supportsImage := false
 	for _, raw := range modalities {
 		switch modality := strings.ToLower(strings.TrimSpace(raw)); modality {
 		case "text", "image":
@@ -357,20 +605,18 @@ func applyCodexClientInputModalitiesMetadata(entry map[string]any, modalities []
 			}
 			seen[modality] = struct{}{}
 			codexModalities = append(codexModalities, modality)
-			if modality == "image" {
-				supportsImage = true
-			}
 		}
 	}
-	if len(codexModalities) == 0 {
-		return
+	return codexModalities
+}
+
+func hasImageModality(modalities []any) bool {
+	for _, m := range modalities {
+		if s, ok := m.(string); ok && s == "image" {
+			return true
+		}
 	}
-	entry["input_modalities"] = codexModalities
-	if supportsImage {
-		entry["supports_image_detail_original"] = true
-	} else {
-		delete(entry, "supports_image_detail_original")
-	}
+	return false
 }
 
 func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.ThinkingSupport, clientVersion string) {

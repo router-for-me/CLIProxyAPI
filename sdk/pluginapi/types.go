@@ -724,6 +724,8 @@ type HostAuthFileEntry struct {
 	Priority int `json:"priority,omitempty"`
 	// Note is the credential note when available.
 	Note string `json:"note,omitempty"`
+	// BaseURL is the upstream base URL configured for the credential when available.
+	BaseURL string `json:"base_url,omitempty"`
 	// Websockets reports whether websocket mode is enabled when available.
 	Websockets bool `json:"websockets,omitempty"`
 	// Success is the recent success count.
@@ -1392,6 +1394,8 @@ type ManagementResponse struct {
 type UsageRecord struct {
 	// Provider identifies the upstream provider.
 	Provider string
+	// BaseURL is the upstream base URL configured for the request/credential when available.
+	BaseURL string
 	// ExecutorType identifies the executor implementation.
 	ExecutorType string
 	// Model is the model used for the request.
