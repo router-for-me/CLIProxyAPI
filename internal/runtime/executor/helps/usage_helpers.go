@@ -51,6 +51,14 @@ type UsageReporter struct {
 	ttftStart           time.Time
 	ttftSet             bool
 	once                sync.Once
+	nowFunc             func() time.Time // optional; tests inject a controllable clock
+}
+
+func (r *UsageReporter) now() time.Time {
+	if r != nil && r.nowFunc != nil {
+		return r.nowFunc()
+	}
+	return time.Now()
 }
 
 type usageExecutor interface {
@@ -266,7 +274,7 @@ func (r *UsageReporter) StartResponseTTFT() {
 	if r == nil {
 		return
 	}
-	now := time.Now()
+	now := r.now()
 	r.ttftMu.Lock()
 	if r.upstreamStartedAt.IsZero() {
 		r.upstreamStartedAt = now
@@ -331,11 +339,11 @@ func (r *UsageReporter) ObserveTokenEvent(isToken bool) {
 		return
 	}
 	if !r.firstPacketSet {
-		r.firstPacketDuration = time.Since(start)
+		r.firstPacketDuration = r.now().Sub(start)
 		r.firstPacketSet = true
 	}
 	if isToken {
-		r.ttft = time.Since(start)
+		r.ttft = r.now().Sub(start)
 		r.ttftSet = true
 		r.ttftStart = time.Time{}
 	}
@@ -356,7 +364,7 @@ func (r *UsageReporter) MarkFirstResponseByte() {
 	if start.IsZero() {
 		return
 	}
-	r.setTTFT(time.Since(start))
+	r.setTTFT(r.now().Sub(start))
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
