@@ -164,6 +164,28 @@ var staticDevinModels = []*ModelInfo{
 			Levels: []string{"low", "medium", "high", "xhigh"},
 		},
 	},
+	{
+		ID:                  "devin/deepseek-v4-flash",
+		Type:                "devin",
+		OwnedBy:             "deepseek",
+		DisplayName:         "DeepSeek V4 Flash",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 64000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"high", "max"},
+		},
+	},
+	{
+		ID:                  "devin/deepseek-v4-1-flash",
+		Type:                "devin",
+		OwnedBy:             "deepseek",
+		DisplayName:         "DeepSeek V4.1 Flash",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 64000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"high", "max"},
+		},
+	},
 }
 
 // GetDevinModels returns the standard Devin/Cognition model definitions.

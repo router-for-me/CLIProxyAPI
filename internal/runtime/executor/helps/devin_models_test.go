@@ -154,6 +154,18 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			thinkingLevel: "",
 			want:          "grok-4-6-xhigh",
 		},
+		{
+			name:          "devin prefix deepseek-v4-flash default high",
+			rawModel:      "devin/deepseek-v4-flash",
+			thinkingLevel: "",
+			want:          "deepseek-v4-flash-high",
+		},
+		{
+			name:          "devin prefix deepseek-v4.1-flash with max suffix",
+			rawModel:      "devin/deepseek-v4.1-flash(max)",
+			thinkingLevel: "",
+			want:          "deepseek-v4-1-flash-max",
+		},
 	}
 
 	for _, tt := range tests {

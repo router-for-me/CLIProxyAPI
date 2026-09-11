@@ -165,6 +165,8 @@ func TestGetDevinModelsFallback(t *testing.T) {
 	foundFable := false
 	foundGemini38 := false
 	foundGrok46 := false
+	foundDeepSeekV4Flash := false
+	foundDeepSeekV41Flash := false
 	for _, m := range devinModels {
 		if m != nil && m.ID == "devin/swe-2" {
 			foundSWE2 = true
@@ -187,6 +189,18 @@ func TestGetDevinModelsFallback(t *testing.T) {
 				t.Errorf("devin/grok-4-6 OwnedBy = %q, want xai", m.OwnedBy)
 			}
 		}
+		if m != nil && m.ID == "devin/deepseek-v4-flash" {
+			foundDeepSeekV4Flash = true
+			if m.OwnedBy != "deepseek" {
+				t.Errorf("devin/deepseek-v4-flash OwnedBy = %q, want deepseek", m.OwnedBy)
+			}
+		}
+		if m != nil && m.ID == "devin/deepseek-v4-1-flash" {
+			foundDeepSeekV41Flash = true
+			if m.OwnedBy != "deepseek" {
+				t.Errorf("devin/deepseek-v4-1-flash OwnedBy = %q, want deepseek", m.OwnedBy)
+			}
+		}
 	}
 	if !foundSWE2 {
 		t.Error("expected devin/swe-2 in GetDevinModels()")
@@ -199,6 +213,12 @@ func TestGetDevinModelsFallback(t *testing.T) {
 	}
 	if !foundGrok46 {
 		t.Error("expected devin/grok-4-6 in GetDevinModels()")
+	}
+	if !foundDeepSeekV4Flash {
+		t.Error("expected devin/deepseek-v4-flash in GetDevinModels()")
+	}
+	if !foundDeepSeekV41Flash {
+		t.Error("expected devin/deepseek-v4-1-flash in GetDevinModels()")
 	}
 
 	byChannel := GetStaticModelDefinitionsByChannel("devin")

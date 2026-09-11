@@ -8,12 +8,14 @@ import (
 
 // Family effort configurations extracted from GetCliModelConfigs (215 models).
 var (
-	swe2Efforts     = []string{"medium", "high", "max"}
-	fable51Efforts  = []string{"low", "medium", "high", "xhigh", "max"}
-	astraEfforts    = []string{"low", "medium", "high", "xhigh", "max"}
-	glm53Efforts    = []string{"low", "high", "max"}
-	gemini38Efforts = []string{"low", "medium", "high"}
-	grok46Efforts   = []string{"low", "medium", "high", "xhigh"}
+	swe2Efforts             = []string{"medium", "high", "max"}
+	fable51Efforts          = []string{"low", "medium", "high", "xhigh", "max"}
+	astraEfforts            = []string{"low", "medium", "high", "xhigh", "max"}
+	glm53Efforts            = []string{"low", "high", "max"}
+	gemini38Efforts         = []string{"low", "medium", "high"}
+	grok46Efforts           = []string{"low", "medium", "high", "xhigh"}
+	deepseekV4FlashEfforts  = []string{"high", "max"}
+	deepseekV41FlashEfforts = []string{"high", "max"}
 )
 
 // knownDevinSuffixes lists recognized model uid suffixes.
@@ -139,6 +141,14 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	case strings.Contains(lowerBase, "grok-4-6") || strings.Contains(lowerBase, "grok-4.6"):
 		clamped := clampEffort(effort, grok46Efforts, "high")
 		return "grok-4-6-" + clamped
+
+	case strings.Contains(lowerBase, "deepseek-v4-1-flash") || strings.Contains(lowerBase, "deepseek-v4.1-flash"):
+		clamped := clampEffort(effort, deepseekV41FlashEfforts, "high")
+		return "deepseek-v4-1-flash-" + clamped
+
+	case strings.Contains(lowerBase, "deepseek-v4-flash"):
+		clamped := clampEffort(effort, deepseekV4FlashEfforts, "high")
+		return "deepseek-v4-flash-" + clamped
 
 	default:
 		// Default generic fallback: append effort if present, else return base
