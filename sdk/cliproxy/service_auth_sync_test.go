@@ -1,8 +1,11 @@
 package cliproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -184,6 +187,11 @@ type syncTestExecutor struct{}
 func (e *syncTestExecutor) Identifier() string { return "codex" }
 
 func (e *syncTestExecutor) Execute(ctx context.Context, a *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if a != nil && a.Metadata != nil {
+		if tok, ok := a.Metadata["access_token"].(string); ok && tok != "" {
+			return cliproxyexecutor.Response{Payload: []byte(tok)}, nil
+		}
+	}
 	return cliproxyexecutor.Response{Payload: []byte(a.ID)}, nil
 }
 
@@ -706,5 +714,331 @@ func TestRuntimeAuthSyncHook_ContextCancellationDoesNotAbortSync(t *testing.T) {
 	resp, errExec := manager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-6-astra"}, cliproxyexecutor.Options{})
 	if errExec != nil || string(resp.Payload) != authID {
 		t.Fatalf("expected scheduler execution to succeed, got resp=%q err=%v", string(resp.Payload), errExec)
+	}
+}
+
+func TestEndToEndAuthFileReplacement_RestoresModelsInV1ModelsWithoutRestart(t *testing.T) {
+	authDir := t.TempDir()
+	fileName := "codex-team.json"
+	filePath := filepath.Join(authDir, fileName)
+
+	// Synthetic JWT containing CodexAuthInfo claims with chatgpt_plan_type: team
+	teamIDToken := "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ICJ1c2VyQGV4YW1wbGUuY29tIiwgImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6IHsiY2hhdGdwdF9wbGFuX3R5cGUiOiAidGVhbSIsICJjaGF0Z3B0X2FjY291bnRfaWQiOiAiYWNjLTEyMyJ9fQ.sig"
+	initialContent := fmt.Sprintf(`{"type":"codex","email":"user@example.com","access_token":"token-old","id_token":%q}`, teamIDToken)
+	if errWrite := os.WriteFile(filePath, []byte(initialContent), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	reg := internalregistry.GetGlobalRegistry()
+	authID := fileName
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	secretKey := "test-secret"
+	hashedSecret, errHash := bcrypt.GenerateFromPassword([]byte(secretKey), bcrypt.DefaultCost)
+	if errHash != nil {
+		t.Fatalf("bcrypt hash failed: %v", errHash)
+	}
+
+	cfg := &config.Config{
+		AuthDir: authDir,
+		RemoteManagement: config.RemoteManagement{
+			SecretKey:   string(hashedSecret),
+			AllowRemote: true,
+		},
+	}
+
+	service, errBuild := NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(filepath.Join(authDir, "config.yaml")).
+		Build()
+	if errBuild != nil {
+		t.Fatalf("Build() failed: %v", errBuild)
+	}
+
+	server := api.NewServer(service.cfg, service.coreManager, service.accessManager, service.configPath, service.serverOptions...)
+	if server == nil {
+		t.Fatal("NewServer() returned nil")
+	}
+	handler := server.Handler()
+	service.coreManager.RegisterExecutor(&syncTestExecutor{})
+
+	auth := &coreauth.Auth{
+		ID:       authID,
+		FileName: fileName,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":         "codex",
+			"email":        "user@example.com",
+			"access_token": "token-old",
+			"id_token":     teamIDToken,
+		},
+		Attributes: map[string]string{
+			"plan_type": "team",
+			"path":      filePath,
+		},
+	}
+	if _, errRegister := service.coreManager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// Initial model sync
+	syncHook := service.runtimeAuthSyncHook()
+	if err := syncHook(context.Background(), auth); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	// 1. Confirm all team models are initially visible in GET /v1/models
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/models initial status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var modelsResp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &modelsResp); err != nil {
+		t.Fatalf("failed to decode /v1/models response: %v", err)
+	}
+	hasModel := func(modelID string) bool {
+		for _, m := range modelsResp.Data {
+			if id, _ := m["id"].(string); id == modelID {
+				return true
+			}
+		}
+		return false
+	}
+	teamModels := []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review"}
+	for _, m := range teamModels {
+		if !hasModel(m) {
+			t.Fatalf("expected %q to be in initial /v1/models list: %s", m, rec.Body.String())
+		}
+	}
+
+	// 2. Simulate terminal authentication error on all 4 models (invalidated token)
+	unauthErr := &coreauth.Error{
+		HTTPStatus: http.StatusUnauthorized,
+		Code:       "unauthorized",
+		Message:    "Encountered invalidated oauth token: test-token",
+	}
+	for _, m := range teamModels {
+		service.coreManager.MarkResult(context.Background(), coreauth.Result{
+			AuthID:     authID,
+			Provider:   "codex",
+			Model:      m,
+			RouteModel: m,
+			Success:    false,
+			Error:      unauthErr,
+		})
+	}
+
+	// Confirm all 4 models are now omitted from /v1/models due to active error/cooldown
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.ServeHTTP(rec, req)
+	modelsResp.Data = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &modelsResp); err != nil {
+		t.Fatalf("failed to decode /v1/models response: %v", err)
+	}
+	for _, m := range teamModels {
+		if hasModel(m) {
+			t.Fatalf("expected %q to be absent after terminal auth failure", m)
+		}
+	}
+
+	// 3. Replace credential via management upload (POST /v0/management/auth-files)
+	newContent := fmt.Sprintf(`{"type":"codex","email":"user@example.com","access_token":"token-new","id_token":%q}`, teamIDToken)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", fileName)
+	if err != nil {
+		t.Fatalf("failed to create multipart file: %v", err)
+	}
+	if _, err = part.Write([]byte(newContent)); err != nil {
+		t.Fatalf("failed to write multipart content: %v", err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatalf("failed to close multipart writer: %v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files", &body)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload failed: status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 4. Verify that GET /v1/models immediately includes all team models without restart
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.ServeHTTP(rec, req)
+	modelsResp.Data = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &modelsResp); err != nil {
+		t.Fatalf("failed to decode /v1/models response: %v", err)
+	}
+	for _, m := range teamModels {
+		if !hasModel(m) {
+			t.Fatalf("expected %q to be restored in /v1/models after credential replacement: %s", m, rec.Body.String())
+		}
+	}
+
+	// 5. Verify direct inference request succeeds using the replacement credential token
+	service.coreManager.RegisterExecutor(&syncTestExecutor{})
+	resp, errExec := service.coreManager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-6-astra"}, cliproxyexecutor.Options{})
+	if errExec != nil || string(resp.Payload) != "token-new" {
+		t.Fatalf("expected inference execution to use replacement token, got resp=%q err=%v", string(resp.Payload), errExec)
+	}
+}
+
+func TestEndToEndAuthFilePatch_RestoresModelsInV1ModelsWithoutRestart(t *testing.T) {
+	authDir := t.TempDir()
+	fileName := "codex-patch.json"
+	filePath := filepath.Join(authDir, fileName)
+
+	teamIDToken := "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ICJ1c2VyQGV4YW1wbGUuY29tIiwgImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6IHsiY2hhdGdwdF9wbGFuX3R5cGUiOiAidGVhbSIsICJjaGF0Z3B0X2FjY291bnRfaWQiOiAiYWNjLTEyMyJ9fQ.sig"
+	initialContent := fmt.Sprintf(`{"type":"codex","email":"user@example.com","access_token":"token-old","id_token":%q}`, teamIDToken)
+	if errWrite := os.WriteFile(filePath, []byte(initialContent), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	reg := internalregistry.GetGlobalRegistry()
+	authID := fileName
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	secretKey := "test-secret"
+	hashedSecret, errHash := bcrypt.GenerateFromPassword([]byte(secretKey), bcrypt.DefaultCost)
+	if errHash != nil {
+		t.Fatalf("bcrypt hash failed: %v", errHash)
+	}
+
+	cfg := &config.Config{
+		AuthDir: authDir,
+		RemoteManagement: config.RemoteManagement{
+			SecretKey:   string(hashedSecret),
+			AllowRemote: true,
+		},
+	}
+
+	service, errBuild := NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(filepath.Join(authDir, "config.yaml")).
+		Build()
+	if errBuild != nil {
+		t.Fatalf("Build() failed: %v", errBuild)
+	}
+
+	server := api.NewServer(service.cfg, service.coreManager, service.accessManager, service.configPath, service.serverOptions...)
+	if server == nil {
+		t.Fatal("NewServer() returned nil")
+	}
+	handler := server.Handler()
+	service.coreManager.RegisterExecutor(&syncTestExecutor{})
+
+	auth := &coreauth.Auth{
+		ID:       authID,
+		FileName: fileName,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":         "codex",
+			"email":        "user@example.com",
+			"access_token": "token-old",
+			"id_token":     teamIDToken,
+		},
+		Attributes: map[string]string{
+			"plan_type": "team",
+			"path":      filePath,
+		},
+	}
+	if _, errRegister := service.coreManager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	syncHook := service.runtimeAuthSyncHook()
+	if err := syncHook(context.Background(), auth); err != nil {
+		t.Fatalf("initial sync failed: %v", err)
+	}
+
+	// 1. Simulate terminal auth failure on all 4 models
+	unauthErr := &coreauth.Error{
+		HTTPStatus: http.StatusUnauthorized,
+		Code:       "unauthorized",
+		Message:    "Encountered invalidated oauth token: test-token",
+	}
+	teamModels := []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "codex-auto-review"}
+	for _, m := range teamModels {
+		service.coreManager.MarkResult(context.Background(), coreauth.Result{
+			AuthID:     authID,
+			Provider:   "codex",
+			Model:      m,
+			RouteModel: m,
+			Success:    false,
+			Error:      unauthErr,
+		})
+	}
+
+	// Confirm all 4 models are now omitted from /v1/models due to active error/cooldown
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.ServeHTTP(rec, req)
+	var modelsResp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &modelsResp); err != nil {
+		t.Fatalf("failed to decode /v1/models response: %v", err)
+	}
+	hasModel := func(modelID string) bool {
+		for _, m := range modelsResp.Data {
+			if id, _ := m["id"].(string); id == modelID {
+				return true
+			}
+		}
+		return false
+	}
+	for _, m := range teamModels {
+		if hasModel(m) {
+			t.Fatalf("expected %q to be absent after terminal auth failure", m)
+		}
+	}
+
+	// 2. Patch auth file fields with fresh access token
+	patchBody := fmt.Sprintf(`{"name":%q,"access_token":"token-fresh","id_token":%q}`, fileName, teamIDToken)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(patchBody))
+	req.Header.Set("Authorization", "Bearer test-secret")
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH fields failed: status=%d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 3. Confirm all team models are restored in /v1/models
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.ServeHTTP(rec, req)
+	modelsResp.Data = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &modelsResp); err != nil {
+		t.Fatalf("failed to decode /v1/models response: %v", err)
+	}
+	for _, m := range teamModels {
+		if !hasModel(m) {
+			t.Fatalf("expected %q to be restored in /v1/models after PATCH: %s", m, rec.Body.String())
+		}
+	}
+
+	// 4. Verify direct inference request succeeds using fresh token after PATCH
+	service.coreManager.RegisterExecutor(&syncTestExecutor{})
+	resp, errExec := service.coreManager.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-6-astra"}, cliproxyexecutor.Options{})
+	if errExec != nil || string(resp.Payload) != "token-fresh" {
+		t.Fatalf("expected inference execution to use fresh token after PATCH, got resp=%q err=%v", string(resp.Payload), errExec)
 	}
 }

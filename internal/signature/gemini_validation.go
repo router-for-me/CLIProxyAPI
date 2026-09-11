@@ -37,12 +37,13 @@
 //     traceable to a prior Gemini model response in the same conversation.
 //   - Opaque-shape tier: for real Gemini signatures, require a non-empty string,
 //     bounded length, successful standard base64 decoding, and a known protobuf
-//     envelope when the caller needs provider compatibility. The only known
+//     envelope when the caller needs provider compatibility. The known
 //     envelope is the Gemini 3.x field-2 -> field-1 payload, whose body holds
-//     either versioned opaque state or a provider UUID. Gemini 2.5 emitted a
-//     repeated field-1 form; those models are out of scope and their signatures
-//     are no longer a known envelope. Bare base64 UUID payloads are classified
-//     separately and should be replaced with the bypass sentinel rather than
+//     versioned opaque Tink state, a provider UUID, or a nested protobuf structure
+//     wrapping Tink ciphertext for server-side tool invocations (toolCall/toolResponse).
+//     Gemini 2.5 emitted a repeated field-1 form; those models are out of scope and
+//     their signatures are no longer a known envelope. Bare base64 UUID payloads are
+//     classified separately and should be replaced with the bypass sentinel rather than
 //     replayed.
 //   - Replay tier: real validation means preserving the exact model part that
 //     came from Gemini, including its thoughtSignature, id/name/function args,
@@ -472,7 +473,7 @@ type geminiEnvelopeInfo struct {
 
 func inspectGeminiField2Envelope(decoded []byte) (geminiEnvelopeInfo, bool) {
 	value, ok := consumeGeminiField2Field1Value(decoded)
-	if !ok || (!isLikelyGeminiOpaquePayload(value) && !isASCIIUUIDBytes(value)) {
+	if !ok || (!isLikelyGeminiOpaquePayload(value) && !isASCIIUUIDBytes(value) && !isLikelyGeminiToolInvocationPayload(value)) {
 		return geminiEnvelopeInfo{}, false
 	}
 	return geminiEnvelopeInfo{
@@ -527,6 +528,59 @@ func isLikelyGeminiOpaquePayload(value []byte) bool {
 	// rate against a caller that reproduces the protobuf envelope but not the key
 	// material; provenance or target scoping, not more byte checks, closes that gap.
 	return len(value) > 0 && value[0] == 0x01
+}
+
+func isLikelyGeminiToolInvocationPayload(value []byte) bool {
+	// In Gemini 3 Tool Combination / Context Circulation, server-side tool blocks
+	// (toolCall and toolResponse) wrap the Tink ciphertext in a protobuf message
+	// containing a length-delimited bytes field whose content is a valid Tink payload
+	// starting with 0x01 (commonly preceded by a status/type varint field).
+	// Validate that value is a valid protobuf structure containing at least one
+	// length-delimited bytes field whose content is a valid Gemini Tink payload.
+	if len(value) == 0 {
+		return false
+	}
+	offset := 0
+	hasTinkField := false
+	for offset < len(value) {
+		_, typ, n := protowire.ConsumeTag(value[offset:])
+		if n < 0 {
+			return false
+		}
+		offset += n
+		switch typ {
+		case protowire.VarintType:
+			_, n = protowire.ConsumeVarint(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+		case protowire.BytesType:
+			bytesVal, n := protowire.ConsumeBytes(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+			if isLikelyGeminiOpaquePayload(bytesVal) {
+				hasTinkField = true
+			}
+		case protowire.Fixed32Type:
+			_, n = protowire.ConsumeFixed32(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+		case protowire.Fixed64Type:
+			_, n = protowire.ConsumeFixed64(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+		default:
+			return false
+		}
+	}
+	return hasTinkField && offset == len(value)
 }
 
 func isASCIIUUIDBytes(decoded []byte) bool {
