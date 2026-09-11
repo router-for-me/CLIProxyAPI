@@ -73,8 +73,20 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
 		t.Fatalf("unexpected prompt_cache_key in responses compact body: %s", string(gotBody))
 	}
-	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
-		t.Fatalf("payload = %s", string(resp.Payload))
+	if gjson.GetBytes(resp.Payload, "id").String() != "resp_1" {
+		t.Fatalf("id = %s", string(resp.Payload))
+	}
+	if gjson.GetBytes(resp.Payload, "object").String() != "response.compaction" {
+		t.Fatalf("object = %s", string(resp.Payload))
+	}
+	if gjson.GetBytes(resp.Payload, "usage.input_tokens").Int() != 1 ||
+		gjson.GetBytes(resp.Payload, "usage.output_tokens").Int() != 2 ||
+		gjson.GetBytes(resp.Payload, "usage.total_tokens").Int() != 3 {
+		t.Fatalf("usage tokens mismatch: %s", string(resp.Payload))
+	}
+	// Gateway may attach usage.tokens_per_second; compact passthrough must keep core fields.
+	if !gjson.GetBytes(resp.Payload, "usage.tokens_per_second").Exists() {
+		t.Fatalf("expected gateway tokens_per_second on compact usage: %s", string(resp.Payload))
 	}
 }
 
