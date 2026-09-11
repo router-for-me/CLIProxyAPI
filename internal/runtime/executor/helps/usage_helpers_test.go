@@ -13,6 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
@@ -851,6 +852,19 @@ func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *
 	}
 }
 
+func TestUsageReporterSetTranslatedReasoningEffortCodexConfigurationUpdate(t *testing.T) {
+	ctx := context.Background()
+	reporter := NewUsageReporter(ctx, "codex", "gpt-6-astra", nil)
+
+	payload := []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"xhigh"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}}]}`)
+	reporter.SetTranslatedReasoningEffort(payload, "codex")
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 10}, false)
+	if record.ReasoningEffort != "low" {
+		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "low")
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",
@@ -1092,5 +1106,76 @@ func TestUsageReporterPropagatesSessionHierarchy(t *testing.T) {
 	recordAlias2 := reporterAlias.buildRecord(usage.Detail{TotalTokens: 100}, false, usage.Failure{})
 	if recordAlias2.SessionID != "pck:key-999" || recordAlias2.ParentSessionID != "" {
 		t.Fatalf("SetSessionHierarchy cross prefix alias emitted as parent: (%q, %q), want (pck:key-999, empty)", recordAlias2.SessionID, recordAlias2.ParentSessionID)
+	}
+}
+
+func TestUsageReporterPropagatesBaseURL(t *testing.T) {
+	ctx := context.Background()
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-base-url-test",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "test-api-key",
+			"base_url": "https://custom.endpoint.example.com/v1",
+		},
+	}
+	reporter := NewUsageReporter(ctx, "codex", "gpt-5.6-luna", auth)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 10}, false, usage.Failure{})
+	if record.BaseURL != "https://custom.endpoint.example.com/v1" {
+		t.Fatalf("record.BaseURL = %q, want %q", record.BaseURL, "https://custom.endpoint.example.com/v1")
+	}
+
+	authMeta := &cliproxyauth.Auth{
+		ID:       "auth-meta-base-url-test",
+		Provider: "openai",
+		Metadata: map[string]any{
+			"base_url": "https://meta.endpoint.example.com/v1",
+		},
+	}
+	reporterMeta := NewUsageReporter(ctx, "openai", "gpt-5.4", authMeta)
+	recordMeta := reporterMeta.buildRecord(usage.Detail{TotalTokens: 10}, false, usage.Failure{})
+	if recordMeta.BaseURL != "https://meta.endpoint.example.com/v1" {
+		t.Fatalf("recordMeta.BaseURL = %q, want %q", recordMeta.BaseURL, "https://meta.endpoint.example.com/v1")
+	}
+
+	// Attribute precedence over metadata
+	authBoth := &cliproxyauth.Auth{
+		ID:       "auth-both-test",
+		Provider: "openai",
+		Attributes: map[string]string{
+			"base_url": "https://attr.example.com",
+		},
+		Metadata: map[string]any{
+			"base_url": "https://meta.example.com",
+		},
+	}
+	reporterBoth := NewUsageReporter(ctx, "openai", "gpt-5.4", authBoth)
+	recordBoth := reporterBoth.buildRecord(usage.Detail{TotalTokens: 10}, false, usage.Failure{})
+	if recordBoth.BaseURL != "https://attr.example.com" {
+		t.Fatalf("recordBoth.BaseURL = %q, want %q", recordBoth.BaseURL, "https://attr.example.com")
+	}
+
+	// Blank attribute falls back to metadata
+	authBlankAttr := &cliproxyauth.Auth{
+		ID:       "auth-blank-test",
+		Provider: "openai",
+		Attributes: map[string]string{
+			"base_url": "   ",
+		},
+		Metadata: map[string]any{
+			"base_url": "https://meta.example.com",
+		},
+	}
+	reporterBlankAttr := NewUsageReporter(ctx, "openai", "gpt-5.4", authBlankAttr)
+	recordBlankAttr := reporterBlankAttr.buildRecord(usage.Detail{TotalTokens: 10}, false, usage.Failure{})
+	if recordBlankAttr.BaseURL != "https://meta.example.com" {
+		t.Fatalf("recordBlankAttr.BaseURL = %q, want %q", recordBlankAttr.BaseURL, "https://meta.example.com")
+	}
+
+	// Nil auth or unconfigured auth leaves BaseURL empty
+	reporterNilAuth := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	recordNilAuth := reporterNilAuth.buildRecord(usage.Detail{TotalTokens: 10}, false, usage.Failure{})
+	if recordNilAuth.BaseURL != "" {
+		t.Fatalf("recordNilAuth.BaseURL = %q, want empty", recordNilAuth.BaseURL)
 	}
 }

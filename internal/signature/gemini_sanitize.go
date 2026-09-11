@@ -25,9 +25,11 @@ func GeminiReplaySignatureOrBypass(rawSignature string, blockKind SignatureBlock
 
 // SanitizeGeminiRequestThoughtSignatures applies Gemini replay policy to a
 // Gemini-shaped request. Existing provider signatures stay on their original
-// model parts. Only a missing or incompatible first functionCall gets the bypass
-// sentinel; unsigned sibling calls remain unsigned, matching native Gemini
-// parallel-call history. functionResponse parts never carry signatures.
+// model parts. Server-side tool blocks (toolCall and toolResponse) are echoed back
+// untouched per the Gemini API contract. Only a missing or incompatible first
+// functionCall gets the bypass sentinel; unsigned sibling calls remain unsigned,
+// matching native Gemini parallel-call history. functionResponse parts never carry
+// signatures.
 func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string) []byte {
 	contentsPath = strings.TrimSpace(contentsPath)
 	if contentsPath == "" {
@@ -70,6 +72,10 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 				return true
 			}
 			if !isModelTurn {
+				partItems = append(partItems, partJSON)
+				return true
+			}
+			if part.Get("toolCall").Exists() || part.Get("tool_call").Exists() || part.Get("toolResponse").Exists() || part.Get("tool_response").Exists() {
 				partItems = append(partItems, partJSON)
 				return true
 			}
@@ -161,6 +167,9 @@ func geminiContentsThoughtSignaturesNeedSanitize(contents gjson.Result) bool {
 				return !needsSanitize
 			}
 			if !isModelTurn {
+				return true
+			}
+			if part.Get("toolCall").Exists() || part.Get("tool_call").Exists() || part.Get("toolResponse").Exists() || part.Get("tool_response").Exists() {
 				return true
 			}
 			hasFunctionCall := part.Get("functionCall").Exists()
