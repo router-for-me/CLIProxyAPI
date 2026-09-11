@@ -40,7 +40,14 @@ func readinessRequiresPositiveWeight(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Routing.Strategy), "weighted-round-robin")
+	// Match sdk/cliproxy normalizedRoutingRuntimeState aliases so readiness
+	// agrees with the weighted selector the runtime actually installs.
+	switch strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy)) {
+	case "weighted-round-robin", "weightedroundrobin", "wrr":
+		return true
+	default:
+		return false
+	}
 }
 
 // authIsUsable mirrors scheduler admission: availability/selection predicates,
