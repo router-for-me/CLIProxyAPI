@@ -1183,7 +1183,7 @@ func TestUsageReporterPropagatesBaseURL(t *testing.T) {
 func TestUsageReporterLatencyAlignsWithTTFTStart(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "openai-compat", "gpt-test", nil)
 	reporter.requestedAt = time.Now().Add(-10 * time.Second) // prep time before upstream
-	time.Sleep(5 * time.Millisecond)
+	// No wall-clock sleep: requestedAt is already far enough in the past for ordering.
 	reporter.StartResponseTTFT()
 	reporter.setTTFT(1 * time.Second)
 	// Simulate end of generation shortly after TTFT window conceptually:
