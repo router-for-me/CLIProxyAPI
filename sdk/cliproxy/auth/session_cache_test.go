@@ -176,4 +176,10 @@ func TestInvalidateAuthReturnsDeletedCount(t *testing.T) {
 	if _, ok := c.Get("mixed::s3::m"); !ok {
 		t.Fatal("unrelated binding was removed")
 	}
+	// Alias groups expand to one entry per cache key; the count is per cache
+	// key, not per logical session.
+	c.SetAliases("auth-c", "mixed::s9::m", "pck:s9")
+	if got := c.InvalidateAuth("auth-c"); got != 2 {
+		t.Fatalf("alias-group InvalidateAuth = %d, want 2 (one per cache key)", got)
+	}
 }

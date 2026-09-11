@@ -335,18 +335,22 @@ func (c *SessionCache) Invalidate(sessionID string) {
 }
 
 // InvalidateAuth removes all sessions bound to a specific auth ID and returns
-// how many cache keys were deleted. Used when an auth becomes unavailable or
-// is removed; the count lets callers report the blast radius.
+// how many LIVE bindings were removed (entries whose TTL had already expired
+// are deleted but not counted). Used when an auth becomes unavailable or is
+// removed; the count lets callers report the blast radius.
 func (c *SessionCache) InvalidateAuth(authID string) int {
 	if authID == "" {
 		return 0
 	}
+	now := time.Now()
 	c.mu.Lock()
 	deleted := 0
 	for sid, entry := range c.entries {
 		if entry.authID == authID {
 			delete(c.entries, sid)
-			deleted++
+			if now.Before(entry.expiresAt) {
+				deleted++
+			}
 		}
 	}
 	c.mu.Unlock()

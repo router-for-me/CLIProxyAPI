@@ -208,7 +208,10 @@ func (m *Manager) invalidateSessionAffinity(authID string) {
 	if m == nil || authID == "" {
 		return
 	}
-	if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) int }); ok && invalidator != nil {
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	if invalidator, ok := selector.(SessionAffinityView); ok && invalidator != nil {
 		if removed := invalidator.InvalidateAuth(authID); removed > 0 {
 			log.Warnf("session-affinity: invalidated %d binding(s) for auth %s", removed, authID)
 		}
