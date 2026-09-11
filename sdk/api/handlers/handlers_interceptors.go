@@ -266,6 +266,19 @@ func appendStreamInterceptorHistory(history [][]byte, chunk []byte) [][]byte {
 	return history
 }
 
+// snapshotHistoryWindow hands the rolling history window to an interceptor as a
+// stable outer-slice snapshot. Entries stay shared and read-only; only the
+// outer slice is copied, so recycling the window (which nils slots and reslices
+// the same backing array) cannot drop entries from a snapshot a host may still
+// retain, while avoiding the per-chunk byte cloning that amplified allocations
+// for legacy plugins.
+func snapshotHistoryWindow(history [][]byte) [][]byte {
+	if len(history) == 0 {
+		return nil
+	}
+	return append(make([][]byte, 0, len(history)), history...)
+}
+
 func byteSlicesSize(items [][]byte) int {
 	total := 0
 	for _, item := range items {

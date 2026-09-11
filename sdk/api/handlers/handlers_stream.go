@@ -229,11 +229,12 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					Metadata:        opts.Metadata,
 				}
 				// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
-				// Share the read-only window instead of cloning it per chunk: the host
-				// clones history only for legacy plugins (schema < 5) and strips it for
-				// v5+ plugins, so a single legacy plugin no longer taxes every chunk.
+				// Hand off a stable outer-slice snapshot instead of cloning bytes per
+				// chunk: the host clones history only for legacy plugins (schema < 5)
+				// and strips it for v5+ plugins, so a single legacy plugin no longer
+				// taxes every chunk, and custom hosts may retain the snapshot safely.
 				if streamChunkPayloadIncludesHistory(interceptorHost) {
-					chunkReq.HistoryChunks = historyChunks
+					chunkReq.HistoryChunks = snapshotHistoryWindow(historyChunks)
 				}
 				// Schema v3+ omits bodies here (one header-init clone only).
 				if streamChunkPayloadIncludesRequestBody(interceptorHost) {
@@ -456,12 +457,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				Metadata:        opts.Metadata,
 			}
 			// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
-			// Share the read-only window instead of cloning it per chunk: the host
-			// clones history only for legacy plugins (schema < 5) and strips it for
-			// v5+ plugins, so a single legacy plugin no longer taxes every chunk.
-			// The window is only recycled between interceptor calls by this goroutine.
+			// Hand off a stable outer-slice snapshot instead of cloning bytes per
+			// chunk: the host clones history only for legacy plugins (schema < 5)
+			// and strips it for v5+ plugins, so a single legacy plugin no longer
+			// taxes every chunk, and custom hosts may retain the snapshot safely.
 			if streamChunkPayloadIncludesHistory(interceptorHost) {
-				chunkReq.HistoryChunks = historyChunks
+				chunkReq.HistoryChunks = snapshotHistoryWindow(historyChunks)
 			}
 			// Schema v3+ omits bodies here (one header-init clone only).
 			if streamChunkPayloadIncludesRequestBody(interceptorHost) {
