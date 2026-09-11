@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -597,4 +599,71 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 		body = cloneBytes(resp.Body)
 	}
 	return body, responseHeaders
+}
+
+// WriteModelListResponse serializes the model-list payload, applies plugin response interceptors
+// if a plugin host is configured, and writes the resulting headers and body to the Gin context.
+func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat string, payload any) {
+	if c == nil {
+		return
+	}
+	var body []byte
+	switch v := payload.(type) {
+	case []byte:
+		body = cloneBytes(v)
+	default:
+		var errMarshal error
+		body, errMarshal = json.Marshal(payload)
+		if errMarshal != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
+			return
+		}
+	}
+
+	rawResponseHeaders := http.Header{
+		"Content-Type": []string{"application/json; charset=utf-8"},
+	}
+
+	host := h.interceptorHost()
+	if host != nil {
+		ctx := context.Background()
+		var reqHeaders http.Header
+		if c.Request != nil {
+			reqHeaders = cloneHeader(c.Request.Header)
+			if reqCtx := c.Request.Context(); reqCtx != nil {
+				ctx = reqCtx
+			}
+		}
+		lifecycle := h.newRequestLifecycleTracker(ctx, sourceFormat, "", "", false, nil, "")
+		resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
+			RequestID:       lifecycle.requestID(),
+			SourceFormat:    sourceFormat,
+			Model:           "",
+			RequestedModel:  "",
+			Stream:          false,
+			RequestHeaders:  reqHeaders,
+			ResponseHeaders: cloneHeader(rawResponseHeaders),
+			OriginalRequest: nil,
+			RequestBody:     nil,
+			Body:            cloneBytes(body),
+			StatusCode:      http.StatusOK,
+			Metadata:        nil,
+		}, "")
+		if len(resp.Body) > 0 {
+			body = cloneBytes(resp.Body)
+		}
+		if resp.Headers != nil {
+			for key, values := range resp.Headers {
+				c.Writer.Header()[key] = append([]string(nil), values...)
+			}
+		}
+		lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
+	}
+
+	if c.Writer.Header().Get("Content-Type") == "" {
+		c.Header("Content-Type", "application/json; charset=utf-8")
+	}
+	c.Set("API_RESPONSE", cloneBytes(body))
+	c.Status(http.StatusOK)
+	_, _ = c.Writer.Write(body)
 }

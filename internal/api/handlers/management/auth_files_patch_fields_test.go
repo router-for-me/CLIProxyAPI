@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -596,5 +597,119 @@ func TestSetSourceAuthFileDisabledNormalizesLegacyMetadata(t *testing.T) {
 		if _, exists := persisted[legacy]; exists {
 			t.Fatalf("persisted metadata retained %q: %#v", legacy, persisted)
 		}
+	}
+}
+
+func TestPatchAuthFileFields_SyncsPlanTypeAndInvokesHook(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	authDir := t.TempDir()
+	fileName := "codex-plan-patch.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":      filePath,
+			"plan_type": "pro",
+		},
+		Metadata: map[string]any{"type": "codex"},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	var hookedAuth *coreauth.Auth
+	handler.SetPostAuthPersistHook(func(_ context.Context, auth *coreauth.Auth) error {
+		if auth != nil {
+			hookedAuth = auth.Clone()
+		}
+		return nil
+	})
+
+	teamIDToken := "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ICJ1c2VyQGV4YW1wbGUuY29tIiwgImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6IHsiY2hhdGdwdF9wbGFuX3R5cGUiOiAidGVhbSIsICJjaGF0Z3B0X2FjY291bnRfaWQiOiAiYWNjLTEyMyJ9fQ.sig"
+	body := fmt.Sprintf(`{"name":%q,"id_token":%q}`, fileName, teamIDToken)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.PatchAuthFileFields(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PatchAuthFileFields status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	auth, ok := manager.GetByID(fileName)
+	if !ok || auth == nil {
+		t.Fatal("auth not found after patch")
+	}
+	if got := auth.Attributes["plan_type"]; got != "team" {
+		t.Fatalf("auth plan_type attribute = %q, want team", got)
+	}
+	if hookedAuth == nil {
+		t.Fatal("expected postAuthPersistHook to be invoked on PatchAuthFileFields")
+	}
+	if got := hookedAuth.Attributes["plan_type"]; got != "team" {
+		t.Fatalf("hooked auth plan_type attribute = %q, want team", got)
+	}
+}
+
+func TestPatchAuthFileFields_ClearsPlanTypeWhenRemoved(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	authDir := t.TempDir()
+	fileName := "codex-clear-plan.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","plan_type":"free"}`), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":      filePath,
+			"plan_type": "free",
+		},
+		Metadata: map[string]any{
+			"type":      "codex",
+			"plan_type": "free",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	body := fmt.Sprintf(`{"name":%q,"plan_type":null}`, fileName)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.PatchAuthFileFields(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PatchAuthFileFields status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	auth, ok := manager.GetByID(fileName)
+	if !ok || auth == nil {
+		t.Fatal("auth not found after patch")
+	}
+	if _, exists := auth.Attributes["plan_type"]; exists {
+		t.Fatalf("expected plan_type attribute to be deleted after clearing plan_type, got %q", auth.Attributes["plan_type"])
 	}
 }
