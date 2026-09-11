@@ -98,13 +98,15 @@ func TestEvaluateReadiness_ZeroWeightExcludedUnderWeightedStrategy(t *testing.T)
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	cfg := &config.Config{Routing: config.RoutingConfig{Strategy: "weighted-round-robin"}}
-	ready, reason, usable, total := evaluateReadiness(cfg, manager)
-	if ready || reason != "no_usable_auth" || usable != 0 || total != 1 {
-		t.Fatalf("weighted evaluateReadiness() = ready=%t reason=%q usable=%d total=%d", ready, reason, usable, total)
+	for _, strategy := range []string{"weighted-round-robin", "weightedroundrobin", "wrr", "WRR", "WeightedRoundRobin"} {
+		cfg := &config.Config{Routing: config.RoutingConfig{Strategy: strategy}}
+		ready, reason, usable, total := evaluateReadiness(cfg, manager)
+		if ready || reason != "no_usable_auth" || usable != 0 || total != 1 {
+			t.Fatalf("strategy %q evaluateReadiness() = ready=%t reason=%q usable=%d total=%d", strategy, ready, reason, usable, total)
+		}
 	}
 	// Non-weighted strategies still admit zero-weight credentials.
-	ready, reason, usable, total = evaluateReadiness(&config.Config{Routing: config.RoutingConfig{Strategy: "round-robin"}}, manager)
+	ready, reason, usable, total := evaluateReadiness(&config.Config{Routing: config.RoutingConfig{Strategy: "round-robin"}}, manager)
 	if !ready || reason != "ok" || usable != 1 || total != 1 {
 		t.Fatalf("round-robin evaluateReadiness() = ready=%t reason=%q usable=%d total=%d", ready, reason, usable, total)
 	}
