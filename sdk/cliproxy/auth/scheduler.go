@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -532,6 +533,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	now := time.Now()
 	total := 0
 	cooldownCount := 0
+	unauthorizedCount := 0
 	earliest := time.Time{}
 
 	var latestModelTime time.Time
@@ -551,9 +553,10 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if shard == nil {
 			continue
 		}
-		localTotal, localCooldownCount, localEarliest := shard.availabilitySummaryLocked(predicate)
+		localTotal, localCooldownCount, localUnauthorizedCount, localEarliest := shard.availabilitySummaryLocked(predicate)
 		total += localTotal
 		cooldownCount += localCooldownCount
+		unauthorizedCount += localUnauthorizedCount
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
@@ -590,6 +593,18 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 			resetIn = 0
 		}
 		return newModelCooldownErrorWithCause(model, "", resetIn, lastCandidateErr)
+	}
+	if unauthorizedCount == total {
+		terminalCause := latestAuthErr
+		if terminalCause == nil {
+			terminalCause = lastCandidateErr
+		}
+		return NewTerminalAuthError(&Error{
+			Code:       "auth_unavailable",
+			Message:    "no auth available",
+			Retryable:  false,
+			HTTPStatus: http.StatusServiceUnavailable,
+		}, terminalCause)
 	}
 	return WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
 }
@@ -1235,7 +1250,8 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
-	total, cooldownCount, earliest := m.availabilitySummaryLocked(predicate)
+	total, cooldownCount, unauthorizedCount, earliest := m.availabilitySummaryLocked(predicate)
+	_, _, _, authErr, _, _ := m.candidateErrorsLocked(model, predicate)
 	lastCandidateErr, _, _ := m.latestCandidateErrorWithTimeLocked(model, predicate)
 	if total == 0 {
 		return WithCause(&Error{Code: "auth_not_found", Message: "no auth available"}, lastCandidateErr)
@@ -1250,6 +1266,18 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 			resetIn = 0
 		}
 		return newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr)
+	}
+	if unauthorizedCount == total {
+		terminalCause := authErr
+		if terminalCause == nil {
+			terminalCause = lastCandidateErr
+		}
+		return NewTerminalAuthError(&Error{
+			Code:       "auth_unavailable",
+			Message:    "no auth available",
+			Retryable:  false,
+			HTTPStatus: http.StatusServiceUnavailable,
+		}, terminalCause)
 	}
 	return WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
 }
@@ -1306,25 +1334,25 @@ func (m *modelScheduler) candidateErrorsLocked(model string, predicate func(*sch
 				modelAuthID = auth.ID
 				modelErr = curModelErr
 			}
-		} else {
-			var curAuthErr error
-			var curAuthTime time.Time
-			if auth.LastError != nil {
-				curAuthErr = auth.LastError
-				curAuthTime = auth.UpdatedAt
-			} else if strings.TrimSpace(auth.StatusMessage) != "" {
-				curAuthErr = errors.New(auth.StatusMessage)
+		}
+
+		var curAuthErr error
+		var curAuthTime time.Time
+		if auth.LastError != nil {
+			curAuthErr = auth.LastError
+			curAuthTime = auth.UpdatedAt
+		} else if strings.TrimSpace(auth.StatusMessage) != "" {
+			curAuthErr = errors.New(auth.StatusMessage)
+			curAuthTime = auth.UpdatedAt
+		}
+		if curAuthErr != nil {
+			if curAuthTime.IsZero() {
 				curAuthTime = auth.UpdatedAt
 			}
-			if curAuthErr != nil {
-				if curAuthTime.IsZero() {
-					curAuthTime = auth.UpdatedAt
-				}
-				if authErr == nil || curAuthTime.After(authTime) || (curAuthTime.Equal(authTime) && auth.ID > authAuthID) {
-					authTime = curAuthTime
-					authAuthID = auth.ID
-					authErr = curAuthErr
-				}
+			if authErr == nil || curAuthTime.After(authTime) || (curAuthTime.Equal(authTime) && auth.ID > authAuthID) {
+				authTime = curAuthTime
+				authAuthID = auth.ID
+				authErr = curAuthErr
 			}
 		}
 	}
@@ -1333,12 +1361,13 @@ func (m *modelScheduler) candidateErrorsLocked(model string, predicate func(*sch
 }
 
 // availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.
-func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, time.Time) {
+func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, int, time.Time) {
 	if m == nil {
-		return 0, 0, time.Time{}
+		return 0, 0, 0, time.Time{}
 	}
 	total := 0
 	cooldownCount := 0
+	unauthorizedCount := 0
 	earliest := time.Time{}
 	for _, entry := range m.entries {
 		if predicate != nil && !predicate(entry) {
@@ -1348,15 +1377,18 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if entry == nil || entry.auth == nil {
 			continue
 		}
-		if entry.state != scheduledStateCooldown {
+		if entry.state == scheduledStateCooldown {
+			cooldownCount++
+			if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
+				earliest = entry.nextRetryAt
+			}
 			continue
 		}
-		cooldownCount++
-		if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
-			earliest = entry.nextRetryAt
+		if hasUnauthorizedAuthFailure(entry.auth) {
+			unauthorizedCount++
 		}
 	}
-	return total, cooldownCount, earliest
+	return total, cooldownCount, unauthorizedCount, earliest
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.

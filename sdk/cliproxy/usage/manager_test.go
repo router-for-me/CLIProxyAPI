@@ -29,6 +29,17 @@ func TestRecordStreamField(t *testing.T) {
 	}
 }
 
+func TestRecordBaseURLField(t *testing.T) {
+	record := Record{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		BaseURL:  "https://custom-gateway.example.com/v1",
+	}
+	if record.BaseURL != "https://custom-gateway.example.com/v1" {
+		t.Fatalf("Record.BaseURL = %q, want %q", record.BaseURL, "https://custom-gateway.example.com/v1")
+	}
+}
+
 func TestGenerateEnabledDefaultsNilToTrue(t *testing.T) {
 	if !GenerateEnabled(nil) {
 		t.Fatalf("GenerateEnabled(nil) = false, want true")

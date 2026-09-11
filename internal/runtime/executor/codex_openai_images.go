@@ -34,6 +34,9 @@ const (
 	codexDirectImagesGenerations = "/images/generations"
 	codexDirectImagesEdit        = "/images/edits"
 	codexGPTImage15Model         = "gpt-image-1.5"
+	codexGPTImage25FlareModel    = "gpt-image-2.5-flare"
+	codexGPTImage25SunburstModel = "gpt-image-2.5-sunburst"
+	codexGPTImage25Model         = "gpt-image-2.5"
 	codexOpenAIImagesMainModel   = "gpt-5.4-mini"
 )
 
@@ -660,7 +663,7 @@ func codexOpenAIImageBaseModel(model string) string {
 
 func codexIsDirectOpenAIImageModel(model string) bool {
 	switch strings.ToLower(strings.TrimSpace(model)) {
-	case codexGPTImage15Model, codexDefaultImageToolModel:
+	case codexGPTImage15Model, codexDefaultImageToolModel, codexGPTImage25FlareModel, codexGPTImage25SunburstModel, codexGPTImage25Model:
 		return true
 	default:
 		return false

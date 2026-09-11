@@ -94,7 +94,34 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 	if s == nil {
 		return
 	}
-	updates = coalesceAuthUpdates(updates)
+	s.authUpdateMu.Lock()
+	defer s.authUpdateMu.Unlock()
+
+	if s.authRevisions == nil {
+		s.authRevisions = make(map[string]uint64)
+	}
+
+	filtered := make([]watcher.AuthUpdate, 0, len(updates))
+	for _, update := range updates {
+		id := authUpdateID(update)
+		if id == "" {
+			filtered = append(filtered, update)
+			continue
+		}
+		rev := update.Revision()
+		if rev > 0 {
+			if prevRev, exists := s.authRevisions[id]; exists && rev <= prevRev {
+				log.Debugf("skipping stale auth update for %s: rev %d <= processed %d", id, rev, prevRev)
+				continue
+			}
+			s.authRevisions[id] = rev
+		}
+		filtered = append(filtered, update)
+	}
+	if len(filtered) == 0 {
+		return
+	}
+	updates = coalesceAuthUpdates(filtered)
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
@@ -133,6 +160,12 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 			}
 			if id == "" {
 				continue
+			}
+			if existing, ok := s.coreManager.GetByID(id); ok && existing != nil && update.Auth != nil {
+				if isStaleCoreAuth(existing, update.Auth) {
+					log.Debugf("skipping stale auth delete for %s: incoming gen=%d, existing gen=%d", id, update.Auth.Generation, existing.Generation)
+					continue
+				}
 			}
 			s.applyCoreAuthRemoval(registrationCtx, id)
 			needsAliasRebuild = true
@@ -282,6 +315,10 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 	op := "register"
 	var err error
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
+		if isStaleCoreAuth(existing, auth) {
+			log.Debugf("skipping stale auth update for %s: incoming gen=%d, existing gen=%d", auth.ID, auth.Generation, existing.Generation)
+			return existing
+		}
 		auth.CreatedAt = existing.CreatedAt
 		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
@@ -305,6 +342,19 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		auth = current
 	}
 	return auth
+}
+
+// isStaleCoreAuth reports whether an incoming auth update is older than the current
+// state in coreManager, based on registration epoch.
+func isStaleCoreAuth(existing, incoming *coreauth.Auth) bool {
+	if existing == nil || incoming == nil {
+		return false
+	}
+	// If incoming has an explicit registration epoch that is older than existing, it's stale.
+	if incoming.RegistrationEpoch > 0 && incoming.RegistrationEpoch < existing.RegistrationEpoch {
+		return true
+	}
+	return false
 }
 
 func (s *Service) completeModelRegistrationForAuth(ctx context.Context, auth *coreauth.Auth) {

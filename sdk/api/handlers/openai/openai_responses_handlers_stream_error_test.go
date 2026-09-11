@@ -183,7 +183,7 @@ func TestResponsesStreamErrorPreservesExtensions(t *testing.T) {
 }
 
 func TestResponsesStreamErrorRedactsSensitiveExtensions(t *testing.T) {
-	for _, key := range []string{"client_secret", "clientSecret", "password", "passwd", "cookie", "Set-Cookie", "Proxy-Authorization", "X-Api-Key", "private_key", "id_token", "authToken", "credentials"} {
+	for _, key := range []string{"client_secret", "clientSecret", "secret_access_key", "secretAccessKey", "password", "passwd", "cookie", "Set-Cookie", "Proxy-Authorization", "X-Api-Key", "private_key", "id_token", "authToken", "credentials"} {
 		for _, value := range []any{"fixture-sensitive-value", []any{"fixture-sensitive-value"}, map[string]any{"value": "fixture-sensitive-value"}} {
 			body, err := json.Marshal(map[string]any{"error": map[string]any{"message": "failed", "future": []any{map[string]any{key: value, "retry": true}}}})
 			if err != nil {
@@ -194,6 +194,43 @@ func TestResponsesStreamErrorRedactsSensitiveExtensions(t *testing.T) {
 				t.Errorf("sensitive field %q not safely preserved: %s", key, text)
 			}
 		}
+	}
+}
+
+func TestResponsesStreamErrorNormalizesCoreFieldsOnly(t *testing.T) {
+	const fields = `"type":false,"code":429,"message":123,"param":null,"future":{"type":false,"code":429,"message":123,"id":9007199254740993}`
+	for _, body := range []string{`{"error":{` + fields + `}}`, `{"response":{"error":{` + fields + `}},"sequence_number":7}`, `{` + fields + `}`} {
+		t.Run(body[:16], func(t *testing.T) {
+			text := responsesStreamErrorText(&interfaces.ErrorMessage{Error: errors.New(body)}, http.StatusTooManyRequests)
+			root := gjson.Parse(text)
+			if root.Get("error").IsObject() {
+				root = root.Get("error")
+			}
+			for field, want := range map[string]string{"type": "false", "code": "429", "message": "123"} {
+				value := root.Get(field)
+				if value.Type != gjson.String || value.String() != want {
+					t.Errorf("core %s = %s, want string %q", field, value.Raw, want)
+				}
+			}
+			for field, want := range map[string]string{"param": "null", "future.type": "false", "future.code": "429", "future.message": "123", "future.id": "9007199254740993"} {
+				if got := root.Get(field).Raw; got != want {
+					t.Errorf("extension %s = %s, want %s", field, got, want)
+				}
+			}
+			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(http.StatusTooManyRequests, text, 1)
+			var event struct {
+				Response struct {
+					Error struct {
+						Type    *string `json:"type"`
+						Code    *string `json:"code"`
+						Message *string `json:"message"`
+					} `json:"error"`
+				} `json:"response"`
+			}
+			if err := json.Unmarshal(chunk, &event); err != nil {
+				t.Fatalf("terminal error violates string core fields: %v", err)
+			}
+		})
 	}
 }
 
@@ -226,6 +263,41 @@ func TestResponsesStreamErrorBoundsExtensions(t *testing.T) {
 				t.Fatalf("invalid terminal fallback: %s", chunk)
 			}
 		})
+	}
+}
+
+func TestResponsesStreamErrorPreservesMissingAndNullCoreFields(t *testing.T) {
+	for _, fields := range []string{``, `"type":null,"code":null,"message":null`} {
+		body := `{"error":{` + fields + `}}`
+		text := responsesStreamErrorText(&interfaces.ErrorMessage{Error: errors.New(body)}, http.StatusBadGateway)
+		for _, field := range []string{"type", "code", "message"} {
+			value := gjson.Get(text, "error."+field)
+			if fields == "" && value.Exists() || fields != "" && value.Raw != "null" {
+				t.Errorf("missing/null %s changed: %s", field, text)
+			}
+		}
+	}
+}
+
+func TestResponsesStreamErrorSanitizesCoreContainersBeforeCoercion(t *testing.T) {
+	for _, value := range []string{`{"secretAccessKey":"fixture secret","retry":true}`, `[{"secret_access_key":"fixture secret","retry":true}]`} {
+		body := `{"error":{"message":` + value + `}}`
+		text := responsesStreamErrorText(&interfaces.ErrorMessage{Error: errors.New(body)}, http.StatusBadGateway)
+		message := gjson.Get(text, "error.message")
+		if message.Type != gjson.String || strings.Contains(message.String(), "fixture") || !strings.Contains(message.String(), "[REDACTED]") || !strings.Contains(message.String(), `"retry":true`) {
+			t.Errorf("core container was not sanitized before coercion: %s", text)
+		}
+	}
+	for _, field := range []string{"message", "sequence_number"} {
+		value := `[` + strings.Repeat(`null,`, 599) + `null]`
+		body := `{"error":{"message":` + value + `}}`
+		if field == "sequence_number" {
+			body = `{"error":{"message":"failed"},"sequence_number":` + value + `}`
+		}
+		text := responsesStreamErrorText(&interfaces.ErrorMessage{Error: errors.New(body)}, http.StatusBadGateway)
+		if text != http.StatusText(http.StatusBadGateway) {
+			t.Errorf("%s escaped the traversal budget: %d bytes", field, len(text))
+		}
 	}
 }
 
@@ -599,8 +671,11 @@ func TestForwardResponsesStreamExposesTerminalErrors(t *testing.T) {
 			if exposed != tc.wantExposed {
 				t.Fatalf("error exposed = %t, want %t: %q", exposed, tc.wantExposed, body)
 			}
-			if exposed && strings.Contains(body, `"error":{`) {
+			if exposed && !strings.Contains(body, "event: error\ndata: ") {
 				t.Fatalf("expected streaming error chunk, got HTTP error body: %q", body)
+			}
+			if exposed && !strings.Contains(body, `"error":{`) {
+				t.Fatalf("expected nested error in streaming error chunk, got: %q", body)
 			}
 		})
 	}
@@ -766,7 +841,7 @@ func testForwardResponsesStreamNestedError(t *testing.T, userAgent string) {
 	framer.WriteChunk(c.Writer, []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
 	data := make(chan []byte)
 	errs := make(chan *interfaces.ErrorMessage, 1)
-	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New(`{"type":"response.failed","response":{"error":{"type":"server_error","code":"upstream_failed","message":"nested response failure","param":null,"future":{"id":9007199254740993,"retry":true,"token":"private-nested-token"}}}}`)}
+	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New(`{"type":"response.failed","response":{"error":{"type":"server_error","code":"upstream_failed","message":"nested response failure","param":null,"future":{"id":9007199254740993,"retry":true,"token":"private-nested-token","secret_access_key":"private-access-key","secretAccessKey":"private-camel-access-key"}}}}`)}
 	close(errs)
 
 	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, framer)
@@ -777,16 +852,21 @@ func testForwardResponsesStreamNestedError(t *testing.T, userAgent string) {
 			t.Fatalf("response.failed lost nested response error field %q: %q", want, body)
 		}
 	}
-	if strings.Contains(body, "private-nested-token") {
-		t.Fatal("upstream error secret reached the client")
+	loggedValue, _ := c.Get("API_RESPONSE_ERROR")
+	loggedErrors, ok := loggedValue.([]*interfaces.ErrorMessage)
+	if !ok || len(loggedErrors) != 1 || loggedErrors[0].Error == nil {
+		t.Fatal("missing sanitized error diagnostic")
+	}
+	for _, secret := range []string{"private-nested-token", "private-access-key", "private-camel-access-key"} {
+		if strings.Contains(body, secret) || strings.Contains(loggedErrors[0].Error.Error(), secret) {
+			t.Fatal("upstream error secret reached the client or diagnostic")
+		}
 	}
 	if userAgent == "" {
-		if !strings.Contains(body, "event: error\n") || strings.Contains(body, "response.failed") || strings.Contains(body, "future") {
+		if !strings.Contains(body, "event: error\n") || strings.Contains(body, "response.failed") {
 			t.Fatalf("generic Responses error envelope changed: %s", body)
 		}
-		return
-	}
-	if !strings.Contains(body, "event: response.failed\n") || !strings.Contains(body, "server_error") {
+	} else if !strings.Contains(body, "event: response.failed\n") || !strings.Contains(body, "server_error") {
 		t.Fatalf("native error envelope changed: %s", body)
 	}
 	for _, want := range []string{`"id":9007199254740993`, `"retry":true`, `"param":null`, `"token":"[REDACTED]"`} {

@@ -1337,8 +1337,9 @@ func applyCloakingInternal(
 	isSubagent := false
 	prevReq := ""
 	promptID := ""
+	var incomingHeaders http.Header
 	if !isProbeOrHelper {
-		incomingHeaders := resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
+		incomingHeaders = resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
 		isSubagent = helps.IsClaudeSubagentRequest(incomingHeaders, payload)
 		existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(payload)
 
@@ -1402,9 +1403,10 @@ func applyCloakingInternal(
 		}
 	}
 
-	// Probes and subagents never use 1h cache in native Claude Code; ensure any
-	// caller-supplied 1h ttl is stripped to match extended-cache-ttl beta suppression.
-	if isSubagent || isProbeOrHelper {
+	// Probes never use 1h cache in native Claude Code; ensure any caller-supplied
+	// 1h ttl is stripped to match extended-cache-ttl beta suppression. Subagents
+	// preserve caller-requested 1h cache TTL (e.g. subagentPromptCacheTtl: 1h).
+	if isProbeOrHelper || (isSubagent && !helps.ClaudeSubagentRequests1h(incomingHeaders, payload)) {
 		payload = stripClaudeCacheControlTTL(payload)
 	}
 

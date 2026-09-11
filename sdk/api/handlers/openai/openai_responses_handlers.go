@@ -191,11 +191,19 @@ func (f *responsesSSEFramer) repairErrorPayload(payload []byte) []byte {
 	}
 	f.terminalEvent = failureEvent
 	errText := responsesStreamErrorText(errMsg, status)
+	seq := 0
+	if s := gjson.GetBytes(payload, "sequence_number"); s.Exists() {
+		seq = int(s.Int())
+	} else if origSeq := gjson.Get(errText, "sequence_number"); origSeq.Exists() {
+		seq = int(origSeq.Int())
+	} else if f != nil && f.dataFrames > 0 {
+		seq = f.dataFrames - 1
+	}
 	if failureEvent == "response.failed" {
-		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, 0)
+		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
 		return []byte(fmt.Sprintf("event: response.failed\ndata: %s\n\n", chunk))
 	}
-	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, seq)
 	return []byte(fmt.Sprintf("event: error\ndata: %s\n\n", chunk))
 }
 
@@ -796,7 +804,7 @@ const (
 	responsesStreamErrorSizeLimit    = 16 * 1024
 	responsesStreamErrorDepthLimit   = 16
 	responsesStreamErrorNodeLimit    = 256
-	responsesStreamSensitiveKeys     = `(?:x[_-]?)?api[_-]?key|(?:access|refresh|id|auth|session)[_-]?token|token|(?:proxy[_-]?)?authorization|(?:client[_-]?)?secret|password|passwd|(?:set[_-]?)?cookies?|credentials?|private[_-]?key`
+	responsesStreamSensitiveKeys     = `(?:x[_-]?)?api[_-]?key|(?:access|refresh|id|auth|session)[_-]?token|token|(?:proxy[_-]?)?authorization|(?:client[_-]?)?secret|secret[_-]?access[_-]?key|password|passwd|(?:set[_-]?)?cookies?|credentials?|private[_-]?key`
 )
 
 var (
@@ -822,44 +830,65 @@ func sanitizeResponsesStreamEventName(eventName string) string {
 	return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(strings.TrimSpace(eventName)), responsesStreamErrorFieldLimit)
 }
 
-func sanitizeResponsesStreamErrorValue(value gjson.Result, field string, depth int, remaining *int) (any, bool) {
+func isResponsesStreamSensitiveKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	k = strings.ReplaceAll(k, "-", "_")
+	if responsesStreamSensitiveKeyPattern.MatchString(k) {
+		return true
+	}
+	if strings.Contains(k, "tokens") || strings.Contains(k, "token_count") || strings.Contains(k, "token_limit") || strings.Contains(k, "token_usage") {
+		return false
+	}
+	switch k {
+	case "authorization", "secret", "password", "passwd", "api_key", "apikey", "token", "access_token", "refresh_token", "id_token", "auth_token", "session_token", "api_token", "client_secret", "client_key":
+		return true
+	}
+	return strings.HasSuffix(k, "_secret") ||
+		strings.HasSuffix(k, "_password") ||
+		strings.HasSuffix(k, "_api_key") ||
+		strings.HasSuffix(k, "_token")
+}
+
+func sanitizeResponsesStreamErrorNode(val any, field string, depth int, remaining *int) (any, bool) {
 	if depth >= responsesStreamErrorDepthLimit || *remaining <= 0 {
 		return nil, false
 	}
 	*remaining -= 1
-	if responsesStreamSensitiveKeyPattern.MatchString(strings.TrimSpace(field)) {
+	if isResponsesStreamSensitiveKey(field) {
 		return "[REDACTED]", true
 	}
-	if value.IsObject() {
-		safe := make(map[string]any)
-		ok := true
-		value.ForEach(func(key, child gjson.Result) bool {
-			safe[key.String()], ok = sanitizeResponsesStreamErrorValue(child, key.String(), depth+1, remaining)
-			return ok
-		})
-		return safe, ok
-	}
-	if value.IsArray() {
-		safe := make([]any, 0)
-		ok := true
-		value.ForEach(func(_, child gjson.Result) bool {
-			var sanitized any
-			sanitized, ok = sanitizeResponsesStreamErrorValue(child, field, depth+1, remaining)
-			if ok {
-				safe = append(safe, sanitized)
+	switch v := val.(type) {
+	case string:
+		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(v), responsesStreamErrorMessageLimit), true
+	case map[string]any:
+		cleaned := make(map[string]any)
+		for k, item := range v {
+			sanitized, ok := sanitizeResponsesStreamErrorNode(item, k, depth+1, remaining)
+			if !ok {
+				return nil, false
 			}
-			return ok
-		})
-		return safe, ok
-	}
-	if value.Type == gjson.String {
-		limit := responsesStreamErrorFieldLimit
-		if field == "message" {
-			limit = responsesStreamErrorMessageLimit
+			cleaned[k] = sanitized
 		}
-		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(value.String()), limit), true
+		val = cleaned
+	case []any:
+		cleaned := make([]any, 0)
+		for _, item := range v {
+			sanitized, ok := sanitizeResponsesStreamErrorNode(item, "", depth+1, remaining)
+			if !ok {
+				return nil, false
+			}
+			cleaned = append(cleaned, sanitized)
+		}
+		val = cleaned
 	}
-	return json.RawMessage(value.Raw), true
+	if depth == 1 && val != nil && (field == "type" || field == "code" || field == "message") {
+		encoded, errMarshal := json.Marshal(val)
+		if errMarshal != nil {
+			return nil, false
+		}
+		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(string(encoded)), responsesStreamErrorMessageLimit), true
+	}
+	return val, true
 }
 
 func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) string {
@@ -867,43 +896,56 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 	if errMsg != nil && errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 		text = strings.TrimSpace(errMsg.Error.Error())
 	}
-	if len(text) > responsesStreamErrorSizeLimit {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) > responsesStreamErrorSizeLimit {
 		return http.StatusText(status)
 	}
-	if !json.Valid([]byte(text)) {
-		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(text), responsesStreamErrorMessageLimit)
+	if !json.Valid([]byte(trimmed)) {
+		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(trimmed), responsesStreamErrorMessageLimit)
 	}
 
-	root := gjson.Parse(text)
-	errorNode := root.Get("error")
-	if !errorNode.Exists() || !errorNode.IsObject() {
-		errorNode = root.Get("response.error")
-	}
-	if errorNode.IsObject() {
-		root = errorNode
-	} else if !root.Get("code").Exists() && !root.Get("message").Exists() && !root.Get("param").Exists() {
-		return http.StatusText(status)
+	var root map[string]any
+	dec := json.NewDecoder(bytes.NewReader([]byte(trimmed)))
+	dec.UseNumber()
+	if errUnmarshal := dec.Decode(&root); errUnmarshal != nil {
+		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(trimmed), responsesStreamErrorMessageLimit)
 	}
 
+	errorNode, hasError := root["error"].(map[string]any)
+	if !hasError {
+		if resp, ok := root["response"].(map[string]any); ok {
+			errorNode, hasError = resp["error"].(map[string]any)
+		}
+	}
+
+	selected := root
+	if hasError {
+		selected = errorNode
+	}
 	remaining := responsesStreamErrorNodeLimit
-	sanitized, ok := sanitizeResponsesStreamErrorValue(root, "", 0, &remaining)
+	cleaned, ok := sanitizeResponsesStreamErrorNode(selected, "", 0, &remaining)
 	if !ok {
 		return http.StatusText(status)
 	}
-	if errorNode.IsObject() {
-		sanitized = map[string]any{"error": sanitized}
+	if hasError {
+		out := map[string]any{
+			"error": cleaned,
+		}
+		if seq, ok := root["sequence_number"]; ok {
+			sanitized, ok := sanitizeResponsesStreamErrorNode(seq, "sequence_number", 1, &remaining)
+			if !ok {
+				return http.StatusText(status)
+			}
+			out["sequence_number"] = sanitized
+		}
+		cleaned = out
 	}
-	safe, errMarshal := json.Marshal(sanitized)
-	if errMarshal != nil {
-		return http.StatusText(status)
+
+	data, errMarshal := json.Marshal(cleaned)
+	if errMarshal == nil && len(data) <= responsesStreamErrorSizeLimit {
+		return string(data)
 	}
-	if !errorNode.IsObject() {
-		safe, _ = sjson.SetBytes(safe, "type", "error")
-	}
-	if len(safe) > responsesStreamErrorSizeLimit {
-		return http.StatusText(status)
-	}
-	return string(safe)
+	return http.StatusText(status)
 }
 
 type responsesStreamSanitizedError struct {
@@ -979,12 +1021,19 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		if framer.terminalEvent != "" {
 			return
 		}
+		seq := 0
+		if framer != nil {
+			seq = framer.dataFrames
+		}
+		if origSeq := gjson.Get(errText, "sequence_number"); origSeq.Exists() {
+			seq = int(origSeq.Int())
+		}
 		if isCodexResponsesClientRequest(c) {
-			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, 0)
+			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
 			_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
 			return
 		}
-		chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+		chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, seq)
 		_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
 	}
 

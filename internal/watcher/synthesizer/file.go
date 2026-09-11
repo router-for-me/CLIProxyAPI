@@ -129,6 +129,12 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 					}
 					auth.Metadata["disabled"] = true
 				}
+				if p, ok := metadata["proxy_url"].(string); ok && auth.ProxyURL == "" {
+					auth.ProxyURL = strings.TrimSpace(p)
+				}
+				if pref, ok := metadata["prefix"].(string); ok && auth.Prefix == "" {
+					auth.Prefix = strings.Trim(strings.TrimSpace(pref), "/")
+				}
 				if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
 					return nil, fmt.Errorf("invalid plugin auth weight in %s: %w", filepath.Base(fullPath), errWeight)
 				}

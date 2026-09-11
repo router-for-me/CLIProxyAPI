@@ -27,6 +27,13 @@ const (
 type ModelInfo struct {
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
+	// MetadataModelID identifies the canonical model used to resolve client metadata.
+	// It is internal and must not be exposed in model-list responses.
+	MetadataModelID string `json:"-"`
+	// ExplicitThinking indicates thinking/reasoning configuration was explicitly configured for this model.
+	ExplicitThinking bool `json:"-"`
+	// ExplicitInputModalities indicates input modalities were explicitly configured for this model.
+	ExplicitInputModalities bool `json:"-"`
 	// Object type for the model (typically "model")
 	Object string `json:"object"`
 	// Created timestamp when the model was created
@@ -348,7 +355,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		// Pure addition path.
 		for _, modelID := range rawModelIDs {
 			model := newModels[modelID]
-			r.addModelRegistration(modelID, provider, model, now)
+			r.addModelRegistration(modelID, provider, model, now, clientID)
 		}
 		r.clientModels[clientID] = append([]string(nil), rawModelIDs...)
 		// Store client's own model infos
@@ -411,6 +418,9 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 						}
 					} else {
 						reg.Providers[oldProvider] = count - toRemove
+						if reg.InfoByProvider != nil && reg.InfoByProvider[oldProvider] != nil {
+							reg.InfoByProvider[oldProvider].SupportsWebSearch = r.hasClientSupportingWebSearchLocked(id, oldProvider, clientID)
+						}
 					}
 				}
 			}
@@ -445,7 +455,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		model := newModels[id]
 		diff := newCount - oldCount
 		for i := 0; i < diff; i++ {
-			r.addModelRegistration(id, provider, model, now)
+			r.addModelRegistration(id, provider, model, now, clientID)
 		}
 	}
 
@@ -457,12 +467,19 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	for _, id := range uniqueModelIDs {
 		model := newModels[id]
 		if reg, ok := r.models[id]; ok {
+			hasWebSearch := model.SupportsWebSearch || r.hasClientSupportingWebSearchLocked(id, "", clientID)
 			reg.Info = cloneModelInfo(model)
+			reg.Info.SupportsWebSearch = hasWebSearch
 			if provider != "" {
 				if reg.InfoByProvider == nil {
 					reg.InfoByProvider = make(map[string]*ModelInfo)
 				}
+				hasProvWebSearch := model.SupportsWebSearch || r.hasClientSupportingWebSearchLocked(id, provider, clientID)
 				reg.InfoByProvider[provider] = cloneModelInfo(model)
+				reg.InfoByProvider[provider].SupportsWebSearch = hasProvWebSearch
+			}
+			if providerChanged && oldProvider != "" && reg.InfoByProvider != nil && reg.InfoByProvider[oldProvider] != nil {
+				reg.InfoByProvider[oldProvider].SupportsWebSearch = r.hasClientSupportingWebSearchLocked(id, oldProvider, clientID)
 			}
 			reg.LastUpdated = now
 			// Re-registering an existing client/model binding starts a fresh registry
@@ -520,14 +537,16 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	misc.LogCredentialSeparator()
 }
 
-func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *ModelInfo, now time.Time) {
+func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *ModelInfo, now time.Time, excludeClientID string) {
 	if model == nil || modelID == "" {
 		return
 	}
 	if existing, exists := r.models[modelID]; exists {
 		existing.Count++
 		existing.LastUpdated = now
+		hasWebSearch := model.SupportsWebSearch || r.hasClientSupportingWebSearchLocked(modelID, "", excludeClientID)
 		existing.Info = cloneModelInfo(model)
+		existing.Info.SupportsWebSearch = hasWebSearch
 		if existing.SuspendedClients == nil {
 			existing.SuspendedClients = make(map[string]string)
 		}
@@ -539,7 +558,9 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 				existing.Providers = make(map[string]int)
 			}
 			existing.Providers[provider]++
+			hasProvWebSearch := model.SupportsWebSearch || r.hasClientSupportingWebSearchLocked(modelID, provider, excludeClientID)
 			existing.InfoByProvider[provider] = cloneModelInfo(model)
+			existing.InfoByProvider[provider].SupportsWebSearch = hasProvWebSearch
 		}
 		log.Debugf("Incremented count for model %s, now %d clients", modelID, existing.Count)
 		return
@@ -593,6 +614,13 @@ func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider stri
 	if registration.Count <= 0 {
 		delete(r.models, modelID)
 		log.Debugf("Removed model %s as no clients remain", modelID)
+	} else {
+		if registration.Info != nil {
+			registration.Info.SupportsWebSearch = r.hasClientSupportingWebSearchLocked(modelID, "", clientID)
+		}
+		if provider != "" && registration.InfoByProvider != nil && registration.InfoByProvider[provider] != nil {
+			registration.InfoByProvider[provider].SupportsWebSearch = r.hasClientSupportingWebSearchLocked(modelID, provider, clientID)
+		}
 	}
 }
 
@@ -713,6 +741,13 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 			if registration.Count <= 0 {
 				delete(r.models, modelID)
 				log.Debugf("Removed model %s as no clients remain", modelID)
+			} else {
+				if registration.Info != nil {
+					registration.Info.SupportsWebSearch = r.hasClientSupportingWebSearchLocked(modelID, "", clientID)
+				}
+				if hasProvider && registration.InfoByProvider != nil && registration.InfoByProvider[provider] != nil {
+					registration.InfoByProvider[provider].SupportsWebSearch = r.hasClientSupportingWebSearchLocked(modelID, provider, clientID)
+				}
 			}
 		}
 	}
@@ -893,6 +928,62 @@ func (r *ModelRegistry) ApplyClientModelProjections(clientID string, epoch uint6
 		r.invalidateAvailableModelsCacheLocked()
 	}
 	return true
+}
+
+// ApplyClientModelCapabilities applies capability mutations to matching models of clientID
+// if the client is currently registered and its registration epoch matches expectedEpoch.
+// Returns true if applied, false if client is unregistered or epoch changed.
+func (r *ModelRegistry) ApplyClientModelCapabilities(clientID string, expectedEpoch uint64, mutate func(modelID string, info *ModelInfo)) bool {
+	if r == nil || mutate == nil {
+		return false
+	}
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return false
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	if r.clientEpochs == nil || r.clientEpochs[clientID] != expectedEpoch {
+		return false
+	}
+	clientInfos, exists := r.clientModelInfos[clientID]
+	if !exists || len(clientInfos) == 0 {
+		return false
+	}
+
+	provider := r.clientProviders[clientID]
+	for id, info := range clientInfos {
+		if info != nil {
+			mutate(id, info)
+			if reg, okReg := r.models[id]; okReg && reg != nil {
+				hasWebSearch := r.hasClientSupportingWebSearchLocked(id, "", "")
+				if reg.Info != nil {
+					reg.Info.SupportsWebSearch = hasWebSearch
+				}
+				if provider != "" && reg.InfoByProvider != nil && reg.InfoByProvider[provider] != nil {
+					reg.InfoByProvider[provider].SupportsWebSearch = r.hasClientSupportingWebSearchLocked(id, provider, "")
+				}
+			}
+		}
+	}
+	r.invalidateAvailableModelsCacheLocked()
+	return true
+}
+
+func (r *ModelRegistry) hasClientSupportingWebSearchLocked(modelID, provider, excludeClientID string) bool {
+	for cID, infos := range r.clientModelInfos {
+		if cID == excludeClientID {
+			continue
+		}
+		if provider != "" && r.clientProviders[cID] != provider {
+			continue
+		}
+		if info, ok := infos[modelID]; ok && info != nil && info.SupportsWebSearch {
+			return true
+		}
+	}
+	return false
 }
 
 // SuspendClientModel marks a client's model as temporarily unavailable until explicitly resumed.

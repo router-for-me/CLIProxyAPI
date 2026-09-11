@@ -173,6 +173,13 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						thoughtSignatureResult = partResult.Get("thought_signature")
 					}
 
+					// Speech-to-text models (gemini-3.5-transcribe) deliver the
+					// transcript in an audioTranscription part instead of text.
+					audioTranscriptionResult := partResult.Get("audioTranscription")
+					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
+						partTextResult = audioTranscriptionResult.Get("text")
+					}
+
 					hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
 					hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
 
@@ -369,6 +376,13 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 						inlineDataResult = partResult.Get("inline_data")
 					}
 
+					// Speech-to-text models (gemini-3.5-transcribe) deliver the
+					// transcript in an audioTranscription part instead of text.
+					audioTranscriptionResult := partResult.Get("audioTranscription")
+					if audioTranscriptionResult.Exists() && !partTextResult.Exists() {
+						partTextResult = audioTranscriptionResult.Get("text")
+					}
+
 					if partTextResult.Exists() {
 						// Append text content, distinguishing between regular content and reasoning.
 						if partResult.Get("thought").Bool() {
@@ -409,11 +423,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 				}
 
 				if hasTextContent {
-					if !hasReasoningContent && len(partsResults) == 1 && len(toolCalls) == 0 && len(images) == 0 {
-						choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.content", partsResults[0].Get("text").String())
-					} else {
-						choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.content", textContent.String())
-					}
+					choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.content", textContent.String())
 				}
 				if hasReasoningContent {
 					choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.reasoning_content", reasoningContent.String())
