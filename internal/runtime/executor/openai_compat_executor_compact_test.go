@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1207,23 +1208,49 @@ func TestOpenAICompatExecutorStreamDropsChunksAfterDone(t *testing.T) {
 }
 
 func TestOpenAICompatExecutorStreamMeasuresTTFTAfterMultilineSSEFrame(t *testing.T) {
+	// Coordinate server writes with client consumption so CI load cannot collapse
+	// the content-frame TTFT and the terminal usage frame into the same instant
+	// (which made latency-TTFT near zero and blew up tokens_per_second).
+	contentSeen := make(chan struct{})
+	var contentOnce sync.Once
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		flusher, _ := w.(http.Flusher)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "expected flusher", http.StatusInternalServerError)
+			return
+		}
 		// Split one valid JSON chat chunk across two data: lines at a JSON whitespace boundary.
 		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[\n"))
-		if flusher != nil {
-			flusher.Flush()
-		}
-		time.Sleep(30 * time.Millisecond)
+		flusher.Flush()
+		// Complete the multiline frame immediately — no wall-clock sleep before the client
+		// has started reading. TTFT must be measured on the joined SSE frame, not fragments.
 		_, _ = w.Write([]byte("data: {\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"))
-		if flusher != nil {
-			flusher.Flush()
+		flusher.Flush()
+
+		// Wait until the client has observed the assembled content chunk (TTFT recorded).
+		select {
+		case <-contentSeen:
+		case <-r.Context().Done():
+			return
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for client to observe assembled content chunk")
+			return
 		}
-		time.Sleep(40 * time.Millisecond)
+
+		// Open a generation window only after TTFT is known. Barrier-ordered timer avoids
+		// the prior race where both sleeps elapsed before the client parsed anything.
+		select {
+		case <-time.After(50 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+
 		// Terminal usage-only chunk (no finish_reason) — TPS must use TTFT from assembled content.
 		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":200,\"total_tokens\":210}}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
 	}))
 	defer server.Close()
 
@@ -1252,6 +1279,7 @@ func TestOpenAICompatExecutorStreamMeasuresTTFTAfterMultilineSSEFrame(t *testing
 		payload := string(chunk.Payload)
 		if gjson.Get(payload, "choices.0.delta.content").String() == "hello" {
 			sawContent = true
+			contentOnce.Do(func() { close(contentSeen) })
 		}
 		if v := gjson.Get(payload, "usage.tokens_per_second"); v.Exists() {
 			tps = v.Float()
