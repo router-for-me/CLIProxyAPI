@@ -15,10 +15,11 @@ import (
 // or is intentionally running without local credentials (Home / empty config).
 // It uses cached auth state only and never issues live upstream calls.
 func evaluateReadiness(cfg *config.Config, manager *auth.Manager) (ready bool, reason string, usable int, total int) {
+	requireWeight := readinessRequiresPositiveWeight(cfg)
 	if manager != nil {
 		for _, entry := range manager.List() {
 			total++
-			if authIsUsable(entry) {
+			if authIsUsable(entry, requireWeight) {
 				usable++
 			}
 		}
@@ -35,16 +36,23 @@ func evaluateReadiness(cfg *config.Config, manager *auth.Manager) (ready bool, r
 	return false, "no_usable_auth", usable, total
 }
 
-func authIsUsable(entry *auth.Auth) bool {
-	if entry == nil || entry.Disabled || entry.Unavailable {
+func readinessRequiresPositiveWeight(cfg *config.Config) bool {
+	if cfg == nil {
 		return false
 	}
-	switch entry.Status {
-	case auth.StatusError, auth.StatusDisabled, auth.StatusPending:
+	return strings.EqualFold(strings.TrimSpace(cfg.Routing.Strategy), "weighted-round-robin")
+}
+
+// authIsUsable mirrors scheduler admission: availability/selection predicates,
+// plus positive weight when routing.strategy is weighted-round-robin.
+func authIsUsable(entry *auth.Auth, requirePositiveWeight bool) bool {
+	if !auth.IsSelectableCredential(entry) {
 		return false
-	default:
-		return true
 	}
+	if requirePositiveWeight && !auth.HasPositiveCredentialWeight(entry) {
+		return false
+	}
+	return true
 }
 
 func hasConfiguredProviderCredentials(cfg *config.Config) bool {

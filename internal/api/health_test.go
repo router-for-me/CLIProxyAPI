@@ -72,6 +72,44 @@ func TestEvaluateReadiness_ActiveAuthIsReady(t *testing.T) {
 	}
 }
 
+func TestEvaluateReadiness_StatusErrorStillSelectableWhenAvailable(t *testing.T) {
+	manager := auth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &auth.Auth{
+		ID:       "partial.json",
+		Provider: "codex",
+		Status:   auth.StatusError, // parent lifecycle error after model-scoped failure
+		// Unavailable left false because another model remains selectable.
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	ready, reason, usable, total := evaluateReadiness(&config.Config{}, manager)
+	if !ready || reason != "ok" || usable != 1 || total != 1 {
+		t.Fatalf("evaluateReadiness() = ready=%t reason=%q usable=%d total=%d", ready, reason, usable, total)
+	}
+}
+
+func TestEvaluateReadiness_ZeroWeightExcludedUnderWeightedStrategy(t *testing.T) {
+	manager := auth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &auth.Auth{
+		ID:         "zero.json",
+		Provider:   "codex",
+		Status:     auth.StatusActive,
+		Attributes: map[string]string{auth.AttributeWeight: "0"},
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	cfg := &config.Config{Routing: config.RoutingConfig{Strategy: "weighted-round-robin"}}
+	ready, reason, usable, total := evaluateReadiness(cfg, manager)
+	if ready || reason != "no_usable_auth" || usable != 0 || total != 1 {
+		t.Fatalf("weighted evaluateReadiness() = ready=%t reason=%q usable=%d total=%d", ready, reason, usable, total)
+	}
+	// Non-weighted strategies still admit zero-weight credentials.
+	ready, reason, usable, total = evaluateReadiness(&config.Config{Routing: config.RoutingConfig{Strategy: "round-robin"}}, manager)
+	if !ready || reason != "ok" || usable != 1 || total != 1 {
+		t.Fatalf("round-robin evaluateReadiness() = ready=%t reason=%q usable=%d total=%d", ready, reason, usable, total)
+	}
+}
+
 func TestReadyzAndMetricsRoutes(t *testing.T) {
 	auth.ResetUpstreamMetricsForTest()
 

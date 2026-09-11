@@ -10,7 +10,7 @@ import (
 )
 
 func TestUpstreamMetricsResultPaths(t *testing.T) {
-	for _, path := range []string{"local", "home", "ephemeral"} {
+	for _, path := range []string{"local", "home", "ephemeral", "availability-neutral"} {
 		t.Run(path, func(t *testing.T) {
 			ResetUpstreamMetricsForTest()
 			t.Cleanup(ResetUpstreamMetricsForTest)
@@ -24,6 +24,8 @@ func TestUpstreamMetricsResultPaths(t *testing.T) {
 					m.reportHomeResult(context.Background(), result, auth)
 				case "ephemeral":
 					m.recordExecutionResult(context.Background(), result, auth, true)
+				case "availability-neutral":
+					m.recordAvailabilityNeutralResult(context.Background(), result)
 				}
 			}
 			report(Result{AuthID: auth.ID, Success: true})
