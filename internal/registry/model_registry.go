@@ -330,7 +330,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		rawModelIDs = append(rawModelIDs, model.ID)
 		newCounts[model.ID]++
 		if existing, exists := newModels[model.ID]; exists {
-			if merged, changed := mergeCodexWebSearchOverride(existing.CodexWebSearch, model.CodexWebSearch); changed {
+			if merged, changed := MergeCodexWebSearchOverride(existing.CodexWebSearch, model.CodexWebSearch); changed {
 				clone := cloneModelInfo(existing)
 				clone.CodexWebSearch = merged
 				newModels[model.ID] = clone
@@ -675,7 +675,12 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	return &copyModel
 }
 
-func mergeCodexWebSearchOverride(existing, incoming *bool) (*bool, bool) {
+// MergeCodexWebSearchOverride combines two per-model Codex web search overrides
+// for the same model ID. A nil override defers to the other value, while an
+// explicit false wins over true so a pool with any unsupported upstream never
+// advertises web search. It returns the merged value and whether it differs
+// from existing.
+func MergeCodexWebSearchOverride(existing, incoming *bool) (*bool, bool) {
 	if existing == nil {
 		if incoming == nil {
 			return nil, false

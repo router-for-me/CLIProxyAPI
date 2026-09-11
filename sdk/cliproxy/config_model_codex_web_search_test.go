@@ -83,3 +83,52 @@ func TestBuildConfigModelsPropagatesCodexWebSearch(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyModelPrefixesMergesCodexWebSearchOverride(t *testing.T) {
+	trueValue := true
+	falseValue := false
+	models := []*ModelInfo{
+		{ID: "pool-alias", CodexWebSearch: &trueValue},
+		{ID: "pool-alias", CodexWebSearch: &falseValue},
+		{ID: "other-alias", CodexWebSearch: &trueValue},
+		{ID: "other-alias"},
+	}
+
+	out := applyModelPrefixes(models, "team", false)
+	if len(out) != 4 {
+		t.Fatalf("expected 4 models (2 unprefixed + 2 prefixed), got %d", len(out))
+	}
+
+	entryMap := make(map[string]*ModelInfo, len(out))
+	for _, m := range out {
+		entryMap[m.ID] = m
+	}
+
+	// A false entry in the pool must win even when a true entry comes first,
+	// for both the unprefixed and the prefixed IDs.
+	for _, id := range []string{"pool-alias", "team/pool-alias"} {
+		model := entryMap[id]
+		if model == nil || model.CodexWebSearch == nil {
+			t.Fatalf("%s CodexWebSearch = nil, want false", id)
+		}
+		if *model.CodexWebSearch {
+			t.Fatalf("%s CodexWebSearch = true, want false", id)
+		}
+	}
+
+	// A nil override defers to the explicit value.
+	for _, id := range []string{"other-alias", "team/other-alias"} {
+		model := entryMap[id]
+		if model == nil || model.CodexWebSearch == nil {
+			t.Fatalf("%s CodexWebSearch = nil, want true", id)
+		}
+		if !*model.CodexWebSearch {
+			t.Fatalf("%s CodexWebSearch = false, want true", id)
+		}
+	}
+
+	// Merging must not mutate the caller's models.
+	if !*models[0].CodexWebSearch {
+		t.Fatal("input model CodexWebSearch mutated")
+	}
+}
