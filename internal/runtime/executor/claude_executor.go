@@ -132,10 +132,14 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 	helps.LogWithRequestID(ctx).WithFields(fields).Debug("claude executor: sanitized signature history before upstream")
 }
 
-// placeholderExactKeys lists complete documented dummy credentials that should
-// trigger an early error instead of being sent upstream. Matching is exact
-// after trim+lowercase so legitimate keys that only contain these fragments
-// (for example my-your-api-key-1) are not rejected.
+// placeholderExactKeys lists complete documented Claude config/sample
+// credentials that should trigger an early error instead of being sent
+// upstream. Matching is exact after trim+lowercase so legitimate keys that
+// only contain these fragments (for example my-your-api-key-1) are not
+// rejected. Generic words such as changeme/change-me/placeholder/replace_me
+// are intentionally omitted: custom Claude gateways accept arbitrary API keys,
+// and those strings can be valid credentials (consistent with safemode treating
+// changeme/change-me as non-template values).
 var placeholderExactKeys = map[string]struct{}{
 	"your_oauth_token_here":  {},
 	"your_api_key_here":      {},
@@ -144,10 +148,6 @@ var placeholderExactKeys = map[string]struct{}{
 	"your-api-key-2":         {},
 	"your-api-key-3":         {},
 	"your-key":               {},
-	"placeholder":            {},
-	"replace_me":             {},
-	"changeme":               {},
-	"change-me":              {},
 	"sk-atsm":                {},
 	"sk-atsm...":             {},
 	"sk-ant-oat-placeholder": {},

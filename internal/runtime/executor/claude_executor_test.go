@@ -9043,10 +9043,10 @@ func TestIsPlaceholderAPIKey(t *testing.T) {
 		{"your_oauth_token_here", true},
 		{"YOUR_API_KEY_HERE", true},
 		{"sk-ant-oat01-abc123", false},
-		{"placeholder", true},
-		{"replace_me", true},
-		{"changeme", true},
-		{"change-me", true},
+		{"placeholder", false},
+		{"replace_me", false},
+		{"changeme", false},
+		{"change-me", false},
 		{"your-key", true},
 		{"your-api-key", true},
 		{"your-api-key-1", true},
@@ -9059,7 +9059,7 @@ func TestIsPlaceholderAPIKey(t *testing.T) {
 		{"sk-atsm-example", false},
 		{"sk-ant-oat-placeholder", true},
 		{"prefix-placeholder-suffix", false},
-		{"  Placeholder  ", true},
+		{"  your-key  ", true},
 		{"sk-ant-api03-real-key", false},
 		{"", false},
 	}
@@ -9096,7 +9096,7 @@ func TestClaudeExecutor_Execute_RejectsPlaceholderKey(t *testing.T) {
 
 func TestClaudeExecutor_ExecuteStream_RejectsPlaceholderKey(t *testing.T) {
 	auth := &cliproxyauth.Auth{
-		Attributes: map[string]string{"api_key": "placeholder"},
+		Attributes: map[string]string{"api_key": "your-api-key-1"},
 	}
 	cfg := &config.Config{}
 	e := NewClaudeExecutor(cfg)
@@ -9120,7 +9120,7 @@ func TestClaudeExecutor_ExecuteStream_RejectsPlaceholderKey(t *testing.T) {
 
 func TestClaudeExecutor_CountTokens_RejectsPlaceholderKey(t *testing.T) {
 	auth := &cliproxyauth.Auth{
-		Attributes: map[string]string{"api_key": "replace_me"},
+		Attributes: map[string]string{"api_key": "your-key"},
 	}
 	cfg := &config.Config{}
 	e := NewClaudeExecutor(cfg)
@@ -9477,7 +9477,7 @@ func TestClaudeExecutor_HttpRequest_RejectsPlaceholderKey(t *testing.T) {
 
 func TestClaudeExecutor_PrepareRequest_RejectsPlaceholderKey(t *testing.T) {
 	auth := &cliproxyauth.Auth{
-		Attributes: map[string]string{"api_key": "changeme"},
+		Attributes: map[string]string{"api_key": "your-api-key"},
 	}
 	e := NewClaudeExecutor(&config.Config{})
 	req, errNew := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", strings.NewReader(`{}`))
