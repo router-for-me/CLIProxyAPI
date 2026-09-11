@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -728,4 +729,156 @@ func (b *UTF8SplitBuffer) Feed(chunk []byte) string {
 	b.remainder = append(b.remainder, combined[validUntil:]...)
 
 	return string(validBytes)
+}
+
+// DevinUpstreamRequestLog represents the human-readable JSON representation of GetChatMessageRequest for request logs.
+type DevinUpstreamRequestLog struct {
+	Model        string               `json:"model"`
+	SessionID    string               `json:"session_id,omitempty"`
+	CascadeID    string               `json:"cascade_id,omitempty"`
+	SystemPrompt string               `json:"system_prompt,omitempty"`
+	Temperature  *float64             `json:"temperature,omitempty"`
+	MaxTokens    int                  `json:"max_tokens,omitempty"`
+	Prompts      []DevinPromptLogItem `json:"prompts,omitempty"`
+	Tools        []DevinToolLogItem   `json:"tools,omitempty"`
+}
+
+// DevinPromptLogItem represents a single prompt item in the request log.
+type DevinPromptLogItem struct {
+	ID            string              `json:"id,omitempty"`
+	Source        int                 `json:"source"`
+	Role          string              `json:"role,omitempty"`
+	Content       string              `json:"content,omitempty"`
+	Thinking      string              `json:"thinking,omitempty"`
+	Signature     string              `json:"signature,omitempty"`
+	SignatureType string              `json:"signature_type,omitempty"`
+	ToolCalls     []DevinToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID    string              `json:"tool_call_id,omitempty"`
+	Images        []DevinImageLogItem `json:"images,omitempty"`
+}
+
+// DevinImageLogItem represents an image attached to a prompt in the request log.
+type DevinImageLogItem struct {
+	MimeType string `json:"mime_type"`
+	DataLen  int    `json:"data_len"`
+}
+
+// DevinToolLogItem represents a tool declared in the request log.
+type DevinToolLogItem struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+func formatSignatureForLog(sig []byte) string {
+	if len(sig) == 0 {
+		return ""
+	}
+	if bytes.HasPrefix(sig, []byte("sealed.v1.")) {
+		return string(sig)
+	}
+	if utf8.Valid(sig) && isPrintableASCII(sig) {
+		return string(sig)
+	}
+	return base64.StdEncoding.EncodeToString(sig)
+}
+
+func isPrintableASCII(b []byte) bool {
+	for _, c := range b {
+		if c < 32 || c > 126 {
+			return false
+		}
+	}
+	return true
+}
+
+// BuildDevinUpstreamLogBody formats the intermediate interactions and the decoded Devin request
+// into a clear, aligned log body without synthetic wrapping.
+func BuildDevinUpstreamLogBody(
+	interactionsPayload []byte,
+	isInteractionsSource bool,
+	chatModelUID string,
+	systemPrompt string,
+	prompts []DevinPrompt,
+	tools []DevinTool,
+	temp *float64,
+	maxTokens int,
+	sessionID string,
+	cascadeID string,
+) []byte {
+	var promptItems []DevinPromptLogItem
+	for _, p := range prompts {
+		role := "user"
+		switch p.Source {
+		case 2:
+			role = "assistant"
+		case 4:
+			role = "tool"
+		}
+		var imgItems []DevinImageLogItem
+		for _, img := range p.Images {
+			imgItems = append(imgItems, DevinImageLogItem{
+				MimeType: img.MimeType,
+				DataLen:  len(img.Base64Data),
+			})
+		}
+		promptItems = append(promptItems, DevinPromptLogItem{
+			ID:            p.MessageID,
+			Source:        p.Source,
+			Role:          role,
+			Content:       p.Content,
+			Thinking:      p.Thinking,
+			Signature:     formatSignatureForLog(p.Signature),
+			SignatureType: p.SignatureType,
+			ToolCalls:     p.ToolCalls,
+			ToolCallID:    p.ToolCallID,
+			Images:        imgItems,
+		})
+	}
+
+	var toolItems []DevinToolLogItem
+	for _, t := range tools {
+		var params json.RawMessage
+		if len(t.Parameters) > 0 && json.Valid(t.Parameters) {
+			params = json.RawMessage(t.Parameters)
+		}
+		toolItems = append(toolItems, DevinToolLogItem{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters:  params,
+		})
+	}
+
+	devinReq := DevinUpstreamRequestLog{
+		Model:        chatModelUID,
+		SessionID:    sessionID,
+		CascadeID:    cascadeID,
+		SystemPrompt: systemPrompt,
+		Temperature:  temp,
+		MaxTokens:    maxTokens,
+		Prompts:      promptItems,
+		Tools:        toolItems,
+	}
+
+	devinReqJSON, errDevin := json.MarshalIndent(devinReq, "", "  ")
+	if errDevin != nil {
+		devinReqJSON = []byte(fmt.Sprintf(`{"model": %q}`, chatModelUID))
+	}
+
+	var buf bytes.Buffer
+	if !isInteractionsSource && len(interactionsPayload) > 0 {
+		buf.WriteString("=== INTERMEDIATE INTERACTIONS ===\n")
+		var prettyInteractions bytes.Buffer
+		if err := json.Indent(&prettyInteractions, interactionsPayload, "", "  "); err == nil {
+			buf.Write(prettyInteractions.Bytes())
+		} else {
+			buf.Write(interactionsPayload)
+		}
+		buf.WriteString("\n\n=== DEVIN UPSTREAM REQUEST ===\n")
+		buf.Write(devinReqJSON)
+	} else {
+		buf.Write(devinReqJSON)
+	}
+
+	return buf.Bytes()
 }

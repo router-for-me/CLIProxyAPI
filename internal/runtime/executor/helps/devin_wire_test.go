@@ -292,3 +292,85 @@ func appendVarint(dst []byte, v uint64) []byte {
 	dst = append(dst, byte(v))
 	return dst
 }
+
+func TestBuildDevinUpstreamLogBody(t *testing.T) {
+	interactions := []byte(`{"model":"devin/swe-2","input":[{"type":"user_input","content":[{"type":"text","text":"hello"}]}]}`)
+	prompts := []DevinPrompt{
+		{
+			MessageID: "msg-1",
+			Source:    1,
+			Content:   "hello",
+		},
+		{
+			MessageID:     "msg-2",
+			Source:        2,
+			Content:       "hi there",
+			Thinking:      "thinking steps",
+			Signature:     []byte("sealed.v1.abc123xyz"),
+			SignatureType: "sealed",
+		},
+	}
+	tools := []DevinTool{
+		{
+			Name:        "get_weather",
+			Description: "Get weather info",
+			Parameters:  []byte(`{"type":"object"}`),
+		},
+	}
+	temp := 0.5
+
+	// Case 1: from non-interactions source format (e.g. OpenAI chat completions)
+	logBody := BuildDevinUpstreamLogBody(
+		interactions,
+		false,
+		"swe-2-high",
+		"system instruction",
+		prompts,
+		tools,
+		&temp,
+		2048,
+		"sess-123",
+		"casc-456",
+	)
+
+	bodyStr := string(logBody)
+	if !strings.Contains(bodyStr, "=== INTERMEDIATE INTERACTIONS ===") {
+		t.Errorf("expected body to contain intermediate interactions header")
+	}
+	if !strings.Contains(bodyStr, "=== DEVIN UPSTREAM REQUEST ===") {
+		t.Errorf("expected body to contain devin upstream request header")
+	}
+	if !strings.Contains(bodyStr, `"model": "swe-2-high"`) {
+		t.Errorf("expected body to contain model UID swe-2-high")
+	}
+	if !strings.Contains(bodyStr, `"thinking": "thinking steps"`) {
+		t.Errorf("expected body to contain thinking steps")
+	}
+	if !strings.Contains(bodyStr, `"signature": "sealed.v1.abc123xyz"`) {
+		t.Errorf("expected body to contain sealed signature")
+	}
+	if !strings.Contains(bodyStr, `"name": "get_weather"`) {
+		t.Errorf("expected body to contain tool get_weather")
+	}
+
+	// Case 2: direct interactions source
+	logBodyDirect := BuildDevinUpstreamLogBody(
+		interactions,
+		true,
+		"swe-2-high",
+		"system instruction",
+		prompts,
+		tools,
+		&temp,
+		2048,
+		"sess-123",
+		"casc-456",
+	)
+	bodyDirectStr := string(logBodyDirect)
+	if strings.Contains(bodyDirectStr, "=== INTERMEDIATE INTERACTIONS ===") {
+		t.Errorf("direct interactions source should NOT have separate intermediate header")
+	}
+	if !strings.Contains(bodyDirectStr, `"model": "swe-2-high"`) {
+		t.Errorf("expected direct body to contain model UID")
+	}
+}

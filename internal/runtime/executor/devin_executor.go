@@ -222,7 +222,7 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	httpReq, chatModelUID, errPrep := e.prepareDevinHTTPRequest(ctx, auth, req, opts)
+	httpReq, chatModelUID, logBody, errPrep := e.prepareDevinHTTPRequest(ctx, auth, req, opts)
 	if errPrep != nil {
 		return resp, errPrep
 	}
@@ -232,7 +232,7 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		URL:       httpReq.URL.String(),
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      []byte(fmt.Sprintf("[connect-proto GetChatMessage: model=%s]", chatModelUID)),
+		Body:      logBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -283,7 +283,7 @@ func (e *DevinExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	httpReq, chatModelUID, errPrep := e.prepareDevinHTTPRequest(ctx, auth, req, opts)
+	httpReq, chatModelUID, logBody, errPrep := e.prepareDevinHTTPRequest(ctx, auth, req, opts)
 	if errPrep != nil {
 		return nil, errPrep
 	}
@@ -293,7 +293,7 @@ func (e *DevinExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		URL:       httpReq.URL.String(),
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      []byte(fmt.Sprintf("[connect-proto GetChatMessage: model=%s]", chatModelUID)),
+		Body:      logBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -338,17 +338,18 @@ func (e *DevinExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}, nil
 }
 
-func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*http.Request, string, error) {
+func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*http.Request, string, []byte, error) {
 	apiKey, baseURL, deviceSeed := devinAuthCredentials(auth)
 	if apiKey == "" {
-		return nil, "", fmt.Errorf("devin credentials missing: api_key or session_token required")
+		return nil, "", nil, fmt.Errorf("devin credentials missing: api_key or session_token required")
 	}
 	if deviceSeed == "" {
 		deviceSeed = apiKey
 	}
 
 	payload := req.Payload
-	if opts.SourceFormat != "" && opts.SourceFormat != sdktranslator.FormatInteractions {
+	isInteractionsSource := opts.SourceFormat == "" || opts.SourceFormat == sdktranslator.FormatInteractions
+	if !isInteractionsSource {
 		payload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatInteractions, req.Model, payload, opts.Stream)
 	}
 	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, thinkingLevel, budgetTokens := parseInteractionsPayload(payload, opts.OriginalRequest)
@@ -376,19 +377,37 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 		matcher,
 	)
 
+	sanitizedSystemPrompt := systemPrompt
+	if systemPrompt != "" {
+		sanitizedSystemPrompt = helps.SanitizeDevinSystemPrompt(systemPrompt, matcher)
+	}
+
+	logBody := helps.BuildDevinUpstreamLogBody(
+		payload,
+		isInteractionsSource,
+		chatModelUID,
+		sanitizedSystemPrompt,
+		prompts,
+		tools,
+		temp,
+		maxTokens,
+		sessionID,
+		cascadeID,
+	)
+
 	framed := helps.WrapConnectEnvelope(protoBytes)
 	url := strings.TrimRight(baseURL, "/") + helps.DevinChatPath
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(framed))
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 
-	return httpReq, chatModelUID, nil
+	return httpReq, chatModelUID, logBody, nil
 }
 
 func (e *DevinExecutor) streamDevinFrames(
