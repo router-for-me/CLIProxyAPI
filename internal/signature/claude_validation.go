@@ -74,7 +74,7 @@
 //	|     |- Field 6  (bytes):  model_text [required, "claude-" prefixed]
 //	|     |- Field 7  (varint): unknown [optional, observed as 1]
 //	|     |- Field 8  (bytes):  block kind [optional, observed as "thinking"]
-//	|     `- Field 11 (bytes):  context id [optional, canonical UUID]
+//	|     `- Field 11 (bytes):  context id [optional, canonical UUID or positive uint64 decimal]
 //	`- Field 3 (varint): trailer [optional, observed as 1]
 //
 // CAIS validation is structural rather than an exact replay of the observed
@@ -112,6 +112,7 @@ package signature
 import (
 	"encoding/base64"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -733,8 +734,8 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 			if errField != nil {
 				return errField
 			}
-			if !isCanonicalUUID(value) {
-				return fmt.Errorf("invalid Claude CAIS signature: channel field 11 context id must be a canonical UUID, got %q", value)
+			if !isClaudeCAISContextID(value) {
+				return fmt.Errorf("invalid Claude CAIS signature: channel field 11 context id must be a canonical UUID or a positive uint64 decimal string, got %q", value)
 			}
 			info.ContextID = value
 		}
@@ -778,6 +779,20 @@ func decodeClaudeCAISUTF8(raw []byte, typ protowire.Type, label string) (string,
 		return "", fmt.Errorf("invalid Claude CAIS signature: %s must be valid UTF-8", label)
 	}
 	return string(value), nil
+}
+
+// isClaudeCAISContextID reports whether s is a CAIS channel field 11 context
+// id: a canonical UUID, or a positive uint64 decimal string with no sign and
+// no leading zero. Observed Opus-5 / model_hub traffic emits both forms.
+func isClaudeCAISContextID(s string) bool {
+	if isCanonicalUUID(s) {
+		return true
+	}
+	if s == "" || s[0] < '1' || s[0] > '9' {
+		return false
+	}
+	_, err := strconv.ParseUint(s, 10, 64)
+	return err == nil
 }
 
 func isCanonicalUUID(s string) bool {
