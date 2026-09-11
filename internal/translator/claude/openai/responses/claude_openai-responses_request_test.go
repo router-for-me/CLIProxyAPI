@@ -1895,3 +1895,161 @@ func TestConvertOpenAIResponsesRequestToClaude_TextFormatStructuredOutput(t *tes
 		}
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_FunctionCallOutputAlternateIDsAndQueueFallback(t *testing.T) {
+	testCases := []struct {
+		name        string
+		outputField string
+		wantToolUse string
+	}{
+		{
+			name:        "call_id standard",
+			outputField: `"call_id":"call_123"`,
+			wantToolUse: "call_123",
+		},
+		{
+			name:        "tool_call_id alternate field",
+			outputField: `"tool_call_id":"call_123"`,
+			wantToolUse: "call_123",
+		},
+		{
+			name:        "callId alternate field",
+			outputField: `"callId":"call_123"`,
+			wantToolUse: "call_123",
+		},
+		{
+			name:        "id alternate field",
+			outputField: `"id":"call_123"`,
+			wantToolUse: "call_123",
+		},
+		{
+			name:        "missing call_id completely fallback to pending queue",
+			outputField: ``,
+			wantToolUse: "call_123",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			outputJSON := `{"type":"function_call_output","output":"tool_result_ok"`
+			if tc.outputField != "" {
+				outputJSON += `,` + tc.outputField
+			}
+			outputJSON += `}`
+
+			inputJSON := []byte(`{
+				"model": "claude-sonnet-4-6",
+				"input": [
+					{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+					{"type":"function_call","call_id":"call_123","name":"Bash","arguments":"{\"command\":\"ls\"}"},
+					` + outputJSON + `
+				]
+			}`)
+
+			out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+			messages := gjson.GetBytes(out, "messages").Array()
+			if len(messages) != 3 {
+				t.Fatalf("expected 3 messages (user, assistant, user), got %d; output=%s", len(messages), string(out))
+			}
+
+			// Assistant message has tool_use with id call_123
+			toolUse := messages[1].Get("content.0")
+			if toolUse.Get("type").String() != "tool_use" {
+				t.Fatalf("expected tool_use, got %s", toolUse.Raw)
+			}
+			if gotID := toolUse.Get("id").String(); gotID != "call_123" {
+				t.Fatalf("tool_use.id = %q, want call_123", gotID)
+			}
+
+			// User message has tool_result with tool_use_id matching tool_use.id
+			toolResult := messages[2].Get("content.0")
+			if toolResult.Get("type").String() != "tool_result" {
+				t.Fatalf("expected tool_result, got %s", toolResult.Raw)
+			}
+			if gotID := toolResult.Get("tool_use_id").String(); gotID != tc.wantToolUse {
+				t.Fatalf("tool_result.tool_use_id = %q, want %q; output=%s", gotID, tc.wantToolUse, string(out))
+			}
+			if gotContent := toolResult.Get("content").String(); gotContent != "tool_result_ok" {
+				t.Fatalf("tool_result.content = %q, want tool_result_ok", gotContent)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MixedMissingAndExplicitParallelOutputs(t *testing.T) {
+	// Call A, Call B.
+	// Output 1 has NO ID (result B).
+	// Output 2 explicitly has call_id: call_a (result A).
+	// Call A must NOT be stolen by Output 1; Output 1 must get Call B.
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","output":"result_b"},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d; output=%s", len(messages), string(out))
+	}
+
+	results := messages[2].Get("content").Array()
+	if len(results) != 2 {
+		t.Fatalf("expected 2 tool_results, got %d; output=%s", len(results), string(out))
+	}
+
+	resultMap := make(map[string]string)
+	for _, r := range results {
+		resultMap[r.Get("tool_use_id").String()] = r.Get("content").String()
+	}
+
+	if got := resultMap["call_a"]; got != "result_a" {
+		t.Fatalf("result for call_a = %q, want result_a", got)
+	}
+	if got := resultMap["call_b"]; got != "result_b" {
+		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaude_MixedMissingAndExplicitParallelOutputsAcrossUserMessage(t *testing.T) {
+	// Call A, Call B.
+	// Output 1 has NO ID (result B).
+	// Intervening user message.
+	// Output 2 explicitly has call_id: call_a (result A).
+	// Call A must NOT be stolen by Output 1; Output 1 must get Call B.
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","output":"result_b"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"status?"}]},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	resultMap := make(map[string]string)
+	for _, m := range messages {
+		if m.Get("role").String() == "user" {
+			for _, part := range m.Get("content").Array() {
+				if part.Get("type").String() == "tool_result" {
+					resultMap[part.Get("tool_use_id").String()] = part.Get("content").String()
+				}
+			}
+		}
+	}
+
+	if got := resultMap["call_a"]; got != "result_a" {
+		t.Fatalf("result for call_a = %q, want result_a", got)
+	}
+	if got := resultMap["call_b"]; got != "result_b" {
+		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}

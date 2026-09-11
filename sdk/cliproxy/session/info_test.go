@@ -647,3 +647,118 @@ func TestBoundSessionIdentitySafetyAndUniqueness(t *testing.T) {
 		t.Fatalf("bounded lengths = (%d, %d), want <= 256", len(boundedA), len(boundedB))
 	}
 }
+
+func TestExtractSessionInfoEnhancedHarnesses(t *testing.T) {
+	t.Parallel()
+
+	// 1. Roo Code / Cline task headers
+	rooHeaders := http.Header{}
+	rooHeaders.Set("X-Task-ID", "task-child-001")
+	rooHeaders.Set("X-Parent-Task-ID", "task-parent-001")
+	info, ok := ExtractSessionInfo(rooHeaders, nil, nil)
+	if !ok || info.SessionID != "task:task-child-001" || info.ParentSessionID != "task:task-parent-001" || info.ClientType != "task" || info.AgentName != "subagent" {
+		t.Fatalf("Roo Code headers extraction failed: %+v", info)
+	}
+
+	// 2. Roo Code / Cline payload
+	rooPayload := []byte(`{"taskId":"task-child-002","parentTaskId":"task-parent-002"}`)
+	info, ok = ExtractSessionInfo(nil, rooPayload, nil)
+	if !ok || info.SessionID != "task:task-child-002" || info.ParentSessionID != "task:task-parent-002" || info.ClientType != "task" || info.AgentName != "subagent" {
+		t.Fatalf("Roo Code payload extraction failed: %+v", info)
+	}
+
+	// 3. OpenCode parent_id / parentID in payload
+	opencodePayload := []byte(`{"session_id":"opencode-child-100","parent_id":"opencode-parent-100"}`)
+	info, ok = ExtractSessionInfo(nil, opencodePayload, nil)
+	if !ok || info.SessionID != "session:opencode-child-100" || info.ParentSessionID != "session:opencode-parent-100" || info.AgentName != "subagent" {
+		t.Fatalf("OpenCode parent_id extraction failed: %+v", info)
+	}
+
+	opencodePayload2 := []byte(`{"sessionID":"opencode-child-200","parentID":"opencode-parent-200"}`)
+	info, ok = ExtractSessionInfo(nil, opencodePayload2, nil)
+	if !ok || info.SessionID != "session:opencode-child-200" || info.ParentSessionID != "session:opencode-parent-200" {
+		t.Fatalf("OpenCode parentID extraction failed: %+v", info)
+	}
+
+	// 4. OpenClaw forkSource.sessionId & previousSessionId
+	openclawPayload1 := []byte(`{"sessionId":"claw-child-1","forkSource":{"sessionId":"claw-parent-1"}}`)
+	info, ok = ExtractSessionInfo(nil, openclawPayload1, nil)
+	if !ok || info.SessionID != "session:claw-child-1" || info.ParentSessionID != "session:claw-parent-1" || !info.IsFork {
+		t.Fatalf("OpenClaw forkSource extraction failed: %+v", info)
+	}
+
+	openclawPayload2 := []byte(`{"sessionId":"claw-child-2","previousSessionId":"claw-parent-2"}`)
+	info, ok = ExtractSessionInfo(nil, openclawPayload2, nil)
+	if !ok || info.SessionID != "session:claw-child-2" || info.ParentSessionID != "session:claw-parent-2" || !info.IsFork {
+		t.Fatalf("OpenClaw previousSessionId extraction failed: %+v", info)
+	}
+
+	// 5. Hermes Agent child_session_id & parent_subagent_id
+	hermesPayload := []byte(`{"child_session_id":"hermes-child-1","parent_subagent_id":"hermes-parent-1"}`)
+	info, ok = ExtractSessionInfo(nil, hermesPayload, nil)
+	if !ok || info.SessionID != "session:hermes-child-1" || info.ParentSessionID != "session:hermes-parent-1" {
+		t.Fatalf("Hermes Agent extraction failed: %+v", info)
+	}
+
+	// 6. OpenHands action_id & parent_action_id
+	openhandsPayload := []byte(`{"action_id":"openhands-action-1","parent_action_id":"openhands-parent-action"}`)
+	info, ok = ExtractSessionInfo(nil, openhandsPayload, nil)
+	if !ok || info.SessionID != "task:openhands-action-1" || info.ParentSessionID != "task:openhands-parent-action" || info.ClientType != "task" {
+		t.Fatalf("OpenHands action extraction failed: %+v", info)
+	}
+
+	// 7. Pi Coding Agent slot parent & parent_session payload
+	piSlotHeaders := http.Header{}
+	piSlotHeaders.Set("X-Slot-Session-Id", "slot-child-001")
+	piSlotHeaders.Set("X-Parent-Slot-Session-Id", "slot-parent-001")
+	info, ok = ExtractSessionInfo(piSlotHeaders, nil, nil)
+	if !ok || info.SessionID != "slot:slot-child-001" || info.ParentSessionID != "slot:slot-parent-001" || info.ClientType != "pi" || info.AgentName != "subagent" {
+		t.Fatalf("Pi slot parent extraction failed: %+v", info)
+	}
+
+	piPayload := []byte(`{"prompt_cache_key":"pi-pck-001","parent_session":"pi-parent-001"}`)
+	info, ok = ExtractSessionInfo(nil, piPayload, nil)
+	if !ok || info.SessionID != "pck:pi-pck-001" || info.ParentSessionID != "pck:pi-parent-001" {
+		t.Fatalf("Pi parent_session extraction failed: %+v", info)
+	}
+
+	// 8. Claude Code Body metadata.parent_agent_id
+	claudeBody := []byte(`{
+		"metadata": {
+			"user_id": "user_123_acc__session_01a06a06-e830-7da9-a866-98470a94389c",
+			"agent_id": "worker-reviewer",
+			"parent_agent_id": "orchestrator-main"
+		}
+	}`)
+	info, ok = ExtractSessionInfo(nil, claudeBody, nil)
+	if !ok || info.SessionID != "claude:01a06a06-e830-7da9-a866-98470a94389c:agent:worker-reviewer" ||
+		info.ParentSessionID != "claude:01a06a06-e830-7da9-a866-98470a94389c:agent:orchestrator-main" ||
+		info.AgentName != "worker-reviewer" {
+		t.Fatalf("Claude metadata parent_agent_id extraction failed: %+v", info)
+	}
+
+	// 9. Generic universal parent headers
+	genericHeaders := http.Header{}
+	genericHeaders.Set("X-Session-ID", "gen-child-001")
+	genericHeaders.Set("X-Parent-ID", "gen-parent-001")
+	info, ok = ExtractSessionInfo(genericHeaders, nil, nil)
+	if !ok || info.SessionID != "header:gen-child-001" || info.ParentSessionID != "header:gen-parent-001" {
+		t.Fatalf("Generic X-Parent-ID header extraction failed: %+v", info)
+	}
+
+	convHeaders := http.Header{}
+	convHeaders.Set("X-Conversation-Id", "conv-child-001")
+	convHeaders.Set("X-Parent-Conversation-Id", "conv-parent-001")
+	info, ok = ExtractSessionInfo(convHeaders, nil, nil)
+	if !ok || info.SessionID != "conv:conv-child-001" || info.ParentSessionID != "conv:conv-parent-001" {
+		t.Fatalf("Conversation X-Parent-Conversation-Id extraction failed: %+v", info)
+	}
+
+	threadHeaders := http.Header{}
+	threadHeaders.Set("X-Thread-Id", "thread-child-001")
+	threadHeaders.Set("X-Parent-Thread-Id", "thread-parent-001")
+	info, ok = ExtractSessionInfo(threadHeaders, nil, nil)
+	if !ok || info.SessionID != "thread:thread-child-001" || info.ParentSessionID != "thread:thread-parent-001" {
+		t.Fatalf("Thread X-Parent-Thread-Id extraction failed: %+v", info)
+	}
+}

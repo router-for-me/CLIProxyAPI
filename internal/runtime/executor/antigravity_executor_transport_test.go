@@ -915,7 +915,14 @@ func TestCloseAntigravityAuthIdleTransportsEvictsIdlePool(t *testing.T) {
 	}
 
 	scope := antigravityTransportScope(auth)
-	key := antigravityTransportKey{credential: scope, base: antigravityBaseTransport}
+	settings := resolveAntigravityPoolSettings(cfg)
+	key := antigravityTransportKey{
+		credential:          scope,
+		base:                antigravityBaseTransport,
+		shortMode:           settings.shortMode,
+		idleConnTimeout:     settings.idleConnTimeout,
+		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
+	}
 
 	// Verify it's cached
 	if !antigravityTransports.Contains(key) {
@@ -969,7 +976,14 @@ func TestAntigravityCountTokens429EvictsIdleTransports(t *testing.T) {
 	}
 
 	scope := antigravityTransportScope(auth)
-	key := antigravityTransportKey{credential: scope, base: antigravityBaseTransport}
+	settings := resolveAntigravityPoolSettings(cfg)
+	key := antigravityTransportKey{
+		credential:          scope,
+		base:                antigravityBaseTransport,
+		shortMode:           settings.shortMode,
+		idleConnTimeout:     settings.idleConnTimeout,
+		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
+	}
 	if !antigravityTransports.Contains(key) {
 		t.Fatal("expected transport to be in cache before count_tokens")
 	}
@@ -986,5 +1000,41 @@ func TestAntigravityCountTokens429EvictsIdleTransports(t *testing.T) {
 	// Verify transport is evicted
 	if antigravityTransports.Contains(key) {
 		t.Fatal("expected transport to be evicted after 429 in CountTokens")
+	}
+}
+
+// TestAntigravityTransportKeySeparatesPoolSettingsAcrossReload verifies that clients
+// with different connection-pool settings produce distinct cache keys and never share
+// stale transports during hot-reload under load.
+func TestAntigravityTransportKeySeparatesPoolSettingsAcrossReload(t *testing.T) {
+	auth := antigravityAuthWithIDAndProxy("auth-key-separation", "")
+
+	// 1. Client with short connection mode (default enabled: false)
+	cfgShort := &config.Config{}
+	clientShort := newAntigravityHTTPClient(context.Background(), cfgShort, auth, 0)
+
+	// 2. Client with pooled mode (enabled: true)
+	enabledPool := true
+	cfgPooled := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabledPool,
+			},
+		},
+	}
+	clientPooled := newAntigravityHTTPClient(context.Background(), cfgPooled, auth, 0)
+
+	// Transports must NOT be shared because their pool settings keys differ!
+	if clientShort.Transport == clientPooled.Transport {
+		t.Fatal("expected short mode and pooled mode to use distinct transports in cache")
+	}
+
+	trShort := clientShort.Transport.(*http.Transport)
+	trPooled := clientPooled.Transport.(*http.Transport)
+	if trShort.MaxIdleConnsPerHost != -1 {
+		t.Fatalf("short transport MaxIdleConnsPerHost = %d, want -1", trShort.MaxIdleConnsPerHost)
+	}
+	if trPooled.MaxIdleConnsPerHost != antigravityDefaultMaxIdleConnsPerHost {
+		t.Fatalf("pooled transport MaxIdleConnsPerHost = %d, want %d", trPooled.MaxIdleConnsPerHost, antigravityDefaultMaxIdleConnsPerHost)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -610,8 +611,40 @@ func TestUsageQueuePluginPayloadIncludesExplicitSessionHierarchy(t *testing.T) {
 
 		payload := popSinglePayload(t)
 		requireStringField(t, payload, "request_id", "ctx-session-req-1")
-		requireStringField(t, payload, "session_id", "slot:pi-worker-1")
-		requireStringField(t, payload, "parent_session_id", "slot:pi-main-root")
+		wantSession := coresession.NormalizeToCanonicalUUID("slot:pi-worker-1")
+		wantParent := coresession.NormalizeToCanonicalUUID("slot:pi-main-root")
+		requireStringField(t, payload, "session_id", wantSession)
+		requireStringField(t, payload, "parent_session_id", wantParent)
+		if len(wantSession) != 36 || wantSession[14] != '8' {
+			t.Fatalf("expected 36-char UUIDv8 for session_id, got %q", wantSession)
+		}
+		if len(wantParent) != 36 || wantParent[14] != '8' {
+			t.Fatalf("expected 36-char UUIDv8 for parent_session_id, got %q", wantParent)
+		}
+	})
+}
+
+func TestUsageQueuePluginPayloadNormalizesPrefixedNativeUUID(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "ctx-native-uuid-1")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:        "codex",
+			Model:           "gpt-5.6-sol",
+			APIKey:          "test-key",
+			SessionID:       "codex:01a07e72-c84d-7fd3-8207-d217b41cc649",
+			ParentSessionID: "codex:01a07e71-a1b2-7c3d-98e1-f23456789abc",
+			RequestedAt:     time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC),
+			Latency:         1000 * time.Millisecond,
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "session_id", "01a07e72-c84d-7fd3-8207-d217b41cc649")
+		requireStringField(t, payload, "parent_session_id", "01a07e71-a1b2-7c3d-98e1-f23456789abc")
 	})
 }
 
@@ -635,7 +668,8 @@ func TestUsageQueuePluginPayloadPreventsSelfReferentialLoop(t *testing.T) {
 
 		payload := popSinglePayload(t)
 		requireStringField(t, payload, "request_id", "ctx-loop-req-1")
-		requireStringField(t, payload, "session_id", "loop-sess-1")
+		wantSession := coresession.NormalizeToCanonicalUUID("loop-sess-1")
+		requireStringField(t, payload, "session_id", wantSession)
 		if _, exists := payload["parent_session_id"]; exists {
 			t.Fatalf("expected parent_session_id to be omitted on self-referential loop, got %s", payload["parent_session_id"])
 		}
@@ -667,7 +701,8 @@ func TestUsageQueuePluginPayloadSameOriginFallback(t *testing.T) {
 		})
 
 		payload := popSinglePayload(t)
-		requireStringField(t, payload, "session_id", "new-custom-root")
+		wantSession := coresession.NormalizeToCanonicalUUID("new-custom-root")
+		requireStringField(t, payload, "session_id", wantSession)
 		if _, exists := payload["parent_session_id"]; exists {
 			t.Fatalf("expected parent_session_id to be omitted when record is independent root, got %s", payload["parent_session_id"])
 		}

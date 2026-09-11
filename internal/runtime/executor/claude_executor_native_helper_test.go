@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -23,7 +24,7 @@ const (
 	claudeNativeHelperCoreBetas = "oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
 )
 
-func claudeNativeHelperHeaders(betas, compression string, structured bool) http.Header {
+func claudeNativeHelperHeaders(betas, compression string) http.Header {
 	headers := http.Header{
 		"Accept":            {"application/json"},
 		"Accept-Encoding":   {compression},
@@ -43,9 +44,6 @@ func claudeNativeHelperHeaders(betas, compression string, structured bool) http.
 		"X-Stainless-Arch":                          {"arm64"},
 		"X-Stainless-Retry-Count":                   {"0"},
 		"X-Stainless-Timeout":                       {"600"},
-	}
-	if structured {
-		headers.Set("X-Stainless-Async", "async")
 	}
 	canonical := make(http.Header, len(headers))
 	for name, values := range headers {
@@ -121,7 +119,7 @@ func TestClaudeExecutorMinimalNativeHelperPreservesMarkerlessWire(t *testing.T) 
 	defer server.Close()
 
 	payload := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"helper probe"}],"metadata":{"user_id":"` + strings.ReplaceAll(claudeNativeHelperUserID, `"`, `\"`) + `"}}`)
-	headers := claudeNativeHelperHeaders(claudeNativeHelperCoreBetas, "gzip", false)
+	headers := claudeNativeHelperHeaders(claudeNativeHelperCoreBetas, "gzip, deflate, br, zstd")
 	executor := NewClaudeExecutor(&config.Config{})
 	_, errExecute := executor.Execute(context.Background(), claudeNativeHelperOAuthAuth(server.URL), cliproxyexecutor.Request{
 		Model:   "claude-haiku-4-5-20251001",
@@ -165,7 +163,7 @@ func TestClaudeExecutorStructuredNativeHelperPreservesStreamProfile(t *testing.T
 
 	betas := claudeNativeHelperCoreBetas + ",structured-outputs-2025-12-15"
 	payload := []byte(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"helper probe"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.258; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Return a short title."}],"tools":[],"metadata":{"user_id":"` + strings.ReplaceAll(claudeNativeHelperUserID, `"`, `\"`) + `"},"max_tokens":32000,"thinking":{"type":"disabled"},"temperature":1,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}`)
-	headers := claudeNativeHelperHeaders(betas, "gzip, deflate, br, zstd", true)
+	headers := claudeNativeHelperHeaders(betas, "gzip, deflate, br, zstd")
 	executor := NewClaudeExecutor(&config.Config{})
 	result, errStream := executor.ExecuteStream(context.Background(), claudeNativeHelperOAuthAuth(server.URL), cliproxyexecutor.Request{
 		Model:   "claude-haiku-4-5-20251001",
@@ -287,6 +285,66 @@ func TestClaudeBodyNeedsBillingFallbackTracksSystemPresence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := claudeBodyNeedsBillingFallback([]byte(test.body)); got != test.want {
 				t.Fatalf("claudeBodyNeedsBillingFallback() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// A 2.1.258 helper that reaches CPA through ANTHROPIC_BASE_URL carries no
+// x-client-request-id, because the client attaches it only for a first-party base
+// URL. The header must stay absent on a custom upstream instead of being
+// synthesized, while a helper that did carry one keeps its own value.
+func TestApplyClaudeHeadersHelperRequestIDFollowsUpstreamBase(t *testing.T) {
+	const nativeRequestID = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+	for _, test := range []struct {
+		name          string
+		url           string
+		incomingID    string
+		wantGenerated bool
+		wantID        string
+	}{
+		{name: "first party base without caller id", url: "https://api.anthropic.com/v1/messages?beta=true", wantGenerated: true},
+		{name: "custom base without caller id", url: "https://gateway.example.com/v1/messages"},
+		{name: "custom base keeps caller id", url: "https://gateway.example.com/v1/messages", incomingID: nativeRequestID, wantID: nativeRequestID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request, errRequest := http.NewRequest(http.MethodPost, test.url, nil)
+			if errRequest != nil {
+				t.Fatal(errRequest)
+			}
+			incoming := http.Header{}
+			if test.incomingID != "" {
+				incoming.Set("X-Client-Request-Id", test.incomingID)
+			}
+			if errHeaders := applyClaudeHeadersWithNativeProfile(
+				request,
+				&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-api-key"}},
+				"test-api-key",
+				false,
+				nil,
+				[]byte(`{"model":"claude-haiku-4-5-20251001"}`),
+				&config.Config{},
+				incoming,
+				true,
+				true,
+				claudeNativeHelperSessionID,
+			); errHeaders != nil {
+				t.Fatalf("applyClaudeHeadersWithNativeProfile() error = %v", errHeaders)
+			}
+			got := request.Header.Get("X-Client-Request-Id")
+			switch {
+			case test.wantID != "":
+				if got != test.wantID {
+					t.Fatalf("X-Client-Request-Id = %q, want caller value %q", got, test.wantID)
+				}
+			case test.wantGenerated:
+				if _, errParse := uuid.Parse(got); errParse != nil {
+					t.Fatalf("X-Client-Request-Id = %q, want a generated UUID", got)
+				}
+			default:
+				if got != "" {
+					t.Fatalf("X-Client-Request-Id = %q, want the header to stay absent", got)
+				}
 			}
 		})
 	}

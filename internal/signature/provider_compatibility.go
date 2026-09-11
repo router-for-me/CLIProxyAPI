@@ -190,7 +190,7 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 	// Probes run from the strongest marker to the weakest:
 	//   1. GPT carries the literal "gAAAA" prefix, which pins both the version
 	//      byte and the high timestamp bytes.
-	//   2. Claude CAIS carries marker 0x08 plus a literal "claude-" model text.
+	//   2. Claude CAIS/CAQS carries marker 0x08 with nested container/channel structure.
 	//   3. Claude single/double-layer carries marker 0x12 plus the same literal.
 	//   4. Gemini validates wire shape only and has no literal to anchor on, so
 	//      it is the weakest judge and goes last.
@@ -392,7 +392,14 @@ func claudeCompatibleSignatureReason(targetProvider SignatureProvider, rawSignat
 	if err != nil {
 		return genericReason
 	}
-	reason := "valid Claude CAIS signature with embedded model " + info.ModelText + " is compatible with any Claude target"
+	var reason string
+	if info.ModelText != "" {
+		reason = "valid Claude CAIS signature with embedded model " + info.ModelText + " is compatible with any Claude target"
+	} else if info.EnvelopeVersion >= 4 {
+		reason = "valid Claude CAQS signature is compatible with any Claude target"
+	} else {
+		reason = "valid Claude CAIS signature is compatible with any Claude target"
+	}
 	if trimmedModel := strings.TrimSpace(targetModel); trimmedModel != "" {
 		reason += ", including target model " + trimmedModel
 	}

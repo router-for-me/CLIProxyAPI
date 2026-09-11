@@ -596,6 +596,9 @@ func ConvertOpenAIResponsesResponseToInteractionsNonStream(ctx context.Context, 
 	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
+	if status := root.Get("status").String(); status != "" {
+		out, _ = sjson.SetBytes(out, "status", status)
+	}
 	out, _ = sjson.SetBytes(out, "id", root.Get("id").String())
 	out, _ = sjson.SetBytes(out, "model", responseModel(modelName, root))
 	forAntigravity := isAntigravityModel(modelName)
@@ -645,7 +648,7 @@ func convertOpenAIResponsesEventToInteractions(modelName string, rawJSON []byte,
 		return out
 	case "response.output_item.done":
 		return openAIResponsesOutputItemDoneToInteractions(modelName, root, st)
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		return openAIResponsesCompletedToInteractions(modelName, root.Get("response"), st)
 	}
 	return nil
@@ -883,6 +886,9 @@ func appendInteractionsCompletedDirect(out [][]byte, st *responsesToInteractions
 	payload, _ = sjson.SetBytes(payload, "interaction.created", now)
 	payload, _ = sjson.SetBytes(payload, "interaction.updated", now)
 	payload, _ = sjson.SetBytes(payload, "interaction.model", responseModel(modelName, response))
+	if status := response.Get("status").String(); status != "" {
+		payload, _ = sjson.SetBytes(payload, "interaction.status", status)
+	}
 	payload = setInteractionsUsageFromResponses(payload, "interaction.usage", response.Get("usage"))
 	out = append(out, emitInteractionsEvent("interaction.completed", payload))
 	st.Completed = true

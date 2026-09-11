@@ -921,6 +921,56 @@ func (m *MerklePrefixMatcher) Clear() {
 	m.mu.Unlock()
 }
 
+// LookupSession observes the bound authIDs for an LCP sessionID without side effects or TTL refresh.
+// It skips expired groups and cleans them up, returning all distinct active authIDs.
+func (m *MerklePrefixMatcher) LookupSession(sessionID string) (authIDs []string, namespace string, ok bool) {
+	if m == nil || sessionID == "" {
+		return nil, "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+
+	var expired []*lcpGroup
+	var active []*lcpGroup
+
+	for _, ns := range m.groups {
+		if ns == nil {
+			continue
+		}
+		for _, group := range ns.groups {
+			if group == nil || group.sessionID != sessionID {
+				continue
+			}
+			if now.Before(group.expiresAt) {
+				active = append(active, group)
+			} else {
+				expired = append(expired, group)
+			}
+		}
+	}
+
+	for _, exp := range expired {
+		m.removeGroupLocked(exp)
+	}
+
+	if len(active) == 0 {
+		return nil, "", false
+	}
+
+	ns := active[0].namespace
+	seen := make(map[string]struct{})
+	var result []string
+	for _, grp := range active {
+		if _, exists := seen[grp.authID]; !exists && grp.authID != "" {
+			seen[grp.authID] = struct{}{}
+			result = append(result, grp.authID)
+		}
+	}
+	sort.Strings(result)
+	return result, ns, len(result) > 0
+}
+
 func (m *MerklePrefixMatcher) fingerprints(turns []CanonicalTurn) []string {
 	if len(turns) == 0 {
 		return nil

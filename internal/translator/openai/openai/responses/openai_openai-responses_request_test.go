@@ -1139,3 +1139,186 @@ func TestResponsesCustomToolNames_OnlyReportsMergedTools(t *testing.T) {
 		}
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FunctionCallOutputAlternateIDsAndQueueFallback(t *testing.T) {
+	testCases := []struct {
+		name           string
+		outputField    string
+		wantToolCallID string
+	}{
+		{
+			name:           "call_id standard",
+			outputField:    `"call_id":"call_123"`,
+			wantToolCallID: "call_123",
+		},
+		{
+			name:           "tool_call_id alternate field",
+			outputField:    `"tool_call_id":"call_123"`,
+			wantToolCallID: "call_123",
+		},
+		{
+			name:           "callId alternate field",
+			outputField:    `"callId":"call_123"`,
+			wantToolCallID: "call_123",
+		},
+		{
+			name:           "id alternate field",
+			outputField:    `"id":"call_123"`,
+			wantToolCallID: "call_123",
+		},
+		{
+			name:           "missing call_id completely fallback to pending queue",
+			outputField:    ``,
+			wantToolCallID: "call_123",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			outputJSON := `{"type":"function_call_output","output":"tool_result_ok"`
+			if tc.outputField != "" {
+				outputJSON += `,` + tc.outputField
+			}
+			outputJSON += `}`
+
+			inputJSON := []byte(`{
+				"model": "deepseek-v4-flash",
+				"input": [
+					{"type":"function_call","call_id":"call_123","name":"Bash","arguments":"{\"command\":\"ls\"}"},
+					` + outputJSON + `
+				]
+			}`)
+
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", inputJSON, false)
+			messages := gjson.GetBytes(out, "messages").Array()
+			if len(messages) != 2 {
+				t.Fatalf("expected 2 messages (assistant, tool), got %d; output=%s", len(messages), string(out))
+			}
+
+			// Assistant message has tool_calls with id call_123
+			toolCallID := messages[0].Get("tool_calls.0.id").String()
+			if toolCallID != "call_123" {
+				t.Fatalf("tool_calls.0.id = %q, want call_123", toolCallID)
+			}
+
+			// Tool message has tool_call_id matching call_123
+			toolMessage := messages[1]
+			if toolMessage.Get("role").String() != "tool" {
+				t.Fatalf("expected role tool, got %s", toolMessage.Raw)
+			}
+			if gotID := toolMessage.Get("tool_call_id").String(); gotID != tc.wantToolCallID {
+				t.Fatalf("tool_call_id = %q, want %q; output=%s", gotID, tc.wantToolCallID, string(out))
+			}
+			if gotContent := toolMessage.Get("content").String(); gotContent != "tool_result_ok" {
+				t.Fatalf("tool message content = %q, want tool_result_ok", gotContent)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MixedMissingAndExplicitParallelOutputs(t *testing.T) {
+	// Call A, Call B.
+	// Output 1 has NO ID (result B).
+	// Output 2 explicitly has call_id: call_a (result A).
+	// Call A must NOT be stolen by Output 1; Output 1 must get Call B.
+	inputJSON := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","output":"result_b"},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages (assistant, tool_b, tool_a), got %d; output=%s", len(messages), string(out))
+	}
+
+	resultMap := make(map[string]string)
+	for _, m := range messages[1:] {
+		resultMap[m.Get("tool_call_id").String()] = m.Get("content").String()
+	}
+
+	if got := resultMap["call_a"]; got != "result_a" {
+		t.Fatalf("result for call_a = %q, want result_a", got)
+	}
+	if got := resultMap["call_b"]; got != "result_b" {
+		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntilMissingIDToolOutput(t *testing.T) {
+	// Call A -> intervening user message -> Output with missing call_id
+	// The user message must be deferred until AFTER the tool output!
+	inputJSON := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"message","role":"user","content":"User command while running"},
+			{"type":"function_call_output","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages (assistant, tool, user), got %d; output=%s", len(messages), string(out))
+	}
+
+	// Message 0: assistant with tool_call
+	if got := messages[0].Get("role").String(); got != "assistant" {
+		t.Fatalf("messages[0].role = %q, want assistant", got)
+	}
+	// Message 1: tool response for call_a (strictly adjacent to assistant tool_calls!)
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("messages[1].role = %q, want tool (user message was not deferred!)", got)
+	}
+	if got := messages[1].Get("tool_call_id").String(); got != "call_a" {
+		t.Fatalf("messages[1].tool_call_id = %q, want call_a", got)
+	}
+	// Message 2: deferred user message
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("messages[2].role = %q, want user", got)
+	}
+	if got := messages[2].Get("content").String(); got != "User command while running" {
+		t.Fatalf("messages[2].content = %q, want 'User command while running'", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MixedMissingAndExplicitParallelOutputsAcrossUserMessage(t *testing.T) {
+	// Call A, Call B.
+	// Output 1 has NO ID (result B).
+	// Intervening user message.
+	// Output 2 explicitly has call_id: call_a (result A).
+	// Call A must NOT be stolen by Output 1; Output 1 must get Call B.
+	inputJSON := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","output":"result_b"},
+			{"type":"message","role":"user","content":"status?"},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	resultMap := make(map[string]string)
+	for _, m := range messages {
+		if m.Get("role").String() == "tool" {
+			resultMap[m.Get("tool_call_id").String()] = m.Get("content").String()
+		}
+	}
+
+	if got := resultMap["call_a"]; got != "result_a" {
+		t.Fatalf("result for call_a = %q, want result_a", got)
+	}
+	if got := resultMap["call_b"]; got != "result_b" {
+		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}

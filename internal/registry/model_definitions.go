@@ -7,14 +7,17 @@ import (
 )
 
 const (
-	codexBuiltinImage15ModelID    = "gpt-image-1.5"
-	codexBuiltinImageModelID      = "gpt-image-2"
-	xaiBuiltinImageModelID        = "grok-imagine-image"
-	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
-	xaiBuiltinImage20ModelID      = "grok-imagine-image-2.0"
-	xaiBuiltinVideoModelID        = "grok-imagine-video"
-	xaiBuiltinVideo15ModelID      = "grok-imagine-video-1.5"
-	xaiBuiltinVideo15PreviewID    = "grok-imagine-video-1.5-preview"
+	codexBuiltinImage15ModelID         = "gpt-image-1.5"
+	codexBuiltinImageModelID           = "gpt-image-2"
+	codexBuiltinImage25FlareModelID    = "gpt-image-2.5-flare"
+	codexBuiltinImage25SunburstModelID = "gpt-image-2.5-sunburst"
+	codexBuiltinImage25ModelID         = "gpt-image-2.5"
+	xaiBuiltinImageModelID             = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID      = "grok-imagine-image-quality"
+	xaiBuiltinImage20ModelID           = "grok-imagine-image-2.0"
+	xaiBuiltinVideoModelID             = "grok-imagine-video"
+	xaiBuiltinVideo15ModelID           = "grok-imagine-video-1.5"
+	xaiBuiltinVideo15PreviewID         = "grok-imagine-video-1.5-preview"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -116,7 +119,13 @@ func GetXAIModels() []*ModelInfo {
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
+	return upsertModelInfos(models,
+		codexBuiltinImage15ModelInfo(),
+		codexBuiltinImageModelInfo(),
+		codexBuiltinImage25FlareModelInfo(),
+		codexBuiltinImage25SunburstModelInfo(),
+		codexBuiltinImage25ModelInfo(),
+	)
 }
 
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
@@ -154,6 +163,42 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func codexBuiltinImage25FlareModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImage25FlareModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.5 Flare",
+		Version:     codexBuiltinImage25FlareModelID,
+	}
+}
+
+func codexBuiltinImage25SunburstModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImage25SunburstModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.5 Sunburst",
+		Version:     codexBuiltinImage25SunburstModelID,
+	}
+}
+
+func codexBuiltinImage25ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImage25ModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.5",
+		Version:     codexBuiltinImage25ModelID,
 	}
 }
 

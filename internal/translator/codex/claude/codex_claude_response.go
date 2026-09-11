@@ -166,6 +166,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		if cacheWriteTokens > 0 {
 			template, _ = sjson.SetBytes(template, "usage.cache_creation_input_tokens", cacheWriteTokens)
 		}
+		template = setClaudeReasoningUsage(template, responseData.Get("usage"))
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_delta", template, 2)
 		output = translatorcommon.AppendSSEEventBytes(output, "message_stop", []byte(`{"type":"message_stop"}`), 2)
@@ -373,6 +374,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	if cacheWriteTokens > 0 {
 		out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", cacheWriteTokens)
 	}
+	out = setClaudeReasoningUsage(out, responseData.Get("usage"))
 
 	hasToolCall := false
 	webSearchSeen := make(map[string]struct{})
@@ -822,6 +824,28 @@ func extractResponsesUsage(usage gjson.Result) (int64, int64, int64, int64) {
 	}
 
 	return inputTokens, outputTokens, cachedTokens, cacheWriteTokens
+}
+
+func setClaudeReasoningUsage(out []byte, usage gjson.Result) []byte {
+	detail := usage.Get("output_tokens_details.reasoning_tokens")
+	if !detail.Exists() || detail.Type != gjson.Number {
+		return out
+	}
+	if strings.HasPrefix(detail.Raw, "-") || detail.Num < 0 {
+		return out
+	}
+	outputTokens := max(int64(0), usage.Get("output_tokens").Int())
+	var tokens int64
+	if detail.Num >= float64(outputTokens) {
+		tokens = outputTokens
+	} else {
+		tokens = detail.Int()
+	}
+	updated, errSetBytes := sjson.SetBytes(out, "usage.output_tokens_details.thinking_tokens", tokens)
+	if errSetBytes != nil {
+		return out
+	}
+	return updated
 }
 
 // buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.

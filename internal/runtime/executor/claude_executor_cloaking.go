@@ -188,30 +188,82 @@ func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, wo
 	return b.String()
 }
 
+func resolveClaudeContinuityTags(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	incomingHeaders http.Header,
+	payload []byte,
+	confirmedClaudeCode bool,
+	existingPrevReq, existingPromptID string,
+) (prevReq, promptID string, cCtx helps.ClaudeContinuityContext, ok bool) {
+	hasExecutionMetadata := helps.ClaudeExecutionMetadataFromContext(ctx)
+	sessionID := helps.ClaudeSessionIDFromContext(ctx)
+	if sessionID == "" && auth != nil {
+		sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
+	}
+	if sessionID == "" || auth == nil {
+		return "", "", helps.ClaudeContinuityContext{}, false
+	}
+
+	credIdentity := claudeDiagnosticsCredentialIdentity(auth)
+	isNewTurn := helps.IsClaudeNewPromptTurn(payload)
+	continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
+
+	if existingPromptID != "" {
+		promptID = existingPromptID
+	} else if prevMsgID != "" && storedPromptID != "" && (hasExecutionMetadata || !isNewTurn) {
+		promptID = storedPromptID
+	} else if !hasExecutionMetadata {
+		promptID = helps.ClaudeDeterministicPromptID("cpa:prompt:" + claudeBillingFingerprintMessageText(payload))
+	} else {
+		promptID = storedPromptID
+	}
+
+	if (hasExecutionMetadata || existingPrevReq != "") && storedPrevReq != "" {
+		prevReq = storedPrevReq
+	} else {
+		prevReq = existingPrevReq
+	}
+
+	cCtx = helps.ClaudeContinuityContext{
+		Key:         continuityKey,
+		Sequence:    seq,
+		PromptID:    promptID,
+		Initialized: true,
+	}
+	if hasExecutionMetadata || existingPrevReq != "" {
+		cCtx.PreviousMessageID = prevMsgID
+		cCtx.PreviousRequestID = storedPrevReq
+	} else {
+		cCtx.PreviousMessageID = ""
+		cCtx.PreviousRequestID = ""
+	}
+	return prevReq, promptID, cCtx, true
+}
+
 func claudeBillingFingerprintMessageText(payload []byte) string {
-	messageText := ""
-	gjson.GetBytes(payload, "messages").ForEach(func(_, message gjson.Result) bool {
-		if message.Get("role").String() != "user" {
-			return true
-		}
-		content := message.Get("content")
-		candidate := ""
-		if content.Type == gjson.String {
-			candidate = content.String()
-		} else if content.IsArray() {
-			content.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					candidate = part.Get("text").String()
+	idx := firstClaudeUserMessageIndex(payload)
+	if idx < 0 {
+		return ""
+	}
+	content := gjson.GetBytes(payload, fmt.Sprintf("messages.%d.content", idx))
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.IsArray() {
+		messageText := ""
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				text := part.Get("text").String()
+				if !isClaudeCodeCurrentDateReminder(text) && !isClaudeCodeContextReminder(text) {
+					messageText = text
 				}
-				return true
-			})
-		}
-		if candidate != "" {
-			messageText = candidate
-		}
-		return true
-	})
-	return messageText
+			}
+			return true
+		})
+		return messageText
+	}
+	return ""
 }
 
 func claudeCCHFallbackBillingHeader(ctx context.Context, cfg *config.Config, payload []byte, entrypoint string) string {
@@ -1337,39 +1389,18 @@ func applyCloakingInternal(
 	isSubagent := false
 	prevReq := ""
 	promptID := ""
+	var incomingHeaders http.Header
 	if !isProbeOrHelper {
-		incomingHeaders := resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
+		incomingHeaders = resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
 		isSubagent = helps.IsClaudeSubagentRequest(incomingHeaders, payload)
 		existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(payload)
 
-		sessionID := helps.ClaudeSessionIDFromContext(ctx)
-		if sessionID == "" && auth != nil {
-			sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
-		}
-
-		if sessionID != "" && auth != nil {
-			credIdentity := claudeDiagnosticsCredentialIdentity(auth)
-			isNewTurn := helps.IsClaudeNewPromptTurn(payload)
-			continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
-
-			if existingPromptID != "" {
-				promptID = existingPromptID
-			} else {
-				promptID = storedPromptID
-			}
-			if storedPrevReq != "" {
-				prevReq = storedPrevReq
-			} else {
-				prevReq = existingPrevReq
-			}
-
+		var cCtx helps.ClaudeContinuityContext
+		var ok bool
+		prevReq, promptID, cCtx, ok = resolveClaudeContinuityTags(ctx, auth, incomingHeaders, payload, confirmedClaudeCode, existingPrevReq, existingPromptID)
+		if ok {
 			if continuityCtx := helps.ClaudeContinuityContextFromContext(ctx); continuityCtx != nil {
-				continuityCtx.Key = continuityKey
-				continuityCtx.Sequence = seq
-				continuityCtx.PreviousMessageID = prevMsgID
-				continuityCtx.PreviousRequestID = prevReq
-				continuityCtx.PromptID = promptID
-				continuityCtx.Initialized = true
+				*continuityCtx = cCtx
 			}
 		}
 	}
@@ -1402,9 +1433,10 @@ func applyCloakingInternal(
 		}
 	}
 
-	// Probes and subagents never use 1h cache in native Claude Code; ensure any
-	// caller-supplied 1h ttl is stripped to match extended-cache-ttl beta suppression.
-	if isSubagent || isProbeOrHelper {
+	// Probes never use 1h cache in native Claude Code; ensure any caller-supplied
+	// 1h ttl is stripped to match extended-cache-ttl beta suppression. Subagents
+	// preserve caller-requested 1h cache TTL (e.g. subagentPromptCacheTtl: 1h).
+	if isProbeOrHelper || (isSubagent && !helps.ClaudeSubagentRequests1h(incomingHeaders, payload)) {
 		payload = stripClaudeCacheControlTTL(payload)
 	}
 

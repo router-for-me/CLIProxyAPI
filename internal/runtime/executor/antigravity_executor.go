@@ -219,10 +219,15 @@ func closeAntigravityAuthIdleTransports(auth *cliproxyauth.Auth) {
 // antigravityTransportKey identifies one connection pool. At most one of proxy and
 // base is set: proxy for a credential-scoped proxy pool, base for a transport handed
 // in through the request context, and neither for a direct pool.
+// Resolved pool settings (shortMode, idleConnTimeout, maxIdleConnsPerHost) are included
+// in the key to prevent stale transport reuse across configuration hot-reloads under load.
 type antigravityTransportKey struct {
-	credential string
-	proxy      string
-	base       *http.Transport
+	credential          string
+	proxy               string
+	base                *http.Transport
+	shortMode           bool
+	idleConnTimeout     time.Duration
+	maxIdleConnsPerHost int
 }
 
 func defaultAntigravityBaseTransport() *http.Transport {
@@ -315,9 +320,17 @@ func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport, c
 	if base == nil {
 		return nil
 	}
+	var cfg *config.Config
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
+	settings := resolveAntigravityPoolSettings(cfg)
 	key := antigravityTransportKey{
-		credential: antigravityTransportScope(auth),
-		base:       base,
+		credential:          antigravityTransportScope(auth),
+		base:                base,
+		shortMode:           settings.shortMode,
+		idleConnTimeout:     settings.idleConnTimeout,
+		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
 	}
 	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
 		return cloneTransportWithHTTP11(base, cfgs...), nil
@@ -341,9 +354,17 @@ func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string,
 	if proxyURL == "" {
 		return nil
 	}
+	var cfg *config.Config
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
+	settings := resolveAntigravityPoolSettings(cfg)
 	key := antigravityTransportKey{
-		credential: antigravityTransportScope(auth),
-		proxy:      proxyURL,
+		credential:          antigravityTransportScope(auth),
+		proxy:               proxyURL,
+		shortMode:           settings.shortMode,
+		idleConnTimeout:     settings.idleConnTimeout,
+		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
 	}
 	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
 		base, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
@@ -502,6 +523,7 @@ func ensureAntigravityGeminiBoundaryUserContent(modelName string, payload []byte
 
 type antigravityContentEdit struct {
 	index       int64
+	path        string
 	start       int
 	end         int
 	replacement []byte
@@ -630,6 +652,13 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 		})
 		return true
 	})
+	return applyAntigravityIndexedEdits(rawJSON, edits, validOffsets)
+}
+
+// applyAntigravityIndexedEdits splices collected JSON fragments into the original
+// request with one body copy. Applying SJSON once per field made large histories
+// scale with history size multiplied by the number of edits.
+func applyAntigravityIndexedEdits(rawJSON []byte, edits []antigravityContentEdit, validOffsets bool) []byte {
 	if len(edits) == 0 {
 		return rawJSON
 	}
@@ -664,7 +693,10 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 func applyAntigravityContentEditsWithSJSON(rawJSON []byte, edits []antigravityContentEdit) []byte {
 	out := rawJSON
 	for _, edit := range edits {
-		path := fmt.Sprintf("request.contents.%d", edit.index)
+		path := edit.path
+		if path == "" {
+			path = fmt.Sprintf("request.contents.%d", edit.index)
+		}
 		if updated, errSet := sjson.SetRawBytes(out, path, edit.replacement); errSet == nil {
 			out = updated
 		}
@@ -672,6 +704,9 @@ func applyAntigravityContentEditsWithSJSON(rawJSON []byte, edits []antigravityCo
 	return out
 }
 
+// repairAntigravityGeminiFunctionResponseNames copies missing or placeholder
+// functionResponse names from the matching functionCall. Edits are applied to
+// each part in isolation, then spliced into the request with one body copy.
 func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 	contents := util.GetGJSONBytesNoCopy(rawJSON, "request.contents")
 	if !contents.IsArray() {
@@ -700,7 +735,8 @@ func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 		return rawJSON
 	}
 
-	out := rawJSON
+	edits := make([]antigravityContentEdit, 0)
+	validOffsets := true
 	contents.ForEach(func(contentIdx, content gjson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
@@ -708,23 +744,39 @@ func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 		}
 		parts.ForEach(func(partIdx, part gjson.Result) bool {
 			fr := part.Get("functionResponse")
-			if fr.Exists() {
-				id := strings.TrimSpace(fr.Get("id").String())
-				name := strings.TrimSpace(fr.Get("name").String())
-				if id != "" && (name == "" || name == "unknown") {
-					if realName, ok := callIDToName[id]; ok {
-						path := fmt.Sprintf("request.contents.%d.parts.%d.functionResponse.name", contentIdx.Int(), partIdx.Int())
-						if updated, errSet := sjson.SetBytes(out, path, realName); errSet == nil {
-							out = updated
-						}
-					}
-				}
+			if !fr.Exists() {
+				return true
 			}
+			id := strings.TrimSpace(fr.Get("id").String())
+			name := strings.TrimSpace(fr.Get("name").String())
+			if id == "" || (name != "" && name != "unknown") {
+				return true
+			}
+			realName, ok := callIDToName[id]
+			if !ok {
+				return true
+			}
+			updatedPart, errSet := sjson.SetBytes([]byte(part.Raw), "functionResponse.name", realName)
+			if errSet != nil {
+				return true
+			}
+			start := part.Index
+			end := start + len(part.Raw)
+			if start < 0 || end < start || end > len(rawJSON) || !bytes.Equal(rawJSON[start:end], []byte(part.Raw)) {
+				validOffsets = false
+			}
+			edits = append(edits, antigravityContentEdit{
+				index:       contentIdx.Int(),
+				path:        fmt.Sprintf("request.contents.%d.parts.%d", contentIdx.Int(), partIdx.Int()),
+				start:       start,
+				end:         end,
+				replacement: updatedPart,
+			})
 			return true
 		})
 		return true
 	})
-	return out
+	return applyAntigravityIndexedEdits(rawJSON, edits, validOffsets)
 }
 
 func validateAntigravityRequestSignatures(ctx context.Context, modelName string, from sdktranslator.Format, rawJSON []byte) ([]byte, error) {

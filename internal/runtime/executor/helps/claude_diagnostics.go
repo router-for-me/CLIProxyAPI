@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
@@ -129,6 +130,20 @@ func IsValidClaudePromptID(id string) bool {
 	}
 	parsed, err := uuid.Parse(id)
 	return err == nil && parsed.Version() == 4 && parsed.Variant() == uuid.RFC4122
+}
+
+// ClaudeDeterministicPromptID generates a deterministic RFC 4122 UUIDv4 from a seed string.
+func ClaudeDeterministicPromptID(seed string) string {
+	digest := sha256.Sum256([]byte(seed))
+	digest[6] = (digest[6] & 0x0f) | 0x40 // Version 4
+	digest[8] = (digest[8] & 0x3f) | 0x80 // Variant RFC 4122
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		digest[0:4],
+		digest[4:6],
+		digest[6:8],
+		digest[8:10],
+		digest[10:16],
+	)
 }
 
 // BeginClaudeContinuity starts one request generation for a stable credential
@@ -474,6 +489,62 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 		return true
 	}
 	return false
+}
+
+// ClaudePayloadHas1hTTL reports whether the request payload contains any cache_control
+// block with ttl set to "1h".
+func ClaudePayloadHas1hTTL(payload []byte) bool {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+	has1h := false
+	checkBlock := func(item gjson.Result) bool {
+		cc := item.Get("cache_control")
+		if cc.IsObject() && cc.Get("ttl").String() == "1h" {
+			has1h = true
+			return false
+		}
+		return true
+	}
+	if tools := gjson.GetBytes(payload, "tools"); tools.IsArray() {
+		tools.ForEach(func(_, item gjson.Result) bool {
+			return checkBlock(item)
+		})
+		if has1h {
+			return true
+		}
+	}
+	if system := gjson.GetBytes(payload, "system"); system.IsArray() {
+		system.ForEach(func(_, item gjson.Result) bool {
+			return checkBlock(item)
+		})
+		if has1h {
+			return true
+		}
+	}
+	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if content.IsArray() {
+				content.ForEach(func(_, item gjson.Result) bool {
+					return checkBlock(item)
+				})
+			}
+			return !has1h
+		})
+	}
+	return has1h
+}
+
+// ClaudeSubagentRequests1h reports whether a subagent request explicitly requests
+// 1h cache TTL either via a cache_control block with ttl="1h" in the payload or via
+// extended-cache-ttl-2025-04-11 in incoming Anthropic-Beta headers.
+func ClaudeSubagentRequests1h(headers http.Header, body []byte) bool {
+	if ClaudePayloadHas1hTTL(body) {
+		return true
+	}
+	betas := strings.Join(HeaderValuesCaseInsensitive(headers, "Anthropic-Beta"), ",")
+	return strings.Contains(betas, "extended-cache-ttl-2025-04-11")
 }
 
 // StripClaudeBillingTags removes cc_prev_req and cc_prompt_id from the billing header in body.

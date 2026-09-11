@@ -2,6 +2,8 @@ package openai
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -310,5 +312,217 @@ func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testin
 	}
 	if !strings.Contains(got, "event: error") {
 		t.Fatalf("unterminated framing test stream did not end with an error: %q", got)
+	}
+}
+
+func TestForwardResponsesStreamErrorEventPreservesNestedError(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+	c.Request.Header.Set("User-Agent", "codex_vscode/0.153.4 (Ubuntu 22.4.0; x86_64)")
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+
+	go func() {
+		data <- []byte("event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0}\n\n")
+		data <- []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"sequence_number\":1}\n\n")
+		close(data)
+
+		errText := `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber","param":null}}`
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(errText),
+		}
+		close(errs)
+	}()
+
+	framer := &responsesSSEFramer{}
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, framer)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: error\n") {
+		t.Fatalf("expected event: error in output, got: %q", body)
+	}
+
+	parts := strings.Split(strings.TrimSpace(body), "\n\n")
+	if len(parts) < 3 {
+		t.Fatalf("expected at least 3 SSE events, got %d. Body: %q", len(parts), body)
+	}
+
+	lastPart := strings.TrimSpace(parts[len(parts)-1])
+	if !strings.HasPrefix(lastPart, "event: error\ndata: ") {
+		t.Fatalf("last event is not error event: %q", lastPart)
+	}
+
+	jsonPayload := strings.TrimSpace(strings.TrimPrefix(lastPart, "event: error\ndata: "))
+	var payload struct {
+		Type           string         `json:"type"`
+		Error          map[string]any `json:"error"`
+		SequenceNumber int            `json:"sequence_number"`
+	}
+	if errUnmarshal := json.Unmarshal([]byte(jsonPayload), &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal error event payload: %v (raw: %s)", errUnmarshal, jsonPayload)
+	}
+	if payload.Type != "error" {
+		t.Fatalf("payload.Type = %q, want error", payload.Type)
+	}
+	if payload.SequenceNumber != 2 {
+		t.Fatalf("payload.SequenceNumber = %d, want 2", payload.SequenceNumber)
+	}
+	if payload.Error["type"] != "invalid_request" {
+		t.Fatalf("payload.Error.type = %v, want invalid_request", payload.Error["type"])
+	}
+	if payload.Error["code"] != "cyber_policy" {
+		t.Fatalf("payload.Error.code = %v, want cyber_policy", payload.Error["code"])
+	}
+	if param, exists := payload.Error["param"]; !exists || param != nil {
+		t.Fatalf("payload.Error.param = %v, want null/nil", param)
+	}
+}
+
+func TestResponsesSSEFramerRepairErrorPayloadCalculatesCorrectSequenceNumber(t *testing.T) {
+	// Case 1: First frame is an error without sequence_number -> should be 0
+	framer1 := &responsesSSEFramer{}
+	var out1 bytes.Buffer
+	framer1.WriteChunk(&out1, []byte("event: error\ndata: {\"error\":{\"code\":\"bad_request\"}}\n\n"))
+	var p1 struct {
+		Type           string         `json:"type"`
+		SequenceNumber int            `json:"sequence_number"`
+		Error          map[string]any `json:"error"`
+	}
+	payload1 := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out1.String()), "event: error\ndata: "))
+	if err := json.Unmarshal([]byte(payload1), &p1); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if p1.SequenceNumber != 0 {
+		t.Fatalf("first frame error sequence_number = %d, want 0", p1.SequenceNumber)
+	}
+
+	// Case 2: Two data frames then an error frame without sequence_number -> should be 2
+	framer2 := &responsesSSEFramer{}
+	var out2 bytes.Buffer
+	framer2.WriteChunk(&out2, []byte("event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0}\n\n"))
+	framer2.WriteChunk(&out2, []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"sequence_number\":1}\n\n"))
+	out2.Reset()
+	framer2.WriteChunk(&out2, []byte("event: error\ndata: {\"error\":{\"code\":\"cyber_policy\"}}\n\n"))
+	var p2 struct {
+		Type           string         `json:"type"`
+		SequenceNumber int            `json:"sequence_number"`
+		Error          map[string]any `json:"error"`
+	}
+	payload2 := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out2.String()), "event: error\ndata: "))
+	if err := json.Unmarshal([]byte(payload2), &p2); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if p2.SequenceNumber != 2 {
+		t.Fatalf("third frame error sequence_number = %d, want 2", p2.SequenceNumber)
+	}
+}
+
+func TestForwardResponsesStreamErrorEventPreservesExplicitSequenceNumber(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+	c.Request.Header.Set("User-Agent", "codex_vscode/0.153.4")
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+
+	go func() {
+		close(data)
+		errText := `{"error":{"type":"invalid_request","code":"custom"},"sequence_number":9}`
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(errText),
+		}
+		close(errs)
+	}()
+
+	framer := &responsesSSEFramer{}
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, framer)
+
+	body := recorder.Body.String()
+	var p struct {
+		Type           string         `json:"type"`
+		SequenceNumber int            `json:"sequence_number"`
+		Error          map[string]any `json:"error"`
+	}
+	lastPart := strings.TrimSpace(strings.Split(strings.TrimSpace(body), "\n\n")[0])
+	payload := strings.TrimSpace(strings.TrimPrefix(lastPart, "event: error\ndata: "))
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		t.Fatalf("unmarshal error payload: %v (raw: %s)", err, payload)
+	}
+	if p.SequenceNumber != 9 {
+		t.Fatalf("explicit sequence_number = %d, want 9", p.SequenceNumber)
+	}
+}
+
+func TestResponsesStreamErrorTextSanitizesNestedSensitiveFieldsAndDotKeys(t *testing.T) {
+	inputJSON := `{"error":{"metadata":{"message":"Bearer test-secret"},"vendor.detail":"Bearer test-secret","access_token":"test-secret","normal_key":"safe_value"},"sequence_number":3}`
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(inputJSON),
+	}
+	out := responsesStreamErrorText(errMsg, http.StatusBadRequest)
+
+	var parsed struct {
+		Error          map[string]any `json:"error"`
+		SequenceNumber int            `json:"sequence_number"`
+	}
+	if errUnmarshal := json.Unmarshal([]byte(out), &parsed); errUnmarshal != nil {
+		t.Fatalf("unmarshal error text output: %v (raw: %s)", errUnmarshal, out)
+	}
+
+	if parsed.SequenceNumber != 3 {
+		t.Fatalf("sequence_number = %d, want 3", parsed.SequenceNumber)
+	}
+	if parsed.Error["access_token"] != "[REDACTED]" {
+		t.Fatalf("access_token was not redacted: %v", parsed.Error["access_token"])
+	}
+	if parsed.Error["vendor.detail"] != "Bearer [REDACTED]" {
+		t.Fatalf("vendor.detail was not properly redacted without path corruption: %v", parsed.Error["vendor.detail"])
+	}
+	meta, ok := parsed.Error["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata is not a map: %v", parsed.Error["metadata"])
+	}
+	if meta["message"] != "Bearer [REDACTED]" {
+		t.Fatalf("nested metadata.message was not redacted: %v", meta["message"])
+	}
+	if parsed.Error["normal_key"] != "safe_value" {
+		t.Fatalf("normal_key = %v, want safe_value", parsed.Error["normal_key"])
+	}
+}
+
+func TestResponsesStreamErrorTextPreservesTokenCountersAndLargeInts(t *testing.T) {
+	inputJSON := `{"error":{"input_tokens":42,"token_limit":8192,"request_id":9007199254740993,"access_token":"secret123"}}`
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(inputJSON),
+	}
+	out := responsesStreamErrorText(errMsg, http.StatusBadRequest)
+
+	// Verify exact raw representation doesn't lose precision for 9007199254740993
+	if !strings.Contains(out, "9007199254740993") {
+		t.Fatalf("large integer precision was lost: %s", out)
+	}
+	if strings.Contains(out, "9007199254740992") {
+		t.Fatalf("large integer was corrupted by float64 conversion: %s", out)
+	}
+
+	var parsed struct {
+		Error map[string]any `json:"error"`
+	}
+	dec := json.NewDecoder(strings.NewReader(out))
+	dec.UseNumber()
+	if errUnmarshal := dec.Decode(&parsed); errUnmarshal != nil {
+		t.Fatalf("unmarshal error: %v", errUnmarshal)
+	}
+
+	if parsed.Error["access_token"] != "[REDACTED]" {
+		t.Fatalf("access_token should be redacted: %v", parsed.Error["access_token"])
+	}
+	if parsed.Error["input_tokens"] != json.Number("42") {
+		t.Fatalf("input_tokens should remain number 42, got %v", parsed.Error["input_tokens"])
+	}
+	if parsed.Error["token_limit"] != json.Number("8192") {
+		t.Fatalf("token_limit should remain number 8192, got %v", parsed.Error["token_limit"])
 	}
 }

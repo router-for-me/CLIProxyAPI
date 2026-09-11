@@ -1,11 +1,14 @@
 package openai
 
 import (
+	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -28,10 +31,10 @@ func writeResponsesWebsocketSyntheticPrewarm(
 	requestJSON []byte,
 	wsTimelineLog websocketTimelineAppender,
 	sessionID string,
-) error {
+) (string, error) {
 	payloads, errPayloads := syntheticResponsesWebsocketPrewarmPayloads(requestJSON)
 	if errPayloads != nil {
-		return errPayloads
+		return "", errPayloads
 	}
 	for i := 0; i < len(payloads); i++ {
 		markAPIResponseTimestamp(c)
@@ -49,10 +52,35 @@ func writeResponsesWebsocketSyntheticPrewarm(
 				websocketPayloadEventType(payloads[i]),
 				errWrite,
 			)
-			return errWrite
+			return "", errWrite
 		}
 	}
-	return nil
+	return gjson.GetBytes(payloads[0], "response.id").String(), nil
+}
+
+// A synthetic warm-up acknowledges input that never reached the upstream.
+// Materialize that input before compacted-history detection can mistake the
+// client's remaining delta for a complete replacement transcript.
+func normalizeResponsesWebsocketPrewarmFollowup(rawJSON, warmupRequest []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
+	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
+	if requestType != wsRequestTypeCreate && requestType != wsRequestTypeAppend {
+		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("unsupported websocket request type: %s", requestType)}
+	}
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("websocket request requires array field: input")}
+	}
+	merged, errMerge := mergeResponsesWebsocketInput(warmupRequest, []byte("[]"), input.Raw)
+	if errMerge != nil {
+		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errMerge}
+	}
+	normalized := normalizeResponseTranscriptReplacement(rawJSON, warmupRequest)
+	var errSet error
+	normalized, errSet = sjson.SetRawBytes(normalized, "input", merged)
+	if errSet != nil {
+		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errSet}
+	}
+	return normalized, normalized, nil
 }
 
 func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, error) {

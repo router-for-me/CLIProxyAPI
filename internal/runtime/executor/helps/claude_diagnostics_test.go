@@ -300,6 +300,32 @@ func TestClaudeContinuityClearsStaleRequestID(t *testing.T) {
 	}
 }
 
+func TestClaudeContinuity_ExpiredEntryDoesNotInheritPromptID(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	key, _, _, _, p1 := BeginClaudeContinuity("cred-expire", "sess-expire", true, "")
+	if p1 == "" {
+		t.Fatal("expected non-empty promptID")
+	}
+
+	// Expire entry manually
+	claudeDiagnosticsState.Lock()
+	entry := claudeDiagnosticsState.entries[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.entries[key] = entry
+	claudeDiagnosticsState.Unlock()
+
+	// Tool continuation call (isNewPromptTurn = false) without explicit prompt ID on expired entry
+	_, _, _, _, p2 := BeginClaudeContinuity("cred-expire", "sess-expire", false, "")
+	if p2 == "" {
+		t.Fatal("new generation must generate non-empty prompt ID")
+	}
+	if p2 == p1 {
+		t.Fatalf("new generation inherited expired prompt ID: %s", p1)
+	}
+}
+
 func TestIsClaudeProbeRequest_MultiContentBlocksNotAProbe(t *testing.T) {
 	// A request with max_tokens: 1 and multiple content blocks where one happens to be "quota"
 	// but another is a regular prompt must NOT be treated as a probe.
@@ -334,5 +360,84 @@ func TestIsClaudeProbeRequest_SingleContentBlockWithReminderIsProbe(t *testing.T
 	}`)
 	if !IsClaudeProbeOrHelperRequest(payload) {
 		t.Fatal("probe with system reminder and single quota block must be classified as a probe")
+	}
+}
+
+func TestClaudePayloadHas1hTTL(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+		want    bool
+	}{
+		{
+			name:    "empty payload",
+			payload: []byte(""),
+			want:    false,
+		},
+		{
+			name:    "invalid json",
+			payload: []byte("not-json"),
+			want:    false,
+		},
+		{
+			name:    "no cache control",
+			payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+			want:    false,
+		},
+		{
+			name:    "default 5m ephemeral",
+			payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}`),
+			want:    false,
+		},
+		{
+			name:    "message content with 1h ttl",
+			payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`),
+			want:    true,
+		},
+		{
+			name:    "system block with 1h ttl",
+			payload: []byte(`{"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral","ttl":"1h"}}]}`),
+			want:    true,
+		},
+		{
+			name:    "tool block with 1h ttl",
+			payload: []byte(`{"tools":[{"name":"tool1","cache_control":{"type":"ephemeral","ttl":"1h"}}]}`),
+			want:    true,
+		},
+		{
+			name:    "message text mentions ttl 1h without cache control",
+			payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"can you set ttl: 1h"}]}]}`),
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClaudePayloadHas1hTTL(tt.payload); got != tt.want {
+				t.Fatalf("ClaudePayloadHas1hTTL() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaudeSubagentRequests1h(t *testing.T) {
+	// 1. Neither header nor payload has 1h
+	headers := http.Header{}
+	payload := []byte(`{"messages":[{"role":"user","content":"task"}]}`)
+	if ClaudeSubagentRequests1h(headers, payload) {
+		t.Fatal("ClaudeSubagentRequests1h() = true, want false when no 1h requested")
+	}
+
+	// 2. Payload has 1h
+	payloadWith1h := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"task","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
+	if !ClaudeSubagentRequests1h(headers, payloadWith1h) {
+		t.Fatal("ClaudeSubagentRequests1h() = false, want true when payload has 1h")
+	}
+
+	// 3. Header has extended-cache-ttl beta
+	headersWithBeta := http.Header{}
+	headersWithBeta.Set("Anthropic-Beta", "claude-code-20250219,extended-cache-ttl-2025-04-11")
+	if !ClaudeSubagentRequests1h(headersWithBeta, payload) {
+		t.Fatal("ClaudeSubagentRequests1h() = false, want true when header has extended-cache-ttl beta")
 	}
 }

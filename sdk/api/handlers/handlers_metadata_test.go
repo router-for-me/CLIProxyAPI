@@ -283,4 +283,20 @@ func TestEnrichContextWithSessionHierarchyFromBody(t *testing.T) {
 	if metaCleared.SessionID != "" || metaCleared.ParentSessionID != "" {
 		t.Fatalf("cleared context = (%q, %q), want (empty, empty)", metaCleared.SessionID, metaCleared.ParentSessionID)
 	}
+
+	// 7. Roo Code task delegation from body
+	rooBody := []byte(`{"taskId":"task-child-99","parentTaskId":"task-parent-99"}`)
+	ctx7 := EnrichContextWithSessionHierarchy(context.Background(), nil, rooBody, nil)
+	meta7 := logging.GetClientRequestMetadata(ctx7)
+	if meta7.SessionID != "task:task-child-99" || meta7.ParentSessionID != "task:task-parent-99" {
+		t.Fatalf("Roo Code task session = (%q, %q), want (task:task-child-99, task:task-parent-99)", meta7.SessionID, meta7.ParentSessionID)
+	}
+
+	// 8. OpenCode parent_id in payload
+	opencodeBody := []byte(`{"session_id":"opencode-sess-1","parent_id":"opencode-root-1"}`)
+	ctx8 := EnrichContextWithSessionHierarchy(context.Background(), nil, opencodeBody, nil)
+	meta8 := logging.GetClientRequestMetadata(ctx8)
+	if meta8.SessionID != "session:opencode-sess-1" || meta8.ParentSessionID != "session:opencode-root-1" {
+		t.Fatalf("OpenCode parent_id session = (%q, %q), want (session:opencode-sess-1, session:opencode-root-1)", meta8.SessionID, meta8.ParentSessionID)
+	}
 }

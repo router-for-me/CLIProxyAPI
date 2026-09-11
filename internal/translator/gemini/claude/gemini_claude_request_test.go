@@ -393,17 +393,17 @@ func TestConvertClaudeRequestToGemini_AlignsPermutedParallelToolResultsWithMixed
 	if got := responseParts[0].Get("text").String(); got != "Results arrived." {
 		t.Fatalf("leading text = %q; output=%s", got, output)
 	}
+	if got := responseParts[1].Get("text").String(); got != "Continue." {
+		t.Fatalf("trailing text reordered before functionResponse = %q; output=%s", got, output)
+	}
 	for index, wantID := range []string{"call_1", "call_2", "call_3"} {
-		responsePart := responseParts[index+1]
+		responsePart := responseParts[index+2]
 		if gotID := responsePart.Get("functionResponse.id").String(); gotID != wantID {
 			t.Fatalf("functionResponse[%d].id = %q, want %q; output=%s", index, gotID, wantID, output)
 		}
 		if gotName := responsePart.Get("functionResponse.name").String(); gotName != "Read" {
 			t.Fatalf("functionResponse[%d].name = %q, want Read; output=%s", index, gotName, output)
 		}
-	}
-	if got := responseParts[4].Get("text").String(); got != "Continue." {
-		t.Fatalf("trailing text = %q; output=%s", got, output)
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
 		t.Fatalf("translated parallel tool history is invalid: %v; output=%s", errPairing, output)
@@ -438,5 +438,57 @@ func TestConvertClaudeRequestToGemini_StringToolResult(t *testing.T) {
 	// String content must not be double-encoded: result should be exactly "alpha".
 	if got := fr.Get("response.result").String(); got != "alpha" {
 		t.Fatalf("expected result 'alpha', got '%s' (raw=%s)", got, fr.Get("response.result").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToGemini_ToolResultWithTrailingSystemReminderReordersParts(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.8-flash",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Read the file"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_01_read", "name": "Read", "input": {"path": "main.go"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_01_read", "content": "package main"},
+					{"type": "text", "text": "<system-reminder>\n<total_tokens>1234</total_tokens>\n</system-reminder>"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3.8-flash", inputJSON, false)
+
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents turns, got %d: %s", len(contents), output)
+	}
+
+	userParts := contents[2].Get("parts").Array()
+	if len(userParts) != 2 {
+		t.Fatalf("expected 2 parts in user response turn, got %d: %s", len(userParts), contents[2].Raw)
+	}
+
+	// Text part must precede functionResponse part to prevent Vertex AI 400
+	// ("Requests ending with a model turn are not supported").
+	if !userParts[0].Get("text").Exists() {
+		t.Fatalf("expected parts[0] to be text part, got: %s", userParts[0].Raw)
+	}
+	if gotText := userParts[0].Get("text").String(); gotText != "<system-reminder>\n<total_tokens>1234</total_tokens>\n</system-reminder>" {
+		t.Fatalf("unexpected text in parts[0]: %q", gotText)
+	}
+	if !userParts[1].Get("functionResponse").Exists() {
+		t.Fatalf("expected parts[1] to be functionResponse part, got: %s", userParts[1].Raw)
+	}
+	if gotID := userParts[1].Get("functionResponse.id").String(); gotID != "toolu_01_read" {
+		t.Fatalf("unexpected functionResponse.id in parts[1]: %q", gotID)
 	}
 }
