@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -371,9 +372,20 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
+	}
+	if h.postAuthPersistHook != nil {
+		hookAuth := updatedAuth
+		if hookAuth == nil {
+			hookAuth = targetAuth
+		}
+		if errHook := h.postAuthPersistHook(ctx, hookAuth); errHook != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("post-auth persist hook failed: %v", errHook)})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -595,6 +607,40 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	}
 	if _, ok := touchedRoots["disabled"]; ok {
 		syncAuthFileDisabledState(auth)
+	}
+	if _, ok := touchedRoots["plan_type"]; ok {
+		syncAuthFilePlanTypeAttribute(auth)
+	} else if _, ok := touchedRoots["id_token"]; ok {
+		syncAuthFilePlanTypeAttribute(auth)
+	}
+}
+
+func syncAuthFilePlanTypeAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	newPlanType := ""
+	if auth.Metadata != nil {
+		if ptRaw, ok := auth.Metadata["plan_type"].(string); ok && strings.TrimSpace(ptRaw) != "" {
+			newPlanType = strings.TrimSpace(ptRaw)
+		} else if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
+			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
+				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
+					newPlanType = pt
+				}
+			}
+		}
+	}
+	if newPlanType != "" {
+		auth.Attributes["plan_type"] = newPlanType
+	} else {
+		delete(auth.Attributes, "plan_type")
 	}
 }
 
