@@ -7,6 +7,75 @@ import (
 	"time"
 )
 
+// Alias-mapped models: the provider's structured 404 names the alias-resolved
+// upstream identifier, not the public route model. Classification must match
+// either name before falling back to the short transient window (#5476 review).
+func TestManager_MarkResult_ExplicitNotFoundMatchesUpstreamModel(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-alias-404", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "public-model",
+		UpstreamModel: "upstream-name",
+		Success:       false,
+		Error: &Error{
+			HTTPStatus: http.StatusNotFound,
+			Message:    `{"type":"not_found_error","message":"model upstream-name was not found"}`,
+		},
+	})
+
+	before := time.Now()
+	updated, _ := m.GetByID(auth.ID)
+	state := existingModelState(updated, canonicalModelKey("public-model"))
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
+		t.Fatalf("upstream-named 404 fell into the transient branch: %v", state.NextRetryAfter.Sub(before))
+	}
+}
+
+// The credential-level clamp inherited from the merged #5501 work keeps a live
+// 401 deadline when a later generic 404 proposes a shorter window (#5476 review).
+func TestManager_MarkResult_Transient404KeepsLongerCredentialDeadline(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-cred-404-order", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "",
+		Success: false, Error: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+	})
+	before := time.Now()
+	snap, _ := m.GetByID(auth.ID)
+	if snap.NextRetryAfter.Before(before.Add(25 * time.Minute)) {
+		t.Fatalf("precondition failed: expected ~30m 401 deadline, got %v", snap.NextRetryAfter.Sub(before))
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "",
+		Success: false, Error: &Error{HTTPStatus: http.StatusNotFound, Message: "upstream stream failed"},
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated.NextRetryAfter.Before(before.Add(25 * time.Minute)) {
+		t.Fatalf("transient 404 shortened the live credential deadline to %v", updated.NextRetryAfter.Sub(before))
+	}
+}
+
 // Concurrent in-flight 404s complete in any order: a generic transient 404
 // landing after an explicit model-not-found result must not shorten the model's
 // still-live long cooldown (#5476 review).

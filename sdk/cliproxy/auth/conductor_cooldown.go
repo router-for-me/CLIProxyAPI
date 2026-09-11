@@ -859,9 +859,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 404:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
-							} else if isExplicitModelNotFoundError(result.Error, thinking.ParseSuffix(modelKey).ModelName) {
+							} else if isExplicitModelNotFoundForState(result.Error, modelKey, result.UpstreamModel) {
 								// A 404 that explicitly names this model as unsupported is
-								// demonstrably persistent and keeps the long cooldown.
+								// demonstrably persistent and keeps the long cooldown. The
+								// structured message names the upstream identifier, which
+								// differs from the route alias under alias mapping.
 								state.NextRetryAfter = now.Add(modelSupportCooldown)
 							} else {
 								// Concurrent in-flight failures complete in any order: a
@@ -1482,6 +1484,24 @@ func resultErrorFromError(err error) *Error {
 		}
 	}
 	return resultErr
+}
+
+// isExplicitModelNotFoundForState reports whether a 404 result explicitly
+// names the attempted model — by route key or by the alias-resolved upstream
+// identifier, since structured provider errors quote the upstream name — as
+// unsupported (#5476 review).
+func isExplicitModelNotFoundForState(err *Error, modelKey, upstreamModel string) bool {
+	if err == nil {
+		return false
+	}
+	if isExplicitModelNotFoundError(err, thinking.ParseSuffix(modelKey).ModelName) {
+		return true
+	}
+	upstream := strings.TrimSpace(upstreamModel)
+	if upstream == "" || strings.EqualFold(upstream, modelKey) {
+		return false
+	}
+	return isExplicitModelNotFoundError(err, thinking.ParseSuffix(upstream).ModelName)
 }
 
 // shouldSkipCredentialCooldown reports failures that must not mark auth/model cooling.
