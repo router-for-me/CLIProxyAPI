@@ -126,8 +126,9 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 		return "gpt-6-astra-" + clamped
 
 	case strings.Contains(lowerBase, "glm-5-2") || strings.Contains(lowerBase, "glm-5.2"):
-		// Upstream GLM-5.2 is free only on the default High effort tier ("glm-5-2").
-		// Max and No-thinking consume paid credits on Devin; restrict to the free tier.
+		if effort == "none" {
+			return "glm-5-2-none"
+		}
 		return "glm-5-2"
 
 	case strings.Contains(lowerBase, "glm-5-3") || strings.Contains(lowerBase, "glm-5.3"):

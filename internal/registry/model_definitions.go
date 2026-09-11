@@ -128,7 +128,7 @@ var staticDevinModels = []*ModelInfo{
 		ContextLength:       200000,
 		MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{
-			Levels: []string{"high"},
+			Levels: []string{"none", "high"},
 		},
 	},
 	{

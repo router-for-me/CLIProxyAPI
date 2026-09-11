@@ -89,13 +89,19 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:          "glm-5-3-high",
 		},
 		{
-			name:          "glm-5-2 free tier always maps to glm-5-2",
+			name:          "glm-5-2 default maps to glm-5-2",
 			rawModel:      "devin/glm-5-2",
 			thinkingLevel: "high",
 			want:          "glm-5-2",
 		},
 		{
-			name:          "glm-5-2 suffix maps to free tier",
+			name:          "glm-5-2 with none effort maps to glm-5-2-none",
+			rawModel:      "devin/glm-5-2:none",
+			thinkingLevel: "",
+			want:          "glm-5-2-none",
+		},
+		{
+			name:          "glm-5-2 suffix max maps to default",
 			rawModel:      "devin/glm-5-2(max)",
 			thinkingLevel: "",
 			want:          "glm-5-2",
