@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
@@ -129,6 +130,20 @@ func IsValidClaudePromptID(id string) bool {
 	}
 	parsed, err := uuid.Parse(id)
 	return err == nil && parsed.Version() == 4 && parsed.Variant() == uuid.RFC4122
+}
+
+// ClaudeDeterministicPromptID generates a deterministic RFC 4122 UUIDv4 from a seed string.
+func ClaudeDeterministicPromptID(seed string) string {
+	digest := sha256.Sum256([]byte(seed))
+	digest[6] = (digest[6] & 0x0f) | 0x40 // Version 4
+	digest[8] = (digest[8] & 0x3f) | 0x80 // Variant RFC 4122
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		digest[0:4],
+		digest[4:6],
+		digest[6:8],
+		digest[8:10],
+		digest[10:16],
+	)
 }
 
 // BeginClaudeContinuity starts one request generation for a stable credential

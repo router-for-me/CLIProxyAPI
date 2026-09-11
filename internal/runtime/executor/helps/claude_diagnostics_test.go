@@ -300,6 +300,32 @@ func TestClaudeContinuityClearsStaleRequestID(t *testing.T) {
 	}
 }
 
+func TestClaudeContinuity_ExpiredEntryDoesNotInheritPromptID(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	key, _, _, _, p1 := BeginClaudeContinuity("cred-expire", "sess-expire", true, "")
+	if p1 == "" {
+		t.Fatal("expected non-empty promptID")
+	}
+
+	// Expire entry manually
+	claudeDiagnosticsState.Lock()
+	entry := claudeDiagnosticsState.entries[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.entries[key] = entry
+	claudeDiagnosticsState.Unlock()
+
+	// Tool continuation call (isNewPromptTurn = false) without explicit prompt ID on expired entry
+	_, _, _, _, p2 := BeginClaudeContinuity("cred-expire", "sess-expire", false, "")
+	if p2 == "" {
+		t.Fatal("new generation must generate non-empty prompt ID")
+	}
+	if p2 == p1 {
+		t.Fatalf("new generation inherited expired prompt ID: %s", p1)
+	}
+}
+
 func TestIsClaudeProbeRequest_MultiContentBlocksNotAProbe(t *testing.T) {
 	// A request with max_tokens: 1 and multiple content blocks where one happens to be "quota"
 	// but another is a regular prompt must NOT be treated as a probe.
