@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -30,11 +31,22 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 	return out
 }
 
-// ApplyPayloadConfigWithRequestTracked applies payload config and reports whether
-// an applied rule targeted trackedPath or one of its descendants.
+// ApplyPayloadConfigForAuth applies payload rules to the credential selected for
+// this execution attempt. Credential selectors do not change model routing.
+func ApplyPayloadConfigForAuth(cfg *config.Config, auth *cliproxyauth.Auth, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
+	out, _ := ApplyPayloadConfigForAuthWithTrackedPaths(cfg, auth, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers)
+	return out
+}
+
 // ApplyPayloadConfigWithTrackedPaths applies payload config and reports which
 // tracked paths (or their descendants) were targeted by an applied rule.
 func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPaths ...string) ([]byte, map[string]bool) {
+	return ApplyPayloadConfigForAuthWithTrackedPaths(cfg, nil, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers, trackedPaths...)
+}
+
+// ApplyPayloadConfigForAuthWithTrackedPaths applies credential-aware payload
+// rules and reports the paths targeted by rules that matched this attempt.
+func ApplyPayloadConfigForAuthWithTrackedPaths(cfg *config.Config, auth *cliproxyauth.Auth, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPaths ...string) ([]byte, map[string]bool) {
 	touched := make(map[string]bool)
 	if cfg == nil || len(payload) == 0 {
 		return payload, touched
@@ -60,6 +72,14 @@ func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fro
 	rules := cfg.Payload
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
 	if hasPayloadRules {
+		authIndex, prefix := "", ""
+		if auth != nil {
+			// Direct SDK callers may not have assigned Index yet. Derive it on
+			// a value copy so matching never mutates a shared credential.
+			authCopy := *auth
+			authIndex = authCopy.EnsureIndex()
+			prefix = strings.TrimSpace(auth.Prefix)
+		}
 		model = strings.TrimSpace(model)
 		requestedModel = strings.TrimSpace(requestedModel)
 		if model != "" || requestedModel != "" {
@@ -72,7 +92,7 @@ func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fro
 			// Apply default rules: first write wins per field across all matching rules.
 			for i := range rules.Default {
 				rule := &rules.Default[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates, authIndex, prefix) {
 					continue
 				}
 				for path, value := range rule.Params {
@@ -100,7 +120,7 @@ func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fro
 			// Apply default raw rules: first write wins per field across all matching rules.
 			for i := range rules.DefaultRaw {
 				rule := &rules.DefaultRaw[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates, authIndex, prefix) {
 					continue
 				}
 				for path, value := range rule.Params {
@@ -132,7 +152,7 @@ func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fro
 			// Apply override rules: last write wins per field across all matching rules.
 			for i := range rules.Override {
 				rule := &rules.Override[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates, authIndex, prefix) {
 					continue
 				}
 				for path, value := range rule.Params {
@@ -152,7 +172,7 @@ func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fro
 			// Apply override raw rules: last write wins per field across all matching rules.
 			for i := range rules.OverrideRaw {
 				rule := &rules.OverrideRaw[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates, authIndex, prefix) {
 					continue
 				}
 				for path, value := range rule.Params {
@@ -176,7 +196,7 @@ func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fro
 			// Apply filter rules: remove matching paths from payload.
 			for i := range rules.Filter {
 				rule := &rules.Filter[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates) {
+				if !payloadModelRulesMatch(rule.Models, protocol, fromProtocol, headers, out, root, candidates, authIndex, prefix) {
 					continue
 				}
 				for _, path := range rule.Params {
@@ -243,7 +263,7 @@ func shouldStripImageGeneration(mode config.DisableImageGenerationMode, requestP
 	}
 }
 
-func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, fromProtocol string, headers http.Header, payload []byte, root string, models []string) bool {
+func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, fromProtocol string, headers http.Header, payload []byte, root string, models []string, authIndex, prefix string) bool {
 	if len(rules) == 0 || len(models) == 0 {
 		return false
 	}
@@ -257,6 +277,12 @@ func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, fr
 				continue
 			}
 			if !payloadFromProtocolMatches(entry.FromProtocol, fromProtocol) {
+				continue
+			}
+			if selected := strings.TrimSpace(entry.AuthIndex); selected != "" && selected != authIndex {
+				continue
+			}
+			if selected := strings.TrimSpace(entry.Prefix); selected != "" && selected != prefix {
 				continue
 			}
 			if !payloadHeadersMatch(headers, entry.Headers) {

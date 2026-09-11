@@ -333,6 +333,10 @@ type PayloadModelRule struct {
 	Headers map[string]string `yaml:"headers" json:"headers"`
 	// FromProtocol restricts the rule to a specific source protocol (e.g., "gemini", "responses").
 	FromProtocol string `yaml:"from-protocol" json:"from-protocol"`
+	// AuthIndex restricts the rule to the selected credential's management auth_index.
+	AuthIndex string `yaml:"auth-index,omitempty" json:"auth-index,omitempty"`
+	// Prefix restricts the rule to the selected credential's configured routing prefix.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 	// Match requires payload JSON paths to equal the configured values.
 	Match []map[string]any `yaml:"match" json:"match"`
 	// NotMatch requires payload JSON paths to not equal the configured values.

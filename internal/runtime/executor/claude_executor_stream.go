@@ -141,8 +141,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	var touchedPayloadPaths map[string]bool
-	body, touchedPayloadPaths = helps.ApplyPayloadConfigWithTrackedPaths(
+	body, touchedPayloadPaths = helps.ApplyPayloadConfigForAuthWithTrackedPaths(
 		e.cfg,
+		auth,
 		baseModel,
 		to.String(),
 		from.String(),
