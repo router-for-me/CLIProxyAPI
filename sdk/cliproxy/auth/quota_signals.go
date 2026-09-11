@@ -16,7 +16,7 @@ const (
 // passive credential-level quota snapshot understood by collectQuotaSignals.
 func ProviderSupportsQuotaObservation(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "claude", "codex":
+	case "claude", "codex", "devin":
 		return true
 	default:
 		return false

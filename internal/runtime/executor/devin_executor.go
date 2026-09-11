@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	devinauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/devin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -86,9 +87,123 @@ func (e *DevinExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	return httpClient.Do(httpReq)
 }
 
-// Refresh is a no-op since Devin uses permanent API keys.
-func (e *DevinExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	return auth, nil
+// Refresh updates Devin user status, plan, and quota signals.
+func (e *DevinExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil {
+		return nil, errors.New("devin executor: auth is nil")
+	}
+
+	sessionToken := strings.TrimSpace(auth.Attributes["api_key"])
+	if sessionToken == "" {
+		sessionToken = strings.TrimSpace(auth.Attributes["session_token"])
+	}
+	if sessionToken == "" && auth.Metadata != nil {
+		if v, ok := auth.Metadata["api_key"].(string); ok {
+			sessionToken = strings.TrimSpace(v)
+		}
+		if sessionToken == "" {
+			if v, ok := auth.Metadata["session_token"].(string); ok {
+				sessionToken = strings.TrimSpace(v)
+			}
+		}
+	}
+	if sessionToken == "" {
+		return auth, nil
+	}
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	authService := devinauth.NewDevinAuthService(httpClient)
+	if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
+		authService.SetServerBaseURL(baseURL)
+	} else if auth.Metadata != nil {
+		if v, ok := auth.Metadata["base_url"].(string); ok && strings.TrimSpace(v) != "" {
+			authService.SetServerBaseURL(v)
+		}
+	}
+	deviceSeed := strings.TrimSpace(auth.Attributes["device_seed"])
+	if deviceSeed == "" && auth.Metadata != nil {
+		if v, ok := auth.Metadata["device_seed"].(string); ok {
+			deviceSeed = strings.TrimSpace(v)
+		}
+	}
+
+	status, err := authService.FetchUserStatus(ctx, sessionToken, deviceSeed)
+	if err != nil {
+		log.Warnf("devin executor: failed to refresh user status for %s: %v", auth.ID, err)
+		return auth, err
+	}
+
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	if updated.Attributes == nil {
+		updated.Attributes = make(map[string]string)
+	}
+
+	if status.Email != "" {
+		updated.Metadata["email"] = status.Email
+		updated.Attributes["email"] = status.Email
+	}
+	if status.UserName != "" {
+		updated.Metadata["user_name"] = status.UserName
+		updated.Attributes["user_name"] = status.UserName
+	}
+	if status.UserID != "" {
+		updated.Metadata["user_id"] = status.UserID
+		updated.Attributes["user_id"] = status.UserID
+	}
+	if status.TeamID != "" {
+		updated.Metadata["team_id"] = status.TeamID
+		updated.Attributes["team_id"] = status.TeamID
+	}
+	if status.Plan != "" {
+		updated.Metadata["plan"] = status.Plan
+		updated.Attributes["plan"] = status.Plan
+	}
+	if status.OrgID != "" {
+		updated.Metadata["org_id"] = status.OrgID
+		updated.Attributes["org_id"] = status.OrgID
+	}
+	if status.OrgName != "" {
+		updated.Metadata["org_name"] = status.OrgName
+		updated.Attributes["org_name"] = status.OrgName
+	}
+
+	updated.Metadata["daily_quota_remaining_percent"] = status.DailyQuotaRemainingPercent
+	updated.Metadata["weekly_quota_remaining_percent"] = status.WeeklyQuotaRemainingPercent
+	if !status.DailyQuotaResetAt.IsZero() {
+		updated.Metadata["daily_quota_reset_at"] = status.DailyQuotaResetAt.Format(time.RFC3339)
+	}
+	if !status.WeeklyQuotaResetAt.IsZero() {
+		updated.Metadata["weekly_quota_reset_at"] = status.WeeklyQuotaResetAt.Format(time.RFC3339)
+	}
+	if !status.PlanStart.IsZero() {
+		updated.Metadata["plan_start"] = status.PlanStart.Format(time.RFC3339)
+	}
+	if !status.PlanEnd.IsZero() {
+		updated.Metadata["plan_end"] = status.PlanEnd.Format(time.RFC3339)
+	}
+
+	// Quota observation signals for management UI and conductor
+	if updated.Quota.Signals == nil {
+		updated.Quota.Signals = make(map[string]string)
+	}
+	if status.Plan != "" {
+		updated.Quota.Signals["plan"] = status.Plan
+	}
+	updated.Quota.Signals["daily_quota_remaining_percent"] = fmt.Sprintf("%d%%", status.DailyQuotaRemainingPercent)
+	updated.Quota.Signals["weekly_quota_remaining_percent"] = fmt.Sprintf("%d%%", status.WeeklyQuotaRemainingPercent)
+	if !status.DailyQuotaResetAt.IsZero() {
+		updated.Quota.Signals["daily_quota_reset_at"] = status.DailyQuotaResetAt.Format(time.RFC3339)
+	}
+	if !status.WeeklyQuotaResetAt.IsZero() {
+		updated.Quota.Signals["weekly_quota_reset_at"] = status.WeeklyQuotaResetAt.Format(time.RFC3339)
+	}
+	updated.Quota.ObservedAt = time.Now()
+	updated.LastRefreshedAt = time.Now()
+
+	return updated, nil
 }
 
 // CountTokens provides token counting for Devin requests.
@@ -806,9 +921,19 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 
 			case "function_result":
 				id := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String())
-				resText := step.Get("result").String()
+				resText := firstNonEmpty(
+					step.Get("result").String(),
+					step.Get("output").String(),
+					step.Get("content").String(),
+				)
 				if resText == "" {
-					resText = step.Get("result").Raw
+					if r := step.Get("result"); r.Exists() {
+						resText = r.Raw
+					} else if o := step.Get("output"); o.Exists() {
+						resText = o.Raw
+					} else if c := step.Get("content"); c.Exists() {
+						resText = c.Raw
+					}
 				}
 				prompts = append(prompts, helps.DevinPrompt{
 					MessageID:  uuid.New().String(),
@@ -841,6 +966,24 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 					MessageID: uuid.New().String(),
 					Source:    2,
 					Content:   text,
+				})
+			case "tool":
+				id := firstNonEmpty(m.Get("tool_call_id").String(), m.Get("id").String())
+				resText := firstNonEmpty(
+					m.Get("content").String(),
+					m.Get("output").String(),
+					m.Get("result").String(),
+				)
+				if resText == "" {
+					if c := m.Get("content"); c.Exists() {
+						resText = c.Raw
+					}
+				}
+				prompts = append(prompts, helps.DevinPrompt{
+					MessageID:  uuid.New().String(),
+					Source:     4,
+					ToolCallID: id,
+					Content:    resText,
 				})
 			}
 		}

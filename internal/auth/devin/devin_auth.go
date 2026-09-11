@@ -41,9 +41,10 @@ type DevinTokenBundle struct {
 
 // DevinAuthService coordinates Devin PKCE authorization and token exchange.
 type DevinAuthService struct {
-	client     *http.Client
-	appBaseURL string
-	apiBaseURL string
+	client        *http.Client
+	appBaseURL    string
+	apiBaseURL    string
+	serverBaseURL string
 }
 
 // NewDevinAuthService creates a new Devin authentication service instance.
@@ -52,9 +53,17 @@ func NewDevinAuthService(client *http.Client) *DevinAuthService {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &DevinAuthService{
-		client:     client,
-		appBaseURL: DefaultAppBaseURL,
-		apiBaseURL: DefaultAPIBaseURL,
+		client:        client,
+		appBaseURL:    DefaultAppBaseURL,
+		apiBaseURL:    DefaultAPIBaseURL,
+		serverBaseURL: DefaultServerURL,
+	}
+}
+
+// SetServerBaseURL overrides the upstream reasoning/seat management base URL (used in tests).
+func (s *DevinAuthService) SetServerBaseURL(url string) {
+	if s != nil && strings.TrimSpace(url) != "" {
+		s.serverBaseURL = strings.TrimRight(strings.TrimSpace(url), "/")
 	}
 }
 

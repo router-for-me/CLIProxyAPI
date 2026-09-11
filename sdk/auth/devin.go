@@ -132,6 +132,9 @@ waitForResult:
 			if res.Error != "" {
 				return nil, fmt.Errorf("devin oauth error: %s", res.Error)
 			}
+			if state != "" && res.State != "" && res.State != state {
+				return nil, fmt.Errorf("devin oauth state mismatch (possible CSRF)")
+			}
 			authCode = res.Code
 			break waitForResult
 
@@ -177,6 +180,9 @@ waitForResult:
 			// 2. Full callback redirect URL
 			parsed, errParse := misc.ParseOAuthCallback(trimmed)
 			if errParse == nil && parsed != nil && parsed.Code != "" {
+				if state != "" && parsed.State != "" && parsed.State != state {
+					return nil, fmt.Errorf("devin oauth state mismatch (possible CSRF)")
+				}
 				authCode = parsed.Code
 				break waitForResult
 			}
@@ -214,6 +220,26 @@ waitForResult:
 		log.Warnf("failed to fetch devin user profile: %v", errSelf)
 	}
 
+	userStatus, errStatus := authSvc.FetchUserStatus(ctx, sessionToken, "")
+	if errStatus != nil {
+		log.Warnf("failed to fetch devin user status and quota: %v", errStatus)
+	}
+
+	var email, plan string
+	if userStatus != nil {
+		if userName == "" && userStatus.UserName != "" {
+			userName = userStatus.UserName
+		}
+		if userID == "" && userStatus.UserID != "" {
+			userID = userStatus.UserID
+		}
+		if orgID == "" && userStatus.OrgID != "" {
+			orgID = userStatus.OrgID
+		}
+		email = userStatus.Email
+		plan = userStatus.Plan
+	}
+
 	identifier := userName
 	if identifier == "" {
 		identifier = userID
@@ -224,30 +250,73 @@ waitForResult:
 
 	fileName := fmt.Sprintf("devin-%s.json", identifier)
 	label := fmt.Sprintf("Devin (%s)", identifier)
+	if email != "" {
+		label = fmt.Sprintf("Devin (%s - %s)", identifier, email)
+	}
+
+	attributes := map[string]string{
+		"api_key":       sessionToken,
+		"session_token": sessionToken,
+		"user_name":     userName,
+		"user_id":       userID,
+		"org_id":        orgID,
+		"base_url":      devinauth.DefaultServerURL,
+		"auth_kind":     "oauth",
+	}
+	metadata := map[string]any{
+		"type":          "devin",
+		"api_key":       sessionToken,
+		"session_token": sessionToken,
+		"user_name":     userName,
+		"user_id":       userID,
+		"org_id":        orgID,
+		"auth_kind":     "oauth",
+	}
+	if email != "" {
+		attributes["email"] = email
+		metadata["email"] = email
+	}
+	if plan != "" {
+		attributes["plan"] = plan
+		metadata["plan"] = plan
+	}
+
+	quotaSignals := make(map[string]string)
+	if plan != "" {
+		quotaSignals["plan"] = plan
+	}
+	if userStatus != nil {
+		metadata["daily_quota_remaining_percent"] = userStatus.DailyQuotaRemainingPercent
+		metadata["weekly_quota_remaining_percent"] = userStatus.WeeklyQuotaRemainingPercent
+		quotaSignals["daily_quota_remaining_percent"] = fmt.Sprintf("%d%%", userStatus.DailyQuotaRemainingPercent)
+		quotaSignals["weekly_quota_remaining_percent"] = fmt.Sprintf("%d%%", userStatus.WeeklyQuotaRemainingPercent)
+		if !userStatus.DailyQuotaResetAt.IsZero() {
+			metadata["daily_quota_reset_at"] = userStatus.DailyQuotaResetAt.Format(time.RFC3339)
+			quotaSignals["daily_quota_reset_at"] = userStatus.DailyQuotaResetAt.Format(time.RFC3339)
+		}
+		if !userStatus.WeeklyQuotaResetAt.IsZero() {
+			metadata["weekly_quota_reset_at"] = userStatus.WeeklyQuotaResetAt.Format(time.RFC3339)
+			quotaSignals["weekly_quota_reset_at"] = userStatus.WeeklyQuotaResetAt.Format(time.RFC3339)
+		}
+		if !userStatus.PlanStart.IsZero() {
+			metadata["plan_start"] = userStatus.PlanStart.Format(time.RFC3339)
+		}
+		if !userStatus.PlanEnd.IsZero() {
+			metadata["plan_end"] = userStatus.PlanEnd.Format(time.RFC3339)
+		}
+	}
 
 	authRecord := &coreauth.Auth{
-		ID:       fileName,
-		Provider: "devin",
-		FileName: fileName,
-		Label:    label,
-		Status:   coreauth.StatusActive,
-		Attributes: map[string]string{
-			"api_key":       sessionToken,
-			"session_token": sessionToken,
-			"user_name":     userName,
-			"user_id":       userID,
-			"org_id":        orgID,
-			"base_url":      devinauth.DefaultServerURL,
-			"auth_kind":     "oauth",
-		},
-		Metadata: map[string]any{
-			"type":          "devin",
-			"api_key":       sessionToken,
-			"session_token": sessionToken,
-			"user_name":     userName,
-			"user_id":       userID,
-			"org_id":        orgID,
-			"auth_kind":     "oauth",
+		ID:         fileName,
+		Provider:   "devin",
+		FileName:   fileName,
+		Label:      label,
+		Status:     coreauth.StatusActive,
+		Attributes: attributes,
+		Metadata:   metadata,
+		Quota: coreauth.QuotaState{
+			ObservedAt: time.Now(),
+			Signals:    quotaSignals,
 		},
 	}
 

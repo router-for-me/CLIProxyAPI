@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	devinauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/devin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -16,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestDevinExecutorIdentifierAndFormat(t *testing.T) {
@@ -471,5 +474,105 @@ func TestSupplementImagesFromOriginal(t *testing.T) {
 	}
 	if !strings.Contains(prompts[0].Content, "[Image 1: pasted_image_1.jpg]") {
 		t.Errorf("content missing image header: %q", prompts[0].Content)
+	}
+}
+
+func TestDevinExecutor_Refresh(t *testing.T) {
+	// Build mock protobuf response
+	var planInfo []byte
+	planInfo = protowire.AppendTag(planInfo, 2, protowire.BytesType)
+	planInfo = protowire.AppendString(planInfo, "Pro")
+
+	var orgInfo []byte
+	orgInfo = protowire.AppendTag(orgInfo, 4, protowire.BytesType)
+	orgInfo = protowire.AppendString(orgInfo, "org-test-devin")
+	orgInfo = protowire.AppendTag(orgInfo, 8, protowire.BytesType)
+	orgInfo = protowire.AppendString(orgInfo, "XCodeCLI")
+	planInfo = protowire.AppendTag(planInfo, 33, protowire.BytesType)
+	planInfo = protowire.AppendBytes(planInfo, orgInfo)
+
+	var planStatus []byte
+	planStatus = protowire.AppendTag(planStatus, 1, protowire.BytesType)
+	planStatus = protowire.AppendBytes(planStatus, planInfo)
+	planStatus = protowire.AppendTag(planStatus, 14, protowire.VarintType)
+	planStatus = protowire.AppendVarint(planStatus, 95)
+	planStatus = protowire.AppendTag(planStatus, 15, protowire.VarintType)
+	planStatus = protowire.AppendVarint(planStatus, 45)
+	planStatus = protowire.AppendTag(planStatus, 17, protowire.VarintType)
+	planStatus = protowire.AppendVarint(planStatus, 1789200000)
+	planStatus = protowire.AppendTag(planStatus, 18, protowire.VarintType)
+	planStatus = protowire.AppendVarint(planStatus, 1789286400)
+
+	var userStatus []byte
+	userStatus = protowire.AppendTag(userStatus, 3, protowire.BytesType)
+	userStatus = protowire.AppendString(userStatus, "refreshuser")
+	userStatus = protowire.AppendTag(userStatus, 5, protowire.BytesType)
+	userStatus = protowire.AppendString(userStatus, "team-xyz")
+	userStatus = protowire.AppendTag(userStatus, 7, protowire.BytesType)
+	userStatus = protowire.AppendString(userStatus, "refreshuser@example.com")
+	userStatus = protowire.AppendTag(userStatus, 13, protowire.BytesType)
+	userStatus = protowire.AppendBytes(userStatus, planStatus)
+	userStatus = protowire.AppendTag(userStatus, 36, protowire.BytesType)
+	userStatus = protowire.AppendString(userStatus, "user-id-999")
+
+	var mockResp []byte
+	mockResp = protowire.AppendTag(mockResp, 1, protowire.BytesType)
+	mockResp = protowire.AppendBytes(mockResp, userStatus)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != devinauth.DevinGetUserStatusPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/proto")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(mockResp)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	exec := NewDevinExecutor(cfg)
+
+	auth := &cliproxyauth.Auth{
+		ID:       "devin-refresh.json",
+		Provider: "devin",
+		Attributes: map[string]string{
+			"api_key":  "devin-session-token$test",
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"api_key":  "devin-session-token$test",
+			"base_url": server.URL,
+		},
+	}
+
+	updated, err := exec.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("exec.Refresh failed: %v", err)
+	}
+
+	if updated.Metadata["plan"] != "Pro" {
+		t.Errorf("expected plan Pro, got %v", updated.Metadata["plan"])
+	}
+	if updated.Metadata["email"] != "refreshuser@example.com" {
+		t.Errorf("expected email refreshuser@example.com, got %v", updated.Metadata["email"])
+	}
+	if updated.Metadata["user_name"] != "refreshuser" {
+		t.Errorf("expected user_name refreshuser, got %v", updated.Metadata["user_name"])
+	}
+	if updated.Metadata["daily_quota_remaining_percent"] != int64(95) {
+		t.Errorf("expected daily quota 95, got %v", updated.Metadata["daily_quota_remaining_percent"])
+	}
+	if updated.Metadata["weekly_quota_remaining_percent"] != int64(45) {
+		t.Errorf("expected weekly quota 45, got %v", updated.Metadata["weekly_quota_remaining_percent"])
+	}
+	if updated.Quota.Signals["daily_quota_remaining_percent"] != "95%" {
+		t.Errorf("expected quota signal 95%%, got %q", updated.Quota.Signals["daily_quota_remaining_percent"])
+	}
+	if updated.Quota.Signals["weekly_quota_remaining_percent"] != "45%" {
+		t.Errorf("expected quota signal 45%%, got %q", updated.Quota.Signals["weekly_quota_remaining_percent"])
+	}
+	if updated.Quota.ObservedAt.IsZero() {
+		t.Error("expected non-zero Quota.ObservedAt")
 	}
 }

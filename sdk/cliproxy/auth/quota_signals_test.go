@@ -384,7 +384,7 @@ func TestProviderSupportsQuotaObservation(t *testing.T) {
 			t.Fatalf("provider %q unexpectedly supports quota observation", provider)
 		}
 	}
-	for _, provider := range []string{"codex", "claude", "CODEX", " Claude "} {
+	for _, provider := range []string{"codex", "claude", "devin", "CODEX", " Claude ", " Devin "} {
 		if !ProviderSupportsQuotaObservation(provider) {
 			t.Fatalf("provider %q unexpectedly excluded from quota observation", provider)
 		}
