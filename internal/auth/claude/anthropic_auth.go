@@ -34,6 +34,18 @@ const (
 	RedirectURI      = "http://localhost:54545/callback"
 	ClaudeOAuthScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
+	// ManualAuthURL is the claude.com entry point the native Claude Code CLI opens
+	// for subscription logins. It 307-redirects to AuthURL with the query preserved,
+	// so both endpoints accept the same parameters.
+	ManualAuthURL = "https://claude.com/cai/oauth/authorize"
+	// ManualRedirectURI is the Anthropic-hosted callback the native CLI uses when it
+	// cannot bind a local port. That page renders "<code>#<state>" for the user to
+	// paste back, so the browser never has to reach this host.
+	ManualRedirectURI = "https://platform.claude.com/oauth/code/callback"
+	// ManualOAuthScope is the scope set Claude Code 2.1.223 requests on the manual
+	// path: ClaudeOAuthScope plus the API-key creation scope.
+	ManualOAuthScope = "org:create_api_key " + ClaudeOAuthScope
+
 	claudeRefreshMinBackoff       = 5 * time.Second
 	claudeRefreshMaxBackoff       = 5 * time.Minute
 	claudeRefreshTimeout          = 30 * time.Second
@@ -317,22 +329,56 @@ func (o *ClaudeAuth) inspectOAuthAccount(ctx context.Context, accessToken string
 //   - string: The state parameter for verification
 //   - error: An error if PKCE codes are missing or URL generation fails
 func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, string, error) {
+	return buildAuthURL(AuthURL, RedirectURI, ClaudeOAuthScope, state, pkceCodes)
+}
+
+// GenerateManualAuthURL creates the authorization URL the native Claude Code CLI
+// opens when it cannot bind a local callback port. Anthropic hosts the redirect
+// target and renders "<code>#<state>" on it, so the login completes by pasting
+// that pair back instead of by an inbound request to this host.
+//
+// Parameters:
+//   - state: A random state parameter for CSRF protection
+//   - pkceCodes: The PKCE codes for secure code exchange
+//
+// Returns:
+//   - string: The complete authorization URL
+//   - string: The state parameter for verification
+//   - error: An error if PKCE codes are missing or URL generation fails
+func (o *ClaudeAuth) GenerateManualAuthURL(state string, pkceCodes *PKCECodes) (string, string, error) {
+	return buildAuthURL(ManualAuthURL, ManualRedirectURI, ManualOAuthScope, state, pkceCodes)
+}
+
+func buildAuthURL(endpoint, redirectURI, scope, state string, pkceCodes *PKCECodes) (string, string, error) {
 	if pkceCodes == nil {
 		return "", "", fmt.Errorf("PKCE codes are required")
 	}
 
-	params := url.Values{
-		"code":                  {"true"},
-		"client_id":             {ClientID},
-		"response_type":         {"code"},
-		"redirect_uri":          {RedirectURI},
-		"scope":                 {ClaudeOAuthScope},
-		"code_challenge":        {pkceCodes.CodeChallenge},
-		"code_challenge_method": {"S256"},
-		"state":                 {state},
+	// Parameter order reproduces the sequence Claude Code 2.1.223 appends to its
+	// URLSearchParams. url.Values.Encode would sort the keys alphabetically and
+	// emit a query that no native client ever sends.
+	params := [][2]string{
+		{"code", "true"},
+		{"client_id", ClientID},
+		{"response_type", "code"},
+		{"redirect_uri", redirectURI},
+		{"scope", scope},
+		{"code_challenge", pkceCodes.CodeChallenge},
+		{"code_challenge_method", "S256"},
+		{"state", state},
 	}
 
-	authURL := fmt.Sprintf("%s?%s", AuthURL, params.Encode())
+	var query strings.Builder
+	for i, param := range params {
+		if i > 0 {
+			query.WriteByte('&')
+		}
+		query.WriteString(url.QueryEscape(param[0]))
+		query.WriteByte('=')
+		query.WriteString(url.QueryEscape(param[1]))
+	}
+
+	authURL := fmt.Sprintf("%s?%s", endpoint, query.String())
 	return authURL, state, nil
 }
 
@@ -368,8 +414,31 @@ func (c *ClaudeAuth) parseCodeAndState(code string) (parsedCode, parsedState str
 //   - *ClaudeAuthBundle: The complete authentication bundle with tokens
 //   - error: An error if token exchange fails
 func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
+	return o.ExchangeCodeForTokensWithRedirect(ctx, code, state, RedirectURI, pkceCodes)
+}
+
+// ExchangeCodeForTokensWithRedirect exchanges an authorization code for tokens
+// using an explicit redirect_uri. Anthropic binds the code to the redirect_uri
+// that produced it, so callers must pass the same value they put in the
+// authorization URL: RedirectURI for the local-callback flow, ManualRedirectURI
+// for the manual Claude Code flow.
+//
+// Parameters:
+//   - ctx: The context for the request
+//   - code: The authorization code received from OAuth callback
+//   - state: The state parameter for verification
+//   - redirectURI: The redirect_uri used to obtain the code
+//   - pkceCodes: The PKCE codes for secure verification
+//
+// Returns:
+//   - *ClaudeAuthBundle: The complete authentication bundle with tokens
+//   - error: An error if token exchange fails
+func (o *ClaudeAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code, state, redirectURI string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
+	}
+	if strings.TrimSpace(redirectURI) == "" {
+		redirectURI = RedirectURI
 	}
 	newCode, newState := o.parseCodeAndState(code)
 
@@ -379,7 +448,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 	reqBody := authorizationCodeExchangeRequest{
 		GrantType:    "authorization_code",
 		Code:         newCode,
-		RedirectURI:  RedirectURI,
+		RedirectURI:  redirectURI,
 		ClientID:     ClientID,
 		CodeVerifier: pkceCodes.CodeVerifier,
 		State:        state,

@@ -61,6 +61,12 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		return nil, fmt.Errorf("claude state generation failed: %w", err)
 	}
 
+	// The manual flow authorizes against Anthropic's hosted callback, so this host
+	// never receives an inbound redirect and no local callback server is needed.
+	if cfg.ClaudeCode.ManualOAuth {
+		return a.loginManual(ctx, cfg, opts, state, pkceCodes)
+	}
+
 	oauthServer := claude.NewOAuthServer(callbackPort)
 	if err = oauthServer.Start(); err != nil {
 		if strings.Contains(err.Error(), "already in use") {
@@ -188,7 +194,51 @@ waitForCallback:
 	log.Debug("Claude authorization code received; exchanging for tokens")
 	log.Debugf("Code: %s, State: %s", result.Code[:min(20, len(result.Code))], state)
 
-	authBundle, err := authSvc.ExchangeCodeForTokens(ctx, result.Code, state, pkceCodes)
+	return a.completeLogin(ctx, authSvc, result.Code, state, claude.RedirectURI, pkceCodes)
+}
+
+// loginManual runs the manual Claude Code OAuth flow. The user opens the printed
+// authorization URL, and Anthropic's hosted callback renders a "<code>#<state>"
+// pair that is pasted back here, so no local callback port is bound.
+func (a *ClaudeAuthenticator) loginManual(ctx context.Context, cfg *config.Config, opts *LoginOptions, state string, pkceCodes *claude.PKCECodes) (*coreauth.Auth, error) {
+	authSvc := claude.NewClaudeAuth(cfg)
+
+	authURL, returnedState, err := authSvc.GenerateManualAuthURL(state, pkceCodes)
+	if err != nil {
+		return nil, fmt.Errorf("claude authorization url generation failed: %w", err)
+	}
+	state = returnedState
+
+	if !opts.NoBrowser && browser.IsAvailable() {
+		if errOpen := browser.OpenURL(authURL); errOpen != nil {
+			log.Warnf("Failed to open browser automatically: %v", errOpen)
+		}
+	}
+	fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
+
+	if opts.Prompt == nil {
+		return nil, fmt.Errorf("claude manual oauth requires an interactive prompt")
+	}
+	input, errPrompt := opts.Prompt("Paste the code shown after authorization (<code>#<state>): ")
+	if errPrompt != nil {
+		return nil, errPrompt
+	}
+	code := strings.TrimSpace(input)
+	if code == "" {
+		return nil, claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, fmt.Errorf("empty authorization code"))
+	}
+	if _, pastedState, found := strings.Cut(code, "#"); found && strings.TrimSpace(pastedState) != state {
+		log.Errorf("State mismatch: expected %s, got %s", state, strings.TrimSpace(pastedState))
+		return nil, claude.NewAuthenticationError(claude.ErrInvalidState, fmt.Errorf("state mismatch"))
+	}
+
+	return a.completeLogin(ctx, authSvc, code, state, claude.ManualRedirectURI, pkceCodes)
+}
+
+// completeLogin exchanges an authorization code and shapes the resulting tokens
+// into the credential record shared by both Claude login flows.
+func (a *ClaudeAuthenticator) completeLogin(ctx context.Context, authSvc *claude.ClaudeAuth, code, state, redirectURI string, pkceCodes *claude.PKCECodes) (*coreauth.Auth, error) {
+	authBundle, err := authSvc.ExchangeCodeForTokensWithRedirect(ctx, code, state, redirectURI, pkceCodes)
 	if err != nil {
 		log.Errorf("Token exchange failed: %v", err)
 		return nil, claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, err)
