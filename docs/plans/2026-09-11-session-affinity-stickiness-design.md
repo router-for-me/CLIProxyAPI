@@ -91,6 +91,15 @@ Request → Pick() → cache hit? ── ya → auth tersedia? ── ya → pak
 State remains in-memory only; entries are `authID + expiresAt + aliases`;
 key format `provider::sessionID::model` unchanged.
 
+**Implementation placement note (as built):** the handoff lives inside
+`Manager.SetSelector` (`sdk/cliproxy/auth/conductor_selection.go`), and the
+migration lives in `Manager.Remove`/`Register`
+(`sdk/cliproxy/auth/conductor_lifecycle.go`) via the
+`pendingAffinityMigrations` stash — no changes to
+`sdk/cliproxy/service_config.go` or upstreamsync were needed. The migration
+equivalence key is `base_url|compat_name|config_index` (config_index added
+during review to disambiguate multi-entry pools).
+
 ## Testing
 
 | Test | Locks |
