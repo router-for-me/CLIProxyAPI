@@ -447,10 +447,10 @@ func interactionsReasoningEncryptedContent(rawSignature string) string {
 	if candidate == "" {
 		return ""
 	}
-	if _, err := signature.InspectGPTReasoningSignature(candidate); err != nil {
-		return ""
+	if signature.IsRecognizedReasoningSignature(candidate) {
+		return candidate
 	}
-	return candidate
+	return ""
 }
 
 func recordResponsesReasoningSummary(st *interactionsToResponsesStreamState, index int, text string) {

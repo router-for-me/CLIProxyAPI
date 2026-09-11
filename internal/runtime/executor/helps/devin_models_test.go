@@ -1,0 +1,101 @@
+package helps
+
+import (
+	"testing"
+)
+
+func TestResolveDevinChatModelUID(t *testing.T) {
+	tests := []struct {
+		name          string
+		rawModel      string
+		thinkingLevel string
+		budgetTokens  int
+		want          string
+	}{
+		{
+			name:     "direct full UID unchanged",
+			rawModel: "claude-fable-5-1-max",
+			want:     "claude-fable-5-1-max",
+		},
+		{
+			name:     "direct swe-2-high unchanged",
+			rawModel: "swe-2-high",
+			want:     "swe-2-high",
+		},
+		{
+			name:          "swe-2 default to high when no effort",
+			rawModel:      "swe-2",
+			thinkingLevel: "",
+			want:          "swe-2-high",
+		},
+		{
+			name:          "swe-2 clamp minimal to medium",
+			rawModel:      "swe-2",
+			thinkingLevel: "minimal",
+			want:          "swe-2-medium",
+		},
+		{
+			name:          "swe-2 clamp low to medium",
+			rawModel:      "swe-2",
+			thinkingLevel: "low",
+			want:          "swe-2-medium",
+		},
+		{
+			name:          "swe-2 with xhigh maps to max",
+			rawModel:      "swe-2",
+			thinkingLevel: "xhigh",
+			want:          "swe-2-max",
+		},
+		{
+			name:          "swe-2 request max",
+			rawModel:      "swe-2",
+			thinkingLevel: "max",
+			want:          "swe-2-max",
+		},
+		{
+			name:          "swe-2 suffix overrides body thinkingLevel",
+			rawModel:      "swe-2(max)",
+			thinkingLevel: "medium",
+			want:          "swe-2-max",
+		},
+		{
+			name:         "fable-5-1 budget tokens maps to max",
+			rawModel:     "claude-fable-5-1",
+			budgetTokens: 64000,
+			want:         "claude-fable-5-1-max",
+		},
+		{
+			name:         "fable-5-1 budget tokens maps to low",
+			rawModel:     "claude-fable-5-1",
+			budgetTokens: 2048,
+			want:         "claude-fable-5-1-low",
+		},
+		{
+			name:          "fable-5-1 with xhigh",
+			rawModel:      "claude-fable-5-1",
+			thinkingLevel: "xhigh",
+			want:          "claude-fable-5-1-xhigh",
+		},
+		{
+			name:          "astra with suffix in parenthesis",
+			rawModel:      "gpt-6-astra(high)",
+			thinkingLevel: "",
+			want:          "gpt-6-astra-high",
+		},
+		{
+			name:          "glm-5-3 clamp medium to high",
+			rawModel:      "glm-5-3",
+			thinkingLevel: "medium",
+			want:          "glm-5-3-high",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveDevinChatModelUID(tt.rawModel, tt.thinkingLevel, tt.budgetTokens)
+			if got != tt.want {
+				t.Errorf("ResolveDevinChatModelUID(%q, %q, %d) = %q, want %q", tt.rawModel, tt.thinkingLevel, tt.budgetTokens, got, tt.want)
+			}
+		})
+	}
+}

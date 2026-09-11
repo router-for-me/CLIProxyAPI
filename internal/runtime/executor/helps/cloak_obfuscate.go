@@ -81,6 +81,11 @@ func (m *SensitiveWordMatcher) obfuscateText(text string) string {
 	return m.regex.ReplaceAllStringFunc(text, obfuscateWord)
 }
 
+// ObfuscateText replaces all sensitive words in the text.
+func (m *SensitiveWordMatcher) ObfuscateText(text string) string {
+	return m.obfuscateText(text)
+}
+
 // ObfuscateSensitiveWords processes the payload and obfuscates sensitive words
 // in system blocks and message content.
 func ObfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []byte {

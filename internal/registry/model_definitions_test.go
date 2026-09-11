@@ -154,3 +154,43 @@ func TestWithCodexBuiltinsIncludesImage25Models(t *testing.T) {
 		}
 	}
 }
+
+func TestGetDevinModelsFallback(t *testing.T) {
+	devinModels := GetDevinModels()
+	if len(devinModels) == 0 {
+		t.Fatal("GetDevinModels() returned empty list")
+	}
+
+	foundSWE2 := false
+	foundFable := false
+	for _, m := range devinModels {
+		if m != nil && m.ID == "swe-2" {
+			foundSWE2 = true
+			if m.Type != "devin" {
+				t.Errorf("swe-2 Type = %q, want devin", m.Type)
+			}
+		}
+		if m != nil && m.ID == "claude-fable-5-1" {
+			foundFable = true
+		}
+	}
+	if !foundSWE2 {
+		t.Error("expected swe-2 in GetDevinModels()")
+	}
+	if !foundFable {
+		t.Error("expected claude-fable-5-1 in GetDevinModels()")
+	}
+
+	byChannel := GetStaticModelDefinitionsByChannel("devin")
+	if len(byChannel) == 0 {
+		t.Fatal("GetStaticModelDefinitionsByChannel(\"devin\") returned empty list")
+	}
+
+	info := LookupStaticModelInfo("swe-2")
+	if info == nil {
+		t.Fatal("LookupStaticModelInfo(\"swe-2\") = nil, want valid model")
+	}
+	if info.DisplayName != "SWE-2" {
+		t.Errorf("info.DisplayName = %q, want SWE-2", info.DisplayName)
+	}
+}

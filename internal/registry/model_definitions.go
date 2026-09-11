@@ -33,6 +33,7 @@ type staticModelsJSON struct {
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
+	Devin       []*ModelInfo `json:"devin"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -83,6 +84,83 @@ func GetKimiModels() []*ModelInfo {
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
+}
+
+var staticDevinModels = []*ModelInfo{
+	{
+		ID:                  "swe-2",
+		Type:                "devin",
+		OwnedBy:             "cognition",
+		DisplayName:         "SWE-2",
+		ContextLength:       262000,
+		MaxCompletionTokens: 128000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"medium", "high", "max"},
+		},
+	},
+	{
+		ID:                  "claude-fable-5-1",
+		Type:                "devin",
+		OwnedBy:             "anthropic",
+		DisplayName:         "Claude Fable 5.1",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 64000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "medium", "high", "xhigh", "max"},
+		},
+	},
+	{
+		ID:                  "gpt-6-astra",
+		Type:                "devin",
+		OwnedBy:             "openai",
+		DisplayName:         "GPT-6 Astra",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 64000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "medium", "high", "xhigh", "max"},
+		},
+	},
+	{
+		ID:                  "swe-1-7-lightning",
+		Type:                "devin",
+		OwnedBy:             "cognition",
+		DisplayName:         "SWE-1.7 Lightning",
+		ContextLength:       202752,
+		MaxCompletionTokens: 64000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"medium", "high"},
+		},
+	},
+	{
+		ID:                  "glm-5-2",
+		Type:                "devin",
+		OwnedBy:             "zhipu",
+		DisplayName:         "GLM-5.2",
+		ContextLength:       200000,
+		MaxCompletionTokens: 64000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "medium", "high", "max"},
+		},
+	},
+	{
+		ID:                  "glm-5-3",
+		Type:                "devin",
+		OwnedBy:             "zhipu",
+		DisplayName:         "GLM-5.3",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 64000,
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "high", "max"},
+		},
+	},
+}
+
+// GetDevinModels returns the standard Devin/Cognition model definitions.
+func GetDevinModels() []*ModelInfo {
+	if m := getModels(); m != nil && len(m.Devin) > 0 {
+		return cloneModelInfos(m.Devin)
+	}
+	return cloneModelInfos(staticDevinModels)
 }
 
 // AntigravityWebSearchModelFor returns the Antigravity model that should run a
@@ -372,6 +450,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "devin":
+		return GetDevinModels()
 	default:
 		return nil
 	}
@@ -394,6 +474,8 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
+		data.Devin,
+		staticDevinModels,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

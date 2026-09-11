@@ -20,6 +20,8 @@ const (
 	// handling is provenance-first - establish the target from the model or route,
 	// then use InspectGrokEncryptedContent as a replay-safety shape check.
 	SignatureProviderGrok SignatureProvider = "grok"
+	// SignatureProviderSWE represents Cognition's SWE model family emitting sealed.v1 envelopes.
+	SignatureProviderSWE SignatureProvider = "swe"
 )
 
 type SignatureBlockKind string
@@ -76,6 +78,8 @@ func SignatureProviderFromModelName(modelName string) SignatureProvider {
 		return SignatureProviderKimi
 	case strings.Contains(lower, "grok"):
 		return SignatureProviderGrok
+	case strings.Contains(lower, "swe-"):
+		return SignatureProviderSWE
 	default:
 		return SignatureProviderUnknown
 	}
@@ -175,6 +179,10 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 			if IsValidGPTReasoningSignature(unprefixed) {
 				return SignatureProviderGPT
 			}
+		case SignatureProviderSWE:
+			if strings.HasPrefix(unprefixed, "sealed.v1.") {
+				return SignatureProviderSWE
+			}
 		}
 		return SignatureProviderUnknown
 	}
@@ -186,6 +194,9 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 	// be matched before the structural pre-filter below rejects it.
 	if IsGeminiThoughtSignatureBypass(sig) {
 		return SignatureProviderGeminiBypass
+	}
+	if strings.HasPrefix(sig, "sealed.v1.") {
+		return SignatureProviderSWE
 	}
 	// Probes run from the strongest marker to the weakest:
 	//   1. GPT carries the literal "gAAAA" prefix, which pins both the version
@@ -283,6 +294,9 @@ func DecideSignatureCompatibilityForModel(targetProvider SignatureProvider, targ
 	case SignatureProviderGPT:
 		decision.Action = SignatureActionDropBlock
 		decision.Reason = "GPT reasoning encrypted_content cannot be synthesized from another provider signature"
+	case SignatureProviderSWE:
+		decision.Action = SignatureActionDropBlock
+		decision.Reason = "SWE requires sealed.v1 signature from its own backend"
 	case SignatureProviderKimi:
 		// Kimi is the only target that can keep the reasoning text when the
 		// signature does not match. Its Messages endpoint never reads the field
@@ -329,6 +343,8 @@ func SignatureProviderFromCachePrefix(prefix string) SignatureProvider {
 		return SignatureProviderGemini
 	case "openai", "gpt", "codex":
 		return SignatureProviderGPT
+	case "swe", "sealed":
+		return SignatureProviderSWE
 	default:
 		return SignatureProviderUnknown
 	}
@@ -423,6 +439,8 @@ func signatureProviderMatchesTarget(target, detected SignatureProvider) bool {
 		return detected == SignatureProviderClaude
 	case SignatureProviderGPT:
 		return detected == SignatureProviderGPT
+	case SignatureProviderSWE:
+		return detected == SignatureProviderSWE
 	case SignatureProviderKimi:
 		return detected == SignatureProviderKimi
 	default:
@@ -456,6 +474,10 @@ func normalizeCompatibleSignatureForProvider(targetProvider SignatureProvider, r
 		if IsValidGPTReasoningSignature(payload) {
 			return payload
 		}
+	case SignatureProviderSWE:
+		if strings.HasPrefix(payload, "sealed.v1.") {
+			return payload
+		}
 	case SignatureProviderKimi:
 		if IsValidKimiThinkingSignature(payload) {
 			return payload
@@ -472,4 +494,18 @@ func isRecognizedGeminiProviderSignature(rawSignature string, blockKind Signatur
 		return true
 	}
 	return false
+}
+
+// IsRecognizedReasoningSignature reports whether rawSignature is a structurally valid
+// reasoning signature or encrypted_content payload from any known provider
+// (GPT, Claude, Gemini, Kimi, Grok, Devin).
+func IsRecognizedReasoningSignature(rawSignature string) bool {
+	sig := strings.TrimSpace(rawSignature)
+	if sig == "" {
+		return false
+	}
+	if DetectSignatureProvider(sig) != SignatureProviderUnknown {
+		return true
+	}
+	return IsValidGrokEncryptedContent(sig)
 }

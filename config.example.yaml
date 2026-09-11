@@ -309,6 +309,12 @@ codex:
 #     idle-conn-timeout: "30s"   # idle keep-alive timeout (default: 30s, capped at 210s)
 #     max-idle-conns-per-host: 2 # max idle connections per host per credential (default: 2)
 
+# Devin provider behavior.
+# devin:
+#   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions and prompts
+#     - "API"
+#     - "proxy"
+
 # xAI provider behavior.
 xai:
   # When true, inject the native x_search tool when the request does not declare it.
