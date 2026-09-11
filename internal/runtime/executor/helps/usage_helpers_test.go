@@ -1179,3 +1179,23 @@ func TestUsageReporterPropagatesBaseURL(t *testing.T) {
 		t.Fatalf("recordNilAuth.BaseURL = %q, want empty", recordNilAuth.BaseURL)
 	}
 }
+
+func TestUsageReporterLatencyAlignsWithTTFTStart(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai-compat", "gpt-test", nil)
+	reporter.requestedAt = time.Now().Add(-10 * time.Second) // prep time before upstream
+	time.Sleep(5 * time.Millisecond)
+	reporter.StartResponseTTFT()
+	reporter.setTTFT(1 * time.Second)
+	// Simulate end of generation shortly after TTFT window conceptually:
+	// latency() must be measured from upstreamStartedAt, not requestedAt.
+	lat := reporter.latency()
+	if lat >= 9*time.Second {
+		t.Fatalf("latency() = %v still includes prep from requestedAt", lat)
+	}
+	tps := usage.TokensPerSecond(100, lat, reporter.ttftDuration())
+	// With aligned clocks, generation window is latency-ttft; even if small, must not use 10s prep.
+	if lat-reporter.ttftDuration() > 2*time.Second {
+		t.Fatalf("generation window %v too large; latency=%v ttft=%v", lat-reporter.ttftDuration(), lat, reporter.ttftDuration())
+	}
+	_ = tps
+}

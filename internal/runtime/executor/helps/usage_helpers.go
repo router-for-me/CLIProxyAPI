@@ -43,6 +43,7 @@ type UsageReporter struct {
 	generate            bool
 	stream              bool
 	requestedAt         time.Time
+	upstreamStartedAt   time.Time
 	ttftMu              sync.RWMutex
 	ttft                time.Duration
 	firstPacketDuration time.Duration
@@ -265,9 +266,13 @@ func (r *UsageReporter) StartResponseTTFT() {
 	if r == nil {
 		return
 	}
+	now := time.Now()
 	r.ttftMu.Lock()
+	if r.upstreamStartedAt.IsZero() {
+		r.upstreamStartedAt = now
+	}
 	if !r.ttftSet && r.ttftStart.IsZero() {
-		r.ttftStart = time.Now()
+		r.ttftStart = now
 	}
 	r.ttftMu.Unlock()
 }
@@ -498,10 +503,19 @@ func failFromErrors(errs ...error) usage.Failure {
 }
 
 func (r *UsageReporter) latency() time.Duration {
-	if r == nil || r.requestedAt.IsZero() {
+	if r == nil {
 		return 0
 	}
-	latency := time.Since(r.requestedAt)
+	r.ttftMu.RLock()
+	start := r.upstreamStartedAt
+	r.ttftMu.RUnlock()
+	if start.IsZero() {
+		start = r.requestedAt
+	}
+	if start.IsZero() {
+		return 0
+	}
+	latency := time.Since(start)
 	if latency < 0 {
 		return 0
 	}

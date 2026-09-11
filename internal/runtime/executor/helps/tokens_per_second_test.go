@@ -99,3 +99,47 @@ func TestUsageRecordTokensPerSecondJSON(t *testing.T) {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 }
+
+func TestAttachTokensPerSecondOverwritesUpstreamValue(t *testing.T) {
+	reporter := ttftReporter()
+	got := AttachTokensPerSecond([]byte(`{"usage":{"prompt_tokens":10,"completion_tokens":200,"total_tokens":210,"tokens_per_second":1.5}}`), reporter)
+	tps := gjson.GetBytes(got, "usage.tokens_per_second").Float()
+	if tps < 99 || tps > 101 {
+		t.Fatalf("tokens_per_second = %v, want gateway ~100 overwriting upstream 1.5; body=%s", tps, got)
+	}
+}
+
+func TestAttachTokensPerSecondFromInteractionUsage(t *testing.T) {
+	reporter := ttftReporter()
+	got := AttachTokensPerSecond([]byte(`{"type":"interaction.completed","interaction":{"usage":{"input_tokens":10,"output_tokens":200,"total_output_tokens":200}}}`), reporter)
+	tps := gjson.GetBytes(got, "interaction.usage.tokens_per_second").Float()
+	if tps < 99 || tps > 101 {
+		t.Fatalf("interaction.usage.tokens_per_second = %v, want ~100; body=%s", tps, got)
+	}
+}
+
+func TestAttachStreamTokensPerSecondInteractionCompleted(t *testing.T) {
+	reporter := ttftReporter()
+	line := []byte("event: interaction.completed\ndata: {\"type\":\"interaction.completed\",\"interaction\":{\"usage\":{\"output_tokens\":200,\"total_output_tokens\":200}}}\n")
+	got := AttachStreamTokensPerSecond(line, reporter)
+	dataIdx := bytes.Index(got, []byte("data:"))
+	if dataIdx < 0 {
+		t.Fatalf("lost data line: %s", got)
+	}
+	payload := bytes.TrimSpace(got[dataIdx+len("data:"):])
+	tps := gjson.GetBytes(payload, "interaction.usage.tokens_per_second").Float()
+	if tps < 99 || tps > 101 {
+		t.Fatalf("interaction stream tokens_per_second = %v, want ~100; body=%s", tps, got)
+	}
+}
+
+func TestAttachTokensPerSecondHeaderSetsGatewayMarker(t *testing.T) {
+	headers := http.Header{}
+	attachTokensPerSecondHeader(headers, []byte(`{"usage":{"completion_tokens":200}}`), ttftReporter())
+	if headers.Get(tokensPerSecondHeader) == "" {
+		t.Fatal("missing TPS header")
+	}
+	if headers.Get(tokensPerSecondGatewayMarker) != "1" {
+		t.Fatalf("missing gateway marker: %#v", headers)
+	}
+}
