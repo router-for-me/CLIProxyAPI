@@ -2070,7 +2070,7 @@ func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"
-	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
 		{
 			ID:                  "gpt-5.5",
 			Object:              "model",
