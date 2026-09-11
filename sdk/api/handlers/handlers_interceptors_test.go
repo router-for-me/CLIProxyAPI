@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1179,7 +1180,7 @@ func TestHandlerStreamInterceptorModernSchemaOmitsHistoryOnPayloadChunks(t *test
 	}
 }
 
-func TestHandlerStreamInterceptorLegacySchemaClonesHistoryChunksOnPayloadChunks(t *testing.T) {
+func TestHandlerStreamInterceptorLegacySchemaDeliversHistoryOnPayloadChunks(t *testing.T) {
 	model := "handler-interceptor-stream-legacy-history-model"
 	executor := &interceptorCaptureExecutor{
 		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
@@ -1222,6 +1223,115 @@ func TestHandlerStreamInterceptorLegacySchemaClonesHistoryChunksOnPayloadChunks(
 	}
 	if len(observedHistories[1]) != 1 || string(observedHistories[1][0]) != "first" {
 		t.Fatalf("chunk 1 history = %#v, want ['first']", observedHistories[1])
+	}
+}
+
+// The handler must hand the host its shared rolling history window instead of
+// cloning the whole window for every chunk: one legacy (schema < 5) plugin must
+// not amplify allocations for every stream chunk. The host clones per legacy
+// plugin before delivery, so plugins still observe isolated snapshots.
+func TestHandlerStreamInterceptorLegacySchemaStableHistorySnapshotsWithoutPerChunkClones(t *testing.T) {
+	model := "handler-interceptor-stream-legacy-history-share-model"
+	// Enough chunks to push the rolling window past maxStreamInterceptorHistoryChunks
+	// and force eviction, so snapshot stability can be asserted against recycling.
+	payloadCount := maxStreamInterceptorHistoryChunks + 6
+	payloads := make([]string, payloadCount)
+	for i := range payloads {
+		payloads[i] = fmt.Sprintf("chunk-%02d", i)
+	}
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, len(payloads))
+			for _, payload := range payloads {
+				chunks <- coreexecutor.StreamChunk{Payload: []byte(payload)}
+			}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream": []string{"stream"}},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
+	var observedHistories [][][]byte
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		includeStreamChunkHistory: true,
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+				return pluginapi.StreamChunkInterceptResponse{}
+			}
+			observedHistories = append(observedHistories, req.HistoryChunks)
+			return pluginapi.StreamChunkInterceptResponse{}
+		},
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	var wantStream strings.Builder
+	for _, payload := range payloads {
+		wantStream.WriteString(payload)
+	}
+	if string(got) != wantStream.String() {
+		t.Fatalf("stream payload = %q, want all chunks delivered", got)
+	}
+	if len(observedHistories) != len(payloads) {
+		t.Fatalf("payload chunk count = %d, want %d", len(observedHistories), len(payloads))
+	}
+	// These assertions run after the stream finished, i.e. after the rolling window
+	// already evicted the earliest chunks: every retained snapshot must still hold
+	// exactly the entries it was handed (stable snapshots across window recycling).
+	for index, history := range observedHistories {
+		wantLen := index
+		if wantLen > maxStreamInterceptorHistoryChunks {
+			wantLen = maxStreamInterceptorHistoryChunks
+		}
+		if len(history) != wantLen {
+			t.Fatalf("chunk %d history len = %d, want %d", index, len(history), wantLen)
+		}
+		start := index - len(history)
+		for item, entry := range history {
+			if string(entry) != payloads[start+item] {
+				t.Fatalf("chunk %d history[%d] = %q, want %q", index, item, entry, payloads[start+item])
+			}
+		}
+	}
+	// Each request must own its outer slice: per-chunk clones of the rolling
+	// window would alias, so distinct backings prove the snapshot is handed off
+	// (and stays immune to the handler recycling the shared window).
+	for index := 1; index < len(observedHistories); index++ {
+		previous := observedHistories[index-1]
+		current := observedHistories[index]
+		if len(previous) == 0 || len(current) == 0 {
+			continue
+		}
+		if &previous[0] == &current[0] {
+			t.Fatalf("chunk %d history outer slice aliases chunk %d's; want stable per-request snapshots", index, index-1)
+		}
+	}
+	// Entries themselves stay shared with the window: aliasing bytes across
+	// consecutive snapshots proves the expensive per-chunk byte cloning is gone.
+	sharedEntry := false
+	for index := 2; index < maxStreamInterceptorHistoryChunks && index < len(observedHistories); index++ {
+		previous := observedHistories[index-1]
+		current := observedHistories[index]
+		if len(previous) == 0 || len(current) == 0 {
+			continue
+		}
+		if &previous[0][0] == &current[0][0] {
+			sharedEntry = true
+			break
+		}
+	}
+	if !sharedEntry {
+		t.Fatal("history entries are cloned per chunk; want shared read-only window entries")
 	}
 }
 

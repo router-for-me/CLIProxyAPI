@@ -1,14 +1,17 @@
 package pluginhost
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 func TestRPCCapabilitiesIncludeFrontendAuthProviderExclusive(t *testing.T) {
@@ -133,6 +136,80 @@ func TestRegisterRPCPluginRejectsFutureSchemaVersion(t *testing.T) {
 	if errRegister == nil || !strings.Contains(errRegister.Error(), "schema version") {
 		t.Fatalf("registerRPCPlugin() error = %v, want unsupported schema version", errRegister)
 	}
+}
+
+func TestRegisterRPCPluginWarnsLegacyStreamChunkInterceptor(t *testing.T) {
+	streamInterceptorPlugin := func(name string) pluginapi.Plugin {
+		plugin := validTestPlugin(name)
+		plugin.Capabilities.StreamChunkInterceptor = responseInterceptorFunc{
+			interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+				return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+			},
+		}
+		return plugin
+	}
+	captureLogs := func(t *testing.T) *bytes.Buffer {
+		t.Helper()
+		var out bytes.Buffer
+		originalOut := log.StandardLogger().Out
+		originalFormatter := log.StandardLogger().Formatter
+		originalLevel := log.GetLevel()
+		log.SetOutput(&out)
+		log.SetFormatter(&log.TextFormatter{
+			DisableColors:    true,
+			DisableTimestamp: true,
+		})
+		log.SetLevel(log.WarnLevel)
+		t.Cleanup(func() {
+			log.SetOutput(originalOut)
+			log.SetFormatter(originalFormatter)
+			log.SetLevel(originalLevel)
+		})
+		return &out
+	}
+
+	t.Run("warns for legacy stream interceptor", func(t *testing.T) {
+		out := captureLogs(t)
+		lookup := newTestSymbolLookup(&testPlugin{registerResult: streamInterceptorPlugin("legacy-stream")})
+		lookup.schemaVersion = pluginabi.SchemaVersionStreamChunkOmitHistory - 1
+
+		if _, errRegister := registerRPCPlugin(context.Background(), nil, "legacy-stream", lookup, pluginabi.MethodPluginRegister, nil); errRegister != nil {
+			t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+		}
+		logs := out.String()
+		if !strings.Contains(logs, "legacy-stream") || !strings.Contains(logs, "stream chunk interceptor") || !strings.Contains(logs, "history") {
+			t.Fatalf("missing legacy stream interceptor warning:\n%s", logs)
+		}
+		if !strings.Contains(logs, fmt.Sprintf("schema_version %d", pluginabi.SchemaVersionStreamChunkOmitHistory-1)) {
+			t.Fatalf("warning missing reported schema version:\n%s", logs)
+		}
+	})
+
+	t.Run("silent for current stream interceptor", func(t *testing.T) {
+		out := captureLogs(t)
+		lookup := newTestSymbolLookup(&testPlugin{registerResult: streamInterceptorPlugin("modern-stream")})
+		lookup.schemaVersion = pluginabi.SchemaVersionStreamChunkOmitHistory
+
+		if _, errRegister := registerRPCPlugin(context.Background(), nil, "modern-stream", lookup, pluginabi.MethodPluginRegister, nil); errRegister != nil {
+			t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+		}
+		if strings.Contains(out.String(), "history") {
+			t.Fatalf("unexpected history warning for schema %d plugin:\n%s", pluginabi.SchemaVersionStreamChunkOmitHistory, out.String())
+		}
+	})
+
+	t.Run("silent for legacy plugin without stream interceptor", func(t *testing.T) {
+		out := captureLogs(t)
+		lookup := newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("legacy-other")})
+		lookup.schemaVersion = 1
+
+		if _, errRegister := registerRPCPlugin(context.Background(), nil, "legacy-other", lookup, pluginabi.MethodPluginRegister, nil); errRegister != nil {
+			t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+		}
+		if strings.Contains(out.String(), "history") {
+			t.Fatalf("unexpected history warning for non-stream legacy plugin:\n%s", out.String())
+		}
+	})
 }
 
 func TestRegisterRPCPluginAcceptsModelRouterOnSchema1(t *testing.T) {

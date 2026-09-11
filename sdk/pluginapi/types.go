@@ -1159,8 +1159,12 @@ type StreamChunkInterceptRequest struct {
 	// Always preserved on header-init (ChunkIndex == StreamChunkHeaderInitIndex) when non-empty.
 	// On payload chunks (ChunkIndex >= 0):
 	//   - schema_version >= 5: omitted (nil) to avoid per-chunk cloning and serialization
-	//   - schema_version < 5: populated as a fresh clone each call (legacy compatibility)
-	// Callers must treat these slices as read-only; hosts clone before delivery to keep snapshots isolated.
+	//   - schema_version < 5: populated each call for legacy compatibility
+	// The handler populates this field with a stable snapshot of its rolling window:
+	// the outer slice is owned by the callee (recycling the window never drops entries
+	// from a snapshot already handed out), while the entry slices are shared read-only
+	// buffers — do not mutate them. Hosts clone entries before delivery to keep
+	// per-plugin snapshots isolated.
 	HistoryChunks [][]byte
 	// ChunkIndex starts at 0 for payload chunks. StreamChunkHeaderInitIndex marks the header-only initialization call.
 	ChunkIndex int

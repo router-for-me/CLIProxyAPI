@@ -75,6 +75,10 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		// Missing schema_version is treated as the original contract.
 		schemaVersion = 1
 	}
+	if resp.Capabilities.StreamChunkInterceptor && !streamChunkOmitsHistory(schemaVersion) {
+		log.Warnf("pluginhost: plugin %s registers a stream chunk interceptor with schema_version %d (< %d); every stream chunk call to it carries the bounded history window, amplifying memory allocations on long streams. Upgrade the plugin to schema_version >= %d to omit the history payload.",
+			id, schemaVersion, pluginabi.SchemaVersionStreamChunkOmitHistory, pluginabi.SchemaVersionStreamChunkOmitHistory)
+	}
 	plugin := pluginapi.Plugin{
 		Metadata:      resp.Metadata,
 		SchemaVersion: schemaVersion,
