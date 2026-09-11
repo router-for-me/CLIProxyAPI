@@ -184,6 +184,35 @@ func TestInvalidateAuthReturnsDeletedCount(t *testing.T) {
 	}
 }
 
+// TestSnapshotForAuthAndSetWithExpiry covers the binding-migration primitives:
+// SnapshotForAuth returns only the live bindings pointing at one auth, and
+// SetWithExpiry rebinds a session while preserving an explicit expiry instead
+// of opening a fresh TTL window.
+func TestSnapshotForAuthAndSetWithExpiry(t *testing.T) {
+	c := NewSessionCache(time.Hour)
+	defer c.Stop()
+	c.Set("mixed::s1::glm-5", "auth-a")
+	c.Set("mixed::s2::glm-5", "auth-a")
+	c.Set("mixed::s3::glm-5", "auth-b")
+
+	bindings := c.SnapshotForAuth("auth-a")
+	if len(bindings) != 2 {
+		t.Fatalf("SnapshotForAuth = %d entries, want 2", len(bindings))
+	}
+	expiry := time.Now().Add(30 * time.Minute)
+	c.SetWithExpiry("mixed::s1::glm-5", "auth-new", expiry)
+	got, ok := c.Get("mixed::s1::glm-5")
+	if !ok || got != "auth-new" {
+		t.Fatalf("after SetWithExpiry: %q %v", got, ok)
+	}
+	c.mu.RLock()
+	entry := c.entries["mixed::s1::glm-5"]
+	c.mu.RUnlock()
+	if !entry.expiresAt.Equal(expiry) {
+		t.Fatalf("expiresAt = %v, want preserved %v", entry.expiresAt, expiry)
+	}
+}
+
 func TestSessionCacheAdoptTransfersUnexpiredEntries(t *testing.T) {
 	src := NewSessionCache(time.Hour)
 	dst := NewSessionCache(time.Hour)

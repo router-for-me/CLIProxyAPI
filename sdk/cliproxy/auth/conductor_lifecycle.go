@@ -98,6 +98,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if cooldownStateChanged {
 		m.persistCooldownStates(ctx)
 	}
+	m.applyPendingAffinityMigrations(auth)
 	return auth.Clone(), nil
 }
 
@@ -192,6 +193,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		m.scheduler.removeAuth(id)
 	}
 	m.queueRefreshUnschedule(id)
+	m.stashPendingAffinityMigrations(existing, id)
 	m.invalidateSessionAffinity(id)
 
 	if provider != "" {
@@ -216,6 +218,106 @@ func (m *Manager) invalidateSessionAffinity(authID string) {
 			log.Warnf("session-affinity: invalidated %d binding(s) for auth %s", removed, authID)
 		}
 	}
+}
+
+// pendingAffinityMigrationTTL bounds how long a removed auth's session
+// bindings stay eligible for rebinding onto a re-registered equivalent.
+const pendingAffinityMigrationTTL = 30 * time.Second
+
+// pendingAffinityMigration is one removed auth's stashed bindings plus the
+// equivalence key a replacement must match to claim them.
+type pendingAffinityMigration struct {
+	bindings       []SessionAffinityBinding
+	equivalenceKey string
+	expiresAt      time.Time
+}
+
+// affinityEquivalenceKey identifies the logical credential behind an auth for
+// binding-migration purposes: the upstream base URL plus the compat entry
+// name. Auths without both attributes (built-in OAuth channels, plugin
+// executors) never migrate — their removals keep the plain invalidation
+// behavior. Empty return means "do not migrate".
+func affinityEquivalenceKey(a *Auth) string {
+	if a == nil || a.Attributes == nil {
+		return ""
+	}
+	baseURL := strings.TrimSpace(a.Attributes["base_url"])
+	compatName := strings.TrimSpace(a.Attributes["compat_name"])
+	if baseURL == "" || compatName == "" {
+		return ""
+	}
+	return strings.ToLower(baseURL) + "|" + strings.ToLower(compatName)
+}
+
+// stashPendingAffinityMigrations snapshots the removed auth's live affinity
+// bindings so a re-rendered equivalent auth can rebind them. Genuinely
+// deleted credentials are unaffected: nothing rebinds unless a Register
+// arrives with the same equivalence key inside the TTL window.
+func (m *Manager) stashPendingAffinityMigrations(existing *Auth, id string) {
+	key := affinityEquivalenceKey(existing)
+	if key == "" {
+		return
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	view, ok := selector.(interface {
+		BindingsForAuth(string) []SessionAffinityBinding
+	})
+	if !ok {
+		return
+	}
+	bindings := view.BindingsForAuth(id)
+	if len(bindings) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pendingAffinityMigrations == nil {
+		m.pendingAffinityMigrations = map[string]pendingAffinityMigration{}
+	}
+	now := time.Now()
+	for k, pending := range m.pendingAffinityMigrations {
+		if now.After(pending.expiresAt) {
+			delete(m.pendingAffinityMigrations, k)
+		}
+	}
+	m.pendingAffinityMigrations[key] = pendingAffinityMigration{
+		bindings:       bindings,
+		equivalenceKey: key,
+		expiresAt:      now.Add(pendingAffinityMigrationTTL),
+	}
+}
+
+// applyPendingAffinityMigrations rebinds sessions stashed by a recent Remove
+// when the newly registered auth is the same logical credential under a new
+// ID. Only exact equivalence-key matches inside the 30s window migrate; the
+// stash is always consumed so a late lookalike cannot resurrect stale pins.
+func (m *Manager) applyPendingAffinityMigrations(auth *Auth) {
+	key := affinityEquivalenceKey(auth)
+	if key == "" {
+		return
+	}
+	m.mu.Lock()
+	pending, ok := m.pendingAffinityMigrations[key]
+	if ok {
+		delete(m.pendingAffinityMigrations, key)
+	}
+	m.mu.Unlock()
+	if !ok || time.Now().After(pending.expiresAt) {
+		return
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	view, okView := selector.(interface {
+		RebindBindings([]SessionAffinityBinding, string)
+	})
+	if !okView {
+		return
+	}
+	view.RebindBindings(pending.bindings, auth.ID)
+	log.WithField("auth_id", auth.ID).Infof("session-affinity: migrated %d binding(s) onto re-registered auth", len(pending.bindings))
 }
 
 // Load resets manager state from the backing store.

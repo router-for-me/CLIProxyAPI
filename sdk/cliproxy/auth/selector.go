@@ -829,6 +829,26 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) int {
 	return s.cache.InvalidateAuth(authID)
 }
 
+// BindingsForAuth exposes the live bindings pointing at one auth (used by the
+// manager to carry bindings across an auth identity change).
+func (s *SessionAffinitySelector) BindingsForAuth(authID string) []SessionAffinityBinding {
+	if s == nil || s.cache == nil {
+		return nil
+	}
+	return s.cache.SnapshotForAuth(authID)
+}
+
+// RebindBindings moves previously stashed bindings onto newAuthID, preserving
+// each binding's original expiry.
+func (s *SessionAffinitySelector) RebindBindings(bindings []SessionAffinityBinding, newAuthID string) {
+	if s == nil || s.cache == nil || newAuthID == "" {
+		return
+	}
+	for _, binding := range bindings {
+		s.cache.SetWithExpiry(binding.Provider+"::"+binding.SessionID+"::"+binding.Model, newAuthID, binding.ExpiresAt)
+	}
+}
+
 // Snapshot returns the live session→auth bindings for observability.
 // Used by the management surface to list and revoke pinned sessions.
 // Returns nil when session affinity is not actually in use.

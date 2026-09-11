@@ -156,6 +156,12 @@ type Manager struct {
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
 
+	// pendingAffinityMigrations carries recently removed auths' session
+	// bindings so a re-render that changes an auth's identity (same logical
+	// credential, new ID) can rebind them. Entries expire after the window
+	// below; the map stays tiny and in-memory only.
+	pendingAffinityMigrations map[string]pendingAffinityMigration
+
 	// runtimeConfig stores the latest application config for request-time decisions.
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value

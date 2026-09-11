@@ -335,6 +335,42 @@ func (c *SessionCache) Adopt(src *SessionCache) int {
 	return adopted
 }
 
+// SnapshotForAuth returns the live bindings currently pointing at authID.
+// Used to carry bindings across an auth re-registration (identity change
+// without a logical credential change).
+func (c *SessionCache) SnapshotForAuth(authID string) []SessionAffinityBinding {
+	if c == nil || authID == "" {
+		return nil
+	}
+	all := c.Snapshot()
+	out := make([]SessionAffinityBinding, 0, len(all))
+	for _, binding := range all {
+		if binding.AuthID == authID {
+			out = append(out, binding)
+		}
+	}
+	return out
+}
+
+// SetWithExpiry binds a session to an auth ID with an explicit expiry instead
+// of a fresh TTL window. Used by binding migration to preserve the remaining
+// lifetime of a moved binding.
+func (c *SessionCache) SetWithExpiry(sessionID, authID string, expiresAt time.Time) {
+	if authID == "" || sessionID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !time.Now().Before(expiresAt) {
+		return
+	}
+	entry := sessionEntry{authID: authID, expiresAt: expiresAt, lastTouched: time.Now()}
+	if previous, ok := c.entries[sessionID]; ok && time.Now().Before(previous.expiresAt) {
+		entry.aliases = mergeSessionAliases(previous.aliases, sessionID)
+	}
+	c.entries[sessionID] = entry
+}
+
 // Invalidate removes a specific session binding without allowing another alias
 // in the same group to recreate it on its next refresh.
 func (c *SessionCache) Invalidate(sessionID string) {
