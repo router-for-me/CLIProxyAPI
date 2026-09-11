@@ -251,6 +251,13 @@ func (m *Manager) SetSelector(selector Selector) {
 	// the outgoing one so its cache goroutine and map do not leak; a shared
 	// instance being re-assigned survives.
 	if outgoingAffinity, ok := outgoing.(*SessionAffinitySelector); ok && outgoingAffinity != selector {
+		if incomingAffinity, okIncoming := selector.(*SessionAffinitySelector); okIncoming {
+			if moved := incomingAffinity.cache.Adopt(outgoingAffinity.cache); moved > 0 {
+				log.Infof("session-affinity: handed off %d binding(s) across selector swap", moved)
+			}
+		} else {
+			log.Infof("session-affinity: dropping %d binding(s) — selector swapped to %T", len(outgoingAffinity.Snapshot()), selector)
+		}
 		outgoingAffinity.Stop()
 	}
 	if m.scheduler != nil {

@@ -183,3 +183,32 @@ func TestInvalidateAuthReturnsDeletedCount(t *testing.T) {
 		t.Fatalf("alias-group InvalidateAuth = %d, want 2 (one per cache key)", got)
 	}
 }
+
+func TestSessionCacheAdoptTransfersUnexpiredEntries(t *testing.T) {
+	src := NewSessionCache(time.Hour)
+	dst := NewSessionCache(time.Hour)
+	defer src.Stop()
+	defer dst.Stop()
+	src.Set("mixed::s1::m", "auth-a")
+	expired := sessionEntry{authID: "auth-b", expiresAt: time.Now().Add(-time.Minute)}
+	src.mu.Lock()
+	src.entries["mixed::dead::m"] = expired
+	src.mu.Unlock()
+
+	adopted := dst.Adopt(src)
+	if adopted != 1 {
+		t.Fatalf("Adopt = %d, want 1 (expired entry skipped)", adopted)
+	}
+	if id, ok := dst.Get("mixed::s1::m"); !ok || id != "auth-a" {
+		t.Fatalf("adopted binding missing or wrong: %q %v", id, ok)
+	}
+
+	// Adopting again does not clobber a live destination entry.
+	dst.Set("mixed::s1::m", "auth-live")
+	if got := dst.Adopt(src); got != 0 {
+		t.Fatalf("second Adopt = %d, want 0 (live destination entries kept)", got)
+	}
+	if id, _ := dst.Get("mixed::s1::m"); id != "auth-live" {
+		t.Fatalf("destination entry clobbered: %q", id)
+	}
+}

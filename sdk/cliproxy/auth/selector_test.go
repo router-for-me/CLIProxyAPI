@@ -2242,3 +2242,31 @@ func TestAffinityKeyHashStable(t *testing.T) {
 		t.Fatal("different keys produced identical hash")
 	}
 }
+
+// TestSetSelectorHandsOffAffinitySelectorCache pins the selector-swap binding
+// loss: routing-config changes build a fresh SessionAffinitySelector, and the
+// old one's session bindings used to be dropped with it. SetSelector must hand
+// the outgoing cache's unexpired entries to the incoming affinity selector
+// before stopping the outgoing one. Manager construction mirrors
+// set_selector_stop_test.go.
+func TestSetSelectorHandsOffAffinityCache(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	old := NewSessionAffinitySelector(&RoundRobinSelector{})
+	manager.SetSelector(old)
+	// Seed a binding through the cache directly (Pick needs live auths).
+	old.cache.Set("mixed::sess::model", "auth-1")
+
+	fresh := NewSessionAffinitySelector(&RoundRobinSelector{})
+	manager.SetSelector(fresh)
+
+	if id, ok := fresh.cache.Get("mixed::sess::model"); !ok || id != "auth-1" {
+		t.Fatalf("binding not handed off: %q %v", id, ok)
+	}
+
+	// The outgoing selector is still stopped after the handoff.
+	select {
+	case <-old.cache.stopCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("outgoing SessionAffinitySelector was not stopped after handoff")
+	}
+}

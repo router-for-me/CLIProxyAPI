@@ -303,6 +303,35 @@ func mergeSessionAliases(existing []string, candidates ...string) []string {
 	return aliases
 }
 
+// Adopt copies every unexpired entry from src into c, skipping keys that
+// already have a live destination entry. Used when a routing-config update
+// replaces one SessionAffinitySelector with another: the old cache would
+// otherwise be dropped with all its session bindings. The source cache is not
+// modified or stopped — the caller owns its lifecycle. Returns how many
+// entries were copied.
+func (c *SessionCache) Adopt(src *SessionCache) int {
+	if src == nil || src == c {
+		return 0
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	src.mu.RLock()
+	adopted := 0
+	for key, entry := range src.entries {
+		if !now.Before(entry.expiresAt) {
+			continue
+		}
+		if current, ok := c.entries[key]; ok && now.Before(current.expiresAt) {
+			continue
+		}
+		c.entries[key] = entry
+		adopted++
+	}
+	src.mu.RUnlock()
+	return adopted
+}
+
 // Invalidate removes a specific session binding without allowing another alias
 // in the same group to recreate it on its next refresh.
 func (c *SessionCache) Invalidate(sessionID string) {
