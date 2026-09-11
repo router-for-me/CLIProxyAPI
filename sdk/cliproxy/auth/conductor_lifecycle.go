@@ -225,18 +225,21 @@ func (m *Manager) invalidateSessionAffinity(authID string) {
 const pendingAffinityMigrationTTL = 30 * time.Second
 
 // pendingAffinityMigration is one removed auth's stashed bindings plus the
-// equivalence key a replacement must match to claim them.
+// expiry that bounds how long a replacement may claim them.
 type pendingAffinityMigration struct {
-	bindings       []SessionAffinityBinding
-	equivalenceKey string
-	expiresAt      time.Time
+	bindings  []SessionAffinityBinding
+	expiresAt time.Time
 }
 
 // affinityEquivalenceKey identifies the logical credential behind an auth for
 // binding-migration purposes: the upstream base URL plus the compat entry
-// name. Auths without both attributes (built-in OAuth channels, plugin
-// executors) never migrate — their removals keep the plain invalidation
-// behavior. Empty return means "do not migrate".
+// name, disambiguated by config_index because every entry of one
+// OpenAI-compat pool shares base_url and compat_name. config_index is stamped
+// by the synthesizer and stable across API-key edits, unlike the auth ID,
+// which hashes the API key. Auths without both base_url and compat_name
+// (built-in OAuth channels, plugin executors) never migrate — their removals
+// keep the plain invalidation behavior — even if a config_index is present.
+// Empty return means "do not migrate".
 func affinityEquivalenceKey(a *Auth) string {
 	if a == nil || a.Attributes == nil {
 		return ""
@@ -246,15 +249,29 @@ func affinityEquivalenceKey(a *Auth) string {
 	if baseURL == "" || compatName == "" {
 		return ""
 	}
-	return strings.ToLower(baseURL) + "|" + strings.ToLower(compatName)
+	return strings.ToLower(baseURL) + "|" + strings.ToLower(compatName) + "|" + strings.TrimSpace(a.Attributes["config_index"])
 }
 
 // stashPendingAffinityMigrations snapshots the removed auth's live affinity
 // bindings so a re-rendered equivalent auth can rebind them. Genuinely
 // deleted credentials are unaffected: nothing rebinds unless a Register
-// arrives with the same equivalence key inside the TTL window.
+// arrives with the same equivalence key inside the TTL window. Expired
+// stashes are pruned on every remove, migratable or not. A known benign
+// race exists: a Register applying between this Remove's delete and its
+// stash finds nothing, and the stash may then be consumed by a later
+// Register with the same key — today's re-render dispatch is sequential
+// (coalesced updates), and a mis-consumption only rebinds within the same
+// pool, self-healing on the next pick.
 func (m *Manager) stashPendingAffinityMigrations(existing *Auth, id string) {
 	key := affinityEquivalenceKey(existing)
+	m.mu.Lock()
+	now := time.Now()
+	for k, pending := range m.pendingAffinityMigrations {
+		if now.After(pending.expiresAt) {
+			delete(m.pendingAffinityMigrations, k)
+		}
+	}
+	m.mu.Unlock()
 	if key == "" {
 		return
 	}
@@ -276,16 +293,9 @@ func (m *Manager) stashPendingAffinityMigrations(existing *Auth, id string) {
 	if m.pendingAffinityMigrations == nil {
 		m.pendingAffinityMigrations = map[string]pendingAffinityMigration{}
 	}
-	now := time.Now()
-	for k, pending := range m.pendingAffinityMigrations {
-		if now.After(pending.expiresAt) {
-			delete(m.pendingAffinityMigrations, k)
-		}
-	}
 	m.pendingAffinityMigrations[key] = pendingAffinityMigration{
-		bindings:       bindings,
-		equivalenceKey: key,
-		expiresAt:      now.Add(pendingAffinityMigrationTTL),
+		bindings:  bindings,
+		expiresAt: now.Add(pendingAffinityMigrationTTL),
 	}
 }
 
@@ -293,6 +303,9 @@ func (m *Manager) stashPendingAffinityMigrations(existing *Auth, id string) {
 // when the newly registered auth is the same logical credential under a new
 // ID. Only exact equivalence-key matches inside the 30s window migrate; the
 // stash is always consumed so a late lookalike cannot resurrect stale pins.
+// Rebinding onto a disabled credential is safe: Pick's availability gate
+// reselects on unavailable bindings, and a disabled pool produces no
+// replacement Register at all.
 func (m *Manager) applyPendingAffinityMigrations(auth *Auth) {
 	key := affinityEquivalenceKey(auth)
 	if key == "" {

@@ -365,10 +365,18 @@ func (c *SessionCache) SetWithExpiry(sessionID, authID string, expiresAt time.Ti
 		return
 	}
 	entry := sessionEntry{authID: authID, expiresAt: expiresAt, lastTouched: time.Now()}
-	if previous, ok := c.entries[sessionID]; ok && time.Now().Before(previous.expiresAt) {
-		entry.aliases = mergeSessionAliases(previous.aliases, sessionID)
+	previous, ok := c.entries[sessionID]
+	if ok {
+		if time.Now().Before(previous.expiresAt) {
+			entry.aliases = mergeSessionAliases(previous.aliases, sessionID)
+		} else {
+			// Expired previous group: drop it wholesale so the rest of its
+			// alias group is not orphaned by the overwrite.
+			c.removeAliasGroupLocked(previous)
+		}
 	}
 	c.entries[sessionID] = entry
+	c.evictLocked(entry)
 }
 
 // Invalidate removes a specific session binding without allowing another alias
