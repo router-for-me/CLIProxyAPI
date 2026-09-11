@@ -204,6 +204,8 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		homeSessionSelections: make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
 		providerOffsets:       make(map[string]int),
 		modelPoolOffsets:      make(map[string]int),
+
+		pendingAffinityMigrations: make(map[string]pendingAffinityMigration),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})

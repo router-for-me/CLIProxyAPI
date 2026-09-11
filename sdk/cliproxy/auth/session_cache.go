@@ -355,14 +355,14 @@ func (c *SessionCache) SnapshotForAuth(authID string) []SessionAffinityBinding {
 // SetWithExpiry binds a session to an auth ID with an explicit expiry instead
 // of a fresh TTL window. Used by binding migration to preserve the remaining
 // lifetime of a moved binding.
-func (c *SessionCache) SetWithExpiry(sessionID, authID string, expiresAt time.Time) {
+func (c *SessionCache) SetWithExpiry(sessionID, authID string, expiresAt time.Time) bool {
 	if authID == "" || sessionID == "" {
-		return
+		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !time.Now().Before(expiresAt) {
-		return
+		return false
 	}
 	entry := sessionEntry{authID: authID, expiresAt: expiresAt, lastTouched: time.Now()}
 	previous, ok := c.entries[sessionID]
@@ -377,6 +377,7 @@ func (c *SessionCache) SetWithExpiry(sessionID, authID string, expiresAt time.Ti
 	}
 	c.entries[sessionID] = entry
 	c.evictLocked(entry)
+	return true
 }
 
 // Invalidate removes a specific session binding without allowing another alias

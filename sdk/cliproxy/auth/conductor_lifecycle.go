@@ -324,13 +324,13 @@ func (m *Manager) applyPendingAffinityMigrations(auth *Auth) {
 	selector := m.selector
 	m.mu.RUnlock()
 	view, okView := selector.(interface {
-		RebindBindings([]SessionAffinityBinding, string)
+		RebindBindings([]SessionAffinityBinding, string) int
 	})
 	if !okView {
 		return
 	}
-	view.RebindBindings(pending.bindings, auth.ID)
-	log.WithField("auth_id", auth.ID).Infof("session-affinity: migrated %d binding(s) onto re-registered auth", len(pending.bindings))
+	rebound := view.RebindBindings(pending.bindings, auth.ID)
+	log.WithField("auth_id", auth.ID).Infof("session-affinity: migrated %d of %d stashed binding(s) onto re-registered auth", rebound, len(pending.bindings))
 }
 
 // Load resets manager state from the backing store.

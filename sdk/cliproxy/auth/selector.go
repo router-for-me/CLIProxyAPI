@@ -839,14 +839,22 @@ func (s *SessionAffinitySelector) BindingsForAuth(authID string) []SessionAffini
 }
 
 // RebindBindings moves previously stashed bindings onto newAuthID, preserving
-// each binding's original expiry.
-func (s *SessionAffinitySelector) RebindBindings(bindings []SessionAffinityBinding, newAuthID string) {
+// each binding's original expiry. Each snapshot entry is rebound as an
+// independent key: cross-alias group metadata from the original binding is
+// not re-established. Revoke-by-session is unaffected (invalidateSessionID
+// matches the session-ID component), but a singly-invalidated sibling alias
+// key can linger until its TTL.
+func (s *SessionAffinitySelector) RebindBindings(bindings []SessionAffinityBinding, newAuthID string) int {
 	if s == nil || s.cache == nil || newAuthID == "" {
-		return
+		return 0
 	}
+	rebound := 0
 	for _, binding := range bindings {
-		s.cache.SetWithExpiry(binding.Provider+"::"+binding.SessionID+"::"+binding.Model, newAuthID, binding.ExpiresAt)
+		if s.cache.SetWithExpiry(binding.Provider+"::"+binding.SessionID+"::"+binding.Model, newAuthID, binding.ExpiresAt) {
+			rebound++
+		}
 	}
+	return rebound
 }
 
 // Snapshot returns the live session→auth bindings for observability.
