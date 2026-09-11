@@ -73,6 +73,10 @@ type Server struct {
 	// currentPath is the absolute path to the current working directory.
 	currentPath string
 
+	// codexBackendTransport overrides the transport used by the identity
+	// passthrough for chatgpt.com backend endpoints; nil builds one from config.
+	codexBackendTransport http.RoundTripper
+
 	// wsRoutes tracks registered websocket upgrade paths.
 	wsRouteMu     sync.Mutex
 	wsRoutes      map[string]struct{}
