@@ -188,14 +188,6 @@ var staticDevinModels = []*ModelInfo{
 	},
 }
 
-// GetDevinModels returns the standard Devin/Cognition model definitions.
-func GetDevinModels() []*ModelInfo {
-	if m := getModels(); m != nil && len(m.Devin) > 0 {
-		return cloneModelInfos(m.Devin)
-	}
-	return cloneModelInfos(staticDevinModels)
-}
-
 // AntigravityWebSearchModelFor returns the Antigravity model that should run a
 // native web search request for modelID.
 func AntigravityWebSearchModelFor(modelID string) string {

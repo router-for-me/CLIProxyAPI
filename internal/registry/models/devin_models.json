@@ -1,0 +1,861 @@
+{
+  "devin": [
+    {
+      "id": "devin/swe-2",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "cognition",
+      "display_name": "SWE-2",
+      "context_length": 262000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "medium",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/swe-1-7",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "cognition",
+      "display_name": "SWE-1.7",
+      "context_length": 262000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "medium",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/swe-1-6",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "cognition",
+      "display_name": "SWE-1.6",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "devin/glm-5-2",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "zhipu",
+      "display_name": "GLM-5.2",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "none",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "devin/glm-5-3",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "zhipu",
+      "display_name": "GLM-5.3",
+      "context_length": 1048576,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/glm-5-3-flash",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "zhipu",
+      "display_name": "GLM-5.3 Flash",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/deepseek-v4-flash",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "deepseek",
+      "display_name": "DeepSeek V4 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/deepseek-v4-1-flash",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "deepseek",
+      "display_name": "DeepSeek V4.1 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/deepseek-v4-pro",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "deepseek",
+      "display_name": "DeepSeek V4 Pro",
+      "context_length": 1048576,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/gemini-3-8-flash",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "google",
+      "display_name": "Gemini 3.8 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "devin/gemini-3-7-flash",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "google",
+      "display_name": "Gemini 3.7 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "devin/gemini-3-6-flash",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "google",
+      "display_name": "Gemini 3.6 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "devin/gemini-3-5-flash",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "google",
+      "display_name": "Gemini 3.5 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "devin/gemini-3-flash",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "google",
+      "display_name": "Gemini 3 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "devin/claude-fable-5-1",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Fable 5.1",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/claude-5-fable",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude 5 Fable",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/claude-sonnet-5",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Sonnet 5",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/claude-opus-5",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Opus 5",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/claude-opus-4-8",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Opus 4.8",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/claude-opus-4-7",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Opus 4.7",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/claude-opus-4-6",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Opus 4.6",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "devin/claude-sonnet-4-6",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Sonnet 4.6",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "devin/claude-haiku-4-5",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Haiku 4.5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "devin/claude-sonnet-4-5",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Sonnet 4.5",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "devin/gpt-6-astra",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-6 Astra",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/gpt-5-6-sol",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-5.6 Sol",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/gpt-5-6-terra",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-5.6 Terra",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/gpt-5-6-luna",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-5.6 Luna",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/gpt-5-5",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-5.5",
+      "context_length": 272000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "devin/gpt-5-4",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-5.4",
+      "context_length": 272000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "devin/gpt-5-4-mini",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-5.4 Mini",
+      "context_length": 400000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "devin/gpt-5-3-codex",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-5.3-Codex",
+      "context_length": 400000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "devin/gpt-4-1",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-4.1",
+      "context_length": 1047576,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "devin/grok-4-6",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "xai",
+      "display_name": "Grok 4.6",
+      "context_length": 500000,
+      "max_completion_tokens": 131072,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "devin/grok-4-5",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "xai",
+      "display_name": "Grok 4.5",
+      "context_length": 500000,
+      "max_completion_tokens": 131072,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "devin/kimi-k3",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "moonshot",
+      "display_name": "Kimi K3",
+      "context_length": 1048576,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "devin/kimi-k2-7",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "moonshot",
+      "display_name": "Kimi K2.7",
+      "context_length": 262144,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "devin/kimi-k2-6",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "moonshot",
+      "display_name": "Kimi K2.6",
+      "context_length": 262144,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "devin/nemotron-3-ultra",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "nvidia",
+      "display_name": "Nemotron 3 Ultra",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "none",
+          "medium",
+          "high"
+        ]
+      }
+    }
+  ]
+}

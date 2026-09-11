@@ -762,19 +762,22 @@ func main() {
 }
 
 // modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
-// Codex client templates still refresh under Home mode because the model list
-// comes from Home IDs while template metadata stays edge-local.
-func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient bool) {
+// Codex client and Devin catalogs still refresh under Home mode because
+// template metadata and Devin models stay edge-local.
+func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient, startDevin bool) {
 	if localModel {
-		return false, false
+		return false, false, false
 	}
-	return !homeEnabled, true
+	return !homeEnabled, true, true
 }
 
 func startModelCatalogUpdaters(localModel, homeEnabled bool) {
-	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
+	startModels, startCodexClient, startDevin := modelCatalogUpdaterPlan(localModel, homeEnabled)
 	if startCodexClient {
 		registry.StartCodexClientModelsUpdater(context.Background())
+	}
+	if startDevin {
+		registry.StartDevinModelsUpdater(context.Background())
 	}
 	if startModels {
 		registry.StartModelsUpdater(context.Background())
