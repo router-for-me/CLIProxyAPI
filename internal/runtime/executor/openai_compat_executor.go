@@ -206,15 +206,18 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
+	// Snapshot client-visible TPS from the raw upstream body before translation so
+	// TranslateNonStream / EnsureResponsesUsageDetails do not dilute the denominator.
+	tps := helps.MeasuredTokensPerSecond(body, reporter)
 	// Translate response back to source format when needed
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
-	out = helps.AttachTokensPerSecond(out, reporter)
+	out = helps.AttachTokensPerSecondRate(out, tps)
 	headers := httpResp.Header.Clone()
-	helps.AttachTokensPerSecondHeader(headers, out, reporter)
+	helps.AttachTokensPerSecondHeaderRate(headers, tps)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: headers}
 	return resp, nil
 }

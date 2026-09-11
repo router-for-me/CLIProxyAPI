@@ -117,21 +117,39 @@ func attachTokensPerSecondAt(jsonBody []byte, path string, tps float64) []byte {
 	return updated
 }
 
-// AttachTokensPerSecond writes usage.tokens_per_second when TTFT is known.
-func AttachTokensPerSecond(payload []byte, reporter *UsageReporter) []byte {
+// MeasuredTokensPerSecond returns gateway TPS for payload usage using the
+// reporter's current latency/TTFT. Call this before response translation so
+// post-generation gateway work is excluded from the response/header denominator.
+func MeasuredTokensPerSecond(payload []byte, reporter *UsageReporter) float64 {
 	if len(payload) == 0 || reporter == nil {
+		return 0
+	}
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return 0
+	}
+	return reporterTokensPerSecond(reporter, outputTokensFromUsageNode(usageNodeFromPayload(trimmed)))
+}
+
+// AttachTokensPerSecondRate writes a precomputed tokens_per_second into usage objects.
+func AttachTokensPerSecondRate(payload []byte, tps float64) []byte {
+	if len(payload) == 0 || tps <= 0 {
 		return payload
 	}
 	trimmed := bytes.TrimSpace(payload)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return payload
 	}
-	tps := reporterTokensPerSecond(reporter, outputTokensFromUsageNode(usageNodeFromPayload(trimmed)))
 	updated := trimmed
 	for _, path := range usageObjectPaths {
 		updated = attachTokensPerSecondAt(updated, path, tps)
 	}
 	return updated
+}
+
+// AttachTokensPerSecond writes usage.tokens_per_second when TTFT is known.
+func AttachTokensPerSecond(payload []byte, reporter *UsageReporter) []byte {
+	return AttachTokensPerSecondRate(payload, MeasuredTokensPerSecond(payload, reporter))
 }
 
 func jsonPayloadFromSSE(line []byte) []byte {
@@ -176,6 +194,14 @@ func setTokensPerSecondHeader(headers map[string][]string, tps float64) {
 	h.Set(tokensPerSecondGatewayMarker, gatewayMeasuredTPSMarkerValue)
 }
 
+// AttachTokensPerSecondHeaderRate writes X-CLIProxyAPI-Tokens-Per-Second from a
+// precomputed rate. Upstream-supplied TPS/marker headers are stripped first so
+// only a gateway measurement can establish provenance for mergeGatewayTelemetryHeaders.
+func AttachTokensPerSecondHeaderRate(headers map[string][]string, tps float64) {
+	StripTokensPerSecondHeaders(http.Header(headers))
+	setTokensPerSecondHeader(headers, tps)
+}
+
 // AttachTokensPerSecondHeader writes X-CLIProxyAPI-Tokens-Per-Second when TTFT is known.
 // Upstream-supplied TPS/marker headers are stripped first so only a gateway measurement
 // can establish provenance for mergeGatewayTelemetryHeaders.
@@ -184,9 +210,5 @@ func AttachTokensPerSecondHeader(headers map[string][]string, payload []byte, re
 }
 
 func attachTokensPerSecondHeader(headers map[string][]string, payload []byte, reporter *UsageReporter) {
-	StripTokensPerSecondHeaders(http.Header(headers))
-	if reporter == nil {
-		return
-	}
-	setTokensPerSecondHeader(headers, reporterTokensPerSecond(reporter, outputTokensFromUsageNode(usageNodeFromPayload(payload))))
+	AttachTokensPerSecondHeaderRate(headers, MeasuredTokensPerSecond(payload, reporter))
 }

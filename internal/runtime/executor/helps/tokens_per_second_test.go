@@ -155,3 +155,36 @@ func TestAttachTokensPerSecondHeaderStripsUpstreamForgedMarker(t *testing.T) {
 		t.Fatalf("upstream forged TPS/marker survived attach: %#v", headers)
 	}
 }
+
+func TestMeasuredTokensPerSecondFrozenAcrossPostGenerationDelay(t *testing.T) {
+	reporter := &UsageReporter{
+		upstreamStartedAt: time.Now().Add(-5 * time.Second),
+		ttft:              3 * time.Second,
+		ttftSet:           true,
+	}
+	raw := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":200,"total_tokens":210}}`)
+	tps := MeasuredTokensPerSecond(raw, reporter)
+	if tps < 99 || tps > 101 {
+		t.Fatalf("snapshot tokens_per_second = %v, want ~100", tps)
+	}
+	time.Sleep(200 * time.Millisecond)
+	later := MeasuredTokensPerSecond(raw, reporter)
+	if later >= tps {
+		t.Fatalf("live remeasure should drop after post-generation delay: early=%v later=%v", tps, later)
+	}
+	translated := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":200,"total_tokens":210,"output_tokens":200}}`)
+	gotPayload := AttachTokensPerSecondRate(translated, tps)
+	got := gjson.GetBytes(gotPayload, "usage.tokens_per_second").Float()
+	if got != tps {
+		t.Fatalf("attached rate %v != snapshot %v", got, tps)
+	}
+	headers := http.Header{}
+	AttachTokensPerSecondHeaderRate(headers, tps)
+	parsed, err := strconv.ParseFloat(headers.Get(tokensPerSecondHeader), 64)
+	if err != nil || parsed < 99 || parsed > 101 {
+		t.Fatalf("header = %q, want ~100 from snapshot", headers.Get(tokensPerSecondHeader))
+	}
+	if headers.Get(tokensPerSecondGatewayMarker) != GatewayMeasuredTPSMarkerValue() {
+		t.Fatalf("missing gateway marker")
+	}
+}
