@@ -55,17 +55,28 @@ func TestManager_RefreshAuthLogsAuthFileBasenameOnInvalidRefreshToken(t *testing
 			continue
 		}
 		saw = true
-		if !strings.Contains(entry.Message, "auth_file=account.json") {
-			t.Fatalf("refresh warn missing auth file basename: %s", entry.Message)
+		if got, _ := entry.Data["auth_file"].(string); got != "account.json" {
+			t.Fatalf("refresh warn auth_file field = %v, want account.json (msg=%s data=%v)", entry.Data["auth_file"], entry.Message, entry.Data)
 		}
-		if strings.Contains(entry.Message, "hidden") || strings.Contains(entry.Message, "auth-dir") {
-			t.Fatalf("refresh warn leaked path: %s", entry.Message)
+		if got, _ := entry.Data["provider"].(string); got != "antigravity" {
+			t.Fatalf("refresh warn provider field = %v, want antigravity (msg=%s data=%v)", entry.Data["provider"], entry.Message, entry.Data)
 		}
-		if strings.Contains(entry.Message, "expired-access-token") {
-			t.Fatalf("refresh warn leaked token: %s", entry.Message)
+		diagnostic, _ := entry.Data["diagnostic"].(string)
+		if diagnostic == "" {
+			t.Fatalf("refresh warn missing diagnostic field: msg=%s data=%v", entry.Message, entry.Data)
 		}
-		if !strings.Contains(entry.Message, "invalid_refresh_token") {
-			t.Fatalf("refresh warn missing invalid_refresh_token: %s", entry.Message)
+		combined := entry.Message + " " + diagnostic
+		if strings.Contains(combined, "hidden") || strings.Contains(combined, "auth-dir") {
+			t.Fatalf("refresh warn leaked path: msg=%s diagnostic=%s", entry.Message, diagnostic)
+		}
+		if strings.Contains(combined, "expired-access-token") {
+			t.Fatalf("refresh warn leaked token: msg=%s diagnostic=%s", entry.Message, diagnostic)
+		}
+		if !strings.Contains(diagnostic, "invalid_refresh_token") {
+			t.Fatalf("refresh warn diagnostic missing invalid_refresh_token: %s", diagnostic)
+		}
+		if strings.Contains(entry.Message, "auth_file=") || strings.Contains(entry.Message, "antigravity") {
+			t.Fatalf("refresh warn still interpolates structured values into message: %s", entry.Message)
 		}
 	}
 	if !saw {
