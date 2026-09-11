@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -38,6 +39,17 @@ func (w *Watcher) start(ctx context.Context) error {
 		return errAddAuthDir
 	}
 	log.Debugf("watching auth directory: %s", w.authDir)
+
+	// The local Codex client model override file lives next to the configuration
+	// file and is replaced atomically inside that directory, so the directory has to
+	// be watched as well for manual edits to take effect. Failing to watch it only
+	// costs the hot reload of that optional file and must not stop the service.
+	configDir := filepath.Dir(w.configPath)
+	if errAddConfigDir := w.watcher.Add(configDir); errAddConfigDir != nil {
+		log.Warnf("failed to watch config directory %s for Codex client model overrides: %v", configDir, errAddConfigDir)
+	} else {
+		log.Debugf("watching config directory: %s", configDir)
+	}
 
 	go w.processEvents(ctx)
 
@@ -65,7 +77,8 @@ func (w *Watcher) processEvents(ctx context.Context) {
 }
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {
-	// Filter only relevant events: config file or auth-dir JSON files.
+	// Filter only relevant events: the config file, auth-dir JSON files, or the
+	// local Codex client model override file.
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
@@ -73,13 +86,24 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
-	if !isConfigEvent && !isAuthJSON {
+	overrideOps := fsnotify.Write | fsnotify.Create | fsnotify.Remove | fsnotify.Rename
+	overridePath := w.codexClientModelsOverridePath()
+	isOverrideEvent := overridePath != "" && normalizedName == w.normalizeAuthPath(overridePath) && event.Op&overrideOps != 0
+	if !isConfigEvent && !isAuthJSON && !isOverrideEvent {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
 	}
 
 	now := time.Now()
 	log.Debugf("file system event detected: %s %s", event.Op.String(), event.Name)
+
+	// Handle the local Codex client model override file before the auth branch:
+	// when it shares a directory with auth JSON files it must not be read as one.
+	if isOverrideEvent {
+		log.Infof("Codex client model override file changed: %s, reloading local overrides", filepath.Base(event.Name))
+		registry.SyncCodexClientModelsOverrideFile(w.configPath)
+		return
+	}
 
 	// Handle config file changes
 	if isConfigEvent {
@@ -177,6 +201,17 @@ func (w *Watcher) isKnownAuthFile(path string) bool {
 	defer w.clientsMutex.RUnlock()
 	_, ok := w.lastAuthHashes[normalized]
 	return ok
+}
+
+// codexClientModelsOverridePath returns the local Codex client model override
+// file that belongs to the watched configuration file. It is empty when the
+// configuration path is unknown.
+func (w *Watcher) codexClientModelsOverridePath() string {
+	configPath := strings.TrimSpace(w.configPath)
+	if configPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(configPath), registry.CodexClientModelsOverrideFileName)
 }
 
 func (w *Watcher) normalizeAuthPath(path string) string {
