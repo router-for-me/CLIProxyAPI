@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
@@ -20,6 +21,8 @@ var corsExposedResponseHeaders = []string{
 	"X-CPA-COMMIT",
 	"X-CPA-BUILD-DATE",
 	"X-CPA-SUPPORT-PLUGIN",
+	managementHandlers.CodexClientModelsOverrideSupportHeader,
+	managementHandlers.CodexClientModelsInheritSupportHeader,
 	"X-CPA-HOME-VERSION",
 	"X-CPA-HOME-BUILD-DATE",
 	"X-SERVER-VERSION",

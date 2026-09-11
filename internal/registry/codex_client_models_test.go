@@ -69,13 +69,13 @@ func TestValidateCodexClientModelsJSON(t *testing.T) {
 func TestLoadCodexClientModelsRejectsInvalidWithoutReplacing(t *testing.T) {
 	original, _ := GetCodexClientModelsSnapshot()
 	t.Cleanup(func() {
-		if _, err := loadCodexClientModelsFromBytes(original, "test cleanup"); err != nil {
+		if _, err := setCodexClientModelsBase(original, "test cleanup"); err != nil {
 			t.Fatalf("restore original catalog: %v", err)
 		}
 	})
 
 	valid := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
-	changed, err := loadCodexClientModelsFromBytes(valid, "test")
+	changed, err := setCodexClientModelsBase(valid, "test")
 	if err != nil {
 		t.Fatalf("load valid catalog: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestLoadCodexClientModelsRejectsInvalidWithoutReplacing(t *testing.T) {
 	}
 	beforeInvalid, revision := GetCodexClientModelsSnapshot()
 
-	if _, err = loadCodexClientModelsFromBytes([]byte(`{"models":[]}`), "test invalid"); err == nil {
+	if _, err = setCodexClientModelsBase([]byte(`{"models":[]}`), "test invalid"); err == nil {
 		t.Fatal("load invalid catalog error = nil, want error")
 	}
 	afterInvalid, afterRevision := GetCodexClientModelsSnapshot()
@@ -131,13 +131,13 @@ func TestRefreshCodexClientModelsKeepsLastValidSnapshot(t *testing.T) {
 	previousURLs := codexClientModelsURLs
 	t.Cleanup(func() {
 		codexClientModelsURLs = previousURLs
-		if _, err := loadCodexClientModelsFromBytes(original, "test cleanup"); err != nil {
+		if _, err := setCodexClientModelsBase(original, "test cleanup"); err != nil {
 			t.Fatalf("restore original catalog: %v", err)
 		}
 	})
 
 	lastValid := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
-	if _, err := loadCodexClientModelsFromBytes(lastValid, "test last valid"); err != nil {
+	if _, err := setCodexClientModelsBase(lastValid, "test last valid"); err != nil {
 		t.Fatalf("load last valid catalog: %v", err)
 	}
 
