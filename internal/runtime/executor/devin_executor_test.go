@@ -87,13 +87,13 @@ func TestDevinExecutor_GetSensitiveWords(t *testing.T) {
 	eWithWords := &DevinExecutor{
 		cfg: &config.Config{
 			Devin: config.DevinConfig{
-				SensitiveWords: []string{"Hermes", "Claude Agent SDK"},
+				SensitiveWords: []string{"sample-word-1", "sample-word-2"},
 			},
 		},
 	}
 	words := eWithWords.getSensitiveWords()
-	if len(words) != 2 || words[0] != "Hermes" || words[1] != "Claude Agent SDK" {
-		t.Errorf("words = %v, want [Hermes Claude Agent SDK]", words)
+	if len(words) != 2 || words[0] != "sample-word-1" || words[1] != "sample-word-2" {
+		t.Errorf("words = %v, want [sample-word-1 sample-word-2]", words)
 	}
 }
 
