@@ -9,9 +9,9 @@ package claude
 import (
 	"bytes"
 	"context"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
@@ -172,8 +172,12 @@ func ConvertCodexResponseToClaude(ctx context.Context, _ string, originalRequest
 		template, _ = sjson.SetBytes(template, "usage.cache_creation_input_tokens", usage.CacheCreationInputTokens)
 		template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", usage.CacheReadInputTokens)
 		template, _ = sjson.SetBytes(template, "usage.output_tokens", usage.OutputTokens)
-		template, _ = sjson.SetBytes(template, "usage.output_tokens_details.thinking_tokens", usage.ThinkingTokens)
-		template = setClaudeReasoningUsage(template, responseData.Get("usage"))
+		if ctx.Value(constant.ClaudeBridgeUsageContextKey{}) == true {
+			template, _ = sjson.SetBytes(template, "usage.output_tokens_details.thinking_tokens", usage.ThinkingTokens)
+		} else {
+			template, _ = sjson.DeleteBytes(template, "usage.output_tokens_details")
+			template = setClaudeReasoningUsage(template, responseData.Get("usage"))
+		}
 		template, _ = sjson.SetBytes(template, "usage.server_tool_use.web_search_requests", usage.WebSearchRequests)
 
 		if ctx.Value(constant.ClaudeBridgeUsageContextKey{}) != true && usage.CacheCreationInputTokens == 0 {
@@ -393,8 +397,12 @@ func ConvertCodexResponseToClaudeNonStream(ctx context.Context, _ string, origin
 	out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", usage.CacheCreationInputTokens)
 	out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", usage.CacheReadInputTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", usage.OutputTokens)
-	out, _ = sjson.SetBytes(out, "usage.output_tokens_details.thinking_tokens", usage.ThinkingTokens)
-	out = setClaudeReasoningUsage(out, responseData.Get("usage"))
+	if ctx.Value(constant.ClaudeBridgeUsageContextKey{}) == true {
+		out, _ = sjson.SetBytes(out, "usage.output_tokens_details.thinking_tokens", usage.ThinkingTokens)
+	} else {
+		out, _ = sjson.DeleteBytes(out, "usage.output_tokens_details")
+		out = setClaudeReasoningUsage(out, responseData.Get("usage"))
+	}
 	out, _ = sjson.SetBytes(out, "usage.server_tool_use.web_search_requests", usage.WebSearchRequests)
 
 	if ctx.Value(constant.ClaudeBridgeUsageContextKey{}) != true && usage.CacheCreationInputTokens == 0 {
