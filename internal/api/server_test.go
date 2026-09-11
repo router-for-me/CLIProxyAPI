@@ -133,11 +133,13 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 	e.request = req.Clone(req.Context())
 	e.authIDs = append(e.authIDs, selected.ID)
 	e.httpCalls++
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
+	if req.Body != nil {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		e.body = body
 	}
-	e.body = body
 	responseBody := e.responseBody
 	if responseBody == nil {
 		responseBody = io.NopCloser(strings.NewReader(`{"results":[{"url":"https://example.com"}]}`))
