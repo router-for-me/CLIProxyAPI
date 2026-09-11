@@ -57,6 +57,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
+	requestedEffort := strings.TrimSpace(record.RequestedEffort)
+	if requestedEffort == "" {
+		requestedEffort = coreusage.RequestedEffortFromContext(ctx)
+	}
 	serviceTier := strings.TrimSpace(record.ServiceTier)
 	if serviceTier == "" {
 		serviceTier = strings.TrimSpace(record.RequestServiceTier)
@@ -136,6 +140,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		SessionID:           sessionID,
 		ParentSessionID:     parentSessionID,
 		ReasoningEffort:     reasoningEffort,
+		RequestedEffort:     requestedEffort,
+		AppliedEffort:       strings.TrimSpace(record.AppliedEffort),
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
 	})
@@ -160,6 +166,8 @@ type queuedUsageDetail struct {
 	SessionID           string                   `json:"session_id,omitempty"`
 	ParentSessionID     string                   `json:"parent_session_id,omitempty"`
 	ReasoningEffort     string                   `json:"reasoning_effort"`
+	RequestedEffort     string                   `json:"requested_effort,omitempty"`
+	AppliedEffort       string                   `json:"applied_effort,omitempty"`
 	ServiceTier         string                   `json:"service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
 }

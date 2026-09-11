@@ -2,6 +2,7 @@
 package thinking
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 
@@ -556,12 +557,36 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != ""
 }
 
-// ExtractReasoningEffort returns the request's thinking setting as a canonical
-// reasoning_effort label for usage logging. Model suffixes have the same
-// priority as ApplyThinking: a valid suffix overrides body fields.
-func ExtractReasoningEffort(body []byte, provider, model string) string {
-	if effort := reasoningEffortFromSuffix(ParseSuffix(model)); effort != "" {
-		return effort
+// FormatRawEffort formats a thinking config without folding a budget into a
+// level name. Empty configs return "". Shapes: none, auto, level:<name>, budget:<n>.
+func FormatRawEffort(config ThinkingConfig) string {
+	if !hasThinkingConfig(config) {
+		return ""
+	}
+	switch config.Mode {
+	case ModeNone:
+		return "none"
+	case ModeAuto:
+		return "auto"
+	case ModeLevel:
+		level := strings.ToLower(strings.TrimSpace(string(config.Level)))
+		if level == "" {
+			return ""
+		}
+		return "level:" + level
+	case ModeBudget:
+		return "budget:" + strconv.Itoa(config.Budget)
+	default:
+		return ""
+	}
+}
+
+func extractRequestThinkingConfig(body []byte, provider, model string) ThinkingConfig {
+	if suffix := ParseSuffix(model); suffix.HasSuffix {
+		config := parseSuffixToConfig(suffix.RawSuffix, "", suffix.ModelName)
+		if hasThinkingConfig(config) {
+			return config
+		}
 	}
 
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -574,12 +599,10 @@ func ExtractReasoningEffort(body []byte, provider, model string) string {
 			config = extractCodexConfig(body)
 		}
 	}
-	return reasoningEffortFromConfig(config)
+	return config
 }
 
-// ExtractTranslatedReasoningEffort returns the final provider payload's thinking
-// setting as a canonical reasoning_effort label for usage logging.
-func ExtractTranslatedReasoningEffort(body []byte, provider string) string {
+func extractTranslatedThinkingConfig(body []byte, provider string) ThinkingConfig {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	config := extractThinkingConfig(body, provider)
 	if !hasThinkingConfig(config) {
@@ -591,14 +614,32 @@ func ExtractTranslatedReasoningEffort(body []byte, provider string) string {
 			}
 		}
 	}
-	return reasoningEffortFromConfig(config)
+	return config
 }
 
-func reasoningEffortFromSuffix(suffix SuffixResult) string {
-	if !suffix.HasSuffix {
-		return ""
-	}
-	return reasoningEffortFromConfig(parseSuffixToConfig(suffix.RawSuffix, "", suffix.ModelName))
+// ExtractReasoningEffort returns the request's thinking setting as a canonical
+// reasoning_effort label for usage logging. Model suffixes have the same
+// priority as ApplyThinking: a valid suffix overrides body fields.
+func ExtractReasoningEffort(body []byte, provider, model string) string {
+	return reasoningEffortFromConfig(extractRequestThinkingConfig(body, provider, model))
+}
+
+// ExtractRawReasoningEffort returns the request's thinking setting without
+// folding a numeric budget into a level name.
+func ExtractRawReasoningEffort(body []byte, provider, model string) string {
+	return FormatRawEffort(extractRequestThinkingConfig(body, provider, model))
+}
+
+// ExtractTranslatedReasoningEffort returns the final provider payload's thinking
+// setting as a canonical reasoning_effort label for usage logging.
+func ExtractTranslatedReasoningEffort(body []byte, provider string) string {
+	return reasoningEffortFromConfig(extractTranslatedThinkingConfig(body, provider))
+}
+
+// ExtractRawTranslatedReasoningEffort returns the final provider payload's
+// thinking setting without folding a numeric budget into a level name.
+func ExtractRawTranslatedReasoningEffort(body []byte, provider string) string {
+	return FormatRawEffort(extractTranslatedThinkingConfig(body, provider))
 }
 
 func reasoningEffortFromConfig(config ThinkingConfig) string {

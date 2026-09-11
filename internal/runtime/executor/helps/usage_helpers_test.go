@@ -840,6 +840,16 @@ func TestUsageReporterSetStream(t *testing.T) {
 	}
 }
 
+func TestUsageReporterPreservesRequestedAndAppliedEffort(t *testing.T) {
+	ctx := usage.WithRequestedEffort(context.Background(), "budget:31999")
+	reporter := NewUsageReporter(ctx, "codex", "gpt-5.4", nil)
+	reporter.SetTranslatedReasoningEffort([]byte(`{"reasoning":{"effort":"high"},"service_tier":"priority"}`), "codex")
+	record := reporter.buildRecord(usage.Detail{}, false)
+	if record.RequestedEffort != "budget:31999" || record.AppliedEffort != "level:high" || record.ReasoningEffort != "high" {
+		t.Fatalf("effort mapping = requested %q, applied %q, reasoning %q", record.RequestedEffort, record.AppliedEffort, record.ReasoningEffort)
+	}
+}
+
 func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *testing.T) {
 	ctx := usage.WithServiceTier(context.Background(), "auto")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)

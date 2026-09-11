@@ -6,7 +6,16 @@ import (
 	"testing"
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
+
+func TestSanitizeCodexToolSchemasRemovesDialectPattern(t *testing.T) {
+	payload := []byte(`{"tools":[{"type":"function","parameters":{"type":"object","properties":{"path":{"type":"string","pattern":"^(?!__.*__$)"}}}}]}`)
+	out := sanitizeCodexToolSchemas(payload)
+	if gjson.GetBytes(out, "tools.0.parameters.properties.path.pattern").Exists() {
+		t.Fatalf("incompatible pattern remained: %s", out)
+	}
+}
 
 func TestTranslateCodexRequestPairReusesEqualPayload(t *testing.T) {
 	from := sdktranslator.Format("codex-test-from-equal")

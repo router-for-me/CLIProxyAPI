@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -36,9 +37,13 @@ func translateCodexRequestPair(from, to sdktranslator.Format, model string, orig
 	isCompat := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
 	translate := func(raw []byte) []byte {
 		if isCompat && from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex {
-			return helps.TranslateRequestWithAPIKeyModelCompatibility(context.Background(), nil, nil, from, to, model, raw, stream, true)
+			return sanitizeCodexToolSchemas(helps.TranslateRequestWithAPIKeyModelCompatibility(context.Background(), nil, nil, from, to, model, raw, stream, true))
 		}
-		return sdktranslator.TranslateRequest(from, to, model, raw, stream)
+		translated := sdktranslator.TranslateRequest(from, to, model, raw, stream)
+		if from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex {
+			translated = sanitizeCodexToolSchemas(translated)
+		}
+		return translated
 	}
 	if bytes.Equal(originalPayload, payload) {
 		body := translate(payload)
@@ -47,6 +52,36 @@ func translateCodexRequestPair(from, to sdktranslator.Format, model string, orig
 	originalTranslated := translate(originalPayload)
 	body := translate(payload)
 	return originalTranslated, body
+}
+
+// sanitizeCodexToolSchemas removes JSON Schema patterns that are valid in Claude
+// requests but rejected by OpenAI's function-schema validator (for example PCRE
+// lookaheads and Unicode property escapes).
+func sanitizeCodexToolSchemas(payload []byte) []byte {
+	var root any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return payload
+	}
+	var walk func(any)
+	walk = func(v any) {
+		switch node := v.(type) {
+		case map[string]any:
+			delete(node, "pattern")
+			for _, child := range node {
+				walk(child)
+			}
+		case []any:
+			for _, child := range node {
+				walk(child)
+			}
+		}
+	}
+	walk(root)
+	out, err := json.Marshal(root)
+	if err != nil {
+		return payload
+	}
+	return out
 }
 
 // PrepareRequest injects Codex credentials into the outgoing HTTP request.

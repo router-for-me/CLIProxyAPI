@@ -110,6 +110,9 @@ func TestSetReasoningEffortMetadataUsesSuffixOverBody(t *testing.T) {
 	if got := meta[coreexecutor.ReasoningEffortMetadataKey]; got != "high" {
 		t.Fatalf("ReasoningEffortMetadataKey = %v, want %q", got, "high")
 	}
+	if got := meta[coreexecutor.RequestedEffortMetadataKey]; got != "level:high" {
+		t.Fatalf("RequestedEffortMetadataKey = %v, want level:high", got)
+	}
 }
 
 func TestSetReasoningEffortMetadataSupportsOpenAIResponses(t *testing.T) {

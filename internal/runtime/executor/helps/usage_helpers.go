@@ -39,6 +39,8 @@ type UsageReporter struct {
 	parentSessionID     string
 	source              string
 	reasoning           string
+	requestedEffort     string
+	appliedEffort       string
 	serviceTier         string
 	generate            bool
 	stream              bool
@@ -105,6 +107,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		source:          resolveUsageSource(auth, apiKey),
 		authType:        resolveUsageAuthType(auth),
 		reasoning:       usage.ReasoningEffortFromContext(ctx),
+		requestedEffort: usage.RequestedEffortFromContext(ctx),
 		serviceTier:     usage.ServiceTierFromContext(ctx),
 		generate:        usage.GenerateFromContext(ctx),
 		stream:          usage.StreamFromContext(ctx),
@@ -203,6 +206,7 @@ func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format stri
 		return
 	}
 	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
+	r.appliedEffort = thinking.ExtractRawTranslatedReasoningEffort(payload, format)
 }
 
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
@@ -459,6 +463,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AccessTokenSHA256:   r.accessTokenFingerprint(),
 		AuthType:            r.authType,
 		ReasoningEffort:     r.reasoning,
+		RequestedEffort:     r.requestedEffort,
+		AppliedEffort:       r.appliedEffort,
 		ServiceTier:         r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
 		Generate:            usage.GenerateFlag(r.generate),

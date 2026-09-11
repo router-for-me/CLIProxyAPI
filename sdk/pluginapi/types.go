@@ -1418,6 +1418,9 @@ type UsageRecord struct {
 	Source string
 	// ReasoningEffort records the requested reasoning effort.
 	ReasoningEffort string
+	// RequestedEffort and AppliedEffort preserve raw thinking levels and budgets.
+	RequestedEffort string
+	AppliedEffort   string
 	// ServiceTier records the requested or reported service tier.
 	ServiceTier string
 	// Generate reports whether the client requested actual generation.
