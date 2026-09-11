@@ -19,16 +19,25 @@ type codexClientModelsPayload struct {
 	Models []map[string]any `json:"models"`
 }
 
+// codexClientModelsStore holds the base catalog fetched from the embedded file or
+// a source URL, the local override layer applied on top of it, and the effective
+// catalog served to Codex clients.
 type codexClientModelsStore struct {
-	mu       sync.RWMutex
-	data     []byte
-	revision uint64
+	mu             sync.RWMutex
+	base           []byte
+	baseSource     string
+	override       map[string]json.RawMessage
+	overridePath   string
+	overrideError  string
+	overrideIssues []CodexClientModelsOverrideIssue
+	data           []byte
+	revision       uint64
 }
 
 var codexClientCatalogStore = &codexClientModelsStore{}
 
 func init() {
-	if _, err := loadCodexClientModelsFromBytes(embeddedCodexClientModelsJSON, "embed"); err != nil {
+	if _, err := setCodexClientModelsBase(embeddedCodexClientModelsJSON, "embed"); err != nil {
 		log.Warnf("registry: failed to parse embedded codex_client_models.json (Codex client catalog will remain unavailable until a valid remote refresh): %v", err)
 	}
 }
@@ -54,18 +63,35 @@ func GetCodexClientModelsSnapshot() ([]byte, uint64) {
 	return append([]byte(nil), codexClientCatalogStore.data...), codexClientCatalogStore.revision
 }
 
-func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
+// setCodexClientModelsBase replaces the base catalog and republishes the effective
+// catalog produced by the local override layer. The base catalog is rejected when
+// the override layer cannot be applied on top of it.
+func setCodexClientModelsBase(data []byte, source string) (bool, error) {
 	if err := ValidateCodexClientModelsJSON(data); err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
+	base := append([]byte(nil), data...)
 
-	cloned := append([]byte(nil), data...)
 	codexClientCatalogStore.mu.Lock()
 	defer codexClientCatalogStore.mu.Unlock()
-	if bytes.Equal(codexClientCatalogStore.data, cloned) {
+	effective, overrideIssues, errMerge := applyCodexClientModelsOverrideResilient(base, codexClientCatalogStore.override)
+	if errMerge != nil {
+		return false, fmt.Errorf("%s: %w", source, errMerge)
+	}
+	if errValidate := ValidateCodexClientModelsJSON(effective); errValidate != nil {
+		return false, fmt.Errorf("%s: %w", source, errValidate)
+	}
+
+	codexClientCatalogStore.base = base
+	codexClientCatalogStore.baseSource = source
+	codexClientCatalogStore.overrideIssues = overrideIssues
+	for _, issue := range overrideIssues {
+		log.Warnf("registry: %s override of Codex client model catalog ignored: %s", source, issue)
+	}
+	if bytes.Equal(codexClientCatalogStore.data, effective) {
 		return false, nil
 	}
-	codexClientCatalogStore.data = cloned
+	codexClientCatalogStore.data = effective
 	codexClientCatalogStore.revision++
 	return true, nil
 }
