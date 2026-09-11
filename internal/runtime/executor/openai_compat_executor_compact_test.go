@@ -12,6 +12,7 @@ import (
 	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -1202,5 +1203,67 @@ func TestOpenAICompatExecutorStreamDropsChunksAfterDone(t *testing.T) {
 	}
 	if gjson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
 		t.Fatalf("second chunk = %s", payloads[1])
+	}
+}
+
+func TestOpenAICompatExecutorStreamMeasuresTTFTAfterMultilineSSEFrame(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		// Split one valid JSON chat chunk across two data: lines at a JSON whitespace boundary.
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(30 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(40 * time.Millisecond)
+		// Terminal usage-only chunk (no finish_reason) — TPS must use TTFT from assembled content.
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":200,\"total_tokens\":210}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "openrouter-model",
+		Payload: []byte(`{"model":"openrouter-model","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var sawContent bool
+	var tps float64
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		payload := string(chunk.Payload)
+		if gjson.Get(payload, "choices.0.delta.content").String() == "hello" {
+			sawContent = true
+		}
+		if v := gjson.Get(payload, "usage.tokens_per_second"); v.Exists() {
+			tps = v.Float()
+		}
+	}
+	if !sawContent {
+		t.Fatal("expected assembled multiline content chunk")
+	}
+	if tps <= 0 {
+		t.Fatalf("expected gateway tokens_per_second on usage chunk, got %v", tps)
+	}
+	if tps > 1_000_000 {
+		t.Fatalf("tokens_per_second = %v looks like near-zero generation window from wrong TTFT", tps)
 	}
 }

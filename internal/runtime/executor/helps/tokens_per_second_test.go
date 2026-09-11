@@ -139,7 +139,19 @@ func TestAttachTokensPerSecondHeaderSetsGatewayMarker(t *testing.T) {
 	if headers.Get(tokensPerSecondHeader) == "" {
 		t.Fatal("missing TPS header")
 	}
-	if headers.Get(tokensPerSecondGatewayMarker) != "1" {
+	if headers.Get(tokensPerSecondGatewayMarker) != GatewayMeasuredTPSMarkerValue() {
 		t.Fatalf("missing gateway marker: %#v", headers)
+	}
+}
+
+func TestAttachTokensPerSecondHeaderStripsUpstreamForgedMarker(t *testing.T) {
+	headers := http.Header{
+		tokensPerSecondHeader:        []string{"999.000"},
+		tokensPerSecondGatewayMarker: []string{"1"},
+	}
+	// No TTFT => strip only; do not re-attach a gateway measurement.
+	attachTokensPerSecondHeader(headers, []byte(`{"usage":{"completion_tokens":200}}`), &UsageReporter{})
+	if headers.Get(tokensPerSecondHeader) != "" || headers.Get(tokensPerSecondGatewayMarker) != "" {
+		t.Fatalf("upstream forged TPS/marker survived attach: %#v", headers)
 	}
 }

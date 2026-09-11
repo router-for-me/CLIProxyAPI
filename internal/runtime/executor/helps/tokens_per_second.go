@@ -2,6 +2,8 @@ package helps
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 
@@ -15,11 +17,46 @@ import (
 const TokensPerSecondHeader = "X-CLIProxyAPI-Tokens-Per-Second"
 
 // TokensPerSecondGatewayMarker marks that TokensPerSecondHeader was set by the
-// gateway (not an upstream). Handlers only forward TPS when this marker is present.
+// gateway (not an upstream). Handlers only forward TPS when this marker is present
+// and carries the process-local GatewayMeasuredTPSMarkerValue (upstream cannot forge it).
 const TokensPerSecondGatewayMarker = "X-CLIProxyAPI-Gateway-Measured-TPS"
 
 const tokensPerSecondHeader = TokensPerSecondHeader
 const tokensPerSecondGatewayMarker = TokensPerSecondGatewayMarker
+
+// gatewayMeasuredTPSMarkerValue is a process-local secret written into
+// TokensPerSecondGatewayMarker. Upstream-supplied marker values never match.
+var gatewayMeasuredTPSMarkerValue = newGatewayMeasuredTPSMarkerValue()
+
+func newGatewayMeasuredTPSMarkerValue() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Extremely unlikely; fall back to a non-empty distinct token.
+		return "gateway-local-tps-marker"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// GatewayMeasuredTPSMarkerValue returns the process-local marker value the gateway
+// writes when it measures tokens/sec. Tests and handlers use this for provenance checks.
+func GatewayMeasuredTPSMarkerValue() string {
+	return gatewayMeasuredTPSMarkerValue
+}
+
+// IsGatewayMeasuredTPSMarker reports whether v is the process-local gateway marker.
+func IsGatewayMeasuredTPSMarker(v string) bool {
+	return v != "" && v == gatewayMeasuredTPSMarkerValue
+}
+
+// StripTokensPerSecondHeaders removes gateway telemetry headers so upstream-supplied
+// TPS / marker pairs cannot establish provenance before the gateway attaches its own.
+func StripTokensPerSecondHeaders(headers http.Header) {
+	if headers == nil {
+		return
+	}
+	headers.Del(tokensPerSecondHeader)
+	headers.Del(tokensPerSecondGatewayMarker)
+}
 
 var usageObjectPaths = []string{
 	"usage",
@@ -136,15 +173,18 @@ func setTokensPerSecondHeader(headers map[string][]string, tps float64) {
 	}
 	h := http.Header(headers)
 	h.Set(tokensPerSecondHeader, fmt.Sprintf("%.3f", tps))
-	h.Set(tokensPerSecondGatewayMarker, "1")
+	h.Set(tokensPerSecondGatewayMarker, gatewayMeasuredTPSMarkerValue)
 }
 
 // AttachTokensPerSecondHeader writes X-CLIProxyAPI-Tokens-Per-Second when TTFT is known.
+// Upstream-supplied TPS/marker headers are stripped first so only a gateway measurement
+// can establish provenance for mergeGatewayTelemetryHeaders.
 func AttachTokensPerSecondHeader(headers map[string][]string, payload []byte, reporter *UsageReporter) {
 	attachTokensPerSecondHeader(headers, payload, reporter)
 }
 
 func attachTokensPerSecondHeader(headers map[string][]string, payload []byte, reporter *UsageReporter) {
+	StripTokensPerSecondHeaders(http.Header(headers))
 	if reporter == nil {
 		return
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"golang.org/x/net/context"
@@ -307,8 +308,10 @@ func downstreamHeadersAfterInterceptors(baseRaw, finalRaw http.Header, passthrou
 
 // mergeGatewayTelemetryHeaders copies gateway-owned inference telemetry
 // (generation tok/s) even when passthrough-headers is false. Upstream
-// headers stay filtered. Only forward TPS when the gateway marker is present
-// so an upstream-supplied X-CLIProxyAPI-Tokens-Per-Second is never trusted.
+// headers stay filtered. Only forward TPS when the process-local gateway
+// marker value is present so an upstream-supplied
+// X-CLIProxyAPI-Tokens-Per-Second / X-CLIProxyAPI-Gateway-Measured-TPS pair
+// is never trusted.
 func mergeGatewayTelemetryHeaders(dst, src http.Header) http.Header {
 	if src == nil {
 		return dst
@@ -321,7 +324,7 @@ func mergeGatewayTelemetryHeaders(dst, src http.Header) http.Header {
 	tps := ""
 	for key, values := range src {
 		canonical := http.CanonicalHeaderKey(key)
-		if canonical == markerCanonical && len(values) > 0 && values[0] != "" {
+		if canonical == markerCanonical && len(values) > 0 && helps.IsGatewayMeasuredTPSMarker(values[0]) {
 			hasMarker = true
 		}
 		if canonical == nameCanonical && len(values) > 0 && values[0] != "" && tps == "" {
