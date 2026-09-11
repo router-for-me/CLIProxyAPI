@@ -171,6 +171,83 @@ func sendMidSystemCountTokens(t *testing.T, ex *ClaudeExecutor, ctx context.Cont
 	return err
 }
 
+// Tool-result repair can move a default-5m cache breakpoint before a 1h
+// mid-conversation system block. Every first-party path must validate TTL order
+// against that repaired sequence, not the pre-repair input.
+func TestClaudeExecutor_RepairedToolResultRenormalizesCacheTTLOnEveryUpstreamPath(t *testing.T) {
+	const model = "claude-opus-5"
+	for _, test := range []struct {
+		name string
+		send func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, auth *cliproxyauth.Auth, payload []byte) error
+	}{
+		{name: "execute", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, auth *cliproxyauth.Auth, payload []byte) error {
+			_, err := ex.Execute(ctx, auth, cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+			return err
+		}},
+		{name: "execute stream", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, auth *cliproxyauth.Auth, payload []byte) error {
+			result, err := ex.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+			if err != nil {
+				return err
+			}
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					return chunk.Err
+				}
+			}
+			return nil
+		}},
+		{name: "count tokens", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, auth *cliproxyauth.Auth, payload []byte) error {
+			_, err := ex.CountTokens(ctx, auth, cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := &midSystemUpstream{}
+			ex := NewClaudeExecutor(midSystemConfig())
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "cloak_mode": "never"}}
+			payload := []byte(`{"model":"claude-opus-5","max_tokens":32,"messages":[` +
+				`{"role":"user","content":[{"type":"text","text":"start"}]},` +
+				`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]},` +
+				`{"role":"system","content":[{"type":"text","text":"constraint","cache_control":{"type":"ephemeral","ttl":"1h"}}]},` +
+				`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done","cache_control":{"type":"ephemeral"}}]}` +
+				`]}`)
+
+			if err := test.send(t, ex, upstream.context(t, nil), auth, payload); err != nil {
+				t.Fatalf("request error = %v", err)
+			}
+			if !upstream.called {
+				t.Fatal("expected repaired request to reach first-party upstream")
+			}
+			assertRepairedToolResultCacheTTL(t, upstream.body)
+		})
+	}
+}
+
+func assertRepairedToolResultCacheTTL(t *testing.T, payload []byte) {
+	t.Helper()
+	messages := gjson.GetBytes(payload, "messages").Array()
+	if len(messages) != 4 {
+		t.Fatalf("message count = %d, want 4: %s", len(messages), payload)
+	}
+	result := messages[2].Get("content.0")
+	if messages[2].Get("role").String() != "user" || result.Get("tool_use_id").String() != "t1" || result.Get("content").String() != "done" {
+		t.Fatalf("tool result was not moved ahead of the system turn: %s", payload)
+	}
+	if got := result.Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool result cache_control.type = %q, want ephemeral: %s", got, payload)
+	}
+	system := messages[3]
+	if system.Get("role").String() != "system" || system.Get("content.0.text").String() != "constraint" {
+		t.Fatalf("system turn was not replayed after the result: %s", payload)
+	}
+	if got := system.Get("content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system cache_control.type = %q, want ephemeral: %s", got, payload)
+	}
+	if system.Get("content.0.cache_control.ttl").Exists() {
+		t.Fatalf("system retained a 1h TTL after the repaired 5m result: %s", payload)
+	}
+}
+
 // Payload rules run long after translation and can rewrite model and messages,
 // so the guard has to read the finished body rather than an intermediate one.
 func TestClaudeExecutor_PayloadOverrideCannotSmuggleLegacyMidSystemMessage(t *testing.T) {
