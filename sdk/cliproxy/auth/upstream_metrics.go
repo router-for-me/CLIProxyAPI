@@ -29,10 +29,16 @@ func recordUpstreamResult(result Result) {
 	}
 }
 
-// recordDirectHttpUpstreamResult counts Manager.HttpRequest outcomes that never
-// flow through MarkResult / reportHomeResult / recordAvailabilityNeutralResult
-// (for example /v1/alpha/search via codexAlphaSearch).
-func recordDirectHttpUpstreamResult(auth *Auth, resp *http.Response, err error) {
+// RecordDirectHttpUpstreamResult counts direct HTTP / WebSocket handshake
+// outcomes that never flow through MarkResult / reportHomeResult /
+// recordAvailabilityNeutralResult (for example /v1/alpha/search via
+// codexAlphaSearch, and Codex Realtime / sideband dials that call
+// PrepareHttpRequest + DialContext outside Manager.HttpRequest).
+//
+// When both err and resp are set (gorilla websocket dials often return a
+// rejected handshake response alongside the dial error), prefer the HTTP
+// status from resp so /metrics reflects the upstream status code.
+func RecordDirectHttpUpstreamResult(auth *Auth, resp *http.Response, err error) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
@@ -42,7 +48,14 @@ func recordDirectHttpUpstreamResult(auth *Auth, resp *http.Response, err error) 
 	}
 	switch {
 	case err != nil:
-		result.Error = resultErrorFromError(err)
+		if resp != nil && resp.StatusCode >= http.StatusBadRequest {
+			result.Error = &Error{
+				HTTPStatus: resp.StatusCode,
+				Message:    resp.Status,
+			}
+		} else {
+			result.Error = resultErrorFromError(err)
+		}
 	case resp == nil:
 		result.Error = &Error{Message: "nil http response"}
 	case resp.StatusCode >= http.StatusBadRequest:
@@ -54,6 +67,11 @@ func recordDirectHttpUpstreamResult(auth *Auth, resp *http.Response, err error) 
 		result.Success = true
 	}
 	recordUpstreamResult(result)
+}
+
+// recordDirectHttpUpstreamResult is kept as an unexported alias for in-package callers.
+func recordDirectHttpUpstreamResult(auth *Auth, resp *http.Response, err error) {
+	RecordDirectHttpUpstreamResult(auth, resp, err)
 }
 
 // SnapshotUpstreamMetrics returns process-wide upstream success and error counts.
