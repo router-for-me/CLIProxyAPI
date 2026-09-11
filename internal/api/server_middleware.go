@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -26,6 +27,7 @@ var corsExposedResponseHeaders = []string{
 	"X-SERVER-BUILD-DATE",
 	"Location",
 	"Retry-After",
+	"Request-Id",
 	"X-Request-Id",
 	"OpenAI-Request-Id",
 }
@@ -193,6 +195,11 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 				"param":   nil,
 				"code":    code,
 			}})
+			return
+		}
+		if c.Request.URL.Path == "/v1/messages" || c.Request.URL.Path == "/v1/messages/count_tokens" {
+			c.Data(statusCode, "application/json", claude.BuildErrorResponse(statusCode, err.Message, claude.EnsureRequestID(c)))
+			c.Abort()
 			return
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
