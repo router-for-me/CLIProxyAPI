@@ -24,6 +24,17 @@ var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
 
+const (
+	defaultCooldownWaitMaxWaitMS   = 15000
+	defaultCooldownWaitMaxAttempts = 3
+)
+
+var (
+	cooldownWaitBudgetMS    atomic.Int64
+	cooldownWaitMaxAttempts atomic.Int64
+	reclassifyQuota403      atomic.Bool
+)
+
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
@@ -33,6 +44,20 @@ func SetQuotaCooldownDisabled(disable bool) {
 // 0 keeps the legacy default; negative values disable transient error cooldowns.
 func SetTransientErrorCooldownSeconds(seconds int) {
 	transientErrorCooldownSeconds.Store(int64(seconds))
+}
+
+// SetCooldownWaitConfig configures the bounded cooldown wait (G5) and the
+// 403→429 reclassification gate (G6). Non-positive values take defaults.
+func SetCooldownWaitConfig(maxWaitMS, maxAttempts int, reclassify403 bool) {
+	if maxWaitMS <= 0 {
+		maxWaitMS = defaultCooldownWaitMaxWaitMS
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = defaultCooldownWaitMaxAttempts
+	}
+	cooldownWaitBudgetMS.Store(int64(maxWaitMS))
+	cooldownWaitMaxAttempts.Store(int64(maxAttempts))
+	reclassifyQuota403.Store(reclassify403)
 }
 
 func quotaCooldownDisabledForAuth(auth *Auth) bool {

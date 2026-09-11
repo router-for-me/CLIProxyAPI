@@ -303,6 +303,25 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// CooldownWait bounds server-side cooldown waiting and 403
+	// reclassification. See CooldownWaitConfig for defaults.
+	CooldownWait CooldownWaitConfig `yaml:"cooldown-wait,omitempty" json:"cooldown-wait,omitempty"`
+}
+
+// CooldownWaitConfig bounds server-side cooldown waits and controls
+// OmniRoute-style error reclassification.
+type CooldownWaitConfig struct {
+	// MaxWaitMS caps the total time a request may wait server-side on
+	// cooldowns before surfacing 429 + Retry-After. 0 means the default
+	// (15000).
+	MaxWaitMS int `yaml:"max-wait-ms,omitempty" json:"max-wait-ms,omitempty"`
+	// MaxAttempts caps re-dispatches inside one cooldown-wait cycle.
+	// 0 means the default (3).
+	MaxAttempts int `yaml:"max-attempts,omitempty" json:"max-attempts,omitempty"`
+	// Reclassify403 rewrites quota-shaped 403 bodies to the 429 quota
+	// ladder instead of the 30-minute unauthorized cooldown. Default false.
+	Reclassify403 bool `yaml:"reclassify-403,omitempty" json:"reclassify-403,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

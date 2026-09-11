@@ -279,6 +279,16 @@ routing:
   # drains credentials by priority as usual. To control cross-provider order
   # explicitly, pin the model with a route (per-key model_routes or a Global
   # Model route) carrying a "priority" strategy.
+  # Bounded server-side cooldown waiting and quota-shaped 403 reclassification.
+  # max-wait-ms caps the total time a request may wait server-side on cooldowns
+  # before surfacing 429 + Retry-After (default: 15000).
+  # max-attempts caps re-dispatches inside one cooldown-wait cycle (default: 3).
+  # reclassify-403 rewrites quota-shaped 403 bodies to the 429 quota ladder instead
+  # of the 30-minute unauthorized cooldown (default: false).
+  # cooldown-wait:
+  #   max-wait-ms: 15000
+  #   max-attempts: 3
+  #   reclassify-403: false
 
 # Codex provider behavior.
 codex:
