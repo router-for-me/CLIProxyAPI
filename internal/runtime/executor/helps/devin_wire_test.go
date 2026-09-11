@@ -108,6 +108,28 @@ func TestBuildDevinGetChatMessageRequest(t *testing.T) {
 	}
 }
 
+func TestBuildDevinGetChatMessageRequest_ObfuscatesToolCallArguments(t *testing.T) {
+	matcher := BuildSensitiveWordMatcher([]string{"SECRET_TOKEN"})
+	prompts := []DevinPrompt{
+		{
+			MessageID: "msg-1",
+			Source:    2,
+			Content:   "calling tool",
+			ToolCalls: []DevinToolCall{
+				{
+					ID:        "call-1",
+					Name:      "test_tool",
+					Arguments: `{"key":"SECRET_TOKEN"}`,
+				},
+			},
+		},
+	}
+	req := BuildDevinGetChatMessageRequest("tok", "seed", "swe-2-high", "", prompts, nil, nil, 100, "s", "c", matcher)
+	if bytes.Contains(req, []byte("SECRET_TOKEN")) {
+		t.Fatalf("expected SECRET_TOKEN in tool call arguments to be obfuscated")
+	}
+}
+
 func TestSanitizeDevinSystemPrompt_AndSensitiveWords(t *testing.T) {
 	matcher := BuildSensitiveWordMatcher([]string{"API", "proxy"})
 	rawPrompt := "x-anthropic-billing-header: cc_version=2.1.260;\nYou are Claude Code, Anthropic's official CLI for Claude.\nHelp the project with API and proxy."

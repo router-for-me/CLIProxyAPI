@@ -288,8 +288,12 @@ func BuildDevinGetChatMessageRequest(
 				tcBytes = protowire.AppendString(tcBytes, tc.Name)
 			}
 			if tc.Arguments != "" {
+				args := tc.Arguments
+				if matcher != nil {
+					args = matcher.ObfuscateText(args)
+				}
 				tcBytes = protowire.AppendTag(tcBytes, 3, protowire.BytesType)
-				tcBytes = protowire.AppendString(tcBytes, tc.Arguments)
+				tcBytes = protowire.AppendString(tcBytes, args)
 			}
 			pBytes = protowire.AppendTag(pBytes, 6, protowire.BytesType)
 			pBytes = protowire.AppendBytes(pBytes, tcBytes)

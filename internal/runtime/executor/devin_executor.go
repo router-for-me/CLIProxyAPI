@@ -228,6 +228,9 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 	if apiKey == "" {
 		return nil, "", fmt.Errorf("devin credentials missing: api_key or session_token required")
 	}
+	if deviceSeed == "" {
+		deviceSeed = apiKey
+	}
 
 	payload := req.Payload
 	if opts.SourceFormat != "" && opts.SourceFormat != sdktranslator.FormatInteractions {
@@ -288,6 +291,8 @@ func (e *DevinExecutor) streamDevinFrames(
 	thoughtStarted := false
 	contentStarted := false
 	currentToolCallActive := false
+	thinkingBuf := &helps.UTF8SplitBuffer{}
+	contentBuf := &helps.UTF8SplitBuffer{}
 	var finalUsage *helps.DevinUsage
 	var accumulatedSignature []byte
 	var signatureType string
@@ -384,20 +389,23 @@ func (e *DevinExecutor) streamDevinFrames(
 
 		// Emit thinking delta
 		if frameRes.ThinkingText != "" {
-			if !thoughtStarted {
-				thoughtStepIndex = stepIndex
-				startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"thought"}}`), "index", stepIndex)
-				if !emitInteractionsEvent(startEvent) {
+			chunk := thinkingBuf.Feed([]byte(frameRes.ThinkingText))
+			if chunk != "" {
+				if !thoughtStarted {
+					thoughtStepIndex = stepIndex
+					startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"thought"}}`), "index", stepIndex)
+					if !emitInteractionsEvent(startEvent) {
+						return
+					}
+					thoughtStarted = true
+				}
+				deltaEvent := []byte(`{"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","text":"","content":{"type":"text","text":""}}}`)
+				deltaEvent, _ = sjson.SetBytes(deltaEvent, "index", thoughtStepIndex)
+				deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.text", chunk)
+				deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.content.text", chunk)
+				if !emitInteractionsEvent(deltaEvent) {
 					return
 				}
-				thoughtStarted = true
-			}
-			deltaEvent := []byte(`{"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","text":"","content":{"type":"text","text":""}}}`)
-			deltaEvent, _ = sjson.SetBytes(deltaEvent, "index", thoughtStepIndex)
-			deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.text", frameRes.ThinkingText)
-			deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.content.text", frameRes.ThinkingText)
-			if !emitInteractionsEvent(deltaEvent) {
-				return
 			}
 		}
 
@@ -415,25 +423,28 @@ func (e *DevinExecutor) streamDevinFrames(
 
 		// Emit content text delta
 		if frameRes.ContentText != "" {
-			if thoughtStarted {
-				stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
-				if !emitInteractionsEvent(stopEvent) {
+			chunk := contentBuf.Feed([]byte(frameRes.ContentText))
+			if chunk != "" {
+				if thoughtStarted {
+					stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
+					if !emitInteractionsEvent(stopEvent) {
+						return
+					}
+					thoughtStarted = false
+					stepIndex++
+				}
+				if !contentStarted {
+					startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"model_output"}}`), "index", stepIndex)
+					if !emitInteractionsEvent(startEvent) {
+						return
+					}
+					contentStarted = true
+				}
+				deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"text","text":""}}`), "index", stepIndex)
+				deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.text", chunk)
+				if !emitInteractionsEvent(deltaEvent) {
 					return
 				}
-				thoughtStarted = false
-				stepIndex++
-			}
-			if !contentStarted {
-				startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"model_output"}}`), "index", stepIndex)
-				if !emitInteractionsEvent(startEvent) {
-					return
-				}
-				contentStarted = true
-			}
-			deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"text","text":""}}`), "index", stepIndex)
-			deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.text", frameRes.ContentText)
-			if !emitInteractionsEvent(deltaEvent) {
-				return
 			}
 		}
 

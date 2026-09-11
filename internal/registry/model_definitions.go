@@ -121,17 +121,6 @@ var staticDevinModels = []*ModelInfo{
 		},
 	},
 	{
-		ID:                  "devin/swe-1-7-lightning",
-		Type:                "devin",
-		OwnedBy:             "cognition",
-		DisplayName:         "SWE-1.7 Lightning",
-		ContextLength:       202752,
-		MaxCompletionTokens: 64000,
-		Thinking: &ThinkingSupport{
-			Levels: []string{"medium", "high"},
-		},
-	},
-	{
 		ID:                  "devin/glm-5-2",
 		Type:                "devin",
 		OwnedBy:             "zhipu",
@@ -139,7 +128,7 @@ var staticDevinModels = []*ModelInfo{
 		ContextLength:       200000,
 		MaxCompletionTokens: 64000,
 		Thinking: &ThinkingSupport{
-			Levels: []string{"low", "medium", "high", "max"},
+			Levels: []string{"high"},
 		},
 	},
 	{
