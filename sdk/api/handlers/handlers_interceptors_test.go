@@ -1179,7 +1179,7 @@ func TestHandlerStreamInterceptorModernSchemaOmitsHistoryOnPayloadChunks(t *test
 	}
 }
 
-func TestHandlerStreamInterceptorLegacySchemaClonesHistoryChunksOnPayloadChunks(t *testing.T) {
+func TestHandlerStreamInterceptorLegacySchemaDeliversHistoryOnPayloadChunks(t *testing.T) {
 	model := "handler-interceptor-stream-legacy-history-model"
 	executor := &interceptorCaptureExecutor{
 		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
@@ -1222,6 +1222,84 @@ func TestHandlerStreamInterceptorLegacySchemaClonesHistoryChunksOnPayloadChunks(
 	}
 	if len(observedHistories[1]) != 1 || string(observedHistories[1][0]) != "first" {
 		t.Fatalf("chunk 1 history = %#v, want ['first']", observedHistories[1])
+	}
+}
+
+// The handler must hand the host its shared rolling history window instead of
+// cloning the whole window for every chunk: one legacy (schema < 5) plugin must
+// not amplify allocations for every stream chunk. The host clones per legacy
+// plugin before delivery, so plugins still observe isolated snapshots.
+func TestHandlerStreamInterceptorLegacySchemaSharesHistoryWindowWithoutPerChunkClones(t *testing.T) {
+	model := "handler-interceptor-stream-legacy-history-share-model"
+	payloads := []string{"first", "second", "third", "fourth", "fifth"}
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, len(payloads))
+			for _, payload := range payloads {
+				chunks <- coreexecutor.StreamChunk{Payload: []byte(payload)}
+			}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream": []string{"stream"}},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
+	var observedHistories [][][]byte
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		includeStreamChunkHistory: true,
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+				return pluginapi.StreamChunkInterceptResponse{}
+			}
+			observedHistories = append(observedHistories, req.HistoryChunks)
+			return pluginapi.StreamChunkInterceptResponse{}
+		},
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if string(got) != "firstsecondthirdfourthfifth" {
+		t.Fatalf("stream payload = %q, want all chunks delivered", got)
+	}
+	if len(observedHistories) != len(payloads) {
+		t.Fatalf("payload chunk count = %d, want %d", len(observedHistories), len(payloads))
+	}
+	for index, history := range observedHistories {
+		if len(history) != index {
+			t.Fatalf("chunk %d history len = %d, want %d earlier chunks", index, len(history), index)
+		}
+		for item, entry := range history {
+			if string(entry) != payloads[item] {
+				t.Fatalf("chunk %d history[%d] = %q, want %q", index, item, entry, payloads[item])
+			}
+		}
+	}
+	// Consecutive chunk requests must observe the same rolling window storage at
+	// least once; per-chunk clones would never alias across requests.
+	sharedBacking := false
+	for index := 1; index < len(observedHistories); index++ {
+		previous := observedHistories[index-1]
+		current := observedHistories[index]
+		if len(previous) == 0 || len(current) == 0 {
+			continue
+		}
+		if &previous[0] == &current[0] {
+			sharedBacking = true
+			break
+		}
+	}
+	if !sharedBacking {
+		t.Fatal("history windows never share backing storage across consecutive chunks; want the shared rolling window instead of per-chunk clones")
 	}
 }
 

@@ -229,9 +229,11 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					Metadata:        opts.Metadata,
 				}
 				// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
-				// Schema v5+ omits history here.
+				// Share the read-only window instead of cloning it per chunk: the host
+				// clones history only for legacy plugins (schema < 5) and strips it for
+				// v5+ plugins, so a single legacy plugin no longer taxes every chunk.
 				if streamChunkPayloadIncludesHistory(interceptorHost) {
-					chunkReq.HistoryChunks = cloneByteSlices(historyChunks)
+					chunkReq.HistoryChunks = historyChunks
 				}
 				// Schema v3+ omits bodies here (one header-init clone only).
 				if streamChunkPayloadIncludesRequestBody(interceptorHost) {
@@ -454,9 +456,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				Metadata:        opts.Metadata,
 			}
 			// Re-evaluate each chunk so mid-stream plugin reloads stay correct.
-			// Schema v5+ omits history here.
+			// Share the read-only window instead of cloning it per chunk: the host
+			// clones history only for legacy plugins (schema < 5) and strips it for
+			// v5+ plugins, so a single legacy plugin no longer taxes every chunk.
+			// The window is only recycled between interceptor calls by this goroutine.
 			if streamChunkPayloadIncludesHistory(interceptorHost) {
-				chunkReq.HistoryChunks = cloneByteSlices(historyChunks)
+				chunkReq.HistoryChunks = historyChunks
 			}
 			// Schema v3+ omits bodies here (one header-init clone only).
 			if streamChunkPayloadIncludesRequestBody(interceptorHost) {
