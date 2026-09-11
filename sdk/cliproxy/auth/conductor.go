@@ -50,6 +50,10 @@ type Result struct {
 	Provider string
 	// Model is the upstream model identifier used for the request.
 	Model string
+	// UpstreamModel is the alias-resolved upstream name the provider actually
+	// received when it differs from Model. Structured not-found errors name
+	// this identifier, so 404 classification matches against both.
+	UpstreamModel string
 	// RouteModel is the requested logical route model before alias resolution.
 	RouteModel string
 	// Success marks whether the execution succeeded.
