@@ -2215,3 +2215,30 @@ func TestSessionAffinitySelectorUsesRequestPayloadWhenOriginalRequestMissing(t *
 		t.Fatalf("request-only conversation changed auth from %q to %q", first.ID, second.ID)
 	}
 }
+
+func TestTruncateSessionIDDistinctDerivedSessions(t *testing.T) {
+	first := truncateSessionID("derived:aaaaaaaa1234567890abcdef")
+	second := truncateSessionID("derived:bbbbbbbb1234567890abcdef")
+	if first == second {
+		t.Fatalf("distinct derived sessions render identically: %q", first)
+	}
+	if got := truncateSessionID("derived:short"); got != "short" {
+		t.Fatalf("short id = %q, want short", got)
+	}
+	if got := truncateSessionID("derived:0123456789abcdef0123456789abcdef"); got != "0123456789abcdef..." {
+		t.Fatalf("long id = %q, want 16 chars + ellipsis", got)
+	}
+}
+
+func TestAffinityKeyHashStable(t *testing.T) {
+	key := "mixed::derived:abc::glm-5"
+	if affinityKeyHash(key) != affinityKeyHash(key) {
+		t.Fatal("affinityKeyHash not deterministic")
+	}
+	if len(affinityKeyHash(key)) != 8 {
+		t.Fatalf("affinityKeyHash length = %d, want 8", len(affinityKeyHash(key)))
+	}
+	if affinityKeyHash(key) == affinityKeyHash("mixed::derived:xyz::glm-5") {
+		t.Fatal("different keys produced identical hash")
+	}
+}

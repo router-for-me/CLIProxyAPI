@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -704,6 +706,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// "model") resolve to one binding per session; splitAffinityKeyLocked
 	// splits on "::" and canonicalization never introduces one.
 	cacheKey := provider + "::" + primaryID + "::" + canonicalModelKey(model)
+	keyHash := affinityKeyHash(cacheKey)
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey = provider + "::" + fallbackID + "::" + canonicalModelKey(model)
@@ -720,7 +723,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
 				bind(auth.ID)
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s key=%s", truncateSessionID(primaryID), auth.ID, provider, model, keyHash)
 				return auth, nil
 			}
 		}
@@ -730,7 +733,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, err
 		}
 		bind(auth.ID)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s key=%s", truncateSessionID(primaryID), auth.ID, provider, model, keyHash)
 		return auth, nil
 	}
 
@@ -739,7 +742,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					bind(auth.ID)
-					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s key=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model, keyHash)
 					return auth, nil
 				}
 			}
@@ -751,9 +754,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 	bind(auth.ID)
-	entry.Debugf("session-affinity: cache miss, new binding | source=%s session=%s auth=%s provider=%s model=%s",
-		sessionIDSource(primaryID), truncateSessionID(primaryID), auth.ID, provider, model)
-	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+	entry.Debugf("session-affinity: cache miss, new binding | source=%s session=%s auth=%s provider=%s model=%s key=%s",
+		sessionIDSource(primaryID), truncateSessionID(primaryID), auth.ID, provider, model, keyHash)
+	entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s key=%s", truncateSessionID(primaryID), auth.ID, provider, model, keyHash)
 	return auth, nil
 }
 
@@ -767,12 +770,34 @@ func selectorLogEntry(ctx context.Context) *log.Entry {
 	return log.NewEntry(log.StandardLogger())
 }
 
-// truncateSessionID shortens session ID for logging (first 8 chars + "...")
+// sessionLogPrefixes are the source prefixes extractSessionIDs prepends to
+// session IDs. They carry no discriminating value in logs — every derived
+// session starts with "derived:" — so truncateSessionID strips them before
+// truncating, otherwise all sessions of one source class log identically.
+var sessionLogPrefixes = []string{"derived:", "conv:", "pck:", "session:", "user:", "execution:", "msg:"}
+
+// truncateSessionID shortens a session ID for logging: strip the known source
+// prefix, then keep the first 16 characters of the unique part so distinct
+// sessions remain distinguishable across log lines.
 func truncateSessionID(id string) string {
-	if len(id) <= 20 {
+	for _, prefix := range sessionLogPrefixes {
+		if strings.HasPrefix(id, prefix) {
+			id = id[len(prefix):]
+			break
+		}
+	}
+	if len(id) <= 16 {
 		return id
 	}
-	return id[:8] + "..."
+	return id[:16] + "..."
+}
+
+// affinityKeyHash returns an 8-hex fingerprint of a full affinity cache key so
+// log lines can be grouped per logical session+provider+model binding without
+// logging the raw session ID in full.
+func affinityKeyHash(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:4])
 }
 
 // sessionIDSource returns the signal class that produced a session ID (the
