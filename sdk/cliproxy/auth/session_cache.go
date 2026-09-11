@@ -308,15 +308,19 @@ func mergeSessionAliases(existing []string, candidates ...string) []string {
 // replaces one SessionAffinitySelector with another: the old cache would
 // otherwise be dropped with all its session bindings. The source cache is not
 // modified or stopped — the caller owns its lifecycle. Returns how many
-// entries were copied.
+// entries were copied. The destination cache is expected to be freshly
+// constructed (the only production caller passes a brand-new cache); adopting
+// into a live cache with alias groups spanning multiple keys can leave
+// partially adopted groups.
 func (c *SessionCache) Adopt(src *SessionCache) int {
-	if src == nil || src == c {
+	if c == nil || src == nil || src == c {
 		return 0
 	}
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	src.mu.RLock()
+	defer src.mu.RUnlock()
 	adopted := 0
 	for key, entry := range src.entries {
 		if !now.Before(entry.expiresAt) {
@@ -328,7 +332,6 @@ func (c *SessionCache) Adopt(src *SessionCache) int {
 		c.entries[key] = entry
 		adopted++
 	}
-	src.mu.RUnlock()
 	return adopted
 }
 
@@ -460,7 +463,7 @@ func (c *SessionCache) Snapshot() []SessionAffinityBinding {
 	out := make([]SessionAffinityBinding, 0, len(c.entries))
 	c.mu.RLock()
 	for key, entry := range c.entries {
-		if now.After(entry.expiresAt) {
+		if !now.Before(entry.expiresAt) {
 			continue // expired; cleaned lazily on access
 		}
 		provider, sessionID, model := splitAffinityKeyLocked(key)

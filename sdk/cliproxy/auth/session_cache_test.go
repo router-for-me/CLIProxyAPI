@@ -212,3 +212,38 @@ func TestSessionCacheAdoptTransfersUnexpiredEntries(t *testing.T) {
 		t.Fatalf("destination entry clobbered: %q", id)
 	}
 }
+
+func TestSessionCacheAdoptPreservesAliasGroups(t *testing.T) {
+	src := NewSessionCache(time.Hour)
+	dst := NewSessionCache(time.Hour)
+	defer src.Stop()
+	defer dst.Stop()
+
+	// Nil-source and nil-receiver guards (mirrors Snapshot's nil guard).
+	if got := dst.Adopt(nil); got != 0 {
+		t.Fatalf("Adopt(nil) = %d, want 0", got)
+	}
+	var nilCache *SessionCache
+	if got := nilCache.Adopt(src); got != 0 {
+		t.Fatalf("Adopt on nil receiver = %d, want 0", got)
+	}
+
+	src.SetAliases("auth-a", "mixed::s1::m", "mixed::s2::m")
+
+	if got := dst.Adopt(src); got != 2 {
+		t.Fatalf("Adopt = %d, want 2 (both alias keys copied)", got)
+	}
+	if id, ok := dst.Get("mixed::s2::m"); !ok || id != "auth-a" {
+		t.Fatalf("alias binding missing after adopt: %q %v", id, ok)
+	}
+	// Invalidate removes only the invalidated key; per Invalidate's contract it
+	// filters that key out of the surviving aliases' groups rather than
+	// deleting the whole group, so the sibling binding stays live.
+	dst.Invalidate("mixed::s1::m")
+	if id, ok := dst.Get("mixed::s2::m"); !ok || id != "auth-a" {
+		t.Fatalf("sibling alias binding should survive Invalidate with the key filtered from its group: %q %v", id, ok)
+	}
+	if _, ok := dst.Get("mixed::s1::m"); ok {
+		t.Fatal("invalidated key resurrected after adopt")
+	}
+}
