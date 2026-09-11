@@ -266,6 +266,19 @@ func TestResponsesStreamErrorBoundsExtensions(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamErrorTextFallsBackForNonstandardStatus(t *testing.T) {
+	deep := strings.Repeat(`[`, 40) + `null` + strings.Repeat(`]`, 40)
+	for name, errMsg := range map[string]*interfaces.ErrorMessage{
+		"nil error":       nil,
+		"oversized error": {Error: errors.New(`{"error":{"message":"failed","future":` + deep + `}}`)},
+	} {
+		text := responsesStreamErrorText(errMsg, 520)
+		if strings.TrimSpace(text) == "" || !strings.Contains(text, "520") {
+			t.Errorf("%s: fallback for status 520 = %q, want nonempty text naming the status", name, text)
+		}
+	}
+}
+
 func TestResponsesStreamErrorPreservesMissingAndNullCoreFields(t *testing.T) {
 	for _, fields := range []string{``, `"type":null,"code":null,"message":null`} {
 		body := `{"error":{` + fields + `}}`

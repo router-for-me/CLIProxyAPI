@@ -891,14 +891,22 @@ func sanitizeResponsesStreamErrorNode(val any, field string, depth int, remainin
 	return val, true
 }
 
+// responsesStreamStatusText never returns "" so terminal frames always carry a message (520-526 have no IANA text).
+func responsesStreamStatusText(status int) string {
+	if text := http.StatusText(status); text != "" {
+		return text
+	}
+	return fmt.Sprintf("upstream error (status %d)", status)
+}
+
 func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) string {
-	text := http.StatusText(status)
+	text := responsesStreamStatusText(status)
 	if errMsg != nil && errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 		text = strings.TrimSpace(errMsg.Error.Error())
 	}
 	trimmed := strings.TrimSpace(text)
 	if len(trimmed) > responsesStreamErrorSizeLimit {
-		return http.StatusText(status)
+		return responsesStreamStatusText(status)
 	}
 	if !json.Valid([]byte(trimmed)) {
 		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(trimmed), responsesStreamErrorMessageLimit)
@@ -925,7 +933,7 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 	remaining := responsesStreamErrorNodeLimit
 	cleaned, ok := sanitizeResponsesStreamErrorNode(selected, "", 0, &remaining)
 	if !ok {
-		return http.StatusText(status)
+		return responsesStreamStatusText(status)
 	}
 	if hasError {
 		out := map[string]any{
@@ -934,7 +942,7 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 		if seq, ok := root["sequence_number"]; ok {
 			sanitized, ok := sanitizeResponsesStreamErrorNode(seq, "sequence_number", 1, &remaining)
 			if !ok {
-				return http.StatusText(status)
+				return responsesStreamStatusText(status)
 			}
 			out["sequence_number"] = sanitized
 		}
@@ -945,7 +953,7 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 	if errMarshal == nil && len(data) <= responsesStreamErrorSizeLimit {
 		return string(data)
 	}
-	return http.StatusText(status)
+	return responsesStreamStatusText(status)
 }
 
 type responsesStreamSanitizedError struct {
