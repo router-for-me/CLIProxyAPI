@@ -852,6 +852,19 @@ func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *
 	}
 }
 
+func TestUsageReporterSetTranslatedReasoningEffortCodexConfigurationUpdate(t *testing.T) {
+	ctx := context.Background()
+	reporter := NewUsageReporter(ctx, "codex", "gpt-6-astra", nil)
+
+	payload := []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"xhigh"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}}]}`)
+	reporter.SetTranslatedReasoningEffort(payload, "codex")
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 10}, false)
+	if record.ReasoningEffort != "low" {
+		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "low")
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",
