@@ -166,13 +166,24 @@ type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
-	// StreamBootstrapBuffering holds back initial handshake events (response.created,
-	// response.in_progress and the websocket metadata frames) until the first generated event
-	// arrives. The upstream delivers server_is_overloaded rejections inside an HTTP 200 stream
-	// right after those handshake events instead of returning 503 on the wire, so buffering them
-	// keeps the downstream response headers uncommitted long enough to retry on another credential.
-	// Trade-off: the response headers are delayed until the upstream starts generating, which can
-	// trip client or reverse-proxy read timeouts. Default is false.
+	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
+	// which the client has seen anything from - the handshake (response.created, response.in_progress,
+	// the websocket metadata frames), keepalive heartbeats, and the *.added announcements of an item
+	// or part that is still empty - until the first generated event arrives. The upstream delivers
+	// server_is_overloaded rejections inside an HTTP 200 stream right after those frames instead of
+	// returning 503 on the wire, so buffering them keeps the downstream response headers uncommitted
+	// long enough to retry on another credential. Trade-off: the response headers are delayed until
+	// the upstream starts generating, which on a slow reasoning turn now means several heartbeat
+	// intervals rather than one, and can trip client or reverse-proxy read timeouts. The hold is
+	// bounded by a frame and a byte budget, not by wall-clock time, and neither budget is advanced
+	// by a websocket peer that sends only control frames or by an upstream that never terminates an
+	// SSE line. Only overload and rate-limit rejections fail over deliberately. A stream that ends
+	// while the bootstrap is still holding ends the attempt rather than reaching the client, and
+	// what follows is pre-existing but now far more likely, since the hold can span the whole
+	// reasoning phase instead of ending at the first keepalive: a clean end with no terminal event
+	// is request-scoped on SSE and stops there, while a websocket close or a transport error on
+	// either transport is not, so the request may be retried on another credential.
+	// Default is false.
 	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
