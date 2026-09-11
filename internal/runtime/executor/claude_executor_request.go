@@ -40,6 +40,7 @@ const (
 	claudeCodeBeta                   = "claude-code-20250219"
 	claudeContext1MBeta              = "context-1m-2025-08-07"
 	claudeMidConvSystemBeta          = "mid-conversation-system-2026-04-07"
+	claudePerTurnControlBeta         = "per-turn-control-2026-07-01"
 	claudeAdvisorToolBeta            = "advisor-tool-2026-03-01"
 	claudeAdvancedToolUseBeta        = "advanced-tool-use-2025-11-20"
 	claudeEffortBeta                 = "effort-2025-11-24"
@@ -94,6 +95,7 @@ var claudeCodeTrailingBetas = []string{
 //	 7 context-management-2025-06-27
 //	 8 prompt-caching-scope-2026-01-05
 //	 9 mid-conversation-system-2026-04-07  models accepting a role=system turn
+//	   per-turn-control-2026-07-01        requested; 2.1.261 per-turn role=system turn
 //	10 advisor-tool-2026-03-01             requests declaring advisor tools or requesting advisor beta
 //	11 advanced-tool-use-2025-11-20       requests using tool search or another advanced tool-use feature
 //	12 effort-2025-11-24                  effort-supporting models with active thinking
@@ -126,6 +128,9 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	}
 	if !claudeUsesLegacySystemReminder(body) {
 		betas = append(betas, claudeMidConvSystemBeta)
+	}
+	if requested[claudePerTurnControlBeta] {
+		betas = append(betas, claudePerTurnControlBeta)
 	}
 	if requested[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body) {
 		betas = append(betas, claudeAdvisorToolBeta)
@@ -905,6 +910,9 @@ func applyClaudeHeadersWithNativeProfile(
 			baseBetas = claudeCountTokensBetasForCredential(useOAuthBetas)
 			if advisorNeeded {
 				baseBetas = withClaudeAdvisorToolBeta(baseBetas)
+			}
+			if requestedMap[claudePerTurnControlBeta] {
+				baseBetas += "," + claudePerTurnControlBeta
 			}
 		}
 	}
