@@ -345,9 +345,10 @@ func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config,
 		return
 	}
 
-	// Keep rejected websocket handshakes on the redacted timeline path. The
-	// response headers and body may contain provider identifiers or raw errors.
-	RecordAPIWebsocketRequest(ctx, cfg, info)
+	// Preserve a normal API request/response attempt, but strip every sensitive
+	// websocket field before handing it to the generic request logger.
+	safeInfo := UpstreamRequestLog{Method: http.MethodGet, Provider: info.Provider}
+	RecordAPIRequest(ctx, cfg, safeInfo)
 	RecordAPIResponseMetadata(ctx, cfg, status, nil)
 	_ = headers
 	_ = body
