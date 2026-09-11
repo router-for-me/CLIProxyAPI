@@ -234,6 +234,7 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 		payload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatInteractions, req.Model, payload, opts.Stream)
 	}
 	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, thinkingLevel, budgetTokens := parseInteractionsPayload(payload, opts.OriginalRequest)
+	sessionID, cascadeID = resolveDevinSessionAndCascadeIDs(ctx, sessionID, cascadeID, opts)
 
 	chatModelUID := helps.ResolveDevinChatModelUID(req.Model, thinkingLevel, budgetTokens)
 
@@ -696,9 +697,20 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 	}
 
 	// 3. Session and Cascade ID
-	sessionID = strings.TrimSpace(root.Get("previous_interaction_id").String())
-	if sessionID == "" {
-		sessionID = uuid.New().String()
+	sessionID = strings.TrimSpace(firstNonEmpty(
+		root.Get("previous_interaction_id").String(),
+		root.Get("session_id").String(),
+		root.Get("sessionId").String(),
+		root.Get("conversation_id").String(),
+	))
+	if sessionID == "" && len(originalRequest) > 0 {
+		origRoot := gjson.ParseBytes(originalRequest)
+		sessionID = strings.TrimSpace(firstNonEmpty(
+			origRoot.Get("previous_interaction_id").String(),
+			origRoot.Get("session_id").String(),
+			origRoot.Get("sessionId").String(),
+			origRoot.Get("conversation_id").String(),
+		))
 	}
 	cascadeID = sessionID
 
@@ -1204,6 +1216,35 @@ func devinAuthLogFields(auth *cliproxyauth.Auth) (authID, authLabel, authType, a
 		}
 	}
 	return
+}
+
+func resolveDevinSessionAndCascadeIDs(ctx context.Context, sessionID, cascadeID string, opts cliproxyexecutor.Options) (string, string) {
+	if sessionID == "" {
+		if ctxSession := util.SessionIDFromContext(ctx); ctxSession != "" {
+			sessionID = ctxSession
+		} else if canon := cliproxyauth.CanonicalSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata); canon != "" {
+			sessionID = canon
+		}
+	}
+	sessionID = normalizeDevinUUID(sessionID)
+	if cascadeID == "" {
+		cascadeID = sessionID
+	} else {
+		cascadeID = normalizeDevinUUID(cascadeID)
+	}
+	return sessionID, cascadeID
+}
+
+func normalizeDevinUUID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return uuid.New().String()
+	}
+	if _, err := uuid.Parse(raw); err == nil {
+		return raw
+	}
+	// Deterministically map any non-UUID session string (e.g. lcp:hash, conv:id) to an RFC 4122 UUID v5
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(raw)).String()
 }
 
 func firstNonEmpty(values ...string) string {

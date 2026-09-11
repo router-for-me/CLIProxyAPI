@@ -2,13 +2,16 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -237,6 +240,44 @@ func TestDevinStatusError_RetryAfter(t *testing.T) {
 	err3 := newDevinStatusError(http.StatusInternalServerError, hdr429, []byte("server error"))
 	if err3.retryAfter != nil {
 		t.Fatalf("expected nil retryAfter for 500, got %v", err3.retryAfter)
+	}
+}
+
+func TestResolveDevinSessionAndCascadeIDs(t *testing.T) {
+	// 1. Direct UUID preservation
+	rawUUID := "8176cf8a-feff-44c1-8e3e-b10f6d737ae1"
+	sid, cid := resolveDevinSessionAndCascadeIDs(context.Background(), rawUUID, rawUUID, cliproxyexecutor.Options{})
+	if sid != rawUUID || cid != rawUUID {
+		t.Fatalf("sid/cid = %q/%q, want %q", sid, cid, rawUUID)
+	}
+
+	// 2. Non-UUID mapping to deterministic UUID
+	sid1, cid1 := resolveDevinSessionAndCascadeIDs(context.Background(), "lcp:12345678", "", cliproxyexecutor.Options{})
+	sid2, cid2 := resolveDevinSessionAndCascadeIDs(context.Background(), "lcp:12345678", "", cliproxyexecutor.Options{})
+	if sid1 != sid2 || cid1 != cid2 {
+		t.Fatalf("deterministic mapping failed: %q != %q", sid1, sid2)
+	}
+	if _, err := uuid.Parse(sid1); err != nil {
+		t.Fatalf("mapped sid is not a valid UUID: %q", sid1)
+	}
+
+	// 3. Fallback to ctx session
+	ctx := util.WithSessionID(context.Background(), "ctx-session-abc")
+	sidCtx, cidCtx := resolveDevinSessionAndCascadeIDs(ctx, "", "", cliproxyexecutor.Options{})
+	if _, err := uuid.Parse(sidCtx); err != nil {
+		t.Fatalf("sidCtx is not a valid UUID: %q", sidCtx)
+	}
+	if sidCtx != cidCtx {
+		t.Fatalf("sidCtx %q != cidCtx %q", sidCtx, cidCtx)
+	}
+
+	// 4. Fallback to fresh UUID when nothing supplied
+	sidEmpty, cidEmpty := resolveDevinSessionAndCascadeIDs(context.Background(), "", "", cliproxyexecutor.Options{})
+	if _, err := uuid.Parse(sidEmpty); err != nil {
+		t.Fatalf("sidEmpty is not a valid UUID: %q", sidEmpty)
+	}
+	if sidEmpty != cidEmpty {
+		t.Fatalf("sidEmpty %q != cidEmpty %q", sidEmpty, cidEmpty)
 	}
 }
 

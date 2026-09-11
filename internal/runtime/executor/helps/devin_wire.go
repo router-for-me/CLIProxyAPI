@@ -406,6 +406,9 @@ func BuildDevinGetChatMessageRequest(
 	f15Bytes = protowire.AppendTag(f15Bytes, 1, protowire.BytesType)
 	f15Bytes = protowire.AppendString(f15Bytes, sessionID)
 
+	f15Bytes = protowire.AppendTag(f15Bytes, 2, protowire.VarintType)
+	f15Bytes = protowire.AppendVarint(f15Bytes, 53)
+
 	f15Bytes = protowire.AppendTag(f15Bytes, 3, protowire.VarintType)
 	f15Bytes = protowire.AppendVarint(f15Bytes, 4)
 
