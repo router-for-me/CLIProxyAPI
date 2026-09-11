@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -85,5 +88,70 @@ func TestUpstreamMetricsHomeExecution(t *testing.T) {
 				t.Fatalf("metrics = %d, %v; want one success", success, failures)
 			}
 		})
+	}
+}
+
+type directHTTPMetricsExecutor struct {
+	status int
+	err    error
+}
+
+func (*directHTTPMetricsExecutor) Identifier() string { return "codex" }
+func (*directHTTPMetricsExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (*directHTTPMetricsExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+func (*directHTTPMetricsExecutor) Refresh(context.Context, *Auth) (*Auth, error) { return nil, nil }
+func (*directHTTPMetricsExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (e *directHTTPMetricsExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	return &http.Response{
+		StatusCode: e.status,
+		Status:     http.StatusText(e.status),
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestUpstreamMetricsHttpRequest(t *testing.T) {
+	ResetUpstreamMetricsForTest()
+	t.Cleanup(ResetUpstreamMetricsForTest)
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "alpha-search-auth", Provider: "codex"}
+	m.RegisterExecutor(&directHTTPMetricsExecutor{status: http.StatusOK})
+
+	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/alpha/search", strings.NewReader(`{"query":"x"}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := m.HttpRequest(context.Background(), auth, req)
+	if err != nil {
+		t.Fatalf("HttpRequest success path: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	m.RegisterExecutor(&directHTTPMetricsExecutor{status: http.StatusTooManyRequests})
+	resp, err = m.HttpRequest(context.Background(), auth, req)
+	if err != nil {
+		t.Fatalf("HttpRequest 429 path: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	m.RegisterExecutor(&directHTTPMetricsExecutor{err: &Error{HTTPStatus: http.StatusBadGateway, Message: "dial failed"}})
+	_, err = m.HttpRequest(context.Background(), auth, req)
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+
+	success, failures := SnapshotUpstreamMetrics()
+	if success != 1 || failures["429"] != 1 || failures["502"] != 1 || len(failures) != 2 {
+		t.Fatalf("metrics = %d, %v; want 1 success, 429=1, 502=1", success, failures)
 	}
 }
