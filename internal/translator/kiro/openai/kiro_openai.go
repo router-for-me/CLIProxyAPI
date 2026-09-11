@@ -98,6 +98,12 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 			// Tool use block starting
 			toolUseID := eventJSON.Get("content_block.id").String()
 			toolName := eventJSON.Get("content_block.name").String()
+			if state.BlockToToolIndex == nil {
+				state.BlockToToolIndex = make(map[int]int)
+			}
+			// Kiro content-block indices count all block types; OpenAI
+			// tool_calls indices count tool calls only.
+			state.BlockToToolIndex[int(eventJSON.Get("index").Int())] = state.ToolCallIndex
 			chunk := BuildOpenAISSEToolCallStart(state, toolUseID, toolName)
 			results = append(results, []byte(chunk))
 			state.ToolCallIndex++
@@ -123,10 +129,18 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 			// Tool call arguments delta
 			partialJSON := eventJSON.Get("delta.partial_json").String()
 			if partialJSON != "" {
-				// Get the tool index from content block index
+				// Resolve the kiro content-block index to the OpenAI tool_calls
+				// index recorded at content_block_start. Fall back to the most
+				// recently started tool call when the block is unknown.
 				blockIndex := int(eventJSON.Get("index").Int())
-				chunk := BuildOpenAISSEToolCallArgumentsDelta(state, partialJSON, blockIndex)
-				results = append(results, []byte(chunk))
+				toolIndex, ok := state.BlockToToolIndex[blockIndex]
+				if !ok {
+					toolIndex = state.ToolCallIndex - 1
+				}
+				if toolIndex >= 0 {
+					chunk := BuildOpenAISSEToolCallArgumentsDelta(state, partialJSON, toolIndex)
+					results = append(results, []byte(chunk))
+				}
 			}
 		}
 

@@ -19,6 +19,10 @@ type OpenAIStreamState struct {
 	Model             string
 	ResponseID        string
 	Created           int64
+	// BlockToToolIndex maps kiro content-block indices (which count all block
+	// types: text, thinking, tool_use) to OpenAI tool_calls indices (which
+	// count tool calls only). Populated when a tool_use block starts.
+	BlockToToolIndex map[int]int
 }
 
 // NewOpenAIStreamState creates a new stream state for tracking
@@ -30,6 +34,7 @@ func NewOpenAIStreamState(model string) *OpenAIStreamState {
 		Model:             model,
 		ResponseID:        "chatcmpl-" + uuid.New().String()[:24],
 		Created:           time.Now().Unix(),
+		BlockToToolIndex:  make(map[int]int),
 	}
 }
 
