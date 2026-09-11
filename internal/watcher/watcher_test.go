@@ -16,6 +16,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -1761,4 +1762,120 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
+}
+
+func TestHandleEventSyncsCodexClientModelOverrideFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	overridePath := filepath.Join(tmpDir, registry.CodexClientModelsOverrideFileName)
+	if err := os.WriteFile(overridePath, []byte(`{"gpt-5.5":{"display_name":"From Watch"}}`), 0o600); err != nil {
+		t.Fatalf("failed to write override file: %v", err)
+	}
+	t.Cleanup(func() { registry.SyncCodexClientModelsOverrideFile("") })
+
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		lastAuthHashes: make(map[string]string),
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	w.handleEvent(fsnotify.Event{Name: overridePath, Op: fsnotify.Write})
+
+	state := registry.GetCodexClientModelsState()
+	if state.OverridePath != overridePath {
+		t.Fatalf("override path = %q, want %q", state.OverridePath, overridePath)
+	}
+	if got := codexClientModelFieldValue(state, "gpt-5.5", "display_name"); got != "From Watch" {
+		t.Fatalf("gpt-5.5 display_name = %v, want the value written to the override file", got)
+	}
+}
+
+func TestHandleEventIgnoresCodexClientModelOverrideTempFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	registry.SyncCodexClientModelsOverrideFile("")
+	t.Cleanup(func() { registry.SyncCodexClientModelsOverrideFile("") })
+
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		lastAuthHashes: make(map[string]string),
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	overridePath := filepath.Join(tmpDir, registry.CodexClientModelsOverrideFileName)
+	w.handleEvent(fsnotify.Event{Name: overridePath + ".tmp", Op: fsnotify.Create})
+	w.handleEvent(fsnotify.Event{Name: overridePath + ".bak", Op: fsnotify.Write})
+
+	if got := registry.GetCodexClientModelsState().OverridePath; got != "" {
+		t.Fatalf("override path = %q, want the override file to stay unloaded", got)
+	}
+}
+
+func codexClientModelFieldValue(state registry.CodexClientModelsState, slug, field string) any {
+	for _, model := range state.Models {
+		if name, _ := model["slug"].(string); name == slug {
+			return model[field]
+		}
+	}
+	return nil
+}
+
+func TestStartPicksUpCodexClientModelOverrideFileChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir), 0o644); err != nil {
+		t.Fatalf("failed to create config file: %v", err)
+	}
+	registry.SyncCodexClientModelsOverrideFile("")
+	t.Cleanup(func() { registry.SyncCodexClientModelsOverrideFile("") })
+
+	w, err := NewWatcher(configPath, authDir, nil)
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.Start(ctx); err != nil {
+		t.Fatalf("expected Start to succeed: %v", err)
+	}
+	defer w.Stop()
+
+	overridePath := filepath.Join(tmpDir, registry.CodexClientModelsOverrideFileName)
+	if err := os.WriteFile(overridePath, []byte(`{"gpt-5.5":{"display_name":"Watcher Applied"}}`), 0o600); err != nil {
+		t.Fatalf("failed to write override file: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		state := registry.GetCodexClientModelsState()
+		if codexClientModelFieldValue(state, "gpt-5.5", "display_name") == "Watcher Applied" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("override file change was not applied, display_name = %v", codexClientModelFieldValue(state, "gpt-5.5", "display_name"))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
