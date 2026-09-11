@@ -539,6 +539,9 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 		if strings.Contains(trimmed, "Fast mode for Claude Code") {
 			continue
 		}
+		if matcher != nil && matcher.Matches(trimmed) {
+			continue
+		}
 		kept = append(kept, line)
 	}
 	res := strings.TrimSpace(strings.Join(kept, "\n"))

@@ -81,6 +81,14 @@ func (m *SensitiveWordMatcher) obfuscateText(text string) string {
 	return m.regex.ReplaceAllStringFunc(text, obfuscateWord)
 }
 
+// Matches reports whether the text contains any of the configured sensitive words.
+func (m *SensitiveWordMatcher) Matches(text string) bool {
+	if m == nil || m.regex == nil {
+		return false
+	}
+	return m.regex.MatchString(text)
+}
+
 // ObfuscateText replaces all sensitive words in the text.
 func (m *SensitiveWordMatcher) ObfuscateText(text string) string {
 	return m.obfuscateText(text)
