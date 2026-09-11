@@ -88,7 +88,7 @@ func GetAntigravityModels() []*ModelInfo {
 
 var staticDevinModels = []*ModelInfo{
 	{
-		ID:                  "swe-2",
+		ID:                  "devin/swe-2",
 		Type:                "devin",
 		OwnedBy:             "cognition",
 		DisplayName:         "SWE-2",
@@ -99,7 +99,7 @@ var staticDevinModels = []*ModelInfo{
 		},
 	},
 	{
-		ID:                  "claude-fable-5-1",
+		ID:                  "devin/claude-fable-5-1",
 		Type:                "devin",
 		OwnedBy:             "anthropic",
 		DisplayName:         "Claude Fable 5.1",
@@ -110,7 +110,7 @@ var staticDevinModels = []*ModelInfo{
 		},
 	},
 	{
-		ID:                  "gpt-6-astra",
+		ID:                  "devin/gpt-6-astra",
 		Type:                "devin",
 		OwnedBy:             "openai",
 		DisplayName:         "GPT-6 Astra",
@@ -121,7 +121,7 @@ var staticDevinModels = []*ModelInfo{
 		},
 	},
 	{
-		ID:                  "swe-1-7-lightning",
+		ID:                  "devin/swe-1-7-lightning",
 		Type:                "devin",
 		OwnedBy:             "cognition",
 		DisplayName:         "SWE-1.7 Lightning",
@@ -132,7 +132,7 @@ var staticDevinModels = []*ModelInfo{
 		},
 	},
 	{
-		ID:                  "glm-5-2",
+		ID:                  "devin/glm-5-2",
 		Type:                "devin",
 		OwnedBy:             "zhipu",
 		DisplayName:         "GLM-5.2",
@@ -143,7 +143,7 @@ var staticDevinModels = []*ModelInfo{
 		},
 	},
 	{
-		ID:                  "glm-5-3",
+		ID:                  "devin/glm-5-3",
 		Type:                "devin",
 		OwnedBy:             "zhipu",
 		DisplayName:         "GLM-5.3",

@@ -139,11 +139,10 @@ func WrapConnectEnvelope(protoBytes []byte) []byte {
 
 // WrapConnectEnvelopeWithFlag wraps payload bytes with an explicit Connect flag.
 func WrapConnectEnvelopeWithFlag(flag byte, protoBytes []byte) []byte {
-	out := make([]byte, 5+len(protoBytes))
-	out[0] = flag
-	binary.BigEndian.PutUint32(out[1:5], uint32(len(protoBytes)))
-	copy(out[5:], protoBytes)
-	return out
+	header := make([]byte, 5, 5+len(protoBytes))
+	header[0] = flag
+	binary.BigEndian.PutUint32(header[1:5], uint32(len(protoBytes)))
+	return append(header, protoBytes...)
 }
 
 // ReadConnectFrame reads a single framed message from a Connect-proto stream.

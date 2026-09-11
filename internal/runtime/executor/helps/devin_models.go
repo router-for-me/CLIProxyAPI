@@ -79,13 +79,19 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 		return "swe-2-high"
 	}
 
-	// 1. If already ends with an exact Devin effort suffix, use directly
-	if HasDevinEffortSuffix(model) {
-		return model
+	// 1. Strip devin/ prefix if present (case-insensitive)
+	cleanModel := model
+	if strings.HasPrefix(strings.ToLower(cleanModel), "devin/") {
+		cleanModel = cleanModel[6:]
 	}
 
-	// 2. Strip CPA colon or parenthesis suffix (suffix overrides body per CPA convention)
-	parsedSuffix := thinking.ParseSuffix(model)
+	// 2. If already ends with an exact Devin effort suffix, use directly
+	if HasDevinEffortSuffix(cleanModel) {
+		return cleanModel
+	}
+
+	// 3. Strip CPA colon or parenthesis suffix (suffix overrides body per CPA convention)
+	parsedSuffix := thinking.ParseSuffix(cleanModel)
 	baseModel := strings.TrimSpace(parsedSuffix.ModelName)
 	if parsedSuffix.HasSuffix {
 		thinkingLevel = parsedSuffix.RawSuffix

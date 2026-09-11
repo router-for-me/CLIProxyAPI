@@ -88,6 +88,36 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			thinkingLevel: "medium",
 			want:          "glm-5-3-high",
 		},
+		{
+			name:          "devin prefix lowercase swe-2",
+			rawModel:      "devin/swe-2",
+			thinkingLevel: "",
+			want:          "swe-2-high",
+		},
+		{
+			name:          "Devin prefix capitalized swe-2 with suffix",
+			rawModel:      "Devin/swe-2(max)",
+			thinkingLevel: "",
+			want:          "swe-2-max",
+		},
+		{
+			name:          "devin prefix claude-fable-5-1",
+			rawModel:      "devin/claude-fable-5-1",
+			thinkingLevel: "",
+			want:          "claude-fable-5-1-medium",
+		},
+		{
+			name:          "Devin prefix gpt-6-astra with suffix",
+			rawModel:      "Devin/gpt-6-astra(high)",
+			thinkingLevel: "",
+			want:          "gpt-6-astra-high",
+		},
+		{
+			name:          "devin prefix direct effort UID",
+			rawModel:      "devin/swe-2-high",
+			thinkingLevel: "",
+			want:          "swe-2-high",
+		},
 	}
 
 	for _, tt := range tests {
