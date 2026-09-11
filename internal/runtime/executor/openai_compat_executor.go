@@ -489,8 +489,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			streamLine := append([]byte("data: "), dataPayload...)
-			// Measure TTFT on the assembled SSE frame (joined multiline data:), not raw fragments.
+			// Measure TTFT / usage on the assembled SSE frame (joined multiline data:), not raw fragments.
 			helps.ObserveChatTokenEvent(reporter, streamLine)
+			streamUsage.ObserveOpenAIStream(streamLine)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
 			for i := range chunks {
 				chunks[i] = helps.AttachStreamTokensPerSecond(chunks[i], reporter)
