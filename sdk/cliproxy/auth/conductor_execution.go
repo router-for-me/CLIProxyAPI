@@ -2004,6 +2004,8 @@ func (m *Manager) NewHttpRequest(ctx context.Context, auth *Auth, method, target
 }
 
 // HttpRequest injects provider credentials into the supplied HTTP request and executes it.
+// Direct callers (Alpha Search, Codex live/realtime) bypass Execute/MarkResult, so outcomes
+// are recorded here for the shared upstream metrics observer.
 func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	if m == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "manager is nil"}
@@ -2022,7 +2024,9 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	return exec.HttpRequest(ctx, auth, req)
+	resp, err := exec.HttpRequest(ctx, auth, req)
+	recordDirectHttpUpstreamResult(auth, resp, err)
+	return resp, err
 }
 
 func ensureCanonicalSessionMetadata(metadata map[string]any, headers http.Header, payload []byte) map[string]any {

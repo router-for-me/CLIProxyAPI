@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -25,6 +27,33 @@ func recordUpstreamResult(result Result) {
 	if counter != nil {
 		counter.Add(1)
 	}
+}
+
+// recordDirectHttpUpstreamResult counts Manager.HttpRequest outcomes that never
+// flow through MarkResult / reportHomeResult / recordAvailabilityNeutralResult
+// (for example /v1/alpha/search via codexAlphaSearch).
+func recordDirectHttpUpstreamResult(auth *Auth, resp *http.Response, err error) {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	result := Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+	}
+	switch {
+	case err != nil:
+		result.Error = resultErrorFromError(err)
+	case resp == nil:
+		result.Error = &Error{Message: "nil http response"}
+	case resp.StatusCode >= http.StatusBadRequest:
+		result.Error = &Error{
+			HTTPStatus: resp.StatusCode,
+			Message:    resp.Status,
+		}
+	default:
+		result.Success = true
+	}
+	recordUpstreamResult(result)
 }
 
 // SnapshotUpstreamMetrics returns process-wide upstream success and error counts.
