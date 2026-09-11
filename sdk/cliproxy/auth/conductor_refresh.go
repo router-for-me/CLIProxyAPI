@@ -679,9 +679,14 @@ func logCredentialRefreshFailure(auth *Auth, err error, retainedUnexpired bool) 
 		file = "unknown"
 	}
 	diagnostic := logging.SafeErrorDiagnostic(err)
+	fields := log.Fields{
+		"provider":   auth.Provider,
+		"auth_file":  file,
+		"diagnostic": diagnostic,
+	}
 	if retainedUnexpired {
-		log.Warnf("credential refresh failed for %s (auth_file=%s): %s; retaining active credential as access token is unexpired", auth.Provider, file, diagnostic)
+		log.WithFields(fields).Warn("credential refresh failed; retaining active credential as access token is unexpired")
 		return
 	}
-	log.Warnf("credential refresh failed for %s (auth_file=%s): %s", auth.Provider, file, diagnostic)
+	log.WithFields(fields).Warn("credential refresh failed")
 }
