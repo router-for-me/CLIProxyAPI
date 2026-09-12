@@ -67,7 +67,7 @@ import (
 
 const (
 	pluginIdentifier = "model-sequence-router"
-	pluginVersion    = "0.10.0"
+	pluginVersion    = "0.11.0"
 )
 
 type runtimeState struct {
