@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"github.com/tiktoken-go/tokenizer"
 )
 
 func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
@@ -609,6 +610,67 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
+}
+
+func (h *OpenAIResponsesAPIHandler) InputTokens(c *gin.Context) {
+	rawJSON, err := handlers.ReadRequestBody(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{Message: fmt.Sprintf("Invalid request: %v", err), Type: "invalid_request_error"},
+		})
+		return
+	}
+
+	c.Header("Content-Type", "application/json")
+	modelName := gjson.GetBytes(rawJSON, "model").String()
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	resp, upstreamHeaders, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	if count, ok := responsesInputTokenCount(resp, rawJSON); ok {
+		_, _ = fmt.Fprintf(c.Writer, `{"object":"response.input_tokens","input_tokens":%d}`, count)
+		cliCancel()
+		return
+	}
+	h.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("token count response did not include input_tokens")})
+	cliCancel()
+}
+
+func responsesInputTokenCount(response, request []byte) (int64, bool) {
+	var count int64
+	found := false
+	for _, path := range []string{"input_tokens", "response.input_tokens", "usage.input_tokens", "response.usage.input_tokens", "total_tokens"} {
+		if value := gjson.GetBytes(response, path); value.Exists() {
+			count, found = value.Int(), true
+			break
+		}
+	}
+	if count > 0 {
+		return count, true
+	}
+
+	parts := make([]string, 0, 4)
+	for _, path := range []string{"instructions", "input", "tools", "text.format"} {
+		if value := gjson.GetBytes(request, path); value.Exists() && value.Raw != "" && value.Raw != `""` && value.Raw != "[]" && value.Raw != "null" {
+			parts = append(parts, value.Raw)
+		}
+	}
+	if len(parts) == 0 {
+		return count, found
+	}
+	enc, err := tokenizer.Get(tokenizer.O200kBase)
+	if err != nil {
+		return count, found
+	}
+	estimate, err := enc.Count(strings.Join(parts, "\n"))
+	if err != nil {
+		return count, found
+	}
+	return int64(estimate), true
 }
 
 // handleNonStreamingResponse handles non-streaming chat completion responses
