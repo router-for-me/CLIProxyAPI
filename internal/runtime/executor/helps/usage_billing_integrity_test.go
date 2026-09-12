@@ -1,8 +1,11 @@
 package helps
 
 import (
+	"context"
+	"errors"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
+	"sync"
 	"testing"
 )
 
@@ -63,13 +66,74 @@ func TestBillingMetadataSurvivesNativeGeminiFiltering(t *testing.T) {
 func TestOpenAIStreamBillingOnlyFramesRetainFinalCounters(t *testing.T) {
 	var buffer StreamUsageBuffer
 	buffer.ObserveOpenAIStream([]byte(`data: {"tool_usage":{"web_search":1}}`))
-	if _, ok := buffer.Detail(); ok {
-		t.Fatal("billing-only frame manufactured observed token usage")
+	if detail, ok := buffer.Detail(); !ok || detail.UsageObserved || detail.TotalTokens != 0 {
+		t.Fatalf("billing-only frame must remain unmeasured: %+v, ok=%v", detail, ok)
 	}
 	buffer.ObserveOpenAIStream([]byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}`))
 	buffer.ObserveOpenAIStream([]byte(`data: {"tool_usage":{"file_search":1}}`))
 	detail, ok := buffer.Detail()
 	if !ok || detail.TotalTokens != 110 || !gjson.Get(detail.RawUsage, "tool_usage.web_search").Exists() || !gjson.Get(detail.RawUsage, "tool_usage.file_search").Exists() {
 		t.Fatalf("metadata-only frames corrupted accounting: %+v", detail)
+	}
+}
+
+type billingOnlyCapture struct {
+	mu      sync.Mutex
+	model   string
+	records []usage.Record
+}
+
+func (*billingOnlyCapture) Synchronous() bool { return true }
+func (s *billingOnlyCapture) HandleUsage(_ context.Context, r usage.Record) {
+	if r.Model == s.model {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.records = append(s.records, r)
+	}
+}
+func TestStreamBillingWithoutTokenUsageIsPublished(t *testing.T) {
+	for _, protocol := range []string{"gemini", "antigravity", "openai"} {
+		for _, failed := range []bool{false, true} {
+			name := protocol + "/success"
+			if failed {
+				name = protocol + "/failure"
+			}
+			t.Run(name, func(t *testing.T) {
+				payload := `{"candidates":[{"groundingMetadata":{"webSearchQueries":["weather"]}}],"tool_usage":{"web_search":1}}`
+				if protocol == "antigravity" {
+					payload = `{"response":` + payload + `}`
+				}
+				var buffer StreamUsageBuffer
+				ObservePluginExecutorStreamUsage(protocol, []byte("data: "+payload), &buffer)
+				detail, ok := buffer.Detail()
+				if !ok || detail.UsageObserved || detail.TotalTokens != 0 || !gjson.Get(detail.RawUsage, "unpriced_server_tools").Bool() {
+					t.Fatalf("billing-only detail was lost or marked measured: %+v, ok=%v", detail, ok)
+				}
+				capture := &billingOnlyCapture{model: t.Name()}
+				usage.RegisterNamedPlugin(t.Name(), capture)
+				defer usage.RegisterNamedPlugin(t.Name(), &billingOnlyCapture{})
+				reporter := NewUsageReporter(context.Background(), protocol, t.Name(), nil)
+				if failed {
+					buffer.PublishFailure(context.Background(), reporter, errors.New("truncated stream"))
+				} else {
+					buffer.Publish(context.Background(), reporter)
+				}
+				reporter.EnsurePublished(context.Background())
+				capture.mu.Lock()
+				defer capture.mu.Unlock()
+				if len(capture.records) != 1 {
+					t.Fatalf("records=%d", len(capture.records))
+				}
+				record := capture.records[0]
+				if record.Failed != failed || record.Detail.UsageObserved || !gjson.Get(record.Detail.RawUsage, "tool_usage.web_search").Exists() {
+					t.Fatalf("published billing lost: %+v", record)
+				}
+			})
+		}
+	}
+	var empty StreamUsageBuffer
+	empty.ObserveBillingPayload([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}`))
+	if _, ok := empty.Detail(); ok {
+		t.Fatal("unrelated payload manufactured billing metadata")
 	}
 }

@@ -146,19 +146,21 @@ func (q *queue) publishToSubscribers(payload []byte) bool {
 		return false
 	}
 
-	delivered := false
+	allDelivered := true
 	for id, subscriber := range q.subscribers {
 		cloned := append([]byte(nil), payload...)
 		select {
 		case subscriber <- cloned:
-			delivered = true
 		default:
+			allDelivered = false
 			delete(q.subscribers, id)
 			close(subscriber)
 		}
 	}
 
-	return delivered
+	// Any disconnected subscriber needs the event in the fallback queue,
+	// even when other subscribers accepted their live copy.
+	return allDelivered
 }
 
 func (q *queue) subscribe(buffer int, initialPayload []byte) (<-chan []byte, func()) {

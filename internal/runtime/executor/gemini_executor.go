@@ -356,12 +356,13 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
-		var billing helps.UsageBillingMetadata
+		var usageBuffer helps.StreamUsageBuffer
+		defer usageBuffer.EnsurePublished(ctx, reporter)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			billing.ObservePayload(line)
+			usageBuffer.ObserveBillingPayload(line)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			filtered := helps.FilterSSEUsageMetadata(line)
 			payload := helps.JSONPayload(filtered)
@@ -369,7 +370,8 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				continue
 			}
 			if detail, ok := helps.ParseGeminiStreamUsage(payload); ok {
-				reporter.Publish(ctx, billing.Apply(detail))
+				usageBuffer.Observe(detail, true)
+				usageBuffer.Publish(ctx, reporter)
 			}
 			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(payload), &param, claudeInputTokens)
 			for i := range lines {
@@ -390,7 +392,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			usageBuffer.PublishFailure(ctx, reporter, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():

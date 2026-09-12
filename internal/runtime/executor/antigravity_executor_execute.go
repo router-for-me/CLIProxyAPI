@@ -406,10 +406,11 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		}()
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
-		var billing helps.UsageBillingMetadata
+		var usageBuffer helps.StreamUsageBuffer
+		defer usageBuffer.EnsurePublished(ctx, reporter)
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			billing.ObservePayload(line)
+			usageBuffer.ObserveBillingPayload(line)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if replayAccumulator != nil {
 				replayAccumulator.ObserveSSELine(line)
@@ -425,20 +426,21 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			}
 
 			if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
-				reporter.Publish(ctx, billing.Apply(detail))
+				usageBuffer.Observe(detail, true)
+				usageBuffer.Publish(ctx, reporter)
 			}
 
 			out <- cliproxyexecutor.StreamChunk{Payload: payload}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			usageBuffer.PublishFailure(ctx, reporter, errScan)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		} else {
 			if replayAccumulator != nil {
 				replayAccumulator.Commit(ctx)
 			}
-			reporter.EnsurePublished(ctx)
+			usageBuffer.EnsurePublished(ctx, reporter)
 		}
 	}(httpResp)
 

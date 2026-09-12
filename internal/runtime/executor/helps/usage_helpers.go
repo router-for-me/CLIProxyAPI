@@ -704,9 +704,13 @@ func (b *StreamUsageBuffer) ObserveBillingPayload(payload []byte) {
 		return
 	}
 	b.billing.ObservePayload(payload)
-	if b.ok {
-		b.detail = b.billing.Apply(b.detail)
+	if len(b.billing.fields) == 0 {
+		return
 	}
+	b.detail = b.billing.Apply(b.detail)
+	// Billing metadata is publishable even when token measurements are absent.
+	// UsageObserved remains the separate indicator for measured token counters.
+	b.ok = true
 }
 
 // ObserveOpenAIStream records response-tier state and the latest usage from an
@@ -763,6 +767,14 @@ func (b *StreamUsageBuffer) Publish(ctx context.Context, reporter *UsageReporter
 	}
 	reporter.Publish(ctx, b.detail)
 	return true
+}
+
+// EnsurePublished retains any billing metadata before falling back to an
+// unmeasured request record when the stream supplies no accounting details.
+func (b *StreamUsageBuffer) EnsurePublished(ctx context.Context, reporter *UsageReporter) {
+	if reporter != nil && !b.Publish(ctx, reporter) {
+		reporter.EnsurePublished(ctx)
+	}
 }
 
 // PublishFailure emits the latest observed usage detail together with failure details.

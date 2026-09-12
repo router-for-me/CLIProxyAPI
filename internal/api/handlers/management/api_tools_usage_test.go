@@ -141,6 +141,7 @@ func TestManagementUsageParsesGeminiJSONStream(t *testing.T) {
   ]`, 130, true, true},
 		{"final_zero", "gemini", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", `[{"usageMetadata":{"promptTokenCount":100,"totalTokenCount":100}},{"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}}]`, 0, true, false},
 		{"no_usage", "gemini", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", `[{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}]`, 0, false, false},
+		{"grounding_without_tokens", "gemini", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", `[{"candidates":[{"groundingMetadata":{"webSearchQueries":["query"]}}]}]`, 0, false, true},
 		{"empty", "gemini", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", `[]`, 0, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

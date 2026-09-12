@@ -303,7 +303,8 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func(first wsrelay.StreamEvent) {
 		defer close(out)
-		defer reporter.EnsurePublished(ctx)
+		var usageBuffer helps.StreamUsageBuffer
+		defer usageBuffer.EnsurePublished(ctx, reporter)
 		responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 		originalRequest := opts.OriginalRequest
 		if len(originalRequest) == 0 {
@@ -313,9 +314,10 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		var param any
 		metadataLogged := false
 		processEvent := func(event wsrelay.StreamEvent) bool {
+			helps.IterateStreamLines(event.Payload, usageBuffer.ObserveBillingPayload)
 			if event.Err != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, event.Err)
-				reporter.PublishFailure(ctx, event.Err)
+				usageBuffer.PublishFailure(ctx, reporter, event.Err)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}:
 				case <-ctx.Done():
@@ -335,7 +337,8 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					helps.AppendAPIResponseChunk(ctx, e.cfg, event.Payload)
 					filtered := helps.FilterSSEUsageMetadata(event.Payload)
 					if detail, ok := helps.ParseGeminiStreamUsage(filtered); ok {
-						reporter.Publish(ctx, detail)
+						usageBuffer.Observe(detail, true)
+						usageBuffer.Publish(ctx, reporter)
 					}
 					lines := helps.TranslateStreamWithClaudeInputTokens(ctx, body.toFormat, responseFormat, req.Model, opts.OriginalRequest, translatedReq, filtered, &param, claudeInputTokens)
 					for i := range lines {
@@ -367,11 +370,13 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 						return false
 					}
 				}
-				reporter.Publish(ctx, helps.ParseGeminiUsage(event.Payload))
+				detail := helps.ParseGeminiUsage(event.Payload)
+				usageBuffer.Observe(detail, detail.UsageObserved)
+				usageBuffer.Publish(ctx, reporter)
 				return false
 			case wsrelay.MessageTypeError:
 				helps.RecordAPIResponseError(ctx, e.cfg, event.Err)
-				reporter.PublishFailure(ctx, event.Err)
+				usageBuffer.PublishFailure(ctx, reporter, event.Err)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}:
 				case <-ctx.Done():
