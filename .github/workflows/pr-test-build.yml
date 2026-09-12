@@ -8,18 +8,22 @@ permissions:
 
 jobs:
   build:
+    if: contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Refresh models catalog
-        run: bash .github/scripts/refresh-model-catalogs.sh
+      - name: Test Claude master boundaries
+        run: go test -race ./internal/claudemaster ./cmd/claude-master ./sdk/auth ./sdk/cliproxy/auth ./internal/auth/claude
       - name: Build
         run: |
           go build -o test-output ./cmd/server
-          rm -f test-output
+          go build -o claude-master-test-output ./cmd/claude-master
