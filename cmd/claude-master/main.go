@@ -35,8 +35,15 @@ func main() {
 func run(args []string) (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(args) == 1 && args[0] == "check" {
+		if _, err := claudemaster.Preflight(ctx, nil); err != nil {
+			return 1, err
+		}
+		fmt.Fprintln(os.Stdout, "Startup checks passed: native Claude "+claudemaster.NativeClaudeVersion+" and local settings. No login or session was started.")
+		return 0, nil
+	}
 	if len(args) < 2 {
-		return 2, errors.New("usage: claude-master login PROFILE --provider claude|codex; claude-master run PROFILE --model MODEL -- [Claude arguments]")
+		return 2, errors.New("usage: claude-master check; claude-master login PROFILE --provider claude|codex; claude-master run PROFILE --model MODEL -- [Claude arguments]")
 	}
 	command, name := args[0], args[1]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)

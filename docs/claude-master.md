@@ -49,9 +49,13 @@ development server, not an administration jumpbox:
 
 ```bash
 go build -o claude-master ./cmd/claude-master
+./claude-master check
 ./claude-master login claude-work --provider claude
 ./claude-master login codex-work --provider codex
 ```
+
+`check` validates the installed native version and local startup settings without
+opening a profile, logging in, or creating a session. It is not a live inference test.
 
 Each login starts a new provider authorization flow. Use the intended inference
 account in that flow. Codex uses device authorization; Claude supports its callback

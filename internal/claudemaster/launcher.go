@@ -28,17 +28,8 @@ func Launch(ctx context.Context, profile Profile, model string, args []string) (
 	if strings.TrimSpace(model) == "" {
 		return 1, errors.New("an explicit backend model is required")
 	}
-	if _, err := ChildEnvironment(os.Environ(), args, "http://127.0.0.1:1", "/unused"); err != nil {
-		return 1, err
-	}
-	if err := ValidateNativeSettings(); err != nil {
-		return 1, err
-	}
-	bin, err := exec.LookPath("claude")
+	bin, err := Preflight(ctx, args)
 	if err != nil {
-		return 1, errors.New("native Claude Code is not installed on PATH")
-	}
-	if err := verifyNativeVersion(ctx, bin); err != nil {
 		return 1, err
 	}
 	certs, err := newProcessCertificate()
@@ -78,6 +69,25 @@ func Launch(ctx context.Context, profile Profile, model string, args []string) (
 		return 1, errors.New("native Claude could not start")
 	}
 	return 0, nil
+}
+
+// Preflight checks native startup compatibility without opening profiles,
+// acquiring credentials, starting a session, or modifying native settings.
+func Preflight(ctx context.Context, args []string) (string, error) {
+	if _, err := ChildEnvironment(os.Environ(), args, "http://127.0.0.1:1", "/unused"); err != nil {
+		return "", err
+	}
+	if err := ValidateNativeSettings(); err != nil {
+		return "", err
+	}
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		return "", errors.New("native Claude Code is not installed on PATH")
+	}
+	if err := verifyNativeVersion(ctx, bin); err != nil {
+		return "", err
+	}
+	return bin, nil
 }
 
 // ChildEnvironment preserves the master login while denying configuration that bypasses the
