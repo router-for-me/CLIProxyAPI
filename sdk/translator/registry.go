@@ -64,6 +64,13 @@ func (r *Registry) HasPluginHooks() bool {
 // "model" field is still updated to match the resolved model name so that
 // client-side prefixes (e.g. "copilot/gpt-5-mini") are not leaked upstream.
 func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool) []byte {
+	out, _ := r.TranslateRequestChecked(from, to, model, rawJSON, stream)
+	return out
+}
+
+// TranslateRequestChecked also reports whether a native transform, plugin, or
+// identity route handled the payload. Its output preserves the legacy fallback.
+func (r *Registry) TranslateRequestChecked(from, to Format, model string, rawJSON []byte, stream bool) ([]byte, bool) {
 	r.mu.RLock()
 	var fn RequestTransform
 	if byTarget, ok := r.requests[from]; ok {
@@ -82,7 +89,7 @@ func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byt
 			// provider payload, including any summary field they remove.
 			body = hooks.NormalizeRequest(context.Background(), from, to, model, body, stream)
 		}
-		return body
+		return body, true
 	}
 
 	if model != "" && gjson.GetBytes(body, "model").String() != model {
@@ -95,7 +102,7 @@ func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byt
 	if hooks == nil {
 		// No translation occurred. Preserve the documented fallback shape instead
 		// of mixing target-protocol summary fields into the source payload.
-		return body
+		return body, from == to
 	}
 
 	// Plugin request normalizers canonicalize the source before a plugin request
@@ -105,8 +112,9 @@ func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byt
 	summaryConfig := thinking.ExtractSummaryConfig(body, from.String())
 	if translated, ok := hooks.TranslateRequest(context.Background(), from, to, model, body, stream); ok {
 		body = thinking.ApplySummaryConfigForModel(translated, to.String(), model, summaryConfig)
+		return body, true
 	}
-	return body
+	return body, from == to
 }
 
 // HasRequestTransformer indicates whether a request translator exists.
@@ -163,6 +171,13 @@ func (r *Registry) HasNonStreamResponseTransformer(from, to Format) bool {
 
 // TranslateStream applies the registered streaming response translator.
 func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+	out, _ := r.TranslateStreamChecked(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	return out
+}
+
+// TranslateStreamChecked also reports whether a native transform, plugin, or
+// identity route handled the payload. Its output preserves the legacy fallback.
+func (r *Registry) TranslateStreamChecked(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([][]byte, bool) {
 	r.mu.RLock()
 	var stream ResponseStreamTransform
 	if byTarget, ok := r.responses[to]; ok {
@@ -178,12 +193,15 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 
 	var outputs [][]byte
 	usedNativeTransform := false
+	handled := from == to
 	if stream != nil {
 		usedNativeTransform = true
+		handled = true
 		outputs = stream(ctx, model, originalRequestRawJSON, requestRawJSON, body, param)
 	} else if hooks != nil {
 		if translated, ok := hooks.TranslateResponse(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, true); ok {
 			outputs = [][]byte{translated}
+			handled = true
 		}
 	}
 	if outputs == nil && !usedNativeTransform {
@@ -194,11 +212,18 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 			outputs[i] = hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, output, true)
 		}
 	}
-	return outputs
+	return outputs, handled
 }
 
 // TranslateNonStream applies the registered non-stream response translator.
 func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+	out, _ := r.TranslateNonStreamChecked(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	return out
+}
+
+// TranslateNonStreamChecked also reports whether a native transform, plugin, or
+// identity route handled the payload. Its output preserves the legacy fallback.
+func (r *Registry) TranslateNonStreamChecked(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([]byte, bool) {
 	r.mu.RLock()
 	var fn ResponseTransform
 	if byTarget, ok := r.responses[to]; ok {
@@ -208,20 +233,23 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 	r.mu.RUnlock()
 
 	body := rawJSON
+	handled := from == to
 	if hooks != nil {
 		body = hooks.NormalizeResponseBefore(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, false)
 	}
 	if fn.NonStream != nil {
+		handled = true
 		body = fn.NonStream(ctx, model, originalRequestRawJSON, requestRawJSON, body, param)
 	} else if hooks != nil {
 		if translated, ok := hooks.TranslateResponse(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, false); ok {
 			body = translated
+			handled = true
 		}
 	}
 	if hooks != nil {
 		body = hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, false)
 	}
-	return body
+	return body, handled
 }
 
 // TranslateTokenCount applies the registered token count response translator.
@@ -264,6 +292,11 @@ func TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool
 	return defaultRegistry.TranslateRequest(from, to, model, rawJSON, stream)
 }
 
+// TranslateRequestChecked uses the default registry and reports whether the route handled the payload.
+func TranslateRequestChecked(from, to Format, model string, rawJSON []byte, stream bool) ([]byte, bool) {
+	return defaultRegistry.TranslateRequestChecked(from, to, model, rawJSON, stream)
+}
+
 // HasRequestTransformer inspects the default registry.
 func HasRequestTransformer(from, to Format) bool {
 	return defaultRegistry.HasRequestTransformer(from, to)
@@ -289,9 +322,19 @@ func TranslateStream(ctx context.Context, from, to Format, model string, origina
 	return defaultRegistry.TranslateStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 
+// TranslateStreamChecked uses the default registry and reports whether the route handled the payload.
+func TranslateStreamChecked(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([][]byte, bool) {
+	return defaultRegistry.TranslateStreamChecked(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+}
+
 // TranslateNonStream is a helper on the default registry.
 func TranslateNonStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
 	return defaultRegistry.TranslateNonStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+}
+
+// TranslateNonStreamChecked uses the default registry and reports whether the route handled the payload.
+func TranslateNonStreamChecked(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([]byte, bool) {
+	return defaultRegistry.TranslateNonStreamChecked(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 
 // TranslateTokenCount is a helper on the default registry.

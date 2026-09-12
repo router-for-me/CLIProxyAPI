@@ -770,6 +770,12 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
+	for i := range arr {
+		if errValidate := config.ValidateOpenAICompatibilityWireAPI(arr[i].WireAPI); errValidate != nil {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("openai-compatibility[%d].wire-api: %v", i, errValidate)})
+			return
+		}
+	}
 	filtered := make([]config.OpenAICompatibility, 0, len(arr))
 	for i := range arr {
 		normalizeOpenAICompatibilityEntry(&arr[i])
@@ -797,6 +803,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Disabled              *bool                               `json:"disabled"`
 		DisableCooling        json.RawMessage                     `json:"disable-cooling"`
 		BaseURL               *string                             `json:"base-url"`
+		WireAPI               *string                             `json:"wire-api"`
 		APIKeyEntries         *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models                *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers               *map[string]string                  `json:"headers"`
@@ -812,6 +819,13 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
+	}
+
+	if body.Value.WireAPI != nil {
+		if errValidate := config.ValidateOpenAICompatibilityWireAPI(*body.Value.WireAPI); errValidate != nil {
+			c.JSON(400, gin.H{"error": errValidate.Error()})
+			return
+		}
 	}
 
 	h.mu.Lock()
@@ -859,6 +873,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.WireAPI != nil {
+		entry.WireAPI = strings.ToLower(strings.TrimSpace(*body.Value.WireAPI))
 	}
 	if body.Value.APIKeyEntries != nil {
 		for keyIndex := range *body.Value.APIKeyEntries {
@@ -1792,6 +1809,7 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.WireAPI = strings.ToLower(strings.TrimSpace(entry.WireAPI))
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {

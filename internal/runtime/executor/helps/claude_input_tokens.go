@@ -53,7 +53,20 @@ func TranslateStreamWithClaudeInputTokens(
 	param *any,
 	state *ClaudeInputTokenState,
 ) [][]byte {
-	chunks := sdktranslator.TranslateStream(
+	chunks, _ := TranslateStreamWithClaudeInputTokensChecked(ctx, upstreamFormat, responseFormat, model, originalRequestRawJSON, requestRawJSON, rawJSON, param, state)
+	return chunks
+}
+
+// TranslateStreamWithClaudeInputTokensChecked also reports whether the translation route handled the chunk.
+func TranslateStreamWithClaudeInputTokensChecked(
+	ctx context.Context,
+	upstreamFormat, responseFormat sdktranslator.Format,
+	model string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+	state *ClaudeInputTokenState,
+) ([][]byte, bool) {
+	chunks, handled := sdktranslator.TranslateStreamChecked(
 		ctx,
 		upstreamFormat,
 		responseFormat,
@@ -69,9 +82,9 @@ func TranslateStreamWithClaudeInputTokens(
 		}
 	}
 	if state == nil {
-		return chunks
+		return chunks, handled
 	}
-	return state.apply(ctx, chunks)
+	return state.apply(ctx, chunks), handled
 }
 
 func claudeInputTokenizer() (tokenizer.Codec, error) {

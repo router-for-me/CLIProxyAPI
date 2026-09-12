@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 // pluginRefreshCompatExecutor keeps native OpenAI-compat inference while
@@ -66,6 +67,26 @@ func (e *pluginRefreshCompatExecutor) Identifier() string {
 	}
 	if e.inner != nil {
 		return e.inner.Identifier()
+	}
+	return ""
+}
+
+// RequestToFormatWithAuth preserves the inner executor's selected wire format.
+func (e *pluginRefreshCompatExecutor) RequestToFormatWithAuth(auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
+	if e == nil || e.inner == nil {
+		return ""
+	}
+	if resolver, ok := e.inner.(interface {
+		RequestToFormatWithAuth(*coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format
+	}); ok {
+		if format := resolver.RequestToFormatWithAuth(auth, req, opts); format != "" {
+			return format
+		}
+	}
+	if resolver, ok := e.inner.(interface {
+		RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format
+	}); ok {
+		return resolver.RequestToFormat(req, opts)
 	}
 	return ""
 }
