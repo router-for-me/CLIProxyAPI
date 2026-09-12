@@ -185,35 +185,13 @@ func ReadConnectFrame(r io.Reader) (flag byte, payload []byte, err error) {
 	return flag, payload, nil
 }
 
-// BuildDevinGetChatMessageRequest encodes an entire GetChatMessageRequest protobuf payload.
-func BuildDevinGetChatMessageRequest(
-	sessionToken string,
-	deviceSeed string,
-	chatModelUID string,
-	systemPrompt string,
-	prompts []DevinPrompt,
-	tools []DevinTool,
-	temperature *float64,
-	maxTokens int,
-	sessionID string,
-	cascadeID string,
-	matcher *SensitiveWordMatcher,
-) []byte {
-	if maxTokens <= 0 {
-		maxTokens = DevinDefaultMaxTokens
-	}
-	if sessionID == "" {
-		sessionID = uuid.New().String()
-	}
-	if cascadeID == "" {
-		cascadeID = sessionID
+// BuildDevinClientMetadataBytes constructs the serialized bytes for Field 1 (ClientMetadata).
+func BuildDevinClientMetadataBytes(sessionToken, deviceSeed, osName string) []byte {
+	if osName == "" {
+		osName = runtime.GOOS
 	}
 	deviceFingerprint := GenerateDevinDeviceFingerprint(deviceSeed)
-	osName := runtime.GOOS
 
-	var reqBytes []byte
-
-	// 1. ClientMetadata (Field 1)
 	var f1Bytes []byte
 	f1Bytes = protowire.AppendTag(f1Bytes, 1, protowire.BytesType)
 	f1Bytes = protowire.AppendString(f1Bytes, "devin-cli")
@@ -241,7 +219,38 @@ func BuildDevinGetChatMessageRequest(
 
 	f1Bytes = protowire.AppendTag(f1Bytes, 31, protowire.BytesType)
 	f1Bytes = protowire.AppendString(f1Bytes, deviceFingerprint)
+	return f1Bytes
+}
 
+// BuildDevinGetChatMessageRequest encodes an entire GetChatMessageRequest protobuf payload.
+func BuildDevinGetChatMessageRequest(
+	sessionToken string,
+	deviceSeed string,
+	chatModelUID string,
+	systemPrompt string,
+	prompts []DevinPrompt,
+	tools []DevinTool,
+	temperature *float64,
+	maxTokens int,
+	sessionID string,
+	cascadeID string,
+	matcher *SensitiveWordMatcher,
+) []byte {
+	if maxTokens <= 0 {
+		maxTokens = DevinDefaultMaxTokens
+	}
+	if sessionID == "" {
+		sessionID = uuid.New().String()
+	}
+	if cascadeID == "" {
+		cascadeID = sessionID
+	}
+	osName := runtime.GOOS
+
+	var reqBytes []byte
+
+	// 1. ClientMetadata (Field 1)
+	f1Bytes := BuildDevinClientMetadataBytes(sessionToken, deviceSeed, osName)
 	reqBytes = protowire.AppendTag(reqBytes, 1, protowire.BytesType)
 	reqBytes = protowire.AppendBytes(reqBytes, f1Bytes)
 
