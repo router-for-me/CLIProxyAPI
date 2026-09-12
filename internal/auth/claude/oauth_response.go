@@ -15,10 +15,18 @@ import (
 )
 
 func readClaudeOAuthResponseBody(resp *http.Response) ([]byte, error) {
+	return readClaudeOAuthResponseBodyLimited(resp, 0)
+}
+
+// readClaudeOAuthResponseBodyLimited reads and decodes the body, refusing
+// more than limit bytes both on the wire and after decompression (a
+// zero limit reads unbounded). The bound applies per layer so a
+// compression bomb is cut off at the decoder, not after inflating.
+func readClaudeOAuthResponseBodyLimited(resp *http.Response, limit int64) ([]byte, error) {
 	if resp == nil || resp.Body == nil {
 		return nil, fmt.Errorf("read Claude OAuth response: body is nil")
 	}
-	encoded, errRead := io.ReadAll(resp.Body)
+	encoded, errRead := readAllLimited(resp.Body, limit)
 	if errRead != nil {
 		return nil, errRead
 	}
@@ -29,7 +37,7 @@ func readClaudeOAuthResponseBody(resp *http.Response) ([]byte, error) {
 			continue
 		}
 		var errDecode error
-		encoded, errDecode = decodeClaudeOAuthEncoding(encoded, encoding)
+		encoded, errDecode = decodeClaudeOAuthEncoding(encoded, encoding, limit)
 		if errDecode != nil {
 			return nil, errDecode
 		}
@@ -37,7 +45,24 @@ func readClaudeOAuthResponseBody(resp *http.Response) ([]byte, error) {
 	return encoded, nil
 }
 
-func decodeClaudeOAuthEncoding(encoded []byte, encoding string) ([]byte, error) {
+// readAllLimited is io.ReadAll with a size cap: limit <= 0 is unbounded,
+// otherwise a body longer than limit bytes is an error rather than a
+// truncated success.
+func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return io.ReadAll(r)
+	}
+	data, errRead := io.ReadAll(io.LimitReader(r, limit+1))
+	if errRead != nil {
+		return nil, errRead
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("read Claude OAuth response: body exceeds %d bytes", limit)
+	}
+	return data, nil
+}
+
+func decodeClaudeOAuthEncoding(encoded []byte, encoding string, limit int64) ([]byte, error) {
 	var reader io.ReadCloser
 	switch encoding {
 	case "gzip":
@@ -60,7 +85,7 @@ func decodeClaudeOAuthEncoding(encoded []byte, encoding string) ([]byte, error) 
 	default:
 		return nil, fmt.Errorf("decode Claude OAuth response: unsupported content encoding %q", encoding)
 	}
-	decoded, errDecoded := io.ReadAll(reader)
+	decoded, errDecoded := readAllLimited(reader, limit)
 	if errDecoded != nil {
 		_ = reader.Close()
 		return nil, fmt.Errorf("decode Claude OAuth %s response: %w", encoding, errDecoded)
