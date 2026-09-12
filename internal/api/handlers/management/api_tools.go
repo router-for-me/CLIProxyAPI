@@ -195,7 +195,10 @@ func (h *Handler) APICall(c *gin.Context) {
 	// Management model probes bypass normal executors and need their own record.
 	var reporter *helps.UsageReporter
 	usageCtx := context.WithValue(c.Request.Context(), "gin", c)
-	model := gjson.Get(body.Data, "model").String()
+	model := strings.TrimSpace(gjson.Get(body.Data, "model").String())
+	if model == "" {
+		model = managementModelFromPath(req.URL.Path)
+	}
 	provider := "openai-compatible"
 	if auth != nil {
 		provider = auth.Provider
@@ -240,6 +243,23 @@ func (h *Handler) APICall(c *gin.Context) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+// Gemini and Vertex encode generation models in the URL instead of the body.
+func managementModelFromPath(path string) string {
+	prefix, action, ok := strings.Cut(path, ":")
+	if !ok || (action != "generateContent" && action != "streamGenerateContent") {
+		return ""
+	}
+	index := strings.LastIndex(prefix, "/models/")
+	if index < 0 {
+		return ""
+	}
+	model := prefix[index+len("/models/"):]
+	if strings.Contains(model, "/") {
+		return ""
+	}
+	return strings.TrimSpace(model)
 }
 
 func firstNonEmptyString(values ...*string) string {

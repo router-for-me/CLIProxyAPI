@@ -1,7 +1,12 @@
 package redisqueue
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,8 +38,112 @@ func TestUsageJournalReplayRequiresAcknowledgement(t *testing.T) {
 	if err != nil || len(items) != 1 {
 		t.Fatalf("ack: %d %v", len(items), err)
 	}
-	if err := restarted.ack([]string{"../../other"}); err == nil {
-		t.Fatal("unsafe id accepted")
+	if err := restarted.ack([]string{""}); err == nil {
+		t.Fatal("empty event ID accepted")
+	}
+}
+
+func TestUsageJournalOpaqueEventIDsRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	j := &usageJournal{dir: filepath.Join(root, "journal")}
+	outside := filepath.Join(root, "outside.json")
+	if err := os.WriteFile(outside, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{"usage:123", "evt.123", "../outside", `C:\event\123`, "Case", "case", "事件/123", "event\x00suffix", "CON", "NUL", "COM1", "LPT1", strings.Repeat("long-id:", 100)}
+	for _, id := range ids {
+		payload, err := json.Marshal(map[string]string{"event_id": id, "request_id": "same"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for attempt := 0; attempt < 2; attempt++ {
+			if err := j.append(payload); err != nil {
+				t.Fatalf("opaque ID %q rejected: %v", id, err)
+			}
+		}
+	}
+	restarted := &usageJournal{dir: j.dir}
+	items, err := restarted.read(100)
+	if err != nil || len(items) != len(ids) {
+		t.Fatalf("replay: got %d items, want %d: %v", len(items), len(ids), err)
+	}
+	seen := make(map[string]bool)
+	for _, payload := range items {
+		var event struct {
+			EventID string `json:"event_id"`
+		}
+		if err := json.Unmarshal(payload, &event); err != nil {
+			t.Fatal(err)
+		}
+		seen[event.EventID] = true
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Fatalf("public ID changed: %q", id)
+		}
+		if err := restarted.ack([]string{id}); err != nil {
+			t.Fatalf("ACK %q failed: %v", id, err)
+		}
+	}
+	if items, err := restarted.read(100); err != nil || len(items) != 0 {
+		t.Fatalf("ACK left %d items: %v", len(items), err)
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "keep" {
+		t.Fatalf("opaque traversal ID changed an outside file: %q %v", data, err)
+	}
+}
+
+func TestUsageJournalLegacyFilesRemainReplayableAndAcknowledged(t *testing.T) {
+	j := &usageJournal{dir: t.TempDir()}
+	legacy := []byte(`{"event_id":"Legacy-ID","request_id":"legacy"}`)
+	if err := os.WriteFile(filepath.Join(j.dir, "Legacy-ID.json"), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.append(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := j.read(10); err != nil || len(items) != 1 {
+		t.Fatalf("legacy replay duplicated: %d %v", len(items), err)
+	}
+	if err := j.append([]byte(`{"event_id":"legacy-id","request_id":"new"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := j.read(10); err != nil || len(items) != 2 {
+		t.Fatalf("distinct case-sensitive public IDs collided: %d %v", len(items), err)
+	}
+	if err := j.ack([]string{"legacy-id"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(j.dir, "Legacy-ID.json")); err != nil {
+		t.Fatalf("ACK removed a different legacy ID: %v", err)
+	}
+	if err := j.ack([]string{"Legacy-ID"}); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := j.read(10); err != nil || len(items) != 0 {
+		t.Fatalf("legacy ACK left %d items: %v", len(items), err)
+	}
+}
+
+func TestUsageJournalHashedNamesCannotCollideWithLegacyIDs(t *testing.T) {
+	j := &usageJournal{dir: t.TempDir()}
+	sum := sha256.Sum256([]byte("usage:123"))
+	legacyID := hex.EncodeToString(sum[:])
+	legacy, _ := json.Marshal(map[string]string{"event_id": legacyID})
+	if err := os.WriteFile(filepath.Join(j.dir, legacyID+".json"), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.append([]byte(`{"event_id":"usage:123"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := j.read(10); err != nil || len(items) != 2 {
+		t.Fatalf("hash collided with legacy file: %d %v", len(items), err)
+	}
+	if err := j.ack([]string{"usage:123"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(j.dir, legacyID+".json")); err != nil {
+		t.Fatalf("hashed ACK removed legacy event: %v", err)
 	}
 }
 

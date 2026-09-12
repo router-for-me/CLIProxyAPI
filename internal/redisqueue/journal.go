@@ -34,6 +34,17 @@ func ConfigureUsageJournal(dir string) {
 	journal.lastErr = nil
 }
 func validEventID(id string) bool {
+	return id != ""
+}
+
+// Public IDs are opaque; they must never be used as filesystem paths. The dot
+// in this prefix separates new names from the legacy filename alphabet.
+func journalEventFilename(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return "sha256." + hex.EncodeToString(sum[:]) + ".json"
+}
+
+func legacyJournalEventID(id string) bool {
 	if len(id) == 0 || len(id) > 128 {
 		return false
 	}
@@ -42,8 +53,35 @@ func validEventID(id string) bool {
 			return false
 		}
 	}
-	return true
+	// On Windows this also rejects reserved device names such as CON.json.
+	// Those names could never have been ordinary legacy journal files.
+	return filepath.IsLocal(id + ".json")
 }
+
+// Check payload identity as well as the legacy filename. Case-insensitive or
+// Unicode-normalizing filesystems can resolve a different public ID to the
+// same legacy path; that event must not be deduplicated or acknowledged.
+func (j *usageJournal) matchingLegacyEventPath(id string) (string, error) {
+	if !legacyJournalEventID(id) {
+		return "", nil
+	}
+	path := filepath.Join(j.dir, id+".json")
+	payload, errRead := os.ReadFile(path)
+	if os.IsNotExist(errRead) {
+		return "", nil
+	}
+	if errRead != nil {
+		return "", errRead
+	}
+	var event struct {
+		EventID string `json:"event_id"`
+	}
+	if json.Unmarshal(payload, &event) != nil || event.EventID != id {
+		return "", nil
+	}
+	return path, nil
+}
+
 func (j *usageJournal) append(payload []byte) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -89,8 +127,15 @@ func (j *usageJournal) append(payload []byte) error {
 	if err := os.MkdirAll(j.dir, 0700); err != nil {
 		return err
 	}
-	target := filepath.Join(j.dir, event.EventID+".json")
+	target := filepath.Join(j.dir, journalEventFilename(event.EventID))
 	if _, err := os.Stat(target); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if legacy, errLegacy := j.matchingLegacyEventPath(event.EventID); errLegacy != nil {
+		return errLegacy
+	} else if legacy != "" {
 		return nil
 	}
 	file, err := os.CreateTemp(j.dir, ".pending-")
@@ -164,8 +209,17 @@ func (j *usageJournal) ack(ids []string) error {
 		}
 	}
 	for _, id := range ids {
-		if err := os.Remove(filepath.Join(j.dir, id+".json")); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(filepath.Join(j.dir, journalEventFilename(id))); err != nil && !os.IsNotExist(err) {
 			return err
+		}
+		legacy, errLegacy := j.matchingLegacyEventPath(id)
+		if errLegacy != nil {
+			return errLegacy
+		}
+		if legacy != "" {
+			if errRemove := os.Remove(legacy); errRemove != nil && !os.IsNotExist(errRemove) {
+				return errRemove
+			}
 		}
 	}
 	if len(ids) == 0 {
