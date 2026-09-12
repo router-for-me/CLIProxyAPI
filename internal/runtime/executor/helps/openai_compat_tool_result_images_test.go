@@ -74,10 +74,39 @@ func TestRelayOpenAIToolResultImagesAppendsUserRelayAtEnd(t *testing.T) {
 	}
 }
 
+func TestRelayOpenAIToolResultImagesConvertsClaudeBase64Image(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"call_1","content":[
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}
+		]}
+	]}`)
+
+	got := RelayOpenAIToolResultImages(input)
+	messages := gjson.GetBytes(got, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("messages length = %d, want 3; payload=%s", len(messages), got)
+	}
+	if imageURL := messages[2].Get("content.1.image_url.url").String(); imageURL != "data:image/png;base64,AA==" {
+		t.Fatalf("relay image URL = %q", imageURL)
+	}
+}
+
+func TestRelayOpenAIToolResultImagesLeavesUnsupportedImageShapeUnchanged(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"tool","tool_call_id":"call_1","content":[{"type":"image","source":{"type":"file","file_id":"file_123"}}]}]}`)
+	got := RelayOpenAIToolResultImages(input)
+	if string(got) != string(input) {
+		t.Fatalf("unsupported image payload changed:\n got: %s\nwant: %s", got, input)
+	}
+}
+
 func TestRelayOpenAIToolResultImagesLeavesTextOnlyPayloadUnchanged(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"tool","tool_call_id":"call_1","content":"plain text"}]}`)
 	got := RelayOpenAIToolResultImages(input)
 	if string(got) != string(input) {
 		t.Fatalf("text-only payload changed:\n got: %s\nwant: %s", got, input)
+	}
+	if len(got) > 0 && &got[0] != &input[0] {
+		t.Fatal("text-only payload should return the original byte slice")
 	}
 }
