@@ -363,10 +363,25 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	if IsAnthropicUpstreamURL(req.URL) {
 		return f.anthropic.RoundTrip(req)
 	}
-	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
+	if IsChatGPTUpstreamURL(req.URL) {
 		return f.chrome.RoundTrip(req)
 	}
 	return f.fallback.RoundTrip(req)
+}
+
+// NewFingerprintRoundTripper routes Anthropic and ChatGPT HTTPS origins through
+// the same provider TLS fingerprints Codex/Claude already use, and sends every
+// other request through fallback. Management APICall must use this helper (not a
+// private copy) so host routing and ClientHello selection keep evolving in one place.
+func NewFingerprintRoundTripper(proxyURL string, fallback http.RoundTripper) http.RoundTripper {
+	if fallback == nil {
+		fallback = http.DefaultTransport
+	}
+	return &fallbackRoundTripper{
+		anthropic: cachedClaudeCodeRoundTripper(proxyURL),
+		chrome:    newUtlsRoundTripper(proxyURL),
+		fallback:  fallback,
+	}
 }
 
 // NewUtlsHTTPClient creates an HTTP client using provider-specific TLS
@@ -387,25 +402,26 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
-	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport
 		}
 	} else if ctxRoundTripper != nil {
-		chromeRT = ctxRoundTripper
-		anthropicRT = ctxRoundTripper
 		standardTransport = ctxRoundTripper
 	}
 
+	var transport http.RoundTripper
+	if ctxRoundTripper != nil && proxyURL == "" {
+		// Preserve the historical override: when a context round tripper is
+		// injected and no auth/config proxy is set, all hosts share it.
+		transport = ctxRoundTripper
+	} else {
+		transport = NewFingerprintRoundTripper(proxyURL, standardTransport)
+	}
+
 	client := &http.Client{
-		Transport: &fallbackRoundTripper{
-			anthropic: anthropicRT,
-			chrome:    chromeRT,
-			fallback:  standardTransport,
-		},
+		Transport: transport,
 	}
 	if timeout > 0 {
 		client.Timeout = timeout
