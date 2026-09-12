@@ -663,7 +663,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			} else {
 				logXAIWebsocketDisconnected(executionSessionID, authID, wsURL, "send_error", errSend)
 				if errClose := closer.Close(); errClose != nil {
-					log.Errorf("xai websockets executor: close websocket error: %v", errClose)
+					logXAIWebsocketCloseFailure("stream", errClose)
 				}
 			}
 			return nil, errSend
@@ -693,7 +693,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			}
 			logXAIWebsocketDisconnected(executionSessionID, authID, wsURL, terminateReason, terminateErr)
 			if errClose := closer.Close(); errClose != nil {
-				log.Errorf("xai websockets executor: close websocket error: %v", errClose)
+				logXAIWebsocketCloseFailure("stream_teardown", errClose)
 			}
 		}()
 
@@ -923,13 +923,7 @@ func (e *XAIWebsocketsExecutor) executeCompactionTriggerFromWebsocketContext(ctx
 	if auth != nil {
 		authID = auth.ID
 	}
-	log.Infof(
-		"xai websockets: compact fallback session=%s auth=%s input_items=%d keep_previous_response_id=%t",
-		xaiExecutionSessionID(req, opts),
-		strings.TrimSpace(authID),
-		inputItemsCount,
-		keepPreviousResponseID,
-	)
+	logXAIWebsocketCompactFallback(xaiExecutionSessionID(req, opts), authID, inputItemsCount, keepPreviousResponseID)
 	compactReq := req
 	compactReq.Payload = compactPayload
 
@@ -1185,7 +1179,7 @@ func (e *XAIWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cl
 		previousCloser := sess.connCloser
 		sess.connMu.Unlock()
 		if errClose := closer.Close(); errClose != nil {
-			log.Errorf("xai websockets executor: close websocket error: %v", errClose)
+			logXAIWebsocketCloseFailure("duplicate", errClose)
 		}
 		logXAIWebsocketConnectedWithReused(sess, sess.sessionID, authID, wsURL, true)
 		return previous, previousCloser, nil, nil
@@ -1209,21 +1203,17 @@ func configureXAIWebsocketConn(sess *codexWebsocketSession, conn *websocket.Conn
 	}
 	sess.resetUpstreamDisconnectError(conn)
 	conn.SetPingHandler(func(appData string) error {
-		sessionID := ""
-		if sess != nil {
-			sessionID = sess.sessionID
-		}
 		sessionKind := sessionObjectKind(sess)
-		log.Debugf("xai websockets: upstream ping received session=%s session_object=%s ping_bytes=%d", sessionID, sessionKind, len(appData))
-		log.Debugf("xai websockets: upstream pong write started session=%s session_object=%s", sessionID, sessionKind)
+		log.WithFields(log.Fields{"provider": "xai", "session_object": sessionKind, "ping_bytes": len(appData)}).Debug("xai websockets: upstream ping received")
+		log.WithFields(log.Fields{"provider": "xai", "session_object": sessionKind}).Debug("xai websockets: upstream pong write started")
 		start := time.Now()
 		// Gorilla websocket allows concurrent WriteControl with WriteMessage.
 		// Avoid writeMu here so keepalive pongs are not starved by long payload writes.
 		errPong := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Time{})
 		if errPong != nil {
-			log.Warnf("xai websockets: upstream pong write failed session=%s session_object=%s duration=%v err=%v", sessionID, sessionKind, time.Since(start), errPong)
+			log.WithFields(log.Fields{"provider": "xai", "session_object": sessionKind, "duration": time.Since(start), "diagnostic": helps.SafeWebsocketErrorDiagnostic(errPong)}).Warn("xai websockets: upstream pong write failed")
 		} else {
-			log.Debugf("xai websockets: upstream pong replied session=%s session_object=%s duration=%v", sessionID, sessionKind, time.Since(start))
+			log.WithFields(log.Fields{"provider": "xai", "session_object": sessionKind, "duration": time.Since(start)}).Debug("xai websockets: upstream pong replied")
 		}
 		return errPong
 	})
@@ -1387,7 +1377,7 @@ func (e *XAIWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWebs
 	}
 	if closer != nil {
 		if errClose := closer.Close(); errClose != nil {
-			log.Errorf("xai websockets executor: close websocket error: %v", errClose)
+			logXAIWebsocketCloseFailure("active", errClose)
 		}
 	}
 	if lifecycle != nil {
@@ -1474,7 +1464,7 @@ func closeXAIWebsocketSession(sess *codexWebsocketSession, reason string) {
 		logXAIWebsocketDisconnectedWithLastEvent(sess, sessionID, authID, wsURL, reason, lastEvent, nil)
 		if closer != nil {
 			if errClose := closer.Close(); errClose != nil {
-				log.Errorf("xai websockets executor: close websocket error: %v", errClose)
+				logXAIWebsocketCloseFailure("session_close", errClose)
 			}
 		}
 	}
@@ -1546,84 +1536,92 @@ func applyXAIWebsocketHeaders(ctx context.Context, headers http.Header, auth *cl
 	return headers
 }
 
-func logXAIWebsocketRequest(sessionID string, authID string, wsURL string, payload []byte) {
+func logXAIWebsocketRequest(_ string, _ string, _ string, payload []byte) {
+	fields := log.Fields{"provider": "xai"}
 	if len(payload) == 0 {
-		log.Infof("xai websockets: upstream request sent session=%s auth=%s url=%s", strings.TrimSpace(sessionID), strings.TrimSpace(authID), strings.TrimSpace(wsURL))
+		log.WithFields(fields).Info("xai websockets: upstream request sent")
 		return
 	}
-	generateValue := "default"
-	if generate := gjson.GetBytes(payload, "generate"); generate.Exists() {
-		generateValue = strings.TrimSpace(generate.Raw)
-	}
-	log.Infof(
-		"xai websockets: upstream request sent session=%s auth=%s url=%s event=%s previous_response_id=%s generate=%s input_items=%d",
-		strings.TrimSpace(sessionID),
-		strings.TrimSpace(authID),
-		strings.TrimSpace(wsURL),
-		strings.TrimSpace(gjson.GetBytes(payload, "type").String()),
-		strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()),
-		generateValue,
-		len(gjson.GetBytes(payload, "input").Array()),
-	)
+	fields["event"] = helps.SafeWebsocketEventType(gjson.GetBytes(payload, "type").String())
+	fields["generate"] = safeXAIGenerateMode(payload)
+	fields["input_items"] = len(gjson.GetBytes(payload, "input").Array())
+	log.WithFields(fields).Info("xai websockets: upstream request sent")
 }
 
-func logXAIWebsocketWarmupCompleted(sessionID string, authID string, wsURL string, payload []byte) {
-	log.Infof(
-		"xai websockets: upstream warmup completed session=%s auth=%s url=%s response_id=%s",
-		strings.TrimSpace(sessionID),
-		strings.TrimSpace(authID),
-		strings.TrimSpace(wsURL),
-		strings.TrimSpace(gjson.GetBytes(payload, "response.id").String()),
-	)
+func logXAIWebsocketWarmupCompleted(_ string, _ string, _ string, _ []byte) {
+	log.WithField("provider", "xai").Info("xai websockets: upstream warmup completed")
 }
 
-func logXAIWebsocketTerminalResponse(sessionID string, authID string, wsURL string, eventType string, payload []byte) {
-	log.Infof(
-		"xai websockets: upstream terminal response session=%s auth=%s url=%s event=%s response_id=%s previous_response_id=%s",
-		strings.TrimSpace(sessionID),
-		strings.TrimSpace(authID),
-		strings.TrimSpace(wsURL),
-		strings.TrimSpace(eventType),
-		strings.TrimSpace(gjson.GetBytes(payload, "response.id").String()),
-		strings.TrimSpace(gjson.GetBytes(payload, "response.previous_response_id").String()),
-	)
+func logXAIWebsocketTerminalResponse(_ string, _ string, _ string, eventType string, _ []byte) {
+	log.WithFields(log.Fields{
+		"provider": "xai",
+		"event":    helps.SafeWebsocketEventType(eventType),
+	}).Info("xai websockets: upstream terminal response")
 }
 
 func logXAIWebsocketConnected(sessionID string, authID string, wsURL string) {
 	logXAIWebsocketConnectedWithReused(nil, sessionID, authID, wsURL, false)
 }
 
-func logXAIWebsocketConnectedWithReused(sess *codexWebsocketSession, sessionID string, authID string, wsURL string, reused bool) {
-	sessionStr := strings.TrimSpace(sessionID)
-	sessionKind := sessionObjectKind(sess)
-	if reused {
-		log.Infof("xai websockets: upstream connected session=%s auth=%s url=%s session_object=%s reused=true", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind)
-		return
-	}
-	log.Infof("xai websockets: upstream connected session=%s auth=%s url=%s session_object=%s reused=false", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind)
+func logXAIWebsocketConnectedWithReused(sess *codexWebsocketSession, _ string, _ string, _ string, reused bool) {
+	log.WithFields(log.Fields{
+		"provider":       "xai",
+		"session_object": sessionObjectKind(sess),
+		"reused":         reused,
+	}).Info("xai websockets: upstream connected")
 }
 
 func logXAIWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
 	logXAIWebsocketDisconnectedWithLastEvent(nil, sessionID, authID, wsURL, reason, "", err)
 }
 
-func logXAIWebsocketDisconnectedWithLastEvent(sess *codexWebsocketSession, sessionID string, authID string, wsURL string, reason string, lastEvent string, err error) {
-	sessionStr := strings.TrimSpace(sessionID)
-	sessionKind := sessionObjectKind(sess)
-	terminalStatus := isTerminalEvent(lastEvent)
+func logXAIWebsocketDisconnectedWithLastEvent(sess *codexWebsocketSession, _ string, _ string, _ string, reason string, lastEvent string, err error) {
+	status := "ok"
 	if err != nil {
-		if lastEvent != "" {
-			log.Infof("xai websockets: upstream disconnected session=%s auth=%s url=%s session_object=%s reason=%s last_event=%s is_terminal=%t err=%v", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind, strings.TrimSpace(reason), lastEvent, terminalStatus, err)
-			return
+		status = "error"
+	}
+	fields := log.Fields{
+		"provider":       "xai",
+		"session_object": sessionObjectKind(sess),
+		"reason":         helps.SafeWebsocketLifecycleReason(reason),
+		"status":         status,
+		"diagnostic":     helps.SafeWebsocketErrorDiagnostic(err),
+		"is_terminal":    isTerminalEvent(lastEvent),
+	}
+	if strings.TrimSpace(lastEvent) != "" {
+		fields["last_event"] = helps.SafeWebsocketEventType(lastEvent)
+	}
+	log.WithFields(fields).Info("xai websockets: upstream disconnected")
+}
+
+func logXAIWebsocketCompactFallback(_ string, _ string, inputItemsCount int, keepPreviousResponseID bool) {
+	log.WithFields(log.Fields{
+		"provider":                  "xai",
+		"input_items":               inputItemsCount,
+		"keep_previous_response_id": keepPreviousResponseID,
+	}).Info("xai websockets: compact fallback")
+}
+
+func logXAIWebsocketCloseFailure(stage string, err error) {
+	log.WithFields(log.Fields{
+		"provider":   "xai",
+		"stage":      helps.SafeWebsocketCloseStage(stage),
+		"diagnostic": helps.SafeWebsocketErrorDiagnostic(err),
+	}).Error("xai websockets: close upstream connection failed")
+}
+
+func safeXAIGenerateMode(payload []byte) string {
+	generate := gjson.GetBytes(payload, "generate")
+	if !generate.Exists() {
+		return "default"
+	}
+	if generate.Type == gjson.True || generate.Type == gjson.False {
+		if generate.Bool() {
+			return "true"
 		}
-		log.Infof("xai websockets: upstream disconnected session=%s auth=%s url=%s session_object=%s reason=%s is_terminal=false err=%v", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind, strings.TrimSpace(reason), err)
-		return
+		return "false"
 	}
-	if lastEvent != "" {
-		log.Infof("xai websockets: upstream disconnected session=%s auth=%s url=%s session_object=%s reason=%s last_event=%s is_terminal=%t", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind, strings.TrimSpace(reason), lastEvent, terminalStatus)
-		return
-	}
-	log.Infof("xai websockets: upstream disconnected session=%s auth=%s url=%s session_object=%s reason=%s is_terminal=false", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind, strings.TrimSpace(reason))
+	return "other"
 }
 
 // CloseXAIWebsocketSessionsForAuthID closes all active xAI upstream websocket sessions

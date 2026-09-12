@@ -49,17 +49,13 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 
 func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
 	provider = strings.TrimSpace(provider)
-	if provider == "" {
+	if provider != "xai" {
 		provider = "codex"
-	}
-	sessionID := ""
-	if sess != nil {
-		sessionID = sess.sessionID
 	}
 	sessionKind := sessionObjectKind(sess)
 	payloadBytes := len(payload)
 	start := time.Now()
-	log.Debugf("%s websockets: write payload started session=%s session_object=%s bytes=%d", provider, sessionID, sessionKind, payloadBytes)
+	log.WithFields(log.Fields{"provider": provider, "session_object": sessionKind, "bytes": payloadBytes}).Debug("websockets: write payload started")
 	var errSend error
 	if sess != nil {
 		errSend = sess.writeMessage(conn, websocket.TextMessage, payload)
@@ -69,9 +65,9 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 		errSend = conn.WriteMessage(websocket.TextMessage, payload)
 	}
 	if errSend != nil {
-		log.Warnf("%s websockets: write payload failed session=%s session_object=%s bytes=%d duration=%v err=%v", provider, sessionID, sessionKind, payloadBytes, time.Since(start), errSend)
+		log.WithFields(log.Fields{"provider": provider, "session_object": sessionKind, "bytes": payloadBytes, "duration": time.Since(start), "diagnostic": helps.SafeWebsocketErrorDiagnostic(errSend)}).Warn("websockets: write payload failed")
 	} else {
-		log.Debugf("%s websockets: write payload completed session=%s session_object=%s bytes=%d duration=%v", provider, sessionID, sessionKind, payloadBytes, time.Since(start))
+		log.WithFields(log.Fields{"provider": provider, "session_object": sessionKind, "bytes": payloadBytes, "duration": time.Since(start)}).Debug("websockets: write payload completed")
 	}
 	return errSend
 }
