@@ -769,7 +769,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if result.Success {
 			if modelKey != "" {
 				state := ensureModelState(auth, modelKey)
-				resetModelState(state, now)
+				// Disable-cooling credentials must never carry a residual
+				// cooldown, so decay only applies when cooling is enabled.
+				if m.cooldownDisabledForAuth(auth) {
+					resetModelState(state, now)
+				} else {
+					decayModelStateOnSuccess(state, now)
+				}
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -906,6 +912,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.Unavailable = false
 						state.Quota.Exceeded = false
 					}
+					state.FailureCount++
 					auth.Status = StatusError
 					auth.UpdatedAt = now
 					updateAggregatedAvailability(auth, now)
@@ -1073,6 +1080,7 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.Quota.BackoffLevel > merged.Quota.BackoffLevel {
 		merged.Quota.BackoffLevel = source.Quota.BackoffLevel
 	}
+	merged.FailureCount = max(target.FailureCount, source.FailureCount)
 	if source.UpdatedAt.After(merged.UpdatedAt) {
 		merged.UpdatedAt = source.UpdatedAt
 	}
@@ -1104,6 +1112,39 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
 	state.Quota = QuotaState{}
+	state.FailureCount = 0
+	state.UpdatedAt = now
+}
+
+// decayModelStateOnSuccess halves the model's failure count on a successful
+// result (G2). A count that survives the halving keeps a short residual
+// cooldown — half the remaining window, floor 1s — so a flapping model
+// recovers in stages instead of returning at full health and failing again
+// immediately. Counts of 0 or 1 take the historical full reset. The registry
+// resume path (shouldResumeModel/clearModelQuota) is unaffected: it clears
+// registry-side suspension/quota marks regardless of the residual timing.
+func decayModelStateOnSuccess(state *ModelState, now time.Time) {
+	if state == nil {
+		return
+	}
+	if state.FailureCount <= 1 {
+		resetModelState(state, now)
+		return
+	}
+	state.FailureCount /= 2
+	pullIn := func(deadline time.Time) time.Time {
+		if deadline.IsZero() || !deadline.After(now) {
+			return now.Add(time.Second)
+		}
+		remaining := deadline.Sub(now) / 2
+		if remaining < time.Second {
+			remaining = time.Second
+		}
+		return now.Add(remaining)
+	}
+	state.NextRetryAfter = pullIn(state.NextRetryAfter)
+	state.Quota.NextRecoverAt = pullIn(state.Quota.NextRecoverAt)
+	state.Unavailable = true
 	state.UpdatedAt = now
 }
 
@@ -1118,6 +1159,9 @@ func modelStateIsClean(state *ModelState) bool {
 		return false
 	}
 	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+		return false
+	}
+	if state.FailureCount != 0 {
 		return false
 	}
 	return true

@@ -230,6 +230,10 @@ type ModelState struct {
 	LastError *Error `json:"last_error,omitempty"`
 	// Quota retains quota information if this model hit rate limits.
 	Quota QuotaState `json:"quota"`
+	// FailureCount tracks recent failures for staged recovery (G2): success
+	// halves it instead of instantly restoring full health. Not persisted in
+	// cooldown-state records.
+	FailureCount int `json:"failure_count,omitempty"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
 }
