@@ -509,7 +509,9 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	consumeSession = true
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	observer := newLiveUsageObserver(ctx, selected, session.model)
+	defer observer.close()
+	if errRelay := relayWebsockets(downstream, upstream, observer.observe); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
@@ -632,10 +634,10 @@ func websocketCloseFunc(name string, conn *websocket.Conn) func() error {
 	}
 }
 
-func relayWebsockets(downstream, upstream *websocket.Conn) error {
+func relayWebsockets(downstream, upstream *websocket.Conn, observers ...func([]byte)) error {
 	results := make(chan error, 2)
 	go func() { results <- copyWebsocket(upstream, downstream) }()
-	go func() { results <- copyWebsocket(downstream, upstream) }()
+	go func() { results <- copyWebsocket(downstream, upstream, observers...) }()
 
 	firstErr := <-results
 	closeCode, closeReason := websocketCloseDetails(firstErr)
@@ -648,7 +650,7 @@ func relayWebsockets(downstream, upstream *websocket.Conn) error {
 	return firstErr
 }
 
-func copyWebsocket(destination, source *websocket.Conn) error {
+func copyWebsocket(destination, source *websocket.Conn, observers ...func([]byte)) error {
 	for {
 		messageType, reader, errReader := source.NextReader()
 		if errReader != nil {
@@ -658,7 +660,17 @@ func copyWebsocket(destination, source *websocket.Conn) error {
 		if errWriter != nil {
 			return errWriter
 		}
-		_, errCopy := io.Copy(writer, reader)
+		capture := &usageFrameCapture{}
+		var target io.Writer = writer
+		if len(observers) > 0 && messageType == websocket.TextMessage {
+			target = io.MultiWriter(writer, capture)
+		}
+		_, errCopy := io.Copy(target, reader)
+		if errCopy == nil && !capture.overflow && len(capture.data) > 0 {
+			for _, observe := range observers {
+				observe(capture.data)
+			}
+		}
 		errClose := writer.Close()
 		if errCopy != nil {
 			return errCopy

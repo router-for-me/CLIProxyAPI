@@ -502,6 +502,13 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway), gin.H{"error": "Failed to read Codex search response"})
 		return
 	}
+	reporter := helps.NewUsageReporter(ctx, "codex", selectionModel, selected)
+	detail := helps.ParseOpenAIUsage(upstreamBody)
+	if resp.StatusCode >= 400 {
+		reporter.PublishFailureWithDetail(ctx, detail, fmt.Errorf("search returned HTTP %d", resp.StatusCode))
+	} else {
+		reporter.Publish(ctx, detail)
+	}
 	helps.AppendAPIResponseChunk(ctx, s.cfg, upstreamBody)
 	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
 		s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, upstreamBody)

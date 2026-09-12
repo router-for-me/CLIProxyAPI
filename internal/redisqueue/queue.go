@@ -146,17 +146,19 @@ func (q *queue) publishToSubscribers(payload []byte) bool {
 		return false
 	}
 
+	delivered := false
 	for id, subscriber := range q.subscribers {
 		cloned := append([]byte(nil), payload...)
 		select {
 		case subscriber <- cloned:
+			delivered = true
 		default:
 			delete(q.subscribers, id)
 			close(subscriber)
 		}
 	}
 
-	return true
+	return delivered
 }
 
 func (q *queue) subscribe(buffer int, initialPayload []byte) (<-chan []byte, func()) {

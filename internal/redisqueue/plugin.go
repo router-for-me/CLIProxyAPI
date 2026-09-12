@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -17,6 +18,8 @@ func init() {
 }
 
 type usageQueuePlugin struct{}
+
+func (*usageQueuePlugin) Synchronous() bool { return true }
 
 func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if p == nil {
@@ -121,7 +124,42 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ResponseHeaders: record.ResponseHeaders,
 	}
 
+	eventID := record.EventID
+	if eventID == "" {
+		eventID = uuid.NewString()
+	}
+	if requestID == "" {
+		requestID = eventID
+	}
+	endpoint := record.Endpoint
+	if endpoint == "" {
+		endpoint = resolveEndpoint(ctx)
+	}
+	kind := record.Kind
+	if kind == "" {
+		kind = "attempt"
+	}
+	if kind == "attempt" && !coreusage.GenerateEnabled(record.Generate) {
+		kind = "prewarm"
+	}
+	transport := record.Transport
+	if transport == "" {
+		if stream {
+			transport = "sse"
+		} else {
+			transport = "http"
+		}
+	}
+	rawUsage := json.RawMessage(usageDetail.RawUsage)
+	if len(rawUsage) > 0 && !json.Valid(rawUsage) {
+		rawUsage = nil
+	}
 	payload, err := json.Marshal(queuedUsageDetail{
+		BillingID: usageDetail.BillingID, CostScope: usageDetail.CostScope, GenerationID: record.GenerationID, EventID: eventID, AttemptID: record.AttemptID, Kind: kind, Transport: transport, BaseURL: record.BaseURL,
+		UsageObserved: usageDetail.UsageObserved, RawUsage: rawUsage,
+		CacheCreation5mTokens: usageDetail.CacheCreation5mTokens, CacheCreation1hTokens: usageDetail.CacheCreation1hTokens,
+		CostUSD: usageDetail.CostUSD,
+
 		requestDetail:       detail,
 		AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
 		TokenBreakdown:      usageDetail.TokenBreakdown,
@@ -129,7 +167,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ExecutorType:        executorType,
 		Model:               modelName,
 		Alias:               aliasName,
-		Endpoint:            resolveEndpoint(ctx),
+		Endpoint:            endpoint,
 		AuthType:            authType,
 		APIKey:              apiKey,
 		RequestID:           requestID,
@@ -142,10 +180,25 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if err != nil {
 		return
 	}
+	journalUsage(payload)
 	Enqueue(payload)
 }
 
 type queuedUsageDetail struct {
+	Transport             string          `json:"transport"`
+	BillingID             string          `json:"billing_id,omitempty"`
+	CostScope             string          `json:"cost_scope,omitempty"`
+	GenerationID          string          `json:"generation_id,omitempty"`
+	EventID               string          `json:"event_id"`
+	AttemptID             string          `json:"attempt_id,omitempty"`
+	Kind                  string          `json:"kind,omitempty"`
+	BaseURL               string          `json:"base_url,omitempty"`
+	UsageObserved         bool            `json:"usage_observed"`
+	RawUsage              json.RawMessage `json:"raw_usage,omitempty"`
+	CacheCreation5mTokens int64           `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens int64           `json:"cache_creation_1h_tokens"`
+	CostUSD               *string         `json:"cost_usd,omitempty"`
+
 	requestDetail
 	AccountingVersion   int                      `json:"accounting_version"`
 	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown"`

@@ -3289,8 +3289,8 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpointAndPublishesUsage(t *testing.
 	if record.Failed {
 		t.Fatalf("failed = true, want false; failure=%+v", record.Fail)
 	}
-	if record.Detail != (usage.Detail{}) {
-		t.Fatalf("detail = %+v, want zero token usage", record.Detail)
+	if record.Detail.TotalTokens != 0 || record.Detail.CostUSD == nil || *record.Detail.CostUSD != "0.0000250000" {
+		t.Fatalf("expected provider media charge with zero text tokens, got %+v", record.Detail)
 	}
 	if record.TTFT <= 0 {
 		t.Fatalf("ttft = %v, want positive duration", record.TTFT)

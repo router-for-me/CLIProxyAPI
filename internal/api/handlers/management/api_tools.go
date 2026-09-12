@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/tidwall/gjson"
 	"io"
 	"net/http"
 	"net/url"
@@ -189,8 +191,24 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 
+	// Management model probes bypass normal executors and need their own record.
+	var reporter *helps.UsageReporter
+	usageCtx := context.WithValue(c.Request.Context(), "gin", c)
+	model := gjson.Get(body.Data, "model").String()
+	if method == http.MethodPost && model != "" {
+		provider := "openai-compatible"
+		if auth != nil {
+			provider = auth.Provider
+		} else if req.URL.Hostname() == "api.x.ai" {
+			provider = "xai"
+		}
+		reporter = helps.NewUsageReporter(usageCtx, provider, model, auth)
+		reporter.SetOperation("management_call", method+" "+req.URL.Path)
+		defer reporter.EnsurePublished(usageCtx)
+	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
+		reporter.PublishFailure(usageCtx, errDo)
 		log.WithError(errDo).Debug("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
@@ -203,10 +221,22 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
 	if errReadAll != nil {
+		reporter.PublishFailure(usageCtx, errReadAll)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
 
+	if reporter != nil {
+		detail := helps.ParseOpenAIUsage(respBody)
+		if strings.HasSuffix(req.URL.Path, "/messages") {
+			detail = helps.ParseClaudeUsage(respBody)
+		}
+		if resp.StatusCode >= 400 {
+			reporter.PublishFailureWithDetail(usageCtx, detail, fmt.Errorf("upstream HTTP %d", resp.StatusCode))
+		} else {
+			reporter.Publish(usageCtx, detail)
+		}
+	}
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,

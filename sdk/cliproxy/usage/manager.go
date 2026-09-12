@@ -20,6 +20,13 @@ const AutoServiceTier = "auto"
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
+	Transport    string
+	GenerationID string
+	EventID      string
+	AttemptID    string
+	Kind         string
+	Endpoint     string
+
 	Provider string
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
@@ -69,6 +76,16 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
+	BillingID string
+	CostScope string
+	// UsageObserved distinguishes an explicitly reported zero from absent usage.
+	UsageObserved         bool
+	RawUsage              string
+	CacheCreation5mTokens int64
+	CacheCreation1hTokens int64
+	// CostUSD is an exact decimal reported by the provider, not a token estimate.
+	CostUSD *string
+
 	InputTokens         int64
 	OutputTokens        int64
 	ReasoningTokens     int64
@@ -343,6 +360,26 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
 	}
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return
+	}
+	markPublished(ctx)
+	if record.GenerationID == "" {
+		record.GenerationID = GenerationFromContext(ctx)
+	}
+	// Durable sinks run before returning to the caller so the in-memory dispatch
+	// queue is not another loss window. Other plugins retain asynchronous dispatch.
+	m.pluginsMu.RLock()
+	synchronous := append([]Plugin(nil), m.plugins...)
+	m.pluginsMu.RUnlock()
+	for _, plugin := range synchronous {
+		if p, ok := plugin.(interface{ Synchronous() bool }); ok && p.Synchronous() {
+			safeInvoke(plugin, ctx, record)
+		}
+	}
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
@@ -382,6 +419,9 @@ func (m *Manager) dispatch(item queueItem) {
 	}
 	for _, plugin := range plugins {
 		if plugin == nil {
+			continue
+		}
+		if p, ok := plugin.(interface{ Synchronous() bool }); ok && p.Synchronous() {
 			continue
 		}
 		safeInvoke(plugin, item.ctx, item.record)
