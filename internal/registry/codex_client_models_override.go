@@ -256,7 +256,11 @@ func (s *codexClientModelsStore) applyOverrideLocked(doc map[string]json.RawMess
 		return errWrite
 	}
 
+	// The document just persisted replaces whatever the previous on-disk content
+	// reported, so the diagnostics that described it must not survive this write.
 	s.override = doc
+	s.overrideError = ""
+	s.overrideIssues = nil
 	s.publishLocked(effective)
 	return nil
 }
@@ -593,6 +597,11 @@ func writeCodexClientModelsOverrideFile(path string, doc map[string]json.RawMess
 		return fmt.Errorf("encode override document: %w", errMarshal)
 	}
 	data = append(data, '\n')
+	// The reader refuses a file above the cap, so a document the next reload would
+	// drop must not be reported as a successful change.
+	if len(data) > maxCodexClientModelsOverrideFileSize {
+		return rejectCodexClientModelsOverride(fmt.Errorf("override file exceeds %d bytes", maxCodexClientModelsOverrideFileSize))
+	}
 
 	dir := filepath.Dir(path)
 	if errMkdir := os.MkdirAll(dir, 0o755); errMkdir != nil {
