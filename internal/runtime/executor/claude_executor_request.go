@@ -584,6 +584,22 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
+// withClaudeLatestAliasContextBeta makes the stable latest aliases opt in to
+// Anthropic's 1M context window without changing the upstream model name.
+func withClaudeLatestAliasContextBeta(model string, betas []string) []string {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "sonnet-latest", "opus-latest":
+		for _, beta := range betas {
+			if beta == claudeContext1MBeta {
+				return betas
+			}
+		}
+		return append(betas, claudeContext1MBeta)
+	default:
+		return betas
+	}
+}
+
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
 // Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
 // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
