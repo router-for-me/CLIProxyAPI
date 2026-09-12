@@ -122,6 +122,29 @@ cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 
 The embedded server calls this automatically for built‑in providers; for custom providers, register during startup (e.g., after loading auths) or upon auth registration hooks.
 
+## Configure Thinking Effort Mapping
+
+Embedded SDK users can opt into provider- and model-specific effort names through the public config types. Rules are evaluated in order, the first complete match wins, and the result is applied once without cascading:
+
+```go
+cfg.Thinking = config.ThinkingPolicyConfig{
+  EffortMapping: []config.ThinkingEffortMappingRule{
+    {
+      From:           "max",
+      To:             "ultra",
+      SourceProtocol: "claude",
+      TargetProtocol: "codex",
+      TargetProvider: "codex",
+      Models:         []string{"gpt-5.5", "gpt-5.6-*"},
+    },
+  },
+}
+```
+
+All scope fields are optional. Model patterns match either the resolved upstream model or the client-requested alias and support `*` wildcards. Without a matching rule, existing reasoning validation is unchanged—for example, a model that supports `max` continues to receive `max`.
+
+The mapped destination is intentionally provider-native and forced after source validation. A value such as `ultra` does not need to be registered as a canonical thinking level, but the upstream provider may reject it. Provider payload overrides run after effort mapping and can still replace the emitted value.
+
 ## Credentials & Transports
 
 - Use `Manager.SetRoundTripperProvider` to inject per‑auth `*http.Transport` (e.g., proxy):

@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -15,14 +16,17 @@ func APIKeyModelIsCompat(req cliproxyexecutor.Request) bool {
 
 // ApplyRequestThinking preserves the registry lookup path unless the auth
 // manager bound authoritative model capabilities to this execution attempt.
-func ApplyRequestThinking(body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, fromFormat, toFormat, provider string) ([]byte, error) {
+// cfg carries the opt-in thinking effort-mapping policy, which is threaded into
+// the thinking pipeline alongside the client-requested model alias.
+func ApplyRequestThinking(cfg *config.Config, body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, fromFormat, toFormat, provider string) ([]byte, error) {
 	originalSource := opts.OriginalRequest
 	if len(originalSource) == 0 {
 		originalSource = req.Payload
 	}
 	summaryConfig := translatedRequestSummaryConfig(body, req.Payload, originalSource, req.Model, fromFormat, toFormat)
+	options := buildThinkingApplyOptions(cfg, opts, req.Model)
 	if modelInfo, ok := cliproxyauth.ResolvedModelInfo(req); ok {
-		return thinking.ApplyThinkingWithModelInfoAndSummary(body, originalSource, req.Model, fromFormat, toFormat, provider, modelInfo, summaryConfig)
+		return thinking.ApplyThinkingWithModelInfoAndSummaryAndOptions(body, originalSource, req.Model, fromFormat, toFormat, provider, modelInfo, summaryConfig, options)
 	}
-	return thinking.ApplyThinkingWithSummary(body, req.Model, fromFormat, toFormat, provider, summaryConfig)
+	return thinking.ApplyThinkingWithSummaryAndOptions(body, req.Model, fromFormat, toFormat, provider, summaryConfig, options)
 }

@@ -74,7 +74,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = preserveXAIResponsesOutputControls(body, req.Payload, from)
 
 	var err error
-	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), e.Identifier(), e.Identifier())
+	body, err = helps.ApplyRequestThinking(e.cfg, body, req, opts, from.String(), e.Identifier(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}

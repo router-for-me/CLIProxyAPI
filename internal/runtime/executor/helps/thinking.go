@@ -3,17 +3,22 @@ package helps
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 // ApplyThinkingWithSourcePayload preserves summary visibility from the original
 // client payload while applying thinking configuration to its translated target
 // payload. currentSourcePayload is the payload that was translated, while
-// originalSourcePayload retains intent removed by an earlier interceptor.
-func ApplyThinkingWithSourcePayload(body, currentSourcePayload, originalSourcePayload []byte, model, fromFormat, toFormat, providerKey string) ([]byte, error) {
+// originalSourcePayload retains intent removed by an earlier interceptor. cfg and
+// opts thread the opt-in thinking effort-mapping policy and the client-requested
+// model alias into the thinking pipeline.
+func ApplyThinkingWithSourcePayload(cfg *config.Config, opts cliproxyexecutor.Options, body, currentSourcePayload, originalSourcePayload []byte, model, fromFormat, toFormat, providerKey string) ([]byte, error) {
 	summary := translatedRequestSummaryConfig(body, currentSourcePayload, originalSourcePayload, model, fromFormat, toFormat)
-	return thinking.ApplyThinkingWithSummary(body, model, fromFormat, toFormat, providerKey, summary)
+	options := buildThinkingApplyOptions(cfg, opts, model)
+	return thinking.ApplyThinkingWithSummaryAndOptions(body, model, fromFormat, toFormat, providerKey, summary, options)
 }
 
 // translatedRequestSummaryConfig gives the translated target payload precedence
