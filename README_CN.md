@@ -268,6 +268,10 @@ VS Code 扩展，可将你的 Claude、ChatGPT/Codex、Antigravity、Grok 和 Ki
 
 原生 macOS 菜单栏应用，通过 CLIProxyAPI 的管理 API 管理多个 Claude 账号（也支持 claude-swap 与 9Router）：5 小时 / 7 天 / 按模型的配额仪表，弹窗内切换 / 暂停 / 星标账号，按当前消耗速度预测各窗口何时耗尽，并可在 iPhone 上同步查看。
 
+### [PiCloud](https://github.com/cookerpapa/pi-cloud)
+
+基于 Pi SDK 的自托管编程 Agent 平台，提供 Web 界面、并发子 Agent 和 CubeSandbox KVM 工作空间。使用 CLIProxyAPI 作为模型供应商网关，将供应商凭据保留在客户机工作空间之外。
+
 > [!NOTE]  
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
 
