@@ -29,7 +29,11 @@ func liveUsageDetail(payload []byte) (usage.Detail, bool) {
 	root := gjson.ParseBytes(payload)
 	switch root.Get("type").String() {
 	case "response.done", "response.completed", "response.incomplete":
-		return helps.ParseCodexUsage(payload)
+		var buffer helps.StreamUsageBuffer
+		buffer.ObserveBillingPayload(payload)
+		detail, ok := helps.ParseCodexUsage(payload)
+		buffer.Observe(detail, ok)
+		return buffer.Detail()
 	case "conversation.item.input_audio_transcription.completed":
 		d := helps.ParseOpenAIUsage(payload)
 		return d, d.UsageObserved
@@ -113,15 +117,21 @@ func (o *liveUsageObserver) close() {
 
 // Bounded capture never limits forwarding of large media frames.
 type usageFrameCapture struct {
-	data     []byte
-	overflow bool
+	data       []byte
+	overflow   bool
+	projection io.Writer
 }
 
 func (b *usageFrameCapture) Write(p []byte) (int, error) {
 	if len(b.data)+len(p) > 1<<20 {
 		b.overflow = true
+		b.data = nil
 	} else if !b.overflow {
 		b.data = append(b.data, p...)
+	}
+	if b.projection != nil {
+		// Accounting parse failures must never interrupt frame forwarding.
+		_, _ = b.projection.Write(p)
 	}
 	return len(p), nil
 }
@@ -133,7 +143,19 @@ func forwardUsageFrame(writer io.Writer, reader io.Reader, observers ...func([]b
 		_, errCopy := io.Copy(writer, reader)
 		return errCopy
 	}
-	capture := &usageFrameCapture{}
+	projectionReader, projectionWriter := io.Pipe()
+	defer func() { _ = projectionWriter.Close() }()
+	type projectionResult struct {
+		payload []byte
+		err     error
+	}
+	projected := make(chan projectionResult, 1)
+	go func() {
+		payload, err := projectUsageFrame(projectionReader)
+		_ = projectionReader.CloseWithError(err)
+		projected <- projectionResult{payload: payload, err: err}
+	}()
+	capture := &usageFrameCapture{projection: projectionWriter}
 	observedReader := io.TeeReader(reader, capture)
 	destination := &usageForwardWriter{Writer: writer}
 	_, errCopy := io.Copy(destination, observedReader)
@@ -142,9 +164,17 @@ func forwardUsageFrame(writer io.Writer, reader io.Reader, observers ...func([]b
 		_, errDrain := io.Copy(io.Discard, observedReader)
 		complete = errDrain == nil
 	}
-	if complete && !capture.overflow && len(capture.data) > 0 {
-		for _, observe := range observers {
-			observe(capture.data)
+	_ = projectionWriter.Close()
+	result := <-projected
+	if complete && result.err == nil {
+		payload := capture.data
+		if capture.overflow {
+			payload = result.payload
+		}
+		if len(payload) > 0 {
+			for _, observe := range observers {
+				observe(payload)
+			}
 		}
 	}
 	return errCopy
