@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -88,7 +89,7 @@ func TestResetModelStateStillClearsQuotaOnSuccess(t *testing.T) {
 
 	resetModelState(state, now)
 
-	if state.Quota != (QuotaState{}) {
+	if !reflect.DeepEqual(state.Quota, QuotaState{}) {
 		t.Fatalf("success path must fully clear quota, got %+v", state.Quota)
 	}
 	if state.Unavailable || state.Status != StatusActive {
