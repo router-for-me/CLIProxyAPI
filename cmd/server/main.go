@@ -38,6 +38,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -677,7 +678,7 @@ func main() {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
-				startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+				startModelCatalogUpdaters(localModel, cfg.Home.Enabled, cfg.ProxyURL)
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -751,7 +752,7 @@ func main() {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
-			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
+			startModelCatalogUpdaters(localModel, cfg.Home.Enabled, cfg.ProxyURL)
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
 	}
@@ -767,7 +768,7 @@ func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCo
 	return !homeEnabled, true
 }
 
-func startModelCatalogUpdaters(localModel, homeEnabled bool) {
+func startModelCatalogUpdaters(localModel, homeEnabled bool, proxyURL string) {
 	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
 	if startCodexClient {
 		registry.StartCodexClientModelsUpdater(context.Background())
@@ -777,6 +778,17 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool) {
 	} else if homeEnabled {
 		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
 	}
+	// Command Code catalog is refreshed from the official provider catalog
+	// (with the local cmdc CLI as cold-start fallback), so it always starts
+	// regardless of local/home mode. Route the fetch through the configured
+	// global proxy so catalog traffic follows the same proxy policy as
+	// inference traffic.
+	if transport, _, errProxy := proxyutil.BuildHTTPTransport(proxyURL); errProxy == nil {
+		registry.SetCommandCodeCatalogTransport(transport)
+	} else {
+		log.Warnf("commandcode catalog proxy: invalid proxy-url %q: %v", proxyURL, errProxy)
+	}
+	registry.StartCommandCodeModelsUpdater(context.Background())
 }
 
 func pluginBootstrapConfigPath(args []string, defaultPath string) string {
