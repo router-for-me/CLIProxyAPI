@@ -172,18 +172,30 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		config.Budget = 0
 		config.Level = ""
 	} else {
-		switch config.Mode {
-		case ModeBudget, ModeAuto, ModeNone:
-			config.Budget = clampBudget(config.Budget, modelInfo, toFormat)
-		}
-
 		// ModeNone for a model that cannot be disabled falls back to the lowest
 		// supported level. Budget-capable models reach this path with Budget > 0;
 		// level-only models need the capability flags checked explicitly because
 		// their Min/Max range is zero.
 		cannotDisableLevelModel := !support.ZeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
-		if config.Mode == ModeNone && len(support.Levels) > 0 && (config.Budget > 0 || cannotDisableLevelModel) {
-			config.Level = ThinkingLevel(support.Levels[0])
+		pureLevelOnly := capability == CapabilityLevelOnly && support.Min == 0 && support.Max == 0
+		if config.Mode == ModeNone && pureLevelOnly {
+			// Level-only models have no numeric budget range, so do not pass their
+			// disabled sentinel through the numeric budget clamp. If the target
+			// cannot disable thinking, resolve its lowest supported level from the
+			// canonical order; provider metadata is not guaranteed to be sorted.
+			config.Budget = 0
+			if cannotDisableLevelModel {
+				config.Mode = ModeLevel
+				config.Level = clampLevel(LevelMinimal, modelInfo, toFormat)
+			}
+		} else {
+			switch config.Mode {
+			case ModeBudget, ModeAuto, ModeNone:
+				config.Budget = clampBudget(config.Budget, modelInfo, toFormat)
+			}
+			if config.Mode == ModeNone && len(support.Levels) > 0 && (config.Budget > 0 || cannotDisableLevelModel) {
+				config.Level = ThinkingLevel(support.Levels[0])
+			}
 		}
 	}
 
