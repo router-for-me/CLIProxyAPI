@@ -220,6 +220,36 @@
       ]
     },
     {
+      "id": "claude-fable-5-1",
+      "object": "model",
+      "created": 1788220800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Fable 5.1",
+      "description": "Anthropic's most capable widely released model, for the most demanding reasoning and long-horizon agentic work",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "claude-fable-5",
       "object": "model",
       "created": 1781049600,
