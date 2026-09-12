@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -535,12 +536,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
 		var nextNativePendingToolCallIDs []string
+		var executorPendingToolCallIDs []string
 		if nativeWebsocketPassthrough {
 			pendingToolCallIDs := []string(nil)
 			if requestRequiresCurrentUpstreamWebsocket {
 				pendingToolCallIDs = lastResponsePendingToolCallIDs
 			}
 			requestJSON = h.prepareCodexOrphanDelegationWithPendingToolCallIDs(c, requestJSON, pendingToolCallIDs)
+			executorPendingToolCallIDs = pendingToolCallIDs
 			if requestRequiresCurrentUpstreamWebsocket {
 				nextNativePendingToolCallIDs = consumeResponsesWebsocketPendingToolCallIDs(lastResponsePendingToolCallIDs, requestJSON)
 			} else {
@@ -584,6 +587,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		attemptedUpstreamMode := responsesWebsocketUpstreamModeUnknown
 		selectedAuthObserved := false
 		pinnedAuthAttempted := false
+		executionParent = multiagentv2.WithPendingToolCallIDs(executionParent, executorPendingToolCallIDs)
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, executionParent)
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 		if nativeWebsocketPassthrough && requestRequiresCurrentUpstreamWebsocket {

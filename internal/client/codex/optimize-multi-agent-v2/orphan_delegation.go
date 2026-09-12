@@ -14,9 +14,31 @@ const (
 	codexAppNamespace            = "codex_app"
 	codexCreateThreadName        = "create_thread"
 	codexSendMessageToThreadName = "send_message_to_thread"
+	codexAutomationUpdateName    = "automation_update"
 	codexAppCreateThreadTool     = "codex_app__create_thread"
 	codexAppSendMessageTool      = "codex_app__send_message_to_thread"
+	codexAppAutomationUpdateTool = "codex_app__automation_update"
 )
+
+type pendingToolCallIDsContextKey struct{}
+
+// WithPendingToolCallIDs stores verified pending tool-call IDs on ctx so later
+// translator/executor rewrites preserve the same pairing decision.
+func WithPendingToolCallIDs(ctx context.Context, pendingToolCallIDs []string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	copied := append([]string(nil), pendingToolCallIDs...)
+	return context.WithValue(ctx, pendingToolCallIDsContextKey{}, copied)
+}
+
+func pendingToolCallIDsFromContext(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	ids, _ := ctx.Value(pendingToolCallIDsContextKey{}).([]string)
+	return ids
+}
 
 // RewriteCodexOrphanDelegationInput converts orphan Codex delegation outputs into
 // standard user messages when orphan delegation compatibility is enabled.
@@ -100,6 +122,8 @@ func matchCodexDelegationTool(item gjson.Result) (string, bool) {
 		return codexAppCreateThreadTool, true
 	case codexSendMessageToThreadName:
 		return codexAppSendMessageTool, true
+	case codexAutomationUpdateName:
+		return codexAppAutomationUpdateTool, true
 	default:
 		return "", false
 	}

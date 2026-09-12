@@ -77,7 +77,7 @@ func RewriteCodexOrphanDelegationInputForConfig(ctx context.Context, headers htt
 	if cfg == nil || !cfg.Codex.OrphanDelegationCompatibility {
 		return payload
 	}
-	return RewriteCodexOrphanDelegationInput(ctx, headers, payload, true)
+	return RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(ctx, headers, payload, true, pendingToolCallIDsFromContext(ctx))
 }
 
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
