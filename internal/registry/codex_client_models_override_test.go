@@ -2,8 +2,10 @@ package registry
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -477,5 +479,88 @@ func TestCodexClientModelsOverrideFileRewriteReplacesExistingFile(t *testing.T) 
 	}
 	if got := codexClientModelStateValue(t, GetCodexClientModelsState(), "gpt-5.5", "display_name"); got != "Third" {
 		t.Fatalf("display_name after entry write = %v, want %q", got, "Third")
+	}
+}
+
+func TestSetCodexClientModelsOverrideClearsStaleDiagnostics(t *testing.T) {
+	restore := snapshotCodexClientModelsStore(t)
+	defer restore()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	overridePath := filepath.Join(dir, CodexClientModelsOverrideFileName)
+	base := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1), testCodexClientModel("gpt-5.6-sol", 2))
+	if _, err := setCodexClientModelsBase(base, "test"); err != nil {
+		t.Fatalf("set base catalog: %v", err)
+	}
+
+	// A hand edit that cannot be parsed reports a file level diagnostic.
+	if errWrite := os.WriteFile(overridePath, []byte("{not json"), 0o644); errWrite != nil {
+		t.Fatalf("write unparsable override file: %v", errWrite)
+	}
+	SyncCodexClientModelsOverrideFile(configPath)
+	if state := GetCodexClientModelsState(); state.OverrideError == "" {
+		t.Fatal("override error is empty after an unparsable file")
+	}
+
+	// A successful write replaces that file, so the file level diagnostic must go.
+	if err := SetCodexClientModelsOverride([]byte(`{"gpt-5.5":{"display_name":"Local 5.5"}}`)); err != nil {
+		t.Fatalf("set override after an unparsable file: %v", err)
+	}
+	if state := GetCodexClientModelsState(); state.OverrideError != "" {
+		t.Fatalf("override error after a successful write = %q, want empty", state.OverrideError)
+	}
+
+	// A hand edit with one bad entry reports a degraded entry diagnostic.
+	if errWrite := os.WriteFile(overridePath, []byte(`{"gpt-5.6-sol":{"$inherit":"missing-model"}}`), 0o644); errWrite != nil {
+		t.Fatalf("write degraded override file: %v", errWrite)
+	}
+	SyncCodexClientModelsOverrideFile(configPath)
+	if state := GetCodexClientModelsState(); len(state.OverrideErrors) != 1 {
+		t.Fatalf("override errors = %d, want 1", len(state.OverrideErrors))
+	}
+
+	// A successful management write replaces the document, so the diagnostics that
+	// describe the previous on-disk content must not survive it.
+	if err := SetCodexClientModelsOverride([]byte(`{"gpt-5.6-sol":{"display_name":"Local Sol"}}`)); err != nil {
+		t.Fatalf("set override: %v", err)
+	}
+	state := GetCodexClientModelsState()
+	if state.OverrideError != "" {
+		t.Fatalf("override error after a successful write = %q, want empty", state.OverrideError)
+	}
+	if len(state.OverrideErrors) != 0 {
+		t.Fatalf("override errors after a successful write = %d, want 0", len(state.OverrideErrors))
+	}
+	if got := state.Origins["gpt-5.6-sol"]; got != CodexClientModelsOriginOverride {
+		t.Fatalf("origin[gpt-5.6-sol] = %q, want %q", got, CodexClientModelsOriginOverride)
+	}
+}
+
+func TestSetCodexClientModelsOverrideRejectsOversizedDocument(t *testing.T) {
+	restore := snapshotCodexClientModelsStore(t)
+	defer restore()
+
+	dir := t.TempDir()
+	overridePath := filepath.Join(dir, CodexClientModelsOverrideFileName)
+	base := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
+	if _, err := setCodexClientModelsBase(base, "test"); err != nil {
+		t.Fatalf("set base catalog: %v", err)
+	}
+	SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
+
+	document := fmt.Sprintf(`{"gpt-5.5":{"base_instructions":%q}}`, strings.Repeat("x", maxCodexClientModelsOverrideFileSize))
+	err := SetCodexClientModelsOverride([]byte(document))
+	if err == nil {
+		t.Fatal("oversized override document was accepted")
+	}
+	if !IsCodexClientModelsOverrideRejected(err) {
+		t.Fatalf("oversized override error = %v, want rejection", err)
+	}
+	if _, errStat := os.Stat(overridePath); !os.IsNotExist(errStat) {
+		t.Fatalf("oversized override wrote %s: %v", overridePath, errStat)
+	}
+	if state := GetCodexClientModelsState(); len(state.Override) != 0 {
+		t.Fatalf("override entries = %d, want 0", len(state.Override))
 	}
 }
