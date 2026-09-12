@@ -77,6 +77,11 @@ type VertexCompatModel struct {
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+
+	// CodexWebSearch overrides the Codex client web search capability for this model.
+	// Nil preserves the existing catalog/provider behavior. Explicit false wins
+	// when multiple routable providers supply the model.
+	CodexWebSearch *bool `yaml:"codex-web-search,omitempty" json:"codex-web-search,omitempty"`
 }
 
 func (m VertexCompatModel) GetName() string        { return m.Name }
@@ -86,6 +91,8 @@ func (m VertexCompatModel) GetForceMapping() bool  { return m.ForceMapping }
 func (m VertexCompatModel) GetThinking() *registry.ThinkingSupport {
 	return m.Thinking
 }
+
+func (m VertexCompatModel) GetCodexWebSearch() *bool { return m.CodexWebSearch }
 
 // SanitizeVertexCompatKeys deduplicates and normalizes Vertex-compatible API key credentials.
 func (cfg *Config) SanitizeVertexCompatKeys() {

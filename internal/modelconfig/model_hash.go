@@ -20,7 +20,7 @@ func ComputeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("image=%t", model.Image) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + "|input=" + strings.Join(normalizeModalities(model.InputModalities), ",") + "|output=" + strings.Join(normalizeModalities(model.OutputModalities), ",") + thinkingHashSuffix(model.Thinking))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("image=%t", model.Image) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + codexWebSearchHashSuffix(model.CodexWebSearch) + "|input=" + strings.Join(normalizeModalities(model.InputModalities), ",") + "|output=" + strings.Join(normalizeModalities(model.OutputModalities), ",") + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -35,7 +35,7 @@ func ComputeVertexCompatModelsHash(models []config.VertexCompatModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + thinkingHashSuffix(model.Thinking))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + codexWebSearchHashSuffix(model.CodexWebSearch) + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -50,7 +50,7 @@ func ComputeClaudeModelsHash(models []config.ClaudeModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + thinkingHashSuffix(model.Thinking))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + codexWebSearchHashSuffix(model.CodexWebSearch) + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -65,7 +65,7 @@ func ComputeCodexModelsHash(models []config.CodexModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + thinkingHashSuffix(model.Thinking))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + codexWebSearchHashSuffix(model.CodexWebSearch) + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -80,7 +80,7 @@ func ComputeGeminiModelsHash(models []config.GeminiModel) string {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + thinkingHashSuffix(model.Thinking))
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + codexWebSearchHashSuffix(model.CodexWebSearch) + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return hashJoined(keys)
@@ -106,6 +106,13 @@ func normalizeModalities(raw []string) []string {
 func thinkingHashSuffix(support *registry.ThinkingSupport) string {
 	data, _ := json.Marshal(support)
 	return "|thinking=" + string(data)
+}
+
+func codexWebSearchHashSuffix(override *bool) string {
+	if override == nil {
+		return "|codex-web-search=unset"
+	}
+	return fmt.Sprintf("|codex-web-search=%t", *override)
 }
 
 func modelRoutingKeys(collect func(out func(key string))) []string {

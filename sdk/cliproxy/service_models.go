@@ -582,7 +582,7 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 	}
 
 	out := make([]*ModelInfo, 0, len(models)*2)
-	seen := make(map[string]struct{}, len(models)*2)
+	seen := make(map[string]int, len(models)*2)
 
 	addModel := func(model *ModelInfo) {
 		if model == nil {
@@ -592,10 +592,18 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		if id == "" {
 			return
 		}
-		if _, exists := seen[id]; exists {
+		if idx, exists := seen[id]; exists {
+			// Duplicate aliases still resolve as one upstream pool at request
+			// time, so merge overrides instead of dropping the later entry's.
+			retained := out[idx]
+			if merged, changed := registry.MergeCodexWebSearchOverride(retained.CodexWebSearch, model.CodexWebSearch); changed {
+				clone := *retained
+				clone.CodexWebSearch = merged
+				out[idx] = &clone
+			}
 			return
 		}
-		seen[id] = struct{}{}
+		seen[id] = len(out)
 		out = append(out, model)
 	}
 
@@ -681,6 +689,10 @@ type modelCompatEntry interface {
 	GetIsCompat() bool
 }
 
+type modelCodexWebSearchEntry interface {
+	GetCodexWebSearch() *bool
+}
+
 func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, created int64, fallbackDisplayName string, userDefined bool) *ModelInfo {
 	name := strings.TrimSpace(model.GetName())
 	alias := strings.TrimSpace(model.GetAlias())
@@ -719,6 +731,12 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	}
 	if compatModel, okCompat := any(model).(modelCompatEntry); okCompat {
 		info.IsCompat = compatModel.GetIsCompat()
+	}
+	if searchModel, okSearch := any(model).(modelCodexWebSearchEntry); okSearch {
+		if override := searchModel.GetCodexWebSearch(); override != nil {
+			value := *override
+			info.CodexWebSearch = &value
+		}
 	}
 	return info
 }
