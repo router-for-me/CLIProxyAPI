@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
+
+func TestPutOpenAICompatRejectsNegativeRequestsPerMinute(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, nil)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/openai-compatibility", bytes.NewBufferString(`[{"name":"bad","base-url":"https://example.com/v1","requests-per-minute":-1}]`))
+	h.PutOpenAICompat(ctx)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+}
 
 func TestGetOpenAICompatIncludesDisableCooling(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
