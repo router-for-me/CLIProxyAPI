@@ -358,6 +358,7 @@ nonstream-keepalive-interval: 0
 #       # Values starting with "$" dynamically copy the header value from downstream client requests.
 #       # If the client did not send the specified header, the header is omitted.
 #       # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
+#       # OpenCode Go client/session header examples: examples/opencode-go/README.md
 #     proxy-url: "socks5://proxy.example.com:1080"
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     models:
