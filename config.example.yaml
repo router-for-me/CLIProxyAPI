@@ -667,6 +667,7 @@ nonstream-keepalive-interval: 0
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
+#         use-max-completion-tokens: false # optional: rename max_tokens to max_completion_tokens in Chat Completions requests, preserving its value; an explicit max_completion_tokens wins
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
