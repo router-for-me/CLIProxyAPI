@@ -416,3 +416,66 @@ func snapshotCodexClientModelsStore(t *testing.T) func() {
 		store.revision = previous.revision
 	}
 }
+func TestCodexClientModelsDegradedEntryKeepsBaseOrigin(t *testing.T) {
+	restore := snapshotCodexClientModelsStore(t)
+	defer restore()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	overridePath := filepath.Join(dir, CodexClientModelsOverrideFileName)
+	base := testCodexClientCatalog(t, testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"context_window": 372000}))
+	if _, err := setCodexClientModelsBase(base, "test"); err != nil {
+		t.Fatalf("set base catalog: %v", err)
+	}
+	document := `{"gpt-5.5":{"$inherit":{"context_window":"missing-model"}}}`
+	if errWrite := os.WriteFile(overridePath, []byte(document), 0o600); errWrite != nil {
+		t.Fatalf("write override file: %v", errWrite)
+	}
+	SyncCodexClientModelsOverrideFile(configPath)
+
+	state := GetCodexClientModelsState()
+	if len(state.OverrideErrors) != 1 || state.OverrideErrors[0].Slug != "gpt-5.5" {
+		t.Fatalf("override errors = %#v, want one issue for gpt-5.5", state.OverrideErrors)
+	}
+	if got := state.Origins["gpt-5.5"]; got != CodexClientModelsOriginBase {
+		t.Fatalf("origin[gpt-5.5] = %q, want %q while the patch is degraded", got, CodexClientModelsOriginBase)
+	}
+	if got := codexClientModelStateValue(t, state, "gpt-5.5", "context_window"); got != float64(372000) {
+		t.Fatalf("context_window = %v, want the base value", got)
+	}
+}
+
+func TestCodexClientModelsOverrideFileRewriteReplacesExistingFile(t *testing.T) {
+	restore := snapshotCodexClientModelsStore(t)
+	defer restore()
+
+	dir := t.TempDir()
+	overridePath := filepath.Join(dir, CodexClientModelsOverrideFileName)
+	base := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1), testCodexClientModel("gpt-5.6-sol", 2))
+	if _, err := setCodexClientModelsBase(base, "test"); err != nil {
+		t.Fatalf("set base catalog: %v", err)
+	}
+	SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
+
+	if err := SetCodexClientModelsOverride([]byte(`{"gpt-5.5":{"display_name":"First"}}`)); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if _, errStat := os.Stat(overridePath); errStat != nil {
+		t.Fatalf("first write did not create %s: %v", overridePath, errStat)
+	}
+
+	// The next writes rename a temporary file over the file created above, which has
+	// to replace the existing destination on every platform.
+	if err := SetCodexClientModelsOverride([]byte(`{"gpt-5.5":{"display_name":"Second"}}`)); err != nil {
+		t.Fatalf("second write over an existing file: %v", err)
+	}
+	if got := codexClientModelStateValue(t, GetCodexClientModelsState(), "gpt-5.5", "display_name"); got != "Second" {
+		t.Fatalf("display_name after second write = %v, want %q", got, "Second")
+	}
+	if err := SetCodexClientModelsOverrideEntry("gpt-5.5", json.RawMessage(`{"display_name":"Third"}`)); err != nil {
+		t.Fatalf("entry write over an existing file: %v", err)
+	}
+	if got := codexClientModelStateValue(t, GetCodexClientModelsState(), "gpt-5.5", "display_name"); got != "Third" {
+		t.Fatalf("display_name after entry write = %v, want %q", got, "Third")
+	}
+}
