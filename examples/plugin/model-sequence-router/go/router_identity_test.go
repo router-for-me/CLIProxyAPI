@@ -2,6 +2,9 @@ package main
 
 import (
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 // TestRouteHoldsSequenceWhenPromptCacheKeyAppears verifies that a credential-affinity
@@ -36,6 +39,37 @@ func TestRouteKeepsConversationsSharingOneCacheLaneApart(t *testing.T) {
 	}
 }
 
+// TestRouteReplaysObjectInteractionsInput verifies that one Interactions turn sent as
+// an object and the equivalent single-element array share one observed turn before a
+// longer transcript advances.
+func TestRouteReplaysObjectInteractionsInput(t *testing.T) {
+	runtime := newTestRuntime(t)
+	logs := captureRouteLogs(runtime)
+	opening := `{"role":"user","steps":[{"type":"user_input","content":[{"text":"object opening"}]}]}`
+	answer := `{"role":"assistant","steps":[{"type":"model_output","content":[{"text":"answer"}]}]}`
+	second := `{"role":"user","steps":[{"type":"user_input","content":[{"text":"second turn"}]}]}`
+	request := pluginapi.ModelRouteRequest{
+		RequestedModel:     "Iterative-Model",
+		SourceFormat:       string(translator.FormatInteractions),
+		AvailableProviders: []string{"codex", "claude"},
+		Body:               []byte(`{"input":` + opening + `}`),
+	}
+
+	runtime.route(request)
+	runtime.route(request)
+	request.Body = []byte(`{"input":[` + opening + `]}`)
+	runtime.route(request)
+	request.Body = []byte(`{"input":[` + opening + `,` + answer + `,` + second + `]}`)
+	runtime.route(request)
+
+	assertRouteRecords(t, logs, []routeRecordExpectation{
+		{outcome: "advanced", sequenceIndex: 0},
+		{outcome: "replayed", sequenceIndex: 0},
+		{outcome: "replayed", sequenceIndex: 0},
+		{outcome: "advanced", sequenceIndex: 1},
+	})
+}
+
 // TestRouteReplaysScalarResponsesInput verifies that scalar and equivalent
 // array input share one observed turn before an extended transcript advances.
 func TestRouteReplaysScalarResponsesInput(t *testing.T) {
@@ -49,14 +83,10 @@ func TestRouteReplaysScalarResponsesInput(t *testing.T) {
 	runtime.route(responsesRoute(t, "scalar", "", 1))
 	runtime.route(responsesRoute(t, "scalar", "", 2))
 
-	wantOutcomes := []string{"advanced", "replayed", "replayed", "advanced"}
-	wantIndexes := []int{0, 0, 0, 1}
-	if len(*logs) != len(wantOutcomes) {
-		t.Fatalf("route records = %d, want %d: %#v", len(*logs), len(wantOutcomes), *logs)
-	}
-	for index, record := range *logs {
-		if record.fields["outcome"] != wantOutcomes[index] || record.fields["sequence_index"] != wantIndexes[index] {
-			t.Fatalf("record %d = %#v, want %s at %d", index, record.fields, wantOutcomes[index], wantIndexes[index])
-		}
-	}
+	assertRouteRecords(t, logs, []routeRecordExpectation{
+		{outcome: "advanced", sequenceIndex: 0},
+		{outcome: "replayed", sequenceIndex: 0},
+		{outcome: "replayed", sequenceIndex: 0},
+		{outcome: "advanced", sequenceIndex: 1},
+	})
 }

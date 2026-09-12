@@ -79,15 +79,31 @@ func inspectRequest(body []byte, salt []byte) requestObservation {
 	return observation
 }
 
-// firstHistory selects the first supported history field and folds scalar
-// Responses input into the same user-message shape accepted by array input.
+// firstHistory selects the first supported history field and folds the shorthand
+// input encodings into the collection shape carried by array input. Scalar input
+// becomes one user message, and a single turn sent as an object becomes that one
+// turn, so every encoding of one conversation state observes the same history.
 func firstHistory(root map[string]any, keys ...string) []any {
 	for _, key := range keys {
-		if values, ok := root[key].([]any); ok {
-			return values
+		value, exists := root[key]
+		if !exists {
+			continue
 		}
-		if text, ok := root[key].(string); key == "input" && ok && strings.TrimSpace(text) != "" {
-			return []any{map[string]any{"role": "user", "content": text}}
+		switch typed := value.(type) {
+		case []any:
+			return typed
+		case string:
+			if key != "input" || strings.TrimSpace(typed) == "" {
+				continue
+			}
+			return []any{map[string]any{"role": "user", "content": typed}}
+		case map[string]any:
+			if key != "input" || len(typed) == 0 {
+				continue
+			}
+			return []any{typed}
+		default:
+			continue
 		}
 	}
 	return nil

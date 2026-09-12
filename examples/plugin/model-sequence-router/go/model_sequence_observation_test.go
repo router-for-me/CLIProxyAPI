@@ -10,6 +10,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+type routeRecordExpectation struct {
+	outcome       string
+	sequenceIndex int
+}
+
 // captureRouteLogs redirects plugin logging into a slice the caller inspects.
 func captureRouteLogs(runtime *runtimeState) *[]capturedPluginLog {
 	logs := make([]capturedPluginLog, 0, 4)
@@ -19,6 +24,21 @@ func captureRouteLogs(runtime *runtimeState) *[]capturedPluginLog {
 		})
 	}
 	return &logs
+}
+
+// assertRouteRecords verifies the captured route records name the expected outcome
+// and sequence position in call order.
+func assertRouteRecords(t *testing.T, logs *[]capturedPluginLog, expectations []routeRecordExpectation) {
+	t.Helper()
+	if len(*logs) != len(expectations) {
+		t.Fatalf("route records = %d, want %d: %#v", len(*logs), len(expectations), *logs)
+	}
+	for index, expectation := range expectations {
+		record := (*logs)[index]
+		if record.fields["outcome"] != expectation.outcome || record.fields["sequence_index"] != expectation.sequenceIndex {
+			t.Fatalf("record %d = %#v, want %s at %d", index, record.fields, expectation.outcome, expectation.sequenceIndex)
+		}
+	}
 }
 
 func TestRouterLogsSelectionThroughHostWithoutSensitiveIdentifiers(t *testing.T) {
@@ -82,16 +102,12 @@ func TestRouterAdvancesOncePerConversationState(t *testing.T) {
 	if got := runtime.route(changed); got.Target != "codex" {
 		t.Fatalf("changed state call = %#v", got)
 	}
-	wantOutcomes := []string{"advanced", "replayed", "advanced"}
-	wantIndexes := []int{0, 0, 1}
-	if len(*logs) != len(wantOutcomes) {
-		t.Fatalf("route records = %d, want %d", len(*logs), len(wantOutcomes))
-	}
-	for index, want := range wantOutcomes {
-		record := (*logs)[index]
-		if record.fields["outcome"] != want || record.fields["sequence_index"] != wantIndexes[index] {
-			t.Fatalf("record %d = %#v, want %s at %d", index, record.fields, want, wantIndexes[index])
-		}
+	assertRouteRecords(t, logs, []routeRecordExpectation{
+		{outcome: "advanced", sequenceIndex: 0},
+		{outcome: "replayed", sequenceIndex: 0},
+		{outcome: "advanced", sequenceIndex: 1},
+	})
+	for index, record := range *logs {
 		if record.fields["identity_source"] != string(identitySourceDerived) {
 			t.Fatalf("record %d identity source = %#v", index, record.fields["identity_source"])
 		}
