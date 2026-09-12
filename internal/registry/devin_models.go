@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -128,10 +129,15 @@ func sanitizeAndValidateDevinModels(models []*ModelInfo) ([]*ModelInfo, error) {
 		if m == nil {
 			return nil, fmt.Errorf("model at index %d is null", i)
 		}
-		id := m.ID
+		id := strings.TrimSpace(m.ID)
 		if id == "" {
 			return nil, fmt.Errorf("model at index %d has empty id", i)
 		}
+		// Automatically namespace model IDs under devin/ if not already prefixed
+		if !strings.HasPrefix(strings.ToLower(id), "devin/") {
+			id = "devin/" + id
+		}
+		m.ID = id
 		if _, exists := seen[id]; exists {
 			return nil, fmt.Errorf("duplicate model id: %q", id)
 		}

@@ -1,7 +1,7 @@
 {
   "devin": [
     {
-      "id": "devin/swe-2",
+      "id": "swe-2",
       "object": "model",
       "type": "devin",
       "owned_by": "cognition",
@@ -24,7 +24,7 @@
       }
     },
     {
-      "id": "devin/swe-1-7",
+      "id": "swe-1-7",
       "object": "model",
       "type": "devin",
       "owned_by": "cognition",
@@ -46,7 +46,7 @@
       }
     },
     {
-      "id": "devin/swe-1-6",
+      "id": "swe-1-6",
       "object": "model",
       "type": "devin",
       "owned_by": "cognition",
@@ -61,7 +61,7 @@
       ]
     },
     {
-      "id": "devin/glm-5-2",
+      "id": "glm-5-2",
       "object": "model",
       "type": "devin",
       "owned_by": "zhipu",
@@ -82,7 +82,7 @@
       }
     },
     {
-      "id": "devin/glm-5-3",
+      "id": "glm-5-3",
       "object": "model",
       "type": "devin",
       "owned_by": "zhipu",
@@ -104,7 +104,7 @@
       }
     },
     {
-      "id": "devin/glm-5-3-flash",
+      "id": "glm-5-3-flash",
       "object": "model",
       "type": "devin",
       "owned_by": "zhipu",
@@ -126,7 +126,7 @@
       }
     },
     {
-      "id": "devin/deepseek-v4-flash",
+      "id": "deepseek-v4-flash",
       "object": "model",
       "type": "devin",
       "owned_by": "deepseek",
@@ -147,7 +147,7 @@
       }
     },
     {
-      "id": "devin/deepseek-v4-1-flash",
+      "id": "deepseek-v4-1-flash",
       "object": "model",
       "type": "devin",
       "owned_by": "deepseek",
@@ -168,7 +168,7 @@
       }
     },
     {
-      "id": "devin/deepseek-v4-pro",
+      "id": "deepseek-v4-pro",
       "object": "model",
       "type": "devin",
       "owned_by": "deepseek",
@@ -189,7 +189,7 @@
       }
     },
     {
-      "id": "devin/gemini-3-8-flash",
+      "id": "gemini-3-8-flash",
       "object": "model",
       "type": "devin",
       "owned_by": "google",
@@ -212,7 +212,7 @@
       }
     },
     {
-      "id": "devin/gemini-3-7-flash",
+      "id": "gemini-3-7-flash",
       "object": "model",
       "type": "devin",
       "owned_by": "google",
@@ -234,7 +234,7 @@
       }
     },
     {
-      "id": "devin/gemini-3-6-flash",
+      "id": "gemini-3-6-flash",
       "object": "model",
       "type": "devin",
       "owned_by": "google",
@@ -258,7 +258,7 @@
       }
     },
     {
-      "id": "devin/gemini-3-5-flash",
+      "id": "gemini-3-5-flash",
       "object": "model",
       "type": "devin",
       "owned_by": "google",
@@ -282,7 +282,7 @@
       }
     },
     {
-      "id": "devin/gemini-3-flash",
+      "id": "gemini-3-flash",
       "object": "model",
       "type": "devin",
       "owned_by": "google",
@@ -306,7 +306,7 @@
       }
     },
     {
-      "id": "devin/claude-fable-5-1",
+      "id": "claude-fable-5-1",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -331,7 +331,7 @@
       }
     },
     {
-      "id": "devin/claude-5-fable",
+      "id": "claude-5-fable",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -356,7 +356,7 @@
       }
     },
     {
-      "id": "devin/claude-sonnet-5",
+      "id": "claude-sonnet-5",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -381,7 +381,7 @@
       }
     },
     {
-      "id": "devin/claude-opus-5",
+      "id": "claude-opus-5",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -406,7 +406,7 @@
       }
     },
     {
-      "id": "devin/claude-opus-4-8",
+      "id": "claude-opus-4-8",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -431,7 +431,7 @@
       }
     },
     {
-      "id": "devin/claude-opus-4-7",
+      "id": "claude-opus-4-7",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -456,7 +456,7 @@
       }
     },
     {
-      "id": "devin/claude-opus-4-6",
+      "id": "claude-opus-4-6",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -472,7 +472,7 @@
       ]
     },
     {
-      "id": "devin/claude-sonnet-4-6",
+      "id": "claude-sonnet-4-6",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -488,7 +488,7 @@
       ]
     },
     {
-      "id": "devin/claude-haiku-4-5",
+      "id": "claude-haiku-4-5",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -504,7 +504,7 @@
       ]
     },
     {
-      "id": "devin/claude-sonnet-4-5",
+      "id": "claude-sonnet-4-5",
       "object": "model",
       "type": "devin",
       "owned_by": "anthropic",
@@ -520,7 +520,7 @@
       ]
     },
     {
-      "id": "devin/gpt-6-astra",
+      "id": "gpt-6-astra",
       "object": "model",
       "type": "devin",
       "owned_by": "openai",
@@ -545,7 +545,7 @@
       }
     },
     {
-      "id": "devin/gpt-5-6-sol",
+      "id": "gpt-5-6-sol",
       "object": "model",
       "type": "devin",
       "owned_by": "openai",
@@ -571,7 +571,7 @@
       }
     },
     {
-      "id": "devin/gpt-5-6-terra",
+      "id": "gpt-5-6-terra",
       "object": "model",
       "type": "devin",
       "owned_by": "openai",
@@ -597,7 +597,7 @@
       }
     },
     {
-      "id": "devin/gpt-5-6-luna",
+      "id": "gpt-5-6-luna",
       "object": "model",
       "type": "devin",
       "owned_by": "openai",
@@ -623,7 +623,7 @@
       }
     },
     {
-      "id": "devin/gpt-5-5",
+      "id": "gpt-5-5",
       "object": "model",
       "type": "devin",
       "owned_by": "openai",
@@ -648,7 +648,7 @@
       }
     },
     {
-      "id": "devin/gpt-5-4",
+      "id": "gpt-5-4",
       "object": "model",
       "type": "devin",
       "owned_by": "openai",
@@ -673,7 +673,7 @@
       }
     },
     {
-      "id": "devin/gpt-5-4-mini",
+      "id": "gpt-5-4-mini",
       "object": "model",
       "type": "devin",
       "owned_by": "openai",
@@ -697,7 +697,7 @@
       }
     },
     {
-      "id": "devin/gpt-5-3-codex",
+      "id": "gpt-5-3-codex",
       "object": "model",
       "type": "devin",
       "owned_by": "openai",
@@ -721,7 +721,7 @@
       }
     },
     {
-      "id": "devin/gpt-4-1",
+      "id": "gpt-4-1",
       "object": "model",
       "type": "devin",
       "owned_by": "openai",
@@ -737,7 +737,7 @@
       ]
     },
     {
-      "id": "devin/grok-4-6",
+      "id": "grok-4-6",
       "object": "model",
       "type": "devin",
       "owned_by": "xai",
@@ -761,7 +761,7 @@
       }
     },
     {
-      "id": "devin/grok-4-5",
+      "id": "grok-4-5",
       "object": "model",
       "type": "devin",
       "owned_by": "xai",
@@ -784,7 +784,7 @@
       }
     },
     {
-      "id": "devin/kimi-k3",
+      "id": "kimi-k3",
       "object": "model",
       "type": "devin",
       "owned_by": "moonshot",
@@ -806,7 +806,7 @@
       }
     },
     {
-      "id": "devin/kimi-k2-7",
+      "id": "kimi-k2-7",
       "object": "model",
       "type": "devin",
       "owned_by": "moonshot",
@@ -821,7 +821,7 @@
       ]
     },
     {
-      "id": "devin/kimi-k2-6",
+      "id": "kimi-k2-6",
       "object": "model",
       "type": "devin",
       "owned_by": "moonshot",
@@ -836,7 +836,7 @@
       ]
     },
     {
-      "id": "devin/nemotron-3-ultra",
+      "id": "nemotron-3-ultra",
       "object": "model",
       "type": "devin",
       "owned_by": "nvidia",

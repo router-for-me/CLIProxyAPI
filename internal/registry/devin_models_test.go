@@ -65,6 +65,24 @@ func TestValidateDevinModelsJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("clean id without devin prefix automatically namespaced", func(t *testing.T) {
+		data := []byte(`{
+			"devin": [
+				{
+					"id": "swe-2",
+					"display_name": "SWE-2"
+				}
+			]
+		}`)
+		models, err := ValidateDevinModelsJSON(data)
+		if err != nil {
+			t.Fatalf("expected valid, got error: %v", err)
+		}
+		if len(models) != 1 || models[0].ID != "devin/swe-2" {
+			t.Fatalf("expected auto-namespaced to devin/swe-2, got: %q", models[0].ID)
+		}
+	})
+
 	t.Run("empty payload", func(t *testing.T) {
 		_, err := ValidateDevinModelsJSON([]byte(`   `))
 		if err == nil {

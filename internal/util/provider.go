@@ -70,6 +70,11 @@ func GetProviderName(modelName string) []string {
 			appendProvider(provider)
 		}
 	}
+	if len(providers) == 0 && !strings.HasPrefix(strings.ToLower(modelName), "devin/") {
+		for _, provider := range registry.GetGlobalRegistry().GetModelProviders("devin/" + strings.ToLower(modelName)) {
+			appendProvider(provider)
+		}
+	}
 
 	if len(providers) > 0 {
 		return providers
