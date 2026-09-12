@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -41,6 +43,31 @@ type poolBreaker struct {
 }
 
 var globalPoolBreaker = &poolBreaker{pools: make(map[string]*poolBreakerEntry)}
+
+// poolBreakerContributionKey returns the breaker key an auth CONTRIBUTES
+// failures/successes under. Only auths that opted in via the
+// pool_circuit_breaker attribute participate (design G3: the opt-in gates
+// contribution), keyed by the auth's compound provider_key.
+func poolBreakerContributionKey(auth *Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	if auth.Attributes[AttributePoolCircuitBreaker] != "true" {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes["provider_key"])
+}
+
+// poolBreakerSelectionKey returns the breaker key an auth is BLOCKED by during
+// selection. The breaker is pool-keyed (design G3): every auth carrying the
+// pool's provider_key is subject to the pool's breaker state, whether or not
+// it itself opted in — the opt-in only gates who feeds the breaker.
+func poolBreakerSelectionKey(auth *Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes["provider_key"])
+}
 
 // entry returns the entry for key, creating a fresh CLOSED entry if absent.
 func (b *poolBreaker) entry(key string) *poolBreakerEntry {
@@ -143,4 +170,46 @@ func (b *poolBreaker) blockDeadline(key string, now time.Time) (time.Time, bool)
 	default:
 		return time.Time{}, false
 	}
+}
+
+// PoolBreakerRecord is one pool's live breaker state for observability.
+type PoolBreakerRecord struct {
+	PoolKey   string    `json:"pool_key"`
+	State     string    `json:"state"` // closed|open|half_open
+	Failures  int       `json:"failures"`
+	OpenedAt  time.Time `json:"opened_at,omitempty"`
+	OpenUntil time.Time `json:"open_until,omitempty"`
+}
+
+// PoolBreakerSnapshot returns the live breaker states (in-memory; not
+// persisted). OpenUntil carries openedAt+resetPeriod while the pool blocks
+// selection (OPEN, or HALF_OPEN with an unresolved probe) and is zero
+// otherwise. Safe to call concurrently with the scheduler/selector.
+func PoolBreakerSnapshot() []PoolBreakerRecord {
+	globalPoolBreaker.mu.Lock()
+	defer globalPoolBreaker.mu.Unlock()
+	records := make([]PoolBreakerRecord, 0, len(globalPoolBreaker.pools))
+	for key, entry := range globalPoolBreaker.pools {
+		record := PoolBreakerRecord{
+			PoolKey:  key,
+			Failures: entry.failures,
+		}
+		switch entry.state {
+		case breakerOpen:
+			record.State = "open"
+			record.OpenedAt = entry.openedAt
+			record.OpenUntil = entry.openedAt.Add(entry.resetPeriod)
+		case breakerHalfOpen:
+			record.State = "half_open"
+			record.OpenedAt = entry.openedAt
+			record.OpenUntil = entry.openedAt.Add(entry.resetPeriod)
+		default:
+			record.State = "closed"
+		}
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].PoolKey < records[j].PoolKey
+	})
+	return records
 }

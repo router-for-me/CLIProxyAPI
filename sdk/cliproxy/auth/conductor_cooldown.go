@@ -776,6 +776,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				} else {
 					decayModelStateOnSuccess(state, now)
 				}
+				// Pool-level breaker (G3): mirror the failure feed — a success
+				// closes the pool breaker regardless of per-auth cooling, so a
+				// disable-cooling pool still recovers once traffic succeeds.
+				if key := poolBreakerContributionKey(auth); key != "" {
+					globalPoolBreaker.recordSuccess(key, now)
+				}
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -902,6 +908,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 408, 500, 502, 503, 504:
 							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()
+							// Pool-level breaker (G3): only 408/5xx feed it;
+							// quota/auth classes belong to the per-auth ladder.
+							if key := poolBreakerContributionKey(auth); key != "" {
+								globalPoolBreaker.recordFailure(key, now)
+							}
 						default:
 							state.NextRetryAfter = recoverableFailureRetryAfter(now, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()

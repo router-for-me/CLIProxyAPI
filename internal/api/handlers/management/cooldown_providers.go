@@ -73,7 +73,10 @@ func (h *Handler) GetCooldownProviders(c *gin.Context) {
 	}
 
 	log.Debugf("cooldown-providers: returning %d rows", len(rows))
-	c.JSON(http.StatusOK, gin.H{"records": rows})
+	c.JSON(http.StatusOK, gin.H{
+		"records":       rows,
+		"pool_breakers": coreauth.PoolBreakerSnapshot(),
+	})
 }
 
 // formatCooldownTime renders a time.Time as RFC3339, returning "" for the

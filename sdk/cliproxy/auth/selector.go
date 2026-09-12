@@ -563,6 +563,15 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
+	// Pool-level circuit breaker (G3): the breaker is keyed by the pool
+	// (provider_key), so every auth carrying that key is subject to its state —
+	// the opt-in attribute gates only who feeds the breaker, not who it blocks.
+	// Applies to both the model and model-less paths below.
+	if key := poolBreakerSelectionKey(auth); key != "" {
+		if deadline, blocked := globalPoolBreaker.blockDeadline(key, now); blocked {
+			return true, blockReasonCooldown, deadline
+		}
+	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			modelKey := canonicalModelKey(model)
