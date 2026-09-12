@@ -170,12 +170,16 @@ type ModelInfo struct {
 	MaxCompletionTokens int64
 	// SupportedParameters lists request parameters supported by the model.
 	SupportedParameters []string
+	// UnsupportedParameters lists request parameters known to be unsupported by the model.
+	UnsupportedParameters []string
 	// SupportedInputModalities lists accepted input modality names.
 	SupportedInputModalities []string
 	// SupportedOutputModalities lists produced output modality names.
 	SupportedOutputModalities []string
 	// Thinking describes optional reasoning controls for the model.
 	Thinking *ThinkingSupport
+	// ReasoningSupported distinguishes known support from unknown metadata.
+	ReasoningSupported *bool
 	// UserDefined reports whether the model was provided by user configuration.
 	UserDefined bool
 }

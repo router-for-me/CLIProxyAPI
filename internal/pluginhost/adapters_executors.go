@@ -369,6 +369,21 @@ func (h *Host) modelProvider(pluginID string) string {
 	return h.modelProviders[pluginID]
 }
 
+// PluginExecutorProvider returns the provider identity registered by an executor plugin.
+func (h *Host) PluginExecutorProvider(pluginID string) string {
+	if provider := h.modelProvider(pluginID); provider != "" {
+		return provider
+	}
+	for _, record := range h.activeRecords() {
+		if record.id != pluginID || record.plugin.Capabilities.Executor == nil {
+			continue
+		}
+		provider, _ := h.executorProvider(record, record.plugin.Capabilities.Executor)
+		return provider
+	}
+	return ""
+}
+
 type executorAdapter struct {
 	host          *Host
 	pluginID      string

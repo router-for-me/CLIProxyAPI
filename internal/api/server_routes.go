@@ -76,6 +76,7 @@ func (s *Server) setupRoutes() {
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
+		v1.POST("/responses/input_tokens", openaiResponsesHandlers.InputTokens)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 		v1.POST("/alpha/search", s.codexAlphaSearch)
 		v1.POST("/live", s.codexLiveHandler.Handle)
@@ -113,6 +114,7 @@ func (s *Server) setupRoutes() {
 	{
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
+		codexDirect.POST("/responses/input_tokens", openaiResponsesHandlers.InputTokens)
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
 		codexDirect.POST("/alpha/search", s.codexAlphaSearch)
 	}
@@ -578,6 +580,11 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 				s.handleHomeCodexClientModels(c, clientVersion)
 				return
 			}
+			openaiHandler.OpenAIModels(c)
+			return
+		}
+
+		if c.Query("capabilities") == "true" {
 			openaiHandler.OpenAIModels(c)
 			return
 		}

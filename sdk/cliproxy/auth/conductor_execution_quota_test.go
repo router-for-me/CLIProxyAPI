@@ -211,6 +211,7 @@ func TestSyncMetadataSessionToContext(t *testing.T) {
 }
 
 func TestApplyRequestAfterAuthInterceptorSessionClearing(t *testing.T) {
+	var selectedProvider string
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-luna",
 		Payload: nil,
@@ -224,6 +225,7 @@ func TestApplyRequestAfterAuthInterceptorSessionClearing(t *testing.T) {
 			cliproxyexecutor.ParentSessionIDMetadataKey:    "session:initial-parent",
 		},
 		RequestAfterAuthInterceptor: func(ctx context.Context, req cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+			selectedProvider = req.Provider
 			return cliproxyexecutor.RequestAfterAuthInterceptResponse{
 				ClearHeaders: []string{"X-Session-ID"},
 			}
@@ -233,6 +235,9 @@ func TestApplyRequestAfterAuthInterceptorSessionClearing(t *testing.T) {
 	finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if selectedProvider != "openai" {
+		t.Fatalf("selected provider = %q, want openai", selectedProvider)
 	}
 	if len(finalOpts.Headers) != 0 {
 		t.Fatalf("headers not cleared: %v", finalOpts.Headers)

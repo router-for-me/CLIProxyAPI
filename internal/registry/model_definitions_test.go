@@ -154,3 +154,37 @@ func TestWithCodexBuiltinsIncludesImage25Models(t *testing.T) {
 		}
 	}
 }
+
+func TestGeneratedMediaBuiltinsDeclareOutputModalities(t *testing.T) {
+	tests := []struct {
+		name  string
+		model *ModelInfo
+		want  string
+	}{
+		{name: "codex image", model: codexBuiltinImageModelInfo(), want: "image"},
+		{name: "codex image 2.5 flare", model: codexBuiltinImage25FlareModelInfo(), want: "image"},
+		{name: "codex image 2.5 sunburst", model: codexBuiltinImage25SunburstModelInfo(), want: "image"},
+		{name: "codex image 2.5", model: codexBuiltinImage25ModelInfo(), want: "image"},
+		{name: "xai image", model: xaiBuiltinImageModelInfo(), want: "image"},
+		{name: "xai video", model: xaiBuiltinVideoModelInfo(), want: "video"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if len(tt.model.SupportedOutputModalities) != 1 || tt.model.SupportedOutputModalities[0] != tt.want {
+				t.Fatalf("output modalities = %#v, want [%s]", tt.model.SupportedOutputModalities, tt.want)
+			}
+		})
+	}
+}
+
+func TestStaticChatModelsDeclareTextModalities(t *testing.T) {
+	for _, id := range []string{"claude-3-5-haiku-20241022", "grok-composer-2.5-fast"} {
+		model := LookupStaticModelInfo(id)
+		if model == nil {
+			t.Fatalf("model %q missing", id)
+		}
+		if len(model.SupportedInputModalities) == 0 || len(model.SupportedOutputModalities) != 1 || model.SupportedOutputModalities[0] != "text" {
+			t.Fatalf("model %q modalities = input %#v output %#v", id, model.SupportedInputModalities, model.SupportedOutputModalities)
+		}
+	}
+}

@@ -134,9 +134,11 @@ func pluginModelInfoToRegistryModelInfo(model pluginapi.ModelInfo) *registry.Mod
 		ContextLength:              int(model.ContextLength),
 		MaxCompletionTokens:        int(model.MaxCompletionTokens),
 		SupportedParameters:        cloneStringSlice(model.SupportedParameters),
+		UnsupportedParameters:      cloneStringSlice(model.UnsupportedParameters),
 		SupportedInputModalities:   cloneStringSlice(model.SupportedInputModalities),
 		SupportedOutputModalities:  cloneStringSlice(model.SupportedOutputModalities),
 		Thinking:                   pluginThinkingSupportToRegistryThinkingSupport(model.Thinking),
+		ReasoningSupported:         cloneBoolPointer(model.ReasoningSupported),
 		UserDefined:                model.UserDefined,
 	}
 }
@@ -174,9 +176,11 @@ func registryModelInfoToPluginModelInfo(model *registry.ModelInfo) pluginapi.Mod
 		ContextLength:              int64(model.ContextLength),
 		MaxCompletionTokens:        int64(model.MaxCompletionTokens),
 		SupportedParameters:        cloneStringSlice(model.SupportedParameters),
+		UnsupportedParameters:      cloneStringSlice(model.UnsupportedParameters),
 		SupportedInputModalities:   cloneStringSlice(model.SupportedInputModalities),
 		SupportedOutputModalities:  cloneStringSlice(model.SupportedOutputModalities),
 		Thinking:                   registryThinkingSupportToPluginThinkingSupport(model.Thinking),
+		ReasoningSupported:         cloneBoolPointer(model.ReasoningSupported),
 		UserDefined:                model.UserDefined,
 	}
 }
@@ -195,10 +199,18 @@ func registryThinkingSupportToPluginThinkingSupport(thinking *registry.ThinkingS
 }
 
 func cloneStringSlice(in []string) []string {
-	if len(in) == 0 {
+	if in == nil {
 		return nil
 	}
-	return append([]string(nil), in...)
+	return append([]string{}, in...)
+}
+
+func cloneBoolPointer(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func cloneRegistryModels(in []*registry.ModelInfo) []*registry.ModelInfo {
@@ -213,6 +225,7 @@ func cloneRegistryModels(in []*registry.ModelInfo) []*registry.ModelInfo {
 		copyModel := *model
 		copyModel.SupportedGenerationMethods = cloneStringSlice(model.SupportedGenerationMethods)
 		copyModel.SupportedParameters = cloneStringSlice(model.SupportedParameters)
+		copyModel.UnsupportedParameters = cloneStringSlice(model.UnsupportedParameters)
 		copyModel.SupportedInputModalities = cloneStringSlice(model.SupportedInputModalities)
 		copyModel.SupportedOutputModalities = cloneStringSlice(model.SupportedOutputModalities)
 		if model.Thinking != nil {
@@ -220,6 +233,7 @@ func cloneRegistryModels(in []*registry.ModelInfo) []*registry.ModelInfo {
 			thinking.Levels = cloneStringSlice(model.Thinking.Levels)
 			copyModel.Thinking = &thinking
 		}
+		copyModel.ReasoningSupported = cloneBoolPointer(model.ReasoningSupported)
 		out = append(out, &copyModel)
 	}
 	return out

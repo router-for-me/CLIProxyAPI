@@ -147,6 +147,14 @@ func (h *Host) ModelsForProvider(provider string) []ModelInfo {
 	return registryModelsToPluginModels(h.inner.ModelsForProvider(provider))
 }
 
+// PluginExecutorProvider returns the provider identity registered by an executor plugin.
+func (h *Host) PluginExecutorProvider(pluginID string) string {
+	if h == nil || h.inner == nil {
+		return ""
+	}
+	return h.inner.PluginExecutorProvider(pluginID)
+}
+
 // RefreshAuth lets plugin auth providers refresh a credential.
 func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, bool, error) {
 	if h == nil || h.inner == nil {
@@ -299,9 +307,11 @@ func registryModelToPluginModel(model *internalregistry.ModelInfo) ModelInfo {
 		ContextLength:              int64(model.ContextLength),
 		MaxCompletionTokens:        int64(model.MaxCompletionTokens),
 		SupportedParameters:        cloneStringSlice(model.SupportedParameters),
+		UnsupportedParameters:      cloneStringSlice(model.UnsupportedParameters),
 		SupportedInputModalities:   cloneStringSlice(model.SupportedInputModalities),
 		SupportedOutputModalities:  cloneStringSlice(model.SupportedOutputModalities),
 		Thinking:                   thinkingSupportToPlugin(model.Thinking),
+		ReasoningSupported:         cloneBoolPointer(model.ReasoningSupported),
 		UserDefined:                model.UserDefined,
 	}
 }
@@ -320,10 +330,18 @@ func thinkingSupportToPlugin(thinking *internalregistry.ThinkingSupport) *Thinki
 }
 
 func cloneStringSlice(in []string) []string {
-	if len(in) == 0 {
+	if in == nil {
 		return nil
 	}
-	return append([]string(nil), in...)
+	return append([]string{}, in...)
+}
+
+func cloneBoolPointer(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 func cloneStringSliceMap(in map[string][]string) map[string][]string {

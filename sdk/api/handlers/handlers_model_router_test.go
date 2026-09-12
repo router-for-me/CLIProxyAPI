@@ -87,10 +87,11 @@ func (h *handlerRouterOnlyTestHost) HasModelRouters() bool {
 
 type handlerDirectExecutorRouteHost struct {
 	handlerRouterOnlyTestHost
-	lastPluginID string
-	lastRequest  coreexecutor.Request
-	lastOptions  coreexecutor.Options
-	stream       func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
+	lastPluginID     string
+	lastRequest      coreexecutor.Request
+	lastOptions      coreexecutor.Options
+	executorProvider string
+	stream           func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
 }
 
 type handlerSkipAwareDirectExecutorRouteHost struct {
@@ -134,10 +135,18 @@ func (h *handlerDirectExecutorRouteHost) CountPluginExecutor(ctx context.Context
 	return coreexecutor.Response{Payload: []byte("7")}, nil
 }
 
+func (h *handlerDirectExecutorRouteHost) PluginExecutorProvider(pluginID string) string {
+	if h.executorProvider != "" {
+		return h.executorProvider
+	}
+	return pluginID
+}
+
 type handlerDirectExecutorInterceptorHost struct {
 	handlerDirectExecutorRouteHost
 	afterAuthCalled bool
 	afterAuthReq    pluginapi.RequestInterceptRequest
+	afterAuthBody   []byte
 }
 
 func (h *handlerDirectExecutorInterceptorHost) HasRequestInterceptors() bool { return true }
@@ -156,7 +165,11 @@ func (h *handlerDirectExecutorInterceptorHost) InterceptRequestAfterAuth(ctx con
 		headers = make(http.Header)
 	}
 	headers.Set("X-After-Auth", "yes")
-	return pluginapi.RequestInterceptResponse{Headers: headers, Body: []byte(`{"after":true}`)}
+	body := h.afterAuthBody
+	if len(body) == 0 {
+		body = []byte(`{"after":true}`)
+	}
+	return pluginapi.RequestInterceptResponse{Headers: headers, Body: body}
 }
 
 func (h *handlerDirectExecutorInterceptorHost) InterceptResponse(ctx context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
