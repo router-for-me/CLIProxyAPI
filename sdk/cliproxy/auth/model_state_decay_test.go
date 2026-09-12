@@ -192,6 +192,23 @@ func TestDecayModelStateOnSuccess(t *testing.T) {
 			t.Fatal("Quota.NextRecoverAt zero, want 1s floor for missing deadline")
 		}
 	})
+
+	t.Run("long-window residual capped at transient window", func(t *testing.T) {
+		state := &ModelState{
+			Status:         StatusError,
+			Unavailable:    true,
+			NextRetryAfter: now.Add(30 * time.Minute), // 401/403-style long lockout
+			FailureCount:   4,
+			UpdatedAt:      now.Add(-time.Second),
+		}
+		decayModelStateOnSuccess(state, now)
+		if state.FailureCount != 2 {
+			t.Fatalf("FailureCount = %d, want 2", state.FailureCount)
+		}
+		if cap := now.Add(transientErrorCooldown); state.NextRetryAfter.After(cap) {
+			t.Fatalf("NextRetryAfter = %v, want capped at %v", state.NextRetryAfter, cap)
+		}
+	})
 }
 
 // TestModelStateDecayCloneAndMerge covers the FailureCount mutation surface
@@ -212,5 +229,116 @@ func TestModelStateDecayCloneAndMerge(t *testing.T) {
 	merged = mergeModelState(&ModelState{Status: StatusError, FailureCount: 7, UpdatedAt: now}, &ModelState{Status: StatusError, FailureCount: 2, UpdatedAt: now})
 	if merged.FailureCount != 7 {
 		t.Fatalf("mergeModelState FailureCount = %d, want max(7, 2) = 7", merged.FailureCount)
+	}
+}
+
+// TestModelStateDecayNotPersisted pins the persistence contract: FailureCount
+// is in-memory only, so cooldown-state records built from a failing model
+// never carry it.
+func TestModelStateDecayNotPersisted(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	store := &recordingCooldownStateStore{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	auth := &Auth{ID: "auth-decay-persist", Provider: "codex"}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register(): %v", errRegister)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "gpt-5",
+		Success:  false,
+		Error:    &Error{Message: "upstream failure", HTTPStatus: http.StatusServiceUnavailable},
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil || updated.ModelStates["gpt-5"] == nil {
+		t.Fatal("expected model state after failure")
+	}
+	if updated.ModelStates["gpt-5"].FailureCount != 1 {
+		t.Fatalf("FailureCount = %d, want 1", updated.ModelStates["gpt-5"].FailureCount)
+	}
+
+	records := manager.CooldownStateSnapshot()
+	if len(records) == 0 {
+		t.Fatal("expected a cooldown record for the failing model")
+	}
+	// CooldownStateRecord has no FailureCount field at all — the struct-level
+	// shape is the persistence contract; this also pins that the snapshot is
+	// populated from a state carrying a nonzero count.
+	for _, record := range records {
+		if record.Model != "gpt-5" {
+			continue
+		}
+		if !record.NextRetryAfter.After(time.Now()) {
+			t.Fatalf("record NextRetryAfter = %v, want future cooldown deadline", record.NextRetryAfter)
+		}
+	}
+}
+
+// TestModelStateDecayDisableCoolingFullReset pins the disable-cooling
+// deviation: a disable-cooling credential always takes the full reset on
+// success — decay must never stamp a residual cooldown on it.
+func TestModelStateDecayDisableCoolingFullReset(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	previousTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(previousTransient) })
+
+	const (
+		provider = "openai-compat-decay-disable"
+		model    = "decay-disable-model"
+		authID   = "decay-disable-auth"
+	)
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(authID, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(authID) })
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	auth := &Auth{
+		ID:       authID,
+		Provider: provider,
+		Status:   StatusActive,
+		Metadata: map[string]any{"disable_cooling": true},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register(): %v", errRegister)
+	}
+
+	for i := 0; i < 4; i++ {
+		manager.MarkResult(context.Background(), Result{
+			AuthID:   authID,
+			Provider: provider,
+			Model:    model,
+			Success:  false,
+			Error:    &Error{Message: "upstream failure", HTTPStatus: http.StatusServiceUnavailable},
+		})
+	}
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   authID,
+		Provider: provider,
+		Model:    model,
+		Success:  true,
+	})
+
+	updated, ok := manager.GetByID(authID)
+	if !ok || updated == nil || updated.ModelStates[model] == nil {
+		t.Fatal("expected model state after success")
+	}
+	state := updated.ModelStates[model]
+	if !modelStateIsClean(state) {
+		t.Fatalf("disable-cooling success should fully reset the state, got %+v", state)
+	}
+	if state.Unavailable || state.NextRetryAfter.After(time.Now()) {
+		t.Fatalf("disable-cooling auth carries residual cooldown: %+v", state)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(updated, model, time.Now()); blocked {
+		t.Fatal("disable-cooling auth blocked after success")
 	}
 }

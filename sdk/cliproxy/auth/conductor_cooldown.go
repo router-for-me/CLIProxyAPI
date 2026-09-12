@@ -1080,6 +1080,7 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.Quota.BackoffLevel > merged.Quota.BackoffLevel {
 		merged.Quota.BackoffLevel = source.Quota.BackoffLevel
 	}
+	// FailureCount merges as a conservative union (max); deadlines gate blocking.
 	merged.FailureCount = max(target.FailureCount, source.FailureCount)
 	if source.UpdatedAt.After(merged.UpdatedAt) {
 		merged.UpdatedAt = source.UpdatedAt
@@ -1118,11 +1119,14 @@ func resetModelState(state *ModelState, now time.Time) {
 
 // decayModelStateOnSuccess halves the model's failure count on a successful
 // result (G2). A count that survives the halving keeps a short residual
-// cooldown — half the remaining window, floor 1s — so a flapping model
-// recovers in stages instead of returning at full health and failing again
-// immediately. Counts of 0 or 1 take the historical full reset. The registry
-// resume path (shouldResumeModel/clearModelQuota) is unaffected: it clears
-// registry-side suspension/quota marks regardless of the residual timing.
+// cooldown — half the remaining window, floor 1s, capped at the transient
+// cooldown window — so a flapping model recovers in stages instead of
+// returning at full health and failing again immediately. The cap keeps
+// long-window classes (30-minute auth lockouts, 12h model_not_supported)
+// from holding a just-verified-working credential out of rotation for hours.
+// Counts of 0 or 1 take the historical full reset. The registry resume path
+// (shouldResumeModel/clearModelQuota) is unaffected: it clears registry-side
+// suspension/quota marks regardless of the residual timing.
 func decayModelStateOnSuccess(state *ModelState, now time.Time) {
 	if state == nil {
 		return
@@ -1132,6 +1136,8 @@ func decayModelStateOnSuccess(state *ModelState, now time.Time) {
 		return
 	}
 	state.FailureCount /= 2
+	// The residual deadline never exceeds the transient cooldown window.
+	residualCap := now.Add(transientErrorCooldown)
 	pullIn := func(deadline time.Time) time.Time {
 		if deadline.IsZero() || !deadline.After(now) {
 			return now.Add(time.Second)
@@ -1140,10 +1146,20 @@ func decayModelStateOnSuccess(state *ModelState, now time.Time) {
 		if remaining < time.Second {
 			remaining = time.Second
 		}
-		return now.Add(remaining)
+		pulled := now.Add(remaining)
+		if pulled.After(residualCap) {
+			pulled = residualCap
+		}
+		return pulled
 	}
 	state.NextRetryAfter = pullIn(state.NextRetryAfter)
 	state.Quota.NextRecoverAt = pullIn(state.Quota.NextRecoverAt)
+	// A successful request means the model no longer errors: keep only the
+	// residual timing so hasModelError stops reporting an error condition
+	// during staged recovery.
+	state.LastError = nil
+	state.StatusMessage = ""
+	state.Status = StatusActive
 	state.Unavailable = true
 	state.UpdatedAt = now
 }

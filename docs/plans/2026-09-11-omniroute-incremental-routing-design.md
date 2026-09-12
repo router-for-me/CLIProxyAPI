@@ -55,7 +55,9 @@ Change in `MarkResult` success path:
 - On success: `count = count / 2` (floor 0). `count == 0` → delete state
   (existing behavior for full-reset classes unchanged).
 - If `count > 0` remains: pull `NextRetryAfter` in to half the remaining
-  cooldown (floor 1s) — staged recovery instead of instant full health.
+  cooldown (floor 1s) — staged recovery instead of instant full health. The
+  residual is capped at the transient cooldown window so long-window classes
+  (30-min lockouts, 12h model_not_supported) don't over-block after success.
 
 No new config; decay is always on for failure-count-based states.
 
