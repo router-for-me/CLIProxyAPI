@@ -89,6 +89,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	cfg.ClaudeCode.CacheKeepalive = cfg.ClaudeCode.CacheKeepalive.WithDefaults()
+	if errValidate := cfg.ClaudeCode.CacheKeepalive.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
 		return nil, errValidate
 	}
