@@ -2266,6 +2266,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
 				}
+				// Carrying the previous window forward must stay bounded. Without
+				// this cap a single far-future upstream reset latches: the
+				// credential is only retried after NextRetryAfter, so it can never
+				// shorten its own window.
+				next = capQuotaCooldown(next, now)
 			}
 			auth.Quota.NextRecoverAt = next
 			auth.NextRetryAfter = next
