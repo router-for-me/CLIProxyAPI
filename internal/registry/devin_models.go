@@ -156,6 +156,15 @@ func sanitizeAndValidateDevinModels(models []*ModelInfo) ([]*ModelInfo, error) {
 		if len(m.SupportedOutputModalities) == 0 {
 			m.SupportedOutputModalities = []string{"text"}
 		}
+		if m.InputTokenLimit == 0 && m.ContextLength > 0 {
+			m.InputTokenLimit = m.ContextLength
+		}
+		if m.OutputTokenLimit == 0 && m.MaxCompletionTokens > 0 {
+			m.OutputTokenLimit = m.MaxCompletionTokens
+		}
+		if len(m.SupportedGenerationMethods) == 0 {
+			m.SupportedGenerationMethods = []string{"generateContent", "countTokens"}
+		}
 		out = append(out, m)
 	}
 
