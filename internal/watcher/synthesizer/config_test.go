@@ -693,6 +693,42 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_OpenAICompat_Insecure(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:          "with-key",
+					BaseURL:       "https://with-key.example.com",
+					Insecure:      true,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "key"}},
+				},
+				{
+					Name:     "without-key",
+					BaseURL:  "https://without-key.example.com",
+					Insecure: true,
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("auth count = %d, want 2", len(auths))
+	}
+	for i := range auths {
+		if got := auths[i].Attributes["insecure"]; got != "true" {
+			t.Fatalf("auth[%d] insecure = %q, want true", i, got)
+		}
+	}
+}
+
 func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

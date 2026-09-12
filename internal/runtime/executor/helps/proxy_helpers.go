@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"crypto/tls"
 	"net/http"
 	"strings"
 	"time"
@@ -33,8 +34,10 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
+	insecure := false
 	if auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)
+		insecure = strings.EqualFold(strings.TrimSpace(auth.Attributes["insecure"]), "true")
 	}
 
 	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
@@ -46,7 +49,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
-			httpClient.Transport = transport
+			httpClient.Transport = configureInsecureTLS(transport, insecure)
 			return httpClient
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
@@ -55,10 +58,30 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		httpClient.Transport = rt
+		httpClient.Transport = configureInsecureTLS(rt, insecure)
+	} else if insecure {
+		httpClient.Transport = configureInsecureTLS(http.DefaultTransport, true)
 	}
 
 	return httpClient
+}
+
+func configureInsecureTLS(rt http.RoundTripper, insecure bool) http.RoundTripper {
+	if !insecure {
+		return rt
+	}
+	transport, ok := rt.(*http.Transport)
+	if !ok || transport == nil {
+		return rt
+	}
+	transport = transport.Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.InsecureSkipVerify = true
+	return transport
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
