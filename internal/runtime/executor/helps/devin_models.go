@@ -113,6 +113,12 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 		clamped := clampEffort(effort, swe2Efforts, "high")
 		return "swe-2-" + clamped
 
+	case strings.Contains(lowerBase, "swe-1-7") || strings.Contains(lowerBase, "swe-1.7"):
+		if effort == "medium" {
+			return "swe-1-7-medium"
+		}
+		return "swe-1-7"
+
 	case strings.Contains(lowerBase, "fable-5-1") || strings.Contains(lowerBase, "fable-5.1"):
 		clamped := clampEffort(effort, fable51Efforts, "medium")
 		return "claude-fable-5-1-" + clamped
@@ -121,9 +127,21 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 		clamped := clampEffort(effort, fable51Efforts, "medium")
 		return "claude-5-fable-" + clamped
 
+	case strings.Contains(lowerBase, "claude-haiku-4-5") || strings.Contains(lowerBase, "claude-haiku-4.5") || strings.Contains(lowerBase, "haiku-4-5"):
+		return "MODEL_PRIVATE_11"
+
+	case strings.Contains(lowerBase, "claude-sonnet-4-5") || strings.Contains(lowerBase, "claude-sonnet-4.5") || strings.Contains(lowerBase, "sonnet-4-5"):
+		if effort != "" && effort != "none" {
+			return "MODEL_PRIVATE_3"
+		}
+		return "MODEL_PRIVATE_2"
+
 	case strings.Contains(lowerBase, "astra"):
 		clamped := clampEffort(effort, astraEfforts, "medium")
 		return "gpt-6-astra-" + clamped
+
+	case strings.Contains(lowerBase, "gpt-4-1") || strings.Contains(lowerBase, "gpt-4.1"):
+		return "MODEL_CHAT_GPT_4_1_2025_04_14"
 
 	case strings.Contains(lowerBase, "glm-5-2") || strings.Contains(lowerBase, "glm-5.2"):
 		if effort == "none" {
@@ -136,6 +154,10 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 		return "glm-5-3-" + clamped
 
 	case strings.Contains(lowerBase, "gemini-3-8-flash") || strings.Contains(lowerBase, "gemini-3.8-flash"):
+		clamped := clampEffort(effort, gemini38Efforts, "high")
+		return "gemini-3-8-flash-" + clamped
+
+	case lowerBase == "gemini-3-flash":
 		clamped := clampEffort(effort, gemini38Efforts, "high")
 		return "gemini-3-8-flash-" + clamped
 

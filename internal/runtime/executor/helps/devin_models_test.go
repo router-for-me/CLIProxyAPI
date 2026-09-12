@@ -172,6 +172,48 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			thinkingLevel: "",
 			want:          "deepseek-v4-1-flash-max",
 		},
+		{
+			name:          "swe-1-7 default maps to swe-1-7",
+			rawModel:      "devin/swe-1-7",
+			thinkingLevel: "",
+			want:          "swe-1-7",
+		},
+		{
+			name:          "swe-1-7 with medium maps to swe-1-7-medium",
+			rawModel:      "devin/swe-1-7:medium",
+			thinkingLevel: "",
+			want:          "swe-1-7-medium",
+		},
+		{
+			name:          "claude-haiku-4-5 maps to MODEL_PRIVATE_11",
+			rawModel:      "devin/claude-haiku-4-5",
+			thinkingLevel: "",
+			want:          "MODEL_PRIVATE_11",
+		},
+		{
+			name:          "claude-sonnet-4-5 non-thinking maps to MODEL_PRIVATE_2",
+			rawModel:      "devin/claude-sonnet-4-5",
+			thinkingLevel: "",
+			want:          "MODEL_PRIVATE_2",
+		},
+		{
+			name:          "claude-sonnet-4-5 thinking maps to MODEL_PRIVATE_3",
+			rawModel:      "devin/claude-sonnet-4-5:high",
+			thinkingLevel: "",
+			want:          "MODEL_PRIVATE_3",
+		},
+		{
+			name:          "gpt-4-1 maps to MODEL_CHAT_GPT_4_1_2025_04_14",
+			rawModel:      "devin/gpt-4-1",
+			thinkingLevel: "",
+			want:          "MODEL_CHAT_GPT_4_1_2025_04_14",
+		},
+		{
+			name:          "gemini-3-flash alias maps to gemini-3-8-flash-high",
+			rawModel:      "devin/gemini-3-flash",
+			thinkingLevel: "",
+			want:          "gemini-3-8-flash-high",
+		},
 	}
 
 	for _, tt := range tests {
