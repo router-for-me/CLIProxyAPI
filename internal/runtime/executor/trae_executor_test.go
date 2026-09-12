@@ -32,7 +32,7 @@ func TestTraeExecutorExecute(t *testing.T) {
 		receivedTraceparent = request.Header.Get("X-Flow-Traceparent")
 		receivedBody = readTestBody(t, request)
 		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(writer, "event: metadata\ndata: {\"model\":\"gpt-5.6-sol\",\"session_id\":\"session-1\"}\n\nevent: output\ndata: {\"response\":\"Hello\",\"reasoning_content\":\"brief thought\",\"tool_calls\":null}\n\nevent: token_usage\ndata: {\"prompt_tokens\":10,\"completion_tokens\":3,\"total_tokens\":13,\"cache_read_input_tokens\":4,\"reasoning_tokens\":1}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
+		_, _ = fmt.Fprint(writer, "event: metadata\ndata: {\"model\":\"gpt-5.6-sol\",\"session_id\":\"session-1\"}\n\nevent: output\ndata: {\"response\":\"Hello\",\"reasoning_content\":\"brief thought\",\"tool_calls\":null}\n\nevent: token_usage\ndata: {\"prompt_tokens\":10,\"completion_tokens\":3,\"total_tokens\":13,\"cache_creation_input_tokens_total\":2,\"cache_read_input_tokens_total\":4,\"reasoning_tokens_total\":1}\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n")
 	}))
 	defer server.Close()
 
@@ -56,6 +56,15 @@ func TestTraeExecutorExecute(t *testing.T) {
 	}
 	if got := gjson.GetBytes(response.Payload, "usage.prompt_tokens").Int(); got != 10 {
 		t.Fatalf("prompt_tokens = %d, payload = %s", got, response.Payload)
+	}
+	if got := gjson.GetBytes(response.Payload, "usage.prompt_tokens_details.cached_tokens").Int(); got != 4 {
+		t.Fatalf("cached_tokens = %d, payload = %s", got, response.Payload)
+	}
+	if got := gjson.GetBytes(response.Payload, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 1 {
+		t.Fatalf("reasoning_tokens = %d, payload = %s", got, response.Payload)
+	}
+	if got := gjson.GetBytes(response.Payload, "usage.cache_creation_input_tokens").Int(); got != 2 {
+		t.Fatalf("cache_creation_input_tokens = %d, payload = %s", got, response.Payload)
 	}
 	if got := gjson.GetBytes(receivedBody, "config_name").String(); got != "gpt-5.6-sol" {
 		t.Fatalf("config_name = %q, body = %s", got, receivedBody)
@@ -81,7 +90,25 @@ func TestTraeExecutorExecute(t *testing.T) {
 func TestTraeExecutorExecuteStreamConvertsToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(writer, "event: metadata\ndata: {\"model\":\"gpt-5.6-sol\",\"session_id\":\"session-2\"}\n\nevent: output\ndata: {\"response\":\"\",\"reasoning_content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function_call\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}\n\nevent: output\ndata: {\"response\":\"\",\"reasoning_content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"\",\"type\":\"\",\"function_call\":{\"name\":\"\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]}\n\nevent: output\ndata: {\"response\":\"\",\"reasoning_content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function_call\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}\n\nevent: token_usage\ndata: {\"prompt_tokens\":8,\"completion_tokens\":4,\"total_tokens\":12}\n\nevent: done\ndata: {\"finish_reason\":\"tool_calls\"}\n\n")
+		_, _ = fmt.Fprint(writer, `event: metadata
+data: {"model":"gpt-5.6-sol","session_id":"session-2"}
+
+event: output
+data: {"response":"","reasoning_content":null,"tool_calls":[{"index":0,"id":"call_1","type":"function","function_call":{"name":"lookup","arguments":"","partial_arguments":"{"}}]}
+
+event: output
+data: {"response":"","reasoning_content":null,"tool_calls":[{"index":0,"id":"","type":"","function_call":{"name":"","arguments":"","partial_arguments":"\"q\":\"x\"}"}}]}
+
+event: output
+data: {"response":"","reasoning_content":null,"tool_calls":[{"index":0,"id":"call_1","type":"function","function_call":{"name":"lookup","arguments":""}}]}
+
+event: token_usage
+data: {"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}
+
+event: done
+data: {"finish_reason":"tool_calls"}
+
+`)
 	}))
 	defer server.Close()
 
@@ -108,11 +135,56 @@ func TestTraeExecutorExecuteStreamConvertsToolCalls(t *testing.T) {
 	if strings.Count(stream, `"name":"lookup"`) != 1 {
 		t.Fatalf("tool name was not emitted exactly once: %s", stream)
 	}
-	if !strings.Contains(stream, `"arguments":"{\\\"q\\\":\\\"x\\\"}"`) {
-		t.Fatalf("tool arguments missing: %s", stream)
+	var arguments strings.Builder
+	for _, line := range strings.Split(stream, "\n") {
+		data := strings.TrimPrefix(line, "data: ")
+		if data == line {
+			continue
+		}
+		if fragment := gjson.Get(data, "choices.0.delta.tool_calls.0.function.arguments"); fragment.Exists() {
+			arguments.WriteString(fragment.String())
+		}
+	}
+	if got := arguments.String(); got != `{"q":"x"}` {
+		t.Fatalf("tool arguments = %q, stream = %s", got, stream)
 	}
 	if !strings.Contains(stream, `"finish_reason":"tool_calls"`) || !strings.Contains(stream, "[DONE]") {
 		t.Fatalf("stream termination missing: %s", stream)
+	}
+}
+
+func TestTraeExecutorExecuteAccumulatesPartialToolArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(writer, `event: metadata
+data: {"model":"gpt-5.6-sol","session_id":"session-3"}
+
+event: output
+data: {"tool_calls":[{"index":0,"id":"call_2","type":"function","function_call":{"name":"lookup","partial_arguments":"{"}}]}
+
+event: output
+data: {"tool_calls":[{"index":0,"function_call":{"partial_arguments":"\"q\":\"x\"}"}}]}
+
+event: done
+data: {"finish_reason":"tool_calls"}
+
+`)
+	}))
+	defer server.Close()
+
+	auth := testTraeAuth(t, server.URL)
+	executor := NewTraeExecutor(&config.Config{})
+	req := cliproxyexecutor.Request{
+		Model:   "GPT-5.6-Sol",
+		Payload: []byte(`{"model":"GPT-5.6-Sol","messages":[{"role":"user","content":"look up x"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`),
+		Format:  sdktranslator.FormatOpenAI,
+	}
+	response, errExecute := executor.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatOpenAI})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if got := gjson.GetBytes(response.Payload, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"q":"x"}` {
+		t.Fatalf("tool arguments = %q, payload = %s", got, response.Payload)
 	}
 }
 

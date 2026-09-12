@@ -95,21 +95,21 @@ func (e *TraeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		}
 	}()
 
-	accumulator := newTraeResponseAccumulator(req.Model)
-	errScan := scanTraeSSE(httpResp.Body, func(event traeSSEEvent) error {
+	accumulator := helps.NewTraeResponseAccumulator(req.Model)
+	errScan := helps.ScanTraeSSE(httpResp.Body, func(event helps.TraeSSEEvent) error {
 		helpRaw := append([]byte("event: "+event.Name+"\ndata: "), event.Data...)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, helpRaw)
-		return accumulator.consume(event)
+		return accumulator.Consume(event)
 	})
 	if errScan != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 		return resp, errScan
 	}
-	if !accumulator.Finished {
+	if !accumulator.IsFinished() {
 		return resp, fmt.Errorf("trae executor: raw chat stream closed before done event")
 	}
 
-	openAIResponse := accumulator.responseJSON()
+	openAIResponse := accumulator.ResponseJSON()
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(openAIResponse))
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
@@ -139,7 +139,7 @@ func (e *TraeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
-	streamState := newTraeStreamState(req.Model)
+	streamState := helps.NewTraeStreamState(req.Model)
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -168,10 +168,10 @@ func (e *TraeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 			return true
 		}
-		errStream := scanTraeSSE(httpResp.Body, func(event traeSSEEvent) error {
+		errStream := helps.ScanTraeSSE(httpResp.Body, func(event helps.TraeSSEEvent) error {
 			helpRaw := append([]byte("event: "+event.Name+"\ndata: "), event.Data...)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, helpRaw)
-			line, _, errConvert := streamState.convert(event)
+			line, errConvert := streamState.Convert(event)
 			if errConvert != nil {
 				return errConvert
 			}
@@ -180,7 +180,7 @@ func (e *TraeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 			return nil
 		})
-		if errStream == nil && !streamState.Finished {
+		if errStream == nil && !streamState.IsFinished() {
 			errStream = fmt.Errorf("trae executor: raw chat stream closed before done event")
 		}
 		if errStream != nil {
@@ -542,4 +542,15 @@ func metadataStringFromJSON(payload []byte, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(anyString(value[key]))
+}
+
+func anyString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return ""
+	}
 }

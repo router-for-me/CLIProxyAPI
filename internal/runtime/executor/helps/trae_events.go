@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"bufio"
@@ -9,9 +9,12 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
-type traeSSEEvent struct {
+// TraeSSEEvent is one event from Trae's raw-chat SSE stream.
+type TraeSSEEvent struct {
 	Name string
 	Data []byte
 }
@@ -65,7 +68,8 @@ type traeStreamToolState struct {
 	Name string
 }
 
-type traeStreamState struct {
+// TraeStreamState converts Trae output events into OpenAI-compatible stream chunks.
+type TraeStreamState struct {
 	ID           string
 	Model        string
 	Created      int64
@@ -75,16 +79,18 @@ type traeStreamState struct {
 	Tools        map[int]traeStreamToolState
 }
 
-func newTraeStreamState(model string) *traeStreamState {
-	return &traeStreamState{
-		ID:      "chatcmpl-" + strings.ReplaceAll(newTraeUUID(), "-", ""),
+// NewTraeStreamState creates a converter for one Trae stream.
+func NewTraeStreamState(model string) *TraeStreamState {
+	return &TraeStreamState{
+		ID:      "chatcmpl-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
 		Model:   model,
 		Created: time.Now().Unix(),
 		Tools:   make(map[int]traeStreamToolState),
 	}
 }
 
-func scanTraeSSE(reader io.Reader, consume func(traeSSEEvent) error) error {
+// ScanTraeSSE scans a Trae raw-chat response and emits complete SSE events.
+func ScanTraeSSE(reader io.Reader, consume func(TraeSSEEvent) error) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	name := ""
@@ -93,7 +99,7 @@ func scanTraeSSE(reader io.Reader, consume func(traeSSEEvent) error) error {
 		if name == "" && len(data) == 0 {
 			return nil
 		}
-		event := traeSSEEvent{Name: name, Data: bytes.Clone(data)}
+		event := TraeSSEEvent{Name: name, Data: bytes.Clone(data)}
 		name = ""
 		data = data[:0]
 		return consume(event)
@@ -122,7 +128,7 @@ func scanTraeSSE(reader io.Reader, consume func(traeSSEEvent) error) error {
 	return emit()
 }
 
-func (state *traeStreamState) convert(event traeSSEEvent) ([]byte, *traeTokenUsage, error) {
+func (state *TraeStreamState) convert(event TraeSSEEvent) ([]byte, *traeTokenUsage, error) {
 	switch event.Name {
 	case "metadata":
 		var metadata traeMetadataEvent
@@ -154,7 +160,7 @@ func (state *traeStreamState) convert(event traeSSEEvent) ([]byte, *traeTokenUsa
 			name := strings.TrimSpace(toolCall.FunctionCall.Name)
 			id := strings.TrimSpace(toolCall.ID)
 			callType := strings.TrimSpace(toolCall.Type)
-			arguments := toolCall.FunctionCall.Arguments
+			arguments := traeToolCallArguments(toolCall)
 			if arguments == "" && id != "" && name != "" && previous.ID == id && previous.Name == name {
 				continue
 			}
@@ -239,7 +245,18 @@ func (state *traeStreamState) convert(event traeSSEEvent) ([]byte, *traeTokenUsa
 	}
 }
 
-func (state *traeStreamState) chatChunk(delta map[string]any, finishReason *string, usage map[string]any) []byte {
+// Convert converts one Trae event into an OpenAI-compatible SSE data line.
+func (state *TraeStreamState) Convert(event TraeSSEEvent) ([]byte, error) {
+	line, _, errConvert := state.convert(event)
+	return line, errConvert
+}
+
+// IsFinished reports whether the Trae stream emitted a done event.
+func (state *TraeStreamState) IsFinished() bool {
+	return state != nil && state.Finished
+}
+
+func (state *TraeStreamState) chatChunk(delta map[string]any, finishReason *string, usage map[string]any) []byte {
 	choices := make([]any, 0, 1)
 	if delta != nil || finishReason != nil {
 		choice := map[string]any{"index": 0, "delta": delta, "finish_reason": nil}
@@ -262,7 +279,8 @@ func (state *traeStreamState) chatChunk(delta map[string]any, finishReason *stri
 	return append([]byte("data: "), raw...)
 }
 
-type traeResponseAccumulator struct {
+// TraeResponseAccumulator builds an OpenAI-compatible non-stream response from Trae events.
+type TraeResponseAccumulator struct {
 	ID                string
 	Model             string
 	Created           int64
@@ -283,16 +301,17 @@ type traeAccumulatedToolCall struct {
 	Arguments strings.Builder
 }
 
-func newTraeResponseAccumulator(model string) *traeResponseAccumulator {
-	return &traeResponseAccumulator{
-		ID:      "chatcmpl-" + strings.ReplaceAll(newTraeUUID(), "-", ""),
+// NewTraeResponseAccumulator creates an accumulator for one Trae response.
+func NewTraeResponseAccumulator(model string) *TraeResponseAccumulator {
+	return &TraeResponseAccumulator{
+		ID:      "chatcmpl-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
 		Model:   model,
 		Created: time.Now().Unix(),
 		Tools:   make(map[int]*traeAccumulatedToolCall),
 	}
 }
 
-func (accumulator *traeResponseAccumulator) consume(event traeSSEEvent) error {
+func (accumulator *TraeResponseAccumulator) consume(event TraeSSEEvent) error {
 	switch event.Name {
 	case "metadata":
 		var metadata traeMetadataEvent
@@ -327,7 +346,7 @@ func (accumulator *traeResponseAccumulator) consume(event traeSSEEvent) error {
 			if toolCall.FunctionCall.Name != "" {
 				current.Name = toolCall.FunctionCall.Name
 			}
-			current.Arguments.WriteString(toolCall.FunctionCall.Arguments)
+			current.Arguments.WriteString(traeToolCallArguments(toolCall))
 		}
 	case "token_usage":
 		var usage traeTokenUsage
@@ -357,7 +376,17 @@ func (accumulator *traeResponseAccumulator) consume(event traeSSEEvent) error {
 	return nil
 }
 
-func (accumulator *traeResponseAccumulator) responseJSON() []byte {
+// Consume adds one Trae event to the response accumulator.
+func (accumulator *TraeResponseAccumulator) Consume(event TraeSSEEvent) error {
+	return accumulator.consume(event)
+}
+
+// IsFinished reports whether the accumulated response emitted a done event.
+func (accumulator *TraeResponseAccumulator) IsFinished() bool {
+	return accumulator != nil && accumulator.Finished
+}
+
+func (accumulator *TraeResponseAccumulator) responseJSON() []byte {
 	message := map[string]any{"role": "assistant", "content": accumulator.Content.String()}
 	if accumulator.Reasoning.Len() > 0 {
 		message["reasoning_content"] = accumulator.Reasoning.String()
@@ -414,6 +443,11 @@ func (accumulator *traeResponseAccumulator) responseJSON() []byte {
 	return raw
 }
 
+// ResponseJSON returns the accumulated OpenAI-compatible chat completion.
+func (accumulator *TraeResponseAccumulator) ResponseJSON() []byte {
+	return accumulator.responseJSON()
+}
+
 func openAIUsage(usage traeTokenUsage) map[string]any {
 	promptTokens := usage.PromptTokens
 	completionTokens := usage.CompletionTokens
@@ -427,19 +461,53 @@ func openAIUsage(usage traeTokenUsage) map[string]any {
 	if totalTokens == 0 && usage.TotalTokensTotal > 0 {
 		totalTokens = usage.TotalTokensTotal
 	}
+	cacheCreationInputTokens := usage.CacheCreationInputTokens
+	if cacheCreationInputTokens == 0 && usage.CacheCreationInputTokensTotal > 0 {
+		cacheCreationInputTokens = usage.CacheCreationInputTokensTotal
+	}
+	cacheReadInputTokens := usage.CacheReadInputTokens
+	if cacheReadInputTokens == 0 && usage.CacheReadInputTokensTotal > 0 {
+		cacheReadInputTokens = usage.CacheReadInputTokensTotal
+	}
+	reasoningTokens := usage.ReasoningTokens
+	if reasoningTokens == 0 && usage.ReasoningTokensTotal > 0 {
+		reasoningTokens = usage.ReasoningTokensTotal
+	}
 	return map[string]any{
 		"prompt_tokens":     promptTokens,
 		"completion_tokens": completionTokens,
 		"total_tokens":      totalTokens,
 		"prompt_tokens_details": map[string]any{
-			"cached_tokens": usage.CacheReadInputTokens,
+			"cached_tokens": cacheReadInputTokens,
 		},
 		"completion_tokens_details": map[string]any{
-			"reasoning_tokens": usage.ReasoningTokens,
+			"reasoning_tokens": reasoningTokens,
 		},
-		"cache_creation_input_tokens": usage.CacheCreationInputTokens,
-		"cache_read_input_tokens":     usage.CacheReadInputTokens,
+		"cache_creation_input_tokens": cacheCreationInputTokens,
+		"cache_read_input_tokens":     cacheReadInputTokens,
 	}
+}
+
+func traeToolCallArguments(toolCall traeToolCall) string {
+	if toolCall.FunctionCall.Arguments != "" {
+		return toolCall.FunctionCall.Arguments
+	}
+	partial := bytes.TrimSpace(toolCall.FunctionCall.PartialArguments)
+	if len(partial) == 0 || bytes.Equal(partial, []byte("null")) {
+		return ""
+	}
+	var fragment string
+	if json.Unmarshal(partial, &fragment) == nil {
+		return fragment
+	}
+	var fragments []string
+	if json.Unmarshal(partial, &fragments) == nil {
+		return strings.Join(fragments, "")
+	}
+	if json.Valid(partial) {
+		return string(partial)
+	}
+	return ""
 }
 
 func anyString(value any) string {
