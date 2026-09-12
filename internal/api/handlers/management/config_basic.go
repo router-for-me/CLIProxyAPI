@@ -332,6 +332,10 @@ func (h *Handler) PutForceModelPrefix(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.ForceModelPrefix = v })
 }
 
+// normalizeRoutingStrategy canonicalizes the global routing strategy for the
+// management API. Keep the alias sets in sync with the other two normalize
+// sites: internal/config/strategy.go (NormalizePoolRoutingStrategy) and
+// sdk/cliproxy/service_config.go (normalizedRoutingRuntimeState).
 func normalizeRoutingStrategy(strategy string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strategy))
 	switch normalized {

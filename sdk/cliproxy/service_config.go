@@ -39,6 +39,9 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		return state
 	}
 
+	// Keep the alias sets in sync with the other two normalize sites:
+	// internal/config/strategy.go (NormalizePoolRoutingStrategy) and
+	// internal/api/handlers/management/config_basic.go (normalizeRoutingStrategy).
 	switch strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy)) {
 	case "weighted-round-robin", "weightedroundrobin", "wrr":
 		state.strategy = "weighted-round-robin"

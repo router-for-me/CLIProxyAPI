@@ -13,9 +13,11 @@ import (
 // canonicalized in the DTO; and the renderer's store read) so downstream
 // layers see one spelling.
 //
-// power-of-two-choices and least-used select by in-flight request counts
-// (design G4): until the scheduler-side counters land, both map to the
-// fill-first-style deterministic pick.
+// power-of-two-choices and least-used (design G4) select by in-flight request
+// counts in the scheduler; until that lands, as a global routing strategy
+// they map to the fill-first-style deterministic pick (interim), and as
+// pool-row values they still stamp pool_strategy (aggressive in-pool
+// failover) while the picks themselves follow the global strategy.
 const (
 	PoolStrategyRoundRobin         = "round-robin"
 	PoolStrategyWeightedRoundRobin = "weighted-round-robin"
@@ -26,6 +28,9 @@ const (
 
 // NormalizePoolRoutingStrategy canonicalizes an operator-supplied pool
 // strategy. Unknown or blank values return "" (unset).
+// Keep the alias sets in sync with the other two normalize sites:
+// sdk/cliproxy/service_config.go (normalizedRoutingRuntimeState) and
+// internal/api/handlers/management/config_basic.go (normalizeRoutingStrategy).
 func NormalizePoolRoutingStrategy(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "round-robin", "roundrobin", "rr", "failover":

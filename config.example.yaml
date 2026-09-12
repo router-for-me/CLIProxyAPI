@@ -566,10 +566,10 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     strategy: "failover" # optional: in-pool selection strategy for this provider's api-key-entries:
-#                         # round-robin | weighted-round-robin | fill-first | power-of-two-choices | least-used
-#                         # (the Model Routes aliases
-#                         # "priority" and "failover" are accepted and canonicalized to fill-first /
-#                         # round-robin). Empty = follow routing.strategy. Setting any value additionally
+#                         # round-robin | weighted-round-robin | fill-first | power-of-two-choices | least-used.
+#                         # The Model Routes aliases "priority" and "failover" are accepted and
+#                         # canonicalized to fill-first / round-robin. Empty = follow routing.strategy.
+#                         # Setting any value additionally
 #                         # enables aggressive in-pool failover: on any entry error — including ones
 #                         # upstreams report as client request faults — the next entry is tried before
 #                         # the error reaches the client; errors surface only after the whole pool is
