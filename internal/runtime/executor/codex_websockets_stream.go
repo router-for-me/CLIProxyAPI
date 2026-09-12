@@ -283,6 +283,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var outputItemsFallback [][]byte
 
 	var bufferedChunks [][]byte
+	// bufferedFrames counts every websocket message read during bootstrap, including the ones the
+	// loop skips, so a peer that only sends frames the loop ignores cannot keep the window open.
+	bufferedFrames := 0
+	bufferedBytes := 0
 	var initialChunks [][]byte
 	immediateTerminal := false
 	// bootstrapTerminalErr holds a non-overload terminal failure seen while buffering. It is
@@ -323,6 +327,18 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				reporter.PublishFailure(ctx, mappedErr)
 				return nil, mappedErr
 			}
+			// Count every message ReadMessage returns, including the ones this loop goes on to skip,
+			// so a peer sending only skippable text frames still closes the window. Control frames
+			// are not counted: the websocket library answers ping and pong inside ReadMessage and
+			// never returns them, so only the read deadline bounds a peer that sends nothing else.
+			// windowOpen is carried into the skip branches below rather than breaking here, because
+			// this message has not been processed yet and dropping it would lose a token, or a
+			// terminal event, from the turn.
+			bufferedFrames++
+			windowOpen := bufferedFrames <= codexBootstrapMaxBufferedFrames
+			if !windowOpen && bufferedFrames == codexBootstrapMaxBufferedFrames+1 {
+				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap frame budget exhausted after %d messages read; this is the first message that may no longer be held", bufferedFrames)
+			}
 			if msgType != websocket.TextMessage {
 				if msgType == websocket.BinaryMessage {
 					errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
@@ -341,11 +357,17 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					reporter.PublishFailure(ctx, errBinary)
 					return nil, errBinary
 				}
+				// No window check here: ReadMessage only ever returns text or binary, and binary
+				// returned just above, so nothing reaches this line. The empty-payload skip below
+				// is the reachable one and does consult the window.
 				continue
 			}
 
 			payload = bytes.TrimSpace(payload)
 			if len(payload) == 0 {
+				if !windowOpen {
+					break
+				}
 				continue
 			}
 			observeCodexTokenEvent(reporter, payload)
@@ -405,7 +427,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					// Fail the attempt before the downstream headers are committed so the
 					// conductor can transparently retry on another credential, and report the
 					// status the upstream refused to put on the wire.
-					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d buffered handshake events, failing over", len(bufferedChunks))
+					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read, failing over", bufferedFrames)
 					return nil, newCodexBootstrapOverloadErr(terminalBody)
 				}
 				bootstrapTerminalErr = streamErr
@@ -466,12 +488,20 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				currentChunks = helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, clientBody, line, &param, claudeInputTokens)
 			}
 
-			if isCodexHandshakeMetadataEvent(eventType) && !isTerminalEvent {
-				if len(bufferedChunks) < codexBootstrapMaxBufferedEvents {
+			// !isTerminalEvent is redundant against the closed allow-list, which admits no terminal
+			// type, and the empty-payload rule cannot fire on a payload already known non-empty. It
+			// stays as the guard a reader expects to find, and its SSE counterpart is !terminalSuccess.
+			if windowOpen && isCodexBootstrapBufferableEvent(eventType, payload) && !isTerminalEvent {
+				frameBytes := len(payload)
+				for i := range currentChunks {
+					frameBytes += len(currentChunks[i])
+				}
+				if bufferedBytes+frameBytes <= codexBootstrapMaxBufferedBytes {
+					bufferedBytes += frameBytes
 					bufferedChunks = append(bufferedChunks, currentChunks...)
 					continue
 				}
-				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap buffer limit %d reached, releasing stream without overload probing", codexBootstrapMaxBufferedEvents)
+				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap byte limit reached after %d messages / %d bytes, releasing stream without overload probing", bufferedFrames, bufferedBytes)
 			}
 
 			initialChunks = currentChunks

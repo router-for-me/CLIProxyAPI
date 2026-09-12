@@ -246,15 +246,49 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
-  # Hold back the initial handshake events (response.created, response.in_progress and the
-  # websocket metadata frames) until the upstream emits its first generated event.
+  # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
+  # response.in_progress, the websocket metadata frames), keepalive heartbeats, and the *.added
+  # announcements of an item or part that is still empty - until the upstream emits its first
+  # generated event. Anything else, including a server-side tool item such as web_search_call and
+  # any frame not on that list, releases the stream immediately. On the SSE transport the lines that
+  # are not `data:` frames - comments, `event:` lines, blank separators - are held alongside them.
+  # The hold is bounded by a frame budget and a 1 MiB byte budget, not by wall-clock time: an
+  # upstream that trickles frames holds the response headers for as long as the client will wait.
   # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
   # right after those handshake events, instead of returning 503 on the wire. Buffering them
   # keeps the downstream response headers uncommitted long enough to transparently retry on
-  # another credential. Only overload/rate-limit rejections trigger failover; every other
-  # terminal failure is still delivered in-stream exactly as before.
-  # Trade-off: response headers are delayed until generation starts, which can trip client or
-  # reverse-proxy read timeouts (e.g. nginx proxy_read_timeout) on long reasoning requests.
+  # another credential. Only overload/rate-limit rejections trigger failover; every other terminal
+  # failure is still delivered in-stream exactly as before. One pre-existing behaviour is worth
+  # knowing, because this option makes the window it lives in much longer: if the stream ends while
+  # the bootstrap is still holding, the attempt ends instead of the error reaching the client, and
+  # whether another credential is then tried depends on how it ended. A clean end with no terminal
+  # event is request-scoped on SSE, so nothing else is tried; a websocket close, or a transport error
+  # such as a dropped connection on either transport, is not, so the request may be retried on
+  # another credential. None of that is new, but before this option the hold ended at the first
+  # keepalive, so it was rare; now it can span the whole reasoning phase.
+  # Trade-off: response headers are delayed until generation starts. Because heartbeats are held
+  # too, the delay now ends at the first generated token rather than at the first heartbeat. The
+  # budget bounds how much is held, not how long: 48 SSE lines, which measures out as 15 heartbeats
+  # of the three-line event:/data:/blank shape, 23 of a two-line ": keepalive" comment followed by
+  # its blank separator, or 47 of a bare ": keepalive" with no separator - one short of the obvious
+  # division, because the rejection frame's own event: line comes out of the same budget before its
+  # data: line is parsed. An upstream that sends the rejection as a bare data: line with no event:
+  # line gets the round number instead. At a 10s upstream heartbeat that is 150s, 230s or 470s of
+  # uncommitted response headers depending on the framing the upstream picks, all of it past nginx's
+  # 60s default proxy_read_timeout, so raise the timeouts in front of the proxy before enabling this.
+  # Those seconds bound what the buffer holds, not when the response headers are committed. Headers
+  # are committed on the first chunk the downstream translator actually produces, so for a format
+  # that renders the handshake as nothing - Chat Completions and Gemini do - they stay uncommitted
+  # past the budget, until the first generated token. That is not specific to the budget: any frame
+  # that releases the buffer has always behaved this way.
+  # The websocket transport spends the same 48 differently - one per message read, whether the loop
+  # holds it or skips it, with no framing to divide by - so there it is 48 heartbeats, about 480s.
+  # Two cases no budget covers: a websocket peer that sends only ping frames, which the library
+  # answers inside the read call, leaving only the 5 minute websocket read deadline; and an upstream
+  # that stops mid-line on SSE, where the scanner never returns and only the request context ends the
+  # wait. Neither is made worse by this option - with it off the same stalled line stalls the
+  # conductor instead, which waits on the same context - but a client-side request timeout, not
+  # proxy_read_timeout, is what bounds them.
   # Default: false
   stream-bootstrap-buffering: false
   # When true, optimize Codex Desktop, codex-tui, and codex_cli_rs requests for multi-agent v2.
