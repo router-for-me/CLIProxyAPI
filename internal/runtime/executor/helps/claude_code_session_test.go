@@ -72,6 +72,23 @@ func TestClaudeCodeExecutionScopeAcceptsLowercaseHeaderMapKeys(t *testing.T) {
 	}
 }
 
+// Relay paths read the agent header raw so an absent header stays absent; the
+// "main" sentinel must stay confined to ExtractClaudeCodeAgentID, which scopes
+// execution state and needs a value for the root agent.
+func TestClaudeCodeAgentIDHeaderLookupKeepsAbsenceRaw(t *testing.T) {
+	if got := HeaderValueCaseInsensitive(http.Header{}, ClaudeCodeAgentHeader); got != "" {
+		t.Fatalf("HeaderValueCaseInsensitive(absent) = %q, want empty", got)
+	}
+	headers := http.Header{}
+	headers.Set(ClaudeCodeAgentHeader, "agent-raw")
+	if got := HeaderValueCaseInsensitive(headers, ClaudeCodeAgentHeader); got != "agent-raw" {
+		t.Fatalf("HeaderValueCaseInsensitive() = %q, want agent-raw", got)
+	}
+	if got := ExtractClaudeCodeAgentID(context.Background(), http.Header{}); got != ClaudeCodeMainAgentID {
+		t.Fatalf("ExtractClaudeCodeAgentID(absent) = %q, want %q", got, ClaudeCodeMainAgentID)
+	}
+}
+
 func TestClaudeCodeExecutionScopeIsolatesAgents(t *testing.T) {
 	rootHeaders := http.Header{}
 	rootHeaders.Set(ClaudeCodeSessionHeader, "session-agents")
