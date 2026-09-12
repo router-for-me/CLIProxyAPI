@@ -351,14 +351,17 @@ func TestConsumeDevinFramesToInteractions(t *testing.T) {
 	if root.Get("status").String() != "completed" {
 		t.Errorf("status = %q, want completed", root.Get("status").String())
 	}
-	if root.Get("usage.total_input_tokens").Int() != 100 {
-		t.Errorf("input tokens = %d, want 100", root.Get("usage.total_input_tokens").Int())
+	if root.Get("usage.total_input_tokens").Int() != 120 {
+		t.Errorf("input tokens = %d, want 120", root.Get("usage.total_input_tokens").Int())
 	}
 	if root.Get("usage.total_output_tokens").Int() != 50 {
 		t.Errorf("output tokens = %d, want 50", root.Get("usage.total_output_tokens").Int())
 	}
 	if root.Get("usage.total_cached_tokens").Int() != 20 {
 		t.Errorf("cached tokens = %d, want 20", root.Get("usage.total_cached_tokens").Int())
+	}
+	if root.Get("usage.total_tokens").Int() != 170 {
+		t.Errorf("total tokens = %d, want 170", root.Get("usage.total_tokens").Int())
 	}
 
 	steps := root.Get("steps").Array()

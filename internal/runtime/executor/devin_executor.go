@@ -704,9 +704,14 @@ func (e *DevinExecutor) streamDevinFrames(
 	completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.id", interactionID)
 	completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.model", req.Model)
 	if finalUsage != nil {
-		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_input_tokens", finalUsage.PromptTokens)
-		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_output_tokens", finalUsage.CompletionTokens)
+		totalInput := finalUsage.PromptTokens + finalUsage.CachedTokens
+		totalOutput := finalUsage.CompletionTokens
+		totalTokens := totalInput + totalOutput
+
+		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_input_tokens", totalInput)
+		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_output_tokens", totalOutput)
 		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_cached_tokens", finalUsage.CachedTokens)
+		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_tokens", totalTokens)
 		if detail, ok := helps.ParseInteractionsStreamUsage(completedEvent); ok {
 			reporter.Publish(ctx, detail)
 		}
@@ -895,9 +900,14 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 	}
 
 	if finalUsage != nil {
-		out, _ = sjson.SetBytes(out, "usage.total_input_tokens", finalUsage.PromptTokens)
-		out, _ = sjson.SetBytes(out, "usage.total_output_tokens", finalUsage.CompletionTokens)
+		totalInput := finalUsage.PromptTokens + finalUsage.CachedTokens
+		totalOutput := finalUsage.CompletionTokens
+		totalTokens := totalInput + totalOutput
+
+		out, _ = sjson.SetBytes(out, "usage.total_input_tokens", totalInput)
+		out, _ = sjson.SetBytes(out, "usage.total_output_tokens", totalOutput)
 		out, _ = sjson.SetBytes(out, "usage.total_cached_tokens", finalUsage.CachedTokens)
+		out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
 	}
 
 	respLog := &helps.DevinUpstreamResponseLog{
