@@ -290,7 +290,8 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first",
+	// "power-of-two-choices", "least-used".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
@@ -761,9 +762,10 @@ type OpenAICompatibility struct {
 
 	// Strategy selects the in-pool credential selection strategy for this
 	// provider's api-key-entries (round-robin, weighted-round-robin,
-	// fill-first). Empty = follow the global routing.strategy. Any non-empty
-	// value opts the pool into aggressive failover: entry errors rotate to
-	// the next entry before surfacing to the client.
+	// fill-first, power-of-two-choices, least-used). Empty = follow the
+	// global routing.strategy. Any non-empty value opts the pool into
+	// aggressive failover: entry errors rotate to the next entry before
+	// surfacing to the client.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// CircuitBreaker opts this provider's pool into the pool-level circuit
@@ -992,9 +994,10 @@ type OpenCodeGo struct {
 
 	// Strategy selects the in-pool credential selection strategy for this
 	// provider's api-key-entries (round-robin, weighted-round-robin,
-	// fill-first). Empty = follow the global routing.strategy. Any non-empty
-	// value opts the pool into aggressive failover: entry errors rotate to
-	// the next entry before surfacing to the client.
+	// fill-first, power-of-two-choices, least-used). Empty = follow the
+	// global routing.strategy. Any non-empty value opts the pool into
+	// aggressive failover: entry errors rotate to the next entry before
+	// surfacing to the client.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// CircuitBreaker opts this provider's pool into the pool-level circuit

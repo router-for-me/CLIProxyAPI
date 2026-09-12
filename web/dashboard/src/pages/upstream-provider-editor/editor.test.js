@@ -399,6 +399,8 @@ test('buildSchemas: claude-api-key + openai-compatibility both expose the routin
     const values = field.options.map((o) => o.value);
     assert.ok(values.includes(''), 'option list includes the blank default');
     assert.ok(values.includes('fill-first'), 'option list includes fill-first');
+    assert.ok(values.includes('power-of-two-choices'), 'option list includes power-of-two-choices');
+    assert.ok(values.includes('least-used'), 'option list includes least-used');
     assert.ok(values.includes('failover'), 'option list includes the failover alias');
     assert.ok(field.hint, 'routing_strategy carries an operator hint');
   }

@@ -44,6 +44,10 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "power-of-two-choices", "poweroftwochoices", "p2c", "two-random-choices":
+		state.strategy = "power-of-two-choices"
+	case "least-used", "leastused", "least-busy":
+		state.strategy = "least-used"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -61,6 +65,10 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "power-of-two-choices":
+		selector = &coreauth.P2CSelector{}
+	case "least-used":
+		selector = &coreauth.LeastUsedSelector{}
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}

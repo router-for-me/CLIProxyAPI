@@ -2270,3 +2270,36 @@ func TestSetSelectorHandsOffAffinityCache(t *testing.T) {
 		t.Fatal("outgoing SessionAffinitySelector was not stopped after handoff")
 	}
 }
+
+// TestP2CSelectorAndLeastUsedSelectorPickFillFirstUntilSchedulerWork covers the
+// interim G4 wiring: both new selectors map to dedicated types now, and their
+// Pick behaves exactly like FillFirstSelector (first available auth,
+// deterministic, no randomization) until the in-flight-aware scheduler
+// selection lands.
+func TestP2CSelectorAndLeastUsedSelectorPickFillFirstUntilSchedulerWork(t *testing.T) {
+	t.Parallel()
+
+	auths := []*Auth{
+		{ID: "b"},
+		{ID: "a"},
+		{ID: "c"},
+	}
+	selectors := map[string]Selector{
+		"p2c":        &P2CSelector{},
+		"least-used": &LeastUsedSelector{},
+	}
+	for name, selector := range selectors {
+		for i := 0; i < 3; i++ {
+			got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+			if err != nil {
+				t.Fatalf("%s Pick() #%d error = %v", name, i, err)
+			}
+			if got == nil {
+				t.Fatalf("%s Pick() #%d auth = nil", name, i)
+			}
+			if got.ID != "a" {
+				t.Fatalf("%s Pick() #%d auth.ID = %q, want %q (fill-first determinism)", name, i, got.ID, "a")
+			}
+		}
+	}
+}

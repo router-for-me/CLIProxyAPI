@@ -302,7 +302,7 @@ func TestValidateUpstreamProviderRequestRoutingStrategy(t *testing.T) {
 			t.Fatalf("error for %q = %v, want the descriptive invalid-routing-strategy message", raw, err)
 		}
 	}
-	for _, raw := range []string{"", "   ", "failover", "priority", "round-robin", "weighted-round-robin", "wrr", "fill-first", "ff"} {
+	for _, raw := range []string{"", "   ", "failover", "priority", "round-robin", "weighted-round-robin", "wrr", "fill-first", "ff", "power-of-two-choices", "p2c", "two-random-choices", "least-used", "least-busy"} {
 		if err := validateUpstreamProviderRequest(&upstreamProviderReq{RoutingStrategy: raw}); err != nil {
 			t.Fatalf("validateUpstreamProviderRequest(%q) = %v, want nil", raw, err)
 		}

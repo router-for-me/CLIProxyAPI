@@ -12,10 +12,16 @@ import (
 // Routes-compatible aliases at input boundaries (the management API request,
 // canonicalized in the DTO; and the renderer's store read) so downstream
 // layers see one spelling.
+//
+// power-of-two-choices and least-used select by in-flight request counts
+// (design G4): until the scheduler-side counters land, both map to the
+// fill-first-style deterministic pick.
 const (
 	PoolStrategyRoundRobin         = "round-robin"
 	PoolStrategyWeightedRoundRobin = "weighted-round-robin"
 	PoolStrategyFillFirst          = "fill-first"
+	PoolStrategyPowerOfTwoChoices  = "power-of-two-choices"
+	PoolStrategyLeastUsed          = "least-used"
 )
 
 // NormalizePoolRoutingStrategy canonicalizes an operator-supplied pool
@@ -28,6 +34,10 @@ func NormalizePoolRoutingStrategy(s string) string {
 		return PoolStrategyWeightedRoundRobin
 	case "fill-first", "fillfirst", "ff", "priority":
 		return PoolStrategyFillFirst
+	case "power-of-two-choices", "poweroftwochoices", "p2c", "two-random-choices":
+		return PoolStrategyPowerOfTwoChoices
+	case "least-used", "leastused", "least-busy":
+		return PoolStrategyLeastUsed
 	default:
 		return ""
 	}
@@ -39,9 +49,9 @@ func NormalizePoolRoutingStrategy(s string) string {
 // intended.
 func ValidatePoolRoutingStrategy(s string) error {
 	switch s {
-	case "", PoolStrategyRoundRobin, PoolStrategyWeightedRoundRobin, PoolStrategyFillFirst:
+	case "", PoolStrategyRoundRobin, PoolStrategyWeightedRoundRobin, PoolStrategyFillFirst, PoolStrategyPowerOfTwoChoices, PoolStrategyLeastUsed:
 		return nil
 	default:
-		return fmt.Errorf("invalid routing strategy %q: want one of round-robin, weighted-round-robin, fill-first", s)
+		return fmt.Errorf("invalid routing strategy %q: want one of round-robin, weighted-round-robin, fill-first, power-of-two-choices, least-used", s)
 	}
 }
