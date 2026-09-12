@@ -450,6 +450,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
+	auth.RecordDirectHttpUpstreamResult(selected, handshakeResponse, errDial)
 	if errDial != nil {
 		handshakeStatus := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
 		if handshakeResponse != nil && handshakeResponse.StatusCode > 0 {
