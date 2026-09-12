@@ -438,7 +438,10 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 			}
 		}
 		if resetsInSeconds := quota.Get("resets_in_seconds").Int(); resetsInSeconds > 0 {
-			retryAfter := min(time.Duration(resetsInSeconds)*time.Second, codexUsageLimitMaxCooldown)
+			retryAfter := codexUsageLimitMaxCooldown
+			if resetsInSeconds < int64(codexUsageLimitMaxCooldown/time.Second) {
+				retryAfter = time.Duration(resetsInSeconds) * time.Second
+			}
 			return &retryAfter
 		}
 	}
