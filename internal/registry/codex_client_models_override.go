@@ -102,16 +102,26 @@ func GetCodexClientModelsState() CodexClientModelsState {
 		slug, _ := model["slug"].(string)
 		state.Origins[strings.TrimSpace(slug)] = CodexClientModelsOriginBase
 	}
+	// An entry that a resilient apply could not patch keeps its base value, so it
+	// has to stay reported as base instead of contradicting the effective catalog.
+	degraded := make(map[string]struct{}, len(state.OverrideErrors))
+	for _, issue := range state.OverrideErrors {
+		degraded[strings.TrimSpace(issue.Slug)] = struct{}{}
+	}
 	for slug := range state.Override {
-		if _, ok := modelIndex[slug]; !ok {
+		trimmed := strings.TrimSpace(slug)
+		if _, ok := modelIndex[trimmed]; !ok {
 			// A null patch removed this entry from the effective catalog.
 			continue
 		}
-		if _, ok := baseIndex[slug]; ok {
-			state.Origins[slug] = CodexClientModelsOriginOverride
+		if _, failed := degraded[trimmed]; failed {
 			continue
 		}
-		state.Origins[slug] = CodexClientModelsOriginCustom
+		if _, ok := baseIndex[trimmed]; ok {
+			state.Origins[trimmed] = CodexClientModelsOriginOverride
+			continue
+		}
+		state.Origins[trimmed] = CodexClientModelsOriginCustom
 	}
 	return state
 }
