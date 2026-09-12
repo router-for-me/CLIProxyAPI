@@ -1,9 +1,16 @@
 package openai
 
 import (
+	"github.com/gin-gonic/gin"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
+
+// CodexModels returns the native Codex model catalog through the shared model
+// list writer so plugin interceptors observe it like every other model list.
+func (h *OpenAIAPIHandler) CodexModels(c *gin.Context) {
+	h.WriteModelListResponse(c, h.HandlerType(), h.codexClientModelsResponse(c.Query("client_version")))
+}
 
 func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) map[string]any {
 	version := ""

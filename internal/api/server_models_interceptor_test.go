@@ -316,3 +316,45 @@ func TestServer_WriteModelListResponse_ExposesToInterceptors(t *testing.T) {
 		t.Fatalf("body did not contain intercepted model: %s", rec.Body.String())
 	}
 }
+
+func TestModelsEndpoint_ExposesResponseToPluginInterceptors_CodexNativeRoute(t *testing.T) {
+	server := newTestServer(t)
+
+	var intercepted bool
+	var capturedReq pluginapi.ResponseInterceptRequest
+
+	server.handlers.SetPluginHost(&mockModelListInterceptorHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			intercepted = true
+			capturedReq = req
+			var parsed map[string]any
+			if err := json.Unmarshal(req.Body, &parsed); err != nil {
+				t.Fatalf("failed to unmarshal original body: %v", err)
+			}
+			parsed["intercepted_by_plugin"] = true
+			modified, _ := json.Marshal(parsed)
+			return pluginapi.ResponseInterceptResponse{
+				Headers: req.ResponseHeaders,
+				Body:    modified,
+			}
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/backend-api/codex/models?client_version=0.137.0", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if !intercepted {
+		t.Fatal("plugin InterceptResponse was not called for /backend-api/codex/models")
+	}
+	if capturedReq.SourceFormat != "openai" {
+		t.Fatalf("captured SourceFormat = %q, want %q", capturedReq.SourceFormat, "openai")
+	}
+	if !strings.Contains(rr.Body.String(), "intercepted_by_plugin") {
+		t.Fatalf("response body did not contain intercepted marker: %s", rr.Body.String())
+	}
+}
