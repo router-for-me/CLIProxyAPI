@@ -591,6 +591,8 @@ func isCodexBillingQuotaError(errorBody []byte) bool {
 	return false
 }
 
+const codexUsageLimitMaxCooldown = 6 * time.Hour
+
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
 	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
 		return nil
@@ -602,12 +604,12 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 		if resetsAt := quota.Get("resets_at").Int(); resetsAt > 0 {
 			resetAtTime := time.Unix(resetsAt, 0)
 			if resetAtTime.After(now) {
-				retryAfter := resetAtTime.Sub(now)
+				retryAfter := min(resetAtTime.Sub(now), codexUsageLimitMaxCooldown)
 				return &retryAfter
 			}
 		}
 		if resetsInSeconds := quota.Get("resets_in_seconds").Int(); resetsInSeconds > 0 {
-			retryAfter := time.Duration(resetsInSeconds) * time.Second
+			retryAfter := min(time.Duration(resetsInSeconds)*time.Second, codexUsageLimitMaxCooldown)
 			return &retryAfter
 		}
 	}
