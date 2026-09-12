@@ -915,8 +915,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										if !otherState.NextRetryAfter.IsZero() && otherState.NextRetryAfter.After(otherRetryAfter) {
 											otherRetryAfter = otherState.NextRetryAfter
 										}
-										if capDeadline := now.Add(quotaBackoffMax); otherRetryAfter.After(capDeadline) {
-											otherRetryAfter = capDeadline
+										if capDeadline := now.Add(quotaBackoffMax); otherQuotaNext.After(capDeadline) {
 											otherQuotaNext = capDeadline
 										}
 										otherState.NextRetryAfter = otherRetryAfter
