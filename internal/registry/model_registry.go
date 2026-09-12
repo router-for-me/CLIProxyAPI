@@ -1061,11 +1061,7 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	}
 
 	for _, id := range models {
-		cleanID := strings.TrimSpace(id)
-		if strings.EqualFold(cleanID, modelID) {
-			return true
-		}
-		if !strings.HasPrefix(strings.ToLower(modelID), "devin/") && strings.EqualFold(cleanID, "devin/"+modelID) {
+		if strings.EqualFold(strings.TrimSpace(id), modelID) {
 			return true
 		}
 	}
@@ -1085,9 +1081,6 @@ func (r *ModelRegistry) IsModelSuspendedForClient(clientID, modelID string) bool
 	defer r.mutex.RUnlock()
 
 	registration, exists := r.models[modelID]
-	if (!exists || registration == nil) && !strings.HasPrefix(strings.ToLower(modelID), "devin/") {
-		registration, exists = r.models["devin/"+modelID]
-	}
 	if !exists || registration == nil || registration.SuspendedClients == nil {
 		return false
 	}
@@ -1437,12 +1430,6 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	defer r.mutex.RUnlock()
 
 	registration, exists := r.models[modelID]
-	if (!exists || registration == nil || len(registration.Providers) == 0) && !strings.HasPrefix(strings.ToLower(modelID), "devin/") {
-		if reg, ok := r.models["devin/"+modelID]; ok && reg != nil && len(reg.Providers) > 0 {
-			registration = reg
-			exists = true
-		}
-	}
 	if !exists || registration == nil || len(registration.Providers) == 0 {
 		return nil
 	}
@@ -1493,11 +1480,7 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
-	reg, ok := r.models[modelID]
-	if (!ok || reg == nil) && !strings.HasPrefix(strings.ToLower(modelID), "devin/") {
-		reg, ok = r.models["devin/"+modelID]
-	}
-	if ok && reg != nil {
+	if reg, ok := r.models[modelID]; ok && reg != nil {
 		// Try provider specific definition first
 		if provider != "" && reg.InfoByProvider != nil {
 			if reg.Providers != nil {
