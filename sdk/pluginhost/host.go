@@ -161,11 +161,11 @@ func (h *Host) HasAuthProvider(provider string) bool {
 }
 
 // StartLogin starts a provider login flow through an active auth-provider plugin.
-func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string) (pluginapi.AuthLoginStartResponse, bool, error) {
+func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string, metadata ...map[string]any) (pluginapi.AuthLoginStartResponse, bool, error) {
 	if h == nil || h.inner == nil {
 		return pluginapi.AuthLoginStartResponse{}, false, nil
 	}
-	return h.inner.StartLogin(ctx, provider, baseURL)
+	return h.inner.StartLogin(ctx, provider, baseURL, metadata...)
 }
 
 // PollLogin polls a provider login flow through an active auth-provider plugin.

@@ -255,15 +255,19 @@ func pluginAuthParseResponseAuths(resp pluginapi.AuthParseResponse) []pluginapi.
 	return []pluginapi.AuthData{resp.Auth}
 }
 
-func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string) (pluginapi.AuthLoginStartResponse, bool, error) {
+func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string, metadata ...map[string]any) (pluginapi.AuthLoginStartResponse, bool, error) {
 	record := h.authProviderRecord(provider)
 	if record == nil {
 		return pluginapi.AuthLoginStartResponse{}, false, nil
 	}
-	return h.callStartLogin(ctx, *record, provider, baseURL)
+	var startMetadata map[string]any
+	if len(metadata) > 0 {
+		startMetadata = metadata[0]
+	}
+	return h.callStartLogin(ctx, *record, provider, baseURL, startMetadata)
 }
 
-func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, provider string, baseURL string) (resp pluginapi.AuthLoginStartResponse, handled bool, err error) {
+func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, provider string, baseURL string, metadata map[string]any) (resp pluginapi.AuthLoginStartResponse, handled bool, err error) {
 	authProvider := record.plugin.Capabilities.AuthProvider
 	if h == nil || authProvider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.AuthLoginStartResponse{}, false, nil
@@ -281,6 +285,7 @@ func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, prov
 		BaseURL:    strings.TrimSpace(baseURL),
 		Host:       h.hostConfigSummary(),
 		HTTPClient: h.newHTTPClient(nil),
+		Metadata:   cloneAnyMap(metadata),
 	}
 	resp, errStart := authProvider.StartLogin(ctx, req)
 	if errStart != nil {

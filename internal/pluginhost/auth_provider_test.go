@@ -215,6 +215,64 @@ func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 	}
 }
 
+func TestStartLoginPassesMetadataAndClonesMap(t *testing.T) {
+	called := false
+	var receivedMetadata map[string]any
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-plugin",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "plugin-provider",
+					startLogin: func(ctx context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+						called = true
+						receivedMetadata = req.Metadata
+						return pluginapi.AuthLoginStartResponse{
+							Provider: req.Provider,
+							State:    "state-1",
+						}, nil
+					},
+				},
+			},
+		},
+	})
+
+	meta := map[string]any{"region": "us-east-1", "nested": "val"}
+	resp, handled, errStart := host.StartLogin(context.Background(), "plugin-provider", "http://localhost:8080/login", meta)
+	if errStart != nil {
+		t.Fatalf("StartLogin() error = %v", errStart)
+	}
+	if !handled || !called {
+		t.Fatalf("StartLogin() handled=%t called=%t, want handled call", handled, called)
+	}
+	if resp.State != "state-1" {
+		t.Fatalf("StartLogin() response = %#v, want state-1", resp)
+	}
+	if receivedMetadata == nil || receivedMetadata["region"] != "us-east-1" {
+		t.Fatalf("receivedMetadata = %#v, want region=us-east-1", receivedMetadata)
+	}
+
+	// Verify metadata cloning: mutating original meta map must not mutate received map
+	meta["region"] = "mutated"
+	if receivedMetadata["region"] != "us-east-1" {
+		t.Fatalf("receivedMetadata was mutated when caller map changed: %#v", receivedMetadata)
+	}
+
+	// Verify calling StartLogin without metadata sets req.Metadata to nil
+	called = false
+	receivedMetadata = nil
+	_, _, errNoMeta := host.StartLogin(context.Background(), "plugin-provider", "http://localhost:8080/login")
+	if errNoMeta != nil {
+		t.Fatalf("StartLogin() without metadata error = %v", errNoMeta)
+	}
+	if !called {
+		t.Fatal("StartLogin() without metadata was not called")
+	}
+	if receivedMetadata != nil {
+		t.Fatalf("receivedMetadata = %#v, want nil for empty metadata", receivedMetadata)
+	}
+}
+
 func TestPollLoginPassesProviderStateHostAndHTTPClient(t *testing.T) {
 	authDir := t.TempDir()
 	called := false
