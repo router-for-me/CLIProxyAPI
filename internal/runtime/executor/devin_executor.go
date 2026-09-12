@@ -293,12 +293,14 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	interactionsJSON, respLog, errConsume := consumeDevinFramesToInteractions(httpResp.Body, req.Model, chatModelUID)
+	if respLog != nil || len(interactionsJSON) > 0 {
+		logRespBody := helps.BuildDevinUpstreamResponseLogBody(respLog, interactionsJSON)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, logRespBody)
+	}
 	if errConsume != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errConsume)
 		return resp, errConsume
 	}
-	logRespBody := helps.BuildDevinUpstreamResponseLogBody(respLog, interactionsJSON)
-	helps.AppendAPIResponseChunk(ctx, e.cfg, logRespBody)
 
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(interactionsJSON))
 
@@ -706,6 +708,7 @@ func (e *DevinExecutor) streamDevinFrames(
 
 	if finalUsage != nil || len(accumulatedSignature) > 0 {
 		streamSummary := &helps.DevinUpstreamResponseLog{
+			Status:        "completed",
 			FramesCount:   streamFrameCount,
 			Thinking:      accumulatedThinking.String(),
 			Content:       accumulatedContent.String(),
@@ -753,6 +756,8 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 	var finalUsage *helps.DevinUsage
 	var accumulatedSignature []byte
 	var signatureType string
+	var unknownFields []int
+	seenUnknown := make(map[int]bool)
 	framesCount := 0
 
 	for {
@@ -761,14 +766,36 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 			if errors.Is(errRead, io.EOF) || errors.Is(errRead, io.ErrUnexpectedEOF) {
 				break
 			}
-			return nil, nil, errRead
+			respLog := &helps.DevinUpstreamResponseLog{
+				Status:        fmt.Sprintf("read_error: %v", errRead),
+				FramesCount:   framesCount,
+				Content:       strings.Join(textParts, ""),
+				Thinking:      strings.Join(thinkingParts, ""),
+				Signature:     string(accumulatedSignature),
+				SignatureType: signatureType,
+				ToolCalls:     toolCalls,
+				Usage:         finalUsage,
+				UnknownFields: unknownFields,
+			}
+			return nil, respLog, errRead
 		}
 		framesCount++
 
 		if flag&helps.ConnectFlagEndStream != 0 {
 			code, errTrailer := helps.ParseDevinTrailerError(payload)
 			if errTrailer != nil {
-				return nil, nil, statusErr{code: code, msg: errTrailer.Error()}
+				respLog := &helps.DevinUpstreamResponseLog{
+					Status:        fmt.Sprintf("trailer_error(%d): %s", code, errTrailer.Error()),
+					FramesCount:   framesCount,
+					Content:       strings.Join(textParts, ""),
+					Thinking:      strings.Join(thinkingParts, ""),
+					Signature:     string(accumulatedSignature),
+					SignatureType: signatureType,
+					ToolCalls:     toolCalls,
+					Usage:         finalUsage,
+					UnknownFields: unknownFields,
+				}
+				return nil, respLog, statusErr{code: code, msg: errTrailer.Error()}
 			}
 			break
 		}
@@ -776,6 +803,13 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		frameRes, errParse := helps.ParseDevinFrame(payload)
 		if errParse != nil {
 			continue
+		}
+
+		for _, uf := range frameRes.UnknownFieldNumbers {
+			if !seenUnknown[uf] {
+				seenUnknown[uf] = true
+				unknownFields = append(unknownFields, uf)
+			}
 		}
 
 		if frameRes.Usage != nil {
@@ -860,6 +894,7 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 	}
 
 	respLog := &helps.DevinUpstreamResponseLog{
+		Status:        "completed",
 		FramesCount:   framesCount,
 		Content:       strings.Join(textParts, ""),
 		Thinking:      strings.Join(thinkingParts, ""),
@@ -867,6 +902,7 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		SignatureType: signatureType,
 		ToolCalls:     toolCalls,
 		Usage:         finalUsage,
+		UnknownFields: unknownFields,
 	}
 
 	return out, respLog, nil

@@ -114,6 +114,7 @@ type DevinFrameResult struct {
 	MessageID               string
 	Usage                   *DevinUsage
 	ResponseDimensionGroups []byte
+	UnknownFieldNumbers     []int
 }
 
 // GenerateDevinDeviceFingerprint generates a stable 732-character hex device fingerprint.
@@ -480,6 +481,8 @@ func ParseDevinFrame(payload []byte) (DevinFrameResult, error) {
 			switch num {
 			case 1:
 				res.OutputID = string(val)
+			case 2:
+				res.Timestamp = parseDevinTimestamp(val)
 			case 3:
 				textParts = append(textParts, string(val))
 			case 6:
@@ -498,6 +501,8 @@ func ParseDevinFrame(payload []byte) (DevinFrameResult, error) {
 				res.DeltaSignatureType = string(val)
 			case 28:
 				res.ResponseDimensionGroups = val
+			default:
+				res.UnknownFieldNumbers = append(res.UnknownFieldNumbers, int(num))
 			}
 
 		default:
@@ -591,6 +596,31 @@ func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
 		}
 	}
 	return tc, nil
+}
+
+func parseDevinTimestamp(data []byte) uint64 {
+	pos := 0
+	var secs uint64
+	for pos < len(data) {
+		num, typ, n := protowire.ConsumeTag(data[pos:])
+		if n <= 0 {
+			break
+		}
+		pos += n
+		if typ == protowire.VarintType {
+			v, vn := protowire.ConsumeVarint(data[pos:])
+			if vn <= 0 {
+				break
+			}
+			pos += vn
+			if num == 1 {
+				secs = v
+			}
+		} else {
+			break
+		}
+	}
+	return secs
 }
 
 func parseDevinUsageField(data []byte) *DevinUsage {
@@ -885,6 +915,7 @@ func BuildDevinUpstreamLogBody(
 
 // DevinUpstreamResponseLog represents the decoded response frames from Devin Connect-RPC.
 type DevinUpstreamResponseLog struct {
+	Status        string          `json:"status,omitempty"`
 	FramesCount   int             `json:"frames_count"`
 	Content       string          `json:"content,omitempty"`
 	Thinking      string          `json:"thinking,omitempty"`
@@ -892,6 +923,7 @@ type DevinUpstreamResponseLog struct {
 	SignatureType string          `json:"signature_type,omitempty"`
 	ToolCalls     []DevinToolCall `json:"tool_calls,omitempty"`
 	Usage         *DevinUsage     `json:"usage,omitempty"`
+	UnknownFields []int           `json:"unknown_fields,omitempty"`
 }
 
 // BuildDevinUpstreamResponseLogBody formats the decoded Devin response and the intermediate
