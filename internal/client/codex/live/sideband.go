@@ -658,19 +658,16 @@ func copyWebsocket(destination, source *websocket.Conn, observers ...func([]byte
 		}
 		writer, errWriter := destination.NextWriter(messageType)
 		if errWriter != nil {
+			if messageType == websocket.TextMessage && len(observers) > 0 {
+				_ = forwardUsageFrame(io.Discard, reader, observers...)
+			}
 			return errWriter
 		}
-		capture := &usageFrameCapture{}
-		var target io.Writer = writer
-		if len(observers) > 0 && messageType == websocket.TextMessage {
-			target = io.MultiWriter(writer, capture)
+		var frameObservers []func([]byte)
+		if messageType == websocket.TextMessage {
+			frameObservers = observers
 		}
-		_, errCopy := io.Copy(target, reader)
-		if errCopy == nil && !capture.overflow && len(capture.data) > 0 {
-			for _, observe := range observers {
-				observe(capture.data)
-			}
-		}
+		errCopy := forwardUsageFrame(writer, reader, frameObservers...)
 		errClose := writer.Close()
 		if errCopy != nil {
 			return errCopy

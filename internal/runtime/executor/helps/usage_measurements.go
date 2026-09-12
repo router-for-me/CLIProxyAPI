@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bytes"
 	"encoding/json"
 	"math/big"
 
@@ -59,6 +60,104 @@ func withResponseBilling(detail usage.Detail, root gjson.Result) usage.Detail {
 		raw["file_search_calls"] = fileSearch
 	}
 	if encoded, errEncode := json.Marshal(raw); errEncode == nil && len(raw) > 0 {
+		detail.RawUsage = string(encoded)
+	}
+	return detail
+}
+
+// UsageBillingMetadata retains billing dimensions which may arrive in a
+// different frame from the final token counters. Observing metadata never
+// turns an unmeasured frame into a measured token response.
+type UsageBillingMetadata struct {
+	fields map[string]any
+}
+
+func (b *UsageBillingMetadata) ObservePayload(payload []byte) {
+	// Most stream frames contain only text/audio deltas. Avoid parsing their
+	// potentially large bodies when no billing dimension can be present.
+	candidate := false
+	for _, marker := range []string{"\"tool_usage\"", "\"server_tool_use\"", "\"groundingMetadata\"", "\"web_search_call\"", "\"file_search_call\"", "\"code_interpreter_call\"", "\"shell_call\""} {
+		if bytes.Contains(payload, []byte(marker)) {
+			candidate = true
+			break
+		}
+	}
+	if !candidate {
+		return
+	}
+	payload = ExtractStreamJSONPayload(payload)
+	if !gjson.ValidBytes(payload) {
+		return
+	}
+	root := gjson.ParseBytes(payload)
+	for _, node := range []gjson.Result{root, root.Get("response")} {
+		if !node.IsObject() {
+			continue
+		}
+		detail := withResponseBilling(usage.Detail{}, node)
+		b.observeDetail(detail)
+		for _, path := range []string{"usage", "message.usage"} {
+			if raw := node.Get(path); raw.IsObject() {
+				b.observeDetail(usage.Detail{RawUsage: raw.Raw})
+			}
+		}
+	}
+}
+
+func (b *UsageBillingMetadata) observeDetail(detail usage.Detail) {
+	var raw map[string]any
+	if json.Unmarshal([]byte(detail.RawUsage), &raw) != nil {
+		return
+	}
+	if b.fields == nil {
+		b.fields = make(map[string]any)
+	}
+	for _, key := range []string{"unpriced_server_tools", "tool_usage", "server_tool_use", "web_search_calls", "file_search_calls"} {
+		if value, ok := raw[key]; ok {
+			b.fields[key] = mergeBillingMetadata(b.fields[key], value)
+		}
+	}
+}
+
+// Provider stream counters are cumulative snapshots, not additive deltas.
+// Keep known keys and the largest count so repeats cannot charge twice and
+// later metadata-less frames cannot erase already observed tool usage.
+func mergeBillingMetadata(previous, next any) any {
+	switch value := next.(type) {
+	case map[string]any:
+		merged, _ := previous.(map[string]any)
+		if merged == nil {
+			merged = make(map[string]any)
+		}
+		for key, child := range value {
+			merged[key] = mergeBillingMetadata(merged[key], child)
+		}
+		return merged
+	case float64:
+		if old, ok := previous.(float64); ok && old > value {
+			return old
+		}
+	case bool:
+		if old, ok := previous.(bool); ok && old {
+			return true
+		}
+	}
+	return next
+}
+
+func (b *UsageBillingMetadata) Apply(detail usage.Detail) usage.Detail {
+	b.observeDetail(detail)
+	if len(b.fields) == 0 {
+		return detail
+	}
+	var raw map[string]any
+	if json.Unmarshal([]byte(detail.RawUsage), &raw) != nil || raw == nil {
+		raw = make(map[string]any)
+	}
+	for key, value := range b.fields {
+		raw[key] = value
+	}
+	if encoded, errEncode := json.Marshal(raw); errEncode == nil {
 		detail.RawUsage = string(encoded)
 	}
 	return detail

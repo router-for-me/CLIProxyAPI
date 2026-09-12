@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"errors"
+	"io"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -13,11 +14,12 @@ import (
 // Observe only upstream data events. Client frames and repeated response.done
 // notifications must never manufacture or double-count provider usage.
 type liveUsageObserver struct {
-	ctx     context.Context
-	auth    *auth.Auth
-	model   string
-	seen    map[string]bool
-	pending map[string]*helps.UsageReporter
+	ctx                context.Context
+	auth               *auth.Auth
+	model              string
+	transcriptionModel string
+	seen               map[string]bool
+	pending            map[string]*helps.UsageReporter
 }
 
 func newLiveUsageObserver(ctx context.Context, selected *auth.Auth, model string) *liveUsageObserver {
@@ -39,13 +41,29 @@ func (o *liveUsageObserver) observe(payload []byte) {
 	if model := root.Get("session.model").String(); model != "" {
 		o.model = model
 	}
+	for _, path := range []string{"session.audio.input.transcription", "session.input_audio_transcription"} {
+		if node := root.Get(path); node.Exists() {
+			o.transcriptionModel = node.Get("model").String()
+			break
+		}
+	}
 	kind := root.Get("type").String()
 	id := root.Get("response.id").String()
 	if id == "" {
 		id = root.Get("item_id").String()
 	}
+	transcription := kind == "conversation.item.input_audio_transcription.completed"
+	if transcription && id != "" {
+		id = "transcription:" + id + ":" + root.Get("content_index").String()
+	} else if id != "" {
+		id = "response:" + id
+	}
 	if kind == "response.created" && id != "" && !o.seen[id] {
-		r := helps.NewUsageReporter(usage.WithNewGeneration(o.ctx), "codex", o.model, o.auth)
+		model := root.Get("response.model").String()
+		if model == "" {
+			model = o.model
+		}
+		r := helps.NewUsageReporter(usage.WithNewGeneration(o.ctx), "codex", model, o.auth)
 		r.SetStream(true)
 		r.SetTransport("websocket")
 		o.pending[id] = r
@@ -60,11 +78,20 @@ func (o *liveUsageObserver) observe(payload []byte) {
 	if model == "" {
 		model = o.model
 	}
+	if transcription {
+		model = o.transcriptionModel
+		if model == "" {
+			model = "unknown"
+		}
+	}
 	r := o.pending[id]
 	if r == nil {
 		r = helps.NewUsageReporter(usage.WithNewGeneration(o.ctx), "codex", model, o.auth)
 		r.SetStream(true)
 		r.SetTransport("websocket")
+	}
+	if transcription {
+		r.SetOperation("tool", "")
 	}
 	ctx := usage.WithNewGeneration(o.ctx)
 	status := root.Get("response.status").String()
@@ -97,4 +124,42 @@ func (b *usageFrameCapture) Write(p []byte) (int, error) {
 		b.data = append(b.data, p...)
 	}
 	return len(p), nil
+}
+
+// Read-side capture must survive a downstream write failure: the provider has
+// already incurred usage even when the client no longer receives the response.
+func forwardUsageFrame(writer io.Writer, reader io.Reader, observers ...func([]byte)) error {
+	if len(observers) == 0 {
+		_, errCopy := io.Copy(writer, reader)
+		return errCopy
+	}
+	capture := &usageFrameCapture{}
+	observedReader := io.TeeReader(reader, capture)
+	destination := &usageForwardWriter{Writer: writer}
+	_, errCopy := io.Copy(destination, observedReader)
+	complete := errCopy == nil
+	if destination.err != nil {
+		_, errDrain := io.Copy(io.Discard, observedReader)
+		complete = errDrain == nil
+	}
+	if complete && !capture.overflow && len(capture.data) > 0 {
+		for _, observe := range observers {
+			observe(capture.data)
+		}
+	}
+	return errCopy
+}
+
+type usageForwardWriter struct {
+	io.Writer
+	err error
+}
+
+func (w *usageForwardWriter) Write(p []byte) (int, error) {
+	n, errWrite := w.Writer.Write(p)
+	if errWrite == nil && n != len(p) {
+		errWrite = io.ErrShortWrite
+	}
+	w.err = errWrite
+	return n, errWrite
 }

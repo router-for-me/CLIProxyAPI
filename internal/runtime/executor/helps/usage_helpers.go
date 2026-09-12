@@ -668,8 +668,9 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 
 // StreamUsageBuffer keeps the latest usage detail observed in a stream.
 type StreamUsageBuffer struct {
-	detail usage.Detail
-	ok     bool
+	detail  usage.Detail
+	ok      bool
+	billing UsageBillingMetadata
 }
 
 var (
@@ -682,6 +683,7 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	if b == nil || !ok {
 		return
 	}
+	detail = b.billing.Apply(detail)
 	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
 	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) {
 		preservedTier := b.detail.ResponseServiceTier
@@ -695,12 +697,25 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	b.ok = true
 }
 
+// ObserveBillingPayload preserves billing metadata even when this frame has no
+// token usage, or the translator later removes provisional usage metadata.
+func (b *StreamUsageBuffer) ObserveBillingPayload(payload []byte) {
+	if b == nil {
+		return
+	}
+	b.billing.ObservePayload(payload)
+	if b.ok {
+		b.detail = b.billing.Apply(b.detail)
+	}
+}
+
 // ObserveOpenAIStream records response-tier state and the latest usage from an
 // OpenAI-style stream while avoiding JSON parsing for irrelevant chunks.
 func (b *StreamUsageBuffer) ObserveOpenAIStream(line []byte) {
 	if b == nil {
 		return
 	}
+	b.ObserveBillingPayload(line)
 	payload := jsonPayload(line)
 	if len(payload) == 0 {
 		return
@@ -921,7 +936,7 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
 	detail.ResponseServiceTier = responseServiceTier
-	return detail, true
+	return withResponseBilling(detail, gjson.ParseBytes(payload)), true
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {
@@ -1203,7 +1218,11 @@ func ParseAntigravityUsage(data []byte) usage.Detail {
 	if !node.Exists() {
 		return usage.Detail{}
 	}
-	return parseGeminiFamilyUsageDetail(node)
+	root := usageNode
+	if response := root.Get("response"); response.IsObject() {
+		root = response
+	}
+	return withResponseBilling(parseGeminiFamilyUsageDetail(node), root)
 }
 
 func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
@@ -1221,7 +1240,11 @@ func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
 	if !node.Exists() {
 		return usage.Detail{}, false
 	}
-	return parseGeminiFamilyUsageDetail(node), true
+	root := gjson.ParseBytes(payload)
+	if response := root.Get("response"); response.IsObject() {
+		root = response
+	}
+	return withResponseBilling(parseGeminiFamilyUsageDetail(node), root), true
 }
 
 var stopChunkWithoutUsage sync.Map

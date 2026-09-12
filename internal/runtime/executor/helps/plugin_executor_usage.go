@@ -38,6 +38,7 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 	if buffer == nil || len(payload) == 0 {
 		return
 	}
+	IterateStreamLines(payload, buffer.ObserveBillingPayload)
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "claude":
 		IterateStreamLines(payload, func(line []byte) {

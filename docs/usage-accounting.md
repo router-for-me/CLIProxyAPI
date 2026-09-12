@@ -36,3 +36,9 @@ Full `go test ./...`, the server build, and race tests for usage, redisqueue, ex
 ## Coordinated desktop consumer
 
 EasyCLIProxyAPI needs the companion accounting update to consume the journal, preserve snapshots, distinguish unknown amounts, and apply modality/provider-specific tariffs. The desktop release must bundle a core release containing this change. Deploying only one side does not provide the full end-to-end guarantees.
+
+## Independent review corrections
+
+The stream accounting buffer now retains billing metadata independently of final token counters, including metadata observed before Gemini/Antigravity SSE filtering. Repeated cumulative tool counters merge without adding the same count twice. A failed provider attempt publishes `usage_complete=false`, preventing a partial token snapshot from being frozen as a complete estimate by the desktop consumer.
+
+Live terminal usage is captured on the upstream read side, including a complete frame whose downstream write fails. Transcription events use the session's transcription model and item/content-index identity rather than the realtime model; absent transcription configuration remains an unknown model. This improves attribution without inventing usage after an upstream read failure.

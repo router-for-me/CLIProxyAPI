@@ -156,7 +156,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	payload, err := json.Marshal(queuedUsageDetail{
 		BillingID: usageDetail.BillingID, CostScope: usageDetail.CostScope, GenerationID: record.GenerationID, EventID: eventID, AttemptID: record.AttemptID, Kind: kind, Transport: transport, BaseURL: record.BaseURL,
-		UsageObserved: usageDetail.UsageObserved, RawUsage: rawUsage,
+		UsageObserved: usageDetail.UsageObserved, UsageComplete: !record.Failed, RawUsage: rawUsage,
 		CacheCreation5mTokens: usageDetail.CacheCreation5mTokens, CacheCreation1hTokens: usageDetail.CacheCreation1hTokens,
 		CostUSD: usageDetail.CostUSD,
 
@@ -185,6 +185,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 }
 
 type queuedUsageDetail struct {
+	UsageComplete         bool            `json:"usage_complete"`
 	Transport             string          `json:"transport"`
 	BillingID             string          `json:"billing_id,omitempty"`
 	CostScope             string          `json:"cost_scope,omitempty"`
