@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 )
@@ -111,6 +113,61 @@ const (
 	AttributeVirtualSource   = "virtual_source"
 	pluginVirtualAttrEnabled = "true"
 )
+
+// AuthFileBasename returns the backing auth file basename for logs.
+// It never returns a directory path, token contents, or other secrets.
+func AuthFileBasename(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	candidates := []string{auth.FileName}
+	if auth.Attributes != nil {
+		candidates = append(candidates, auth.Attributes["path"])
+	}
+	candidates = append(candidates, auth.ID)
+	for _, raw := range candidates {
+		if base := sanitizeAuthFileBasename(raw); base != "" {
+			return base
+		}
+	}
+	return ""
+}
+
+const maxAuthFileBasename = 255
+
+// sanitizeAuthFileBasename extracts a log-safe leaf name from a candidate path
+// or id. Windows separators are normalized so Unix hosts still see the leaf;
+// control characters are rejected so warning logs cannot be line-injected.
+func sanitizeAuthFileBasename(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	normalized := strings.ReplaceAll(raw, `\`, "/")
+	base := path.Base(normalized)
+	if base == "" || base == "." || base == "/" {
+		return ""
+	}
+	if strings.ContainsAny(base, `/\`) {
+		return ""
+	}
+	if strings.IndexFunc(base, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return ""
+	}
+	if !utf8.ValidString(base) {
+		return ""
+	}
+	if len(base) > maxAuthFileBasename {
+		base = base[:maxAuthFileBasename]
+		// Avoid splitting a trailing UTF-8 sequence.
+		for len(base) > 0 && !utf8.ValidString(base) {
+			base = base[:len(base)-1]
+		}
+	}
+	return base
+}
 
 // MarkPluginVirtualAuth marks an auth that was expanded from a plugin-owned source file.
 func MarkPluginVirtualAuth(auth *Auth, sourcePath string, ordinal int) {

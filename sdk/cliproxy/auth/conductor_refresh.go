@@ -12,6 +12,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
@@ -566,6 +567,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 					current.StatusMessage = "token expired"
 				}
+				logCredentialRefreshFailure(current, err, false)
 			} else {
 				// Access token remains valid. Preserve current in-flight/cooldown status without overwrite.
 				nextRetry := now.Add(refreshFailureBackoff)
@@ -575,7 +577,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 				current.NextRefreshAfter = nextRetry
 
 				if !current.Unavailable {
-					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
+					logCredentialRefreshFailure(current, err, true)
 				}
 			}
 			m.auths[id] = current
@@ -730,4 +732,50 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
 	}
 	wg.Wait()
 	return results
+}
+
+func logCredentialRefreshFailure(auth *Auth, err error, retainedUnexpired bool) {
+	if auth == nil || err == nil {
+		return
+	}
+	file := AuthFileBasename(auth)
+	if file == "" {
+		file = "unknown"
+	}
+	diagnostic := logging.SafeErrorDiagnostic(err)
+	fields := log.Fields{
+		"provider":   sanitizeProviderForLog(auth.Provider),
+		"auth_file":  file,
+		"diagnostic": diagnostic,
+	}
+	if retainedUnexpired {
+		log.WithFields(fields).Warn("credential refresh failed; retaining active credential as access token is unexpired")
+		return
+	}
+	log.WithFields(fields).Warn("credential refresh failed")
+}
+
+// sanitizeProviderForLog returns a single-line provider label for warning fields.
+// Control characters are stripped so LogFormatter cannot inject forged log lines
+// when an SDK caller registers a provider like "antigravity\n".
+func sanitizeProviderForLog(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return "unknown"
+	}
+	if strings.IndexFunc(provider, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		provider = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return -1
+			}
+			return r
+		}, provider)
+		provider = strings.TrimSpace(provider)
+	}
+	if provider == "" {
+		return "unknown"
+	}
+	return provider
 }
