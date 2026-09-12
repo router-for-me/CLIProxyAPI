@@ -117,6 +117,15 @@ func (s *Server) setupRoutes() {
 		codexDirect.POST("/alpha/search", s.codexAlphaSearch)
 	}
 
+	// Remaining chatgpt.com backend endpoints so clients can point chatgpt_base_url
+	// here: usage reads use a pooled Codex credential, everything else keeps the
+	// caller's own identity. The param segment coexists with the static codex routes.
+	codexBackend := s.engine.Group("/backend-api/:segment")
+	codexBackend.Use(AuthMiddleware(s.accessManager))
+	{
+		codexBackend.Any("/*path", s.codexBackendPassthrough)
+	}
+
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
@@ -448,70 +457,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		return s.handlers.AuthManager.HttpRequest(ctx, current, req)
 	}
 
-	if errCtx := ctx.Err(); errCtx != nil {
-		if selection != nil {
-			selection.End("attempt_canceled")
-		}
-		c.JSON(clienterror.HTTPStatusFromErrorOr(errCtx, http.StatusRequestTimeout), gin.H{"error": errCtx.Error()})
-		return
-	}
-	resp, err := performRequest(selected)
-	if err != nil {
-		if errors.Is(err, errMissingBaseURL) {
-			if selection != nil {
-				selection.End("missing_base_url")
-			}
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
-			return
-		}
-		if selection != nil {
-			selection.End("request_failed")
-		}
-		helps.RecordAPIResponseError(ctx, s.cfg, err)
-		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway), gin.H{"error": err.Error()})
-		return
-	}
-	closeResponseBody := func() error {
-		errClose := resp.Body.Close()
-		if errClose != nil {
-			log.Errorf("codex alpha search: close response body error: %v", errClose)
-		}
-		return errClose
-	}
-	if selection != nil {
-		if errBind := selection.Bind(closeResponseBody); errBind != nil {
-			if resp.StatusCode == http.StatusUnauthorized {
-				s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
-			}
-			selection.End("response_bind_failed")
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
-			return
-		}
-		defer selection.End("response_closed")
-	} else {
-		defer func() { _ = closeResponseBody() }()
-	}
-	helps.RecordAPIResponseMetadata(ctx, s.cfg, resp.StatusCode, resp.Header.Clone())
-	upstreamBody, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil {
-		helps.AppendAPIResponseChunk(ctx, s.cfg, upstreamBody)
-		if selection != nil && resp.StatusCode == http.StatusUnauthorized {
-			s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, upstreamBody)
-		}
-		helps.RecordAPIResponseError(ctx, s.cfg, err)
-		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway), gin.H{"error": "Failed to read Codex search response"})
-		return
-	}
-	helps.AppendAPIResponseChunk(ctx, s.cfg, upstreamBody)
-	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
-		s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, upstreamBody)
-		log.WithField("status", resp.StatusCode).Warnf("codex alpha search upstream request failed: %s", logging.SafeDiagnosticForLog(string(upstreamBody)))
-	}
-	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
-		c.Header("Content-Type", contentType)
-	}
-	c.Status(resp.StatusCode)
-	_, _ = c.Writer.Write(upstreamBody)
+	s.relayCodexUpstream(c, ctx, selection, selected, selectionModel, "codex alpha search", performRequest, errMissingBaseURL)
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
