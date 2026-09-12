@@ -1,0 +1,8 @@
+{
+  "error": {
+    "type": "credential_concurrency_exceeded",
+    "message": "credential concurrency limit reached",
+    "retryable": true,
+    "retry_after_ms": 750
+  }
+}

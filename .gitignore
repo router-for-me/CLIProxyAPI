@@ -1,0 +1,68 @@
+# Binaries
+cli-proxy-api
+*.exe
+
+# Configuration
+config.yaml
+.env
+
+# Generated content
+bin/*
+/logs
+conv/*
+temp/*
+refs/*
+plugins/*
+examples/plugin/bin/*
+
+# Storage backends
+pgstore/*
+gitstore/*
+objectstore/*
+
+# Static assets
+static/*
+
+# Authentication data
+auths/*
+/auths
+!auths/.gitkeep
+
+# Documentation
+docs/*
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+AGENTS.override.md
+
+# Tooling metadata
+.vscode/*
+.worktrees/
+.codex/*
+.claude/*
+.claude
+.gemini/*
+.serena/*
+.agent/*
+.agents
+.pi
+.agents/*
+.opencode/*
+.idea/*
+.beads/*
+.bmad/*
+_bmad/*
+_bmad-output/*
+.gocache/
+.gitnexus/
+
+# macOS
+.DS_Store
+._*
+
+# docker
+docker-compose.override.yml
+
+
+# Local LLM Wiki vault
+.llm-wiki
