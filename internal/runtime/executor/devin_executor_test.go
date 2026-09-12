@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	devinauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/devin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -580,5 +582,102 @@ func TestDevinExecutor_Refresh(t *testing.T) {
 	}
 	if updated.Quota.ObservedAt.IsZero() {
 		t.Error("expected non-zero Quota.ObservedAt")
+	}
+}
+
+func TestDevinExecutor_MaxCompletionTokensClamping(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-devin-clamp-client"
+	modelID := "devin/swe-2-clamp-test"
+	reg.RegisterClient(clientID, "devin", []*registry.ModelInfo{
+		{
+			ID:                  modelID,
+			MaxCompletionTokens: 64000,
+			ContextLength:       262000,
+		},
+	})
+	defer reg.UnregisterClient(clientID)
+
+	cfg := &config.Config{}
+	exec := NewDevinExecutor(cfg)
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key": "test-key",
+		},
+	}
+
+	// 1. When requested max_output_tokens exceeds MaxCompletionTokens (e.g. 100000 > 64000)
+	payloadOversized := []byte(`{
+		"generation_config": {
+			"max_output_tokens": 100000
+		},
+		"input": [{"type":"user_input","content":[{"type":"text","text":"hello"}]}]
+	}`)
+	reqOversized := cliproxyexecutor.Request{
+		Model:   modelID,
+		Payload: payloadOversized,
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatInteractions,
+	}
+
+	httpReq, _, _, err := exec.prepareDevinHTTPRequest(context.Background(), auth, reqOversized, opts)
+	if err != nil {
+		t.Fatalf("prepareDevinHTTPRequest failed: %v", err)
+	}
+
+	// Read body, unwrap 5-byte Connect envelope, and inspect Field 8 Subfield 2 (maxTokens)
+	bodyBytes, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read body failed: %v", err)
+	}
+	flag, payloadBytes, err := helps.ReadConnectFrame(bytes.NewReader(bodyBytes))
+	if err != nil || flag != 0 {
+		t.Fatalf("unwrap failed: %v", err)
+	}
+
+	maxTokensFound := 0
+	b := payloadBytes
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			break
+		}
+		b = b[n:]
+		if num == 8 && typ == protowire.BytesType {
+			subBytes, m := protowire.ConsumeBytes(b)
+			if m >= 0 {
+				sb := subBytes
+				for len(sb) > 0 {
+					snum, styp, sn := protowire.ConsumeTag(sb)
+					if sn < 0 {
+						break
+					}
+					sb = sb[sn:]
+					if snum == 2 && styp == protowire.VarintType {
+						val, vn := protowire.ConsumeVarint(sb)
+						if vn >= 0 {
+							maxTokensFound = int(val)
+							break
+						}
+					}
+					skip := protowire.ConsumeFieldValue(snum, styp, sb)
+					if skip < 0 {
+						break
+					}
+					sb = sb[skip:]
+				}
+			}
+			break
+		}
+		skip := protowire.ConsumeFieldValue(num, typ, b)
+		if skip < 0 {
+			break
+		}
+		b = b[skip:]
+	}
+
+	if maxTokensFound != 64000 {
+		t.Errorf("maxTokensFound = %d, want clamped 64000", maxTokensFound)
 	}
 }
