@@ -6,7 +6,7 @@ import (
 )
 
 // pool_breaker.go implements the opt-in pool-level circuit breaker (G3,
-// OmniRoute reference): only 408/5xx failures contribute; 401/402/403/429
+// OmniRoute reference): callers must feed only 408/5xx results; 401/402/403/429
 // belong to the per-auth+model cooldown. State is in-memory by design — a
 // restart starts every pool clean. Failure counting is fixed-window (resets
 // 60s after the window starts), a deliberate simplification of the design
@@ -42,7 +42,8 @@ type poolBreaker struct {
 
 var globalPoolBreaker = &poolBreaker{pools: make(map[string]*poolBreakerEntry)}
 
-func (b *poolBreaker) entry(key string, now time.Time) *poolBreakerEntry {
+// entry returns the entry for key, creating a fresh CLOSED entry if absent.
+func (b *poolBreaker) entry(key string) *poolBreakerEntry {
 	entry, ok := b.pools[key]
 	if !ok {
 		entry = &poolBreakerEntry{state: breakerClosed, resetPeriod: poolBreakerResetBase}
@@ -62,7 +63,7 @@ func (b *poolBreaker) recordFailure(key string, now time.Time) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	entry := b.entry(key, now)
+	entry := b.entry(key)
 	if entry.state == breakerHalfOpen {
 		entry.state = breakerOpen
 		entry.openedAt = now
@@ -86,7 +87,9 @@ func (b *poolBreaker) recordFailure(key string, now time.Time) {
 	}
 }
 
-// recordSuccess closes an open/half-open breaker and clears the window.
+// recordSuccess closes an open/half-open breaker and clears the window. The
+// now parameter is unused today (deletion needs no time) but kept for a
+// uniform signature with the other methods.
 func (b *poolBreaker) recordSuccess(key string, now time.Time) {
 	if key == "" {
 		return
@@ -101,9 +104,10 @@ func (b *poolBreaker) recordSuccess(key string, now time.Time) {
 
 // blockDeadline reports whether the pool currently blocks selection and when
 // it lifts. OPEN blocks until openedAt+resetPeriod; the lazy transition to
-// HALF_OPEN admits exactly one probe (the first caller after expiry); other
-// callers stay blocked until the probe resolves or a fresh reset period
-// elapses.
+// HALF_OPEN admits exactly one probe (the first caller after expiry). While
+// the probe is unresolved, other callers are blocked until a probe window
+// anchored at probe-admission time (openedAt+resetPeriod) elapses; if the
+// window expires without a verdict, a fresh probe is admitted.
 func (b *poolBreaker) blockDeadline(key string, now time.Time) (time.Time, bool) {
 	if key == "" {
 		return time.Time{}, false
@@ -124,11 +128,18 @@ func (b *poolBreaker) blockDeadline(key string, now time.Time) (time.Time, bool)
 		entry.probeUsed = false
 		fallthrough
 	case breakerHalfOpen:
-		if !entry.probeUsed {
-			entry.probeUsed = true
-			return time.Time{}, false // probe admitted
+		if entry.probeUsed {
+			// A probe is in flight; block until its anchored window elapses.
+			probeDeadline := entry.openedAt.Add(entry.resetPeriod)
+			if now.Before(probeDeadline) {
+				return probeDeadline, true
+			}
+			// The probe window expired without a verdict; admit a fresh probe.
+			entry.probeUsed = false
 		}
-		return now.Add(entry.resetPeriod), true
+		entry.probeUsed = true
+		entry.openedAt = now      // anchor the probe window at admission time
+		return time.Time{}, false // probe admitted
 	default:
 		return time.Time{}, false
 	}

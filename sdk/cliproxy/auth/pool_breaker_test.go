@@ -70,14 +70,16 @@ func TestPoolBreakerOpenBlocksThenAdmitsOneProbe(t *testing.T) {
 	if blocked {
 		t.Fatal("expected first post-expiry call to admit the probe (not blocked)")
 	}
-	// Second call while probe unresolved: blocked again.
+	// Second call while probe unresolved: blocked with a stable deadline
+	// anchored at probe admission time.
 	probe2Time := base.Add(poolBreakerResetBase + time.Second)
 	deadline, blocked = b.blockDeadline("pool-a", probe2Time)
 	if !blocked {
 		t.Fatal("expected second post-expiry call blocked while probe unresolved")
 	}
-	if !deadline.Equal(probe2Time.Add(poolBreakerResetBase)) {
-		t.Fatalf("deadline = %v, want %v", deadline, probe2Time.Add(poolBreakerResetBase))
+	want := base.Add(poolBreakerResetBase).Add(poolBreakerResetBase)
+	if !deadline.Equal(want) {
+		t.Fatalf("deadline = %v, want %v", deadline, want)
 	}
 }
 
@@ -211,5 +213,90 @@ func TestGlobalPoolBreakerInitialized(t *testing.T) {
 	}
 	if globalPoolBreaker.pools == nil {
 		t.Fatal("globalPoolBreaker.pools must be initialized")
+	}
+}
+
+func TestPoolBreakerHalfOpenBlockedDeadlineStable(t *testing.T) {
+	t.Parallel()
+	b := &poolBreaker{pools: make(map[string]*poolBreakerEntry)}
+	base := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 8; i++ {
+		b.recordFailure("pool-a", base)
+	}
+	// Expire and admit the probe at base+30s.
+	probeAdmittedAt := base.Add(poolBreakerResetBase)
+	if _, blocked := b.blockDeadline("pool-a", probeAdmittedAt); blocked {
+		t.Fatal("expected probe admitted")
+	}
+	// Two blocked calls at different nows (both inside the probe window)
+	// must see the SAME deadline, anchored at probe admission, not drifting.
+	call1 := base.Add(2*poolBreakerResetBase - 10*time.Second)
+	call2 := call1.Add(5 * time.Second)
+	d1, blocked1 := b.blockDeadline("pool-a", call1)
+	d2, blocked2 := b.blockDeadline("pool-a", call2)
+	if !blocked1 || !blocked2 {
+		t.Fatal("expected both calls blocked while probe unresolved")
+	}
+	if !d1.Equal(d2) {
+		t.Fatalf("unstable deadline: first call %v, second call %v", d1, d2)
+	}
+	if !d1.Equal(probeAdmittedAt.Add(poolBreakerResetBase)) {
+		t.Fatalf("deadline = %v, want anchored %v", d1, probeAdmittedAt.Add(poolBreakerResetBase))
+	}
+}
+
+func TestPoolBreakerHalfOpenFreshProbeAfterWindowExpiry(t *testing.T) {
+	t.Parallel()
+	b := &poolBreaker{pools: make(map[string]*poolBreakerEntry)}
+	base := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 8; i++ {
+		b.recordFailure("pool-a", base)
+	}
+	// Admit the first probe.
+	probeAdmittedAt := base.Add(poolBreakerResetBase)
+	if _, blocked := b.blockDeadline("pool-a", probeAdmittedAt); blocked {
+		t.Fatal("expected first probe admitted")
+	}
+	// While the probe window is live: blocked.
+	if _, blocked := b.blockDeadline("pool-a", probeAdmittedAt.Add(poolBreakerResetBase/2)); !blocked {
+		t.Fatal("expected blocked while probe window live")
+	}
+	// Probe window elapses without a verdict: a fresh probe is admitted.
+	afterWindow := probeAdmittedAt.Add(poolBreakerResetBase)
+	if _, blocked := b.blockDeadline("pool-a", afterWindow); blocked {
+		t.Fatal("expected fresh probe admitted after probe window expiry")
+	}
+	// The fresh probe again blocks other callers, anchored at the re-arm time.
+	deadline, blocked := b.blockDeadline("pool-a", afterWindow.Add(time.Second))
+	if !blocked {
+		t.Fatal("expected blocked after fresh probe admitted")
+	}
+	if !deadline.Equal(afterWindow.Add(poolBreakerResetBase)) {
+		t.Fatalf("deadline = %v, want %v", deadline, afterWindow.Add(poolBreakerResetBase))
+	}
+}
+
+func TestPoolBreakerFailureWhileOpenKeepsOpenedAt(t *testing.T) {
+	t.Parallel()
+	b := &poolBreaker{pools: make(map[string]*poolBreakerEntry)}
+	base := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 8; i++ {
+		b.recordFailure("pool-a", base)
+	}
+	b.mu.Lock()
+	openedAt := b.pools["pool-a"].openedAt
+	b.mu.Unlock()
+	// A failure while OPEN must be ignored: openedAt untouched.
+	b.recordFailure("pool-a", base.Add(10*time.Second))
+	b.mu.Lock()
+	after := b.pools["pool-a"].openedAt
+	b.mu.Unlock()
+	if !after.Equal(openedAt) {
+		t.Fatalf("openedAt changed while OPEN: %v -> %v", openedAt, after)
+	}
+	// Deadline still anchored at the original opening.
+	deadline, blocked := b.blockDeadline("pool-a", base.Add(time.Second))
+	if !blocked || !deadline.Equal(openedAt.Add(poolBreakerResetBase)) {
+		t.Fatalf("deadline = %v blocked=%v, want %v blocked", deadline, blocked, openedAt.Add(poolBreakerResetBase))
 	}
 }
