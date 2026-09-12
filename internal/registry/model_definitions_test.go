@@ -80,6 +80,26 @@ func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {
 	}
 }
 
+func TestGetXAIModelsIncludesGrok46(t *testing.T) {
+	for _, model := range GetXAIModels() {
+		if model == nil || model.ID != "grok-4.6" {
+			continue
+		}
+		if model.ContextLength != 500000 || model.MaxCompletionTokens != 65536 {
+			t.Fatalf("grok-4.6 limits = context %d, completion %d", model.ContextLength, model.MaxCompletionTokens)
+		}
+		if model.Thinking == nil || model.Thinking.ZeroAllowed || len(model.Thinking.Levels) != 3 {
+			t.Fatalf("grok-4.6 thinking = %#v", model.Thinking)
+		}
+		if len(model.SupportedInputModalities) != 2 || len(model.SupportedOutputModalities) != 1 {
+			t.Fatalf("grok-4.6 modalities = input %#v, output %#v", model.SupportedInputModalities, model.SupportedOutputModalities)
+		}
+		return
+	}
+
+	t.Fatal("xAI models do not contain grok-4.6")
+}
+
 func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {
 	registryRef := GetGlobalRegistry()
 	registryRef.RegisterClient("test-antigravity-websearch-route", "antigravity", []*ModelInfo{
