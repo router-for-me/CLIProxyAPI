@@ -127,6 +127,7 @@ func TestParseCodexRetryAfterQuotaLayouts(t *testing.T) {
 			{name: "relative reset above cap is capped", body: `{"type":"usage_limit_reached","resets_in_seconds":21601}`, want: 6 * time.Hour},
 			{name: "long secondary window reset is capped", body: `{"type":"usage_limit_reached","resets_in_seconds":244741}`, want: 6 * time.Hour},
 			{name: "absolute reset above cap is capped", body: `{"type":"usage_limit_reached","resets_at":1700100000}`, want: 6 * time.Hour},
+			{name: "relative reset overflow is capped", body: `{"type":"usage_limit_reached","resets_in_seconds":9223372036854775807}`, want: 6 * time.Hour},
 			{name: "type matching agrees with quota classification", body: `{"type":" USAGE_LIMIT_REACHED ","resets_in_seconds":30}`, want: 30 * time.Second},
 			{name: "missing reset", body: `{"type":"usage_limit_reached"}`},
 			{name: "expired reset", body: `{"type":"usage_limit_reached","resets_at":1699999940}`},
