@@ -188,6 +188,14 @@ func TestXAIWebsocketLifecycleLogsOmitSensitiveValues(t *testing.T) {
 	}
 }
 
+func TestWebsocketWriteLogsOmitSessionAndErrorDetails(t *testing.T) {
+	records := captureWebsocketLogs(t, func() {
+		sess := &codexWebsocketSession{sessionID: sentinelSessionID}
+		_ = writeWebsocketPayloadMessage("codex", sess, nil, []byte(sentinelAccessToken))
+	})
+	assertNoSentinelLeak(t, records)
+}
+
 func TestSafeWebsocketLifecycleReasonRejectsUnlistedValues(t *testing.T) {
 	if got := helps.SafeWebsocketLifecycleReason("read_error"); got != "read_error" {
 		t.Fatalf("helps.SafeWebsocketLifecycleReason(read_error) = %q, want read_error", got)
