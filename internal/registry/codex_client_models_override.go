@@ -17,8 +17,10 @@ import (
 // model override layer, resolved next to the active configuration file.
 const CodexClientModelsOverrideFileName = "codex_client_models_override.json"
 
-// maxCodexClientModelsOverrideFileSize bounds the override document read from disk.
-const maxCodexClientModelsOverrideFileSize = 1 << 20
+// CodexClientModelsOverrideMaxFileSize bounds the override document in both
+// directions: a file above it is ignored, and a document that would serialize
+// above it is refused instead of being persisted.
+const CodexClientModelsOverrideMaxFileSize = 1 << 20
 
 // The override file is a JSON Merge Patch (RFC 7386) document keyed by Codex client
 // model slug, for example:
@@ -414,14 +416,15 @@ func applyCodexClientModelsOverrideWithPolicy(base []byte, override map[string]j
 	}
 
 	// A chain of inheritance sources is allowed up to a fixed number of hops. The
-	// check is static so the outcome does not depend on the order entries resolve in.
+	// check is static so the outcome does not depend on the order entries resolve
+	// in, and it counts the chain each field resolution actually follows.
 	chainDepths := make(map[string]int, len(sources))
 	chainVisiting := make(map[string]bool, len(sources))
 	for _, slug := range slugs {
 		if len(sources[slug]) == 0 {
 			continue
 		}
-		depth, resolved := codexClientModelsInheritChainDepth(slug, sources, chainDepths, chainVisiting)
+		depth, resolved := codexClientModelsInheritFieldDepth(slug, "", sources, chainDepths, chainVisiting)
 		if !resolved || depth <= maxCodexClientModelsInheritDepth {
 			continue
 		}
@@ -581,8 +584,8 @@ func readCodexClientModelsOverrideFile(path string) (map[string]json.RawMessage,
 		}
 		return nil, fmt.Errorf("stat override file: %w", errStat)
 	}
-	if info.Size() > maxCodexClientModelsOverrideFileSize {
-		return nil, fmt.Errorf("override file exceeds %d bytes", maxCodexClientModelsOverrideFileSize)
+	if info.Size() > CodexClientModelsOverrideMaxFileSize {
+		return nil, fmt.Errorf("override file exceeds %d bytes", CodexClientModelsOverrideMaxFileSize)
 	}
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
@@ -599,8 +602,8 @@ func writeCodexClientModelsOverrideFile(path string, doc map[string]json.RawMess
 	data = append(data, '\n')
 	// The reader refuses a file above the cap, so a document the next reload would
 	// drop must not be reported as a successful change.
-	if len(data) > maxCodexClientModelsOverrideFileSize {
-		return rejectCodexClientModelsOverride(fmt.Errorf("override file exceeds %d bytes", maxCodexClientModelsOverrideFileSize))
+	if len(data) > CodexClientModelsOverrideMaxFileSize {
+		return rejectCodexClientModelsOverride(fmt.Errorf("override file exceeds %d bytes", CodexClientModelsOverrideMaxFileSize))
 	}
 
 	dir := filepath.Dir(path)

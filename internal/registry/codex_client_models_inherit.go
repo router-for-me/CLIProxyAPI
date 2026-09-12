@@ -422,28 +422,42 @@ func cloneCodexClientModelsValue(value any) any {
 	}
 }
 
-// codexClientModelsInheritChainDepth returns the longest inheritance chain that
-// starts at slug, counting one hop per source reference. A cycle reports ok = false
-// and is left to the resolver, which names the model and field it re-entered.
-func codexClientModelsInheritChainDepth(
-	slug string,
+// codexClientModelsInheritFieldDepth returns the longest inheritance chain that
+// resolving one field of slug can follow, counting one hop per source reference.
+// It walks only the source references the resolver follows for that field, so a
+// model that lends a different field to a different path does not add a hop. A
+// cycle reports ok = false and is left to the resolver, which names the model and
+// field it re-entered.
+func codexClientModelsInheritFieldDepth(
+	slug, fieldPath string,
 	sources map[string][]codexClientModelsInheritSource,
 	memo map[string]int,
 	visiting map[string]bool,
 ) (int, bool) {
-	if depth, ok := memo[slug]; ok {
+	key := slug + "\x00" + fieldPath
+	if depth, ok := memo[key]; ok {
 		return depth, true
 	}
-	if visiting[slug] {
+	if visiting[key] {
 		return 0, false
 	}
-	visiting[slug] = true
-	defer delete(visiting, slug)
+	visiting[key] = true
+	defer delete(visiting, key)
 
+	segments := splitCodexClientModelsPath(fieldPath)
 	longest := 0
 	resolved := true
 	for _, source := range sources[slug] {
-		child, okChild := codexClientModelsInheritChainDepth(source.slug, sources, memo, visiting)
+		if !codexClientModelsPathsOverlap(segments, source.segments) {
+			continue
+		}
+		// The resolver continues with the requested path when the source replaces
+		// it, and with the source's own path when the source writes inside it.
+		next := fieldPath
+		if !codexClientModelsPathHasPrefix(segments, source.segments) {
+			next = source.path
+		}
+		child, okChild := codexClientModelsInheritFieldDepth(source.slug, next, sources, memo, visiting)
 		if !okChild {
 			resolved = false
 			continue
@@ -453,7 +467,7 @@ func codexClientModelsInheritChainDepth(
 		}
 	}
 	if resolved {
-		memo[slug] = longest
+		memo[key] = longest
 	}
 	return longest, resolved
 }

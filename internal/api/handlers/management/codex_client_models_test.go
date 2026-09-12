@@ -107,6 +107,34 @@ type codexClientModelsResponse struct {
 	Override map[string]json.RawMessage                  `json:"override"`
 }
 
+func TestPutCodexClientModelsOverrideRejectsOversizedBody(t *testing.T) {
+	dir := t.TempDir()
+	overridePath := filepath.Join(dir, registry.CodexClientModelsOverrideFileName)
+	registry.SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
+	t.Cleanup(func() { _ = registry.ClearCodexClientModelsOverride() })
+
+	engine := gin.New()
+	h := &Handler{
+		cfg:            &config.Config{},
+		configFilePath: filepath.Join(dir, "config.yaml"),
+		failedAttempts: make(map[string]*attemptInfo),
+		envSecret:      "test-secret",
+	}
+	middleware := h.Middleware()
+	engine.PUT("/v0/management/codex-client-models/override", middleware, h.PutCodexClientModelsOverride)
+
+	// The body has to fit into a bounded override file, so one far above that bound
+	// is refused before the server holds it in memory.
+	body := `{"gpt-5.5":{"description":"` + strings.Repeat("x", registry.CodexClientModelsOverrideMaxFileSize) + `"}}`
+	rec := performCodexClientModelsRequest(t, engine, http.MethodPut, "/v0/management/codex-client-models/override", body)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized PUT status = %d, want %d (body %s)", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+	if _, errStat := os.Stat(overridePath); !os.IsNotExist(errStat) {
+		t.Fatalf("oversized PUT wrote %s: %v", overridePath, errStat)
+	}
+}
+
 func performCodexClientModelsRequest(t *testing.T, engine *gin.Engine, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader io.Reader
