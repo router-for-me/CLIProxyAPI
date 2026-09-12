@@ -239,6 +239,39 @@ func TestCodexClientModelsInheritChainDepth(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsInheritFieldLevelChainDepth(t *testing.T) {
+	base := testCodexClientCatalog(t,
+		testCodexClientModelWithExtras("gpt-5.5", 1, nil),
+		testCodexClientModelWithExtras("field-a", 2, nil),
+		testCodexClientModelWithExtras("field-b", 3, map[string]any{"context_window": 1000}),
+		testCodexClientModelWithExtras("field-c", 4, map[string]any{"priority": 42}),
+		testCodexClientModelWithExtras("field-d", 5, map[string]any{"minimal_client_version": "0.150.0"}),
+	)
+
+	// Each entry borrows one field from the next model, so the entries form a four
+	// model graph while no field resolution follows more than one hop.
+	document := map[string]any{
+		"field-a": map[string]any{"$inherit": map[string]any{"context_window": "field-b"}},
+		"field-b": map[string]any{"$inherit": map[string]any{"priority": "field-c"}},
+		"field-c": map[string]any{"$inherit": map[string]any{"minimal_client_version": "field-d"}},
+		"field-d": map[string]any{"$inherit": map[string]any{"max_context_window": "gpt-5.5"}},
+	}
+
+	models, err := applyOverrideForTest(t, base, document)
+	if err != nil {
+		t.Fatalf("field level inheritance rejected: %v", err)
+	}
+	if got := models["field-a"]["context_window"]; got != float64(1000) {
+		t.Fatalf("field-a context_window = %v, want the value one hop away", got)
+	}
+	if got := models["field-b"]["priority"]; got != float64(42) {
+		t.Fatalf("field-b priority = %v, want the value one hop away", got)
+	}
+	if got := models["field-c"]["minimal_client_version"]; got != "0.150.0" {
+		t.Fatalf("field-c minimal_client_version = %v, want the value one hop away", got)
+	}
+}
+
 func TestCodexClientModelsInheritCycles(t *testing.T) {
 	base := testCodexClientCatalog(t,
 		testCodexClientModelWithExtras("gpt-5.5", 1, nil),

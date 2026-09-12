@@ -549,7 +549,7 @@ func TestSetCodexClientModelsOverrideRejectsOversizedDocument(t *testing.T) {
 	}
 	SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
 
-	document := fmt.Sprintf(`{"gpt-5.5":{"base_instructions":%q}}`, strings.Repeat("x", maxCodexClientModelsOverrideFileSize))
+	document := fmt.Sprintf(`{"gpt-5.5":{"base_instructions":%q}}`, strings.Repeat("x", CodexClientModelsOverrideMaxFileSize))
 	err := SetCodexClientModelsOverride([]byte(document))
 	if err == nil {
 		t.Fatal("oversized override document was accepted")

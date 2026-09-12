@@ -2,6 +2,7 @@ package management
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -72,8 +73,18 @@ func readCodexClientModelsBody(c *gin.Context) ([]byte, bool) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "request body is required"})
 		return nil, false
 	}
+	// An override document is persisted in a file of a bounded size, so a body above
+	// that bound is refused before it is held in memory.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, registry.CodexClientModelsOverrideMaxFileSize)
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		var errTooLarge *http.MaxBytesError
+		if errors.As(err, &errTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error": fmt.Sprintf("request body exceeds %d bytes", registry.CodexClientModelsOverrideMaxFileSize),
+			})
+			return nil, false
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("failed to read request body: %v", err)})
 		return nil, false
 	}
