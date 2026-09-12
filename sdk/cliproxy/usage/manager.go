@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -365,6 +366,9 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	m.mu.Unlock()
 	if closed {
 		return
+	}
+	if strings.TrimSpace(record.EventID) == "" {
+		record.EventID = uuid.NewString()
 	}
 	markPublished(ctx)
 	if record.GenerationID == "" {

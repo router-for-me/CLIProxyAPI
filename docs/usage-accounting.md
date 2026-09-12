@@ -42,3 +42,9 @@ EasyCLIProxyAPI needs the companion accounting update to consume the journal, pr
 The stream accounting buffer now retains billing metadata independently of final token counters, including metadata observed before Gemini/Antigravity SSE filtering. Repeated cumulative tool counters merge without adding the same count twice. A failed provider attempt publishes `usage_complete=false`, preventing a partial token snapshot from being frozen as a complete estimate by the desktop consumer.
 
 Live terminal usage is captured on the upstream read side, including a complete frame whose downstream write fails. Transcription events use the session's transcription model and item/content-index identity rather than the realtime model; absent transcription configuration remains an unknown model. This improves attribution without inventing usage after an upstream read failure.
+
+## PR review corrections
+
+The common HTTP handler context bridge now copies accounting scope and generation identity while preserving the execution context's existing cancellation behavior. Measured HTTP operations therefore suppress the unmeasured fallback correctly. The usage manager assigns a missing event ID once before either synchronous or asynchronous plugins run, preserving caller-supplied identities.
+
+Coverage skips unmatched routes and locally rejected authorization, so unauthenticated requests cannot create permanent journal entries through that fallback. `usage_complete` uses the same resolved failure state as the emitted `failed` field. Model-bearing management calls select the provider/endpoint protocol parser and merge SSE usage; partial response bodies are retained when reading fails.

@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/tidwall/gjson"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,9 +12,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 const defaultAPICallTimeout = 60 * time.Second
@@ -195,13 +196,13 @@ func (h *Handler) APICall(c *gin.Context) {
 	var reporter *helps.UsageReporter
 	usageCtx := context.WithValue(c.Request.Context(), "gin", c)
 	model := gjson.Get(body.Data, "model").String()
+	provider := "openai-compatible"
+	if auth != nil {
+		provider = auth.Provider
+	} else if req.URL.Hostname() == "api.x.ai" {
+		provider = "xai"
+	}
 	if method == http.MethodPost && model != "" {
-		provider := "openai-compatible"
-		if auth != nil {
-			provider = auth.Provider
-		} else if req.URL.Hostname() == "api.x.ai" {
-			provider = "xai"
-		}
 		reporter = helps.NewUsageReporter(usageCtx, provider, model, auth)
 		reporter.SetOperation("management_call", method+" "+req.URL.Path)
 		defer reporter.EnsurePublished(usageCtx)
@@ -220,17 +221,14 @@ func (h *Handler) APICall(c *gin.Context) {
 	}()
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
+	detail := parseManagementResponseUsage(provider, req.URL.Path, resp.Header.Get("Content-Type"), respBody)
 	if errReadAll != nil {
-		reporter.PublishFailure(usageCtx, errReadAll)
+		reporter.PublishFailureWithDetail(usageCtx, detail, errReadAll)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
 
 	if reporter != nil {
-		detail := helps.ParseOpenAIUsage(respBody)
-		if strings.HasSuffix(req.URL.Path, "/messages") {
-			detail = helps.ParseClaudeUsage(respBody)
-		}
 		if resp.StatusCode >= 400 {
 			reporter.PublishFailureWithDetail(usageCtx, detail, fmt.Errorf("upstream HTTP %d", resp.StatusCode))
 		} else {
@@ -690,4 +688,29 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 		return nil
 	}
 	return transport
+}
+
+// Management calls bypass the executor dispatcher, so select the same protocol
+// parsers explicitly and merge streaming start/delta usage when appropriate.
+func parseManagementResponseUsage(provider, path, contentType string, payload []byte) coreusage.Detail {
+	protocol := "openai"
+	switch {
+	case strings.EqualFold(provider, "antigravity"):
+		protocol = "antigravity"
+	case strings.HasSuffix(path, "/interactions"):
+		protocol = "interactions"
+	case strings.HasSuffix(path, "/messages") || strings.EqualFold(provider, "claude") || strings.EqualFold(provider, "anthropic"):
+		protocol = "claude"
+	case strings.Contains(path, ":generateContent") || strings.Contains(path, ":streamGenerateContent") || strings.EqualFold(provider, "gemini") || strings.EqualFold(provider, "vertex") || strings.EqualFold(provider, "aistudio"):
+		protocol = "gemini"
+	case strings.HasSuffix(path, "/responses") || strings.EqualFold(provider, "codex"):
+		protocol = "openai-response"
+	}
+	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		var buffer helps.StreamUsageBuffer
+		helps.ObservePluginExecutorStreamUsage(protocol, payload, &buffer)
+		detail, _ := buffer.Detail()
+		return detail
+	}
+	return helps.ParsePluginExecutorResponseUsage(protocol, payload)
 }

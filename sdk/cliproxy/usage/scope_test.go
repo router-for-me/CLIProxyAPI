@@ -36,3 +36,33 @@ func TestGenerationIdentityChangesWithoutLosingCoverageScope(t *testing.T) {
 		t.Fatal("generation context lost request coverage")
 	}
 }
+
+type identityReviewSink struct {
+	synchronous bool
+	records     chan Record
+}
+
+func (s *identityReviewSink) Synchronous() bool                       { return s.synchronous }
+func (s *identityReviewSink) HandleUsage(_ context.Context, r Record) { s.records <- r }
+func TestEventIdentityIsSharedBySynchronousAndAsyncPlugins(t *testing.T) {
+	m := NewManager(1)
+	defer m.Stop()
+	a := &identityReviewSink{synchronous: true, records: make(chan Record, 2)}
+	b := &identityReviewSink{records: make(chan Record, 2)}
+	m.Register(a)
+	m.Register(b)
+	for _, provided := range []string{"", "caller-supplied"} {
+		m.Publish(context.Background(), Record{EventID: provided})
+		syncRecord := <-a.records
+		if syncRecord.EventID == "" {
+			t.Fatal("manager did not assign an event ID")
+		}
+		asyncRecord := <-b.records
+		if syncRecord.EventID != asyncRecord.EventID {
+			t.Fatal("plugins received different IDs")
+		}
+		if provided != "" && syncRecord.EventID != provided {
+			t.Fatal("caller identity was replaced")
+		}
+	}
+}

@@ -33,3 +33,26 @@ func markPublished(ctx context.Context) {
 		}
 	}
 }
+
+// WithAccountingContext carries accounting identity across an execution context
+// boundary without changing its cancellation or copying unrelated request values.
+// An explicitly chosen execution generation takes precedence over the request.
+func WithAccountingContext(target, source context.Context) context.Context {
+	if target == nil {
+		target = context.Background()
+	}
+	if source == nil {
+		return target
+	}
+	if target.Value(scopeKey{}) == nil {
+		if scope, ok := source.Value(scopeKey{}).(*AccountingScope); ok {
+			target = context.WithValue(target, scopeKey{}, scope)
+		}
+	}
+	if GenerationFromContext(target) == "" {
+		if id := GenerationFromContext(source); id != "" {
+			target = context.WithValue(target, generationKey{}, id)
+		}
+	}
+	return target
+}
