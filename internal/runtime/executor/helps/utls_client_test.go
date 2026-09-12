@@ -114,6 +114,19 @@ func TestCloseConnectionBodyClosesConnectionBeforeBodyOnce(t *testing.T) {
 	}
 }
 
+func TestNewChromeRoundTripperUsesDirectDialer(t *testing.T) {
+	t.Parallel()
+
+	roundTripper := NewChromeRoundTripper("direct")
+	got, ok := roundTripper.(*utlsRoundTripper)
+	if !ok {
+		t.Fatalf("type = %T, want *utlsRoundTripper", roundTripper)
+	}
+	if got.dialer == nil {
+		t.Fatal("expected chrome round tripper to configure a dialer")
+	}
+}
+
 func TestUtlsRoundTripperDialUsesRequestContext(t *testing.T) {
 	dialStarted := make(chan struct{})
 	roundTripper := &utlsRoundTripper{dialer: contextDialerFunc(func(ctx context.Context, _, _ string) (net.Conn, error) {

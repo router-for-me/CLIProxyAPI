@@ -67,6 +67,13 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	return &utlsRoundTripper{dialer: dialer}
 }
 
+// NewChromeRoundTripper returns the Chrome TLS/HTTP2 transport used for
+// chatgpt.com. Management APICall reuses this so ChatGPT backend-api calls
+// share the same ClientHello as Codex instead of Go's default fingerprint.
+func NewChromeRoundTripper(proxyURL string) http.RoundTripper {
+	return newUtlsRoundTripper(proxyURL)
+}
+
 func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
 	contextDialer, ok := t.dialer.(proxy.ContextDialer)
 	if !ok {

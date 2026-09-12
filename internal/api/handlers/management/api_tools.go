@@ -12,12 +12,24 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 const defaultAPICallTimeout = 60 * time.Second
+
+// chromeAPICallUserAgent matches the ChatGPT web client used by the proven
+// subscriptions fetch path. Applied only when the caller omitted User-Agent
+// for chatgpt.com so Go's default "Go-http-client" UA is not sent.
+const chromeAPICallUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+// newChromeAPICallTransport builds the Chrome-impersonating transport for
+// chatgpt.com. Tests replace this to avoid live TLS handshakes.
+var newChromeAPICallTransport = func(proxyURL string) http.RoundTripper {
+	return helps.NewChromeRoundTripper(proxyURL)
+}
 
 const (
 	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -79,6 +91,11 @@ type apiCallResponse struct {
 //  2. Selected credential proxy_url
 //  3. Global config proxy-url
 //  4. Direct connect (environment proxies are not used)
+//
+// ChatGPT (https://chatgpt.com) uses the same Chrome TLS/HTTP2 fingerprint as
+// Codex. Callers may send ChatGPT web headers (User-Agent, oai-language,
+// x-openai-target-path / x-openai-target-route); missing ones are filled only
+// for that host. Other hosts keep the standard transport.
 //
 // Response JSON (returned with HTTP 200 when the APICall itself succeeds):
 //   - status_code: Upstream HTTP status code.
@@ -183,11 +200,12 @@ func (h *Handler) APICall(c *gin.Context) {
 	if hostOverride != "" {
 		req.Host = hostOverride
 	}
+	applyChatGPTAPICallHeaderDefaults(req)
 
 	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
+		Timeout:   defaultAPICallTimeout,
+		Transport: h.apiCallClientTransport(auth, requestProxyURL),
 	}
-	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -481,14 +499,30 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	return nil
 }
 
-func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) http.RoundTripper {
+func (h *Handler) apiCallClientTransport(auth *coreauth.Auth, requestProxyURL string) http.RoundTripper {
+	return &apiCallRoundTripper{
+		chrome:   newChromeAPICallTransport(h.apiCallProxyURL(auth, requestProxyURL)),
+		fallback: h.apiCallTransport(auth, requestProxyURL),
+	}
+}
+
+func (h *Handler) apiCallProxyURL(auth *coreauth.Auth, requestProxyURL string) string {
 	if proxyStr := strings.TrimSpace(requestProxyURL); proxyStr != "" {
-		if transport := buildProxyTransport(proxyStr); transport != nil {
-			return transport
+		if buildProxyTransport(proxyStr) != nil {
+			return proxyStr
 		}
-		return directAPICallTransport()
+		return "direct"
 	}
 
+	for _, proxyStr := range h.apiCallProxyCandidates(auth) {
+		if buildProxyTransport(proxyStr) != nil {
+			return proxyStr
+		}
+	}
+	return ""
+}
+
+func (h *Handler) apiCallProxyCandidates(auth *coreauth.Auth) []string {
 	var proxyCandidates []string
 	if auth != nil {
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
@@ -505,14 +539,60 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) 
 			proxyCandidates = append(proxyCandidates, proxyStr)
 		}
 	}
+	return proxyCandidates
+}
 
-	for _, proxyStr := range proxyCandidates {
+func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) http.RoundTripper {
+	if proxyStr := h.apiCallProxyURL(auth, requestProxyURL); proxyStr != "" {
 		if transport := buildProxyTransport(proxyStr); transport != nil {
 			return transport
 		}
 	}
-
 	return directAPICallTransport()
+}
+
+type apiCallRoundTripper struct {
+	chrome   http.RoundTripper
+	fallback http.RoundTripper
+}
+
+func (t *apiCallRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t == nil {
+		return nil, fmt.Errorf("api-call transport is nil")
+	}
+	if usesChromeAPICallTLS(req.URL) && t.chrome != nil {
+		return t.chrome.RoundTrip(req)
+	}
+	if t.fallback == nil {
+		return nil, fmt.Errorf("api-call fallback transport is nil")
+	}
+	return t.fallback.RoundTrip(req)
+}
+
+func usesChromeAPICallTLS(u *url.URL) bool {
+	return u != nil && u.Scheme == "https" && strings.EqualFold(u.Hostname(), "chatgpt.com")
+}
+
+func applyChatGPTAPICallHeaderDefaults(req *http.Request) {
+	if req == nil || !usesChromeAPICallTLS(req.URL) {
+		return
+	}
+	setHeaderDefault := func(key, value string) {
+		if strings.TrimSpace(req.Header.Get(key)) == "" {
+			req.Header.Set(key, value)
+		}
+	}
+	path := req.URL.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	setHeaderDefault("Accept", "*/*")
+	setHeaderDefault("Accept-Language", "en-US,en;q=0.9")
+	setHeaderDefault("OAI-Language", "en-US")
+	setHeaderDefault("Referer", "https://chatgpt.com/")
+	setHeaderDefault("User-Agent", chromeAPICallUserAgent)
+	setHeaderDefault("X-OpenAI-Target-Path", path)
+	setHeaderDefault("X-OpenAI-Target-Route", path)
 }
 
 func directAPICallTransport() http.RoundTripper {
