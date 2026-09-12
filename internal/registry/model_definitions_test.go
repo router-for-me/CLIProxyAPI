@@ -104,6 +104,9 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 	if got := AntigravityWebSearchModelFor("gemini-web-search-test"); got != "gemini-web-search-test" {
 		t.Fatalf("AntigravityWebSearchModelFor capable model = %q, want itself", got)
 	}
+	if got := AntigravityWebSearchModelFor("gemini-web-search-test-high"); got != "gemini-web-search-test" {
+		t.Fatalf("AntigravityWebSearchModelFor capable model with -high suffix = %q, want gemini-web-search-test", got)
+	}
 	if got := AntigravityWebSearchModelFor("gemini-cross-provider-route"); got != "" {
 		t.Fatalf("cross-provider model should not get Antigravity web search model, got %q", got)
 	}

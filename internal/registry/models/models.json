@@ -3478,6 +3478,7 @@
       "display_name": "Gemini 3.7 Flash",
       "name": "gemini-3.7-flash-high",
       "description": "Gemini 3.7 Flash (High)",
+      "supports_web_search": true,
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {
@@ -3508,6 +3509,7 @@
       "display_name": "Gemini 3.8 Flash",
       "name": "gemini-3.8-flash-high",
       "description": "Gemini 3.8 Flash (High)",
+      "supports_web_search": true,
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {

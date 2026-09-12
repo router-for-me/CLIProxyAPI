@@ -92,7 +92,8 @@ func AntigravityWebSearchModelFor(modelID string) string {
 	if modelID == "" {
 		return ""
 	}
-	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+	models := GetGlobalRegistry().GetAvailableModelsByProvider("antigravity")
+	for _, model := range models {
 		if model == nil {
 			continue
 		}
@@ -105,6 +106,28 @@ func AntigravityWebSearchModelFor(modelID string) string {
 				return currentModelID
 			}
 			return ""
+		}
+	}
+	altModelID := strings.TrimSuffix(modelID, "-high")
+	if altModelID != modelID {
+		for _, model := range models {
+			if model == nil {
+				continue
+			}
+			currentModelID := normalizeAntigravityCapabilityModelID(model.ID)
+			if currentModelID == altModelID && model.SupportsWebSearch {
+				return currentModelID
+			}
+		}
+	}
+	altModelIDHigh := modelID + "-high"
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		currentModelID := normalizeAntigravityCapabilityModelID(model.ID)
+		if currentModelID == altModelIDHigh && model.SupportsWebSearch {
+			return currentModelID
 		}
 	}
 	return ""
