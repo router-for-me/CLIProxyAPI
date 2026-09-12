@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,180 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestAPICallFallsBackToDirectWhenProxyRefused(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("direct-ok"))
+	}))
+	defer upstream.Close()
+
+	const deadProxy = "http://127.0.0.1:1"
+	resetProxyFallbackState(deadProxy)
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{
+				ProxyURL:            deadProxy,
+				ProxyFallbackDirect: true,
+			},
+		},
+	}
+	router := gin.New()
+	router.POST("/", h.APICall)
+
+	body := `{"method":"GET","url":"` + upstream.URL + `/quota"}`
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response apiCallResponse
+	if errDecode := json.NewDecoder(recorder.Body).Decode(&response); errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("upstream status code = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if response.Body != "direct-ok" {
+		t.Fatalf("upstream body = %q, want %q", response.Body, "direct-ok")
+	}
+}
+
+func TestAPICallReportsProxyRefusedWithoutFallback(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("should-not-reach"))
+	}))
+	defer upstream.Close()
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://127.0.0.1:1"},
+		},
+	}
+	router := gin.New()
+	router.POST("/", h.APICall)
+
+	body := `{"method":"GET","url":"` + upstream.URL + `/quota"}`
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d; body = %s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "proxy connection refused") && !strings.Contains(recorder.Body.String(), "request failed") {
+		t.Fatalf("body = %s, want a proxy/request failure message", recorder.Body.String())
+	}
+}
+
+func TestAPICallRequestFailedMessage(t *testing.T) {
+	t.Parallel()
+
+	if got := apiCallRequestFailedMessage(context.DeadlineExceeded); got != "request timed out" {
+		t.Fatalf("deadline message = %q", got)
+	}
+	if got := apiCallRequestFailedMessage(errors.New("dial tcp 127.0.0.1:1082: connect: connection refused")); got != "proxy connection refused" {
+		t.Fatalf("refused message = %q", got)
+	}
+	if got := apiCallRequestFailedMessage(errors.New("proxy CONNECT returned status 503")); got != "proxy connect failed" {
+		t.Fatalf("connect message = %q", got)
+	}
+}
+
+func TestAPICallTransportFallbackWrapsGlobalProxy(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{
+				ProxyURL:            "http://127.0.0.1:1082",
+				ProxyFallbackDirect: true,
+			},
+		},
+	}
+
+	transport := h.apiCallTransport(nil, "")
+	if _, ok := transport.(*proxyDirectFallbackTransport); !ok {
+		t.Fatalf("transport type = %T, want *proxyDirectFallbackTransport", transport)
+	}
+}
+
+func TestProxyDirectFallbackDoesNotRetryPost(t *testing.T) {
+	t.Parallel()
+
+	const proxyKey = "test-post-proxy"
+	resetProxyFallbackState(proxyKey)
+	defer resetProxyFallbackState(proxyKey)
+
+	proxyErr := errors.New("connection refused")
+	directCalls := 0
+	transport := &proxyDirectFallbackTransport{
+		proxyKey: proxyKey,
+		proxy: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, proxyErr
+		}),
+		direct: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			directCalls++
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		}),
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://example.com", strings.NewReader("payload"))
+	_, errRoundTrip := transport.RoundTrip(req)
+	if !errors.Is(errRoundTrip, proxyErr) {
+		t.Fatalf("RoundTrip error = %v, want proxy error %v", errRoundTrip, proxyErr)
+	}
+	if directCalls != 0 {
+		t.Fatalf("direct fallback calls = %d, want 0 for POST", directCalls)
+	}
+}
+
+func TestProxyDirectFallbackRetriesGetAfterProxyFailure(t *testing.T) {
+	t.Parallel()
+
+	const proxyKey = "test-get-proxy"
+	resetProxyFallbackState(proxyKey)
+	defer resetProxyFallbackState(proxyKey)
+
+	directCalls := 0
+	transport := &proxyDirectFallbackTransport{
+		proxyKey: proxyKey,
+		proxy: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("connection refused")
+		}),
+		direct: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			directCalls++
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		}),
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://example.com", nil)
+	resp, errRoundTrip := transport.RoundTrip(req)
+	if errRoundTrip != nil {
+		t.Fatalf("RoundTrip error = %v, want nil", errRoundTrip)
+	}
+	if resp == nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("response = %#v, want HTTP 200", resp)
+	}
+	if directCalls != 1 {
+		t.Fatalf("direct fallback calls = %d, want 1 for GET", directCalls)
+	}
+}
 
 func TestAPICallUsesRequestProxyURL(t *testing.T) {
 	t.Parallel()
