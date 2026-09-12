@@ -882,3 +882,41 @@ func BuildDevinUpstreamLogBody(
 
 	return buf.Bytes()
 }
+
+// DevinUpstreamResponseLog represents the decoded response frames from Devin Connect-RPC.
+type DevinUpstreamResponseLog struct {
+	FramesCount   int             `json:"frames_count"`
+	Content       string          `json:"content,omitempty"`
+	Thinking      string          `json:"thinking,omitempty"`
+	Signature     string          `json:"signature,omitempty"`
+	SignatureType string          `json:"signature_type,omitempty"`
+	ToolCalls     []DevinToolCall `json:"tool_calls,omitempty"`
+	Usage         *DevinUsage     `json:"usage,omitempty"`
+}
+
+// BuildDevinUpstreamResponseLogBody formats the decoded Devin response and the intermediate
+// interactions into a clear, aligned log body.
+func BuildDevinUpstreamResponseLogBody(respLog *DevinUpstreamResponseLog, interactionsJSON []byte) []byte {
+	var buf bytes.Buffer
+	if respLog != nil {
+		if len(respLog.Signature) > 0 {
+			respLog.Signature = formatSignatureForLog([]byte(respLog.Signature))
+		}
+		respJSON, err := json.MarshalIndent(respLog, "", "  ")
+		if err == nil && len(respJSON) > 0 {
+			buf.WriteString("=== DEVIN UPSTREAM RESPONSE ===\n")
+			buf.Write(respJSON)
+			buf.WriteString("\n\n")
+		}
+	}
+	if len(interactionsJSON) > 0 {
+		buf.WriteString("=== INTERMEDIATE INTERACTIONS ===\n")
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, interactionsJSON, "", "  "); err == nil {
+			buf.Write(pretty.Bytes())
+		} else {
+			buf.Write(interactionsJSON)
+		}
+	}
+	return buf.Bytes()
+}

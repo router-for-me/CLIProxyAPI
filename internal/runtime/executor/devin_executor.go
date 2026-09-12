@@ -292,12 +292,13 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, newDevinStatusError(httpResp.StatusCode, httpResp.Header, errData)
 	}
 
-	interactionsJSON, errConsume := consumeDevinFramesToInteractions(httpResp.Body, req.Model, chatModelUID)
+	interactionsJSON, respLog, errConsume := consumeDevinFramesToInteractions(httpResp.Body, req.Model, chatModelUID)
 	if errConsume != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errConsume)
 		return resp, errConsume
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, interactionsJSON)
+	logRespBody := helps.BuildDevinUpstreamResponseLogBody(respLog, interactionsJSON)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, logRespBody)
 
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(interactionsJSON))
 
@@ -462,6 +463,8 @@ func (e *DevinExecutor) streamDevinFrames(
 	currentToolCallActive := false
 	thinkingBuf := &helps.UTF8SplitBuffer{}
 	contentBuf := &helps.UTF8SplitBuffer{}
+	var accumulatedThinking strings.Builder
+	var accumulatedContent strings.Builder
 	var finalUsage *helps.DevinUsage
 	var accumulatedSignature []byte
 	var signatureType string
@@ -469,11 +472,17 @@ func (e *DevinExecutor) streamDevinFrames(
 	claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, sdktranslator.FormatInteractions, responseFormat, opts.OriginalRequest)
 	var translateParam any
 
+	firstStreamEvent := true
+	streamFrameCount := 0
 	emitInteractionsEvent := func(rawJSON []byte) bool {
 		if len(rawJSON) == 0 {
 			return true
 		}
 		trimmed := bytes.TrimSpace(rawJSON)
+		if firstStreamEvent {
+			firstStreamEvent = false
+			helps.AppendAPIResponseChunk(ctx, e.cfg, []byte("=== INTERMEDIATE INTERACTIONS STREAM ===\n"))
+		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, append(append([]byte{}, trimmed...), '\n'))
 
 		if responseFormat == sdktranslator.FormatInteractions {
@@ -526,6 +535,7 @@ func (e *DevinExecutor) streamDevinFrames(
 			log.Debugf("devin executor: read connect frame error: %v", errRead)
 			break
 		}
+		streamFrameCount++
 
 		// EOS Trailer
 		if flag&helps.ConnectFlagEndStream != 0 {
@@ -558,6 +568,7 @@ func (e *DevinExecutor) streamDevinFrames(
 
 		// Emit thinking delta
 		if frameRes.ThinkingText != "" {
+			accumulatedThinking.WriteString(frameRes.ThinkingText)
 			chunk := thinkingBuf.Feed([]byte(frameRes.ThinkingText))
 			if chunk != "" {
 				if !thoughtStarted {
@@ -592,6 +603,7 @@ func (e *DevinExecutor) streamDevinFrames(
 
 		// Emit content text delta
 		if frameRes.ContentText != "" {
+			accumulatedContent.WriteString(frameRes.ContentText)
 			chunk := contentBuf.Feed([]byte(frameRes.ContentText))
 			if chunk != "" {
 				if thoughtStarted {
@@ -692,6 +704,20 @@ func (e *DevinExecutor) streamDevinFrames(
 	}
 	_ = emitInteractionsEvent(completedEvent)
 
+	if finalUsage != nil || len(accumulatedSignature) > 0 {
+		streamSummary := &helps.DevinUpstreamResponseLog{
+			FramesCount:   streamFrameCount,
+			Thinking:      accumulatedThinking.String(),
+			Content:       accumulatedContent.String(),
+			Signature:     string(accumulatedSignature),
+			SignatureType: signatureType,
+			Usage:         finalUsage,
+		}
+		if summaryJSON, err := json.MarshalIndent(streamSummary, "", "  "); err == nil {
+			helps.AppendAPIResponseChunk(ctx, e.cfg, []byte("\n=== DEVIN UPSTREAM RESPONSE SUMMARY ===\n"+string(summaryJSON)+"\n"))
+		}
+	}
+
 	// 6. Terminate stream with [DONE]
 	if responseFormat == sdktranslator.FormatInteractions {
 		select {
@@ -719,13 +745,15 @@ func (e *DevinExecutor) streamDevinFrames(
 	}
 }
 
-func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string) ([]byte, error) {
+func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string) ([]byte, *helps.DevinUpstreamResponseLog, error) {
 	interactionID := fmt.Sprintf("interaction_%s", uuid.New().String()[:12])
 	var textParts []string
 	var thinkingParts []string
 	var toolCalls []helps.DevinToolCall
 	var finalUsage *helps.DevinUsage
 	var accumulatedSignature []byte
+	var signatureType string
+	framesCount := 0
 
 	for {
 		flag, payload, errRead := helps.ReadConnectFrame(body)
@@ -733,13 +761,14 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 			if errors.Is(errRead, io.EOF) || errors.Is(errRead, io.ErrUnexpectedEOF) {
 				break
 			}
-			return nil, errRead
+			return nil, nil, errRead
 		}
+		framesCount++
 
 		if flag&helps.ConnectFlagEndStream != 0 {
 			code, errTrailer := helps.ParseDevinTrailerError(payload)
 			if errTrailer != nil {
-				return nil, statusErr{code: code, msg: errTrailer.Error()}
+				return nil, nil, statusErr{code: code, msg: errTrailer.Error()}
 			}
 			break
 		}
@@ -754,6 +783,9 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		}
 		if len(frameRes.DeltaSignature) > 0 {
 			accumulatedSignature = append(accumulatedSignature, frameRes.DeltaSignature...)
+		}
+		if frameRes.DeltaSignatureType != "" {
+			signatureType = frameRes.DeltaSignatureType
 		}
 		if frameRes.ThinkingText != "" {
 			thinkingParts = append(thinkingParts, frameRes.ThinkingText)
@@ -827,7 +859,17 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		out, _ = sjson.SetBytes(out, "usage.total_cached_tokens", finalUsage.CachedTokens)
 	}
 
-	return out, nil
+	respLog := &helps.DevinUpstreamResponseLog{
+		FramesCount:   framesCount,
+		Content:       strings.Join(textParts, ""),
+		Thinking:      strings.Join(thinkingParts, ""),
+		Signature:     string(accumulatedSignature),
+		SignatureType: signatureType,
+		ToolCalls:     toolCalls,
+		Usage:         finalUsage,
+	}
+
+	return out, respLog, nil
 }
 
 func parseInteractionsPayload(payload, originalRequest []byte) (

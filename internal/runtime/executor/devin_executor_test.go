@@ -334,9 +334,15 @@ func TestConsumeDevinFramesToInteractions(t *testing.T) {
 	trailerJSON := []byte(`{}`)
 	streamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, trailerJSON))
 
-	interactionsJSON, err := consumeDevinFramesToInteractions(&streamBuf, "swe-2", "swe-2-high")
+	interactionsJSON, respLog, err := consumeDevinFramesToInteractions(&streamBuf, "swe-2", "swe-2-high")
 	if err != nil {
 		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
+	}
+	if respLog == nil {
+		t.Fatal("expected non-nil respLog")
+	}
+	if respLog.FramesCount != 3 {
+		t.Errorf("FramesCount = %d, want 3", respLog.FramesCount)
 	}
 
 	root := gjson.ParseBytes(interactionsJSON)
