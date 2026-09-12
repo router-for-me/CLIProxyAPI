@@ -168,6 +168,32 @@ func pluginAuthProviderFromPath(path string) (string, bool) {
 	return provider, true
 }
 
+// pluginLoginMetadata turns the auth-url query string into per-login metadata
+// for the plugin, so a single provider can be logged in several times with
+// different settings (for example one account per region or organization
+// portal) without editing the plugin's global config between logins. The
+// management key is read from headers only, so no credential is carried here.
+func pluginLoginMetadata(c *gin.Context) map[string]any {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return nil
+	}
+	query := c.Request.URL.Query()
+	if len(query) == 0 {
+		return nil
+	}
+	metadata := make(map[string]any, len(query))
+	for key, values := range query {
+		if len(values) == 0 {
+			continue
+		}
+		metadata[key] = values[0]
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
 func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 	if h == nil || c == nil || c.Request == nil || c.Request.URL == nil {
 		return false
@@ -190,7 +216,7 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return true
 	}
-	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL)
+	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL, pluginLoginMetadata(c))
 	if !handled {
 		return false
 	}

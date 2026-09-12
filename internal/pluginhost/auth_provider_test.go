@@ -215,6 +215,48 @@ func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 	}
 }
 
+func TestStartLoginForwardsPerLoginMetadata(t *testing.T) {
+	var gotMetadata map[string]any
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-plugin",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "plugin-provider",
+					startLogin: func(ctx context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+						gotMetadata = req.Metadata
+						return pluginapi.AuthLoginStartResponse{Provider: req.Provider, State: "state-1"}, nil
+					},
+				},
+			},
+		},
+	})
+	host.runtimeConfig = &config.Config{AuthDir: t.TempDir()}
+
+	metadata := map[string]any{"idc_start_url": "https://d-abc.awsapps.com/start", "idc_region": "eu-west-1"}
+	if _, handled, errStart := host.StartLogin(context.Background(), "plugin-provider", "http://localhost:8080/login", metadata); errStart != nil || !handled {
+		t.Fatalf("StartLogin() handled=%t error=%v, want handled call", handled, errStart)
+	}
+	if gotMetadata["idc_start_url"] != "https://d-abc.awsapps.com/start" || gotMetadata["idc_region"] != "eu-west-1" {
+		t.Fatalf("StartLogin metadata = %#v, want the per-login values", gotMetadata)
+	}
+
+	// The plugin must receive a copy: mutating its metadata cannot reach the caller.
+	gotMetadata["idc_region"] = "mutated"
+	if metadata["idc_region"] != "eu-west-1" {
+		t.Fatalf("caller metadata mutated by plugin: %#v", metadata)
+	}
+
+	// Omitting metadata keeps the previous behavior (nil, not an empty map).
+	gotMetadata = map[string]any{"stale": true}
+	if _, handled, errStart := host.StartLogin(context.Background(), "plugin-provider", "http://localhost:8080/login"); errStart != nil || !handled {
+		t.Fatalf("StartLogin() without metadata handled=%t error=%v", handled, errStart)
+	}
+	if gotMetadata != nil {
+		t.Fatalf("StartLogin metadata = %#v, want nil when no metadata is passed", gotMetadata)
+	}
+}
+
 func TestPollLoginPassesProviderStateHostAndHTTPClient(t *testing.T) {
 	authDir := t.TempDir()
 	called := false
