@@ -215,13 +215,28 @@ func (b *poolBreaker) admitProbe(key string, now time.Time) bool {
 	}
 }
 
+// poolBreakerAdmitsDispatch reports whether the auth's pool may dispatch this
+// request, taking the pool's probe slot when the breaker is HALF_OPEN without
+// a probe in flight. Called at execution commit — after the auth is chosen and
+// prepared, right before dispatch — so an admitted probe always corresponds to
+// a real dispatch. A denial means another request holds the probe or the pool
+// re-opened between pick and dispatch; the caller must rotate to another
+// auth (or release its home selection before rotating).
+func poolBreakerAdmitsDispatch(auth *Auth) bool {
+	key := poolBreakerSelectionKey(auth)
+	if key == "" {
+		return true
+	}
+	return globalPoolBreaker.admitProbe(key, time.Now())
+}
+
 // PoolBreakerRecord is one pool's live breaker state for observability.
 type PoolBreakerRecord struct {
 	PoolKey   string    `json:"pool_key"`
 	State     string    `json:"state"` // closed|open|half_open
 	Failures  int       `json:"failures"`
-	OpenedAt  time.Time `json:"opened_at,omitempty"`
-	OpenUntil time.Time `json:"open_until,omitempty"`
+	OpenedAt  time.Time `json:"opened_at,omitzero"`
+	OpenUntil time.Time `json:"open_until,omitzero"`
 }
 
 // PoolBreakerSnapshot returns the live breaker states (in-memory; not

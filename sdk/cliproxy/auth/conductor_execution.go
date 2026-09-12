@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -333,7 +332,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastErr = errPrepare
 			continue
 		}
-		if key := poolBreakerSelectionKey(auth); key != "" && !globalPoolBreaker.admitProbe(key, time.Now()) {
+		if !poolBreakerAdmitsDispatch(auth) {
 			// Another request holds the pool's probe slot, or the breaker
 			// re-opened between pick and dispatch; rotate to another auth.
 			// Admission happens only here — at execution commit — so an
@@ -469,7 +468,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			lastErr = errPrepare
 			continue
 		}
-		if key := poolBreakerSelectionKey(auth); key != "" && !globalPoolBreaker.admitProbe(key, time.Now()) {
+		if !poolBreakerAdmitsDispatch(auth) {
 			// Another request holds the pool's probe slot, or the breaker
 			// re-opened between pick and dispatch; rotate to another auth.
 			// Admission happens only here — at execution commit — so an
@@ -685,7 +684,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			continue
 		}
-		if key := poolBreakerSelectionKey(auth); key != "" && !globalPoolBreaker.admitProbe(key, time.Now()) {
+		if !poolBreakerAdmitsDispatch(auth) {
 			// Another request holds the pool's probe slot, or the breaker
 			// re-opened between pick and dispatch; rotate to another auth.
 			// Admission happens only here — at execution commit — so an
@@ -695,6 +694,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "pool_breaker_probe_denied"); errEnd != nil {
 					return nil, errEnd
 				}
+			}
+			if homeMode {
+				// Advance the Home auth count so the next dispatch asks Home
+				// for a different credential instead of re-picking this one
+				// in a tight loop until the probe window expires.
+				homeAuthCount++
 			}
 			continue
 		}
