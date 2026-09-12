@@ -58,6 +58,10 @@ func TestModelsFromMetadataAndRegistryModels(t *testing.T) {
 	if len(registryModels[0].SupportedInputModalities) != 2 || registryModels[0].SupportedInputModalities[1] != "IMAGE" {
 		t.Fatalf("SupportedInputModalities = %v", registryModels[0].SupportedInputModalities)
 	}
+	levels := registryModels[0].Thinking.Levels
+	if len(levels) != 4 || levels[3] != "xhigh" {
+		t.Fatalf("Thinking levels = %v, want xhigh capability", levels)
+	}
 }
 
 func TestLoadCachedModels(t *testing.T) {

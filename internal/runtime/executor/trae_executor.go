@@ -242,12 +242,18 @@ func (e *TraeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	refreshCtx, cancelRefresh := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelRefresh()
 	models, clientVersion, errModels := traeauth.FetchModels(refreshCtx, cliPath)
-	if errModels != nil {
-		return nil, fmt.Errorf("trae executor: refresh local CLI login: %w", errModels)
-	}
 	credentials, errLoad := traeauth.LoadCredentials(authPath)
 	if errLoad != nil {
 		return nil, errLoad
+	}
+	if errModels != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !traeCredentialUsableAt(credentials, time.Now()) {
+			return nil, fmt.Errorf("trae executor: refresh local CLI login: %w", errModels)
+		}
+		log.Warn("trae executor: model catalog refresh failed; retaining unexpired local credential")
 	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
@@ -258,9 +264,11 @@ func (e *TraeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	auth.Metadata["expires_at"] = credentials.ExpiresAt
 	auth.Metadata["expired"] = credentials.ExpiresAt
 	auth.Metadata["last_refresh"] = credentials.LastRefresh
-	auth.Metadata["models"] = models
-	if clientVersion != "" {
-		auth.Metadata["client_version"] = clientVersion
+	if errModels == nil {
+		auth.Metadata["models"] = models
+		if clientVersion != "" {
+			auth.Metadata["client_version"] = clientVersion
+		}
 	}
 	return auth, nil
 }
@@ -330,7 +338,7 @@ func (e *TraeExecutor) prepareRequest(ctx context.Context, auth *cliproxyauth.Au
 		"tools":               []any{},
 		"user_input":          latestTraeUserInput(messages),
 	}
-	for _, key := range []string{"tools", "response_format"} {
+	for _, key := range []string{"tools", "tool_choice", "response_format"} {
 		if value, ok := translated[key]; ok && value != nil {
 			requestPayload[key] = value
 		}
@@ -542,6 +550,18 @@ func metadataStringFromJSON(payload []byte, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(anyString(value[key]))
+}
+
+func traeCredentialUsableAt(credentials traeauth.Credentials, now time.Time) bool {
+	if strings.TrimSpace(credentials.AccessToken) == "" {
+		return false
+	}
+	expiresAt := strings.TrimSpace(credentials.ExpiresAt)
+	if expiresAt == "" {
+		return true
+	}
+	expiry, errParse := time.Parse(time.RFC3339Nano, expiresAt)
+	return errParse == nil && expiry.After(now)
 }
 
 func anyString(value any) string {

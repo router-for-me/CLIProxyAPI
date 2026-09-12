@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	traeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/trae"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -88,7 +89,9 @@ func TestTraeExecutorExecute(t *testing.T) {
 }
 
 func TestTraeExecutorExecuteStreamConvertsToolCalls(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	var receivedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		receivedBody = readTestBody(t, request)
 		writer.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(writer, `event: metadata
 data: {"model":"gpt-5.6-sol","session_id":"session-2"}
@@ -116,7 +119,7 @@ data: {"finish_reason":"tool_calls"}
 	executor := NewTraeExecutor(&config.Config{})
 	req := cliproxyexecutor.Request{
 		Model:   "GPT-5.6-Sol",
-		Payload: []byte(`{"model":"GPT-5.6-Sol","messages":[{"role":"user","content":"look up x"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`),
+		Payload: []byte(`{"model":"GPT-5.6-Sol","messages":[{"role":"user","content":"look up x"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":"required"}`),
 		Format:  sdktranslator.FormatOpenAI,
 	}
 	result, errExecute := executor.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{Stream: true, SourceFormat: sdktranslator.FormatOpenAI, ResponseFormat: sdktranslator.FormatOpenAI})
@@ -147,6 +150,9 @@ data: {"finish_reason":"tool_calls"}
 	}
 	if got := arguments.String(); got != `{"q":"x"}` {
 		t.Fatalf("tool arguments = %q, stream = %s", got, stream)
+	}
+	if got := gjson.GetBytes(receivedBody, "tool_choice").String(); got != "required" {
+		t.Fatalf("tool_choice = %q, body = %s", got, receivedBody)
 	}
 	if !strings.Contains(stream, `"finish_reason":"tool_calls"`) || !strings.Contains(stream, "[DONE]") {
 		t.Fatalf("stream termination missing: %s", stream)
@@ -185,6 +191,56 @@ data: {"finish_reason":"tool_calls"}
 	}
 	if got := gjson.GetBytes(response.Payload, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"q":"x"}` {
 		t.Fatalf("tool arguments = %q, payload = %s", got, response.Payload)
+	}
+}
+
+func TestTraeExecutorRefreshCatalogFailureUsesUnexpiredReferencedCredential(t *testing.T) {
+	tests := []struct {
+		name      string
+		expiresAt time.Time
+		wantErr   bool
+	}{
+		{name: "unexpired", expiresAt: time.Now().Add(time.Hour)},
+		{name: "expired", expiresAt: time.Now().Add(-time.Hour), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			authPath := filepath.Join(t.TempDir(), "auth.json")
+			expiresAt := test.expiresAt.UTC().Format(time.RFC3339)
+			authJSON := fmt.Sprintf(`{"auth_mode":"trae","last_refresh":"2026-09-12T08:00:00Z","trae":{"access_token":"live-token","user_id":"test-user","expires_at":%q,"region":"CN"}}`, expiresAt)
+			if errWrite := os.WriteFile(authPath, []byte(authJSON), 0o600); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			models := []traeauth.Model{{
+				Name:          "GPT-5.6-Sol",
+				ConfigName:    "gpt-5.6-sol",
+				BackendModel:  "gpt-5.6-sol__dev",
+				Provider:      traeauth.Provider,
+				ContextWindow: 272000,
+			}}
+			auth := &cliproxyauth.Auth{
+				ID:       "trae-refresh-test.json",
+				Provider: traeauth.Provider,
+				Metadata: map[string]any{
+					"trae_cli_path":  filepath.Join(t.TempDir(), "missing-traecli"),
+					"trae_auth_path": authPath,
+					"models":         models,
+				},
+			}
+			refreshed, errRefresh := NewTraeExecutor(&config.Config{}).Refresh(context.Background(), auth)
+			if (errRefresh != nil) != test.wantErr {
+				t.Fatalf("Refresh() error = %v, wantErr %t", errRefresh, test.wantErr)
+			}
+			if test.wantErr {
+				return
+			}
+			if _, ok := traeauth.ModelFor(refreshed.Metadata, "GPT-5.6-Sol"); !ok {
+				t.Fatalf("Refresh() discarded cached model metadata: %+v", refreshed.Metadata)
+			}
+			if got := refreshed.Metadata["expires_at"]; got != expiresAt {
+				t.Fatalf("expires_at = %v, want %q", got, expiresAt)
+			}
+		})
 	}
 }
 

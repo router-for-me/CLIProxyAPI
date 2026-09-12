@@ -274,7 +274,7 @@ func RegistryModels(metadata map[string]any) []*registry.ModelInfo {
 				break
 			}
 		}
-		levels := []string{"low", "medium", "high"}
+		levels := []string{"low", "medium", "high", "xhigh"}
 		if model.Meta.Trae.SupportsMaxMode {
 			levels = append(levels, "max")
 		}
