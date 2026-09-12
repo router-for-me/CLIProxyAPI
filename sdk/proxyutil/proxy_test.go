@@ -222,6 +222,37 @@ func TestBuildHTTPTransportHTTPSProxyInheritsDefaultTransportSettings(t *testing
 	}
 }
 
+func TestBuildDialerSOCKS5AndSOCKS5H(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "socks5", input: "socks5://proxy.example.com:1080"},
+		{name: "socks5h", input: "socks5h://proxy.example.com:1080"},
+		{name: "socks5h with auth", input: "socks5h://user:pass@proxy.example.com:1080"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dialer, mode, errBuild := BuildDialer(tt.input)
+			if errBuild != nil {
+				t.Fatalf("BuildDialer returned error: %v", errBuild)
+			}
+			if mode != ModeProxy {
+				t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+			}
+			if dialer == nil {
+				t.Fatal("expected dialer, got nil")
+			}
+		})
+	}
+}
+
 func TestBuildDialerHTTPProxyCONNECT(t *testing.T) {
 	t.Parallel()
 
