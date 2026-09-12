@@ -338,6 +338,10 @@ func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string,
 	applyXAICustomHeaders(r, auth, clientHeaders...)
 }
 
+// xaiResolveComposerSessionID resolves the xAI Composer conversation ID. The result feeds both
+// prompt_cache_key and the x-grok-conv-id header, so it must stay agent-scoped: sharing it across
+// sibling Claude Code agents would merge their Composer conversations. It therefore uses the
+// unconditionally agent-scoped identity and does not honour codex-cache-key-per-agent.
 func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {
 	if sessionID := xaiExecutionSessionID(req, opts); sessionID != "" {
 		return sessionID, nil
@@ -345,7 +349,7 @@ func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Reque
 	if !xaiRequiresIsolatedConversation(baseModel) {
 		return "", nil
 	}
-	cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, baseModel, req.Payload, opts.Headers)
+	cached, ok, errCache := helps.ClaudeCodeConversationCache(ctx, baseModel, req.Payload, opts.Headers)
 	if errCache != nil {
 		return "", errCache
 	}

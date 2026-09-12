@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/tidwall/gjson"
 )
 
@@ -36,10 +37,20 @@ func ExtractClaudeCodeAgentID(ctx context.Context, headers http.Header) string {
 }
 
 // ClaudeCodeExecutionScope returns the stable root-session and agent identity used by Codex execution state.
+// This scope is always agent-qualified: it keys reasoning-replay state, which must never be
+// shared between sibling agents.
 func ClaudeCodeExecutionScope(ctx context.Context, payload []byte, headers http.Header) (string, bool) {
+	return claudeCodeScope(ctx, payload, headers, true)
+}
+
+// claudeCodeScope builds the Claude Code session identity, optionally qualified by agent.
+func claudeCodeScope(ctx context.Context, payload []byte, headers http.Header, perAgent bool) (string, bool) {
 	sessionID := ExtractClaudeCodeSessionID(ctx, payload, headers)
 	if sessionID == "" {
 		return "", false
+	}
+	if !perAgent {
+		return "claude:" + sessionID, true
 	}
 	return "claude:" + sessionID + ":agent:" + ExtractClaudeCodeAgentID(ctx, headers), true
 }
@@ -116,10 +127,34 @@ func extractClaudeCodeSessionIDFromPayload(payload []byte) string {
 	return ""
 }
 
-// ClaudeCodePromptCache derives a deterministic upstream prompt_cache_key for one Claude Code agent.
-func ClaudeCodePromptCache(ctx context.Context, modelName string, payload []byte, headers http.Header) (CodexCache, bool, error) {
+// ClaudeCodePromptCache derives a deterministic upstream prompt_cache_key for a Claude Code request.
+//
+// The key is agent-scoped by default. Set codex-cache-key-per-agent: false in the config to key
+// on the session alone, so a subagent fan-out shares one upstream partition instead of opening a
+// fresh one per agent. The optional cfg is variadic so existing callers without a config in scope
+// keep the default; a nil or absent config means agent-scoped.
+func ClaudeCodePromptCache(ctx context.Context, modelName string, payload []byte, headers http.Header, configs ...*config.Config) (CodexCache, bool, error) {
+	var cfg *config.Config
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
+	return claudeCodeCacheIdentity(ctx, modelName, payload, headers, cfg.CodexCacheKeyPerAgentEnabled())
+}
+
+// ClaudeCodeConversationCache derives the same deterministic identity as ClaudeCodePromptCache but
+// is always agent-scoped, ignoring codex-cache-key-per-agent.
+//
+// Callers use this value as an upstream conversation ID rather than as a cache key: sibling agents
+// of one Claude Code session must never land in the same upstream conversation, because that mixes
+// their conversation state. Only prompt-cache sharing is configurable; conversation identity is not.
+func ClaudeCodeConversationCache(ctx context.Context, modelName string, payload []byte, headers http.Header) (CodexCache, bool, error) {
+	return claudeCodeCacheIdentity(ctx, modelName, payload, headers, true)
+}
+
+// claudeCodeCacheIdentity hashes the model and the Claude Code scope into a stable UUID.
+func claudeCodeCacheIdentity(ctx context.Context, modelName string, payload []byte, headers http.Header, perAgent bool) (CodexCache, bool, error) {
 	modelName = strings.TrimSpace(modelName)
-	executionScope, ok := ClaudeCodeExecutionScope(ctx, payload, headers)
+	executionScope, ok := claudeCodeScope(ctx, payload, headers, perAgent)
 	if modelName == "" || !ok {
 		return CodexCache{}, false, nil
 	}

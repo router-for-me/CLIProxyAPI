@@ -20,6 +20,7 @@ import (
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -2400,6 +2401,58 @@ func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 				t.Fatalf("x-grok-conv-id = %q, want empty", gotGrokConvID)
 			}
 		})
+	}
+}
+
+func TestXAIExecutorComposerSessionStaysAgentScopedWhenCacheKeyPerAgentDisabled(t *testing.T) {
+	perAgent := false
+	exec := NewXAIExecutor(&config.Config{CodexCacheKeyPerAgent: &perAgent})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	payload := []byte(`{"model":"grok-composer-2.5-fast","metadata":{"user_id":"{\"session_id\":\"cache-session-shared\"}"},"input":"hello"}`)
+	req := cliproxyexecutor.Request{Model: "grok-composer-2.5-fast", Payload: payload}
+
+	agentSession := func(agentID string) (string, string) {
+		t.Helper()
+		headers := http.Header{}
+		headers.Set(helps.ClaudeCodeSessionHeader, "cache-session-shared")
+		if agentID != "" {
+			headers.Set(helps.ClaudeCodeAgentHeader, agentID)
+		}
+		prepared, err := exec.prepareResponsesRequest(context.Background(), req, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Stream:       true,
+			Headers:      headers,
+		}, true)
+		if err != nil {
+			t.Fatalf("prepareResponsesRequest(%q) error = %v", agentID, err)
+		}
+		httpReq, errRequest := http.NewRequest(http.MethodPost, "https://example.test/responses", bytes.NewReader(prepared.body))
+		if errRequest != nil {
+			t.Fatalf("NewRequest() error = %v", errRequest)
+		}
+		applyXAIHeaders(httpReq, auth, "xai-token", true, prepared.sessionID)
+		return prepared.sessionID, httpReq.Header.Get("x-grok-conv-id")
+	}
+
+	agentA, convA := agentSession("agent-a")
+	agentB, convB := agentSession("agent-b")
+	root, convRoot := agentSession("")
+
+	if agentA == "" || agentB == "" || root == "" {
+		t.Fatalf("empty Composer session: root=%q a=%q b=%q", root, agentA, agentB)
+	}
+	if agentA == agentB || agentA == root || agentB == root {
+		t.Fatalf("Composer sessions collapsed across agents: root=%q a=%q b=%q", root, agentA, agentB)
+	}
+	if convA != agentA || convB != agentB || convRoot != root {
+		t.Fatalf("x-grok-conv-id does not track the Composer session: root=%q/%q a=%q/%q b=%q/%q", root, convRoot, agentA, convA, agentB, convB)
+	}
+
+	if again, _ := agentSession("agent-a"); again != agentA {
+		t.Fatalf("Composer session for agent-a is unstable: %q then %q", agentA, again)
 	}
 }
 

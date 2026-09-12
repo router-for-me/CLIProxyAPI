@@ -108,7 +108,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		if modelName == "" {
 			modelName = thinking.ParseSuffix(req.Model).ModelName
 		}
-		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, headers)
+		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, headers, e.cfg)
 		if errCache != nil {
 			return nil, nil, codexIdentityConfuseState{}, errCache
 		}
