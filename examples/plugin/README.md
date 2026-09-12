@@ -105,6 +105,18 @@ plugins:
 
 `auth_id` selects a matching candidate when `delegate` is empty. `delegate` accepts `""`, `fill-first`, or `round-robin`; other non-empty values leave the pick unhandled. `deny` returns a scheduler error.
 
+## Public plugin quota metadata
+
+Plugins may publish quota data under the reserved `plugin_quota` key in auth metadata. The public boundary is deterministic:
+
+- The value must be a non-empty object containing only ordinary JSON-compatible maps, arrays, strings, booleans, nulls, and finite numbers. A bounded tree preflight rejects custom marshalers, structs, byte blobs, oversized strings or collections, excessive nesting, and cycles before encoding.
+- Every key must be ASCII. Keys are lowercased and stripped of separators and punctuation before policy comparison. The denied compact names are `token`, `accesstoken`, `refreshtoken`, `idtoken`, `oauthtoken`, `bearertoken`, `sessiontoken`, `portaltoken`, `clientsecret`, `secret`, `secretkey`, `password`, `passwd`, `credential`, `credentials`, `creds`, `authorization`, `cookie`, `sessioncookie`, `apikey`, `accesskey`, and `privatekey`.
+- The exact compact quota count keys `tokens`, `latesttokens`, and `periodtokens` are allowed. Similar names are neither denied nor allowed by substring matching.
+- The host detaches the object, preserves JSON numbers without float64 conversion, and recursively HTML-escapes string values without changing keys.
+- The 16 KiB cap is measured on compact encoded JSON after preflight. Schema and version semantics belong to consumers, so other current and future fields are preserved.
+
+Producers must replace the complete nested `plugin_quota` value for each update rather than mutate an object already handed to the host.
+
 ## Build All Examples
 
 ```bash
