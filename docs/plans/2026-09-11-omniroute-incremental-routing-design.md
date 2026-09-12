@@ -100,6 +100,18 @@ type poolState struct {
 - **Persistence**: in-memory only (deliberate — burst protection, not
   operational state).
 
+As-built note (2026-09-12): probe admission moved OUT of the selection read
+path to execution commit. The original lazy-probe design (first
+`isAuthBlockedForModel` caller after expiry takes the probe) never recovered:
+the pick consumes the probe, then the model-filter call (`filterExecutionModels`)
+sees the pool blocked and drops the request before dispatch — no probe verdict
+ever arrives. As built, `blockDeadline` is read-only (only time-based
+relabels: expired OPEN→HALF_OPEN, expired probe window→re-arm), and the
+single-probe slot is taken by `admitProbe` at the three execution-commit sites
+(Execute/ExecuteCount/ExecuteStream, after auth preparation, right before
+dispatch), so an admitted probe always corresponds to a real dispatch.
+`scheduler.upsertAuth` and other read paths can no longer consume probes.
+
 ## G4 — New strategies: p2c and least-used
 
 - Canonical values `power-of-two-choices` and `least-used` in

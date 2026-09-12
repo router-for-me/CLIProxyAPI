@@ -129,12 +129,14 @@ func (b *poolBreaker) recordSuccess(key string, now time.Time) {
 	delete(b.pools, key)
 }
 
-// blockDeadline reports whether the pool currently blocks selection and when
-// it lifts. OPEN blocks until openedAt+resetPeriod; the lazy transition to
-// HALF_OPEN admits exactly one probe (the first caller after expiry). While
-// the probe is unresolved, other callers are blocked until a probe window
-// anchored at probe-admission time (openedAt+resetPeriod) elapses; if the
-// window expires without a verdict, a fresh probe is admitted.
+// blockDeadline reports whether the pool currently blocks selection reads and
+// when it lifts. It is a READ: it never takes the probe slot (admission moved
+// to admitProbe at execution commit), so repeated reads are idempotent — the
+// only writes are the time-based relabels (an expired OPEN becomes HALF_OPEN;
+// an expired probe window re-arms probeUsed). OPEN blocks until
+// openedAt+resetPeriod; HALF_OPEN with a probe in flight blocks until the
+// probe window anchored at admission time; HALF_OPEN without a probe does not
+// block — commit enforces the single probe. CLOSED/missing never block.
 func (b *poolBreaker) blockDeadline(key string, now time.Time) (time.Time, bool) {
 	if key == "" {
 		return time.Time{}, false
@@ -151,9 +153,13 @@ func (b *poolBreaker) blockDeadline(key string, now time.Time) (time.Time, bool)
 		if now.Before(deadline) {
 			return deadline, true
 		}
+		// Lazy relabel: the reset period elapsed, so a probe may be taken via
+		// admitProbe. Selection reads stay admission-free on purpose — an
+		// admission here was consumed by read paths (model filtering) that
+		// never dispatch, leaving the pool unable to ever recover.
 		entry.state = breakerHalfOpen
 		entry.probeUsed = false
-		fallthrough
+		return time.Time{}, false
 	case breakerHalfOpen:
 		if entry.probeUsed {
 			// A probe is in flight; block until its anchored window elapses.
@@ -161,14 +167,51 @@ func (b *poolBreaker) blockDeadline(key string, now time.Time) (time.Time, bool)
 			if now.Before(probeDeadline) {
 				return probeDeadline, true
 			}
-			// The probe window expired without a verdict; admit a fresh probe.
+			// The probe window expired without a verdict; re-arm so the next
+			// admitProbe can take a fresh probe.
+			entry.probeUsed = false
+		}
+		// No probe in flight: selection may proceed; the single-probe
+		// guarantee is enforced at commit.
+		return time.Time{}, false
+	default:
+		return time.Time{}, false
+	}
+}
+
+// admitProbe reports whether the caller may dispatch the pool's probe
+// request, taking the probe slot when it does (the only place probeUsed goes
+// false→true). Called at execution commit — after the auth is chosen and
+// prepared, right before dispatch — so an admitted probe always corresponds
+// to a real dispatch. Missing/CLOSED entries admit freely; OPEN never admits;
+// HALF_OPEN admits only when no live probe is in flight (an expired probe
+// window re-arms first) and re-anchors the window at admission time.
+func (b *poolBreaker) admitProbe(key string, now time.Time) bool {
+	if key == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	entry, ok := b.pools[key]
+	if !ok {
+		return true
+	}
+	switch entry.state {
+	case breakerOpen:
+		return false
+	case breakerHalfOpen:
+		if entry.probeUsed {
+			if now.Before(entry.openedAt.Add(entry.resetPeriod)) {
+				return false
+			}
+			// The previous probe's window expired without a verdict: re-arm.
 			entry.probeUsed = false
 		}
 		entry.probeUsed = true
-		entry.openedAt = now      // anchor the probe window at admission time
-		return time.Time{}, false // probe admitted
+		entry.openedAt = now // anchor the probe window at admission time
+		return true
 	default:
-		return time.Time{}, false
+		return true
 	}
 }
 
@@ -202,7 +245,12 @@ func PoolBreakerSnapshot() []PoolBreakerRecord {
 		case breakerHalfOpen:
 			record.State = "half_open"
 			record.OpenedAt = entry.openedAt
-			record.OpenUntil = entry.openedAt.Add(entry.resetPeriod)
+			// OpenUntil only reflects a real block: a relabeled HALF_OPEN
+			// without a live probe does not block selection (commit admits
+			// the next probe), so it reports no open deadline.
+			if entry.probeUsed {
+				record.OpenUntil = entry.openedAt.Add(entry.resetPeriod)
+			}
 		default:
 			record.State = "closed"
 		}

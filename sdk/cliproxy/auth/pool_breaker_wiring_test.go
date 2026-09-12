@@ -72,6 +72,20 @@ func poolBreakerEntryState(key string) (breakerState, time.Time, bool) {
 	return entry.state, entry.openedAt.Add(entry.resetPeriod), true
 }
 
+// expirePoolBreakerOpen backdates an OPEN entry's openedAt so its reset period
+// is already elapsed at now. The wiring path reads time.Now(), so expiry is
+// simulated by moving the anchor instead of sleeping.
+func expirePoolBreakerOpen(t *testing.T, key string) {
+	t.Helper()
+	globalPoolBreaker.mu.Lock()
+	defer globalPoolBreaker.mu.Unlock()
+	entry, ok := globalPoolBreaker.pools[key]
+	if !ok || entry.state != breakerOpen {
+		t.Fatalf("expirePoolBreakerOpen(%s): entry missing or not open (ok=%v)", key, ok)
+	}
+	entry.openedAt = time.Now().Add(-(entry.resetPeriod + 5*time.Second))
+}
+
 // TestPoolBreakerWiring_OpensAndBlocksPool pins the G3 wiring: threshold
 // failures fed through MarkResult open the breaker for the pool key, blocking
 // selection for opted-in auths and (pool-keyed) for same-pool auths without
@@ -162,6 +176,83 @@ func TestPoolBreakerWiring_OpensAndBlocksPool(t *testing.T) {
 		if record.PoolKey == "claude:7" {
 			t.Fatalf("PoolBreakerSnapshot() still contains claude:7 after success: %+v", record)
 		}
+	}
+}
+
+// TestPoolBreakerWiring_HalfOpenRecoveryPinsProbeAtCommit pins the fixed defect:
+// after the breaker OPENs and its reset period elapses, selection reads
+// (isAuthBlockedForModel, including the model-filter call that follows the
+// pick) return NOT blocked repeatedly — the probe slot survives them — and
+// the single probe is taken only at execution commit via admitProbe. A
+// MarkResult success through the admitted probe closes the pool again.
+func TestPoolBreakerWiring_HalfOpenRecoveryPinsProbeAtCommit(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	breakerAuth := registerPoolBreakerAuth(t, manager, "auth-breaker-halfopen", "claude:10", true)
+	cleanupPoolBreakerKeys(t, "claude:10")
+
+	for i := 0; i < poolBreakerFailureThreshold; i++ {
+		manager.MarkResult(context.Background(), transient503Result(breakerAuth.ID))
+	}
+	state, deadline, ok := poolBreakerEntryState("claude:10")
+	if !ok || state != breakerOpen {
+		t.Fatalf("expected breaker for claude:10 to be open after threshold failures, ok=%v state=%v", ok, state)
+	}
+	if !deadline.After(time.Now()) {
+		t.Fatalf("expected open breaker deadline %v to be in the future", deadline)
+	}
+
+	// Expire the reset period (simulated by backdating openedAt; the wiring
+	// path reads time.Now()).
+	expirePoolBreakerOpen(t, "claude:10")
+
+	// The exact defect, pinned: the read path must return NOT blocked for
+	// repeated calls — a second read (the model filter after the pick) must
+	// not consume the first caller's probe.
+	now := time.Now()
+	for call := 0; call < 3; call++ {
+		blocked, reason, next := isAuthBlockedForModel(breakerAuth, "claude-sonnet-4-5", now)
+		if blocked || reason != blockReasonNone || !next.IsZero() {
+			t.Fatalf("isAuthBlockedForModel read %d after expiry = (%v, %v, %v), want unblocked", call, blocked, reason, next)
+		}
+	}
+	// The same holds on the model-less path.
+	if blocked, _, _ := isAuthBlockedForModel(breakerAuth, "", now); blocked {
+		t.Fatalf("isAuthBlockedForModel(no model) after expiry = blocked, want unblocked")
+	}
+
+	// Admission is explicit and one-shot: first commit takes the probe, a
+	// second concurrent commit is denied.
+	if !globalPoolBreaker.admitProbe("claude:10", time.Now()) {
+		t.Fatal("expected first admitProbe to take the probe")
+	}
+	if globalPoolBreaker.admitProbe("claude:10", time.Now()) {
+		t.Fatal("expected second admitProbe denied while probe in flight")
+	}
+	// While the probe is in flight, selection reads report the block with the
+	// deadline anchored at admission.
+	blocked, reason, next := isAuthBlockedForModel(breakerAuth, "claude-sonnet-4-5", time.Now())
+	if !blocked || reason != blockReasonCooldown {
+		t.Fatalf("isAuthBlockedForModel while probe in flight = (%v, %v), want blocked cooldown", blocked, reason)
+	}
+	if next.IsZero() || !next.After(time.Now()) {
+		t.Fatalf("isAuthBlockedForModel while probe in flight deadline = %v, want future", next)
+	}
+
+	// The probe succeeds through MarkResult: the pool closes and selection
+	// recovers.
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   breakerAuth.ID,
+		Provider: "claude",
+		Model:    "claude-sonnet-4-5",
+		Success:  true,
+	})
+	for _, record := range PoolBreakerSnapshot() {
+		if record.PoolKey == "claude:10" {
+			t.Fatalf("PoolBreakerSnapshot() still contains claude:10 after probe success: %+v", record)
+		}
+	}
+	if blockedAfter, _, _ := isAuthBlockedForModel(breakerAuth, "claude-sonnet-4-5", time.Now()); blockedAfter {
+		t.Fatalf("isAuthBlockedForModel after probe success = blocked, want selectable")
 	}
 }
 

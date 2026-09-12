@@ -65,19 +65,32 @@ func TestPoolBreakerOpenBlocksThenAdmitsOneProbe(t *testing.T) {
 	if !deadline.Equal(base.Add(poolBreakerResetBase)) {
 		t.Fatalf("deadline = %v, want %v", deadline, base.Add(poolBreakerResetBase))
 	}
-	// At the deadline: lazy transition admits exactly one probe.
-	_, blocked = b.blockDeadline("pool-a", base.Add(poolBreakerResetBase))
-	if blocked {
-		t.Fatal("expected first post-expiry call to admit the probe (not blocked)")
+	// At the deadline: the read relabels OPEN→HALF_OPEN and does not block.
+	expiry := base.Add(poolBreakerResetBase)
+	if _, blocked := b.blockDeadline("pool-a", expiry); blocked {
+		t.Fatal("expected expired OPEN relabeled to HALF_OPEN without blocking")
 	}
-	// Second call while probe unresolved: blocked with a stable deadline
-	// anchored at probe admission time.
-	probe2Time := base.Add(poolBreakerResetBase + time.Second)
+	// A SECOND read must also not block: reads are side-effect-free with
+	// respect to the probe slot, so selection/model-filter reads can never
+	// consume the probe before dispatch (regression pin).
+	if _, blocked := b.blockDeadline("pool-a", expiry.Add(time.Second)); blocked {
+		t.Fatal("expected repeated reads to stay unblocked in HALF_OPEN without a probe")
+	}
+	// Admission is explicit: the first commit takes the probe, the second does not.
+	if !b.admitProbe("pool-a", expiry.Add(2*time.Second)) {
+		t.Fatal("expected first admitProbe to take the probe")
+	}
+	if b.admitProbe("pool-a", expiry.Add(3*time.Second)) {
+		t.Fatal("expected second admitProbe denied while probe in flight")
+	}
+	// While the probe is in flight: reads blocked with the deadline anchored
+	// at probe admission time.
+	probe2Time := base.Add(poolBreakerResetBase + 4*time.Second)
 	deadline, blocked = b.blockDeadline("pool-a", probe2Time)
 	if !blocked {
-		t.Fatal("expected second post-expiry call blocked while probe unresolved")
+		t.Fatal("expected reads blocked while probe unresolved")
 	}
-	want := base.Add(poolBreakerResetBase).Add(poolBreakerResetBase)
+	want := expiry.Add(2 * time.Second).Add(poolBreakerResetBase)
 	if !deadline.Equal(want) {
 		t.Fatalf("deadline = %v, want %v", deadline, want)
 	}
@@ -90,9 +103,11 @@ func TestPoolBreakerProbeFailureDoublesResetPeriod(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		b.recordFailure("pool-a", base)
 	}
-	// Expire and admit the probe.
-	_, blocked := b.blockDeadline("pool-a", base.Add(poolBreakerResetBase))
-	if blocked {
+	// Expire (read relabels OPEN→HALF_OPEN), then commit takes the probe.
+	if _, blocked := b.blockDeadline("pool-a", base.Add(poolBreakerResetBase)); blocked {
+		t.Fatal("expected expired OPEN relabeled without blocking")
+	}
+	if !b.admitProbe("pool-a", base.Add(poolBreakerResetBase+time.Second)) {
 		t.Fatal("expected probe admitted")
 	}
 	// Probe failure re-opens with doubled reset period.
@@ -117,9 +132,13 @@ func TestPoolBreakerResetPeriodCappedAtMax(t *testing.T) {
 		for i := 0; i < 8; i++ {
 			b.recordFailure("pool-a", base)
 		}
-		// Expire with a long jump so even the max period elapses.
+		// Expire with a long jump so even the max period elapses, then take
+		// the probe via admitProbe.
 		now := base.Add(10 * time.Minute)
 		if _, blocked := b.blockDeadline("pool-a", now); blocked {
+			t.Fatalf("cycle %d: expected expired OPEN relabeled without blocking", cycle)
+		}
+		if !b.admitProbe("pool-a", now) {
 			t.Fatalf("cycle %d: expected probe admitted", cycle)
 		}
 		openedAt := now.Add(time.Second)
@@ -149,9 +168,12 @@ func TestPoolBreakerProbeSuccessCloses(t *testing.T) {
 	}
 	now := base.Add(poolBreakerResetBase)
 	if _, blocked := b.blockDeadline("pool-a", now); blocked {
+		t.Fatal("expected expired OPEN relabeled without blocking")
+	}
+	if !b.admitProbe("pool-a", now.Add(time.Second)) {
 		t.Fatal("expected probe admitted")
 	}
-	b.recordSuccess("pool-a", now.Add(time.Second))
+	b.recordSuccess("pool-a", now.Add(2*time.Second))
 	if _, blocked := b.blockDeadline("pool-a", now.Add(2*time.Second)); blocked {
 		t.Fatal("expected pool closed after probe success")
 	}
@@ -223,9 +245,13 @@ func TestPoolBreakerHalfOpenBlockedDeadlineStable(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		b.recordFailure("pool-a", base)
 	}
-	// Expire and admit the probe at base+30s.
-	probeAdmittedAt := base.Add(poolBreakerResetBase)
-	if _, blocked := b.blockDeadline("pool-a", probeAdmittedAt); blocked {
+	// Expire (relabel) and take the probe at base+31s via admitProbe.
+	expiry := base.Add(poolBreakerResetBase)
+	if _, blocked := b.blockDeadline("pool-a", expiry); blocked {
+		t.Fatal("expected expired OPEN relabeled without blocking")
+	}
+	probeAdmittedAt := expiry.Add(time.Second)
+	if !b.admitProbe("pool-a", probeAdmittedAt) {
 		t.Fatal("expected probe admitted")
 	}
 	// Two blocked calls at different nows (both inside the probe window)
@@ -252,27 +278,35 @@ func TestPoolBreakerHalfOpenFreshProbeAfterWindowExpiry(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		b.recordFailure("pool-a", base)
 	}
-	// Admit the first probe.
-	probeAdmittedAt := base.Add(poolBreakerResetBase)
-	if _, blocked := b.blockDeadline("pool-a", probeAdmittedAt); blocked {
+	// Expire (relabel) and take the first probe.
+	expiry := base.Add(poolBreakerResetBase)
+	if _, blocked := b.blockDeadline("pool-a", expiry); blocked {
+		t.Fatal("expected expired OPEN relabeled without blocking")
+	}
+	probeAdmittedAt := expiry.Add(time.Second)
+	if !b.admitProbe("pool-a", probeAdmittedAt) {
 		t.Fatal("expected first probe admitted")
 	}
 	// While the probe window is live: blocked.
 	if _, blocked := b.blockDeadline("pool-a", probeAdmittedAt.Add(poolBreakerResetBase/2)); !blocked {
 		t.Fatal("expected blocked while probe window live")
 	}
-	// Probe window elapses without a verdict: a fresh probe is admitted.
+	// The in-flight probe's window elapses without a verdict: reads re-arm
+	// (still unblocked) and a fresh probe is admitted at commit.
 	afterWindow := probeAdmittedAt.Add(poolBreakerResetBase)
 	if _, blocked := b.blockDeadline("pool-a", afterWindow); blocked {
+		t.Fatal("expected reads unblocked after probe window expiry")
+	}
+	if !b.admitProbe("pool-a", afterWindow.Add(time.Second)) {
 		t.Fatal("expected fresh probe admitted after probe window expiry")
 	}
 	// The fresh probe again blocks other callers, anchored at the re-arm time.
-	deadline, blocked := b.blockDeadline("pool-a", afterWindow.Add(time.Second))
+	deadline, blocked := b.blockDeadline("pool-a", afterWindow.Add(2*time.Second))
 	if !blocked {
 		t.Fatal("expected blocked after fresh probe admitted")
 	}
-	if !deadline.Equal(afterWindow.Add(poolBreakerResetBase)) {
-		t.Fatalf("deadline = %v, want %v", deadline, afterWindow.Add(poolBreakerResetBase))
+	if !deadline.Equal(afterWindow.Add(time.Second).Add(poolBreakerResetBase)) {
+		t.Fatalf("deadline = %v, want %v", deadline, afterWindow.Add(time.Second).Add(poolBreakerResetBase))
 	}
 }
 

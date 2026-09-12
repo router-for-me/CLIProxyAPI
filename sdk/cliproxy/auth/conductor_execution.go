@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -332,6 +333,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastErr = errPrepare
 			continue
 		}
+		if key := poolBreakerSelectionKey(auth); key != "" && !globalPoolBreaker.admitProbe(key, time.Now()) {
+			// Another request holds the pool's probe slot, or the breaker
+			// re-opened between pick and dispatch; rotate to another auth.
+			// Admission happens only here — at execution commit — so an
+			// admitted probe always corresponds to a real dispatch.
+			continue
+		}
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -459,6 +467,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: resultErrorFromError(errPrepare)}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
+			continue
+		}
+		if key := poolBreakerSelectionKey(auth); key != "" && !globalPoolBreaker.admitProbe(key, time.Now()) {
+			// Another request holds the pool's probe slot, or the breaker
+			// re-opened between pick and dispatch; rotate to another auth.
+			// Admission happens only here — at execution commit — so an
+			// admitted probe always corresponds to a real dispatch.
 			continue
 		}
 		var authErr error
@@ -665,6 +680,19 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			lastErr = errPrepare
 			if selection != nil {
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
+					return nil, errEnd
+				}
+			}
+			continue
+		}
+		if key := poolBreakerSelectionKey(auth); key != "" && !globalPoolBreaker.admitProbe(key, time.Now()) {
+			// Another request holds the pool's probe slot, or the breaker
+			// re-opened between pick and dispatch; rotate to another auth.
+			// Admission happens only here — at execution commit — so an
+			// admitted probe always corresponds to a real dispatch.
+			if selection != nil {
+				releaseAttempt()
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "pool_breaker_probe_denied"); errEnd != nil {
 					return nil, errEnd
 				}
 			}
