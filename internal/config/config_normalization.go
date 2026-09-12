@@ -164,6 +164,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		e.AliasPool = NormalizeAliasPool(e.AliasPool)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -171,6 +172,31 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		out = append(out, e)
 	}
 	cfg.OpenAICompatibility = out
+}
+
+const (
+	// AliasPoolRoundRobin is the default same-alias pool strategy.
+	AliasPoolRoundRobin = "round-robin"
+	// AliasPoolPrefer tries members in config order (primary, then fallbacks).
+	AliasPoolPrefer = "prefer"
+)
+
+// NormalizeAliasPool maps configured alias-pool values to a canonical token.
+// Unknown or empty values become the default round-robin strategy (empty string).
+func NormalizeAliasPool(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", AliasPoolRoundRobin, "roundrobin", "rr":
+		return ""
+	case AliasPoolPrefer, "preference", "primary", "failover", "ordered":
+		return AliasPoolPrefer
+	default:
+		return ""
+	}
+}
+
+// AliasPoolIsPrefer reports whether the configured alias-pool uses ordered preference.
+func AliasPoolIsPrefer(value string) bool {
+	return NormalizeAliasPool(value) == AliasPoolPrefer
 }
 
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.
