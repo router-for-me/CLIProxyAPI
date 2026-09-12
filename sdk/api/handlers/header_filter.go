@@ -44,6 +44,9 @@ var cpaReservedResponseHeaders = map[string]struct{}{
 	"Access-Control-Expose-Headers":    {},
 	"Access-Control-Max-Age":           {},
 	"X-Cpa-Trace-Id":                   {},
+	// Gateway-managed inference telemetry — never passthrough upstream values.
+	"X-CLIProxyAPI-Tokens-Per-Second":    {},
+	"X-CLIProxyAPI-Gateway-Measured-TPS": {},
 }
 
 // IsCPAReservedResponseHeader reports whether a downstream response header is managed by CPA.

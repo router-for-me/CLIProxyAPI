@@ -43,6 +43,7 @@ type UsageReporter struct {
 	generate            bool
 	stream              bool
 	requestedAt         time.Time
+	upstreamStartedAt   time.Time
 	ttftMu              sync.RWMutex
 	ttft                time.Duration
 	firstPacketDuration time.Duration
@@ -50,6 +51,14 @@ type UsageReporter struct {
 	ttftStart           time.Time
 	ttftSet             bool
 	once                sync.Once
+	nowFunc             func() time.Time // optional; tests inject a controllable clock
+}
+
+func (r *UsageReporter) now() time.Time {
+	if r != nil && r.nowFunc != nil {
+		return r.nowFunc()
+	}
+	return time.Now()
 }
 
 type usageExecutor interface {
@@ -265,9 +274,13 @@ func (r *UsageReporter) StartResponseTTFT() {
 	if r == nil {
 		return
 	}
+	now := r.now()
 	r.ttftMu.Lock()
+	if r.upstreamStartedAt.IsZero() {
+		r.upstreamStartedAt = now
+	}
 	if !r.ttftSet && r.ttftStart.IsZero() {
-		r.ttftStart = time.Now()
+		r.ttftStart = now
 	}
 	r.ttftMu.Unlock()
 }
@@ -326,11 +339,11 @@ func (r *UsageReporter) ObserveTokenEvent(isToken bool) {
 		return
 	}
 	if !r.firstPacketSet {
-		r.firstPacketDuration = time.Since(start)
+		r.firstPacketDuration = r.now().Sub(start)
 		r.firstPacketSet = true
 	}
 	if isToken {
-		r.ttft = time.Since(start)
+		r.ttft = r.now().Sub(start)
 		r.ttftSet = true
 		r.ttftStart = time.Time{}
 	}
@@ -351,7 +364,7 @@ func (r *UsageReporter) MarkFirstResponseByte() {
 	if start.IsZero() {
 		return
 	}
-	r.setTTFT(time.Since(start))
+	r.setTTFT(r.now().Sub(start))
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -444,7 +457,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
-	return usage.Record{
+	record := usage.Record{
 		Provider:            r.provider,
 		BaseURL:             r.baseURL,
 		ExecutorType:        r.executorType,
@@ -470,6 +483,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Fail:                fail,
 		Detail:              detail,
 	}
+	record.TokensPerSecond = usage.TokensPerSecond(detail.OutputTokens, record.Latency, record.TTFT)
+	return record
 }
 
 func failFromErrors(errs ...error) usage.Failure {
@@ -496,10 +511,19 @@ func failFromErrors(errs ...error) usage.Failure {
 }
 
 func (r *UsageReporter) latency() time.Duration {
-	if r == nil || r.requestedAt.IsZero() {
+	if r == nil {
 		return 0
 	}
-	latency := time.Since(r.requestedAt)
+	r.ttftMu.RLock()
+	start := r.upstreamStartedAt
+	r.ttftMu.RUnlock()
+	if start.IsZero() {
+		start = r.requestedAt
+	}
+	if start.IsZero() {
+		return 0
+	}
+	latency := time.Since(start)
 	if latency < 0 {
 		return 0
 	}

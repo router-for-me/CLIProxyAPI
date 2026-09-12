@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"golang.org/x/net/context"
@@ -287,17 +288,58 @@ func finalInterceptorHeaders(current, intercepted http.Header) http.Header {
 }
 
 func downstreamHeadersFromExecutor(headers http.Header, passthrough bool) http.Header {
-	if !passthrough {
-		return nil
+	var out http.Header
+	if passthrough {
+		out = FilterUpstreamHeaders(headers)
 	}
-	return FilterUpstreamHeaders(headers)
+	return mergeGatewayTelemetryHeaders(out, headers)
 }
 
 func downstreamHeadersAfterInterceptors(baseRaw, finalRaw http.Header, passthrough bool) http.Header {
+	var out http.Header
 	if passthrough {
-		return FilterUpstreamHeaders(finalRaw)
+		out = FilterUpstreamHeaders(finalRaw)
+	} else {
+		out = FilterUpstreamHeaders(diffHeaders(baseRaw, finalRaw))
 	}
-	return FilterUpstreamHeaders(diffHeaders(baseRaw, finalRaw))
+	out = mergeGatewayTelemetryHeaders(out, finalRaw)
+	return mergeGatewayTelemetryHeaders(out, baseRaw)
+}
+
+// mergeGatewayTelemetryHeaders copies gateway-owned inference telemetry
+// (generation tok/s) even when passthrough-headers is false. Upstream
+// headers stay filtered. Only forward TPS when the process-local gateway
+// marker value is present so an upstream-supplied
+// X-CLIProxyAPI-Tokens-Per-Second / X-CLIProxyAPI-Gateway-Measured-TPS pair
+// is never trusted.
+func mergeGatewayTelemetryHeaders(dst, src http.Header) http.Header {
+	if src == nil {
+		return dst
+	}
+	const name = "X-CLIProxyAPI-Tokens-Per-Second"
+	const marker = "X-CLIProxyAPI-Gateway-Measured-TPS"
+	markerCanonical := http.CanonicalHeaderKey(marker)
+	nameCanonical := http.CanonicalHeaderKey(name)
+	hasMarker := false
+	tps := ""
+	for key, values := range src {
+		canonical := http.CanonicalHeaderKey(key)
+		if canonical == markerCanonical && len(values) > 0 && helps.IsGatewayMeasuredTPSMarker(values[0]) {
+			hasMarker = true
+		}
+		if canonical == nameCanonical && len(values) > 0 && values[0] != "" && tps == "" {
+			tps = values[0]
+		}
+	}
+	if !hasMarker || tps == "" {
+		return dst
+	}
+	if dst == nil {
+		dst = make(http.Header)
+	}
+	dst.Set(name, tps)
+	dst.Del(marker)
+	return dst
 }
 
 func diffHeaders(base, next http.Header) http.Header {

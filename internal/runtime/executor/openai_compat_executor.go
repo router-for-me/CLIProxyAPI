@@ -206,13 +206,19 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
+	// Snapshot client-visible TPS from the raw upstream body before translation so
+	// TranslateNonStream / EnsureResponsesUsageDetails do not dilute the denominator.
+	tps := helps.MeasuredTokensPerSecond(body, reporter)
 	// Translate response back to source format when needed
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	out = helps.AttachTokensPerSecondRate(out, tps)
+	headers := httpResp.Header.Clone()
+	helps.AttachTokensPerSecondHeaderRate(headers, tps)
+	resp = cliproxyexecutor.Response{Payload: out, Headers: headers}
 	return resp, nil
 }
 
@@ -393,7 +399,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -483,8 +489,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			streamLine := append([]byte("data: "), dataPayload...)
+			// Measure TTFT / usage on the assembled SSE frame (joined multiline data:), not raw fragments.
+			helps.ObserveChatTokenEvent(reporter, streamLine)
+			streamUsage.ObserveOpenAIStream(streamLine)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
 			for i := range chunks {
+				chunks[i] = helps.AttachStreamTokensPerSecond(chunks[i], reporter)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
@@ -569,7 +579,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		streamUsage.Publish(ctx, reporter)
 		reporter.EnsurePublished(ctx)
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	streamHeaders := httpResp.Header.Clone()
+	helps.StripTokensPerSecondHeaders(streamHeaders)
+	return &cliproxyexecutor.StreamResult{Headers: streamHeaders, Chunks: out}, nil
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -630,7 +642,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -686,7 +698,9 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			}
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	streamHeaders := httpResp.Header.Clone()
+	helps.StripTokensPerSecondHeaders(streamHeaders)
+	return &cliproxyexecutor.StreamResult{Headers: streamHeaders, Chunks: out}, nil
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

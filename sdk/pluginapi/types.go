@@ -1429,6 +1429,9 @@ type UsageRecord struct {
 	Latency time.Duration
 	// TTFT is the time to first token for streaming requests.
 	TTFT time.Duration
+	// TokensPerSecond is gateway-measured output-token throughput excluding TTFT.
+	// Zero means unknown and should be treated as omitted.
+	TokensPerSecond float64
 	// Failed reports whether the request failed.
 	Failed bool
 	// Failure contains failure details when Failed is true.
