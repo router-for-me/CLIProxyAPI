@@ -120,6 +120,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		return
 	}
+	ensureAntigravityFlash38Tiers(parsed)
 
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
@@ -295,11 +296,66 @@ func mergeProviderNames(existing, incoming []string) []string {
 	return merged
 }
 
+// ensureAntigravityFlash38Tiers guarantees the Medium and Low tiers of Gemini 3.8
+// Flash are present in the antigravity catalog. The daily Antigravity endpoint
+// (v1internal:fetchAvailableModels) serves gemini-3.8-flash-{high,medium,low} as three
+// distinct upstream model ids (the reasoning tier is encoded in the id, not in a
+// thinkingLevel parameter), but the published models.json lists only
+// gemini-3.8-flash-high. Without the other two tiers the medium/low variants are
+// unreachable through the proxy. We clone them from the -high entry so context and
+// capability metadata stay consistent, only adding a tier when it is absent.
+//
+// This must run on BOTH catalog load paths — the embedded fallback
+// (loadModelsFromBytes) and the remote refresh (tryRefreshModels) — because a remote
+// refresh replaces the store wholesale; injecting on a single path lets the next
+// refresh silently drop the added tiers.
+//
+// Note: the same registry gap affects other tiered Antigravity flash families
+// (e.g. 3.6/3.7), which the daily endpoint also serves in three tiers; the approach
+// generalizes if maintainers prefer to cover them here as well.
+func ensureAntigravityFlash38Tiers(parsed *staticModelsJSON) {
+	if parsed == nil {
+		return
+	}
+	var base *ModelInfo
+	have := make(map[string]bool, len(parsed.Antigravity))
+	for _, m := range parsed.Antigravity {
+		if m == nil {
+			continue
+		}
+		have[m.ID] = true
+		if m.ID == "gemini-3.8-flash-high" {
+			base = m
+		}
+	}
+	if base == nil {
+		return
+	}
+	tiers := []struct {
+		id, display string
+	}{
+		{"gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"},
+		{"gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"},
+	}
+	for _, t := range tiers {
+		if have[t.id] {
+			continue
+		}
+		clone := *base
+		clone.ID = t.id
+		clone.Name = t.id
+		clone.DisplayName = t.display
+		clone.Description = t.display
+		parsed.Antigravity = append(parsed.Antigravity, &clone)
+	}
+}
+
 func loadModelsFromBytes(data []byte, source string) error {
 	var parsed staticModelsJSON
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return fmt.Errorf("%s: decode models catalog: %w", source, err)
 	}
+	ensureAntigravityFlash38Tiers(&parsed)
 	if err := validateModelsCatalog(&parsed); err != nil {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)
 	}
