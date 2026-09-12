@@ -124,6 +124,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	// The Codex client model override layer is a local file next to the configuration.
+	// Loading it here keeps the effective catalog aligned with the runtime config.
+	registry.SyncCodexClientModelsOverrideFile(s.configPath)
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
 		s.syncPluginModelRuntime(ctx)

@@ -1544,6 +1544,28 @@ func TestManagementResponseExposesPluginSupportHeaderForCORS(t *testing.T) {
 	}
 }
 
+func TestManagementResponseExposesCodexClientModelSupportHeadersForCORS(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/codex-client-models", nil)
+	req.Header.Set("Origin", "http://127.0.0.1:5173")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+	for _, headerName := range []string{
+		managementHandlers.CodexClientModelsOverrideSupportHeader,
+		managementHandlers.CodexClientModelsInheritSupportHeader,
+	} {
+		if got := rr.Header().Get(headerName); got != "1" {
+			t.Fatalf("%s = %q, want %q", headerName, got, "1")
+		}
+	}
+}
+
 func TestOAuthCallbackRouteSkipsManagementKeyMiddleware(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
