@@ -57,6 +57,11 @@ const (
 	xaiUsingAPIAttr = "using_api"
 )
 
+const (
+	// XAIClientVersionValue is shared with account model discovery requests.
+	XAIClientVersionValue = xaiClientVersionValue
+)
+
 // xaiXSearchToolJSON is the native X Search tool injected when enabled by config.
 // Internal subtool traces are still filtered downstream when this tool is present.
 var xaiXSearchToolJSON = []byte(`{"type":"x_search"}`)
