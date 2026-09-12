@@ -325,6 +325,24 @@ nonstream-keepalive-interval: 0
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
 #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
 
+# Server-side pre-compaction: when a request's estimated input tokens exceed
+# window * threshold (minus max_tokens), older turns are summarized by an
+# auxiliary model and the shortened request is forwarded upstream. The system
+# prompt, tools, and the recent turns (bounded by keep-recent-turns and
+# keep-recent-tokens) are kept byte-identical. A middle block too large for the
+# auxiliary model's window is summarized in a rolling pass, chunk by chunk.
+# Applies to Claude Messages and OpenAI chat formats; Gemini is out of scope.
+# Summaries are cached per session (X-Claude-Code-Session-Id, else derived) so
+# a later turn in the same session does not re-summarize already-covered turns.
+# pre-compact:
+#   enabled: true
+#   aux-model: claude-haiku-4-5-20251001       # model used for the summarization call
+#   threshold: 0.85            # fraction of the model's context window usable before compacting
+#   keep-recent-turns: 6       # at most this many recent user turns kept verbatim (prompt-cache prefix safe)
+#   keep-recent-tokens: 40000  # stop keeping turns once the kept tail exceeds this; at least one full turn is always kept
+#   cache-ttl: 2h              # how long a per-session summary is reused
+#   cache-max-sessions: 2000   # LRU cap on cached sessions
+
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.
 # When false, client signatures are used directly after normalization (bypass mode for testing).

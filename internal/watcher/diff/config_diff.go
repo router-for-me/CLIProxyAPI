@@ -55,6 +55,16 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.DisableClaudeCloakMode != newCfg.DisableClaudeCloakMode {
 		changes = append(changes, fmt.Sprintf("disable-claude-cloak-mode: %t -> %t", oldCfg.DisableClaudeCloakMode, newCfg.DisableClaudeCloakMode))
 	}
+	if oldCfg.PreCompact != newCfg.PreCompact {
+		changes = append(changes, fmt.Sprintf("pre-compact: enabled %t -> %t, aux-model %s -> %s, threshold %v -> %v, keep-recent-turns %d -> %d, keep-recent-tokens %d -> %d, cache-ttl %s -> %s, cache-max-sessions %d -> %d",
+			oldCfg.PreCompact.Enabled, newCfg.PreCompact.Enabled,
+			oldCfg.PreCompact.AuxModel, newCfg.PreCompact.AuxModel,
+			oldCfg.PreCompact.Threshold, newCfg.PreCompact.Threshold,
+			oldCfg.PreCompact.KeepRecentTurns, newCfg.PreCompact.KeepRecentTurns,
+			oldCfg.PreCompact.KeepRecentTokens, newCfg.PreCompact.KeepRecentTokens,
+			oldCfg.PreCompact.CacheTTL, newCfg.PreCompact.CacheTTL,
+			oldCfg.PreCompact.CacheMaxSessions, newCfg.PreCompact.CacheMaxSessions))
+	}
 	if oldCfg.ClaudeCode.DisableCloakingModelList != newCfg.ClaudeCode.DisableCloakingModelList {
 		changes = append(changes, fmt.Sprintf("claude-code.disable-cloaking-model-list: %t -> %t", oldCfg.ClaudeCode.DisableCloakingModelList, newCfg.ClaudeCode.DisableCloakingModelList))
 	}
