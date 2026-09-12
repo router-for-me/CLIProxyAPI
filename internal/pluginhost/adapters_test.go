@@ -3314,7 +3314,7 @@ func setHostSnapshotForTest(host *Host, enabled bool, records ...capabilityRecor
 	sortRecords(records)
 	host.mu.Lock()
 	host.rebuildActivePluginMapsLocked(records)
-	host.snapshot.Store(&Snapshot{enabled: enabled, records: records})
+	host.snapshot.Store(&Snapshot{enabled: enabled, records: records, quotaSupportedProviders: make(map[string][]string)})
 	host.mu.Unlock()
 }
 

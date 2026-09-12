@@ -103,6 +103,34 @@ func TestRPCCapabilitiesIncludeModelRouter(t *testing.T) {
 	}
 }
 
+func TestRPCCapabilitiesIncludeQuotaProvider(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			QuotaProvider: &testQuotaProvider{identifier: "quota-test"},
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.QuotaProvider {
+		t.Fatal("QuotaProvider = false, want true")
+	}
+
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	if !json.Valid(raw) {
+		t.Fatalf("marshaled capabilities are invalid JSON: %s", raw)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded["quota_provider"] != true {
+		t.Fatalf("quota_provider = %#v, want true", decoded["quota_provider"])
+	}
+}
+
 func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 	lookup := newTestSymbolLookup(&testPlugin{
 		registerResult: validTestPlugin("schema"),

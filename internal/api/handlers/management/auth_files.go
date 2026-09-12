@@ -98,13 +98,20 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	}
 	nameFilter := strings.TrimSpace(c.Query("name"))
 	authIndexFilter := strings.TrimSpace(c.Query("auth_index"))
+	h.mu.Lock()
+	host := h.pluginHost
+	h.mu.Unlock()
+	var quotaSupportedProviders map[string]struct{}
+	if host != nil {
+		quotaSupportedProviders = host.QuotaSupportedProvidersSet(c.Request.Context())
+	}
 	auths := h.authManager.List()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if !matchesAuthFileLookup(auth, nameFilter, authIndexFilter) {
 			continue
 		}
-		if entry := h.buildAuthFileEntry(auth); entry != nil {
+		if entry := h.buildAuthFileEntry(auth, quotaSupportedProviders); entry != nil {
 			files = append(files, entry)
 		}
 	}
@@ -303,13 +310,13 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files})
 }
 
-func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
+func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, quotaSupported ...map[string]struct{}) gin.H {
 	authFileEntryMu.Lock()
 	defer authFileEntryMu.Unlock()
-	return h.buildAuthFileEntryLocked(auth)
+	return h.buildAuthFileEntryLocked(auth, quotaSupported...)
 }
 
-func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
+func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported ...map[string]struct{}) gin.H {
 	if auth == nil {
 		return nil
 	}
@@ -347,6 +354,30 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
+	}
+	var quotaSupportedMap map[string]struct{}
+	if len(quotaSupported) > 0 {
+		quotaSupportedMap = quotaSupported[0]
+	}
+	if quotaSupportedMap != nil {
+		if _, ok := quotaSupportedMap[strings.ToLower(strings.TrimSpace(auth.Provider))]; ok {
+			entry["supports_quota"] = true
+			entry["quota_provider"] = auth.Provider
+		}
+	} else {
+		h.mu.Lock()
+		host := h.pluginHost
+		h.mu.Unlock()
+		if host != nil && host.HasQuotaProvider(auth.Provider) {
+			entry["supports_quota"] = true
+			entry["quota_provider"] = auth.Provider
+		}
+	}
+	if auth.Metadata != nil {
+		if probe, okProbe := auth.Metadata["quota_probe"]; okProbe && probe != nil {
+			entry["supports_quota"] = true
+			entry["quota_probe"] = probe
+		}
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email

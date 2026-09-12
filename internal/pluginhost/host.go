@@ -395,7 +395,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		h.cleanupFilesPending = false
 	}
 	h.rebuildActivePluginMapsLocked(records)
-	h.snapshot.Store(&Snapshot{enabled: true, records: records})
+	h.snapshot.Store(&Snapshot{enabled: true, records: records, quotaSupportedProviders: make(map[string][]string)})
 	h.mu.Unlock()
 	h.refreshThinkingProviders(records)
 	for _, fields := range hotReloadLogs {
@@ -1056,7 +1056,8 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.ThinkingApplier != nil ||
 		caps.UsagePlugin != nil ||
 		caps.CommandLinePlugin != nil ||
-		caps.ManagementAPI != nil
+		caps.ManagementAPI != nil ||
+		caps.QuotaProvider != nil
 }
 
 func typeName(v any) string {
