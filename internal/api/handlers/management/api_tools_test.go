@@ -3,13 +3,17 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -173,6 +177,10 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 				APIKey:   "xai-key",
 				ProxyURL: "http://xai-proxy.example.com:8080",
 			}},
+			MetaKey: []config.MetaKey{{
+				APIKey:   "meta-key",
+				ProxyURL: "http://meta-proxy.example.com:8080",
+			}},
 			OpenAICompatibility: []config.OpenAICompatibility{{
 				Name:    "bohe",
 				BaseURL: "https://bohe.example.com",
@@ -220,6 +228,14 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 				Attributes: map[string]string{"api_key": "xai-key"},
 			},
 			wantProxy: "http://xai-proxy.example.com:8080",
+		},
+		{
+			name: "meta",
+			auth: &coreauth.Auth{
+				Provider:   "meta",
+				Attributes: map[string]string{"api_key": "meta-key"},
+			},
+			wantProxy: "http://meta-proxy.example.com:8080",
 		},
 		{
 			name: "openai-compatibility",
@@ -313,5 +329,264 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestAPICallResolvesMetaToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/key" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"api_key": "LLM|api-call-minted-key",
+			})
+			return
+		}
+		if r.URL.Path == "/test" {
+			authHeader := r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"auth_header": authHeader,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	metaAuth := &coreauth.Auth{
+		ID:       "meta:oauth:user1",
+		Provider: "meta",
+		Metadata: map[string]any{
+			"dca_token": "dca:tool-test-token",
+		},
+	}
+	if _, err := manager.Register(context.Background(), metaAuth); err != nil {
+		t.Fatalf("register meta auth: %v", err)
+	}
+	authIndex := metaAuth.EnsureIndex()
+
+	h := &Handler{
+		cfg:         &config.Config{},
+		authManager: manager,
+		tokenStore:  &memoryAuthStore{},
+	}
+	router := gin.New()
+	router.POST("/api/call", h.APICall)
+
+	body := `{"auth_index":"` + authIndex + `","method":"GET","url":"` + server.URL + `/test","header":{"Authorization":"Bearer $TOKEN$"}}`
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/call", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d; body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response apiCallResponse
+	if errDecode := json.NewDecoder(recorder.Body).Decode(&response); errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+
+	var upstreamBody map[string]string
+	if err := json.Unmarshal([]byte(response.Body), &upstreamBody); err != nil {
+		t.Fatalf("decode upstream response: %v", err)
+	}
+	if upstreamBody["auth_header"] != "Bearer LLM|api-call-minted-key" {
+		t.Errorf("expected header 'Bearer LLM|api-call-minted-key', got %q", upstreamBody["auth_header"])
+	}
+}
+
+func TestResolveMetaTokenUpdatesManagerAndStore(t *testing.T) {
+	mints := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mints++
+		_ = json.NewEncoder(w).Encode(map[string]string{"api_key": "LLM|minted", "base_url": " https://regional.meta.example/v1 "})
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL)
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{ID: "meta-management", Provider: "meta", Metadata: map[string]any{"dca_token": "dca:test", "base_url": "https://previous.meta.example/v1"}, Attributes: map[string]string{"base_url": "https://previous.meta.example/v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: &config.Config{}, authManager: manager, tokenStore: store}
+	for i := 0; i < 2; i++ {
+		token, err := h.resolveTokenForAuth(context.Background(), h.authByIndex(auth.Index), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token != "LLM|minted" {
+			t.Fatalf("token = %q", token)
+		}
+	}
+	if mints != 1 {
+		t.Errorf("minted %d times for sequential calls, want 1", mints)
+	}
+	live := h.authByIndex(auth.Index)
+	if live.Metadata["api_key"] != "LLM|minted" {
+		t.Error("live manager did not retain minted key")
+	}
+	if live.Metadata["base_url"] != "https://regional.meta.example/v1" || live.Attributes["base_url"] != "https://regional.meta.example/v1" {
+		t.Error("live manager did not retain minted base URL")
+	}
+	saved, err := store.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 1 || saved[0].Metadata["api_key"] != "LLM|minted" || saved[0].Metadata["base_url"] != "https://regional.meta.example/v1" {
+		t.Fatalf("configured store did not retain minted credentials: %#v", saved)
+	}
+}
+
+type failingMetaTokenStore struct {
+	memoryAuthStore
+	err error
+}
+
+func (s *failingMetaTokenStore) Save(context.Context, *coreauth.Auth) (string, error) {
+	return "", s.err
+}
+
+func TestResolveMetaTokenPropagatesStoreFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"api_key":"LLM|minted"}`))
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL)
+	saveErr := errors.New("test store unavailable")
+	store := &failingMetaTokenStore{err: saveErr}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{ID: "meta-save-failure", Provider: "meta", Metadata: map[string]any{"dca_token": "dca:test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: &config.Config{}, authManager: manager, tokenStore: store}
+	token, err := h.resolveTokenForAuth(context.Background(), h.authByIndex(auth.Index), "")
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("error = %v, want store failure", err)
+	}
+	if token != "" {
+		t.Error("returned a token despite failed persistence")
+	}
+	if h.authByIndex(auth.Index).Metadata["api_key"] != nil {
+		t.Error("failed save installed a token in the manager")
+	}
+}
+
+func TestResolveMetaToken_ConcurrentSingleflight(t *testing.T) {
+	var mints int64
+	serverStarted := make(chan struct{})
+	releaseServer := make(chan struct{})
+	var startOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&mints, 1)
+		startOnce.Do(func() { close(serverStarted) })
+		<-releaseServer
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"api_key":  "LLM|minted-concurrent",
+			"base_url": "https://regional.meta.example/v1",
+		})
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL)
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{
+		ID:       "meta-mgmt-concurrent",
+		Provider: "meta",
+		Metadata: map[string]any{"dca_token": "dca:concurrent-test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := &Handler{cfg: &config.Config{}, authManager: manager, tokenStore: store}
+
+	const callers = 5
+	var entryWg sync.WaitGroup
+	entryWg.Add(callers)
+	ready := make(chan struct{})
+	var inFlight sync.WaitGroup
+	inFlight.Add(callers)
+	var doneWg sync.WaitGroup
+	doneWg.Add(callers)
+
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer doneWg.Done()
+			entryWg.Done()
+			<-ready
+			inFlight.Done()
+			var token string
+			var errToken error
+			if i%2 == 0 {
+				prepared, err := manager.PrepareRequestAuth(context.Background(), executor.NewMetaExecutor(h.cfg), auth.Clone())
+				errToken = err
+				token = metaTokenFromAuth(prepared)
+			} else {
+				token, errToken = h.resolveTokenForAuth(context.Background(), auth.Clone(), "")
+			}
+			if errToken != nil {
+				t.Errorf("resolveTokenForAuth error: %v", errToken)
+			}
+			if token != "LLM|minted-concurrent" {
+				t.Errorf("expected LLM|minted-concurrent, got %q", token)
+			}
+		}()
+	}
+
+	entryWg.Wait()
+	close(ready)
+
+	<-serverStarted
+	inFlight.Wait()
+	close(releaseServer)
+	doneWg.Wait()
+
+	if totalMints := atomic.LoadInt64(&mints); totalMints != 1 {
+		t.Errorf("expected 1 mint request, got %d", totalMints)
+	}
+	live := h.authByIndex(auth.Index)
+	if live.Metadata["api_key"] != "LLM|minted-concurrent" {
+		t.Error("live manager did not retain minted key")
+	}
+	if live.Attributes["api_key"] != "LLM|minted-concurrent" {
+		t.Error("live manager did not retain minted key in attributes")
+	}
+}
+
+func TestResolveMetaTokenUsesRequestProxyWithoutSavingOverride(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer dca:proxy-test" {
+			t.Error("mint request did not carry the DCA token")
+		}
+		_, _ = w.Write([]byte(`{"api_key":"LLM|proxied"}`))
+	}))
+	defer proxy.Close()
+	t.Setenv("META_MINT_URL", "http://meta.invalid/key")
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{
+		ID: "meta-proxy.json", Provider: "meta", ProxyURL: "http://127.0.0.1:1",
+		Metadata: map[string]any{"dca_token": "dca:proxy-test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: &config.Config{}, authManager: manager, tokenStore: store}
+	token, err := h.resolveMetaToken(context.Background(), auth.Clone(), proxy.URL)
+	if err != nil || token != "LLM|proxied" {
+		t.Fatalf("resolve via request proxy: token=%q, err=%v", token, err)
+	}
+	live, _ := manager.GetByID(auth.ID)
+	if live.ProxyURL != auth.ProxyURL {
+		t.Fatal("request proxy override changed the credential's configured proxy")
 	}
 }

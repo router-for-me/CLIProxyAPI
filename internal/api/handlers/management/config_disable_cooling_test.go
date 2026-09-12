@@ -92,6 +92,18 @@ func TestPatchDisableCoolingOverrideForEveryFamily(t *testing.T) {
 			patch: (*Handler).PatchXAIKey,
 			get:   func(cfg *config.Config) *bool { return cfg.XAIKey[0].DisableCooling },
 		},
+		{
+			name: "meta",
+			setup: func(cfg *config.Config) {
+				cfg.MetaKey = []config.MetaKey{{
+					APIKey:         "key",
+					BaseURL:        "https://api.meta.ai/v1",
+					DisableCooling: &initial,
+				}}
+			},
+			patch: (*Handler).PatchMetaKey,
+			get:   func(cfg *config.Config) *bool { return cfg.MetaKey[0].DisableCooling },
+		},
 	}
 
 	for _, tc := range tests {
