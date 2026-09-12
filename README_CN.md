@@ -244,7 +244,7 @@ Quotio 的跨平台（Tauri）移植版，支持 Windows / macOS / Linux。通�
 
 VS Code 扩展，可将你的 Claude、ChatGPT/Codex、Antigravity、Grok 和 Kimi 订阅作为原生语言模型接入 GitHub Copilot Chat，并且也可用于生成 Git 提交信息、聊天标题和摘要。它以完全托管的后台生命周期运行 CLIProxyAPI（下载、验证、监督），并在所有窗口间共享，因此无需配置。无需 API 密钥，只需 OAuth。
 
-### [CPA-Tray-Powershell](https://github.com/IQ-Director/CPA-Tray-Powershell)
+### [CPA-Tray-Powershell](https://github.com/ztzpro/CPA-Tray-Powershell.git)
 
 基于 PowerShell 的 Windows CLIProxyAPI 托盘启动工具。支持无终端窗口后台运行、打开管理页面、关闭管理窗口后保持后端运行，并可通过托盘重新打开页面；同时支持启动时自动检查 CLIProxyAPI 更新、SHA-256 校验与失败回滚、一键重启并更新 CLIProxyAPI、基于 PID 校验的进程管理以及安全停止服务。
 
