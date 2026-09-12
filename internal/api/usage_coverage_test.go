@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -28,7 +30,7 @@ func TestCoverageSurvivesNormalHandlerContext(t *testing.T) {
 	sink := &coverageReviewSink{model: t.Name()}
 	usage.RegisterPlugin(sink)
 	router := gin.New()
-	router.Use(usageCoverageMiddleware())
+	router.Use(usageCoverageMiddleware(), AuthMiddleware(nil))
 	router.POST("/v1/"+t.Name(), func(c *gin.Context) {
 		h := &handlers.BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{}}
 		ctx, cancel := h.GetContextWithCancel(nil, c, context.Background())
@@ -52,7 +54,7 @@ func TestCoverageSkipsRejectedAndUnmatchedRequests(t *testing.T) {
 		matched bool
 		want    int
 	}{
-		{"unauthorized", 401, true, 0}, {"forbidden", 403, true, 0}, {"unmatched", 404, false, 0}, {"accepted_control", 200, true, 1},
+		{"unauthorized", 401, true, 0}, {"forbidden", 403, true, 0}, {"unmatched", 404, false, 0}, {"gate_unavailable", 503, true, 0}, {"gate_rate_limited", 429, true, 0}, {"accepted_control", 200, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sink := &coverageReviewSink{model: t.Name()}
@@ -64,15 +66,44 @@ func TestCoverageSkipsRejectedAndUnmatchedRequests(t *testing.T) {
 				router.POST(path, func(c *gin.Context) {
 					if tc.status >= 400 {
 						c.AbortWithStatus(tc.status)
-					} else {
-						c.Status(tc.status)
 					}
-				})
+				}, AuthMiddleware(nil), func(c *gin.Context) { c.Status(tc.status) })
 			}
 			router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, path, nil))
 			if len(sink.records) != tc.want {
 				t.Fatalf("record count=%d, want %d", len(sink.records), tc.want)
 			}
 		})
+	}
+}
+
+func TestCoverageSkipsHomeHeartbeatRejection(t *testing.T) {
+	previous := home.Current()
+	home.SetCurrent(nil)
+	t.Cleanup(func() { home.SetCurrent(previous) })
+	sink := &coverageReviewSink{model: t.Name()}
+	usage.RegisterPlugin(sink)
+	server := &Server{cfg: &config.Config{Home: config.HomeConfig{Enabled: true}}}
+	router := gin.New()
+	router.Use(usageCoverageMiddleware(), server.homeHeartbeatMiddleware(), AuthMiddleware(nil))
+	path := "/v1/" + t.Name()
+	router.POST(path, func(c *gin.Context) { t.Fatal("handler ran while heartbeat was unavailable") })
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
+	if recorder.Code != http.StatusServiceUnavailable || len(sink.records) != 0 {
+		t.Fatalf("heartbeat rejection: status=%d records=%d", recorder.Code, len(sink.records))
+	}
+}
+
+func TestCoverageRetainsAcceptedHandlerFailures(t *testing.T) {
+	sink := &coverageReviewSink{model: t.Name()}
+	usage.RegisterPlugin(sink)
+	router := gin.New()
+	router.Use(usageCoverageMiddleware(), AuthMiddleware(nil))
+	path := "/v1/" + t.Name()
+	router.POST(path, func(c *gin.Context) { c.AbortWithStatus(http.StatusServiceUnavailable) })
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, path, nil))
+	if len(sink.records) != 1 || !sink.records[0].Failed {
+		t.Fatalf("accepted handler failure lost: %+v", sink.records)
 	}
 }

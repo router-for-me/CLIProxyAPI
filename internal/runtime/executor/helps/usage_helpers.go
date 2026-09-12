@@ -685,7 +685,7 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	}
 	detail = b.billing.Apply(detail)
 	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
-	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) {
+	if responseServiceTier == "" || hasUsageDetail(detail) {
 		preservedTier := b.detail.ResponseServiceTier
 		b.detail = detail
 		if b.detail.ResponseServiceTier == "" {
@@ -1092,7 +1092,7 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 }
 
 func hasUsageDetail(detail usage.Detail) bool {
-	return hasNonZeroTokenUsage(detail)
+	return detail.UsageObserved || hasNonZeroTokenUsage(detail)
 }
 
 func ParseInteractionsUsage(data []byte) usage.Detail {
@@ -1167,7 +1167,7 @@ func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	detail := withResponseBilling(parseGeminiFamilyUsageDetail(node), gjson.ParseBytes(payload))
-	if !hasNonZeroTokenUsage(detail) {
+	if !detail.UsageObserved {
 		return usage.Detail{}, false
 	}
 	return detail, true

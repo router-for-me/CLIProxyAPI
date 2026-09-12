@@ -391,6 +391,8 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		defer releaseAttempt()
 	}
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
+	reporter := helps.NewUsageReporter(ctx, "codex", selectionModel, selected)
+	defer reporter.EnsurePublished(ctx)
 
 	baseHeaders := make(http.Header)
 	baseHeaders.Set("Content-Type", "application/json")
@@ -449,6 +451,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	}
 
 	if errCtx := ctx.Err(); errCtx != nil {
+		reporter.PublishFailure(ctx, errCtx)
 		if selection != nil {
 			selection.End("attempt_canceled")
 		}
@@ -457,6 +460,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	}
 	resp, err := performRequest(selected)
 	if err != nil {
+		reporter.PublishFailure(ctx, err)
 		if errors.Is(err, errMissingBaseURL) {
 			if selection != nil {
 				selection.End("missing_base_url")
@@ -478,11 +482,22 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		}
 		return errClose
 	}
+	responseFailure := func(body []byte, fallback error) error {
+		if resp.StatusCode < http.StatusBadRequest {
+			return fallback
+		}
+		message := strings.TrimSpace(string(body))
+		if message == "" {
+			message = "search returned HTTP " + strconv.Itoa(resp.StatusCode)
+			if resp.StatusCode == http.StatusUnauthorized {
+				message = "upstream unauthorized"
+			}
+		}
+		return &auth.Error{HTTPStatus: resp.StatusCode, Message: message}
+	}
 	if selection != nil {
 		if errBind := selection.Bind(closeResponseBody); errBind != nil {
-			if resp.StatusCode == http.StatusUnauthorized {
-				s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
-			}
+			reporter.PublishFailure(ctx, responseFailure(nil, errBind))
 			selection.End("response_bind_failed")
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
 			return
@@ -494,24 +509,20 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	helps.RecordAPIResponseMetadata(ctx, s.cfg, resp.StatusCode, resp.Header.Clone())
 	upstreamBody, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
+		reporter.PublishFailureWithDetail(ctx, helps.ParseOpenAIUsage(upstreamBody), responseFailure(upstreamBody, err))
 		helps.AppendAPIResponseChunk(ctx, s.cfg, upstreamBody)
-		if selection != nil && resp.StatusCode == http.StatusUnauthorized {
-			s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, upstreamBody)
-		}
 		helps.RecordAPIResponseError(ctx, s.cfg, err)
 		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway), gin.H{"error": "Failed to read Codex search response"})
 		return
 	}
-	reporter := helps.NewUsageReporter(ctx, "codex", selectionModel, selected)
 	detail := helps.ParseOpenAIUsage(upstreamBody)
 	if resp.StatusCode >= 400 {
-		reporter.PublishFailureWithDetail(ctx, detail, fmt.Errorf("search returned HTTP %d", resp.StatusCode))
+		reporter.PublishFailureWithDetail(ctx, detail, responseFailure(upstreamBody, nil))
 	} else {
 		reporter.Publish(ctx, detail)
 	}
 	helps.AppendAPIResponseChunk(ctx, s.cfg, upstreamBody)
 	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
-		s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, upstreamBody)
 		log.WithField("status", resp.StatusCode).Warnf("codex alpha search upstream request failed: %s", logging.SafeDiagnosticForLog(string(upstreamBody)))
 	}
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
@@ -545,6 +556,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	authMiddleware := AuthMiddleware(s.accessManager)
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
+			c.Set(usageRequestAcceptedKey, true)
 			c.Next()
 			return
 		}

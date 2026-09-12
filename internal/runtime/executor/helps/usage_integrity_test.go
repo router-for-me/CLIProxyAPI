@@ -30,3 +30,48 @@ func TestUsageIntegrityDeepSeekLegacyCache(t *testing.T) {
 		t.Fatalf("legacy cache lost: %+v", d)
 	}
 }
+
+func TestGeminiFamilyStreamPreservesMeasuredZero(t *testing.T) {
+	tests := []struct {
+		name     string
+		protocol string
+		payload  string
+	}{
+		{"gemini", "gemini", `data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}}`},
+		{"gemini snake case", "gemini", `data: {"usage_metadata":{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}}`},
+		{"interactions", "interactions", `data: {"type":"interaction.completed","interaction":{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`},
+		{"interactions Gemini fields", "interactions", `data: {"type":"interaction.completed","interaction":{"usage":{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}}}`},
+		{"antigravity", "antigravity", `data: {"response":{"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buffer StreamUsageBuffer
+			ObservePluginExecutorStreamUsage(tt.protocol, []byte(tt.payload), &buffer)
+			detail, ok := buffer.Detail()
+			if !ok || !detail.UsageObserved || detail.RawUsage == "" || detail.TotalTokens != 0 {
+				t.Fatalf("measured zero was lost: detail=%+v ok=%v", detail, ok)
+			}
+			var missing StreamUsageBuffer
+			ObservePluginExecutorStreamUsage(tt.protocol, []byte(`data: {"candidates":[{"finishReason":"STOP"}]}`), &missing)
+			if detail, ok := missing.Detail(); ok || detail.UsageObserved {
+				t.Fatalf("missing usage became measured: detail=%+v ok=%v", detail, ok)
+			}
+		})
+	}
+}
+
+func TestStreamUsageBufferPreservesMeasuredZeroWithTier(t *testing.T) {
+	var buffer StreamUsageBuffer
+	buffer.ObserveOpenAIStream([]byte(`data: {"service_tier":"default","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"service_tier":"priority","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`))
+	detail, ok := buffer.Detail()
+	if !ok || !detail.UsageObserved || detail.RawUsage == "" || detail.TotalTokens != 0 || detail.ResponseServiceTier != "priority" {
+		t.Fatalf("final measured zero with tier was lost: detail=%+v ok=%v", detail, ok)
+	}
+	var zeroOnly StreamUsageBuffer
+	zeroOnly.ObserveOpenAIStream([]byte(`data: {"service_tier":"priority","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`))
+	detail, ok = zeroOnly.Detail()
+	if !ok || !detail.UsageObserved || detail.RawUsage == "" || detail.TotalTokens != 0 {
+		t.Fatalf("only measured zero with tier was lost: detail=%+v ok=%v", detail, ok)
+	}
+}

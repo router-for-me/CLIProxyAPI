@@ -10,6 +10,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
+const usageRequestAcceptedKey = "cpa.usage.requestAccepted"
+
 // coverageMiddleware records operations whose handlers have no token reporter.
 // Control-plane calls and opaque WebRTC media are explicitly unmeasured; token
 // estimates (for example count_tokens) are never recorded as consumed tokens.
@@ -29,10 +31,9 @@ func usageCoverageMiddleware() gin.HandlerFunc {
 		if scope.Published() {
 			return
 		}
-		// Do not turn rejected credentials or unknown routes into unexpired
-		// journal files. Coverage is for accepted, registered API operations.
-		status := c.Writer.Status()
-		if c.FullPath() == "" || c.IsAborted() && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+		// Only requests admitted by route authentication may create fallback
+		// journal files. Earlier gates can reject requests with any status.
+		if c.FullPath() == "" || !c.GetBool(usageRequestAcceptedKey) {
 			return
 		}
 		usage.PublishRecord(context.WithValue(ctx, "gin", c), usage.Record{Provider: "unknown", Model: "unknown", ExecutorType: "EndpointCoverage", Endpoint: c.Request.Method + " " + path, Kind: "unmeasured", Generate: usage.GenerateFlag(false), RequestedAt: started, Latency: time.Since(started), Failed: c.Writer.Status() >= http.StatusBadRequest, Fail: usage.Failure{StatusCode: c.Writer.Status()}})
