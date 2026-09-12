@@ -21,9 +21,13 @@ func RelayOpenAIToolResultImages(payload []byte) []byte {
 		return payload
 	}
 
-	out := make([][]byte, 0, len(messages.Array())+1)
+	messageResults := messages.Array()
+	if !hasRelayableOpenAIToolResultImages(messageResults) {
+		return payload
+	}
+
+	out := make([][]byte, 0, len(messageResults)+1)
 	pendingImages := make([][]byte, 0, 2)
-	changed := false
 
 	flushImages := func() {
 		if len(pendingImages) == 0 {
@@ -33,14 +37,13 @@ func RelayOpenAIToolResultImages(payload []byte) []byte {
 		pendingImages = pendingImages[:0]
 	}
 
-	for _, message := range messages.Array() {
+	for _, message := range messageResults {
 		messageJSON := []byte(message.Raw)
 		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 		if role == "tool" {
 			if text, images, ok := splitOpenAIToolResultImages(message.Get("content")); ok {
 				messageJSON, _ = sjson.SetBytes(messageJSON, "content", text)
 				pendingImages = append(pendingImages, images...)
-				changed = true
 			}
 			out = append(out, messageJSON)
 			continue
@@ -58,14 +61,38 @@ func RelayOpenAIToolResultImages(payload []byte) []byte {
 	}
 	flushImages()
 
-	if !changed {
-		return payload
-	}
 	updated, err := sjson.SetRawBytes(payload, "messages", joinOpenAIRawJSON(out))
 	if err != nil {
 		return payload
 	}
 	return updated
+}
+
+func hasRelayableOpenAIToolResultImages(messages []gjson.Result) bool {
+	for _, message := range messages {
+		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "tool") {
+			continue
+		}
+		content := message.Get("content")
+		if content.IsArray() {
+			found := false
+			content.ForEach(func(_, part gjson.Result) bool {
+				if canRelayOpenAIToolResultImagePart(part) {
+					found = true
+					return false
+				}
+				return true
+			})
+			if found {
+				return true
+			}
+			continue
+		}
+		if content.IsObject() && canRelayOpenAIToolResultImagePart(content) {
+			return true
+		}
+	}
+	return false
 }
 
 func splitOpenAIToolResultImages(content gjson.Result) (string, [][]byte, bool) {
@@ -74,10 +101,14 @@ func splitOpenAIToolResultImages(content gjson.Result) (string, [][]byte, bool) 
 		images := make([][]byte, 0, 2)
 		hasImage := false
 		content.ForEach(func(_, part gjson.Result) bool {
-			if isOpenAIImageToolResultPart(part) {
+			if image, ok := openAIToolResultImagePart(part); ok {
 				hasImage = true
-				if image, ok := openAIToolResultImagePart(part); ok {
-					images = append(images, image)
+				images = append(images, image)
+				return true
+			}
+			if isOpenAIImageToolResultPart(part) {
+				if part.Raw != "" {
+					textParts = append(textParts, part.Raw)
 				} else {
 					textParts = append(textParts, openAIToolResultImageOmittedText)
 				}
@@ -98,13 +129,36 @@ func splitOpenAIToolResultImages(content gjson.Result) (string, [][]byte, bool) 
 		return text, images, true
 	}
 
-	if content.IsObject() && isOpenAIImageToolResultPart(content) {
+	if content.IsObject() {
 		if image, ok := openAIToolResultImagePart(content); ok {
 			return openAIToolResultImageRelayText, [][]byte{image}, true
 		}
-		return openAIToolResultImageOmittedText, nil, true
 	}
 	return "", nil, false
+}
+
+func canRelayOpenAIToolResultImagePart(part gjson.Result) bool {
+	if !part.IsObject() {
+		return false
+	}
+
+	typeName := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
+	switch typeName {
+	case "image_url":
+		return openAICompatImageURLValue(part.Get("image_url")) != ""
+	case "input_image":
+		return openAICompatInputImageURL(part) != ""
+	case "image":
+		return openAICompatClaudeImageSourceURL(part.Get("source")) != ""
+	}
+
+	if part.Get("image_url").Exists() {
+		return openAICompatImageURLValue(part.Get("image_url")) != ""
+	}
+	if part.Get("input_image").Exists() {
+		return openAICompatImageURLValue(part.Get("input_image")) != ""
+	}
+	return false
 }
 
 func openAIToolResultImagePart(part gjson.Result) ([]byte, bool) {
@@ -113,23 +167,23 @@ func openAIToolResultImagePart(part gjson.Result) ([]byte, bool) {
 	}
 
 	var imageURL, detail string
-	switch strings.ToLower(strings.TrimSpace(part.Get("type").String())) {
+	typeName := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
+	switch typeName {
 	case "image_url":
-		url := part.Get("image_url.url")
-		if url.Type != gjson.String {
-			return nil, false
-		}
-		imageURL = strings.TrimSpace(url.String())
+		imageURL = openAICompatImageURLValue(part.Get("image_url"))
 		detail = normalizeOpenAICompatImageDetail(part.Get("image_url.detail").String())
 	case "input_image":
-		url := part.Get("image_url")
-		if url.Type != gjson.String {
-			return nil, false
-		}
-		imageURL = strings.TrimSpace(url.String())
+		imageURL = openAICompatInputImageURL(part)
 		detail = normalizeOpenAICompatImageDetail(part.Get("detail").String())
+	case "image":
+		imageURL = openAICompatClaudeImageSourceURL(part.Get("source"))
 	default:
-		return nil, false
+		if part.Get("image_url").Exists() {
+			imageURL = openAICompatImageURLValue(part.Get("image_url"))
+			detail = normalizeOpenAICompatImageDetail(part.Get("image_url.detail").String())
+		} else if part.Get("input_image").Exists() {
+			imageURL = openAICompatImageURLValue(part.Get("input_image"))
+		}
 	}
 	if imageURL == "" {
 		return nil, false
@@ -141,6 +195,47 @@ func openAIToolResultImagePart(part gjson.Result) ([]byte, bool) {
 		image, _ = sjson.SetBytes(image, "image_url.detail", detail)
 	}
 	return image, true
+}
+
+func openAICompatImageURLValue(value gjson.Result) string {
+	if value.Type == gjson.String {
+		return strings.TrimSpace(value.String())
+	}
+	if value.IsObject() {
+		if url := value.Get("url"); url.Type == gjson.String {
+			return strings.TrimSpace(url.String())
+		}
+		if imageURL := value.Get("image_url"); imageURL.Type == gjson.String {
+			return strings.TrimSpace(imageURL.String())
+		}
+	}
+	return ""
+}
+
+func openAICompatInputImageURL(part gjson.Result) string {
+	if imageURL := openAICompatImageURLValue(part.Get("image_url")); imageURL != "" {
+		return imageURL
+	}
+	return openAICompatImageURLValue(part.Get("input_image"))
+}
+
+func openAICompatClaudeImageSourceURL(source gjson.Result) string {
+	if !source.IsObject() {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(source.Get("type").String())) {
+	case "base64":
+		mediaType := strings.TrimSpace(source.Get("media_type").String())
+		data := strings.TrimSpace(source.Get("data").String())
+		if mediaType == "" || data == "" {
+			return ""
+		}
+		return "data:" + mediaType + ";base64," + data
+	case "url":
+		return strings.TrimSpace(source.Get("url").String())
+	default:
+		return ""
+	}
 }
 
 func normalizeOpenAICompatImageDetail(detail string) string {
