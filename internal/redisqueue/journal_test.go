@@ -1,9 +1,11 @@
 package redisqueue
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,4 +186,44 @@ func TestUsageJournalFingerprintsCredentialSource(t *testing.T) {
 	if value["source"] == "upstream-secret" {
 		t.Fatal("upstream credential persisted in source")
 	}
+}
+
+func TestUsageJournalStripsFailureBodyWithoutChangingLegacyQueue(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ConfigureUsageJournal(t.TempDir())
+		defer ConfigureUsageJournal("")
+		body := strings.Repeat("private-prompt-and-echoed-credential", 1000)
+		(&usageQueuePlugin{}).HandleUsage(context.Background(), coreusage.Record{
+			EventID: "failure-redaction", Provider: "codex", Model: "test", Failed: true,
+			Fail:   coreusage.Failure{StatusCode: 401, Body: body},
+			Detail: coreusage.Detail{InputTokens: 10, TotalTokens: 10, UsageObserved: true},
+		})
+		legacy := popSinglePayload(t)
+		var legacyFail failDetail
+		if err := json.Unmarshal(legacy["fail"], &legacyFail); err != nil {
+			t.Fatal(err)
+		}
+		if legacyFail.Body != body {
+			t.Fatal("legacy failure diagnostics were changed")
+		}
+		items, err := ReadUsageJournal(10)
+		if err != nil || len(items) != 1 {
+			t.Fatalf("journal read: count=%d err=%v", len(items), err)
+		}
+		var durable struct {
+			EventID string                     `json:"event_id"`
+			Failed  bool                       `json:"failed"`
+			Fail    map[string]json.RawMessage `json:"fail"`
+			Tokens  tokenStats                 `json:"tokens"`
+		}
+		if err := json.Unmarshal(items[0], &durable); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := durable.Fail["body"]; exists || strings.Contains(string(items[0]), "private-prompt") {
+			t.Fatal("durable journal retained sensitive upstream failure body")
+		}
+		if durable.EventID != "failure-redaction" || !durable.Failed || string(durable.Fail["status_code"]) != "401" || durable.Tokens.TotalTokens != 10 {
+			t.Fatalf("failure attribution or usage was lost: %+v", durable)
+		}
+	})
 }

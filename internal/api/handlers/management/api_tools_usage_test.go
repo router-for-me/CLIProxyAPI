@@ -125,3 +125,56 @@ func TestManagementUsageDerivesModelFromURL(t *testing.T) {
 		})
 	}
 }
+
+func TestManagementUsageParsesGeminiJSONStream(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, path, response string
+		tokens                         int64
+		observed, grounding            bool
+	}{
+		{"gemini", "gemini", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", `[{"usageMetadata":{"promptTokenCount":100,"totalTokenCount":100}},{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"thoughtsTokenCount":10,"totalTokenCount":130}}]`, 130, true, false},
+		{"vertex", "vertex", "/v1/projects/demo/locations/global/publishers/google/models/gemini-2.5-pro:streamGenerateContent", `[
+   {"candidates":[{"groundingMetadata":{"webSearchQueries":["query"]}}]},
+   {"usageMetadata":{
+     "promptTokenCount":100,"candidatesTokenCount":30,"totalTokenCount":130
+   }}
+  ]`, 130, true, true},
+		{"final_zero", "gemini", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", `[{"usageMetadata":{"promptTokenCount":100,"totalTokenCount":100}},{"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}}]`, 0, true, false},
+		{"no_usage", "gemini", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", `[{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}]`, 0, false, false},
+		{"empty", "gemini", "/v1beta/models/gemini-2.5-flash:streamGenerateContent", `[]`, 0, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				_, _ = w.Write([]byte(tc.response))
+			}))
+			defer upstream.Close()
+			manager := coreauth.NewManager(nil, nil, nil)
+			auth := &coreauth.Auth{ID: t.Name(), Provider: tc.provider}
+			auth.EnsureIndex()
+			if _, err := manager.Register(context.Background(), auth); err != nil {
+				t.Fatal(err)
+			}
+			sink := &managementUsageReviewSink{authID: t.Name()}
+			usage.RegisterPlugin(sink)
+			h := &Handler{authManager: manager}
+			router := gin.New()
+			router.POST("/", h.APICall)
+			body, _ := json.Marshal(map[string]any{"method": "POST", "url": upstream.URL + tc.path, "auth_index": auth.Index, "data": `{"contents":[]}`})
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusOK || len(sink.records) != 1 {
+				t.Fatalf("HTTP %d, usage records=%d: %s", recorder.Code, len(sink.records), recorder.Body.String())
+			}
+			detail := sink.records[0].Detail
+			if detail.UsageObserved != tc.observed || detail.TotalTokens != tc.tokens {
+				t.Fatalf("lost array stream usage: %+v", detail)
+			}
+			if tc.grounding && !strings.Contains(detail.RawUsage, `"unpriced_server_tools":true`) {
+				t.Fatalf("lost earlier grounding metadata: %s", detail.RawUsage)
+			}
+		})
+	}
+}

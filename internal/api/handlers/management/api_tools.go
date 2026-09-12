@@ -732,5 +732,24 @@ func parseManagementResponseUsage(provider, path, contentType string, payload []
 		detail, _ := buffer.Detail()
 		return detail
 	}
+	// Google REST streams use a JSON array unless the request selects SSE.
+	// Preserve element boundaries (including pretty-printed objects), keep
+	// earlier billing metadata, and let the final measured counters win.
+	if protocol == "gemini" && gjson.ValidBytes(payload) {
+		if root := gjson.ParseBytes(payload); root.IsArray() {
+			var buffer helps.StreamUsageBuffer
+			for _, item := range root.Array() {
+				if !item.IsObject() {
+					continue
+				}
+				frame := []byte(item.Raw)
+				buffer.ObserveBillingPayload(frame)
+				detail := helps.ParsePluginExecutorResponseUsage(protocol, frame)
+				buffer.Observe(detail, detail.UsageObserved)
+			}
+			detail, _ := buffer.Detail()
+			return detail
+		}
+	}
 	return helps.ParsePluginExecutorResponseUsage(protocol, payload)
 }

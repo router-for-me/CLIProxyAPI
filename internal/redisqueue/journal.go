@@ -116,6 +116,16 @@ func (j *usageJournal) append(payload []byte) error {
 	}
 	delete(fields, "api_key")
 	delete(fields, "response_headers")
+	// Provider failures may echo prompts or credentials. Preserve the status
+	// for accounting, but keep response bodies only in the legacy queue.
+	if rawFail, exists := fields["fail"]; exists {
+		var failure map[string]json.RawMessage
+		if errDecode := json.Unmarshal(rawFail, &failure); errDecode != nil {
+			return errDecode
+		}
+		delete(failure, "body")
+		fields["fail"], _ = json.Marshal(failure)
+	}
 	var errEncode error
 	payload, errEncode = json.Marshal(fields)
 	if errEncode != nil {

@@ -17,7 +17,7 @@ Alpha Search and model-bearing management POST probes publish available usage. T
 
 ## Durable local consumer
 
-When a config file is supplied, the local journal is stored in `usage-journal/` beside it. The usage queue plugin persists events synchronously before asynchronous plugins run. Each file is atomically renamed after flushing; POSIX also flushes the directory. File permissions are private. API keys and credential-valued sources are fingerprinted; response headers are excluded from the durable copy. Legacy wire behavior remains available for old clients.
+When a config file is supplied, the local journal is stored in `usage-journal/` beside it. The usage queue plugin persists events synchronously before asynchronous plugins run. Each file is atomically renamed after flushing; POSIX also flushes the directory. File permissions are private. API keys and credential-valued sources are fingerprinted; response headers and upstream failure bodies are excluded from the durable copy. Legacy wire behavior remains available for old clients.
 
 The existing authenticated management API exposes:
 
@@ -52,3 +52,5 @@ Coverage skips unmatched routes and locally rejected authorization, so unauthent
 Management Gemini/Vertex generation calls also resolve models from `/models/{model}:generateContent` and `:streamGenerateContent` paths when the request body omits `model`; explicit body models remain authoritative. Opaque event IDs are preserved in payloads and mapped to SHA-256 filenames for durable storage and ACK. Previously written journal files remain readable and acknowledgeable.
 
 Coverage fallback requires successful route admission, including legacy authentication-disabled and realtime client-secret paths. Requests blocked by Home heartbeat or other gates before admission do not create journal files; admitted handler failures remain visible. Alpha Search creates its reporter before the upstream attempt so transport/read failures and latency retain their source attribution. Gemini and Interactions streams preserve explicitly reported zero usage, including when a response tier is present.
+
+The durable sanitizer removes `fail.body` because provider errors can echo request content or credentials; the status and token attribution remain, and the legacy memory queue retains diagnostics. Management Gemini JSON-array streams merge elements using the same accounting buffer as SSE. xAI video responses preserve cumulative billing identity even when the provider has not yet reported usage.

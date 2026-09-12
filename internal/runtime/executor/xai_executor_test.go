@@ -3657,8 +3657,11 @@ func TestXAIExecutorExecuteVideosCreate(t *testing.T) {
 	if record.Failed {
 		t.Fatalf("failed = true, want false; failure=%+v", record.Fail)
 	}
-	if record.Detail != (usage.Detail{}) {
-		t.Fatalf("detail = %+v, want zero token usage", record.Detail)
+	if record.Detail.BillingID != "xai-video/vid_123" || record.Detail.CostScope != "operation" {
+		t.Fatalf("detail = %+v, want video operation identity", record.Detail)
+	}
+	if record.Detail.UsageObserved || record.Detail.TotalTokens != 0 || record.Detail.InputTokens != 0 || record.Detail.OutputTokens != 0 || record.Detail.CostUSD != nil {
+		t.Fatalf("detail = %+v, want unreported token usage and cost", record.Detail)
 	}
 	if record.TTFT <= 0 {
 		t.Fatalf("ttft = %v, want positive duration", record.TTFT)

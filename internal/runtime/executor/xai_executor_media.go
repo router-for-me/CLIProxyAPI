@@ -154,10 +154,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 		detail.BillingID = "xai-video/" + billingID
 		detail.CostScope = "operation"
 	}
-	if detail.UsageObserved {
-		reporter.Publish(ctx, detail)
-	} else {
-		reporter.EnsurePublished(ctx)
-	}
+	// Creation and polling responses can identify the operation without reporting usage.
+	reporter.Publish(ctx, detail)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
