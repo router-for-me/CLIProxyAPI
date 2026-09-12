@@ -107,7 +107,6 @@ func (*prematureResponsesStreamExecutor) HttpRequest(context.Context, *coreauth.
 }
 
 func TestResponsesHandlerEmitsFailureWhenExecutorStopsAfterPartialOutput(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &prematureResponsesStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -152,7 +151,6 @@ func TestSanitizeResponsesStreamErrorMessageNormalizesSuccessStatus(t *testing.T
 }
 
 func TestResponsesHandlerCommitsValidFrameBeforeMalformedFrameInSameChunk(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &prematureResponsesStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -182,7 +180,6 @@ func TestResponsesHandlerCommitsValidFrameBeforeMalformedFrameInSameChunk(t *tes
 }
 
 func TestResponsesHandlerAcceptsMultilineDataAcrossExecutorChunks(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &prematureResponsesStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -211,7 +208,6 @@ func TestResponsesHandlerAcceptsMultilineDataAcrossExecutorChunks(t *testing.T) 
 }
 
 func TestResponsesHandlerPreservesDirectResponseBeforeFirstFrame(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &prematureResponsesStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -243,7 +239,6 @@ func TestResponsesHandlerPreservesDirectResponseBeforeFirstFrame(t *testing.T) {
 }
 
 func TestResponsesHandlerSanitizesErrorBeforeFirstFrame(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &prematureResponsesStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -282,7 +277,6 @@ func TestResponsesHandlerSanitizesErrorBeforeFirstFrame(t *testing.T) {
 }
 
 func TestResponsesHandlerFlushesDataOnlyFrameBeforeStreamingError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &prematureResponsesStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -317,7 +311,6 @@ func TestResponsesHandlerFlushesDataOnlyFrameBeforeStreamingError(t *testing.T) 
 }
 
 func TestResponsesHandlerEmitsFailureWhenDataOnlyStreamClosesCleanly(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &prematureResponsesStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -355,7 +348,6 @@ func TestResponsesHandlerEmitsFailureWhenDataOnlyStreamClosesCleanly(t *testing.
 }
 
 func TestResponsesHandlerDoesNotCommitHeadersForIncompleteFirstFrame(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &prematureResponsesStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -388,7 +380,6 @@ func TestResponsesHandlerDoesNotCommitHeadersForIncompleteFirstFrame(t *testing.
 }
 
 func TestResponsesHandlerRejectsStreamClosedBeforeFirstPayload(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	executor := &prematureResponsesStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -421,7 +412,6 @@ func TestResponsesHandlerRejectsStreamClosedBeforeFirstPayload(t *testing.T) {
 }
 
 func TestResponsesHandlerDoesNotLoseErrorBeforeFirstPayload(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	for i := 0; i < 100; i++ {
 		executor := &prematureResponsesStreamExecutor{}
@@ -456,7 +446,6 @@ func TestResponsesHandlerDoesNotLoseErrorBeforeFirstPayload(t *testing.T) {
 // TestForwardResponsesStreamExposesTerminalErrors pins the SSE side: once a
 // Responses stream has started, every terminal upstream error reaches the client.
 func TestForwardResponsesStreamExposesTerminalErrors(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name        string
@@ -532,7 +521,6 @@ func TestForwardResponsesStreamExposesTerminalErrors(t *testing.T) {
 }
 
 func TestForwardResponsesStreamUsesResponseFailedForCodex(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)
@@ -569,7 +557,6 @@ func TestForwardResponsesStreamUsesResponseFailedForCodex(t *testing.T) {
 }
 
 func TestForwardResponsesStreamExposesTransportErrorAfterOutputForCodex(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)
@@ -615,7 +602,6 @@ func TestForwardResponsesStreamExposesTransportErrorAfterOutputForCodex(t *testi
 }
 
 func TestForwardResponsesStreamSanitizesDiagnosticErrorDetails(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)
@@ -666,7 +652,6 @@ func TestForwardResponsesStreamSanitizesDiagnosticErrorDetails(t *testing.T) {
 }
 
 func TestForwardResponsesStreamPreservesNestedResponseError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)
@@ -697,7 +682,6 @@ func TestForwardResponsesStreamPreservesNestedResponseError(t *testing.T) {
 }
 
 func TestForwardResponsesStreamSanitizesLastEventDiagnostic(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)
@@ -754,7 +738,6 @@ func TestForwardResponsesStreamSanitizesPayloadErrorsAndStopsAtFailure(t *testin
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
 			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, nil)
 			h := NewOpenAIResponsesAPIHandler(base)
 			recorder := httptest.NewRecorder()
@@ -789,7 +772,6 @@ func TestForwardResponsesStreamSanitizesPayloadErrorsAndStopsAtFailure(t *testin
 }
 
 func TestForwardResponsesStreamReportsDataOnlyErrorFlushedAtEOF(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)
 	recorder := httptest.NewRecorder()
@@ -821,7 +803,6 @@ func TestForwardResponsesStreamReportsDataOnlyErrorFlushedAtEOF(t *testing.T) {
 }
 
 func TestForwardResponsesStreamDoesNotAppendFailureAfterTerminalEvent(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: true}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)
@@ -864,7 +845,6 @@ func TestForwardResponsesStreamDoesNotAppendFailureAfterTerminalEvent(t *testing
 }
 
 func TestForwardResponsesStreamFailsWhenUpstreamClosesWithoutTerminalEvent(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	h := NewOpenAIResponsesAPIHandler(base)

@@ -25,7 +25,6 @@ import (
 func performImagesEndpointRequest(t *testing.T, endpointPath string, contentType string, body io.Reader, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.POST(endpointPath, handler)
 
@@ -387,7 +386,6 @@ func TestSSEFrameAccumulatorFlushesDataOnlyFrame(t *testing.T) {
 }
 
 func TestWriteImagesStreamErrorEventSanitizesPayload(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	raw := `{"error":{"code":"upstream_failed","message":"token=image-secret"},"debug":"` + strings.Repeat("x", 8192) + `"}`
@@ -417,7 +415,6 @@ func TestCollectImagesRejectsPayloadErrorBeforeCompleted(t *testing.T) {
 }
 
 func TestForwardImagesStreamCancelsWithPayloadError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -443,7 +440,6 @@ func TestForwardImagesStreamCancelsWithPayloadError(t *testing.T) {
 }
 
 func TestForwardRawImageStreamPrefersPendingErrorOnClose(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
 	for i := 0; i < 100; i++ {
 		recorder := httptest.NewRecorder()

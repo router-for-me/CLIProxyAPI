@@ -23,7 +23,6 @@ import (
 func performVideosEndpointRequest(t *testing.T, method string, endpointPath string, contentType string, body io.Reader, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	switch method {
 	case http.MethodGet:
@@ -44,7 +43,6 @@ func performVideosEndpointRequest(t *testing.T, method string, endpointPath stri
 func performVideosRouteRequest(t *testing.T, method string, routePath string, requestPath string, contentType string, body io.Reader, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	switch method {
 	case http.MethodGet:
@@ -479,7 +477,6 @@ func TestWriteVideoContentFromURL(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	gin.SetMode(gin.TestMode)
 	resp := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(resp)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/openai/v1/videos/video_123/content", nil)
@@ -529,7 +526,6 @@ func TestWriteVideoContentFromURLUsesPinnedAuthProxy(t *testing.T) {
 	handler := NewOpenAIAPIHandler(base)
 	videoAuthBindings.set("video_123", authID, time.Hour)
 
-	gin.SetMode(gin.TestMode)
 	resp := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(resp)
 	ctx.Params = gin.Params{{Key: "video_id", Value: "video_123"}}
@@ -558,7 +554,6 @@ func TestWriteVideoContentFromURLFallsBackToGlobalProxy(t *testing.T) {
 	base := apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}, nil)
 	handler := NewOpenAIAPIHandler(base)
 
-	gin.SetMode(gin.TestMode)
 	resp := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(resp)
 	ctx.Params = gin.Params{{Key: "video_id", Value: "video_456"}}
@@ -1039,7 +1034,6 @@ func TestVideosCreateFormRequest(t *testing.T) {
 }
 
 func videosCreateRequestFromFormContext(body string) ([]byte, error) {
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	var rawJSON []byte
 	var err error
