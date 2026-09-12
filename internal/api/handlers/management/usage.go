@@ -53,3 +53,36 @@ func parseUsageQueueCount(value string) (int, error) {
 	}
 	return count, nil
 }
+
+// GetUsageJournal returns replayable events without deleting them.
+func (h *Handler) GetUsageJournal(c *gin.Context) {
+	count, errCount := parseUsageQueueCount(c.Query("count"))
+	if errCount != nil || count > 1000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "count must be between 1 and 1000"})
+		return
+	}
+	items, errRead := redisqueue.ReadUsageJournal(count)
+	if errRead != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errRead.Error()})
+		return
+	}
+	records := make([]usageQueueRecord, 0, len(items))
+	for _, item := range items {
+		records = append(records, usageQueueRecord(item))
+	}
+	c.JSON(http.StatusOK, records)
+}
+func (h *Handler) AckUsageJournal(c *gin.Context) {
+	var body struct {
+		IDs []string `json:"event_ids"`
+	}
+	if errBind := c.ShouldBindJSON(&body); errBind != nil || len(body.IDs) > 1000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid event_ids"})
+		return
+	}
+	if errAck := redisqueue.AckUsageJournal(body.IDs); errAck != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errAck.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"acknowledged": len(body.IDs)})
+}

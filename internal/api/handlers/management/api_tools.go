@@ -12,9 +12,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 const defaultAPICallTimeout = 60 * time.Second
@@ -189,8 +192,27 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 
+	// Management model probes bypass normal executors and need their own record.
+	var reporter *helps.UsageReporter
+	usageCtx := context.WithValue(c.Request.Context(), "gin", c)
+	model := strings.TrimSpace(gjson.Get(body.Data, "model").String())
+	if model == "" {
+		model = managementModelFromPath(req.URL.Path)
+	}
+	provider := "openai-compatible"
+	if auth != nil {
+		provider = auth.Provider
+	} else if req.URL.Hostname() == "api.x.ai" {
+		provider = "xai"
+	}
+	if method == http.MethodPost && model != "" {
+		reporter = helps.NewUsageReporter(usageCtx, provider, model, auth)
+		reporter.SetOperation("management_call", method+" "+req.URL.Path)
+		defer reporter.EnsurePublished(usageCtx)
+	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
+		reporter.PublishFailure(usageCtx, errDo)
 		log.WithError(errDo).Debug("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
@@ -202,16 +224,42 @@ func (h *Handler) APICall(c *gin.Context) {
 	}()
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
+	detail := parseManagementResponseUsage(provider, req.URL.Path, resp.Header.Get("Content-Type"), respBody)
 	if errReadAll != nil {
+		reporter.PublishFailureWithDetail(usageCtx, detail, errReadAll)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
 
+	if reporter != nil {
+		if resp.StatusCode >= 400 {
+			reporter.PublishFailureWithDetail(usageCtx, detail, fmt.Errorf("upstream HTTP %d", resp.StatusCode))
+		} else {
+			reporter.Publish(usageCtx, detail)
+		}
+	}
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+// Gemini and Vertex encode generation models in the URL instead of the body.
+func managementModelFromPath(path string) string {
+	prefix, action, ok := strings.Cut(path, ":")
+	if !ok || (action != "generateContent" && action != "streamGenerateContent") {
+		return ""
+	}
+	index := strings.LastIndex(prefix, "/models/")
+	if index < 0 {
+		return ""
+	}
+	model := prefix[index+len("/models/"):]
+	if strings.Contains(model, "/") {
+		return ""
+	}
+	return strings.TrimSpace(model)
 }
 
 func firstNonEmptyString(values ...*string) string {
@@ -660,4 +708,48 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 		return nil
 	}
 	return transport
+}
+
+// Management calls bypass the executor dispatcher, so select the same protocol
+// parsers explicitly and merge streaming start/delta usage when appropriate.
+func parseManagementResponseUsage(provider, path, contentType string, payload []byte) coreusage.Detail {
+	protocol := "openai"
+	switch {
+	case strings.EqualFold(provider, "antigravity"):
+		protocol = "antigravity"
+	case strings.HasSuffix(path, "/interactions"):
+		protocol = "interactions"
+	case strings.HasSuffix(path, "/messages") || strings.EqualFold(provider, "claude") || strings.EqualFold(provider, "anthropic"):
+		protocol = "claude"
+	case strings.Contains(path, ":generateContent") || strings.Contains(path, ":streamGenerateContent") || strings.EqualFold(provider, "gemini") || strings.EqualFold(provider, "vertex") || strings.EqualFold(provider, "aistudio"):
+		protocol = "gemini"
+	case strings.HasSuffix(path, "/responses") || strings.EqualFold(provider, "codex"):
+		protocol = "openai-response"
+	}
+	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		var buffer helps.StreamUsageBuffer
+		helps.ObservePluginExecutorStreamUsage(protocol, payload, &buffer)
+		detail, _ := buffer.Detail()
+		return detail
+	}
+	// Google REST streams use a JSON array unless the request selects SSE.
+	// Preserve element boundaries (including pretty-printed objects), keep
+	// earlier billing metadata, and let the final measured counters win.
+	if protocol == "gemini" && gjson.ValidBytes(payload) {
+		if root := gjson.ParseBytes(payload); root.IsArray() {
+			var buffer helps.StreamUsageBuffer
+			for _, item := range root.Array() {
+				if !item.IsObject() {
+					continue
+				}
+				frame := []byte(item.Raw)
+				buffer.ObserveBillingPayload(frame)
+				detail := helps.ParsePluginExecutorResponseUsage(protocol, frame)
+				buffer.Observe(detail, detail.UsageObserved)
+			}
+			detail, _ := buffer.Detail()
+			return detail
+		}
+	}
+	return helps.ParsePluginExecutorResponseUsage(protocol, payload)
 }

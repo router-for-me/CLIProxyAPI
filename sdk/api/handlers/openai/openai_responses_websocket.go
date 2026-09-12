@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"net"
 	"net/http"
 	"strings"
@@ -569,6 +570,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponseID = ""
 			lastResponsePendingToolCallIDs = nil
 			prewarmID, errWrite := writeResponsesWebsocketSyntheticPrewarm(c, writer, requestJSON, wsTimelineLog, passthroughSessionID)
+			prewarmCtx := usage.WithNewGeneration(context.WithValue(c.Request.Context(), "gin", c))
+			usage.PublishRecord(prewarmCtx, usage.Record{Provider: "local", Model: gjson.GetBytes(requestJSON, "model").String(), Kind: "prewarm", Transport: "websocket", Generate: usage.GenerateFlag(false), RequestedAt: time.Now(), Failed: errWrite != nil, Detail: usage.Detail{UsageObserved: true, TokenBreakdown: usage.NewSubsetTokenBreakdown(0, 0, 0, 0, 0, 0)}})
 			if errWrite != nil {
 				wsTerminateErr = errWrite
 				return
@@ -616,6 +619,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if pinnedAuthID != "" && !routeOverridesModelResolution {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 		}
+		cliCtx = usage.WithNewGeneration(cliCtx)
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 		if !selectedAuthObserved {
 			// Plugin/alternate routes bypass auth selection. Keep canonical HTTP-mode

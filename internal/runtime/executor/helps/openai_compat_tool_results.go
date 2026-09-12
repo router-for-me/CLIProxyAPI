@@ -37,6 +37,14 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 	out := payload
 	messageIndex := 0
 	messages.ForEach(func(_, message gjson.Result) bool {
+		// The Claude translator relays tool images in a following user message
+		// because Chat Completions tool messages only accept text content.
+		if message.Get("role").String() == "user" && message.Get("content.0.text").String() == "Images returned by the preceding tool call(s):" {
+			path := fmt.Sprintf("messages.%d.content", messageIndex)
+			if updated, errSet := sjson.SetBytes(out, path, flattenOpenAIToolResultContent(message.Get("content"))); errSet == nil {
+				out = updated
+			}
+		}
 		if message.Get("role").String() == "tool" {
 			content := message.Get("content")
 			if content.Exists() && content.Type != gjson.String {

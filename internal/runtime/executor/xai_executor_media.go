@@ -66,7 +66,12 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 
-	reporter.EnsurePublished(ctx)
+	detail := helps.ParseOpenAIUsage(data)
+	if detail.UsageObserved {
+		reporter.Publish(ctx, detail)
+	} else {
+		reporter.EnsurePublished(ctx)
+	}
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
 
@@ -140,6 +145,16 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
-	reporter.EnsurePublished(ctx)
+	detail := helps.ParseOpenAIUsage(data)
+	billingID := strings.TrimSpace(gjson.GetBytes(data, "request_id").String())
+	if billingID == "" {
+		billingID = strings.TrimSpace(gjson.GetBytes(payload, "request_id").String())
+	}
+	if billingID != "" {
+		detail.BillingID = "xai-video/" + billingID
+		detail.CostScope = "operation"
+	}
+	// Creation and polling responses can identify the operation without reporting usage.
+	reporter.Publish(ctx, detail)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }

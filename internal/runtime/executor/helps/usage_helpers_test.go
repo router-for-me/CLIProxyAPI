@@ -431,24 +431,22 @@ func TestParseGeminiUsageIncludesToolUsePromptTokens(t *testing.T) {
 	}
 }
 
-func TestParseGeminiStreamUsageSkipsZeroPlaceholder(t *testing.T) {
+func TestParseGeminiStreamUsageFinalUsageReplacesZeroPlaceholder(t *testing.T) {
 	lines := [][]byte{
 		[]byte(`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":0}}`),
 		[]byte(`data: {"usageMetadata":{"promptTokenCount":17984,"candidatesTokenCount":2668,"thoughtsTokenCount":1028,"totalTokenCount":21680}}`),
 	}
 
-	accepted := make([]usage.Detail, 0, len(lines))
+	var buffer StreamUsageBuffer
 	for _, line := range lines {
 		detail, ok := ParseGeminiStreamUsage(line)
-		if ok {
-			accepted = append(accepted, detail)
-		}
+		buffer.Observe(detail, ok)
 	}
 
-	if len(accepted) != 1 {
-		t.Fatalf("accepted usage count = %d, want 1", len(accepted))
+	detail, ok := buffer.Detail()
+	if !ok || !detail.UsageObserved {
+		t.Fatalf("final usage missing: %+v, ok=%v", detail, ok)
 	}
-	detail := accepted[0]
 	if detail.InputTokens != 17984 || detail.OutputTokens != 2668 || detail.ReasoningTokens != 1028 || detail.TotalTokens != 21680 {
 		t.Fatalf("accepted usage detail = %+v", detail)
 	}

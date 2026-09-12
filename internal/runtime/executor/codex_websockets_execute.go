@@ -356,6 +356,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			} else {
 				reporter.EnsurePublished(ctx)
 			}
+			publishCodexImageToolUsage(ctx, reporter, body, payload)
 			var param any
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)
 			out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, clientBody, clientPayload, &param)

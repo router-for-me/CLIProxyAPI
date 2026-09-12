@@ -201,10 +201,13 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		}()
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
+		var usageBuffer helps.StreamUsageBuffer
+		defer usageBuffer.EnsurePublished(ctx, reporter)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			usageBuffer.ObserveBillingPayload(line)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if replayAccumulator != nil {
 				replayAccumulator.ObserveSSELine(line)
@@ -220,7 +223,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 
 			if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
-				reporter.Publish(ctx, detail)
+				usageBuffer.Observe(detail, true)
+				usageBuffer.Publish(ctx, reporter)
 			}
 
 			payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
@@ -235,7 +239,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			usageBuffer.PublishFailure(ctx, reporter, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
@@ -255,7 +259,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			if replayAccumulator != nil {
 				replayAccumulator.Commit(ctx)
 			}
-			reporter.EnsurePublished(ctx)
+			usageBuffer.EnsurePublished(ctx, reporter)
 		}
 	}(httpResp)
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil

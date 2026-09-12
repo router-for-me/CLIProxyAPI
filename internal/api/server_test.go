@@ -488,7 +488,9 @@ func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) 
 				executor.beforeReturn = func() { test.beforeReturn(registry) }
 			}
 			server.handlers.AuthManager.RegisterExecutor(executor)
-			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), testAuthID)
+			usageCapture := &alphaSearchUsageCapture{authID: testAuthID}
+			coreusage.RegisterNamedPlugin(t.Name(), usageCapture)
+			t.Cleanup(func() { coreusage.RegisterNamedPlugin(t.Name(), &alphaSearchUsageCapture{}) })
 
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
@@ -498,7 +500,12 @@ func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) 
 			if recorder.Code != test.wantStatus {
 				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
 			}
-			record := usageCapture.wait(t)
+			usageCapture.mu.Lock()
+			defer usageCapture.mu.Unlock()
+			if len(usageCapture.records) != 1 {
+				t.Fatalf("got %d Home unauthorized records, want 1", len(usageCapture.records))
+			}
+			record := usageCapture.records[0]
 			if record.Fail.StatusCode != http.StatusUnauthorized || record.Fail.Body != test.wantFailBody {
 				t.Fatalf("Home unauthorized failure = status %d body %q, want status 401 body %q", record.Fail.StatusCode, record.Fail.Body, test.wantFailBody)
 			}

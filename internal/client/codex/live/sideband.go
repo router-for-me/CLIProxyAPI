@@ -509,7 +509,9 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	consumeSession = true
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	observer := newLiveUsageObserver(ctx, selected, session.model)
+	defer observer.close()
+	if errRelay := relayWebsockets(downstream, upstream, observer.observe); errRelay != nil && !isNormalWebsocketClose(errRelay) {
 		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
@@ -632,10 +634,10 @@ func websocketCloseFunc(name string, conn *websocket.Conn) func() error {
 	}
 }
 
-func relayWebsockets(downstream, upstream *websocket.Conn) error {
+func relayWebsockets(downstream, upstream *websocket.Conn, observers ...func([]byte)) error {
 	results := make(chan error, 2)
 	go func() { results <- copyWebsocket(upstream, downstream) }()
-	go func() { results <- copyWebsocket(downstream, upstream) }()
+	go func() { results <- copyWebsocket(downstream, upstream, observers...) }()
 
 	firstErr := <-results
 	closeCode, closeReason := websocketCloseDetails(firstErr)
@@ -648,7 +650,7 @@ func relayWebsockets(downstream, upstream *websocket.Conn) error {
 	return firstErr
 }
 
-func copyWebsocket(destination, source *websocket.Conn) error {
+func copyWebsocket(destination, source *websocket.Conn, observers ...func([]byte)) error {
 	for {
 		messageType, reader, errReader := source.NextReader()
 		if errReader != nil {
@@ -656,9 +658,16 @@ func copyWebsocket(destination, source *websocket.Conn) error {
 		}
 		writer, errWriter := destination.NextWriter(messageType)
 		if errWriter != nil {
+			if messageType == websocket.TextMessage && len(observers) > 0 {
+				_ = forwardUsageFrame(io.Discard, reader, observers...)
+			}
 			return errWriter
 		}
-		_, errCopy := io.Copy(writer, reader)
+		var frameObservers []func([]byte)
+		if messageType == websocket.TextMessage {
+			frameObservers = observers
+		}
+		errCopy := forwardUsageFrame(writer, reader, frameObservers...)
 		errClose := writer.Close()
 		if errCopy != nil {
 			return errCopy
