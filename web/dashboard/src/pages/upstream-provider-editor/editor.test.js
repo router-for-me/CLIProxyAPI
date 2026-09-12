@@ -501,6 +501,46 @@ test('buildPayload: routing_strategy emitted only when the operator picked one',
   }
 });
 
+test('buildForm/buildPayload: circuit_breaker hydrates and is always emitted as a boolean', () => {
+  // Hydration: a row opted in through the management API surfaces in the form.
+  const on = buildForm('claude-api-key', {
+    provider_type: 'claude-api-key',
+    circuit_breaker: true,
+    api_key: 'FAKE-SECRET-A',
+  });
+  assert.equal(on.circuit_breaker, true,
+    'opted-in row hydrates circuit_breaker=true');
+  const off = buildForm('claude-api-key', {
+    provider_type: 'claude-api-key',
+    api_key: 'FAKE-SECRET-A',
+  });
+  assert.equal(off.circuit_breaker, false,
+    'row without the opt-in hydrates false');
+
+  // Payload: ALWAYS emitted as a boolean (management Update is a full-row
+  // replace — omitting or blanking it would silently reset the flag on any
+  // unrelated edit). Both states and the missing-field form must round-trip.
+  const mk = (cb) => ({
+    name: 'row',
+    circuit_breaker: cb,
+    api_key_entries: [{ id: 1, name: '', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: '', priority: '' }],
+  });
+  for (const t of ['openai-compatibility', 'claude-api-key', 'opencode-go']) {
+    const emittedOn = buildPayload(mk(true), t);
+    assert.equal(emittedOn.circuit_breaker, true, `${t}: opted-in payload carries true`);
+    const emittedOff = buildPayload(mk(false), t);
+    assert.equal(emittedOff.circuit_breaker, false, `${t}: opted-out payload carries false`);
+  }
+  // Legacy form state that predates the field (undefined) must emit false,
+  // never crash, and never drop the key.
+  const legacy = buildPayload({
+    name: 'row',
+    api_key_entries: [{ id: 1, name: '', api_key: 'FAKE-SECRET-A', proxy_url: '', weight: '', priority: '' }],
+  }, 'openai-compatibility');
+  assert.equal(legacy.circuit_breaker, false,
+    'undefined form field emits false (key present, boolean)');
+});
+
 test('buildPayload: per-entry priority emitted incl. explicit 0; blank omitted', () => {
   const form = {
     api_key_entries: [

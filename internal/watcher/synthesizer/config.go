@@ -666,8 +666,11 @@ func (s *ConfigSynthesizer) synthesizeOpenCodeGo(ctx *SynthesisContext) []*corea
 			out = append(out, a)
 			createdEntries++
 		}
-		// No entries: synthesize a bare row auth (keyless, same fallback
-		// shape as the OpenAI-compat path) so the row still shows up live.
+		// No entries: synthesize a bare row auth (keyless) so the row still
+		// shows up live. Divergence from the OpenAI-compat fallback: this
+		// path stamps neither pool_strategy nor pool_circuit_breaker — a
+		// keyless row has no dispatches to fail over or feed the breaker, so
+		// the row-level Strategy/CircuitBreaker only reach the entry auths.
 		if createdEntries == 0 {
 			idKind := "opencode-go:apikey"
 			id, token := idGen.Next(idKind, base)

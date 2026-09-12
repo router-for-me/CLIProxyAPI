@@ -147,6 +147,11 @@ export function buildForm(providerType, initial, carryOver) {
     // row unset so the global routing.strategy applies; carried across
     // provider-type switches like the row-level priority above.
     routing_strategy: carry.routing_strategy ?? src.routing_strategy ?? '',
+    // Pool-level circuit breaker opt-in (design G3). Mirrors `disabled`:
+    // hydrated from the row, always emitted as a boolean in buildPayload so
+    // any dashboard edit preserves the flag (management Update is a
+    // full-row replace — omitting it would silently reset it to false).
+    circuit_breaker: !!(src && src.circuit_breaker),
     disabled: src.disabled ?? false,
     websockets: src.websockets ?? false,
     rebuild_mid_system_message: src.rebuild_mid_system_message ?? false,
@@ -271,6 +276,9 @@ export function buildPayload(form, providerType) {
     provider_type: providerType,
     priority: Number(form.priority) || 0,
     disabled: !!form.disabled,
+    // Always emitted as a boolean so editing any other field keeps the
+    // persisted opt-in (a full-row Update must not reset it).
+    circuit_breaker: !!form.circuit_breaker,
     prefix: (form.prefix || '').trim(),
     base_url: (form.base_url || '').trim(),
     proxy_url: (form.proxy_url || '').trim() || 'none',
