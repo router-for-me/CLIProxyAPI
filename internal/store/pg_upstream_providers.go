@@ -36,10 +36,15 @@ type UpstreamProvider struct {
 	// additionally opts the pool into aggressive failover — any entry error
 	// rotates to the next entry before surfacing to the client.
 	RoutingStrategy string `json:"routing_strategy,omitempty"`
-	Prefix          string `json:"prefix,omitempty"`
-	APIKey          string `json:"api_key,omitempty"`
-	BaseURL         string `json:"base_url,omitempty"`
-	ProxyURL        string `json:"proxy_url,omitempty"`
+	// CircuitBreaker is the opt-in pool-level circuit breaker flag (design
+	// G3): when true, 408/5xx failures from this row's pool feed the breaker
+	// and the pool's auths become subject to its pool-wide blocking. false
+	// (default) keeps failures scoped to per-auth cooldowns.
+	CircuitBreaker bool   `json:"circuit_breaker"`
+	Prefix         string `json:"prefix,omitempty"`
+	APIKey         string `json:"api_key,omitempty"`
+	BaseURL        string `json:"base_url,omitempty"`
+	ProxyURL       string `json:"proxy_url,omitempty"`
 	// ProxyPoolID, when non-nil, binds the row to a proxy_pools entry; the
 	// renderer resolves it into the concrete ProxyURL (or RelayBaseURL for
 	// relay pools). nil = no row-level pool binding.
@@ -223,7 +228,7 @@ func (s *pgUpstreamProviderStore) Get(ctx context.Context, id int64) (*UpstreamP
 		return nil, fmt.Errorf("postgres store: upstream providers store not initialized")
 	}
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
+		SELECT id, provider_type, name, priority, disabled, routing_strategy, circuit_breaker, prefix, api_key,
 		       base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
 		       status, unavailable, last_error, last_error_at, websockets,
 		       rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
@@ -272,7 +277,7 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 	}
 	row := tx.QueryRowContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
-			provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
+			provider_type, name, priority, disabled, routing_strategy, circuit_breaker, prefix, api_key,
 			base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
 			status, unavailable, last_error, last_error_at, websockets,
 			rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
@@ -280,9 +285,9 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 			token_access_token, token_refresh_token, token_token_type,
 			token_expiry, token_expired, token_scope, extra_config
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33
 		)
-		RETURNING id, provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
+		RETURNING id, provider_type, name, priority, disabled, routing_strategy, circuit_breaker, prefix, api_key,
 		          base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
 		          status, unavailable, last_error, last_error_at, websockets,
 		          rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
@@ -291,7 +296,7 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 		          token_expiry, token_expired, token_scope, extra_config,
 		          created_at, updated_at
 	`, s.table),
-		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), nullableString(p.Prefix),
+		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), p.CircuitBreaker, nullableString(p.Prefix),
 		nullableString(p.APIKey), nullableString(p.BaseURL), nullableString(p.ProxyURL), nullableID(p.ProxyPoolID),
 		nullableString(p.Label), nullableString(p.Email), nullableString(p.FileName),
 		nullableString(p.SourceBackend), nullableString(p.Status), p.Unavailable,
@@ -352,36 +357,37 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 			priority = $3,
 			disabled = $4,
 			routing_strategy = $5,
-			prefix = $6,
-			api_key = $7,
-			base_url = $8,
-			proxy_url = $9,
-			proxy_pool_id = $10,
-			label = $11,
-			email = $12,
-			file_name = $13,
-			source_backend = $14,
-			status = $15,
-			unavailable = $16,
-			last_error = $17,
-			last_error_at = $18,
-			websockets = $19,
-			rebuild_mid_system_message = $20,
-			experimental_cch_signing = $21,
-			cloak_mode = $22,
-			cloak_strict_mode = $23,
-			cloak_sensitive_words = $24,
-			cloak_cache_user_id = $25,
-			token_access_token = $26,
-			token_refresh_token = $27,
-			token_token_type = $28,
-			token_expiry = $29,
-			token_expired = $30,
-			token_scope = $31,
-			extra_config = $32,
+			circuit_breaker = $6,
+			prefix = $7,
+			api_key = $8,
+			base_url = $9,
+			proxy_url = $10,
+			proxy_pool_id = $11,
+			label = $12,
+			email = $13,
+			file_name = $14,
+			source_backend = $15,
+			status = $16,
+			unavailable = $17,
+			last_error = $18,
+			last_error_at = $19,
+			websockets = $20,
+			rebuild_mid_system_message = $21,
+			experimental_cch_signing = $22,
+			cloak_mode = $23,
+			cloak_strict_mode = $24,
+			cloak_sensitive_words = $25,
+			cloak_cache_user_id = $26,
+			token_access_token = $27,
+			token_refresh_token = $28,
+			token_token_type = $29,
+			token_expiry = $30,
+			token_expired = $31,
+			token_scope = $32,
+			extra_config = $33,
 			updated_at = NOW()
-		WHERE id = $33
-		RETURNING id, provider_type, name, priority, disabled, routing_strategy, prefix, api_key,
+		WHERE id = $34
+		RETURNING id, provider_type, name, priority, disabled, routing_strategy, circuit_breaker, prefix, api_key,
 		          base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
 		          status, unavailable, last_error, last_error_at, websockets,
 		          rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
@@ -390,7 +396,7 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 		          token_expiry, token_expired, token_scope, extra_config,
 		          created_at, updated_at
 	`, s.table),
-		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), nullableString(p.Prefix),
+		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), p.CircuitBreaker, nullableString(p.Prefix),
 		nullableString(p.APIKey), nullableString(p.BaseURL), nullableString(p.ProxyURL), nullableID(p.ProxyPoolID),
 		nullableString(p.Label), nullableString(p.Email), nullableString(p.FileName),
 		nullableString(p.SourceBackend), nullableString(p.Status), p.Unavailable,
@@ -885,7 +891,7 @@ func scanUpstreamProvider(sc scanner, p *UpstreamProvider) error {
 		proxyPoolID                    sql.NullInt64
 	)
 	if err := sc.Scan(
-		&p.ID, &p.ProviderType, &name, &p.Priority, &p.Disabled, &routingStrategy, &prefix, &apiKey,
+		&p.ID, &p.ProviderType, &name, &p.Priority, &p.Disabled, &routingStrategy, &p.CircuitBreaker, &prefix, &apiKey,
 		&baseURL, &proxyURL, &proxyPoolID, &label, &email, &fileName, &sourceBackend,
 		&status, &p.Unavailable, &lastError, &lastErrorAt, &p.Websockets,
 		&p.RebuildMidSystemMessage, &p.ExperimentalCCHSigning, &cloakMode,

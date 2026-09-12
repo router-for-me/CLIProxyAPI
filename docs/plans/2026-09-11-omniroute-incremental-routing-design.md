@@ -113,7 +113,7 @@ dispatch), so an admitted probe always corresponds to a real dispatch.
 `scheduler.upsertAuth` and other read paths can no longer consume probes.
 Home mode is only partially covered by this wiring: home dispatches never
 FEED the breaker (`reportHomeResult` bypasses `MarkResult`) and the non-stream
-home loops (`executeHome`/`executeHomeCount`) bypass admission entirely, so in a
+home loops (`executeHome`, whose `countTokens` flag covers both variants) bypass admission entirely, so in a
 pure HomeEnabled deployment the breaker stays closed — harmless but inactive
 until a follow-up wires the feeds. The stream loop's home branch does consult
 the gate (denial releases the selection and advances the Home auth count),

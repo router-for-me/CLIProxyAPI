@@ -503,6 +503,14 @@ type ClaudeKey struct {
 	// Empty = legacy single-key behavior. Operators should not set this
 	// field manually.
 	UpstreamProviderStrategy string `yaml:"upstream-provider-strategy,omitempty" json:"-"`
+
+	// UpstreamProviderCircuitBreaker carries the upstream_providers row's
+	// circuit_breaker opt-in (design G3) onto every fan-out item. The
+	// synthesizer embeds it in the auth's `pool_circuit_breaker` attribute so
+	// 408/5xx failures feed the pool-wide breaker and the pool's auths become
+	// subject to its blocking. false (default) keeps failures scoped to
+	// per-auth cooldowns. Operators should not set this field manually.
+	UpstreamProviderCircuitBreaker bool `yaml:"upstream-provider-circuit-breaker,omitempty" json:"-"`
 }
 
 func (k ClaudeKey) GetAPIKey() string { return k.APIKey }
@@ -758,6 +766,13 @@ type OpenAICompatibility struct {
 	// the next entry before surfacing to the client.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
+	// CircuitBreaker opts this provider's pool into the pool-level circuit
+	// breaker (design G3): when true, 408/5xx failures from the pool's
+	// entries feed the pool-wide breaker and the pool's auths become subject
+	// to its blocking. false (default) keeps failures scoped to per-auth
+	// cooldowns.
+	CircuitBreaker bool `yaml:"circuit-breaker,omitempty" json:"circuit-breaker,omitempty"`
+
 	// Disabled prevents this provider from being used for routing.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 
@@ -981,6 +996,13 @@ type OpenCodeGo struct {
 	// value opts the pool into aggressive failover: entry errors rotate to
 	// the next entry before surfacing to the client.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// CircuitBreaker opts this provider's pool into the pool-level circuit
+	// breaker (design G3): when true, 408/5xx failures from the pool's
+	// entries feed the pool-wide breaker and the pool's auths become subject
+	// to its blocking. false (default) keeps failures scoped to per-auth
+	// cooldowns.
+	CircuitBreaker bool `yaml:"circuit-breaker,omitempty" json:"circuit-breaker,omitempty"`
 
 	// Disabled prevents this provider from being used for routing.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`

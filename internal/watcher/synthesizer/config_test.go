@@ -1681,6 +1681,160 @@ func TestConfigSynthesizer_OpenAICompat_PoolStrategy_FallbackAuth(t *testing.T) 
 	}
 }
 
+// TestConfigSynthesizer_CircuitBreaker_Claude stamps the pool_circuit_breaker
+// attribute on every fan-out item of a pool whose row opted in: the value is
+// the literal "true" (the runtime compares it literally), and items without
+// the opt-in never gain the attribute.
+func TestConfigSynthesizer_CircuitBreaker_Claude(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:                         "sk-ant-breaker-a",
+					UpstreamProviderID:             21,
+					UpstreamProviderEntryID:        211,
+					UpstreamProviderStrategy:       "round-robin",
+					UpstreamProviderCircuitBreaker: true,
+				},
+				{
+					APIKey:                         "sk-ant-breaker-b",
+					UpstreamProviderID:             21,
+					UpstreamProviderEntryID:        212,
+					UpstreamProviderStrategy:       "round-robin",
+					UpstreamProviderCircuitBreaker: true,
+				},
+				{
+					// Opted-out pool: the attribute must stay absent even
+					// though the pool carries a strategy.
+					APIKey:                   "sk-ant-breaker-off",
+					UpstreamProviderID:       22,
+					UpstreamProviderEntryID:  221,
+					UpstreamProviderStrategy: "round-robin",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 3 {
+		t.Fatalf("expected 3 auths, got %d", len(auths))
+	}
+	for i := 0; i < 2; i++ {
+		if got := auths[i].Attributes[coreauth.AttributePoolCircuitBreaker]; got != "true" {
+			t.Errorf("auth[%d].pool_circuit_breaker = %q, want literal %q", i, got, "true")
+		}
+	}
+	if v, ok := auths[2].Attributes[coreauth.AttributePoolCircuitBreaker]; ok {
+		t.Errorf("opted-out auth pool_circuit_breaker = %q, want attribute to be absent", v)
+	}
+}
+
+// TestConfigSynthesizer_CircuitBreaker_OpenAICompatAndOpenCodeGo covers the
+// remaining stamp sites: entry auths of an opted-in OpenAI-compat pool and
+// its zero-entries fallback auth, plus opencode-go entry auths, all carry the
+// literal "true"; pools without the opt-in keep the attribute absent.
+func TestConfigSynthesizer_CircuitBreaker_OpenAICompatAndOpenCodeGo(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:           "pool-on",
+					BaseURL:        "https://pool-on.example.com/v1",
+					Strategy:       "fill-first",
+					CircuitBreaker: true,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "k-on-1"},
+						{APIKey: "k-on-2"},
+					},
+				},
+				{
+					// Fallback path: no entries, opted in.
+					Name:           "pool-on-fallback",
+					BaseURL:        "https://pool-on-fallback.example.com/v1",
+					Strategy:       "round-robin",
+					CircuitBreaker: true,
+				},
+				{
+					Name:     "pool-off",
+					BaseURL:  "https://pool-off.example.com/v1",
+					Strategy: "round-robin",
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "k-off"},
+					},
+				},
+			},
+			OpenCodeGo: []config.OpenCodeGo{
+				{
+					Name:               "ocgo-on",
+					BaseURL:            "https://opencode.ai/zen/go/v1",
+					Strategy:           "round-robin",
+					CircuitBreaker:     true,
+					UpstreamProviderID: 31,
+					APIKeyEntries: []config.OpenCodeGoKey{
+						{APIKey: "ocgo-k1"},
+					},
+				},
+				{
+					Name:               "ocgo-off",
+					BaseURL:            "https://opencode.ai/zen/go/v1",
+					Strategy:           "round-robin",
+					UpstreamProviderID: 32,
+					APIKeyEntries: []config.OpenCodeGoKey{
+						{APIKey: "ocgo-k2"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 2 compat entries + 1 compat fallback + 1 compat-off entry + 1 ocgo-on + 1 ocgo-off = 6.
+	if len(auths) != 6 {
+		t.Fatalf("expected 6 auths, got %d", len(auths))
+	}
+	// Classify by identity attributes: compat auths carry compat_name, and
+	// opencode-go auths carry provider_key "opencode-go:<rowID>" (row ids make
+	// the two opencode-go pools distinguishable — their Label is shared).
+	optedIn := map[string]bool{
+		"compat:pool-on":          true,
+		"compat:pool-on-fallback": true,
+		"key:opencode-go:31":      true,
+	}
+	on := 0
+	for _, auth := range auths {
+		id := ""
+		if name, ok := auth.Attributes["compat_name"]; ok {
+			id = "compat:" + name
+		} else if pk, ok := auth.Attributes["provider_key"]; ok {
+			id = "key:" + pk
+		}
+		got, stamped := auth.Attributes[coreauth.AttributePoolCircuitBreaker]
+		if optedIn[id] {
+			on++
+			if !stamped || got != "true" {
+				t.Errorf("%s pool_circuit_breaker = %q (present=%v), want literal %q", id, got, stamped, "true")
+			}
+		} else if stamped {
+			t.Errorf("%s pool_circuit_breaker = %q, want attribute to be absent", id, got)
+		}
+	}
+	if on != 4 {
+		t.Fatalf("opted-in auth count = %d, want 4 (2 compat entries + 1 fallback + 1 opencode-go)", on)
+	}
+}
+
 // TestConfigSynthesizer_ClaudeKeys_RelayBaseURL stamps the relay base onto
 // the auth when the rendered key carries one; ProxyURL stays empty.
 func TestConfigSynthesizer_ClaudeKeys_RelayBaseURL(t *testing.T) {

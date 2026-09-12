@@ -259,6 +259,12 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if s := config.NormalizePoolRoutingStrategy(ck.UpstreamProviderStrategy); s != "" {
 			attrs[coreauth.AttributePoolStrategy] = s
 		}
+		// The circuit-breaker opt-in is stamped as the literal "true" — the
+		// runtime compares the attribute value literally (poolBreakerContributionKey),
+		// so anything else means "not opted in". Absent = default off.
+		if ck.UpstreamProviderCircuitBreaker {
+			attrs[coreauth.AttributePoolCircuitBreaker] = "true"
+		}
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		relayBaseURL := strings.TrimSpace(ck.RelayBaseURL)
 		if relayBaseURL != "" {
@@ -416,9 +422,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			addWeightToAttrs(entry.Weight, attrs)
 			// Stamp the pool-level routing strategy on every entry auth so
 			// the conductor can activate aggressive in-pool failover. Empty
-			// (unset/unknown) leaves the attribute absent.
+			// (unset/unknown) leaves the attribute absent. The circuit-breaker
+			// opt-in rides alongside it as the literal "true" (design G3).
 			if s := config.NormalizePoolRoutingStrategy(compat.Strategy); s != "" {
 				attrs[coreauth.AttributePoolStrategy] = s
+			}
+			if compat.CircuitBreaker {
+				attrs[coreauth.AttributePoolCircuitBreaker] = "true"
 			}
 			if key != "" {
 				attrs["api_key"] = key
@@ -466,9 +476,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
 			// The fallback auth still belongs to the pool, so it carries the
-			// pool strategy the same way the entry auths would.
+			// pool strategy and the circuit-breaker opt-in the same way the
+			// entry auths would.
 			if s := config.NormalizePoolRoutingStrategy(compat.Strategy); s != "" {
 				attrs[coreauth.AttributePoolStrategy] = s
+			}
+			if compat.CircuitBreaker {
+				attrs[coreauth.AttributePoolCircuitBreaker] = "true"
 			}
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
@@ -617,9 +631,13 @@ func (s *ConfigSynthesizer) synthesizeOpenCodeGo(ctx *SynthesisContext) []*corea
 			addWeightToAttrs(entry.Weight, attrs)
 			// Stamp the row-level routing strategy on every entry auth so
 			// the conductor can activate aggressive in-pool failover. Empty
-			// (unset/unknown) leaves the attribute absent.
+			// (unset/unknown) leaves the attribute absent. The circuit-breaker
+			// opt-in rides alongside it as the literal "true" (design G3).
 			if st := config.NormalizePoolRoutingStrategy(row.Strategy); st != "" {
 				attrs[coreauth.AttributePoolStrategy] = st
+			}
+			if row.CircuitBreaker {
+				attrs[coreauth.AttributePoolCircuitBreaker] = "true"
 			}
 			if key != "" {
 				attrs["api_key"] = key

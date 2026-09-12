@@ -258,6 +258,36 @@ func TestToUpstreamProviderMapsRoutingStrategyAndEntryPriority(t *testing.T) {
 	}
 }
 
+// TestToUpstreamProviderMapsCircuitBreaker covers the bool passthrough at the
+// DTO boundary (design G3): circuit_breaker true survives toUpstreamProvider
+// untouched (no validation or canonicalization — it is a plain bool), and the
+// response side surfaces the persisted value back to the dashboard editor.
+func TestToUpstreamProviderMapsCircuitBreaker(t *testing.T) {
+	p := toUpstreamProvider(&upstreamProviderReq{
+		ProviderType:   "claude-api-key",
+		CircuitBreaker: true,
+	})
+	if !p.CircuitBreaker {
+		t.Fatal("CircuitBreaker = false, want true (plain passthrough)")
+	}
+	if p := toUpstreamProvider(&upstreamProviderReq{ProviderType: "claude-api-key"}); p.CircuitBreaker {
+		t.Fatal("omitted CircuitBreaker = true, want false (default off)")
+	}
+
+	// The persisted row must surface the opt-in through the dashboard response.
+	raw, err := json.Marshal(toUpstreamProviderResponse(store.UpstreamProvider{
+		ID:             1,
+		ProviderType:   "claude-api-key",
+		CircuitBreaker: true,
+	}))
+	if err != nil {
+		t.Fatalf("encode response: %v", err)
+	}
+	if !strings.Contains(string(raw), `"circuit_breaker":true`) {
+		t.Fatalf("response missing circuit_breaker: %s", raw)
+	}
+}
+
 // TestValidateUpstreamProviderRequestRoutingStrategy verifies the pre-store
 // gate: an unknown strategy is rejected with the descriptive fixable error,
 // while canonical values, the Model Routes aliases, and the global-normalizer

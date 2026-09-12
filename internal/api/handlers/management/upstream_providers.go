@@ -96,6 +96,7 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 		Name:                    strings.TrimSpace(body.Name),
 		Priority:                body.Priority,
 		RoutingStrategy:         config.NormalizePoolRoutingStrategy(body.RoutingStrategy),
+		CircuitBreaker:          body.CircuitBreaker,
 		Disabled:                body.Disabled,
 		Prefix:                  strings.TrimSpace(body.Prefix),
 		APIKey:                  strings.TrimSpace(body.APIKey),

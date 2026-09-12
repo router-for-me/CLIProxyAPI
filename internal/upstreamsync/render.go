@@ -283,6 +283,10 @@ func buildClaudeKeyWithPools(p store.UpstreamProvider, e store.UpstreamProviderA
 	// the synthesizer/conductor can read it per auth. Raw store values are
 	// canonicalized here; blank stays blank (unset = global routing strategy).
 	k.UpstreamProviderStrategy = config.NormalizePoolRoutingStrategy(p.RoutingStrategy)
+	// The circuit-breaker opt-in is row-level data stamped alongside the
+	// strategy onto every fan-out item; the synthesizer turns it into the
+	// auth's pool_circuit_breaker attribute (design G3).
+	k.UpstreamProviderCircuitBreaker = p.CircuitBreaker
 	for _, m := range p.Models {
 		k.Models = append(k.Models, config.ClaudeModel{
 			Name:         m.Name,
@@ -316,15 +320,17 @@ func openAICompatFromProviderWithPools(p store.UpstreamProvider, pools poolLooku
 		Name:     p.Name,
 		Priority: p.Priority,
 		// Raw store strategies are canonicalized here; blank stays blank
-		// (unset = follow the global routing strategy).
-		Strategy:     config.NormalizePoolRoutingStrategy(p.RoutingStrategy),
-		Disabled:     p.Disabled,
-		Prefix:       p.Prefix,
-		BaseURL:      p.BaseURL,
-		ProxyURL:     rowProxyURL,
-		RelayBaseURL: rowRelayBase,
-		ProxyPoolID:  p.ProxyPoolID,
-		Headers:      p.Headers,
+		// (unset = follow the global routing strategy). The circuit-breaker
+		// opt-in rides alongside it (design G3).
+		Strategy:       config.NormalizePoolRoutingStrategy(p.RoutingStrategy),
+		CircuitBreaker: p.CircuitBreaker,
+		Disabled:       p.Disabled,
+		Prefix:         p.Prefix,
+		BaseURL:        p.BaseURL,
+		ProxyURL:       rowProxyURL,
+		RelayBaseURL:   rowRelayBase,
+		ProxyPoolID:    p.ProxyPoolID,
+		Headers:        p.Headers,
 	}
 	for _, e := range p.APIKeyEntries {
 		if e.Disabled {
@@ -380,6 +386,7 @@ func openCodeGoFromProviderWithPools(p store.UpstreamProvider, pools poolLookup)
 		Name:               p.Name,
 		Priority:           p.Priority,
 		Strategy:           config.NormalizePoolRoutingStrategy(p.RoutingStrategy),
+		CircuitBreaker:     p.CircuitBreaker,
 		Disabled:           p.Disabled,
 		Prefix:             p.Prefix,
 		BaseURL:            p.BaseURL,

@@ -780,6 +780,85 @@ func TestUpstreamProviderStoreRoutingStrategyAndEntryPriorityRoundTrip(t *testin
 	}
 }
 
+// TestUpstreamProviderStoreCircuitBreakerRoundTrip pins the schema contract
+// for the pool-level circuit breaker opt-in (design G3):
+// upstream_providers.circuit_breaker is a NOT NULL BOOLEAN column defaulting
+// to FALSE — legacy rows survive the migration opted out — and the flag
+// round-trips through Create/Update/Get, including clearing it back to false.
+// Like the other store round-trips this is gated on PGSTORE_TEST_DSN.
+func TestUpstreamProviderStoreCircuitBreakerRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_circuit_breaker")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The migration must add a NOT NULL BOOLEAN circuit_breaker column
+	// defaulting to FALSE so legacy rows stay opted out after the upgrade.
+	var cbType, cbNullable, cbDefault string
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT data_type, is_nullable, COALESCE(column_default, '')
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'circuit_breaker'
+	`, pg.cfg.Schema, pg.cfg.UpstreamProvidersTable).Scan(&cbType, &cbNullable, &cbDefault); err != nil {
+		t.Fatalf("query circuit_breaker column: %v", err)
+	}
+	if cbType != "boolean" || cbNullable != "NO" {
+		t.Fatalf("circuit_breaker column = %s/%s, want boolean/NO", cbType, cbNullable)
+	}
+	if !strings.Contains(cbDefault, "false") {
+		t.Fatalf("circuit_breaker column default = %q, want false", cbDefault)
+	}
+
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType:   "claude-api-key",
+		Name:           "breaker-pool",
+		BaseURL:        "https://claude.example.test",
+		CircuitBreaker: true,
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "breaker-secret-a", Name: "alpha"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created.CircuitBreaker {
+		t.Fatal("created circuit_breaker = false, want true")
+	}
+
+	loaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !loaded.CircuitBreaker {
+		t.Fatal("circuit_breaker round-trip = false, want true")
+	}
+
+	// Clearing the opt-in back to default must persist.
+	_, err = src.Update(ctx, UpstreamProvider{
+		ID:             created.ID,
+		ProviderType:   "claude-api-key",
+		Name:           "breaker-pool",
+		BaseURL:        "https://claude.example.test",
+		CircuitBreaker: false,
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: created.APIKeyEntries[0].ID, APIKey: "breaker-secret-a", Name: "alpha"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update clearing circuit_breaker: %v", err)
+	}
+	reloaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after clear: %v", err)
+	}
+	if reloaded.CircuitBreaker {
+		t.Fatal("circuit_breaker after clear = true, want false")
+	}
+}
+
 func TestUpstreamProviderStoreAPIKeyEntryDisabledRoundTrip(t *testing.T) {
 	pg := newTestPostgresStore(t, "upstream_entry_disabled")
 	defer pg.Close()

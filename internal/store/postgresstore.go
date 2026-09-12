@@ -735,6 +735,15 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: migrate upstream providers routing strategy column: %w", err)
 	}
+	// upstream_providers.circuit_breaker column. The opt-in pool-level circuit
+	// breaker (design G3): rows set to true feed the breaker and are subject
+	// to its pool-wide blocking; false (default) keeps today's behavior.
+	// NOT NULL DEFAULT FALSE so legacy rows survive the upgrade opted out.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS circuit_breaker BOOLEAN NOT NULL DEFAULT FALSE`, upstreamProvidersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream providers circuit breaker column: %w", err)
+	}
 	// upstream_provider_api_key_entries priority column. Optional per-entry
 	// selection tier; NULL = inherit the provider row priority. Nullable
 	// INTEGER with no DEFAULT, mirroring the weight column contract.
@@ -1586,6 +1595,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			priority                   INTEGER NOT NULL DEFAULT 0,
 			disabled                   BOOLEAN NOT NULL DEFAULT FALSE,
 			routing_strategy           TEXT,
+			circuit_breaker            BOOLEAN NOT NULL DEFAULT FALSE,
 			prefix                     TEXT,
 			api_key                    TEXT,
 			base_url                   TEXT,

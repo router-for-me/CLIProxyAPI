@@ -197,7 +197,10 @@ func providerFromClaudeKey(k config.ClaudeKey) store.UpstreamProvider {
 		// Normalize on the way in so raw YAML aliases land as canonical rows,
 		// mirroring the renderer's canonicalization of store values.
 		RoutingStrategy: config.NormalizePoolRoutingStrategy(k.UpstreamProviderStrategy),
-		SourceBackend:   "config",
+		// Row-level circuit-breaker opt-in round-trips like the strategy
+		// (design G3): it has a real parent column to land in.
+		CircuitBreaker: k.UpstreamProviderCircuitBreaker,
+		SourceBackend:  "config",
 	}
 	// SeedFromArtifacts creates a fresh parent row per config item, and the
 	// store's syncAPIKeyEntriesTx validator rejects any positive child ID
@@ -247,6 +250,7 @@ func providerFromOpenAICompat(k config.OpenAICompatibility) store.UpstreamProvid
 		// Normalize on the way in so raw YAML aliases land as canonical rows,
 		// mirroring the renderer's canonicalization of store values.
 		RoutingStrategy: config.NormalizePoolRoutingStrategy(k.Strategy),
+		CircuitBreaker:  k.CircuitBreaker,
 		Disabled:        k.Disabled,
 		Prefix:          k.Prefix,
 		BaseURL:         k.BaseURL,

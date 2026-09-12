@@ -480,6 +480,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     priority: 10 # optional: selection tier when several credentials match; higher tiers are served first and descend on cooldown; 0 is the default
 #     upstream-provider-strategy: "fill-first" # renderer-managed: the upstream_providers row's routing strategy, stamped by the dashboard renderer. Not set manually.
+#     upstream-provider-circuit-breaker: false # renderer-managed: the upstream_providers row's circuit_breaker opt-in (set on the Upstream Providers page); true feeds 408/5xx into the pool-wide breaker. Not set manually.
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
@@ -573,6 +574,8 @@ nonstream-keepalive-interval: 0
 #                         # the error reaches the client; errors surface only after the whole pool is
 #                         # exhausted. A model route pinning this pool without its own strategy
 #                         # inherits this value.
+#     circuit-breaker: false # optional: opt this pool into the pool-level circuit breaker; true feeds 408/5xx
+#                            # failures into a pool-wide breaker that blocks the whole pool while open
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
 #     headers:

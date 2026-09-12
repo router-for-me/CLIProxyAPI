@@ -436,6 +436,93 @@ func TestSeedInverseCarriesStrategyAndEntryPriority(t *testing.T) {
 	}
 }
 
+// TestRenderCircuitBreakerCarryThrough verifies the row-level circuit_breaker
+// opt-in (design G3) renders onto every fan-out item — the Claude
+// UpstreamProviderCircuitBreaker carry-through, the OpenAI-compat and
+// opencode-go CircuitBreaker fields — and that a row without the opt-in
+// renders it false on all paths, including the Claude legacy single-key
+// fallback (buildClaudeKey is shared).
+func TestRenderCircuitBreakerCarryThrough(t *testing.T) {
+	cfg := RenderConfig([]store.UpstreamProvider{
+		{
+			ID:             7,
+			ProviderType:   TypeClaudeAPIKey,
+			Name:           "pooled",
+			CircuitBreaker: true,
+			APIKeyEntries: []store.UpstreamProviderAPIKey{
+				{ID: 71, APIKey: "k1"},
+				{ID: 72, APIKey: "k2"},
+			},
+		},
+		{
+			ID:           8,
+			ProviderType: TypeClaudeAPIKey,
+			Name:         "legacy",
+			APIKey:       "legacy-single-secret",
+			// no entries → legacy single-key fallback path
+		},
+		{
+			ID:             9,
+			ProviderType:   TypeOpenAICompatibility,
+			Name:           "compat-pool",
+			BaseURL:        "https://compat.example.com/v1",
+			CircuitBreaker: true,
+			APIKeyEntries: []store.UpstreamProviderAPIKey{
+				{ID: 91, APIKey: "ck1"},
+			},
+		},
+		{
+			ID:             10,
+			ProviderType:   TypeOpenCodeGo,
+			Name:           "ocgo-pool",
+			BaseURL:        "https://opencode.ai/zen/go/v1",
+			CircuitBreaker: true,
+			APIKeyEntries: []store.UpstreamProviderAPIKey{
+				{ID: 101, APIKey: "ok1"},
+			},
+		},
+	})
+	if len(cfg.ClaudeKey) != 3 {
+		t.Fatalf("ClaudeKey items = %d, want 3", len(cfg.ClaudeKey))
+	}
+	for i := 0; i < 2; i++ {
+		if !cfg.ClaudeKey[i].UpstreamProviderCircuitBreaker {
+			t.Fatalf("ClaudeKey[%d].UpstreamProviderCircuitBreaker = false, want true (fan-out item)", i)
+		}
+	}
+	if cfg.ClaudeKey[2].UpstreamProviderCircuitBreaker {
+		t.Fatal("legacy fallback UpstreamProviderCircuitBreaker = true, want false (row opted out)")
+	}
+	if len(cfg.OpenAICompatibility) != 1 || !cfg.OpenAICompatibility[0].CircuitBreaker {
+		t.Fatalf("OpenAICompatibility CircuitBreaker not carried: %+v", cfg.OpenAICompatibility)
+	}
+	if len(cfg.OpenCodeGo) != 1 || !cfg.OpenCodeGo[0].CircuitBreaker {
+		t.Fatalf("OpenCodeGo CircuitBreaker not carried: %+v", cfg.OpenCodeGo)
+	}
+}
+
+// TestSeedInverseCarriesCircuitBreaker verifies the seed direction round-trips
+// the opt-in: the Claude UpstreamProviderCircuitBreaker carry-through and the
+// OpenAI-compat CircuitBreaker field land on the row's circuit_breaker column.
+func TestSeedInverseCarriesCircuitBreaker(t *testing.T) {
+	p := providerFromClaudeKey(config.ClaudeKey{APIKey: "k", UpstreamProviderCircuitBreaker: true})
+	if !p.CircuitBreaker {
+		t.Fatal("claude seed circuit_breaker not carried")
+	}
+	p2 := providerFromOpenAICompat(config.OpenAICompatibility{
+		Name: "pool", CircuitBreaker: true,
+		APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "k1"}},
+	})
+	if !p2.CircuitBreaker {
+		t.Fatal("openai seed circuit_breaker not carried")
+	}
+	// Default off stays off through the seed.
+	p3 := providerFromClaudeKey(config.ClaudeKey{APIKey: "k"})
+	if p3.CircuitBreaker {
+		t.Fatal("claude seed default circuit_breaker = true, want false")
+	}
+}
+
 // TestRenderSkipsDisabledEntries verifies that entries with Disabled=true
 // stay persisted but never reach the rendered config: the OpenAI-compat
 // entries list and the Claude fan-out both drop them, while active

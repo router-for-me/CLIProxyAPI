@@ -17,11 +17,16 @@ type upstreamProviderReq struct {
 	// entry-bearing providers. Accepts the canonical values plus the Model
 	// Routes aliases (priority, failover) — canonicalized in toUpstreamProvider.
 	RoutingStrategy string `json:"routing_strategy,omitempty"`
-	Disabled        bool   `json:"disabled,omitempty"`
-	Prefix          string `json:"prefix,omitempty"`
-	APIKey          string `json:"api_key,omitempty"`
-	BaseURL         string `json:"base_url,omitempty"`
-	ProxyURL        string `json:"proxy_url,omitempty"`
+	// CircuitBreaker opts the row's pool into the pool-level circuit breaker
+	// (design G3): true feeds 408/5xx failures into the pool-wide breaker and
+	// subjects the pool's auths to its blocking. false (default) keeps
+	// failures scoped to per-auth cooldowns.
+	CircuitBreaker bool   `json:"circuit_breaker,omitempty"`
+	Disabled       bool   `json:"disabled,omitempty"`
+	Prefix         string `json:"prefix,omitempty"`
+	APIKey         string `json:"api_key,omitempty"`
+	BaseURL        string `json:"base_url,omitempty"`
+	ProxyURL       string `json:"proxy_url,omitempty"`
 	// ProxyPoolID, when non-nil, binds the row to a proxy_pools entry; the
 	// renderer resolves it into the concrete ProxyURL (or RelayBaseURL).
 	ProxyPoolID             *int64         `json:"proxy_pool_id,omitempty"`
