@@ -138,6 +138,13 @@ Semantics when all candidates for a route are cooldown-blocked:
 - Streaming: wait happens only before the first byte is sent
   (failover-after-stream-start stays forbidden).
 
+As-built note (2026-09): the budget is applied **per-wait**, not cumulatively —
+`shouldRetryAfterError` is stateless and applies the budget independently on
+every call, so the worst-case total server-side wait is
+`max_attempts x max_wait_ms`, not `max_wait_ms`. True cumulative budgeting
+would need per-request state threaded through the Execute/ExecuteStream loops
+and is a possible follow-up.
+
 ## G6 — Narrow 403→429 reclassification (opt-in)
 
 - Point: start of `MarkResult`, pre-classification, 403 only.

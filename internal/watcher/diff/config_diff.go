@@ -148,7 +148,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))
 	}
 	if !reflect.DeepEqual(oldCfg.Routing.CooldownWait, newCfg.Routing.CooldownWait) {
-		changes = append(changes, "routing.cooldown-wait: updated")
+		changes = append(changes, fmt.Sprintf("routing.cooldown-wait: %d/%d/%t -> %d/%d/%t",
+			oldCfg.Routing.CooldownWait.MaxWaitMS, oldCfg.Routing.CooldownWait.MaxAttempts, oldCfg.Routing.CooldownWait.Reclassify403,
+			newCfg.Routing.CooldownWait.MaxWaitMS, newCfg.Routing.CooldownWait.MaxAttempts, newCfg.Routing.CooldownWait.Reclassify403))
 	}
 	if !reflect.DeepEqual(oldCfg.Payload, newCfg.Payload) {
 		changes = appendPayloadConfigChanges(changes, oldCfg.Payload, newCfg.Payload)

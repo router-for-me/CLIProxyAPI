@@ -1000,12 +1000,14 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if isRequestInvalidError(err) {
 		return 0, false
 	}
-	// Bounded cooldown wait (G5): the routing.cooldown_wait budget is a total
-	// ceiling across re-dispatches; it only ever tightens the pre-existing
-	// max-retry-interval ceiling, never loosens it.
+	// Bounded cooldown wait (G5): the routing.cooldown_wait budget is applied
+	// per-wait — each shouldRetryAfterError call applies it independently (the
+	// function is stateless), so the worst-case total server-side wait across
+	// re-dispatches is max_attempts x max_wait_ms. It only ever tightens the
+	// pre-existing max-retry-interval ceiling, never loosens it.
 	if budget := cooldownWaitBudgetMS.Load(); budget > 0 {
 		budgetWait := time.Duration(budget) * time.Millisecond
-		if maxWait <= 0 || budgetWait < maxWait {
+		if budgetWait < maxWait {
 			maxWait = budgetWait
 		}
 	}

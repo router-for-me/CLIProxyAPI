@@ -362,6 +362,11 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval, cfg.MaxRetryCredentials)
 	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
 	coreauth.SetCooldownWaitConfig(cfg.Routing.CooldownWait.MaxWaitMS, cfg.Routing.CooldownWait.MaxAttempts, cfg.Routing.CooldownWait.Reclassify403)
+	// Surface the cooldown-wait clamp so operators can see when the budget
+	// tightens the max-retry-interval ceiling at config-apply time.
+	if budgetWait := time.Duration(coreauth.CooldownWaitBudgetMS()) * time.Millisecond; maxInterval > 0 && budgetWait < maxInterval {
+		log.Infof("routing.cooldown-wait.max_wait_ms=%d tightens max-retry-interval=%s to %s for server-side cooldown waits", cfg.Routing.CooldownWait.MaxWaitMS, maxInterval, budgetWait)
+	}
 }
 
 func (s *Service) configureCooldownStateStore(cfg *config.Config) {

@@ -60,6 +60,12 @@ func SetCooldownWaitConfig(maxWaitMS, maxAttempts int, reclassify403 bool) {
 	reclassifyQuota403.Store(reclassify403)
 }
 
+// CooldownWaitBudgetMS reports the configured cooldown-wait budget in
+// milliseconds (already normalized to the default when unset).
+func CooldownWaitBudgetMS() int64 {
+	return cooldownWaitBudgetMS.Load()
+}
+
 func quotaCooldownDisabledForAuth(auth *Auth) bool {
 	return quotaCooldownDisabledForAuthWithConfig(auth, nil)
 }
