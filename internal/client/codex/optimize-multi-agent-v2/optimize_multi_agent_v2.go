@@ -73,12 +73,12 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 }
 
 // RewriteCodexOrphanDelegationInputForConfig applies RewriteCodexOrphanDelegationInput
-// based on cfg.Codex.OrphanDelegationCompatibility and the X-Openai-Subagent header.
+// based on cfg.Codex.OrphanDelegationCompatibility.
 func RewriteCodexOrphanDelegationInputForConfig(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) []byte {
 	if cfg == nil || !cfg.Codex.OrphanDelegationCompatibility {
 		return payload
 	}
-	return RewriteCodexOrphanDelegationInput(ctx, headers, payload, true)
+	return RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(ctx, headers, payload, true, pendingToolCallIDsFromContext(ctx))
 }
 
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent

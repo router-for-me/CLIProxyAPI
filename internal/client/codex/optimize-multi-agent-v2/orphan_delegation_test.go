@@ -12,8 +12,11 @@ import (
 )
 
 func testRewriteCodexOrphan(payload []byte, enabled bool) []byte {
-	headers := http.Header{"X-Openai-Subagent": []string{"collab_spawn"}}
-	return RewriteCodexOrphanDelegationInput(context.Background(), headers, payload, enabled)
+	return RewriteCodexOrphanDelegationInput(context.Background(), http.Header{}, payload, enabled)
+}
+
+func testRewriteCodexOrphanWithPendingCalls(payload []byte, pendingToolCallIDs []string) []byte {
+	return RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(context.Background(), http.Header{}, payload, true, pendingToolCallIDs)
 }
 
 func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
@@ -35,7 +38,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		}
 	})
 
-	t.Run("missing subagent header leaves payload unchanged", func(t *testing.T) {
+	t.Run("missing subagent header rewrites matching orphan", func(t *testing.T) {
 		payload := []byte(`{
 			"model": "deepseek-v4-pro",
 			"input": [
@@ -48,12 +51,12 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := RewriteCodexOrphanDelegationInput(context.Background(), http.Header{}, payload, true)
-		if string(got) != string(payload) {
-			t.Fatalf("expected payload unchanged without header, got: %s", string(got))
+		if gjson.GetBytes(got, "input.0.type").String() != "message" {
+			t.Fatalf("expected matching orphan to be rewritten without header, got: %s", string(got))
 		}
 	})
 
-	t.Run("different subagent header leaves payload unchanged", func(t *testing.T) {
+	t.Run("different subagent header still rewrites matching orphan", func(t *testing.T) {
 		payload := []byte(`{
 			"model": "deepseek-v4-pro",
 			"input": [
@@ -67,8 +70,8 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		}`)
 		headers := http.Header{"X-Openai-Subagent": []string{"other_subagent"}}
 		got := RewriteCodexOrphanDelegationInput(context.Background(), headers, payload, true)
-		if string(got) != string(payload) {
-			t.Fatalf("expected payload unchanged with wrong header, got: %s", string(got))
+		if gjson.GetBytes(got, "input.0.type").String() != "message" {
+			t.Fatalf("expected matching orphan to be rewritten with unrelated header, got: %s", string(got))
 		}
 	})
 
@@ -110,7 +113,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		}
 	})
 
-	t.Run("case-insensitive header key and value works", func(t *testing.T) {
+	t.Run("header value does not affect structural eligibility", func(t *testing.T) {
 		payload := []byte(`{
 			"model": "deepseek-v4-pro",
 			"input": [
@@ -128,7 +131,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
-			t.Fatalf("case-insensitive header should rewrite, got: %s", item0.Raw)
+			t.Fatalf("matching orphan should rewrite regardless of header value, got: %s", item0.Raw)
 		}
 	})
 
@@ -151,6 +154,95 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
 			t.Fatalf("input.0 not rewritten: %s", item0.Raw)
+		}
+		wantText := "Tool output from codex_app__send_message_to_thread:\n<codex_delegation>msg</codex_delegation>"
+		if text := item0.Get("content.0.text").String(); text != wantText {
+			t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		tool string
+	}{
+		{name: "create thread", tool: codexCreateThreadName},
+		{name: "send message to thread", tool: codexSendMessageToThreadName},
+		{name: "automation update", tool: codexAutomationUpdateName},
+	} {
+		t.Run("preserves incremental pending "+tc.name+" output", func(t *testing.T) {
+			payload := []byte(`{
+				"previous_response_id": "resp_previous",
+				"input": [{
+					"type": "function_call_output",
+					"call_id": "call_pending",
+					"name": "` + tc.tool + `",
+					"namespace": "codex_app",
+					"output": "completed"
+				}]
+			}`)
+			got := testRewriteCodexOrphanWithPendingCalls(payload, []string{"call_pending"})
+			if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
+				t.Fatalf("incremental pending output was rewritten: %s", got)
+			}
+		})
+	}
+
+	t.Run("response append preserves pending output without previous response id", func(t *testing.T) {
+		payload := []byte(`{
+			"type": "response.append",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_pending",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "completed"
+			}]
+		}`)
+		got := testRewriteCodexOrphanWithPendingCalls(payload, []string{"call_pending"})
+		if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
+			t.Fatalf("pending append output was rewritten: %s", got)
+		}
+	})
+
+	t.Run("ordinary request rewrites unknown call id with previous response", func(t *testing.T) {
+		payload := []byte(`{
+			"previous_response_id": "resp_previous",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_unknown",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "completed"
+			}]
+		}`)
+		got := testRewriteCodexOrphan(payload, true)
+		parsed := gjson.ParseBytes(got)
+		item0 := parsed.Get("input.0")
+		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
+			t.Fatalf("ordinary incremental unknown call should be rewritten: %s", item0.Raw)
+		}
+		wantText := "Tool output from codex_app__create_thread:\ncompleted"
+		if text := item0.Get("content.0.text").String(); text != wantText {
+			t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
+		}
+	})
+
+	t.Run("ordinary request rewrites previous_response_id with stale non-empty call_id", func(t *testing.T) {
+		payload := []byte(`{
+			"previous_response_id": "resp_previous",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_stale_123",
+				"name": "send_message_to_thread",
+				"namespace": "codex_app",
+				"output": "<codex_delegation>msg</codex_delegation>"
+			}]
+		}`)
+		got := testRewriteCodexOrphan(payload, true)
+		parsed := gjson.ParseBytes(got)
+		item0 := parsed.Get("input.0")
+		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
+			t.Fatalf("stale call_id with previous_response_id should be rewritten: %s", item0.Raw)
 		}
 		wantText := "Tool output from codex_app__send_message_to_thread:\n<codex_delegation>msg</codex_delegation>"
 		if text := item0.Get("content.0.text").String(); text != wantText {
@@ -190,7 +282,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		}
 	})
 
-	t.Run("preserves non-whitelisted tools", func(t *testing.T) {
+	t.Run("rewrites orphan automation_update without call_id", func(t *testing.T) {
 		payload := []byte(`{
 			"model": "deepseek-v4-pro",
 			"input": [
@@ -198,8 +290,26 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 					"type": "function_call_output",
 					"name": "automation_update",
 					"namespace": "codex_app",
-					"output": "ignored"
-				},
+					"output": "<heartbeat>check</heartbeat>"
+				}
+			]
+		}`)
+		got := testRewriteCodexOrphan(payload, true)
+		parsed := gjson.ParseBytes(got)
+		item0 := parsed.Get("input.0")
+		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
+			t.Fatalf("automation_update orphan was not rewritten: %s", item0.Raw)
+		}
+		wantText := "Tool output from codex_app__automation_update:\n<heartbeat>check</heartbeat>"
+		if text := item0.Get("content.0.text").String(); text != wantText {
+			t.Fatalf("input.0.content.0.text = %q, want %q", text, wantText)
+		}
+	})
+
+	t.Run("preserves non-whitelisted tools", func(t *testing.T) {
+		payload := []byte(`{
+			"model": "deepseek-v4-pro",
+			"input": [
 				{
 					"type": "function_call_output",
 					"name": "create_thread",
@@ -212,10 +322,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		parsed := gjson.ParseBytes(got)
 
 		if parsed.Get("input.0.type").String() != "function_call_output" {
-			t.Fatalf("automation_update should not be rewritten: %s", parsed.Get("input.0").Raw)
-		}
-		if parsed.Get("input.1.type").String() != "function_call_output" {
-			t.Fatalf("other_namespace should not be rewritten: %s", parsed.Get("input.1").Raw)
+			t.Fatalf("other_namespace should not be rewritten: %s", parsed.Get("input.0").Raw)
 		}
 	})
 
@@ -474,7 +581,7 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 	}`)
 	collabHeaders := http.Header{"X-Openai-Subagent": []string{"collab_spawn"}}
 
-	t.Run("enabled but missing X-Openai-Subagent header does not rewrite", func(t *testing.T) {
+	t.Run("enabled without X-Openai-Subagent header rewrites", func(t *testing.T) {
 		cfg := &config.Config{
 			Codex: config.CodexConfig{
 				OrphanDelegationCompatibility: true,
@@ -484,12 +591,12 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 		parsed := gjson.ParseBytes(got)
 
 		item0 := parsed.Get("input.0")
-		if item0.Get("type").String() != "function_call_output" {
-			t.Fatalf("input.0 = %s, want function_call_output when X-Openai-Subagent header is missing", item0.Raw)
+		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
+			t.Fatalf("input.0 = %s, want message/user when X-Openai-Subagent header is missing", item0.Raw)
 		}
 	})
 
-	t.Run("enabled with wrong X-Openai-Subagent header value does not rewrite", func(t *testing.T) {
+	t.Run("enabled with unrelated X-Openai-Subagent header rewrites", func(t *testing.T) {
 		cfg := &config.Config{
 			Codex: config.CodexConfig{
 				OrphanDelegationCompatibility: true,
@@ -500,8 +607,8 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 		parsed := gjson.ParseBytes(got)
 
 		item0 := parsed.Get("input.0")
-		if item0.Get("type").String() != "function_call_output" {
-			t.Fatalf("input.0 = %s, want function_call_output when X-Openai-Subagent header is wrong", item0.Raw)
+		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
+			t.Fatalf("input.0 = %s, want message/user when X-Openai-Subagent header is unrelated", item0.Raw)
 		}
 	})
 
@@ -550,6 +657,115 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 		}
 		if text != wantText {
 			t.Fatalf("messages.0.content = %q, want %q", text, wantText)
+		}
+	})
+
+	t.Run("enabled translates previous_response_id unknown call_id to chat user message without empty tool_call_id", func(t *testing.T) {
+		cfg := &config.Config{
+			Codex: config.CodexConfig{
+				OrphanDelegationCompatibility: true,
+			},
+		}
+		incremental := []byte(`{
+			"model": "test-model",
+			"previous_response_id": "resp_previous",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_unknown",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "completed"
+			}]
+		}`)
+		got := TranslateRequestWithCodexMultiAgentV2(context.Background(), collabHeaders, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "test-model", incremental, false)
+		parsed := gjson.ParseBytes(got)
+		messages := parsed.Get("messages").Array()
+		if len(messages) != 1 {
+			t.Fatalf("expected 1 message, got %d: %s", len(messages), string(got))
+		}
+		msg0 := messages[0]
+		if msg0.Get("role").String() != "user" {
+			t.Fatalf("messages.0.role = %q, want user (should not remain a tool message)", msg0.Get("role").String())
+		}
+		if toolCallID := msg0.Get("tool_call_id"); toolCallID.Exists() {
+			t.Fatalf("messages.0.tool_call_id = %q, want absent", toolCallID.String())
+		}
+		wantText := "Tool output from codex_app__create_thread:\ncompleted"
+		var text string
+		if msg0.Get("content").IsArray() {
+			text = msg0.Get("content.0.text").String()
+		} else {
+			text = msg0.Get("content").String()
+		}
+		if text != wantText {
+			t.Fatalf("messages.0.content = %q, want %q", text, wantText)
+		}
+	})
+
+	t.Run("enabled translates orphan automation_update to chat user message", func(t *testing.T) {
+		cfg := &config.Config{
+			Codex: config.CodexConfig{
+				OrphanDelegationCompatibility: true,
+			},
+		}
+		heartbeat := []byte(`{
+			"model": "test-model",
+			"input": [{
+				"type": "function_call_output",
+				"name": "automation_update",
+				"namespace": "codex_app",
+				"output": "<heartbeat>check</heartbeat>"
+			}]
+		}`)
+		got := TranslateRequestWithCodexMultiAgentV2(context.Background(), http.Header{}, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "test-model", heartbeat, false)
+		parsed := gjson.ParseBytes(got)
+		messages := parsed.Get("messages").Array()
+		if len(messages) != 1 {
+			t.Fatalf("expected 1 message, got %d: %s", len(messages), string(got))
+		}
+		msg0 := messages[0]
+		if msg0.Get("role").String() != "user" {
+			t.Fatalf("messages.0.role = %q, want user", msg0.Get("role").String())
+		}
+		if toolCallID := msg0.Get("tool_call_id"); toolCallID.Exists() {
+			t.Fatalf("messages.0.tool_call_id = %q, want absent", toolCallID.String())
+		}
+		wantText := "Tool output from codex_app__automation_update:\n<heartbeat>check</heartbeat>"
+		var text string
+		if msg0.Get("content").IsArray() {
+			text = msg0.Get("content.0.text").String()
+		} else {
+			text = msg0.Get("content").String()
+		}
+		if text != wantText {
+			t.Fatalf("messages.0.content = %q, want %q", text, wantText)
+		}
+	})
+
+	t.Run("enabled preserves context pending output through executor rewrite", func(t *testing.T) {
+		cfg := &config.Config{
+			Codex: config.CodexConfig{
+				OrphanDelegationCompatibility: true,
+			},
+		}
+		payload := []byte(`{
+			"model": "test-model",
+			"previous_response_id": "resp_previous",
+			"input": [{
+				"type": "function_call_output",
+				"call_id": "call_pending",
+				"name": "create_thread",
+				"namespace": "codex_app",
+				"output": "completed"
+			}]
+		}`)
+		ctx := WithPendingToolCallIDs(context.Background(), []string{"call_pending"})
+		got := TranslateRequestWithCodexMultiAgentV2(ctx, http.Header{}, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAIResponse, "test-model", payload, false)
+		if itemType := gjson.GetBytes(got, "input.0.type").String(); itemType != "function_call_output" {
+			t.Fatalf("context pending output was rewritten: %s", got)
+		}
+		if callID := gjson.GetBytes(got, "input.0.call_id").String(); callID != "call_pending" {
+			t.Fatalf("call_id = %q, want call_pending; payload=%s", callID, got)
 		}
 	})
 

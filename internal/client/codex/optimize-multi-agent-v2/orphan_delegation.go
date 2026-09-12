@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -15,17 +14,43 @@ const (
 	codexAppNamespace            = "codex_app"
 	codexCreateThreadName        = "create_thread"
 	codexSendMessageToThreadName = "send_message_to_thread"
+	codexAutomationUpdateName    = "automation_update"
 	codexAppCreateThreadTool     = "codex_app__create_thread"
 	codexAppSendMessageTool      = "codex_app__send_message_to_thread"
-	codexOpenAISubagentHeader    = "X-Openai-Subagent"
-	codexCollabSpawnSubagent     = "collab_spawn"
+	codexAppAutomationUpdateTool = "codex_app__automation_update"
 )
 
+type pendingToolCallIDsContextKey struct{}
+
+// WithPendingToolCallIDs stores verified pending tool-call IDs on ctx so later
+// translator/executor rewrites preserve the same pairing decision.
+func WithPendingToolCallIDs(ctx context.Context, pendingToolCallIDs []string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	copied := append([]string(nil), pendingToolCallIDs...)
+	return context.WithValue(ctx, pendingToolCallIDsContextKey{}, copied)
+}
+
+func pendingToolCallIDsFromContext(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	ids, _ := ctx.Value(pendingToolCallIDsContextKey{}).([]string)
+	return ids
+}
+
 // RewriteCodexOrphanDelegationInput converts orphan Codex delegation outputs into
-// standard user messages when orphan delegation compatibility is enabled and the
-// request carries the X-Openai-Subagent: collab_spawn header.
+// standard user messages when orphan delegation compatibility is enabled.
 func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header, payload []byte, enabled bool) []byte {
-	if !enabled || len(payload) == 0 || !isCodexCollabSpawnSubagent(ctx, headers) {
+	return RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(ctx, headers, payload, enabled, nil)
+}
+
+// RewriteCodexOrphanDelegationInputWithPendingToolCallIDs converts orphan Codex
+// delegation outputs while preserving outputs paired with pending calls from the
+// preceding response.
+func RewriteCodexOrphanDelegationInputWithPendingToolCallIDs(ctx context.Context, headers http.Header, payload []byte, enabled bool, pendingToolCallIDs []string) []byte {
+	if !enabled || len(payload) == 0 {
 		return payload
 	}
 
@@ -44,6 +69,12 @@ func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header,
 			}
 		}
 	}
+	pendingCalls := make(map[string]int, len(pendingToolCallIDs))
+	for _, callID := range pendingToolCallIDs {
+		if strings.TrimSpace(callID) != "" {
+			pendingCalls[callID]++
+		}
+	}
 
 	updated := payload
 	for itemIndex, item := range inputItems {
@@ -55,6 +86,11 @@ func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header,
 		if strings.TrimSpace(callID) != "" && availableCalls[callID] > 0 {
 			// Paired with a function call in the same request; consume and preserve.
 			availableCalls[callID]--
+			continue
+		}
+		if pendingCalls[callID] > 0 {
+			// Paired with a pending function call from the preceding response.
+			pendingCalls[callID]--
 			continue
 		}
 
@@ -76,19 +112,6 @@ func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header,
 	return updated
 }
 
-func codexSubagentHeader(ctx context.Context, headers http.Header) string {
-	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-			return headerValueCaseInsensitive(ginCtx.Request.Header, codexOpenAISubagentHeader)
-		}
-	}
-	return headerValueCaseInsensitive(headers, codexOpenAISubagentHeader)
-}
-
-func isCodexCollabSpawnSubagent(ctx context.Context, headers http.Header) bool {
-	return strings.EqualFold(codexSubagentHeader(ctx, headers), codexCollabSpawnSubagent)
-}
-
 func matchCodexDelegationTool(item gjson.Result) (string, bool) {
 	if item.Get("namespace").String() != codexAppNamespace {
 		return "", false
@@ -99,6 +122,8 @@ func matchCodexDelegationTool(item gjson.Result) (string, bool) {
 		return codexAppCreateThreadTool, true
 	case codexSendMessageToThreadName:
 		return codexAppSendMessageTool, true
+	case codexAutomationUpdateName:
+		return codexAppAutomationUpdateTool, true
 	default:
 		return "", false
 	}

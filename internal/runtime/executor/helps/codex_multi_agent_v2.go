@@ -30,8 +30,7 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 }
 
 // RewriteCodexOrphanDelegationInput converts orphan Codex delegation outputs into
-// standard user messages when orphan delegation compatibility is enabled and the
-// request carries the X-Openai-Subagent: collab_spawn header.
+// standard user messages when orphan delegation compatibility is enabled.
 func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) []byte {
 	return multiagentv2.RewriteCodexOrphanDelegationInputForConfig(ctx, headers, payload, cfg)
 }
