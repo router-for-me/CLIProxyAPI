@@ -6,12 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -22,17 +22,25 @@ func (f apiCallRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, erro
 	return f(req)
 }
 
-func stubChromeAPICallTransport(t *testing.T, proxy *string, trip apiCallRoundTripFunc) {
+func stubAPICallFingerprintTransport(t *testing.T, proxy *string, trip apiCallRoundTripFunc) {
 	t.Helper()
-	original := newChromeAPICallTransport
+	original := newAPICallFingerprintTransport
 	t.Cleanup(func() {
-		newChromeAPICallTransport = original
+		newAPICallFingerprintTransport = original
 	})
-	newChromeAPICallTransport = func(proxyURL string) http.RoundTripper {
+	newAPICallFingerprintTransport = func(proxyURL string, fallback http.RoundTripper) http.RoundTripper {
 		if proxy != nil {
 			*proxy = proxyURL
 		}
-		return trip
+		return apiCallRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if helps.IsChatGPTUpstreamURL(req.URL) {
+				return trip(req)
+			}
+			if fallback == nil {
+				return nil, io.EOF
+			}
+			return fallback.RoundTrip(req)
+		})
 	}
 }
 
@@ -338,35 +346,6 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 }
 
-func TestUsesChromeAPICallTLS(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		raw  string
-		want bool
-	}{
-		{name: "chatgpt backend-api", raw: "https://chatgpt.com/backend-api/subscriptions", want: true},
-		{name: "chatgpt mixed case host", raw: "https://ChatGPT.com/backend-api/codex/responses", want: true},
-		{name: "chatgpt http", raw: "http://chatgpt.com/backend-api/subscriptions", want: false},
-		{name: "lookalike host", raw: "https://chatgpt.com.example/backend-api/subscriptions", want: false},
-		{name: "other https", raw: "https://api.example.com/v1/ping", want: false},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			parsed, errParse := url.Parse(tc.raw)
-			if errParse != nil {
-				t.Fatalf("parse url: %v", errParse)
-			}
-			if got := usesChromeAPICallTLS(parsed); got != tc.want {
-				t.Fatalf("usesChromeAPICallTLS(%q) = %v, want %v", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestApplyChatGPTAPICallHeaderDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -445,7 +424,7 @@ func TestApplyChatGPTAPICallHeaderDefaults(t *testing.T) {
 func TestAPICallChatGPTUsesChromeTransportAndPassesHeaders(t *testing.T) {
 	var gotProxy string
 	var gotReq *http.Request
-	stubChromeAPICallTransport(t, &gotProxy, apiCallRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	stubAPICallFingerprintTransport(t, &gotProxy, apiCallRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		gotReq = req.Clone(req.Context())
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -483,7 +462,7 @@ func TestAPICallChatGPTUsesChromeTransportAndPassesHeaders(t *testing.T) {
 		t.Fatalf("upstream body = %q, want subscription JSON", response.Body)
 	}
 	if gotProxy != "http://request-proxy.example.com:8080" {
-		t.Fatalf("chrome proxy = %q, want request proxy", gotProxy)
+		t.Fatalf("fingerprint proxy = %q, want request proxy", gotProxy)
 	}
 	if gotReq == nil {
 		t.Fatal("expected chrome transport to receive the upstream request")
@@ -501,7 +480,7 @@ func TestAPICallChatGPTUsesChromeTransportAndPassesHeaders(t *testing.T) {
 
 func TestAPICallNonChatGPTDoesNotUseChromeTransport(t *testing.T) {
 	chromeCalled := false
-	stubChromeAPICallTransport(t, nil, apiCallRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	stubAPICallFingerprintTransport(t, nil, apiCallRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		chromeCalled = true
 		return &http.Response{
 			StatusCode: http.StatusTeapot,
@@ -551,14 +530,15 @@ func TestAPICallNonChatGPTDoesNotUseChromeTransport(t *testing.T) {
 	}
 }
 
-func TestAPICallClientTransportPassesResolvedProxyToChrome(t *testing.T) {
+func TestAPICallClientTransportPassesResolvedProxyToFingerprint(t *testing.T) {
 	var gotProxy string
-	original := newChromeAPICallTransport
+	original := newAPICallFingerprintTransport
 	t.Cleanup(func() {
-		newChromeAPICallTransport = original
+		newAPICallFingerprintTransport = original
 	})
-	newChromeAPICallTransport = func(proxyURL string) http.RoundTripper {
+	newAPICallFingerprintTransport = func(proxyURL string, fallback http.RoundTripper) http.RoundTripper {
 		gotProxy = proxyURL
+		_ = fallback
 		return apiCallRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
 		})
@@ -572,24 +552,24 @@ func TestAPICallClientTransportPassesResolvedProxyToChrome(t *testing.T) {
 	auth := &coreauth.Auth{ProxyURL: "http://credential-proxy.example.com:8080"}
 	_ = h.apiCallClientTransport(auth, " http://request-proxy.example.com:8080 ")
 	if gotProxy != "http://request-proxy.example.com:8080" {
-		t.Fatalf("chrome proxy = %q, want request proxy", gotProxy)
+		t.Fatalf("fingerprint proxy = %q, want request proxy", gotProxy)
 	}
 
 	gotProxy = ""
 	_ = h.apiCallClientTransport(auth, "")
 	if gotProxy != "http://credential-proxy.example.com:8080" {
-		t.Fatalf("chrome proxy = %q, want credential proxy", gotProxy)
+		t.Fatalf("fingerprint proxy = %q, want credential proxy", gotProxy)
 	}
 
 	gotProxy = ""
 	_ = h.apiCallClientTransport(&coreauth.Auth{ProxyURL: "bad-value"}, "")
 	if gotProxy != "http://global-proxy.example.com:8080" {
-		t.Fatalf("chrome proxy = %q, want global proxy", gotProxy)
+		t.Fatalf("fingerprint proxy = %q, want global proxy", gotProxy)
 	}
 
 	gotProxy = ""
 	_ = h.apiCallClientTransport(nil, "")
 	if gotProxy != "http://global-proxy.example.com:8080" {
-		t.Fatalf("chrome proxy = %q, want global proxy when auth is nil", gotProxy)
+		t.Fatalf("fingerprint proxy = %q, want global proxy when auth is nil", gotProxy)
 	}
 }
