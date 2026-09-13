@@ -380,7 +380,12 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	var chromeRT http.RoundTripper
+	if cfg != nil && cfg.Codex.ForceHTTP1 {
+		chromeRT = newChromeHTTP1RoundTripper(proxyURL)
+	} else {
+		chromeRT = newUtlsRoundTripper(proxyURL)
+	}
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
