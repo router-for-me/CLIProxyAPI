@@ -3,6 +3,9 @@
 // ensuring consistent naming across the application.
 package constant
 
+// ClaudeBridgeUsageContextKey scopes bridge-specific context accounting to its requests.
+type ClaudeBridgeUsageContextKey struct{}
+
 const (
 	// Gemini represents the Google Gemini provider identifier.
 	Gemini = "gemini"
@@ -27,4 +30,16 @@ const (
 
 	// Interactions represents the Google Interactions API format identifier.
 	Interactions = "interactions"
+
+	// ClaudeResponsesBridgeAlt identifies Claude /messages requests that must use
+	// the Codex Responses API while preserving a Claude-compatible response.
+	ClaudeResponsesBridgeAlt = "claude/responses"
+
+	// ClaudeResponsesCompactBridgeAlt identifies Claude compaction requests that
+	// must use the Codex /responses/compact endpoint.
+	ClaudeResponsesCompactBridgeAlt = "claude/responses/compact"
+
+	// ClaudeResponsesCompactionField carries validated compacted Responses items
+	// from the Claude handler to the Codex executor. It is never sent upstream.
+	ClaudeResponsesCompactionField = "cpa_responses_compaction"
 )
