@@ -69,6 +69,7 @@ func TestSettingsRejectsRoutingAtEverySource(t *testing.T) {
 func TestSettingsBlocksEmptyProxyAndCredentialHelpers(t *testing.T) {
 	for _, raw := range []string{
 		`{"env":{"NO_PROXY":""}}`, `{"env":{"https_proxy":""}}`,
+		`{"env":{"DISABLE_AUTOUPDATER":"0"}}`, `{"env":{"DISABLE_AUTOUPDATER":""}}`,
 		`{"env":{"NODE_EXTRA_CA_CERTS":"certificate"}}`, `{"env":{"ANTHROPIC_BASE_URL":"https://other.example"}}`,
 		`{"env":{"ANTHROPIC_PROFILE":"other"}}`, `{"env":{"CLAUDE_CODE_USE_MANTLE":"0"}}`,
 		`{"env":{"HOME":"elsewhere"}}`, `{"apiKeyHelper":"credential-canary"}`,
