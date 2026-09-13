@@ -40,6 +40,11 @@ type authScheduler struct {
 	authProviders       map[string]string
 	mixedCursors        map[string]int
 	mixedWeightedStates map[string]*smoothWeightedState
+	// inFlight tracks per-auth in-flight dispatch counts (G4). It lives
+	// outside scheduledAuthMeta because metas are recreated on every upsert
+	// and rebuild (MarkResult re-upserts per result), which would zero a
+	// meta-resident counter mid-flight.
+	inFlight map[string]int
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -153,7 +158,58 @@ func newAuthScheduler(selector Selector) *authScheduler {
 		authProviders:       make(map[string]string),
 		mixedCursors:        make(map[string]int),
 		mixedWeightedStates: make(map[string]*smoothWeightedState),
+		inFlight:            make(map[string]int),
 	}
+}
+
+// adjustInFlight applies a delta to an auth's in-flight counter. No-op for
+// unknown auths or empty IDs. The counter feeds the power-of-two-choices and
+// least-used pick strategies (G4) and is otherwise informational.
+func (s *authScheduler) adjustInFlight(authID string, delta int) {
+	if s == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" || delta == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.authKnownLocked(authID) {
+		return
+	}
+	if s.inFlight == nil {
+		s.inFlight = make(map[string]int)
+	}
+	next := s.inFlight[authID] + delta
+	if next <= 0 {
+		delete(s.inFlight, authID)
+		return
+	}
+	s.inFlight[authID] = next
+}
+
+// inFlightForAuth returns the auth's current in-flight count (0 when unknown).
+func (s *authScheduler) inFlightForAuth(authID string) int {
+	if s == nil {
+		return 0
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inFlight[authID]
+}
+
+// authKnownLocked reports whether the auth is currently registered in the
+// scheduler under any provider. Callers must hold s.mu.
+func (s *authScheduler) authKnownLocked(authID string) bool {
+	if providerKey, ok := s.authProviders[authID]; ok && providerKey != "" {
+		return true
+	}
+	return false
 }
 
 // selectorStrategy maps a selector implementation to the scheduler semantics it should emulate.
@@ -196,6 +252,18 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	now := time.Now()
 	for _, auth := range auths {
 		s.upsertAuthLocked(auth, now)
+	}
+	s.pruneInFlightLocked()
+}
+
+// pruneInFlightLocked drops in-flight entries for auths no longer registered.
+// Counts for live auths are preserved: the counter tracks dispatches in
+// progress, which a rebuild does not interrupt. Callers must hold s.mu.
+func (s *authScheduler) pruneInFlightLocked() {
+	for authID := range s.inFlight {
+		if !s.authKnownLocked(authID) {
+			delete(s.inFlight, authID)
+		}
 	}
 }
 
@@ -569,6 +637,7 @@ func (s *authScheduler) removeAuthLocked(authID string) {
 		}
 		delete(s.authProviders, authID)
 	}
+	delete(s.inFlight, authID)
 }
 
 // ensureProviderLocked returns the provider scheduler for providerKey, creating it when needed.

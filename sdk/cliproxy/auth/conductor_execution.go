@@ -272,6 +272,71 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 	return out
 }
 
+// acquireAuthInFlight increments the in-flight counter for a picked auth.
+// Called at execution commit — after pool breaker admission — so probe-denied
+// picks are never counted. No-op for nil manager/scheduler/auth and for auths
+// unknown to the scheduler. The counter feeds the power-of-two-choices and
+// least-used pick strategies (G4) and is otherwise informational.
+func (m *Manager) acquireAuthInFlight(auth *Auth) {
+	if m == nil || m.scheduler == nil || auth == nil {
+		return
+	}
+	m.scheduler.adjustInFlight(auth.ID, 1)
+}
+
+// releaseAuthInFlight decrements the in-flight counter for a completed auth.
+// Exactly one call must follow every acquire: the execution loops release at
+// the next iteration boundary or function exit, and streaming attempts hand
+// the release to the stream drain goroutine (the stream stays in flight until
+// it drains). Calling it for an auth that was never acquired is a no-op.
+func (m *Manager) releaseAuthInFlight(auth *Auth) {
+	if m == nil || m.scheduler == nil || auth == nil {
+		return
+	}
+	m.scheduler.adjustInFlight(auth.ID, -1)
+}
+
+// wrapStreamDrainRelease wraps a scheduler-picked stream so the attempt's
+// in-flight hold is released exactly once when the stream finishes draining.
+// On client cancellation it stops FORWARDING but keeps draining the wrapped
+// stream until its underlying drain goroutine (which records results)
+// closes the channel: releasing the hold before that close would let a
+// result-observing caller read results that the drain has not recorded yet.
+// A stalled upstream that never delivers another chunk or close keeps the
+// hold — mirroring the pre-existing drain-goroutine leak rather than
+// pretending the dispatch ended. A nil ctx is tolerated (no cancellation
+// source), matching wrapStreamResult's nil-ctx handling.
+func wrapStreamDrainRelease(ctx context.Context, result *cliproxyexecutor.StreamResult, release func()) *cliproxyexecutor.StreamResult {
+	if release == nil {
+		return result
+	}
+	if result == nil || result.Chunks == nil {
+		release()
+		return result
+	}
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		defer release()
+		forward := true
+		for chunk := range result.Chunks {
+			if !forward {
+				continue
+			}
+			if ctx == nil {
+				out <- chunk
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				forward = false
+			case out <- chunk:
+			}
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: out}
+}
+
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -285,7 +350,21 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	attempted := make(map[string]struct{})
 	var lastErr error
 	pinnedPool := ""
+	// releaseInFlight releases the current attempt's in-flight hold exactly
+	// once: at the top of the next loop iteration when the attempt rotates to
+	// another auth, or at function exit via the deferred closure (covers
+	// every return and panic after the acquire).
+	var releaseInFlight func()
+	defer func() {
+		if releaseInFlight != nil {
+			releaseInFlight()
+		}
+	}()
 	for {
+		if releaseInFlight != nil {
+			releaseInFlight()
+			releaseInFlight = nil
+		}
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -339,6 +418,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			// admitted probe always corresponds to a real dispatch.
 			continue
 		}
+		acquiredAuth := auth
+		m.acquireAuthInFlight(acquiredAuth)
+		releaseInFlight = func() { m.releaseAuthInFlight(acquiredAuth) }
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -421,7 +503,19 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	attempted := make(map[string]struct{})
 	var lastErr error
 	pinnedPool := ""
+	// releaseInFlight releases the current attempt's in-flight hold exactly
+	// once (see executeMixedOnce for the full rationale).
+	var releaseInFlight func()
+	defer func() {
+		if releaseInFlight != nil {
+			releaseInFlight()
+		}
+	}()
 	for {
+		if releaseInFlight != nil {
+			releaseInFlight()
+			releaseInFlight = nil
+		}
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -475,6 +569,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			// admitted probe always corresponds to a real dispatch.
 			continue
 		}
+		acquiredAuth := auth
+		m.acquireAuthInFlight(acquiredAuth)
+		releaseInFlight = func() { m.releaseAuthInFlight(acquiredAuth) }
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -567,7 +664,22 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	unauthorizedRefreshTried := make(map[string]struct{})
 	var lastErr error
 	pinnedPool := ""
+	// releaseInFlight releases the current attempt's in-flight hold exactly
+	// once: at the top of the next loop iteration, at function exit via the
+	// deferred closure, or — for a successfully started stream — by handing
+	// ownership to the stream drain wrapper, which releases when the stream
+	// the client holds finishes draining.
+	var releaseInFlight func()
+	defer func() {
+		if releaseInFlight != nil {
+			releaseInFlight()
+		}
+	}()
 	for {
+		if releaseInFlight != nil {
+			releaseInFlight()
+			releaseInFlight = nil
+		}
 		if !homeMode && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return nil, lastErr
@@ -703,6 +815,15 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			continue
 		}
+		if selection == nil {
+			// Scheduler-picked dispatch (home dispatches are out of scope for
+			// the in-flight counter; see the G4 design). The hold is owned by
+			// releaseInFlight until a successful stream start hands it to the
+			// drain wrapper.
+			m.acquireAuthInFlight(auth)
+			acquiredAuth := auth
+			releaseInFlight = func() { m.releaseAuthInFlight(acquiredAuth) }
+		}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
 		streamExecutionModel := ""
 		if restoreExecutionModel {
@@ -718,6 +839,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil, unauthorizedRefreshTried)
 		if errStream != nil {
+			// The attempt ends without a stream: releaseInFlight stays armed
+			// for the next iteration / function exit.
 			if selection != nil {
 				releaseAttempt()
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "stream_start_failed"); errEnd != nil {
@@ -743,7 +866,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
 		}
-		return streamResult, nil
+		// Scheduler-picked stream: the in-flight hold transfers to the stream
+		// drain wrapper and is released when the client-side stream finishes
+		// draining (including on client disconnect, where no result is ever
+		// recorded). Clear the local release so it is not released twice.
+		streamRelease := releaseInFlight
+		releaseInFlight = nil
+		return wrapStreamDrainRelease(ctx, streamResult, streamRelease), nil
 	}
 }
 
