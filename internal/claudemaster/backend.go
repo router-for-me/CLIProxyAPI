@@ -122,6 +122,8 @@ func backendConfig(authDir string) *config.Config {
 		DisableClaudeCloakMode: true, AuthAutoRefreshWorkers: 1,
 	}
 	cfg.SDKConfig.DisableImageGeneration = config.DisableImageGenerationPassthrough
+	// The native adapter applies its own narrow response-header boundary below.
+	cfg.SDKConfig.PassthroughHeaders = true
 	cfg.ProxyURL = "direct"
 	cfg.ClaudeCode.DisableCloakingModelList = true
 	cfg.Codex.DisableCodexCloaking = true
@@ -498,8 +500,9 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 		ctx = handlers.WithPinnedAuthID(ctx, opts.AuthID)
 		ctx = context.WithValue(ctx, "gin", c)
 		if c.Request.URL.Path == "/v1/messages/count_tokens" {
-			payload, _, errMsg := base.ExecuteCountWithAuthManager(ctx, "claude", opts.Model, raw, "")
+			payload, headers, errMsg := base.ExecuteCountWithAuthManager(ctx, "claude", opts.Model, raw, "")
 			observeBackendError(ctx, errMsg)
+			writeBackendProtocolHeaders(c.Writer.Header(), headers)
 			writeBackendResult(c.Writer, payload, errMsg)
 			return
 		}
@@ -511,8 +514,9 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 			streamBackendResponse(ctx, c.Writer, base, opts.Model, raw)
 			return
 		}
-		payload, _, errMsg := base.ExecuteWithAuthManager(ctx, "claude", opts.Model, raw, "")
+		payload, headers, errMsg := base.ExecuteWithAuthManager(ctx, "claude", opts.Model, raw, "")
 		observeBackendError(ctx, errMsg)
+		writeBackendProtocolHeaders(c.Writer.Header(), headers)
 		writeBackendResult(c.Writer, payload, errMsg)
 	}
 	router.POST("/v1/messages", dispatch)
@@ -554,14 +558,9 @@ func prepareBackendRequest(request *http.Request, model string) ([]byte, error) 
 			body["metadata"], _ = json.Marshal(metadata)
 		}
 	}
-	// Never pass master credentials, cookies, account identities, forwarding
-	// headers, or arbitrary X-* fields into an inference provider executor.
-	header := make(http.Header)
-	for _, key := range []string{"Anthropic-Version", "Anthropic-Beta", "Accept"} {
-		if values := request.Header.Values(key); len(values) > 0 {
-			header[key] = append([]string(nil), values...)
-		}
-	}
+	// Keep native protocol headers, never the master account's credentials or
+	// identity. Repeat the boundary for direct Backend.Handler callers.
+	header := coreexecutor.NativeClaudeProtocolHeaders(request.Header)
 	header.Set("Content-Type", "application/json")
 	request.Header = header
 	request.URL.RawQuery = ""
@@ -606,7 +605,7 @@ func streamBackendResponse(ctx context.Context, w http.ResponseWriter, base *han
 		backendError(w, http.StatusInternalServerError, "streaming is unavailable")
 		return
 	}
-	data, _, errs := base.ExecuteStreamWithAuthManager(ctx, "claude", model, raw, "")
+	data, headers, errs := base.ExecuteStreamWithAuthManager(ctx, "claude", model, raw, "")
 	started := false
 	for data != nil || errs != nil {
 		select {
@@ -637,6 +636,7 @@ func streamBackendResponse(ctx context.Context, w http.ResponseWriter, base *han
 				continue
 			}
 			if !started {
+				writeBackendProtocolHeaders(w.Header(), headers)
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("Cache-Control", "no-cache")
 				started = true
@@ -654,19 +654,31 @@ func streamBackendResponse(ctx context.Context, w http.ResponseWriter, base *han
 }
 
 func writeBackendUpstreamError(w http.ResponseWriter, errMsg *interfaces.ErrorMessage) {
+	writeBackendProtocolHeaders(w.Header(), errMsg.Addon)
 	status := errMsg.StatusCode
 	if status < 400 || status > 599 {
 		status = http.StatusBadGateway
 	}
-	// Preserve only a syntactically valid retry delay, never arbitrary upstream
-	// error bodies or account-bearing headers.
-	retryAfter := errMsg.Addon.Get("Retry-After")
-	if seconds, err := strconv.ParseUint(retryAfter, 10, 32); err == nil {
-		w.Header().Set("Retry-After", strconv.FormatUint(seconds, 10))
-	} else if date, err := http.ParseTime(retryAfter); err == nil {
-		w.Header().Set("Retry-After", date.UTC().Format(http.TimeFormat))
-	}
 	backendError(w, status, "Selected inference account failed; no fallback was attempted")
+}
+
+// Native uses these headers for retries and usage reporting. Authentication,
+// cookies, account identifiers, framing and compression are never forwarded.
+func writeBackendProtocolHeaders(dst, src http.Header) {
+	filtered := handlers.FilterUpstreamHeaders(src)
+	retryAfter := filtered.Get("Retry-After")
+	if seconds, err := strconv.ParseUint(retryAfter, 10, 32); err == nil {
+		dst.Set("Retry-After", strconv.FormatUint(seconds, 10))
+	} else if date, err := http.ParseTime(retryAfter); err == nil {
+		dst.Set("Retry-After", date.UTC().Format(http.TimeFormat))
+	}
+	for key, values := range filtered {
+		lower := strings.ToLower(key)
+		if lower == "request-id" || lower == "x-request-id" || lower == "x-should-retry" ||
+			lower == "retry-after-ms" || strings.HasPrefix(lower, "anthropic-ratelimit-") {
+			dst[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
+		}
+	}
 }
 
 func backendError(w http.ResponseWriter, status int, message string) {

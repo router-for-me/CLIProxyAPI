@@ -9,7 +9,11 @@ permissions:
 jobs:
   build:
     if: contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,7 +26,35 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test Claude master boundaries
-        run: go test -race ./internal/claudemaster ./cmd/claude-master ./sdk/auth ./sdk/cliproxy/auth ./internal/auth/claude
+        run: go test -race ./internal/claudemaster ./cmd/claude-master ./sdk/auth ./sdk/cliproxy/auth ./internal/auth/claude ./sdk/cliproxy/executor
+      - name: Test native Claude executor header boundaries
+        run: go test -race -run 'TestNativeClaude|TestClaude.*Header|TestClassifyClaude|TestClaudeExecutorCompatThinkingReplayClears|TestKimiExecutorClaudeErrorClears' ./internal/runtime/executor
+      - name: Download verified native Claude for isolated transport test
+        shell: bash
+        run: |
+          set -euo pipefail
+          native_version=$(sed -n 's/^const NativeClaudeVersion = "\([0-9.]*\)"$/\1/p' internal/claudemaster/launcher.go)
+          [[ "$native_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) native_platform=linux-x64 ;;
+            Linux-aarch64) native_platform=linux-arm64 ;;
+            Darwin-arm64) native_platform=darwin-arm64 ;;
+            Darwin-x86_64) native_platform=darwin-x64 ;;
+            *) exit 1 ;;
+          esac
+          native_dir=$(mktemp -d "${RUNNER_TEMP}/claude-master-native.XXXXXX")
+          native_base="https://downloads.claude.ai/claude-code-releases/${native_version}"
+          curl -fsSL --proto '=https' --proto-redir '=https' -o "${native_dir}/manifest.json" "${native_base}/manifest.json"
+          native_checksum=$(jq -er --arg platform "$native_platform" '.platforms[$platform].checksum | select(test("^[a-f0-9]{64}$"))' "${native_dir}/manifest.json")
+          curl -fsSL --proto '=https' --proto-redir '=https' -o "${native_dir}/claude" "${native_base}/${native_platform}/claude"
+          native_actual=$(shasum -a 256 "${native_dir}/claude" | awk '{print $1}')
+          test "$native_actual" = "$native_checksum"
+          chmod 0700 "${native_dir}/claude"
+          native_reported=$(DISABLE_AUTOUPDATER=1 "${native_dir}/claude" --version)
+          test "$native_reported" = "${native_version} (Claude Code)"
+          printf 'CLAUDE_MASTER_NATIVE_TEST_BINARY=%s/claude\n' "$native_dir" >> "$GITHUB_ENV"
+      - name: Test real native Claude against synthetic transport
+        run: go test -race -count=1 -run '^TestNativeCompatibilitySmoke$' ./internal/claudemaster
       - name: Build
         run: |
           go build -o test-output ./cmd/server

@@ -2,11 +2,13 @@ package claudemaster
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -17,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 const masterAPIHost = "api.anthropic.com"
@@ -353,15 +357,21 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		request.ContentLength = r.ContentLength
+		request.Header = coreexecutor.NativeClaudeProtocolHeaders(r.Header)
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Accept", "application/json, text/event-stream")
-		for _, key := range []string{"Anthropic-Version", "Anthropic-Beta"} {
-			for _, value := range r.Header.Values(key) {
-				request.Header.Add(key, value)
-			}
-		}
+		request = request.WithContext(coreexecutor.WithNativeClaudeProtocolHeaders(request.Context(), request.Header))
 		p.counters.inferenceRequests.Add(1)
 		p.inference.ServeHTTP(w, request)
+		return
+	}
+	if path == "/v1/sessions" || strings.HasPrefix(path, "/v1/sessions/") {
+		if !proxyLegacySessionPath(r.Method, path) || !proxyLegacySessionRequest(r) {
+			p.counters.blockedRequests.Add(1)
+			http.Error(w, "unrecognized legacy Remote Control request; request blocked", http.StatusForbidden)
+			return
+		}
+		p.counters.controlRequests.Add(1)
+		p.control.ServeHTTP(w, r)
 		return
 	}
 	if !proxyControlPath(r.Method, path) {
@@ -372,6 +382,130 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	p.counters.controlRequests.Add(1)
 	p.control.ServeHTTP(w, r)
+}
+
+// The legacy namespace also hosts managed agents. Permit only the native BYOC
+// Remote Control operations seen in the 2.1.209--2.1.270 audit, never its whole
+// subtree or a generic SDK session-creation payload.
+func proxyLegacySessionPath(method, path string) bool {
+	if path == "/v1/sessions" {
+		return method == http.MethodPost
+	}
+	suffix, ok := strings.CutPrefix(path, "/v1/sessions/")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(suffix, "/")
+	if !proxyControlID(parts[0]) {
+		return false
+	}
+	if len(parts) == 1 {
+		return method == http.MethodGet || method == http.MethodPatch
+	}
+	if len(parts) != 2 || method != http.MethodPost {
+		return false
+	}
+	return parts[1] == "events" || parts[1] == "archive" || parts[1] == "unarchive"
+}
+
+func proxyLegacySessionRequest(r *http.Request) bool {
+	byoc := false
+	environments := false
+	for _, value := range r.Header.Values("Anthropic-Beta") {
+		for _, token := range strings.Split(value, ",") {
+			token = strings.TrimSpace(token)
+			if strings.Contains(strings.ToLower(token), "managed-agents") {
+				return false
+			}
+			if token == "ccr-byoc-2025-07-29" {
+				byoc = true
+			}
+			if token == "environments-2025-11-01" {
+				environments = true
+			}
+		}
+	}
+	crudProfile := byoc && proxyControlID(r.Header.Get("X-Organization-Uuid"))
+	// Permission responses and archive calls from the bridge worker use a
+	// different audited header profile, with no organization header. Do not
+	// impose the CLI CRUD profile on this native bridge callback path.
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/sessions/"), "/")
+	bridgeCallback := r.Method == http.MethodPost && len(parts) == 2 && (parts[1] == "events" || parts[1] == "archive")
+	bridgeProfile := environments && bridgeCallback && proxyLegacyRunnerVersion(r.Header.Get("X-Environment-Runner-Version"))
+	if !crudProfile && !bridgeProfile {
+		return false
+	}
+	if r.URL.Path != "/v1/sessions" {
+		return true
+	}
+	if r.Body == nil || (r.Header.Get("Content-Encoding") != "" && r.Header.Get("Content-Encoding") != "identity") {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, backendMaxBodyBytes+1))
+	_ = r.Body.Close()
+	if err != nil || len(raw) > backendMaxBodyBytes {
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	var body map[string]json.RawMessage
+	if json.Unmarshal(raw, &body) != nil || body == nil {
+		return false
+	}
+	for key := range body {
+		switch key {
+		case "source", "events", "session_context", "environment_id", "self_hosted_runner_pool_id", "title", "tags", "permission_mode":
+		default:
+			return false
+		}
+	}
+	var source string
+	if json.Unmarshal(body["source"], &source) != nil || source != "remote-control" {
+		return false
+	}
+	var events []json.RawMessage
+	if json.Unmarshal(body["events"], &events) != nil || events == nil {
+		return false
+	}
+	var session map[string]json.RawMessage
+	if json.Unmarshal(body["session_context"], &session) != nil || session == nil {
+		return false
+	}
+	for key := range session {
+		switch key {
+		case "sources", "outcomes", "model", "cwd", "reuse_outcome_branches":
+		default:
+			return false
+		}
+	}
+	_, environment := body["environment_id"]
+	_, pool := body["self_hosted_runner_pool_id"]
+	if environment == pool {
+		return false
+	}
+	key := "environment_id"
+	if pool {
+		key = "self_hosted_runner_pool_id"
+	}
+	var worker string
+	return json.Unmarshal(body[key], &worker) == nil && proxyControlID(worker)
+}
+
+func proxyLegacyRunnerVersion(version string) bool {
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if len(part) == 0 || len(part) > 8 {
+			return false
+		}
+		for _, char := range part {
+			if char < '0' || char > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func proxyCanonicalPath(u *url.URL) bool {

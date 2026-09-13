@@ -26,11 +26,12 @@ import (
 
 func TestPrepareBackendRequest(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?api_key=master-secret", strings.NewReader(`{"model":"master-model","metadata":{"user_id":"master-identity","keep":"value"},"system":"original system","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"Bash","input_schema":{"type":"object"}}]}`))
-	for _, key := range []string{"Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization", "X-Forwarded-For", "X-Account-Id", "User-Agent", "X-Claude-Code-Session-Id"} {
+	for _, key := range []string{"Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization", "X-Forwarded-For", "X-Account-Id", "X-Claude-Code-Session-Id"} {
 		request.Header.Set(key, "master-secret")
 	}
 	request.Header.Set("Anthropic-Version", "2023-06-01")
 	request.Header.Set("Anthropic-Beta", "test-beta")
+	request.Header.Set("User-Agent", "claude-cli/2.1.269 (external, cli)")
 	clean, err := prepareBackendRequest(request, "selected-model")
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +54,7 @@ func TestPrepareBackendRequest(t *testing.T) {
 			t.Fatalf("master header survived: %s", key)
 		}
 	}
-	if request.Header.Get("Anthropic-Version") != "2023-06-01" || request.URL.RawQuery != "" || request.Host != "" {
+	if request.Header.Get("Anthropic-Version") != "2023-06-01" || request.Header.Get("User-Agent") != "claude-cli/2.1.269 (external, cli)" || request.URL.RawQuery != "" || request.Host != "" {
 		t.Fatal("safe protocol header or URL sanitization incorrect")
 	}
 	bodyAgain, err := io.ReadAll(request.Body)
@@ -88,6 +89,11 @@ func TestPrepareBackendRequestDropsEmptyIdentityMetadata(t *testing.T) {
 
 func writeSyntheticBackendCredential(t *testing.T, dir, name string, extra map[string]any) BackendOptions {
 	t.Helper()
+	canonicalDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir = canonicalDir
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

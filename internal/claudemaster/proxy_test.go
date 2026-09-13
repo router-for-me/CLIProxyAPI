@@ -54,6 +54,11 @@ func proxyTestCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
 func proxyTestStart(t *testing.T, inference http.Handler, control http.RoundTripper) (*Proxy, *http.Client, *x509.CertPool) {
 	t.Helper()
 	cert, pool := proxyTestCertificate(t)
+	return proxyTestStartWithCertificate(t, inference, control, cert, pool)
+}
+
+func proxyTestStartWithCertificate(t *testing.T, inference http.Handler, control http.RoundTripper, cert tls.Certificate, pool *x509.CertPool) (*Proxy, *http.Client, *x509.CertPool) {
+	t.Helper()
 	if control == nil {
 		control = proxyTestTransport(func(*http.Request) (*http.Response, error) {
 			return nil, errors.New("unexpected control request")
@@ -103,7 +108,7 @@ func TestProxyInferenceCredentialBoundary(t *testing.T) {
 		if r.Header.Get("Content-Type") != "application/json" || r.Header.Get("Anthropic-Version") != "2023-06-01" || r.Header.Get("Anthropic-Beta") != "test-beta" {
 			t.Error("required inference protocol headers were not retained")
 		}
-		if len(r.Header) != 4 || strings.Contains(fmt.Sprint(r.Header), "MASTER-CANARY") || r.URL.RawQuery != "" || r.URL.Host != "" || r.Host != "" || r.TLS != nil || r.RequestURI != "" {
+		if len(r.Header) != 6 || strings.Contains(fmt.Sprint(r.Header), "MASTER-CANARY") || r.URL.RawQuery != "" || r.URL.Host != "" || r.Host != "" || r.TLS != nil || r.RequestURI != "" {
 			t.Error("master account request identity leaked into inference")
 		}
 		body, err := io.ReadAll(r.Body)
@@ -116,8 +121,9 @@ func TestProxyInferenceCredentialBoundary(t *testing.T) {
 	_, client, _ := proxyTestStart(t, inference, nil)
 	headers := http.Header{
 		"Authorization": {"Bearer MASTER-CANARY"}, "Cookie": {"session=MASTER-CANARY"}, "X-Api-Key": {"MASTER-CANARY"},
-		"X-Account-Id": {"MASTER-CANARY"}, "X-Custom-Identity": {"MASTER-CANARY"}, "Accept": {"MASTER-CANARY"},
+		"X-Account-Id": {"MASTER-CANARY"}, "X-Custom-Identity": {"MASTER-CANARY"}, "Accept": {"application/json"},
 		"Anthropic-Version": {"2023-06-01"}, "Anthropic-Beta": {"test-beta"}, "Content-Type": {"application/json"},
+		"User-Agent": {"claude-cli/2.1.269 (external, cli)"}, "Accept-Encoding": {"gzip, deflate, br, zstd"},
 	}
 	for _, path := range []string{"/v1/messages?beta=true&identity=MASTER-CANARY", "/v1/messages/count_tokens"} {
 		resp, body := proxyTestRequest(t, client, http.MethodPost, path, `{"model":"master-model","messages":[]}`, headers.Clone())

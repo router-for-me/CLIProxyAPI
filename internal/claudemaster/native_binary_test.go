@@ -14,7 +14,7 @@ func nativeBinaryTestEnvironment(t *testing.T) (string, string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("synthetic native executables use POSIX shell")
 	}
-	homeDir := t.TempDir()
+	homeDir := canonicalTestTempDir(t)
 	binDir := filepath.Join(homeDir, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -83,13 +83,29 @@ func TestResolveNativeBinaryFallsBackWithoutChangingNewerLauncher(t *testing.T) 
 
 func TestResolveNativeBinaryHonorsAbsoluteXDGDataHome(t *testing.T) {
 	_, _ = nativeBinaryTestEnvironment(t)
-	dataDir := t.TempDir()
+	dataDir := canonicalTestTempDir(t)
 	t.Setenv("XDG_DATA_HOME", dataDir)
 	reviewed := filepath.Join(dataDir, "claude", "versions", NativeClaudeVersion)
 	writeNativeTestExecutable(t, reviewed, NativeClaudeVersion)
 	got, err := resolveNativeBinary(t.Context())
 	if err != nil || got != reviewed {
 		t.Fatalf("installed XDG version not selected: %v", err)
+	}
+}
+
+func TestResolveNativeBinaryCanonicalizesSymlinkedInstallParent(t *testing.T) {
+	homeDir, _ := nativeBinaryTestEnvironment(t)
+	dataDir := canonicalTestTempDir(t)
+	reviewed := filepath.Join(dataDir, "claude", "versions", NativeClaudeVersion)
+	writeNativeTestExecutable(t, reviewed, NativeClaudeVersion)
+	alias := filepath.Join(homeDir, "data-link")
+	if err := os.Symlink(dataDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", alias)
+	got, err := resolveNativeBinary(t.Context())
+	if err != nil || got != reviewed {
+		t.Fatalf("symlinked install parent not resolved: %v", err)
 	}
 }
 
