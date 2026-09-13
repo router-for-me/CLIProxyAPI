@@ -10,6 +10,28 @@ import (
 	"time"
 )
 
+func TestAuthCloneDetachesEmptyModelStates(t *testing.T) {
+	original := &Auth{ModelStates: map[string]*ModelState{}}
+	snapshot := original.Clone()
+	working := snapshot.Clone()
+
+	original.ModelStates["original"] = &ModelState{}
+	snapshot.ModelStates["snapshot"] = &ModelState{}
+	working.ModelStates["working"] = &ModelState{}
+	for name, auth := range map[string]*Auth{
+		"original": original,
+		"snapshot": snapshot,
+		"working":  working,
+	} {
+		if len(auth.ModelStates) != 1 || auth.ModelStates[name] == nil {
+			t.Errorf("%s model states = %v, want only its own insertion", name, auth.ModelStates)
+		}
+	}
+	if clone := (&Auth{}).Clone(); clone.ModelStates != nil {
+		t.Fatal("cloning nil model states should preserve nil")
+	}
+}
+
 func TestRequestRetryOverride(t *testing.T) {
 	var unset *Auth
 	if got, ok := unset.RequestRetryOverride(); ok || got != 0 {
