@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -1071,6 +1072,44 @@ func TestConfigSynthesizer_PropagatesWeightsForAllAPIKeyTypes(t *testing.T) {
 		wantWeight := strconv.Itoa(index + 1)
 		if gotWeight := auth.Attributes[coreauth.AttributeWeight]; gotWeight != wantWeight {
 			t.Fatalf("auth[%d] weight = %q, want %q", index, gotWeight, wantWeight)
+		}
+	}
+}
+
+func TestConfigSynthesizer_PropagatesCredentialGroupsForAllAPIKeyTypes(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey:       []config.GeminiKey{{APIKey: "gemini", CredentialGroup: " team-a "}},
+			InteractionsKey: []config.GeminiKey{{APIKey: "interactions", CredentialGroup: "team-b"}},
+			ClaudeKey:       []config.ClaudeKey{{APIKey: "claude", CredentialGroup: "team-c"}},
+			CodexKey:        []config.CodexKey{{APIKey: "codex", CredentialGroup: "team-d"}},
+			XAIKey:          []config.XAIKey{{APIKey: "xai", CredentialGroup: "team-e"}},
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "compat",
+				BaseURL: "https://compat.example.com",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+					APIKey:          "compat",
+					CredentialGroup: "team-f",
+				}},
+			}},
+			VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "vertex", CredentialGroup: "team-g"}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 7 {
+		t.Fatalf("auth count = %d, want 7", len(auths))
+	}
+	for index, auth := range auths {
+		wantGroup := fmt.Sprintf("team-%c", 'a'+index)
+		if gotGroup := auth.Attributes["credential_group"]; gotGroup != wantGroup {
+			t.Fatalf("auth[%d] credential_group = %q, want %q", index, gotGroup, wantGroup)
 		}
 	}
 }
