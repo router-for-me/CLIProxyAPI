@@ -27,6 +27,7 @@ import (
 const (
 	wsRequestTypeCreate                   = "response.create"
 	wsRequestTypeAppend                   = "response.append"
+	wsRequestTypeSteer                    = "response.steer"
 	wsEventTypeError                      = "error"
 	wsEventTypeCompleted                  = "response.completed"
 	wsEventTypeDone                       = "response.done"
@@ -554,8 +555,32 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 
-		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
-		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
+		if !responsesWebsocketSteerRequest(requestJSON) {
+			requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
+			requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
+		} else if !nativeWebsocketPassthrough {
+			errMsg = responsesWebsocketSteeringNotSupportedError()
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+			markAPIResponseTimestamp(c)
+			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
+			log.Infof(
+				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				passthroughSessionID,
+				websocket.TextMessage,
+				websocketPayloadEventType(errorPayload),
+				websocketPayloadPreview(errorPayload),
+			)
+			if errWrite != nil {
+				log.Warnf(
+					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+					passthroughSessionID,
+					websocketPayloadEventType(errorPayload),
+					errWrite,
+				)
+				return
+			}
+			continue
+		}
 
 		if !useUpstreamWebsocketPassthrough && shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, false) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
@@ -588,7 +613,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			nextLastRequest = requestJSON
 		}
 
-		modelName := gjson.GetBytes(requestJSON, "model").String()
+		modelName := strings.TrimSpace(gjson.GetBytes(requestJSON, "model").String())
+		if modelName == "" {
+			modelName = requestModelName
+		}
 		lastAttemptedAuthID := pinnedAuthID
 		attemptedUpstreamMode := responsesWebsocketUpstreamModeUnknown
 		selectedAuthObserved := false
@@ -701,8 +729,10 @@ func responsesWebsocketHTTPReplayRequiredError() error {
 }
 
 func responsesWebsocketRequestRequiresCurrentUpstream(payload []byte) bool {
+	requestType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 	return strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" ||
-		strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeAppend
+		requestType == wsRequestTypeAppend ||
+		requestType == wsRequestTypeSteer
 }
 
 func responsesWebsocketNativePassthroughAllowed(upstreamMode string, useUpstreamWebsocket bool, pinnedAuthID string, upstreamAuthID string) bool {
@@ -729,6 +759,15 @@ func websocketUpgradeHeaders(req *http.Request) http.Header {
 		headers.Set(wsTurnStateHeader, turnState)
 	}
 	return headers
+}
+
+func responsesWebsocketSteeringNotSupportedError() *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error: errors.New(
+			`{"error":{"message":"response.steer requires an upstream Responses WebSocket on the current connection","type":"invalid_request_error","code":"steering_not_supported"}}`,
+		),
+	}
 }
 
 func responsesWebsocketPreviousResponseNotFoundError() *interfaces.ErrorMessage {

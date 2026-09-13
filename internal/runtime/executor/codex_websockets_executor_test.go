@@ -47,6 +47,22 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
+func TestBuildCodexWebsocketRequestBodyPreservesSteer(t *testing.T) {
+	body := []byte(`{"type":"response.steer","previous_response_id":"resp-1","input":"Keep the scope small."}`)
+
+	wsReqBody := buildCodexWebsocketRequestBody(body)
+
+	if got := gjson.GetBytes(wsReqBody, "type").String(); got != "response.steer" {
+		t.Fatalf("type = %s, want response.steer", got)
+	}
+	if gjson.GetBytes(wsReqBody, "model").Exists() {
+		t.Fatalf("steer body must not gain a model field: %s", wsReqBody)
+	}
+	if gjson.GetBytes(wsReqBody, "stream").Exists() {
+		t.Fatalf("steer body must not gain a stream field: %s", wsReqBody)
+	}
+}
+
 func BenchmarkBuildCodexWebsocketRequestBodyLargePayload(b *testing.B) {
 	body := []byte(`{"model":"gpt-5.6","input":[{"type":"message","id":"msg_1","role":"user","content":"` + strings.Repeat("x", 8<<20) + `"}]}`)
 	b.ReportAllocs()
