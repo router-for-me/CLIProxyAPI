@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 func mustDefaultTransport(t *testing.T) *http.Transport {
@@ -249,7 +252,112 @@ func TestBuildDialerSOCKS5AndSOCKS5H(t *testing.T) {
 			if dialer == nil {
 				t.Fatal("expected dialer, got nil")
 			}
+			if dialer == proxy.Direct {
+				t.Fatal("BuildDialer silently returned proxy.Direct for a SOCKS proxy URL")
+			}
 		})
+	}
+}
+
+func TestBuildDialerSOCKS5HCONNECTRemoteDNS(t *testing.T) {
+	t.Parallel()
+
+	type connectLog struct {
+		atyp byte
+		host string
+		port uint16
+	}
+	connects := make(chan connectLog, 1)
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen SOCKS5: %v", errListen)
+	}
+	defer func() {
+		if errClose := listener.Close(); errClose != nil {
+			t.Errorf("close SOCKS5 listener: %v", errClose)
+		}
+	}()
+
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+		reader := bufio.NewReader(conn)
+		header := make([]byte, 2)
+		if _, errHeader := io.ReadFull(reader, header); errHeader != nil {
+			return
+		}
+		if _, errMethods := io.ReadFull(reader, make([]byte, header[1])); errMethods != nil {
+			return
+		}
+		if _, errWrite := conn.Write([]byte{0x05, 0x00}); errWrite != nil {
+			return
+		}
+
+		req := make([]byte, 4)
+		if _, errReq := io.ReadFull(reader, req); errReq != nil {
+			return
+		}
+		got := connectLog{atyp: req[3]}
+		switch req[3] {
+		case 0x03:
+			length, errLen := reader.ReadByte()
+			if errLen != nil {
+				return
+			}
+			name := make([]byte, length)
+			if _, errName := io.ReadFull(reader, name); errName != nil {
+				return
+			}
+			got.host = string(name)
+		default:
+			return
+		}
+		portBytes := make([]byte, 2)
+		if _, errPort := io.ReadFull(reader, portBytes); errPort != nil {
+			return
+		}
+		got.port = binary.BigEndian.Uint16(portBytes)
+		if _, errWrite := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); errWrite != nil {
+			return
+		}
+		connects <- got
+	}()
+
+	dialer, mode, errBuild := BuildDialer("socks5h://" + listener.Addr().String())
+	if errBuild != nil {
+		t.Fatalf("BuildDialer returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	if dialer == nil || dialer == proxy.Direct {
+		t.Fatal("BuildDialer(socks5h) silently returned proxy.Direct")
+	}
+
+	conn, errDial := dialer.Dial("tcp", "chatgpt.com:443")
+	if errDial != nil {
+		t.Fatalf("dialer.Dial returned error: %v", errDial)
+	}
+	defer func() { _ = conn.Close() }()
+
+	select {
+	case got := <-connects:
+		if got.atyp != 0x03 {
+			t.Fatalf("SOCKS ATYP = %d, want 3 (domain)", got.atyp)
+		}
+		if got.host != "chatgpt.com" {
+			t.Fatalf("SOCKS CONNECT host = %q, want chatgpt.com", got.host)
+		}
+		if got.port != 443 {
+			t.Fatalf("SOCKS CONNECT port = %d, want 443", got.port)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SOCKS5H dialer did not send a CONNECT")
 	}
 }
 

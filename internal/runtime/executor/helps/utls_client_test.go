@@ -21,6 +21,7 @@ import (
 
 	tls "github.com/refraction-networking/utls"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"golang.org/x/net/proxy"
 )
 
 type utlsClientRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -122,8 +123,17 @@ func TestNewChromeRoundTripperUsesDirectDialer(t *testing.T) {
 	if !ok {
 		t.Fatalf("type = %T, want *utlsRoundTripper", roundTripper)
 	}
-	if got.dialer == nil {
-		t.Fatal("expected chrome round tripper to configure a dialer")
+	if got.dialer != proxy.Direct {
+		t.Fatalf("direct chrome dialer = %T, want proxy.Direct", got.dialer)
+	}
+
+	socks := NewChromeRoundTripper("socks5h://127.0.0.1:1")
+	gotSOCKS, ok := socks.(*utlsRoundTripper)
+	if !ok {
+		t.Fatalf("socks5h type = %T, want *utlsRoundTripper", socks)
+	}
+	if gotSOCKS.dialer == nil || gotSOCKS.dialer == proxy.Direct {
+		t.Fatal("socks5h chrome path silently fell back to proxy.Direct")
 	}
 }
 
