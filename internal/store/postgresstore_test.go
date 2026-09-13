@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/empty"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -30,6 +32,8 @@ type postgresAuthTestBackend struct {
 	inspect       func(postgresAuthTestCall)
 	content       []byte
 	hasContent    bool
+	createdAt     time.Time
+	updatedAt     time.Time
 	unlockMissing bool
 	unlockErr     error
 }
@@ -60,7 +64,7 @@ func (b *postgresAuthTestBackend) exec(query string, args []driver.NamedValue) (
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return postgresAuthTestExec(query, args, &b.content, &b.hasContent)
+	return postgresAuthTestExec(query, args, &b.content, &b.hasContent, &b.createdAt, &b.updatedAt)
 }
 
 func (b *postgresAuthTestBackend) query(query string, args []driver.NamedValue) (driver.Rows, error) {
@@ -78,13 +82,15 @@ func (b *postgresAuthTestBackend) query(query string, args []driver.NamedValue) 
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return postgresAuthTestQuery(query, &b.content, &b.hasContent)
+	return postgresAuthTestQuery(query, &b.content, &b.hasContent, b.createdAt, b.updatedAt)
 }
 
 func (b *postgresAuthTestBackend) setContent(data []byte) {
 	b.mu.Lock()
 	b.content = append([]byte(nil), data...)
 	b.hasContent = true
+	b.createdAt = time.Unix(100, 0).UTC()
+	b.updatedAt = time.Unix(200, 0).UTC()
 	b.mu.Unlock()
 }
 
@@ -102,7 +108,7 @@ func (b *postgresAuthTestBackend) snapshotCalls() []postgresAuthTestCall {
 	return calls
 }
 
-func postgresAuthTestExec(query string, args []driver.NamedValue, content *[]byte, hasContent *bool) (driver.Result, error) {
+func postgresAuthTestExec(query string, args []driver.NamedValue, content *[]byte, hasContent *bool, createdAt, updatedAt *time.Time) (driver.Result, error) {
 	trimmed := strings.TrimSpace(query)
 	switch {
 	case strings.HasPrefix(trimmed, "INSERT INTO"):
@@ -111,6 +117,10 @@ func postgresAuthTestExec(query string, args []driver.NamedValue, content *[]byt
 		}
 		*content = postgresAuthTestValue(args, 1)
 		*hasContent = true
+		*createdAt, *updatedAt = time.Unix(300, 0).UTC(), time.Unix(300, 0).UTC()
+		if len(args) == 4 {
+			*createdAt, *updatedAt = args[2].Value.(time.Time), args[3].Value.(time.Time)
+		}
 		return driver.RowsAffected(1), nil
 	case strings.HasPrefix(trimmed, "UPDATE"):
 		if !*hasContent {
@@ -120,6 +130,10 @@ func postgresAuthTestExec(query string, args []driver.NamedValue, content *[]byt
 			return driver.RowsAffected(0), nil
 		}
 		*content = postgresAuthTestValue(args, 1)
+		*updatedAt = time.Unix(300, 0).UTC()
+		if len(args) == 5 {
+			*createdAt, *updatedAt = args[3].Value.(time.Time), args[4].Value.(time.Time)
+		}
 		return driver.RowsAffected(1), nil
 	case strings.HasPrefix(trimmed, "DELETE") && len(args) > 1:
 		if !*hasContent || !bytes.Equal(*content, postgresAuthTestValue(args, 1)) {
@@ -137,7 +151,7 @@ func postgresAuthTestExec(query string, args []driver.NamedValue, content *[]byt
 	}
 }
 
-func postgresAuthTestQuery(query string, content *[]byte, hasContent *bool) (driver.Rows, error) {
+func postgresAuthTestQuery(query string, content *[]byte, hasContent *bool, createdAt, updatedAt time.Time) (driver.Rows, error) {
 	trimmed := strings.TrimSpace(query)
 	rows := &postgresAuthTestRows{columns: []string{"content"}}
 	switch {
@@ -153,6 +167,12 @@ func postgresAuthTestQuery(query string, content *[]byte, hasContent *bool) (dri
 		}
 	default:
 		return nil, errors.New("query unsupported")
+	}
+	if strings.Contains(query, "created_at") {
+		rows.columns = append(rows.columns, "created_at", "updated_at")
+		for i := range rows.values {
+			rows.values[i] = append(rows.values[i], createdAt, updatedAt)
+		}
 	}
 	return rows, nil
 }
@@ -234,6 +254,8 @@ func (c *postgresAuthTestConn) beginTx() (driver.Tx, error) {
 		conn:       c,
 		content:    append([]byte(nil), c.backend.content...),
 		hasContent: c.backend.hasContent,
+		createdAt:  c.backend.createdAt,
+		updatedAt:  c.backend.updatedAt,
 	}
 	c.backend.mu.Unlock()
 	c.tx = tx
@@ -244,6 +266,8 @@ type postgresAuthTestTx struct {
 	conn       *postgresAuthTestConn
 	content    []byte
 	hasContent bool
+	createdAt  time.Time
+	updatedAt  time.Time
 	done       bool
 }
 
@@ -256,19 +280,21 @@ func (tx *postgresAuthTestTx) exec(query string, args []driver.NamedValue) (driv
 		if tx.conn.backend.hasContent {
 			tx.content = append([]byte(nil), tx.conn.backend.content...)
 			tx.hasContent = true
+			tx.createdAt = tx.conn.backend.createdAt
+			tx.updatedAt = tx.conn.backend.updatedAt
 			tx.conn.backend.mu.Unlock()
 			return driver.RowsAffected(0), nil
 		}
 		tx.conn.backend.mu.Unlock()
 	}
-	return postgresAuthTestExec(query, args, &tx.content, &tx.hasContent)
+	return postgresAuthTestExec(query, args, &tx.content, &tx.hasContent, &tx.createdAt, &tx.updatedAt)
 }
 
 func (tx *postgresAuthTestTx) query(query string, args []driver.NamedValue) (driver.Rows, error) {
 	if err := tx.conn.backend.call(query, args); err != nil {
 		return nil, err
 	}
-	return postgresAuthTestQuery(query, &tx.content, &tx.hasContent)
+	return postgresAuthTestQuery(query, &tx.content, &tx.hasContent, tx.createdAt, tx.updatedAt)
 }
 
 func (tx *postgresAuthTestTx) Commit() error {
@@ -278,6 +304,8 @@ func (tx *postgresAuthTestTx) Commit() error {
 	tx.conn.backend.mu.Lock()
 	tx.conn.backend.content = append([]byte(nil), tx.content...)
 	tx.conn.backend.hasContent = tx.hasContent
+	tx.conn.backend.createdAt = tx.createdAt
+	tx.conn.backend.updatedAt = tx.updatedAt
 	tx.conn.backend.mu.Unlock()
 	tx.done = true
 	tx.conn.tx = nil
@@ -377,36 +405,49 @@ func TestPostgresStoreSaveDatabaseFailureDoesNotPublishLocalFile(t *testing.T) {
 }
 
 func TestPostgresStoreSavePublishFailureRestoresDatabase(t *testing.T) {
-	t.Run("existing", func(t *testing.T) {
-		localPrevious := []byte(`{"value":"local"}`)
-		durablePrevious := []byte(`{"value":"durable"}`)
-		backend := &postgresAuthTestBackend{}
-		backend.setContent(durablePrevious)
-		store := newPostgresAuthStoreForTest(t, backend)
-		path := filepath.Join(store.authDir, "credential.json")
-		if err := os.WriteFile(path, localPrevious, 0o600); err != nil {
-			t.Fatalf("write previous auth: %v", err)
-		}
-		store.renameFile = func(string, string) error { return errors.New("publish rejected") }
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing/empty=%t", empty), func(t *testing.T) {
+			localPrevious := []byte(`{"value":"local"}`)
+			durablePrevious := []byte(`{"value":"durable"}`)
+			backend := &postgresAuthTestBackend{}
+			backend.setContent(durablePrevious)
+			store := newPostgresAuthStoreForTest(t, backend)
+			path := filepath.Join(store.authDir, "credential.json")
+			if err := os.WriteFile(path, localPrevious, 0o600); err != nil {
+				t.Fatalf("write previous auth: %v", err)
+			}
+			store.renameFile = func(string, string) error { return errors.New("publish rejected") }
 
-		_, err := store.Save(context.Background(), &cliproxyauth.Auth{
-			ID:       "credential.json",
-			Metadata: map[string]any{"value": "candidate"},
+			auth := &cliproxyauth.Auth{
+				ID:       "credential.json",
+				Metadata: map[string]any{"value": "candidate"},
+			}
+			if empty {
+				auth.Storage = &postgresAuthTestStorage{}
+			}
+			_, err := store.Save(context.Background(), auth)
+			if err == nil || !strings.Contains(err.Error(), "publish rejected") {
+				t.Fatalf("Save() error = %v, want publish error", err)
+			}
+			durable, exists := backend.durableSnapshot()
+			if !exists || !bytes.Equal(durable, durablePrevious) {
+				t.Fatalf("database record = (%q, %t), want (%q, true)", durable, exists, durablePrevious)
+			}
+			if !backend.createdAt.Equal(time.Unix(100, 0)) || !backend.updatedAt.Equal(time.Unix(200, 0)) {
+				t.Fatalf("database timestamps = (%v, %v), want original creation and update times", backend.createdAt, backend.updatedAt)
+			}
+			calls := backend.snapshotCalls()
+			if empty {
+				if len(calls) != 2 || !strings.Contains(calls[1].query, "DO NOTHING") {
+					t.Fatalf("database calls = %#v, want conditional reinsert", calls)
+				}
+			} else if len(calls) != 3 || !strings.Contains(calls[2].query, "content = $3") {
+				t.Fatalf("database calls = %#v, want conditional restore", calls)
+			}
+			assertPostgresAuthLocal(t, path, localPrevious)
+			assertPostgresAuthNoTemp(t, path)
 		})
-		if err == nil || !strings.Contains(err.Error(), "publish rejected") {
-			t.Fatalf("Save() error = %v, want publish error", err)
-		}
-		durable, exists := backend.durableSnapshot()
-		if !exists || !bytes.Equal(durable, durablePrevious) {
-			t.Fatalf("database record = (%q, %t), want (%q, true)", durable, exists, durablePrevious)
-		}
-		calls := backend.snapshotCalls()
-		if len(calls) != 3 || !strings.Contains(calls[2].query, "content = $3") {
-			t.Fatalf("database calls = %#v, want conditional restore", calls)
-		}
-		assertPostgresAuthLocal(t, path, localPrevious)
-		assertPostgresAuthNoTemp(t, path)
-	})
+	}
 
 	t.Run("new", func(t *testing.T) {
 		backend := &postgresAuthTestBackend{}

@@ -155,3 +155,94 @@ func TestPostgresStoreConcurrentPublicationFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestPostgresStorePublicationRestoresCompleteRecord(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN must point to a disposable PostgreSQL database")
+	}
+	for _, test := range []struct {
+		name      string
+		existing  bool
+		candidate string
+		fail      bool
+		cancel    bool
+	}{
+		{"update-failure", true, `{"value":"candidate"}`, true, false},
+		{"delete-failure", true, "", true, false},
+		{"cancelled-update", true, `{"value":"candidate"}`, true, true},
+		{"cancelled-delete", true, "", true, true},
+		{"insert-failure", false, `{"value":"candidate"}`, true, false},
+		{"successful-update", true, `{"value":"candidate"}`, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := sql.Open("pgx", dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if errClose := db.Close(); errClose != nil {
+					t.Error(errClose)
+				}
+			})
+			table := fmt.Sprintf("auth_record_test_%d", time.Now().UnixNano())
+			if _, err = db.ExecContext(ctx, "CREATE TABLE "+table+" (id TEXT PRIMARY KEY, content JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if _, errDrop := db.ExecContext(ctx, "DROP TABLE "+table); errDrop != nil {
+					t.Error(errDrop)
+				}
+			})
+			store := &PostgresStore{db: db, cfg: PostgresStoreConfig{AuthTable: table}, authDir: t.TempDir()}
+			const id = "credential.json"
+			const previous = `{"type":"codex","value":"before"}`
+			created := time.Date(2001, 2, 3, 4, 5, 6, 123456000, time.UTC)
+			updated := time.Date(2002, 3, 4, 5, 6, 7, 654321000, time.UTC)
+			if test.existing {
+				if _, err = db.ExecContext(ctx, "INSERT INTO "+table+" (id, content, created_at, updated_at) VALUES ($1, $2, $3, $4)", id, previous, created, updated); err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(filepath.Join(store.authDir, id), []byte(previous), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			saveCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			publishErr := errors.New("publication rejected")
+			if test.fail {
+				store.renameFile = func(string, string) error {
+					if test.cancel {
+						cancel()
+					}
+					return publishErr
+				}
+			}
+			_, err = store.Save(saveCtx, &cliproxyauth.Auth{ID: id, Storage: &postgresAuthTestStorage{data: []byte(test.candidate)}})
+			if test.fail && (!errors.Is(err, publishErr) || strings.Contains(err.Error(), "rollback failed")) || !test.fail && err != nil {
+				t.Fatalf("Save() error = %v", err)
+			}
+			var content string
+			var gotCreated, gotUpdated time.Time
+			err = db.QueryRowContext(ctx, "SELECT content, created_at, updated_at FROM "+table+" WHERE id = $1", id).Scan(&content, &gotCreated, &gotUpdated)
+			if !test.existing {
+				if !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("failed insertion left a record: %v", err)
+				}
+				return
+			}
+			wantContent := test.candidate
+			if test.fail {
+				wantContent = previous
+			}
+			if err != nil || !jsonEqual([]byte(content), []byte(wantContent)) || !gotCreated.Equal(created) || test.fail && !gotUpdated.Equal(updated) || !test.fail && !gotUpdated.After(updated) {
+				t.Fatalf("record = (%s, %v, %v), error = %v", content, gotCreated, gotUpdated, err)
+			}
+			listed, errList := store.List(ctx)
+			if errList != nil || len(listed) != 1 || !listed[0].CreatedAt.Equal(gotCreated) || !listed[0].UpdatedAt.Equal(gotUpdated) {
+				t.Fatalf("List() did not preserve record timestamps: %+v, %v", listed, errList)
+			}
+		})
+	}
+}
