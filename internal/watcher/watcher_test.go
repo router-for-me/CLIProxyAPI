@@ -1827,13 +1827,18 @@ func TestHandleEventIgnoresCodexClientModelOverrideTempFiles(t *testing.T) {
 	}
 }
 
+// codexClientModelFieldValue reports the value the local override layer writes for a
+// slug's field.
 func codexClientModelFieldValue(state registry.CodexClientModelsState, slug, field string) any {
-	for _, model := range state.Models {
-		if name, _ := model["slug"].(string); name == slug {
-			return model[field]
-		}
+	patch, ok := state.Override[slug]
+	if !ok {
+		return nil
 	}
-	return nil
+	var entry map[string]any
+	if errUnmarshal := json.Unmarshal(patch, &entry); errUnmarshal != nil {
+		return nil
+	}
+	return entry[field]
 }
 
 func TestStartPicksUpCodexClientModelOverrideFileChanges(t *testing.T) {
