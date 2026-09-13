@@ -194,6 +194,9 @@ func TestPostgresStorePublicationRestoresCompleteRecord(t *testing.T) {
 		{"cancelled-delete", true, "", true, true},
 		{"insert-failure", false, `{"value":"candidate"}`, true, false},
 		{"successful-update", true, `{"value":"candidate"}`, false, false},
+		{"unchanged-storage", true, `{"type":"codex","value":"before","disabled":false}`, false, false},
+		{"unchanged-metadata", true, `{"disabled":false,"value":"before","type":"codex"}`, false, false},
+		{"unchanged-local-repair", true, `{"type":"codex","value":"before","disabled":false}`, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -217,7 +220,7 @@ func TestPostgresStorePublicationRestoresCompleteRecord(t *testing.T) {
 			})
 			store := &PostgresStore{db: db, cfg: PostgresStoreConfig{AuthTable: table}, authDir: t.TempDir()}
 			const id = "credential.json"
-			const previous = `{"type":"codex","value":"before"}`
+			const previous = `{"type":"codex","value":"before","disabled":false}`
 			created := time.Date(2001, 2, 3, 4, 5, 6, 123456000, time.UTC)
 			updated := time.Date(2002, 3, 4, 5, 6, 7, 654321000, time.UTC)
 			if test.existing {
@@ -230,6 +233,11 @@ func TestPostgresStorePublicationRestoresCompleteRecord(t *testing.T) {
 			}
 			saveCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
+			if test.name == "unchanged-local-repair" {
+				if err = os.WriteFile(filepath.Join(store.authDir, id), []byte(`{"value":"stale"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			publishErr := errors.New("publication rejected")
 			if test.fail {
 				store.renameFile = func(string, string) error {
@@ -239,7 +247,12 @@ func TestPostgresStorePublicationRestoresCompleteRecord(t *testing.T) {
 					return publishErr
 				}
 			}
-			_, err = store.Save(saveCtx, &cliproxyauth.Auth{ID: id, Storage: &postgresAuthTestStorage{data: []byte(test.candidate)}})
+			auth := &cliproxyauth.Auth{ID: id, Storage: &postgresAuthTestStorage{data: []byte(test.candidate)}}
+			if test.name == "unchanged-metadata" {
+				auth.Storage = nil
+				auth.Metadata = map[string]any{"type": "codex", "value": "before"}
+			}
+			_, err = store.Save(saveCtx, auth)
 			if test.fail && (!errors.Is(err, publishErr) || strings.Contains(err.Error(), "rollback failed")) || !test.fail && err != nil {
 				t.Fatalf("Save() error = %v", err)
 			}
@@ -256,8 +269,13 @@ func TestPostgresStorePublicationRestoresCompleteRecord(t *testing.T) {
 			if test.fail {
 				wantContent = previous
 			}
-			if err != nil || !jsonEqual([]byte(content), []byte(wantContent)) || !gotCreated.Equal(created) || test.fail && !gotUpdated.Equal(updated) || !test.fail && !gotUpdated.After(updated) {
+			preserveUpdated := test.fail || strings.HasPrefix(test.name, "unchanged-")
+			if err != nil || !jsonEqual([]byte(content), []byte(wantContent)) || !gotCreated.Equal(created) || preserveUpdated && !gotUpdated.Equal(updated) || !preserveUpdated && !gotUpdated.After(updated) {
 				t.Fatalf("record = (%s, %v, %v), error = %v", content, gotCreated, gotUpdated, err)
+			}
+			local, errLocal := os.ReadFile(filepath.Join(store.authDir, id))
+			if errLocal != nil || !jsonEqual(local, []byte(wantContent)) {
+				t.Fatalf("local content = %s, error = %v, want %s", local, errLocal, wantContent)
 			}
 			listed, errList := store.List(ctx)
 			if errList != nil || len(listed) != 1 || !listed[0].CreatedAt.Equal(gotCreated) || !listed[0].UpdatedAt.Equal(gotUpdated) {

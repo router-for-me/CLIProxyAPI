@@ -679,7 +679,7 @@ func (s *PostgresStore) replaceAuthRecord(ctx context.Context, conn *sql.Conn, r
 
 	table := s.fullTableName(s.cfg.AuthTable)
 	selectQuery := fmt.Sprintf("SELECT content, created_at, updated_at FROM %s WHERE id = $1 FOR UPDATE", table)
-	updateQuery := fmt.Sprintf("UPDATE %s SET content = $2, updated_at = NOW() WHERE id = $1", table)
+	updateQuery := fmt.Sprintf("UPDATE %s SET content = $2, updated_at = CASE WHEN content = $2 THEN updated_at ELSE NOW() END WHERE id = $1", table)
 	insertQuery := fmt.Sprintf(`
 		INSERT INTO %s (id, content, created_at, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
