@@ -25,6 +25,11 @@ func ValidateAuthWeight(auth *Auth) error {
 	return nil
 }
 
+// AuthWeight returns the effective routing weight for an auth.
+func AuthWeight(auth *Auth) int64 {
+	return authWeight(auth)
+}
+
 // ApplyAuthWeightMetadata validates the auth and applies a source metadata weight.
 func ApplyAuthWeightMetadata(auth *Auth, metadata map[string]any) error {
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {

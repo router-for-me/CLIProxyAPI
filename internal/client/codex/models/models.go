@@ -88,7 +88,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			if thinkingSupport := codexClientThinkingSupport(model); thinkingSupport != nil {
 				applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
 			}
-			applyCodexClientProviderCapabilities(entry, id, true, providersForModel)
+			applyCodexClientProviderCapabilities(entry, model, id, true, providersForModel)
 			sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 			applyCodexClientVisibilityOverride(entry, id)
 			if optimizeMultiAgentV2 {
@@ -101,7 +101,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2, clientVersion)
 		applyCodexClientMaxTokens(entry, model)
-		applyCodexClientProviderCapabilities(entry, id, false, providersForModel)
+		applyCodexClientProviderCapabilities(entry, model, id, false, providersForModel)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 		applyCodexClientVisibilityOverride(entry, id)
 		result = append(result, entry)
@@ -404,9 +404,9 @@ func applyCodexClientMaxTokens(entry map[string]any, model map[string]any) {
 	}
 }
 
-func applyCodexClientProviderCapabilities(entry map[string]any, id string, isTemplate bool, providersForModel ProvidersForModelFunc) {
+func applyCodexClientProviderCapabilities(entry, model map[string]any, id string, isTemplate bool, providersForModel ProvidersForModelFunc) {
 	if !isTemplate {
-		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
+		applyCodexClientSearchToolSupport(entry, model, id, false, providersForModel)
 		return
 	}
 	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
@@ -416,9 +416,10 @@ func applyCodexClientProviderCapabilities(entry map[string]any, id string, isTem
 		entry["service_tiers"] = []any{}
 		delete(entry, "upgrade")
 		delete(entry, "availability_nux")
+		applyCodexClientSearchToolSupport(entry, model, id, true, providersForModel)
 		return
 	}
-	applyCodexClientSearchToolSupport(entry, id, isTemplate, providersForModel)
+	applyCodexClientSearchToolSupport(entry, model, id, isTemplate, providersForModel)
 }
 
 func isPureCodexProvider(id string, providersForModel ProvidersForModelFunc) bool {
@@ -442,7 +443,11 @@ func isPureCodexProvider(id string, providersForModel ProvidersForModelFunc) boo
 	return true
 }
 
-func applyCodexClientSearchToolSupport(entry map[string]any, id string, templateModel bool, providersForModel ProvidersForModelFunc) {
+func applyCodexClientSearchToolSupport(entry, model map[string]any, id string, templateModel bool, providersForModel ProvidersForModelFunc) {
+	if override, ok := model["codex_web_search"].(bool); ok {
+		entry["supports_search_tool"] = override
+		return
+	}
 	supportsSearch, _ := entry["supports_search_tool"].(bool)
 	if !supportsSearch {
 		return

@@ -208,6 +208,59 @@ func TestComputeOtherModelHashesIncludeForceMapping(t *testing.T) {
 	}
 }
 
+func TestComputeModelHashesIncludeCodexWebSearch(t *testing.T) {
+	trueValue := true
+	falseValue := false
+	tests := []struct {
+		name     string
+		unset    string
+		enabled  string
+		disabled string
+	}{
+		{
+			name:     "openai compatibility",
+			unset:    ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m"}}),
+			enabled:  ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m", CodexWebSearch: &trueValue}}),
+			disabled: ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m", CodexWebSearch: &falseValue}}),
+		},
+		{
+			name:     "vertex",
+			unset:    ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "m"}}),
+			enabled:  ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "m", CodexWebSearch: &trueValue}}),
+			disabled: ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "m", CodexWebSearch: &falseValue}}),
+		},
+		{
+			name:     "claude",
+			unset:    ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "m"}}),
+			enabled:  ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "m", CodexWebSearch: &trueValue}}),
+			disabled: ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "m", CodexWebSearch: &falseValue}}),
+		},
+		{
+			name:     "codex",
+			unset:    ComputeCodexModelsHash([]config.CodexModel{{Name: "m"}}),
+			enabled:  ComputeCodexModelsHash([]config.CodexModel{{Name: "m", CodexWebSearch: &trueValue}}),
+			disabled: ComputeCodexModelsHash([]config.CodexModel{{Name: "m", CodexWebSearch: &falseValue}}),
+		},
+		{
+			name:     "gemini",
+			unset:    ComputeGeminiModelsHash([]config.GeminiModel{{Name: "m"}}),
+			enabled:  ComputeGeminiModelsHash([]config.GeminiModel{{Name: "m", CodexWebSearch: &trueValue}}),
+			disabled: ComputeGeminiModelsHash([]config.GeminiModel{{Name: "m", CodexWebSearch: &falseValue}}),
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if testCase.unset == "" || testCase.enabled == "" || testCase.disabled == "" {
+				t.Fatal("model hashes must not be empty")
+			}
+			if testCase.unset == testCase.enabled || testCase.unset == testCase.disabled || testCase.enabled == testCase.disabled {
+				t.Fatalf("codex-web-search tri-state must change model hash: unset=%q enabled=%q disabled=%q", testCase.unset, testCase.enabled, testCase.disabled)
+			}
+		})
+	}
+}
+
 func TestComputeExcludedModelsHash_Normalizes(t *testing.T) {
 	hash1 := ComputeExcludedModelsHash([]string{" A ", "b", "a"})
 	hash2 := ComputeExcludedModelsHash([]string{"a", " b", "A"})

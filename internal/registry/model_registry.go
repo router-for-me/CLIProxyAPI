@@ -73,6 +73,11 @@ type ModelInfo struct {
 	// fetchAvailableModels.webSearchModelIds and can execute native googleSearch.
 	SupportsWebSearch bool `json:"supports_web_search,omitempty"`
 
+	// CodexWebSearch overrides the Codex client model catalog's
+	// supports_search_tool value for this model. Nil preserves the default
+	// template and provider behavior.
+	CodexWebSearch *bool `json:"-"`
+
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
@@ -324,7 +329,12 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		}
 		rawModelIDs = append(rawModelIDs, model.ID)
 		newCounts[model.ID]++
-		if _, exists := newModels[model.ID]; exists {
+		if existing, exists := newModels[model.ID]; exists {
+			if merged, changed := MergeCodexWebSearchOverride(existing.CodexWebSearch, model.CodexWebSearch); changed {
+				clone := cloneModelInfo(existing)
+				clone.CodexWebSearch = merged
+				newModels[model.ID] = clone
+			}
 			continue
 		}
 		newModels[model.ID] = model
@@ -648,6 +658,10 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 		}
 		copyModel.Thinking = &copyThinking
 	}
+	if model.CodexWebSearch != nil {
+		value := *model.CodexWebSearch
+		copyModel.CodexWebSearch = &value
+	}
 	if model.Config != nil {
 		copyConfig := *model.Config
 		if len(model.Config.OverrideHeader) > 0 {
@@ -659,6 +673,29 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 		copyModel.Config = &copyConfig
 	}
 	return &copyModel
+}
+
+// MergeCodexWebSearchOverride combines two per-model Codex web search overrides
+// for the same model ID. A nil override defers to the other value, while an
+// explicit false wins over true so a pool with any unsupported upstream never
+// advertises web search. It returns the merged value and whether it differs
+// from existing.
+func MergeCodexWebSearchOverride(existing, incoming *bool) (*bool, bool) {
+	if existing == nil {
+		if incoming == nil {
+			return nil, false
+		}
+		value := *incoming
+		return &value, true
+	}
+	if incoming == nil || !*existing {
+		return existing, false
+	}
+	if !*incoming {
+		value := false
+		return &value, true
+	}
+	return existing, false
 }
 
 func cloneModelInfosUnique(models []*ModelInfo) []*ModelInfo {
@@ -1225,6 +1262,39 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	return models, expiresAt
 }
 
+// codexWebSearchOverrideLocked returns the effective explicit Codex web search
+// override for a model. Explicit false wins so a model is never advertised as
+// search-capable while an available provider explicitly says it is unsupported.
+// The caller must hold r.mutex.
+func (r *ModelRegistry) codexWebSearchOverrideLocked(modelID string) *bool {
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || len(registration.Providers) == 0 {
+		return nil
+	}
+
+	hasTrue := false
+	for clientID, infos := range r.clientModelInfos {
+		info := infos[modelID]
+		if info == nil || info.CodexWebSearch == nil {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(r.clientProviders[clientID]))
+		if provider == "" || registration.Providers[provider] <= 0 {
+			continue
+		}
+		if !*info.CodexWebSearch {
+			value := false
+			return &value
+		}
+		hasTrue = true
+	}
+	if hasTrue {
+		value := true
+		return &value
+	}
+	return nil
+}
+
 func cloneModelMaps(models []map[string]any) []map[string]any {
 	cloned := make([]map[string]any, 0, len(models))
 	for _, model := range models {
@@ -1439,23 +1509,10 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 		count int
 	}
 	providers := make([]providerCount, 0, len(registration.Providers))
-	// suspendedByProvider := make(map[string]int)
-	// if registration.SuspendedClients != nil {
-	// 	for clientID := range registration.SuspendedClients {
-	// 		if provider, ok := r.clientProviders[clientID]; ok && provider != "" {
-	// 			suspendedByProvider[provider]++
-	// 		}
-	// 	}
-	// }
 	for name, count := range registration.Providers {
 		if count <= 0 {
 			continue
 		}
-		// adjusted := count - suspendedByProvider[name]
-		// if adjusted <= 0 {
-		// 	continue
-		// }
-		// providers = append(providers, providerCount{name: name, count: adjusted})
 		providers = append(providers, providerCount{name: name, count: count})
 	}
 	if len(providers) == 0 {
@@ -1536,6 +1593,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
+		}
+		if override := r.codexWebSearchOverrideLocked(model.ID); override != nil {
+			result["codex_web_search"] = *override
 		}
 		return result
 
