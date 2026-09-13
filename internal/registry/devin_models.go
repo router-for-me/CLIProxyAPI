@@ -62,7 +62,15 @@ func LookupDevinModel(modelID string) *ModelInfo {
 		return nil
 	}
 
-	for _, m := range GetDevinModels() {
+	devinCatalogStore.mu.RLock()
+	models := devinCatalogStore.models
+	devinCatalogStore.mu.RUnlock()
+
+	if len(models) == 0 {
+		models = GetDevinModels()
+	}
+
+	for _, m := range models {
 		mClean := strings.ToLower(strings.TrimPrefix(m.ID, "devin/"))
 		if mClean == clean {
 			return cloneModelInfo(m)

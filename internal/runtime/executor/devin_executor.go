@@ -144,38 +144,15 @@ func (e *DevinExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		return nil, errors.New("devin executor: auth is nil")
 	}
 
-	sessionToken := strings.TrimSpace(auth.Attributes["api_key"])
-	if sessionToken == "" {
-		sessionToken = strings.TrimSpace(auth.Attributes["session_token"])
-	}
-	if sessionToken == "" && auth.Metadata != nil {
-		if v, ok := auth.Metadata["api_key"].(string); ok {
-			sessionToken = strings.TrimSpace(v)
-		}
-		if sessionToken == "" {
-			if v, ok := auth.Metadata["session_token"].(string); ok {
-				sessionToken = strings.TrimSpace(v)
-			}
-		}
-	}
+	sessionToken, baseURL, deviceSeed := devinAuthCredentials(auth)
 	if sessionToken == "" {
 		return auth, nil
 	}
 
 	httpClient := helps.NewDevinHTTPClient(ctx, e.cfg, auth, 30*time.Second)
 	authService := devinauth.NewDevinAuthService(httpClient)
-	if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
+	if baseURL != "" {
 		authService.SetServerBaseURL(baseURL)
-	} else if auth.Metadata != nil {
-		if v, ok := auth.Metadata["base_url"].(string); ok && strings.TrimSpace(v) != "" {
-			authService.SetServerBaseURL(v)
-		}
-	}
-	deviceSeed := strings.TrimSpace(auth.Attributes["device_seed"])
-	if deviceSeed == "" && auth.Metadata != nil {
-		if v, ok := auth.Metadata["device_seed"].(string); ok {
-			deviceSeed = strings.TrimSpace(v)
-		}
 	}
 
 	status, err := authService.FetchUserStatus(ctx, sessionToken, deviceSeed)
@@ -784,7 +761,9 @@ func (e *DevinExecutor) streamDevinFrames(
 		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_cached_tokens", finalUsage.CachedTokens)
 		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_tokens", totalTokens)
 		if detail, ok := helps.ParseInteractionsStreamUsage(completedEvent); ok {
-			reporter.Publish(ctx, detail)
+			if reporter != nil {
+				reporter.Publish(ctx, detail)
+			}
 		}
 	}
 	_ = emitInteractionsEvent(completedEvent)
@@ -846,13 +825,20 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		if len(toolBuilders) == 0 {
 			return nil
 		}
-		res := make([]helps.DevinToolCall, len(toolBuilders))
+		res := make([]helps.DevinToolCall, 0, len(toolBuilders))
 		for i := range toolBuilders {
-			res[i] = helps.DevinToolCall{
+			if toolBuilders[i] == nil {
+				continue
+			}
+			// Skip unpopulated sparse placeholders
+			if toolBuilders[i].id == "" && toolBuilders[i].name == "" && toolBuilders[i].args.Len() == 0 {
+				continue
+			}
+			res = append(res, helps.DevinToolCall{
 				ID:        toolBuilders[i].id,
 				Name:      toolBuilders[i].name,
 				Arguments: toolBuilders[i].args.String(),
-			}
+			})
 		}
 		return res
 	}

@@ -447,6 +447,9 @@ func BuildDevinGetChatMessageRequest(
 			tBytes = protowire.AppendString(tBytes, tool.Name)
 		}
 		desc := tool.Description
+		// Claude Code subagent tool descriptions hardcode snake_case "task_id", but Devin's
+		// upstream tool execution environment strictly expects camelCase "taskId". Normalizing
+		// the prompt description prevents the model from generating incompatible parameter names.
 		if strings.Contains(desc, "Takes a task_id parameter identifying the task") {
 			desc = strings.ReplaceAll(desc, "Takes a task_id parameter identifying the task", "Takes a taskId parameter identifying the task")
 		}
