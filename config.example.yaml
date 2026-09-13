@@ -304,6 +304,24 @@ codex:
 #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions
 #     - "API"
 #     - "proxy"
+#     # Google's Cloud Code Assist content rule answers a request whose system instructions
+#     # carry certain harness phrases with a misleading 429 RESOURCE_EXHAUSTED
+#     # ("Resource has been exhausted (e.g. check quota).") even though the credential's quota
+#     # is untouched. The credential then cools down and the caller only sees
+#     # "All credentials for model ... are cooling down via provider antigravity".
+#     # Coding harnesses that hardcode the RFC 2119 conventions block trip this on every
+#     # request, so mask the phrases that rule matches:
+#     #   - "RFC 2119"
+#     #   - "system-conventions"
+#     #   - "system_conventions"
+#     #   - "system-directive"
+#     #   - "system_directive"
+#     # The executor also logs a warning when one of these phrases still leaves the process
+#     # unmasked. See https://github.com/router-for-me/CLIProxyAPI/issues/5751
+#   false-429-phrases:           # optional: override the phrases that trigger that warning
+#     # Unset keeps the built-in list ("RFC 2119", "system-conventions", "system_conventions",
+#     # "system-directive", "system_directive"). An empty list disables the warning. Any other
+#     # list replaces the built-in one, for operators tracking a different upstream rule.
 #   connection-pool:             # optional: upstream HTTP connection pool settings
 #     enabled: false             # whether to enable connection pooling (default: false; set to true to enable connection pooling)
 #     idle-conn-timeout: "30s"   # idle keep-alive timeout (default: 30s, capped at 210s)

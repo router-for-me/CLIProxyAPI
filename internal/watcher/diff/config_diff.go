@@ -108,6 +108,17 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !reflect.DeepEqual(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: %d -> %d", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
 	}
+	oldFalse429Phrases := "<nil>"
+	if oldCfg.Antigravity.False429Phrases != nil {
+		oldFalse429Phrases = fmt.Sprintf("%d", len(*oldCfg.Antigravity.False429Phrases))
+	}
+	newFalse429Phrases := "<nil>"
+	if newCfg.Antigravity.False429Phrases != nil {
+		newFalse429Phrases = fmt.Sprintf("%d", len(*newCfg.Antigravity.False429Phrases))
+	}
+	if oldFalse429Phrases != newFalse429Phrases {
+		changes = append(changes, fmt.Sprintf("antigravity.false-429-phrases: %s -> %s", oldFalse429Phrases, newFalse429Phrases))
+	}
 	oldEnabled := "<nil>"
 	if oldCfg.Antigravity.ConnectionPool.Enabled != nil {
 		oldEnabled = fmt.Sprintf("%t", *oldCfg.Antigravity.ConnectionPool.Enabled)

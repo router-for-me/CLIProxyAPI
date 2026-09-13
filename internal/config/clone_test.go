@@ -30,6 +30,43 @@ func TestParseConfigBytes_AntigravitySensitiveWords(t *testing.T) {
 	}
 }
 
+func TestParseConfigBytes_AntigravityFalse429Phrases(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`antigravity:
+  false-429-phrases:
+    - "ACME-SENTINEL"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if cfg.Antigravity.False429Phrases == nil {
+		t.Fatal("Antigravity.False429Phrases = nil, want configured list")
+	}
+	if want := []string{"ACME-SENTINEL"}; !reflect.DeepEqual(*cfg.Antigravity.False429Phrases, want) {
+		t.Fatalf("Antigravity.False429Phrases = %#v, want %#v", *cfg.Antigravity.False429Phrases, want)
+	}
+
+	// An explicit empty list has to survive parsing: it is how the diagnostic is disabled,
+	// so collapsing it into nil would silently re-enable the built-in phrases.
+	cleared, errCleared := ParseConfigBytes([]byte("antigravity:\n  false-429-phrases: []\n"))
+	if errCleared != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errCleared)
+	}
+	if cleared.Antigravity.False429Phrases == nil {
+		t.Fatal("Antigravity.False429Phrases = nil, want empty configured list")
+	}
+	if len(*cleared.Antigravity.False429Phrases) != 0 {
+		t.Fatalf("Antigravity.False429Phrases = %#v, want empty", *cleared.Antigravity.False429Phrases)
+	}
+
+	unset, errUnset := ParseConfigBytes([]byte("port: 8045\n"))
+	if errUnset != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errUnset)
+	}
+	if unset.Antigravity.False429Phrases != nil {
+		t.Fatalf("Antigravity.False429Phrases = %#v, want nil when unset", *unset.Antigravity.False429Phrases)
+	}
+}
+
 func TestParseConfigBytes_AntigravityConnectionPool(t *testing.T) {
 	cfg, errParse := ParseConfigBytes([]byte(`antigravity:
   connection-pool:
