@@ -102,6 +102,46 @@ func TestAntigravityFalse429WarningStaysSilentOnceMasked(t *testing.T) {
 	}
 }
 
+func TestAntigravityFalse429WarningUsesConfiguredPhrases(t *testing.T) {
+	resetAntigravityFalse429Warnings()
+	t.Cleanup(resetAntigravityFalse429Warnings)
+	hook := newAntigravityFingerprintHook(t)
+
+	configured := []string{"ACME-SENTINEL"}
+	executor := NewAntigravityExecutor(&config.Config{
+		Antigravity: config.AntigravityConfig{False429Phrases: &configured},
+	})
+	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"ACME-SENTINEL and RFC 2119"}]}}}`)
+
+	executor.obfuscateSensitiveWords(payload)
+
+	entries := hook.AllEntries()
+	if len(entries) != 1 {
+		t.Fatalf("warnings = %d, want 1 for the configured phrase: %#v", len(entries), entries)
+	}
+	if got := entries[0].Data["phrase"]; got != "ACME-SENTINEL" {
+		t.Fatalf("phrase = %v, want the configured phrase", got)
+	}
+}
+
+func TestAntigravityFalse429WarningDisabledByEmptyList(t *testing.T) {
+	resetAntigravityFalse429Warnings()
+	t.Cleanup(resetAntigravityFalse429Warnings)
+	hook := newAntigravityFingerprintHook(t)
+
+	cleared := []string{}
+	executor := NewAntigravityExecutor(&config.Config{
+		Antigravity: config.AntigravityConfig{False429Phrases: &cleared},
+	})
+	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"RFC 2119"}]}}}`)
+
+	executor.obfuscateSensitiveWords(payload)
+
+	if entries := hook.AllEntries(); len(entries) != 0 {
+		t.Fatalf("warnings = %d, want none when the list is cleared: %#v", len(entries), entries)
+	}
+}
+
 func TestAntigravityFalse429WarningIgnoresUserContent(t *testing.T) {
 	resetAntigravityFalse429Warnings()
 	t.Cleanup(resetAntigravityFalse429Warnings)

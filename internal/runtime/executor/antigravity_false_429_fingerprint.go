@@ -9,7 +9,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// antigravityKnownFalse429Phrases are system-instruction phrases that Google's Cloud Code
+// antigravityDefaultFalse429Phrases are system-instruction phrases that Google's Cloud Code
 // Assist content rule answers with a misleading 429 RESOURCE_EXHAUSTED body
 // ("Resource has been exhausted (e.g. check quota).") while the credential's quota is
 // untouched.
@@ -24,8 +24,9 @@ import (
 // router-for-me/CLIProxyAPI#5751 and can1357/oh-my-pi#11699 (the `<system-conventions>`
 // + `RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` opening block that
 // several coding harnesses hardcode). A phrase that does not actually trip the upstream
-// rule would turn this diagnostic into a false warning.
-var antigravityKnownFalse429Phrases = []string{
+// rule would turn this diagnostic into a false warning. Operators tracking a different
+// rule replace the list through antigravity.false-429-phrases.
+var antigravityDefaultFalse429Phrases = []string{
 	"RFC 2119",
 	"system-conventions",
 	"system_conventions",
@@ -38,6 +39,15 @@ var antigravityKnownFalse429Phrases = []string{
 // sends a flagged prompt would otherwise turn one misconfiguration into a per-request log
 // flood.
 var antigravityFalse429Warned sync.Map
+
+// false429Phrases resolves the diagnostic phrase list: the built-in list by default, the
+// operator's list when configured, and nothing when it was explicitly cleared.
+func (e *AntigravityExecutor) false429Phrases() []string {
+	if e != nil && e.cfg != nil && e.cfg.Antigravity.False429Phrases != nil {
+		return *e.cfg.Antigravity.False429Phrases
+	}
+	return antigravityDefaultFalse429Phrases
+}
 
 // warnKnownFalse429Phrases reports system-instruction phrases that still reach the
 // upstream after payload transforms. It is a diagnostic only: the payload is never
@@ -68,7 +78,7 @@ func (e *AntigravityExecutor) warnKnownFalse429Phrases(payload []byte) {
 		return
 	}
 
-	for _, phrase := range antigravityKnownFalse429Phrases {
+	for _, phrase := range e.false429Phrases() {
 		if !strings.Contains(text, phrase) {
 			continue
 		}

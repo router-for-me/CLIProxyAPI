@@ -142,6 +142,13 @@ type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 
+	// False429Phrases lists system-instruction phrases that the upstream content rule answers
+	// with a misleading 429 RESOURCE_EXHAUSTED instead of a content error; the executor warns
+	// once when one of them still leaves unmasked. Unset keeps the built-in list of known
+	// harness fingerprints, an empty list disables the diagnostic, and any other list replaces
+	// the built-in one.
+	False429Phrases *[]string `yaml:"false-429-phrases,omitempty" json:"false-429-phrases,omitempty"`
+
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
 }

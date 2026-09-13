@@ -340,6 +340,7 @@ func TestBuildConfigChangeDetails_RedactsEndpointURLs(t *testing.T) {
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	oldPoolEnabled := false
 	newPoolEnabled := true
+	newFalse429Phrases := []string{"ACME-SENTINEL"}
 	oldCfg := &config.Config{
 		Port:                          1000,
 		AuthDir:                       "/old",
@@ -387,7 +388,8 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		WebsocketAuth:                 true,
 		QuotaExceeded:                 config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true, AntigravityCredits: true},
 		Antigravity: config.AntigravityConfig{
-			SensitiveWords: []string{"new-word-1", "new-word-2"},
+			SensitiveWords:  []string{"new-word-1", "new-word-2"},
+			False429Phrases: &newFalse429Phrases,
 			ConnectionPool: config.AntigravityConnectionPoolConfig{
 				Enabled:         &newPoolEnabled,
 				IdleConnTimeout: "10s",
@@ -442,6 +444,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "quota-exceeded.switch-preview-model: false -> true")
 	expectContains(t, details, "quota-exceeded.antigravity-credits: false -> true")
 	expectContains(t, details, "antigravity.sensitive-words: 1 -> 2")
+	expectContains(t, details, "antigravity.false-429-phrases: <nil> -> 1")
 	expectContains(t, details, "antigravity.connection-pool.enabled: false -> true")
 	expectContains(t, details, `antigravity.connection-pool.idle-conn-timeout: "30s" -> "10s"`)
 	expectContains(t, details, "xai.inject-x-search: false -> true")
