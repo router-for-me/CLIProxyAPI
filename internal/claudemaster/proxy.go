@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const masterAPIHost = "api.anthropic.com"
@@ -27,6 +28,29 @@ type ProxyOptions struct {
 	Certificate      tls.Certificate
 	Inference        http.Handler
 	ControlTransport http.RoundTripper
+}
+
+// ProxyStats is a best-effort, counter-only diagnostic snapshot. It never
+// contains request paths, headers, bodies, account identities, or credentials.
+// Accepted means an authenticated, valid CONNECT was handed off to a tunnel;
+// APIRequests counts requests successfully parsed after the local TLS handshake.
+type ProxyStats struct {
+	ConnectAccepted   uint64
+	ConnectRejected   uint64
+	APIRequests       uint64
+	InferenceRequests uint64
+	ControlRequests   uint64
+	BlockedRequests   uint64
+	ActiveConnections uint64
+}
+
+type proxyCounters struct {
+	connectAccepted   atomic.Uint64
+	connectRejected   atomic.Uint64
+	apiRequests       atomic.Uint64
+	inferenceRequests atomic.Uint64
+	controlRequests   atomic.Uint64
+	blockedRequests   atomic.Uint64
 }
 
 // Proxy is a process-local CONNECT proxy, not a network security boundary.
@@ -48,6 +72,7 @@ type Proxy struct {
 	conns       map[*proxyConn]struct{}
 	wg          sync.WaitGroup
 	closeOnce   sync.Once
+	counters    proxyCounters
 }
 
 // StartProxy binds an ephemeral IPv4 loopback port. It never reads account
@@ -108,6 +133,24 @@ func StartProxy(opts ProxyOptions) (*Proxy, error) {
 // do not log it or expose it in status output.
 func (p *Proxy) URL() string { return p.url }
 
+// Snapshot can be displayed without exposing the proxy's private capability or
+// user data. ActiveConnections counts owned CONNECT sockets, including both ends
+// of blind tunnels; it does not enumerate destinations or transport pool sockets.
+func (p *Proxy) Snapshot() ProxyStats {
+	p.mu.Lock()
+	active := uint64(len(p.conns))
+	p.mu.Unlock()
+	return ProxyStats{
+		ConnectAccepted:   p.counters.connectAccepted.Load(),
+		ConnectRejected:   p.counters.connectRejected.Load(),
+		APIRequests:       p.counters.apiRequests.Load(),
+		InferenceRequests: p.counters.inferenceRequests.Load(),
+		ControlRequests:   p.counters.controlRequests.Load(),
+		BlockedRequests:   p.counters.blockedRequests.Load(),
+		ActiveConnections: active,
+	}
+}
+
 // Close cancels handlers and closes both normal and CONNECT-hijacked sockets.
 // It is safe to call concurrently or more than once.
 func (p *Proxy) Close() error {
@@ -163,32 +206,39 @@ func (p *Proxy) track(conn net.Conn) *proxyConn {
 
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodConnect {
+		p.counters.connectRejected.Add(1)
 		http.Error(w, "proxy expects HTTPS CONNECT", http.StatusBadRequest)
 		return
 	}
 	if len(r.Header.Values("Proxy-Authorization")) != 1 || subtle.ConstantTimeCompare([]byte(r.Header.Get("Proxy-Authorization")), []byte(p.proxyAuth)) != 1 {
+		p.counters.connectRejected.Add(1)
 		w.Header().Set("Proxy-Authenticate", `Basic realm="claude-master"`)
 		http.Error(w, "proxy authentication required", http.StatusProxyAuthRequired)
 		return
 	}
 	host, err := proxyAuthority(r.RequestURI)
 	if err != nil || r.Host != r.RequestURI || r.ContentLength > 0 || len(r.TransferEncoding) != 0 {
+		p.counters.connectRejected.Add(1)
 		http.Error(w, "invalid CONNECT authority", http.StatusBadRequest)
 		return
 	}
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
+		p.counters.connectRejected.Add(1)
 		http.Error(w, "CONNECT unavailable", http.StatusInternalServerError)
 		return
 	}
 	raw, buffered, err := hijacker.Hijack()
 	if err != nil {
+		p.counters.connectRejected.Add(1)
 		return
 	}
 	client := p.track(raw)
 	if client == nil {
+		p.counters.connectRejected.Add(1)
 		return
 	}
+	p.counters.connectAccepted.Add(1)
 	// Read any TLS ClientHello bytes pipelined with CONNECT before reading the
 	// raw socket. The bytes must go through TLS, not into decrypted HTTP.
 	stream := &proxyBufferedConn{Conn: client, reader: buffered.Reader}
@@ -269,22 +319,26 @@ func proxyAuthority(authority string) (string, error) {
 }
 
 func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
+	p.counters.apiRequests.Add(1)
 	host := r.Host
 	if !strings.Contains(host, ":") {
 		host += ":443"
 	}
 	normalized, err := proxyAuthority(host)
 	if err != nil || normalized != masterAPIHost || r.URL.IsAbs() || r.URL.Host != "" || len(r.Header.Values("Proxy-Authorization")) != 0 || !proxyCanonicalPath(r.URL) {
+		p.counters.blockedRequests.Add(1)
 		http.Error(w, "invalid proxied request", http.StatusBadRequest)
 		return
 	}
 	path := r.URL.Path
 	if path == "/v1/messages" || path == "/v1/messages/count_tokens" {
 		if r.Method != http.MethodPost {
+			p.counters.blockedRequests.Add(1)
 			http.Error(w, "inference requires POST", http.StatusMethodNotAllowed)
 			return
 		}
 		if encoding := r.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
+			p.counters.blockedRequests.Add(1)
 			http.Error(w, "inference requires uncompressed JSON", http.StatusUnsupportedMediaType)
 			return
 		}
@@ -294,6 +348,7 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 		// metadata.user_id while remapping the model and owns its own login.
 		request, errRequest := http.NewRequestWithContext(r.Context(), http.MethodPost, path, r.Body)
 		if errRequest != nil {
+			p.counters.blockedRequests.Add(1)
 			http.Error(w, "invalid inference request", http.StatusBadRequest)
 			return
 		}
@@ -305,14 +360,17 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 				request.Header.Add(key, value)
 			}
 		}
+		p.counters.inferenceRequests.Add(1)
 		p.inference.ServeHTTP(w, request)
 		return
 	}
 	if !proxyControlPath(r.Method, path) {
+		p.counters.blockedRequests.Add(1)
 		// Never send an unknown/future inference endpoint to the master account.
 		http.Error(w, "unrecognized control endpoint; request blocked", http.StatusForbidden)
 		return
 	}
+	p.counters.controlRequests.Add(1)
 	p.control.ServeHTTP(w, r)
 }
 
@@ -335,6 +393,9 @@ func proxyControlPath(method, path string) bool {
 	if suffix, ok := strings.CutPrefix(path, "/v1/environments/bridge/"); ok {
 		return method == http.MethodDelete && proxyControlID(suffix)
 	}
+	if suffix, ok := strings.CutPrefix(path, "/v1/environments/"); ok {
+		return proxyEnvironmentControl(method, suffix)
+	}
 	if path == "/v1/code/auth/refresh" || path == "/v1/oauth/token" {
 		return method == http.MethodPost
 	}
@@ -351,6 +412,29 @@ func proxyControlPath(method, path string) bool {
 		}
 	}
 	return false
+}
+
+// Native Claude Code 2.1.269 uses these exact control-plane routes to acquire,
+// acknowledge, renew, stop, and reconnect bridge work. Do not permit the whole
+// environments subtree: an unknown endpoint must still fail closed.
+func proxyEnvironmentControl(method, suffix string) bool {
+	parts := strings.Split(suffix, "/")
+	if (len(parts) != 3 && len(parts) != 4) || !proxyControlID(parts[0]) {
+		return false
+	}
+	if len(parts) == 3 {
+		return method == http.MethodGet && parts[1] == "work" && parts[2] == "poll" ||
+			method == http.MethodPost && parts[1] == "bridge" && parts[2] == "reconnect"
+	}
+	if method != http.MethodPost || parts[1] != "work" || !proxyControlID(parts[2]) {
+		return false
+	}
+	switch parts[3] {
+	case "ack", "stop", "heartbeat":
+		return true
+	default:
+		return false
+	}
 }
 
 func proxyControlID(id string) bool {

@@ -10,6 +10,9 @@ func TestInvalidArgumentsStopBeforeProfileOrLogin(t *testing.T) {
 		{"login", "profile", "--provider", "claude", "--", "unexpected"},
 		{"run", "profile"}, {"run", "profile", "--provider", "claude", "--model", "test"},
 		{"run", "profile", "--unknown-secret=canary"},
+		{"probe", "profile"}, {"probe", "profile", "--model", "test", "--", "unexpected"},
+		{"probe", "profile", "--model", "test", "--diagnostics"},
+		{"login", "profile", "--provider", "claude", "--diagnostics"},
 	} {
 		code, err := run(args)
 		if err == nil || code != 2 {

@@ -2,11 +2,16 @@ package claudemaster
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeSettingsFixture(t *testing.T, path, content string) {
@@ -20,7 +25,7 @@ func writeSettingsFixture(t *testing.T, path, content string) {
 }
 
 func TestSettingsPreflightPreservesOrdinarySettings(t *testing.T) {
-	base := t.TempDir()
+	base := canonicalTestTempDir(t)
 	home, root, managed := filepath.Join(base, "home"), filepath.Join(base, "repo"), filepath.Join(base, "managed")
 	path := filepath.Join(home, ".claude", "settings.json")
 	const original = `{"permissions":{"allow":["Bash(git status)"]},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo synthetic"}]}]},"env":{"EDITOR":"vim","ANTHROPIC_MODEL":"claude-opus-4-8"}}`
@@ -37,7 +42,7 @@ func TestSettingsPreflightPreservesOrdinarySettings(t *testing.T) {
 func TestSettingsRejectsRoutingAtEverySource(t *testing.T) {
 	for _, source := range []string{"user", "cache", "project", "local", "repo-root", "main-checkout", "managed", "drop-in"} {
 		t.Run(source, func(t *testing.T) {
-			base := t.TempDir()
+			base := canonicalTestTempDir(t)
 			home, cwd, repo, main, managed := filepath.Join(base, "home"), filepath.Join(base, "cwd"), filepath.Join(base, "repo"), filepath.Join(base, "main"), filepath.Join(base, "managed")
 			paths := map[string]string{
 				"user":          filepath.Join(home, ".claude", "settings.json"),
@@ -80,7 +85,7 @@ func TestSettingsBlocksEmptyProxyAndCredentialHelpers(t *testing.T) {
 func TestSettingsRejectsLinkedMalformedAndOversizedFiles(t *testing.T) {
 	for _, kind := range []string{"symlink", "directory", "oversized", "malformed"} {
 		t.Run(kind, func(t *testing.T) {
-			base := t.TempDir()
+			base := canonicalTestTempDir(t)
 			path := filepath.Join(base, "settings.json")
 			switch kind {
 			case "symlink":
@@ -108,7 +113,7 @@ func TestSettingsRejectsLinkedMalformedAndOversizedFiles(t *testing.T) {
 }
 
 func TestSettingsDropInsFollowNativeDocumentedNames(t *testing.T) {
-	base := t.TempDir()
+	base := canonicalTestTempDir(t)
 	managed := filepath.Join(base, "managed")
 	for _, name := range []string{".hidden.json", "settings.txt"} {
 		writeSettingsFixture(t, filepath.Join(managed, "managed-settings.d", name), `{"env":{"NO_PROXY":"*"}}`)
@@ -122,7 +127,7 @@ func TestNativeProjectRootsIncludeMainCheckoutForWorktree(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git required for synthetic repository discovery test")
 	}
-	base := t.TempDir()
+	base := canonicalTestTempDir(t)
 	repo, work := filepath.Join(base, "main"), filepath.Join(base, "work")
 	gitTest := func(args ...string) {
 		t.Helper()
@@ -139,7 +144,7 @@ func TestNativeProjectRootsIncludeMainCheckoutForWorktree(t *testing.T) {
 	if err := os.Mkdir(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	roots, err := nativeProjectRoots(cwd)
+	roots, err := nativeProjectRoots(context.Background(), cwd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,10 +160,96 @@ func TestNativeProjectRootsIncludeMainCheckoutForWorktree(t *testing.T) {
 }
 
 func TestNativeProjectRootsOutsideGit(t *testing.T) {
-	cwd := t.TempDir()
-	roots, err := nativeProjectRoots(cwd)
+	cwd := canonicalTestTempDir(t)
+	roots, err := nativeProjectRoots(context.Background(), cwd)
 	if err != nil || len(roots) != 1 || roots[0] != cwd {
 		t.Fatalf("nonrepo roots: %v %v", roots, err)
+	}
+}
+
+func TestNativeSettingsPreCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := ValidateNativeSettings(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-cancelled settings validation did not stop: %v", err)
+	}
+	if _, err := nativeProjectRoots(ctx, canonicalTestTempDir(t)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-cancelled root discovery did not stop: %v", err)
+	}
+}
+
+// The child acknowledges startup over a loopback test connection and then blocks on I/O.
+// This proves cancellation after process start without sleeps or a live Git/provider operation.
+func TestGitDiscoveryCancellationHelper(t *testing.T) {
+	if os.Getenv("CLAUDE_MASTER_GIT_TEST_HELPER") != "1" {
+		return
+	}
+	conn, err := net.Dial("tcp", os.Getenv("CLAUDE_MASTER_GIT_TEST_LISTENER"))
+	if err != nil {
+		os.Exit(2)
+	}
+	if _, err := conn.Write([]byte{1}); err != nil {
+		os.Exit(2)
+	}
+	_, _ = conn.Read(make([]byte, 1))
+	_ = conn.Close()
+	os.Exit(0)
+}
+
+func TestNativeProjectRootsCancelsRunningGit(t *testing.T) {
+	dir := canonicalTestTempDir(t)
+	gitPath := filepath.Join(dir, "git")
+	const helper = "#!/bin/sh\nexec \"$CLAUDE_MASTER_GIT_TEST_BINARY\" -test.run=^TestGitDiscoveryCancellationHelper$\n"
+	if err := os.WriteFile(gitPath, []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CLAUDE_MASTER_GIT_TEST_BINARY", os.Args[0])
+	t.Setenv("CLAUDE_MASTER_GIT_TEST_HELPER", "1")
+	t.Setenv("CLAUDE_MASTER_GIT_TEST_LISTENER", listener.Addr().String())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := nativeProjectRoots(ctx, dir)
+		result <- err
+	}()
+	ready := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			ready <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, err = io.ReadFull(conn, make([]byte, 1))
+		ready <- err
+		// Keep the child blocked until context cancellation closes its socket.
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case err := <-result:
+		t.Fatalf("Git helper exited before the cancellation test: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Git helper did not acknowledge startup")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled Git was treated as a successful/non-Git fallback: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled Git process did not stop")
 	}
 }
 

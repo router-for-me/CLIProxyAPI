@@ -13,12 +13,23 @@ import (
 
 func profileFixture(t *testing.T) *ProfileLock {
 	t.Helper()
-	lock, err := openProfileAt(filepath.Join(t.TempDir(), "profiles"), "test-user", true)
+	lock, err := openProfileAt(filepath.Join(canonicalTestTempDir(t), "profiles"), "test-user", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = lock.Close() })
 	return lock
+}
+
+func canonicalTestTempDir(t *testing.T) string {
+	t.Helper()
+	// macOS commonly places TempDir below /var, a symlink to /private/var. Canonicalize only
+	// the test fixture; production profile validation must continue rejecting linked paths.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func installProfileFixture(t *testing.T, lock *ProfileLock) {
@@ -44,7 +55,7 @@ func installProfileFixture(t *testing.T, lock *ProfileLock) {
 }
 
 func TestProfileRejectsTraversal(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "profiles")
+	root := filepath.Join(canonicalTestTempDir(t), "profiles")
 	for _, name := range []string{"", ".", "..", "../other", "a/b", "a\\b", "/absolute", ".hidden", "a\nsecret"} {
 		if lock, err := openProfileAt(root, name, true); err == nil {
 			_ = lock.Close()
@@ -122,7 +133,7 @@ func TestProfileRejectsCredentialSymlinkAndHiddenDirectory(t *testing.T) {
 }
 
 func TestProfileRejectsLinkedOrPublicDirectories(t *testing.T) {
-	parent := t.TempDir()
+	parent := canonicalTestTempDir(t)
 	actual := filepath.Join(parent, "actual")
 	if err := os.Mkdir(actual, 0o700); err != nil {
 		t.Fatal(err)
@@ -193,7 +204,7 @@ func TestProfileIgnoresUncommittedLoginStage(t *testing.T) {
 }
 
 func TestLoginStoreRejectsOutsidePathsAndReservesPrivateFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTestTempDir(t)
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -18,7 +18,8 @@ func environmentMap(env []string) map[string]string {
 }
 
 func TestChildEnvironmentPreservesMasterAndScopesProxy(t *testing.T) {
-	env, err := ChildEnvironment([]string{"PATH=/usr/bin", "USER=alice", "HTTPS_PROXY=http://old", "NO_PROXY=*", "no_proxy=api.anthropic.com", "CLAUDE_CODE_CHILD_SESSION=parent", "CLAUDE_CODE_SESSION_ID=old", "REMOTE_CLAW_SECRET_FILE=private", "CLAUDE_MASTER_TEST_SECRET=secret"}, []string{"--remote-control"}, "http://private-capability@127.0.0.1:1234", "/process/ca.pem")
+	const proxyURL = "http://private-capability@127.0.0.1:1234"
+	env, err := ChildEnvironment([]string{"PATH=/usr/bin", "USER=alice", "HTTPS_PROXY=http://old", "NO_PROXY=*", "no_proxy=api.anthropic.com", "CLAUDE_CODE_CHILD_SESSION=parent", "CLAUDE_CODE_SESSION_ID=old", "REMOTE_CLAW_SECRET_FILE=private", "CLAUDE_MASTER_TEST_SECRET=secret"}, []string{"--remote-control"}, proxyURL, "/process/ca.pem")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,8 +29,28 @@ func TestChildEnvironmentPreservesMasterAndScopesProxy(t *testing.T) {
 			t.Errorf("leaked %s", key)
 		}
 	}
-	if got["PATH"] != "/usr/bin" || got["USER"] != "alice" || got["HTTPS_PROXY"] != got["https_proxy"] || got["NODE_EXTRA_CA_CERTS"] != "/process/ca.pem" {
+	if got["PATH"] != "/usr/bin" || got["USER"] != "alice" || got["HTTPS_PROXY"] != proxyURL || got["https_proxy"] != proxyURL || got["NODE_EXTRA_CA_CERTS"] != "/process/ca.pem" || got["DISABLE_AUTOUPDATER"] != "1" {
 		t.Fatal("incorrect child environment")
+	}
+}
+
+func TestChildEnvironmentDisablesOnlyItsOwnUpdater(t *testing.T) {
+	parent := []string{"DISABLE_AUTOUPDATER=0", "DISABLE_AUTOUPDATER=false"}
+	env, err := ChildEnvironment(parent, nil, "proxy", "ca")
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, value := range env {
+		if strings.HasPrefix(value, "DISABLE_AUTOUPDATER=") {
+			count++
+			if value != "DISABLE_AUTOUPDATER=1" {
+				t.Fatal("child updater was not disabled")
+			}
+		}
+	}
+	if count != 1 || parent[0] != "DISABLE_AUTOUPDATER=0" || parent[1] != "DISABLE_AUTOUPDATER=false" {
+		t.Fatal("duplicate child override or parent environment mutation")
 	}
 }
 

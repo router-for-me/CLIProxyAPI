@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -319,18 +321,159 @@ type backendSelector struct {
 }
 
 func (s *backendSelector) Pick(ctx context.Context, provider, model string, opts coreexecutor.Options, auths []*coreauth.Auth) (*coreauth.Auth, error) {
-	if provider != s.provider {
+	// The manager's mixed-provider dispatcher also serves single-provider
+	// requests, and passes the synthetic label "mixed" to custom selectors.
+	// Validate the actual credential below; the dispatch label is not its
+	// provider and must not prevent the one pinned account from being used.
+	if provider != s.provider && provider != "mixed" {
 		return nil, errors.New("inference provider differs from the pinned profile")
 	}
 	for _, auth := range auths {
 		if auth != nil && auth.ID == s.authID && auth.Provider == s.provider {
-			return (&coreauth.FillFirstSelector{}).Pick(ctx, provider, model, opts, []*coreauth.Auth{auth})
+			return (&coreauth.FillFirstSelector{}).Pick(ctx, s.provider, model, opts, []*coreauth.Auth{auth})
 		}
 	}
 	return nil, errors.New("selected inference account is unavailable; no fallback is configured")
 }
 
 const backendMaxBodyBytes = 32 << 20
+
+// BackendErrorStage is a fixed, privacy-safe diagnostic category, not an error
+// message. It never includes account details, URLs, headers, or provider bodies.
+type BackendErrorStage string
+
+const (
+	BackendErrorNone               BackendErrorStage = "none"
+	BackendErrorInitialization     BackendErrorStage = "initialization"
+	BackendErrorCanceled           BackendErrorStage = "canceled"
+	BackendErrorTimeout            BackendErrorStage = "timeout"
+	BackendErrorRequest            BackendErrorStage = "request"
+	BackendErrorClosed             BackendErrorStage = "closed"
+	BackendErrorAuthSelection      BackendErrorStage = "auth_selection"
+	BackendErrorAuthNotFound       BackendErrorStage = "auth_not_found"
+	BackendErrorAuthUnavailable    BackendErrorStage = "auth_unavailable"
+	BackendErrorProviderNotFound   BackendErrorStage = "provider_not_found"
+	BackendErrorExecutorNotFound   BackendErrorStage = "executor_not_found"
+	BackendErrorModelNotFound      BackendErrorStage = "model_not_found"
+	BackendErrorCredentialProfile  BackendErrorStage = "credential_profile"
+	BackendErrorCredentialIdentity BackendErrorStage = "credential_identity"
+	BackendErrorCredentialStore    BackendErrorStage = "credential_store"
+	BackendErrorSigning            BackendErrorStage = "signing"
+	BackendErrorThinking           BackendErrorStage = "thinking"
+	BackendErrorModelSystemTurn    BackendErrorStage = "model_system_turn"
+	BackendErrorSystemBlockType    BackendErrorStage = "system_block_type"
+	BackendErrorTLS                BackendErrorStage = "tls"
+	BackendErrorTransport          BackendErrorStage = "transport"
+	// SDK status-bearing errors can be local validation or actual upstream HTTP.
+	BackendErrorUpstreamHTTP BackendErrorStage = "http_error"
+	BackendErrorResponse     BackendErrorStage = "response"
+	BackendErrorInternal     BackendErrorStage = "internal"
+)
+
+type backendErrorObservationKey struct{}
+
+// Only the classified enum is retained. Raw errors are never sent to an
+// observer callback, HTTP response, response header, or diagnostic log.
+type backendErrorObservation struct {
+	mu    sync.Mutex
+	stage BackendErrorStage
+}
+
+func (o *backendErrorObservation) result() BackendErrorStage {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.stage == "" {
+		return BackendErrorNone
+	}
+	return o.stage
+}
+
+func observeBackendStage(ctx context.Context, stage BackendErrorStage) {
+	if ctx == nil || stage == BackendErrorNone {
+		return
+	}
+	o, _ := ctx.Value(backendErrorObservationKey{}).(*backendErrorObservation)
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.stage == "" {
+		o.stage = stage
+	}
+}
+
+func observeBackendError(ctx context.Context, message *interfaces.ErrorMessage) {
+	if message != nil {
+		observeBackendStage(ctx, classifyBackendError(message.Error))
+	}
+}
+
+func classifyBackendError(err error) BackendErrorStage {
+	if err == nil {
+		return BackendErrorInternal
+	}
+	if errors.Is(err, context.Canceled) {
+		return BackendErrorCanceled
+	}
+	// Inspect only known local prefixes, with a bounded walk and prefix length.
+	// Do not parse upstream bodies or return any portion of an error string.
+	for current, depth := err, 0; current != nil && depth < 8; current, depth = errors.Unwrap(current), depth+1 {
+		prefix := current.Error()
+		if len(prefix) > 128 {
+			prefix = prefix[:128]
+		}
+		switch {
+		case strings.HasPrefix(prefix, "invalid_request_error: role 'system' is not supported on this model."):
+			return BackendErrorModelSystemTurn
+		case strings.HasPrefix(prefix, "invalid_request_error: system.") && strings.Contains(prefix, "Input should be 'text'"):
+			return BackendErrorSystemBlockType
+		case strings.HasPrefix(prefix, "populate Claude OAuth account profile:"), strings.HasPrefix(prefix, "fetch Claude OAuth profile:"):
+			return BackendErrorCredentialProfile
+		case strings.HasPrefix(prefix, "ensure Claude credential device pool:"), strings.HasPrefix(prefix, "ensure Claude CLI fingerprint identity:"), strings.HasPrefix(prefix, "apply Claude credential metadata:"), strings.HasPrefix(prefix, "set Claude credential metadata:"):
+			return BackendErrorCredentialIdentity
+		case strings.HasPrefix(prefix, "finalize Claude CCH:"), strings.HasPrefix(prefix, "insert Claude CCH placeholder:"), strings.HasPrefix(prefix, "prepend Claude CCH billing block:"):
+			return BackendErrorSigning
+		case strings.HasPrefix(prefix, "claude tls:"):
+			return BackendErrorTLS
+		case strings.HasPrefix(prefix, "cannot serialize refreshed inference credential"), strings.HasPrefix(prefix, "cannot stage refreshed inference credential"), strings.HasPrefix(prefix, "cannot write refreshed inference credential"), strings.HasPrefix(prefix, "cannot sync refreshed inference credential"), strings.HasPrefix(prefix, "cannot close refreshed inference credential"), strings.HasPrefix(prefix, "cannot commit refreshed inference credential"), strings.HasPrefix(prefix, "inference credential store is closed"), strings.HasPrefix(prefix, "unsupported inference credential storage"), strings.HasPrefix(prefix, "inference credential does not match"), strings.HasPrefix(prefix, "inference credential has an invalid persistence"), strings.HasPrefix(prefix, "selected credential file is no longer safe"), strings.HasPrefix(prefix, "inference auth directory is no longer private"), strings.HasPrefix(prefix, "refreshed credential was committed but"):
+			return BackendErrorCredentialStore
+		case strings.HasPrefix(prefix, "selected inference account is unavailable;"), strings.HasPrefix(prefix, "inference provider differs from the pinned profile"):
+			return BackendErrorAuthSelection
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return BackendErrorTimeout
+	}
+	var thinkingErr *thinking.ThinkingError
+	if errors.As(err, &thinkingErr) {
+		return BackendErrorThinking
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		return BackendErrorTransport
+	}
+	var authErr *coreauth.Error
+	if errors.As(err, &authErr) && authErr != nil {
+		switch authErr.Code {
+		case "auth_not_found":
+			return BackendErrorAuthNotFound
+		case "auth_unavailable":
+			return BackendErrorAuthUnavailable
+		case "provider_not_found":
+			return BackendErrorProviderNotFound
+		case "executor_not_found":
+			return BackendErrorExecutorNotFound
+		case "model_not_found":
+			return BackendErrorModelNotFound
+		}
+	}
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) && statusErr.StatusCode() >= 400 && statusErr.StatusCode() <= 599 {
+		return BackendErrorUpstreamHTTP
+	}
+	return BackendErrorInternal
+}
 
 func newBackendHandler(lifetime context.Context, opts BackendOptions, base *handlers.BaseAPIHandler) http.Handler {
 	router := gin.New()
@@ -339,11 +482,13 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 		stop := context.AfterFunc(lifetime, cancel)
 		defer func() { stop(); cancel() }()
 		if lifetime.Err() != nil || ctx.Err() != nil {
+			observeBackendStage(ctx, BackendErrorClosed)
 			backendError(c.Writer, http.StatusServiceUnavailable, "inference backend is closed")
 			return
 		}
 		raw, err := prepareBackendRequest(c.Request, opts.Model)
 		if err != nil {
+			observeBackendStage(ctx, BackendErrorRequest)
 			backendError(c.Writer, http.StatusBadRequest, "invalid inference request")
 			return
 		}
@@ -354,6 +499,7 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 		ctx = context.WithValue(ctx, "gin", c)
 		if c.Request.URL.Path == "/v1/messages/count_tokens" {
 			payload, _, errMsg := base.ExecuteCountWithAuthManager(ctx, "claude", opts.Model, raw, "")
+			observeBackendError(ctx, errMsg)
 			writeBackendResult(c.Writer, payload, errMsg)
 			return
 		}
@@ -366,6 +512,7 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 			return
 		}
 		payload, _, errMsg := base.ExecuteWithAuthManager(ctx, "claude", opts.Model, raw, "")
+		observeBackendError(ctx, errMsg)
 		writeBackendResult(c.Writer, payload, errMsg)
 	}
 	router.POST("/v1/messages", dispatch)
@@ -455,6 +602,7 @@ func writeBackendResult(w http.ResponseWriter, payload []byte, errMsg *interface
 func streamBackendResponse(ctx context.Context, w http.ResponseWriter, base *handlers.BaseAPIHandler, model string, raw []byte) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		observeBackendStage(ctx, BackendErrorInternal)
 		backendError(w, http.StatusInternalServerError, "streaming is unavailable")
 		return
 	}
@@ -472,6 +620,7 @@ func streamBackendResponse(ctx context.Context, w http.ResponseWriter, base *han
 			if errMsg == nil {
 				continue
 			}
+			observeBackendError(ctx, errMsg)
 			if !started {
 				writeBackendUpstreamError(w, errMsg)
 			} else {
@@ -499,6 +648,7 @@ func streamBackendResponse(ctx context.Context, w http.ResponseWriter, base *han
 		}
 	}
 	if !started {
+		observeBackendStage(ctx, BackendErrorResponse)
 		backendError(w, http.StatusBadGateway, "selected inference account returned an empty stream")
 	}
 }

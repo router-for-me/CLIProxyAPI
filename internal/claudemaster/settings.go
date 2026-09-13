@@ -2,6 +2,7 @@ package claudemaster
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,7 +21,10 @@ const settingsByteLimit = 1024 * 1024
 // Native Claude can reload files, fetch new server policies, or change directories after this check.
 // We preserve its settings/permissions/hooks instead of disabling their sources. Native MDM policies
 // are not JSON files and cannot be covered by this bounded file validator.
-func ValidateNativeSettings() error {
+func ValidateNativeSettings(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return errors.New("cannot locate native user settings")
@@ -29,7 +33,7 @@ func ValidateNativeSettings() error {
 	if err != nil {
 		return errors.New("cannot locate native project settings")
 	}
-	roots, err := nativeProjectRoots(cwd)
+	roots, err := nativeProjectRoots(ctx, cwd)
 	if err != nil {
 		return err
 	}
@@ -176,14 +180,22 @@ func forbiddenProviderEnv(name string) bool {
 	return false
 }
 
-func nativeProjectRoots(cwd string) ([]string, error) {
+func nativeProjectRoots(ctx context.Context, cwd string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	resolved, err := filepath.EvalSymlinks(cwd)
 	if err != nil {
 		return nil, errors.New("cannot resolve project settings directory")
 	}
 	roots := []string{resolved}
-	root, err := boundedGitOutput(resolved, "rev-parse", "--show-toplevel")
+	root, err := boundedGitOutput(ctx, resolved, "rev-parse", "--show-toplevel")
 	if err != nil {
+		// Cancellation is never evidence that this is a non-Git directory. Propagate it before
+		// the ordinary Git-marker fallback so Ctrl-C cannot be mistaken for successful preflight.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// A directory outside Git has only the starting-directory project settings. If a Git marker
 		// is present, failure is ambiguous (ownership/configuration), so never silently miss its roots.
 		for dir := resolved; ; dir = filepath.Dir(dir) {
@@ -201,8 +213,11 @@ func nativeProjectRoots(cwd string) ([]string, error) {
 		return nil, errors.New("Git returned an invalid settings root")
 	}
 	roots = append(roots, root)
-	worktrees, err := boundedGitOutput(resolved, "worktree", "list", "--porcelain", "-z")
+	worktrees, err := boundedGitOutput(ctx, resolved, "worktree", "list", "--porcelain", "-z")
 	if err != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return nil, errors.New("cannot resolve main checkout settings")
 	}
 	first, _, _ := strings.Cut(worktrees, "\x00")
@@ -222,13 +237,16 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func boundedGitOutput(cwd string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", cwd}, args...)...)
+func boundedGitOutput(ctx context.Context, cwd string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", cwd}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
 	var output boundedOutput
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		return "", errors.New("Git settings discovery failed")
 	}
 	return output.String(), nil

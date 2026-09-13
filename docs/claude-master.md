@@ -43,8 +43,11 @@ billing fallback.
 
 ## Build and use
 
-Requires Go 1.26+, Linux, and native Claude Code **2.1.269**. The launcher rejects
-other native versions until their routing behavior has been reviewed. Build on a
+Requires Go 1.26+, Linux, and an installed native Claude Code **2.1.269**. The launcher
+resolves the reviewed executable before starting; if the default CLI has advanced,
+it uses the existing versioned 2.1.269 installation. It does not download a version,
+roll back the default CLI, or change global update settings. Background updates are
+disabled only in the child environment. Build on a
 development server, not an administration jumpbox:
 
 ```bash
@@ -57,6 +60,18 @@ go build -o claude-master ./cmd/claude-master
 `check` validates the installed native version and local startup settings without
 opening a profile, logging in, or creating a session. It is not a live inference test.
 
+After authorizing the intended account, test the selected backend with one small,
+fixed prompt before starting the native client:
+
+```bash
+./claude-master probe claude-work --model <claude-model-id>
+```
+
+`probe` sends only its built-in test prompt, with no tools or project context. It
+reports an HTTP status, whether the expected reply matched, and a fixed error-stage
+label, never a raw response or token. It uses the same profile lock and account pin
+as `run`.
+
 Each login starts a new provider authorization flow. Use the intended inference
 account in that flow. Codex uses device authorization; Claude supports its callback
 flow and manual callback entry. Do not paste native token files into a profile.
@@ -68,6 +83,19 @@ provider's bundled CLIProxyAPI model catalog:
 ./claude-master run claude-work --model <claude-model-id> -- --remote-control
 ./claude-master run codex-work --model <codex-model-id> -- --remote-control
 ```
+
+For a Claude backend, the launcher supplies the same exact model ID to native
+Claude Code. A native `--model` override must match it exactly; drifting aliases
+such as `sonnet` and fallback models are rejected. This matters because native
+Sonnet 5 request features are not valid for a pinned Sonnet 4.6 backend. Codex model
+translation remains a separately gated live test.
+
+For troubleshooting, add `--diagnostics` before `--`. It prints numeric counts of
+accepted/rejected proxy connections, parsed requests, inference/control dispatches,
+blocked routes, and active connections every five seconds and at shutdown, plus
+a fixed backend error-stage label at shutdown. It does
+not log URLs, headers, prompts, responses, or account identifiers. An inference
+dispatch count means the adapter was called, not that the provider accepted it.
 
 The master Claude login remains the native login for the current Unix user. The
 selected inference profile is fixed for the lifetime of the launched process.
@@ -108,6 +136,13 @@ experimental session. Claude updates can introduce new routes or change proxy/TL
 behavior; fail-closed errors must be investigated before expanding the route
 allowlist or native-version pin.
 
+The reviewed executable pin covers the launched parent. Native subprocess launch
+paths can select the user's default Claude executable, so full subagent behavior
+is not yet certified across differing installed versions. An old version can also
+be removed by native installation cleanup; if the reviewed version is unavailable,
+the launcher refuses to start. Do not roll this experimental build out as an
+unattended fleet service yet.
+
 ## Verification and rollout
 
 Automated tests use synthetic credentials and fake HTTP/TLS upstreams. They check
@@ -117,6 +152,12 @@ Passing these tests does not establish live Remote Control compatibility or bill
 behavior. The pristine upstream baseline currently fails
 `TestOpenAICompatExecutorToolResultContentByInputModalities` in four subcases;
 that unrelated existing failure must not be reported as a passing full suite.
+
+On September 13, 2026, the ARM development-server test passed direct Claude OAuth
+inference, native streamed replies, and an actual native Bash `pwd` tool turn using
+the independently authorized profile. Native Remote Control reported an active
+session. Phone-side round-trip confirmation, Codex OAuth inference, full native
+subagent behavior, and unattended fleet rollout remain separate acceptance gates.
 
 Before enabling this for normal sessions, complete a separately authorized profile
 login and a disposable session on the development server. Verify that it appears

@@ -529,6 +529,25 @@ func TestProxyControlRouteInventory(t *testing.T) {
 		{"DELETE", "/v1/environments/bridge/abc/nested", false},
 		{"DELETE", "/v1/environments/bridge/abc%2Fdef", false},
 		{"POST", "/v1/environments/bridge/abc", false},
+		{"GET", "/v1/environments/env_123/work/poll", true},
+		{"POST", "/v1/environments/env_123/work/work_456/ack", true},
+		{"POST", "/v1/environments/env_123/work/work_456/stop", true},
+		{"POST", "/v1/environments/env_123/work/work_456/heartbeat", true},
+		{"POST", "/v1/environments/env_123/bridge/reconnect", true},
+		{"POST", "/v1/environments/env_123/work/poll", false},
+		{"GET", "/v1/environments/env_123/work/work_456/ack", false},
+		{"PUT", "/v1/environments/env_123/work/work_456/heartbeat", false},
+		{"GET", "/v1/environments/env_123/bridge/reconnect", false},
+		{"POST", "/v1/environments/env_123/work/work_456/result", false},
+		{"POST", "/v1/environments/env_123/work/work_456/messages", false},
+		{"GET", "/v1/environments/env_123/work/poll/extra", false},
+		{"POST", "/v1/environments/env_123/work/work_456/ack/extra", false},
+		{"POST", "/v1/environments/env_123/bridge/reconnect/extra", false},
+		{"GET", "/v1/environments//work/poll", false},
+		{"GET", "/v1/environments/../work/poll", false},
+		{"GET", "/v1/environments/env%2Fother/work/poll", false},
+		{"POST", "/v1/environments/env_123/work/../ack", false},
+		{"POST", "/v1/environments/env_123/work/work%2Fother/ack", false},
 		{"POST", "/v1/code/auth/refresh", true},
 		{"GET", "/v1/code/auth/refresh", false},
 		{"POST", "/v1/oauth/token", true},
@@ -545,6 +564,60 @@ func TestProxyControlRouteInventory(t *testing.T) {
 		if got := proxyControlPath(test.method, test.path); got != test.allowed {
 			t.Errorf("%s %s allowed=%v, expected %v", test.method, test.path, got, test.allowed)
 		}
+	}
+}
+
+func TestProxyEnvironmentControlsUseMasterControlOnly(t *testing.T) {
+	var calls atomic.Int32
+	_, client, _ := proxyTestStart(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("environment control reached inference")
+	}), proxyTestTransport(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if r.URL.Host != masterAPIHost || r.URL.RawQuery != "cursor=synthetic%2Bvalue" || r.Header.Get("Authorization") != "Bearer SYNTHETIC-CONTROL" {
+			t.Error("environment control lost fixed target, raw query, or native auth")
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil || string(body) != `{}` {
+			t.Error("environment control body changed")
+		}
+		return proxyTestResponse(http.StatusOK, `{"accepted":true}`), nil
+	}))
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/environments/env_test/work/poll"},
+		{http.MethodPost, "/v1/environments/env_test/work/work_test/ack"},
+		{http.MethodPost, "/v1/environments/env_test/work/work_test/stop"},
+		{http.MethodPost, "/v1/environments/env_test/work/work_test/heartbeat"},
+		{http.MethodPost, "/v1/environments/env_test/bridge/reconnect"},
+	} {
+		response, _ := proxyTestRequest(t, client, route.method, route.path+"?cursor=synthetic%2Bvalue", `{}`, http.Header{"Authorization": {"Bearer SYNTHETIC-CONTROL"}})
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("verified environment control rejected: %d", response.StatusCode)
+		}
+	}
+	if calls.Load() != 5 {
+		t.Fatal("not all five environment controls reached fixed control transport")
+	}
+	for _, route := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodPost, "/v1/environments/env_test/work/poll", http.StatusForbidden},
+		{http.MethodGet, "/v1/environments/env_test/work/work_test/ack", http.StatusForbidden},
+		{http.MethodPut, "/v1/environments/env_test/work/work_test/heartbeat", http.StatusForbidden},
+		{http.MethodPost, "/v1/environments/env_test/work/work_test/result", http.StatusForbidden},
+		{http.MethodPost, "/v1/environments/env_test/work/work_test/ack/extra", http.StatusForbidden},
+		{http.MethodGet, "/v1/environments/../work/poll", http.StatusBadRequest},
+		{http.MethodGet, "/v1/environments/env%2Fother/work/poll", http.StatusBadRequest},
+		{http.MethodPost, "/v1/environments/env_test/work/../ack", http.StatusBadRequest},
+		{http.MethodPost, "/v1/environments/env_test/work//ack", http.StatusBadRequest},
+	} {
+		response, _ := proxyTestRequest(t, client, route.method, route.path, `{}`, nil)
+		if response.StatusCode != route.status {
+			t.Fatalf("invalid environment request returned %d, expected %d", response.StatusCode, route.status)
+		}
+	}
+	if calls.Load() != 5 {
+		t.Fatal("invalid environment route reached upstream")
 	}
 }
 
@@ -600,4 +673,76 @@ func TestProxyControlCancellationBeforeResponse(t *testing.T) {
 		t.Fatal("control request was not canceled")
 	}
 	<-done
+}
+
+func TestProxySnapshotCountsOnlyRoutingEvents(t *testing.T) {
+	p, client, _ := proxyTestStart(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = io.WriteString(w, `{}`)
+	}), proxyTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Body != nil {
+			_, _ = io.Copy(io.Discard, r.Body)
+		}
+		return proxyTestResponse(200, `{}`), nil
+	}))
+	if initial := p.Snapshot(); initial != (ProxyStats{}) {
+		t.Fatalf("new proxy counters are not empty: %+v", initial)
+	}
+	for _, path := range []string{"/v1/messages", "/v1/code/sessions", "/v1/unknown"} {
+		proxyTestRequest(t, client, http.MethodPost, path, `{}`, http.Header{"Authorization": {"Bearer SNAPSHOT-CANARY"}})
+	}
+	proxyURL, _ := url.Parse(p.URL())
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(conn, "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\nProxy-Authorization: Basic WRONG-CANARY\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	_ = conn.Close()
+	snapshot := p.Snapshot()
+	if snapshot.ConnectAccepted == 0 || snapshot.ConnectRejected != 1 || snapshot.APIRequests != 3 || snapshot.InferenceRequests != 1 || snapshot.ControlRequests != 1 || snapshot.BlockedRequests != 1 || snapshot.ActiveConnections == 0 {
+		t.Fatalf("unexpected routing counters: %+v", snapshot)
+	}
+	// Concurrent reads must never race request counters or the owned socket map.
+	var readers sync.WaitGroup
+	readers.Add(4)
+	for range 4 {
+		go func() {
+			defer readers.Done()
+			for range 100 {
+				_ = p.Snapshot()
+			}
+		}()
+	}
+	_ = p.Close()
+	readers.Wait()
+	after := p.Snapshot()
+	if after.ActiveConnections != 0 || after.APIRequests != snapshot.APIRequests || after.ConnectRejected != snapshot.ConnectRejected {
+		t.Fatalf("shutdown did not retain safe counters and clear sockets: %+v", after)
+	}
+}
+
+func TestProxySnapshotDistinguishesConnectFromTLSRequests(t *testing.T) {
+	p, _, _ := proxyTestStart(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("TLS never completed") }), nil)
+	proxyURL, _ := url.Parse(p.URL())
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_, _ = fmt.Fprintf(conn, "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\nProxy-Authorization: %s\r\n\r\n", p.proxyAuth)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("CONNECT failed: %v", err)
+	}
+	snapshot := p.Snapshot()
+	if snapshot.ConnectAccepted != 1 || snapshot.APIRequests != 0 || snapshot.InferenceRequests != 0 || snapshot.ControlRequests != 0 || snapshot.ActiveConnections != 1 {
+		t.Fatalf("incomplete TLS handshake was counted as an API request: %+v", snapshot)
+	}
 }

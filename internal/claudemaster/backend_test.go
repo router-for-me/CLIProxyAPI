@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -460,5 +462,89 @@ func TestBackendErrorOnlyPreservesValidRetryAfter(t *testing.T) {
 		if w.Header().Get("Retry-After") != want || w.Header().Get("X-Account") != "" || strings.Contains(w.Body.String(), "private-error") {
 			t.Fatalf("unsafe error forwarding for %q", value)
 		}
+	}
+}
+
+type backendDiagnosticHTTPError struct {
+	status int
+	body   string
+}
+
+func (e backendDiagnosticHTTPError) Error() string   { return e.body }
+func (e backendDiagnosticHTTPError) StatusCode() int { return e.status }
+
+func TestBackendErrorClassifierOnlyReturnsFixedStages(t *testing.T) {
+	canary := "PRIVATE-ACCOUNT-TOKEN-CANARY"
+	for _, tc := range []struct {
+		name  string
+		err   error
+		stage BackendErrorStage
+	}{
+		{"nil", nil, BackendErrorInternal},
+		{"canceled", fmt.Errorf("%s: %w", canary, context.Canceled), BackendErrorCanceled},
+		{"timeout", context.DeadlineExceeded, BackendErrorTimeout},
+		{"profile", fmt.Errorf("populate Claude OAuth account profile: %w", errors.New(canary)), BackendErrorCredentialProfile},
+		{"profile-timeout", fmt.Errorf("populate Claude OAuth account profile: %w", context.DeadlineExceeded), BackendErrorCredentialProfile},
+		{"identity", fmt.Errorf("outer: %w", errors.New("apply Claude credential metadata: "+canary)), BackendErrorCredentialIdentity},
+		{"device", errors.New("ensure Claude CLI fingerprint identity: " + canary), BackendErrorCredentialIdentity},
+		{"signing", errors.New("finalize Claude CCH: " + canary), BackendErrorSigning},
+		{"tls", errors.New("claude tls: handshake upstream: " + canary), BackendErrorTLS},
+		{"store", errors.New("cannot commit refreshed inference credential"), BackendErrorCredentialStore},
+		{"thinking", &thinking.ThinkingError{Message: canary, Model: canary}, BackendErrorThinking},
+		{"model-system-turn", errors.New("invalid_request_error: role 'system' is not supported on this model. " + canary), BackendErrorModelSystemTurn},
+		{"system-block-type", errors.New("invalid_request_error: system.0.type: Input should be 'text' " + canary), BackendErrorSystemBlockType},
+		{"transport", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New(canary)}, BackendErrorTransport},
+		{"auth-not-found", &coreauth.Error{Code: "auth_not_found", Message: canary, HTTPStatus: 500}, BackendErrorAuthNotFound},
+		{"auth-unavailable", &coreauth.Error{Code: "auth_unavailable", Message: canary, HTTPStatus: 503}, BackendErrorAuthUnavailable},
+		{"provider-not-found", &coreauth.Error{Code: "provider_not_found", Message: canary, HTTPStatus: 500}, BackendErrorProviderNotFound},
+		{"executor-not-found", &coreauth.Error{Code: "executor_not_found", Message: canary, HTTPStatus: 500}, BackendErrorExecutorNotFound},
+		{"model-not-found", &coreauth.Error{Code: "model_not_found", Message: canary, HTTPStatus: 500}, BackendErrorModelNotFound},
+		{"unlisted-auth-code", &coreauth.Error{Code: canary, Message: canary}, BackendErrorInternal},
+		{"upstream", backendDiagnosticHTTPError{500, canary}, BackendErrorUpstreamHTTP},
+		{"unknown", errors.New(canary), BackendErrorInternal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stage := classifyBackendError(tc.err)
+			if stage != tc.stage || strings.Contains(string(stage), canary) {
+				t.Fatalf("unexpected diagnostic stage: %s", stage)
+			}
+		})
+	}
+}
+
+func TestBackendErrorObservationIsRequestScopedAndPrivate(t *testing.T) {
+	for _, tc := range []struct {
+		path   string
+		stream bool
+	}{{"/v1/messages", false}, {"/v1/messages", true}, {"/v1/messages/count_tokens", false}} {
+		t.Run(fmt.Sprintf("%s-%t", tc.path, tc.stream), func(t *testing.T) {
+			capture := &backendCapture{err: errors.New("finalize Claude CCH: PRIVATE-CANARY")}
+			handler, _ := backendTestHandler(t, t.Context(), capture)
+			observation := &backendErrorObservation{}
+			ctx := context.WithValue(t.Context(), backendErrorObservationKey{}, observation)
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(fmt.Sprintf(`{"stream":%t,"messages":[{"role":"user","content":"hello"}]}`, tc.stream))).WithContext(ctx)
+			writer := httptest.NewRecorder()
+			handler.ServeHTTP(writer, request)
+			if observation.result() != BackendErrorSigning || capture.calls != 1 {
+				t.Fatalf("expected one classified execution; stage=%s calls=%d", observation.result(), capture.calls)
+			}
+			if strings.Contains(writer.Body.String(), "PRIVATE-CANARY") || strings.Contains(fmt.Sprint(writer.Header()), "PRIVATE-CANARY") || writer.Header().Get("X-Backend-Error-Stage") != "" {
+				t.Fatal("diagnostic data escaped into an HTTP response")
+			}
+			if (&backendErrorObservation{}).result() != BackendErrorNone {
+				t.Fatal("diagnostic observation leaked into another request")
+			}
+		})
+	}
+}
+
+func TestBackendErrorObservationKeepsFirstFailure(t *testing.T) {
+	observation := &backendErrorObservation{}
+	ctx := context.WithValue(t.Context(), backendErrorObservationKey{}, observation)
+	observeBackendStage(ctx, BackendErrorNone)
+	observeBackendError(ctx, &interfaces.ErrorMessage{Error: errors.New("finalize Claude CCH: PRIVATE-CANARY")})
+	observeBackendError(ctx, &interfaces.ErrorMessage{Error: context.Canceled})
+	if observation.result() != BackendErrorSigning {
+		t.Fatal("secondary cancellation obscured the original failure")
 	}
 }

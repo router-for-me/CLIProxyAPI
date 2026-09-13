@@ -8,9 +8,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"math/big"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,8 +28,18 @@ const NativeClaudeVersion = "2.1.269"
 // Launch starts the native master with its existing personal Claude login and a process-only proxy.
 // The caller must hold the profile lock until this returns. It never edits Claude configuration.
 func Launch(ctx context.Context, profile Profile, model string, args []string) (int, error) {
+	return LaunchWithDiagnostics(ctx, profile, model, args, nil)
+}
+
+// LaunchWithDiagnostics optionally emits numeric counters and fixed error-stage labels. It never
+// emits proxy credentials, request content, URLs, or account identifiers.
+func LaunchWithDiagnostics(ctx context.Context, profile Profile, model string, args []string, diagnostics io.Writer) (int, error) {
 	if strings.TrimSpace(model) == "" {
 		return 1, errors.New("an explicit backend model is required")
+	}
+	args, err := NativeArguments(profile.Provider, model, args)
+	if err != nil {
+		return 1, err
 	}
 	bin, err := Preflight(ctx, args)
 	if err != nil {
@@ -42,11 +55,28 @@ func Launch(ctx context.Context, profile Profile, model string, args []string) (
 		return 1, errors.New("cannot start selected inference backend; check the profile and model")
 	}
 	defer func() { _ = backend.Close() }()
-	proxy, err := StartProxy(ProxyOptions{Certificate: certs.leaf, Inference: backend.Handler()})
+	observation := &backendErrorObservation{}
+	inference := backend.Handler()
+	if diagnostics != nil {
+		inference = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), backendErrorObservationKey{}, observation)
+			backend.Handler().ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+	proxy, err := StartProxy(ProxyOptions{Certificate: certs.leaf, Inference: inference})
 	if err != nil {
 		return 1, errors.New("cannot start private inference proxy")
 	}
-	defer func() { _ = proxy.Close() }()
+	stopDiagnostics := startProxyDiagnostics(proxy, diagnostics)
+	defer func() {
+		_ = proxy.Close()
+		stopDiagnostics()
+		if diagnostics != nil {
+			_ = json.NewEncoder(diagnostics).Encode(struct {
+				BackendErrorStage BackendErrorStage
+			}{observation.result()})
+		}
+	}()
 	env, err := ChildEnvironment(os.Environ(), args, proxy.URL(), certs.caPath)
 	if err != nil {
 		return 1, err
@@ -77,17 +107,10 @@ func Preflight(ctx context.Context, args []string) (string, error) {
 	if _, err := ChildEnvironment(os.Environ(), args, "http://127.0.0.1:1", "/unused"); err != nil {
 		return "", err
 	}
-	if err := ValidateNativeSettings(); err != nil {
+	if err := ValidateNativeSettings(ctx); err != nil {
 		return "", err
 	}
-	bin, err := exec.LookPath("claude")
-	if err != nil {
-		return "", errors.New("native Claude Code is not installed on PATH")
-	}
-	if err := verifyNativeVersion(ctx, bin); err != nil {
-		return "", err
-	}
-	return bin, nil
+	return resolveNativeBinary(ctx)
 }
 
 // ChildEnvironment preserves the master login while denying configuration that bypasses the
@@ -100,6 +123,7 @@ func ChildEnvironment(environ, args []string, proxyURL, caPath string) ([]string
 		"NODE_EXTRA_CA_CERTS": true, "CLAUDE_CODE_CHILD_SESSION": true,
 		"CLAUDE_CODE_SESSION_ID": true, "REMOTE_CLAW_SECRET_FILE": true,
 		"VERCEL_AUTOMATION_BYPASS_SECRET": true,
+		"DISABLE_AUTOUPDATER":             true,
 	}
 	for _, arg := range args {
 		flag := strings.SplitN(arg, "=", 2)[0]
@@ -126,7 +150,7 @@ func ChildEnvironment(environ, args []string, proxyURL, caPath string) ([]string
 		}
 		out = append(out, entry)
 	}
-	out = append(out, "HTTPS_PROXY="+proxyURL, "https_proxy="+proxyURL, "NODE_EXTRA_CA_CERTS="+caPath)
+	out = append(out, "HTTPS_PROXY="+proxyURL, "https_proxy="+proxyURL, "NODE_EXTRA_CA_CERTS="+caPath, "DISABLE_AUTOUPDATER=1")
 	return out, nil
 }
 

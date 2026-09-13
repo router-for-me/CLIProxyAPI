@@ -43,24 +43,28 @@ func run(args []string) (int, error) {
 		return 0, nil
 	}
 	if len(args) < 2 {
-		return 2, errors.New("usage: claude-master check; claude-master login PROFILE --provider claude|codex; claude-master run PROFILE --model MODEL -- [Claude arguments]")
+		return 2, errors.New("usage: claude-master check; claude-master login PROFILE --provider claude|codex; claude-master probe PROFILE --model MODEL; claude-master run PROFILE --model MODEL [--diagnostics] -- [Claude arguments]")
 	}
 	command, name := args[0], args[1]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	provider := flags.String("provider", "", "inference login provider")
 	model := flags.String("model", "", "selected backend model")
+	diagnostics := flags.Bool("diagnostics", false, "print numeric proxy counters only")
 	if err := flags.Parse(args[2:]); err != nil {
 		return 2, errors.New("invalid launcher arguments")
 	}
-	if command != "login" && command != "run" {
-		return 2, errors.New("expected login or run")
+	if command != "login" && command != "run" && command != "probe" {
+		return 2, errors.New("expected login, run, or probe")
 	}
-	if command == "login" && (*model != "" || len(flags.Args()) != 0 || (*provider != "claude" && *provider != "codex")) {
+	if command == "login" && (*diagnostics || *model != "" || len(flags.Args()) != 0 || (*provider != "claude" && *provider != "codex")) {
 		return 2, errors.New("login requires --provider claude or --provider codex, without model or Claude arguments")
 	}
-	if command == "run" && (*provider != "" || strings.TrimSpace(*model) == "") {
-		return 2, errors.New("run requires --model MODEL; provider comes from the selected profile")
+	if (command == "run" || command == "probe") && (*provider != "" || strings.TrimSpace(*model) == "") {
+		return 2, errors.New("run and probe require --model MODEL; provider comes from the selected profile")
+	}
+	if command == "probe" && (*diagnostics || len(flags.Args()) != 0) {
+		return 2, errors.New("probe does not accept Claude arguments or proxy diagnostics")
 	}
 	profileLock, err := claudemaster.OpenProfile(name, command == "login")
 	if err != nil {
@@ -87,5 +91,20 @@ func run(args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	return claudemaster.Launch(ctx, profile, *model, flags.Args())
+	if command == "probe" {
+		result, err := claudemaster.Probe(ctx, profile, *model)
+		if err != nil {
+			return 1, err
+		}
+		fmt.Fprintf(os.Stdout, "Inference probe: status=%d matched=%t stage=%s\n", result.Status, result.Matched, result.Stage)
+		if !result.Matched {
+			return 1, errors.New("selected inference profile did not return the expected probe response")
+		}
+		return 0, nil
+	}
+	var diagnosticOutput io.Writer
+	if *diagnostics {
+		diagnosticOutput = os.Stderr
+	}
+	return claudemaster.LaunchWithDiagnostics(ctx, profile, *model, flags.Args(), diagnosticOutput)
 }
