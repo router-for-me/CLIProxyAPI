@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
@@ -20,10 +21,34 @@ const CodexClientModelsOverrideSupportHeader = "X-CPA-SUPPORT-CODEX-CLIENT-MODEL
 // directive inside Codex client model override entries.
 const CodexClientModelsInheritSupportHeader = "X-CPA-SUPPORT-CODEX-CLIENT-MODEL-INHERIT"
 
+// codexClientModelsResponseBody is the management representation of the Codex client
+// model catalog: the catalog together with the models the server currently serves to
+// Codex clients, so a client can tell which entries are actually handed out.
+type codexClientModelsResponseBody struct {
+	registry.CodexClientModelsState
+	// ServedModels lists one summary per model Codex clients can request.
+	ServedModels []codexmodels.ServedModelSummary `json:"served_models"`
+}
+
+// buildCodexClientModelsResponse builds the response every read and mutation returns, so
+// clients render the result without a second request.
+func buildCodexClientModelsResponse() codexClientModelsResponseBody {
+	modelRegistry := registry.GetGlobalRegistry()
+	served := codexmodels.SummarizeServedModels(
+		modelRegistry.GetAvailableModels("openai"),
+		modelRegistry.GetModelProviders,
+		"",
+	)
+	return codexClientModelsResponseBody{
+		CodexClientModelsState: registry.GetCodexClientModelsState(),
+		ServedModels:           served,
+	}
+}
+
 // GetCodexClientModels returns the effective Codex client model catalog together
-// with the local override layer applied on top of it.
+// with the local override layer applied on top of it and the served model list.
 func (h *Handler) GetCodexClientModels(c *gin.Context) {
-	c.JSON(http.StatusOK, registry.GetCodexClientModelsState())
+	c.JSON(http.StatusOK, buildCodexClientModelsResponse())
 }
 
 // PutCodexClientModelsOverride replaces the whole local override document.
@@ -65,7 +90,7 @@ func (h *Handler) respondCodexClientModelsOverride(c *gin.Context, err error) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, registry.GetCodexClientModelsState())
+	c.JSON(http.StatusOK, buildCodexClientModelsResponse())
 }
 
 func readCodexClientModelsBody(c *gin.Context) ([]byte, bool) {

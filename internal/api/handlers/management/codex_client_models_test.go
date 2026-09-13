@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
@@ -102,9 +103,151 @@ func TestCodexClientModelsEndpoints(t *testing.T) {
 }
 
 type codexClientModelsResponse struct {
-	Models   []map[string]any                            `json:"models"`
-	Origins  map[string]registry.CodexClientModelsOrigin `json:"origins"`
-	Override map[string]json.RawMessage                  `json:"override"`
+	Models       []map[string]any                            `json:"models"`
+	Origins      map[string]registry.CodexClientModelsOrigin `json:"origins"`
+	Override     map[string]json.RawMessage                  `json:"override"`
+	ServedModels []codexmodels.ServedModelSummary            `json:"served_models"`
+}
+
+func TestCodexClientModelsReportsServedModels(t *testing.T) {
+	dir := t.TempDir()
+	registry.SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
+	t.Cleanup(func() { _ = registry.ClearCodexClientModelsOverride() })
+
+	// A model the catalog does not define is still served to Codex clients, so the
+	// state has to report it and name the default template it was built from.
+	clientID := "codex-client-served-summary-test"
+	modelID := clientID + "-model"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{{
+		ID:          modelID,
+		DisplayName: "Served Summary",
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	engine := gin.New()
+	h := &Handler{
+		cfg:            &config.Config{},
+		configFilePath: filepath.Join(dir, "config.yaml"),
+		failedAttempts: make(map[string]*attemptInfo),
+		envSecret:      "test-secret",
+	}
+	engine.GET("/v0/management/codex-client-models", h.Middleware(), h.GetCodexClientModels)
+
+	rec := performCodexClientModelsRequest(t, engine, http.MethodGet, "/v0/management/codex-client-models", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	payload := decodeCodexClientModelsResponse(t, rec)
+	served := codexClientModelsServedSummary(payload, modelID)
+	if served == nil {
+		t.Fatalf("served_models is missing %q: %+v", modelID, payload.ServedModels)
+	}
+	if !served.DefaultTemplate {
+		t.Fatalf("default_template = false for a model without a catalog entry, want true")
+	}
+	if served.TemplateSlug != "gpt-5.5" {
+		t.Fatalf("template_slug = %q, want %q", served.TemplateSlug, "gpt-5.5")
+	}
+	if served.DisplayName != "Served Summary" {
+		t.Fatalf("display_name = %q, want %q", served.DisplayName, "Served Summary")
+	}
+	// A model the catalog does not define is ordered after every catalog entry, so
+	// the summary has to carry the position a management UI preserves on adoption.
+	if served.Priority <= 0 {
+		t.Fatalf("priority = %d, want the served position", served.Priority)
+	}
+	if served.ContextWindow <= 0 || served.MaxContextWindow <= 0 {
+		t.Fatalf("context windows = %d/%d, want the served values", served.ContextWindow, served.MaxContextWindow)
+	}
+	// The catalog only defines its own entries, so the served model stays out of it
+	// until an override adds a dedicated entry.
+	if got := codexClientModelsResponseSlugs(t, payload); containsCodexClientModelsSlug(got, modelID) {
+		t.Fatalf("catalog slugs %v contain the served model %q", got, modelID)
+	}
+}
+
+func TestCodexClientModelsServedModelsFollowsOverrides(t *testing.T) {
+	dir := t.TempDir()
+	registry.SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
+	t.Cleanup(func() { _ = registry.ClearCodexClientModelsOverride() })
+
+	clientID := "codex-client-served-override-test"
+	modelID := clientID + "-model"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{{
+		ID:          modelID,
+		DisplayName: "Served Override",
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	engine := gin.New()
+	h := &Handler{
+		cfg:            &config.Config{},
+		configFilePath: filepath.Join(dir, "config.yaml"),
+		failedAttempts: make(map[string]*attemptInfo),
+		envSecret:      "test-secret",
+	}
+	middleware := h.Middleware()
+	engine.PUT("/v0/management/codex-client-models/override/:slug", middleware, h.PutCodexClientModelsOverrideEntry)
+	engine.DELETE("/v0/management/codex-client-models/override/:slug", middleware, h.DeleteCodexClientModelsOverrideEntry)
+
+	entry := `{"$inherit":"gpt-5.5","slug":"` + modelID + `","display_name":"Dedicated Entry","description":"Dedicated Entry","context_window":128000,"max_context_window":128000,"priority":200}`
+	rec := performCodexClientModelsRequest(t, engine, http.MethodPut, "/v0/management/codex-client-models/override/"+modelID, entry)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	payload := decodeCodexClientModelsResponse(t, rec)
+	served := codexClientModelsServedSummary(payload, modelID)
+	if served == nil {
+		t.Fatalf("served_models is missing %q", modelID)
+	}
+	if served.DefaultTemplate {
+		t.Fatalf("default_template = true after the entry was added, want false")
+	}
+	if served.TemplateSlug != modelID {
+		t.Fatalf("template_slug = %q, want %q", served.TemplateSlug, modelID)
+	}
+	if served.ContextWindow != 128000 {
+		t.Fatalf("context_window = %d, want %d", served.ContextWindow, 128000)
+	}
+	if served.MaxContextWindow != 128000 {
+		t.Fatalf("max_context_window = %d, want %d", served.MaxContextWindow, 128000)
+	}
+	if served.Priority != 200 {
+		t.Fatalf("priority = %d, want %d", served.Priority, 200)
+	}
+
+	rec = performCodexClientModelsRequest(t, engine, http.MethodDelete, "/v0/management/codex-client-models/override/"+modelID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	payload = decodeCodexClientModelsResponse(t, rec)
+	served = codexClientModelsServedSummary(payload, modelID)
+	if served == nil {
+		t.Fatalf("served_models is missing %q after the override was removed", modelID)
+	}
+	if !served.DefaultTemplate || served.TemplateSlug != "gpt-5.5" {
+		t.Fatalf("template after DELETE = %q (default %v), want the default template %q", served.TemplateSlug, served.DefaultTemplate, "gpt-5.5")
+	}
+}
+
+func codexClientModelsServedSummary(payload codexClientModelsResponse, slug string) *codexmodels.ServedModelSummary {
+	for index := range payload.ServedModels {
+		if payload.ServedModels[index].Slug == slug {
+			return &payload.ServedModels[index]
+		}
+	}
+	return nil
+}
+
+func containsCodexClientModelsSlug(slugs []string, slug string) bool {
+	for _, candidate := range slugs {
+		if candidate == slug {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPutCodexClientModelsOverrideRejectsOversizedBody(t *testing.T) {
