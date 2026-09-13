@@ -312,6 +312,55 @@ func TestManager_Execute_UnauthorizedWithoutRefreshTokenDoesNotCallRefresh(t *te
 	}
 }
 
+func TestAuthHasRefreshCredentialAllowsProviderOwnedRefresh(t *testing.T) {
+	auth := &Auth{Attributes: map[string]string{AttributeRefreshCapable: "true"}}
+	if !authHasRefreshCredential(auth) {
+		t.Fatal("plugin-owned refresh capability should permit one-time unauthorized refresh")
+	}
+	if authHasRefreshCredential(&Auth{Attributes: map[string]string{AttributeRefreshCapable: "false"}}) {
+		t.Fatal("disabled plugin-owned refresh capability should not permit unauthorized refresh")
+	}
+}
+
+func TestManager_ExecuteStream_UnauthorizedRefreshesProviderOwnedCredential(t *testing.T) {
+	m, executor, primary, backup, model := newUnauthorizedRefreshFixture(t, false)
+	registered, ok := m.GetByID(primary.ID)
+	if !ok || registered == nil {
+		t.Fatal("primary auth is not registered")
+	}
+	delete(registered.Metadata, "refresh_token")
+	registered.Attributes = map[string]string{AttributeRefreshCapable: "true"}
+	if _, errUpdate := m.Update(context.Background(), registered); errUpdate != nil {
+		t.Fatalf("update primary auth: %v", errUpdate)
+	}
+
+	stream, errStream := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream error = %v, want refreshed primary success", errStream)
+	}
+	if stream == nil || stream.Chunks == nil {
+		t.Fatal("expected stream result")
+	}
+	chunk, ok := <-stream.Chunks
+	if !ok || chunk.Err != nil {
+		t.Fatalf("stream chunk = %#v, want successful payload", chunk)
+	}
+	if got := string(chunk.Payload); got != primary.ID+":fresh-access-token" {
+		t.Fatalf("stream payload = %q, want refreshed primary response", got)
+	}
+	if got := executor.RefreshCalls(); got != 1 {
+		t.Fatalf("Refresh calls = %d, want 1", got)
+	}
+	if got := executor.StreamCalls(); len(got) != 2 || got[0] != primary.ID || got[1] != primary.ID {
+		t.Fatalf("Stream calls = %v, want [primary, primary]", got)
+	}
+	for _, id := range executor.StreamCalls() {
+		if id == backup.ID {
+			t.Fatal("backup auth should not be used when provider-owned refresh recovers primary")
+		}
+	}
+}
+
 func TestManager_Execute_UnauthorizedRefreshThenRetryStillFailsFallsBackOnce(t *testing.T) {
 	m, executor, primary, backup, model := newUnauthorizedRefreshFixture(t, false)
 	// Refresh "succeeds" but hands back another invalidated token.

@@ -362,7 +362,10 @@ func authHasRefreshCredential(auth *Auth) bool {
 	if authMetadataString(auth, "refresh_token") != "" {
 		return true
 	}
-	return authMetadataString(auth, "refreshToken") != ""
+	if authMetadataString(auth, "refreshToken") != "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes[AttributeRefreshCapable]), "true")
 }
 
 // CredentialsChanged reports whether authentication credentials (tokens or API keys)
