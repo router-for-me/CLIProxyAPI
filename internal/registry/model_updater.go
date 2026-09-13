@@ -121,10 +121,13 @@ func tryRefreshModels(ctx context.Context, label string) {
 		return
 	}
 
-	// Detect changes before updating store.
+	// Apply the optional local overlay before comparing or publishing so
+	// equivalent effective catalogs do not trigger false refresh callbacks and
+	// readers never observe a partially overlaid catalog.
+	overlayCodexCache(parsed)
 	changed := detectChangedProviders(oldData, parsed)
 
-	// Update store with new data regardless.
+	// Publish one complete effective catalog atomically.
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()

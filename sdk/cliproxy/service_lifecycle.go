@@ -70,6 +70,10 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}
 
+	// SDK embedders do not pass through cmd/server's post-.env hook. Apply
+	// the opt-in Codex cache overlay before any auth publishes its model set.
+	registry.RefreshCodexCacheOverlay()
+
 	s.applyRetryConfig(s.cfg)
 	s.configureCooldownStateStore(s.cfg)
 
