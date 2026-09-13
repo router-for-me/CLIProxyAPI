@@ -27,6 +27,10 @@ type pluginExecutorFormatResolver interface {
 	PluginExecutorRequestToFormat(string, coreexecutor.Request, coreexecutor.Options) sdktranslator.Format
 }
 
+type pluginExecutorProviderResolver interface {
+	PluginExecutorProvider(string) string
+}
+
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
@@ -290,32 +294,54 @@ func (h *BaseAPIHandler) pluginExecutorRequest(ctx context.Context, entryProtoco
 }
 
 func (h *BaseAPIHandler) applyRequestInterceptorsAfterPluginExecutorRoute(ctx context.Context, host PluginExecutorHost, executorPluginID, entryProtocol, originalRequestedModel, requestID string, req coreexecutor.Request, opts coreexecutor.Options, skipPluginID string) (coreexecutor.Request, coreexecutor.Options, *interfaces.ErrorMessage) {
-	if !requestInterceptorsEnabled(h.interceptorHost()) {
-		return req, opts, nil
-	}
-	toFormat := sdktranslator.FromString(entryProtocol)
-	if resolver, ok := host.(pluginExecutorFormatResolver); ok && resolver != nil {
-		if resolved := resolver.PluginExecutorRequestToFormat(executorPluginID, req, opts); resolved != "" {
-			toFormat = resolved
+	if requestInterceptorsEnabled(h.interceptorHost()) {
+		toFormat := sdktranslator.FromString(entryProtocol)
+		if resolver, ok := host.(pluginExecutorFormatResolver); ok && resolver != nil {
+			if resolved := resolver.PluginExecutorRequestToFormat(executorPluginID, req, opts); resolved != "" {
+				toFormat = resolved
+			}
+		}
+		resp := h.applyRequestInterceptorsAfterAuth(ctx, coreexecutor.RequestAfterAuthInterceptRequest{
+			SourceFormat:   opts.SourceFormat,
+			ToFormat:       toFormat,
+			Model:          req.Model,
+			RequestedModel: originalRequestedModel,
+			Stream:         opts.Stream,
+			Headers:        cloneHeader(opts.Headers),
+			Body:           cloneBytes(req.Payload),
+			Metadata:       opts.Metadata,
+		}, requestID, skipPluginID)
+		opts.Headers = mergeRequestInterceptorHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
+		if len(resp.Body) > 0 {
+			req.Payload = cloneBytes(resp.Body)
+			opts.OriginalRequest = cloneBytes(resp.Body)
+		}
+		if resp.Terminate {
+			return req, opts, directTerminationError(resp.StatusCode, resp.ResponseHeaders, resp.ResponseBody)
 		}
 	}
-	resp := h.applyRequestInterceptorsAfterAuth(ctx, coreexecutor.RequestAfterAuthInterceptRequest{
+	provider := executorPluginID
+	if resolver, ok := host.(pluginExecutorProviderResolver); ok && resolver != nil {
+		if resolved := resolver.PluginExecutorProvider(executorPluginID); resolved != "" {
+			provider = resolved
+		}
+	}
+	policyResp := applyModelCapabilityPolicy(coreexecutor.RequestAfterAuthInterceptRequest{
+		Provider:       provider,
 		SourceFormat:   opts.SourceFormat,
-		ToFormat:       toFormat,
 		Model:          req.Model,
 		RequestedModel: originalRequestedModel,
 		Stream:         opts.Stream,
 		Headers:        cloneHeader(opts.Headers),
 		Body:           cloneBytes(req.Payload),
 		Metadata:       opts.Metadata,
-	}, requestID, skipPluginID)
-	opts.Headers = mergeRequestInterceptorHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
-	if len(resp.Body) > 0 {
-		req.Payload = cloneBytes(resp.Body)
-		opts.OriginalRequest = cloneBytes(resp.Body)
+	})
+	if policyResp.Terminate {
+		return req, opts, directTerminationError(policyResp.StatusCode, policyResp.ResponseHeaders, policyResp.ResponseBody)
 	}
-	if resp.Terminate {
-		return req, opts, directTerminationError(resp.StatusCode, resp.ResponseHeaders, resp.ResponseBody)
+	if len(policyResp.Body) > 0 {
+		req.Payload = cloneBytes(policyResp.Body)
+		opts.OriginalRequest = cloneBytes(policyResp.Body)
 	}
 	return req, opts, nil
 }

@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T)
 		ContextLength:              300,
 		MaxCompletionTokens:        400,
 		SupportedParameters:        []string{"temperature"},
+		UnsupportedParameters:      []string{"top_p"},
 		SupportedInputModalities:   []string{"text"},
 		SupportedOutputModalities:  []string{"image"},
 		Thinking: &pluginapi.ThinkingSupport{
@@ -69,13 +71,56 @@ func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T)
 
 	model.SupportedGenerationMethods[0] = "mutated"
 	model.SupportedParameters[0] = "mutated"
+	model.UnsupportedParameters[0] = "mutated"
 	model.SupportedInputModalities[0] = "mutated"
 	model.SupportedOutputModalities[0] = "mutated"
 	model.Thinking.Levels[0] = "mutated"
-	if got.SupportedGenerationMethods[0] != "generate" || got.SupportedParameters[0] != "temperature" ||
+	if got.SupportedGenerationMethods[0] != "generate" || got.SupportedParameters[0] != "temperature" || got.UnsupportedParameters[0] != "top_p" ||
 		got.SupportedInputModalities[0] != "text" || got.SupportedOutputModalities[0] != "image" ||
 		got.Thinking.Levels[0] != "low" {
 		t.Fatalf("converted model kept aliases to plugin slices: %#v", got)
+	}
+}
+
+func TestPluginModelInfoToRegistryModelInfoPreservesKnownEmptySlices(t *testing.T) {
+	got := pluginModelInfoToRegistryModelInfo(pluginapi.ModelInfo{
+		ID:                        "known-empty",
+		SupportedParameters:       []string{},
+		UnsupportedParameters:     []string{},
+		SupportedInputModalities:  []string{},
+		SupportedOutputModalities: []string{},
+	})
+	if got.SupportedParameters == nil || got.UnsupportedParameters == nil || got.SupportedInputModalities == nil || got.SupportedOutputModalities == nil {
+		t.Fatalf("known-empty slices became unknown: %#v", got)
+	}
+}
+
+func TestPluginModelInfoTransportsExplicitNonReasoningCapability(t *testing.T) {
+	var model pluginapi.ModelInfo
+	if err := json.Unmarshal([]byte(`{"ID":"plugin/non-reasoning","ReasoningSupported":false}`), &model); err != nil {
+		t.Fatal(err)
+	}
+	got := pluginModelInfoToRegistryModelInfo(model)
+	capability := registry.GetGlobalRegistry()
+	capability.RegisterClient("plugin-explicit-non-reasoning", "plugin", []*registry.ModelInfo{got})
+	t.Cleanup(func() { capability.UnregisterClient("plugin-explicit-non-reasoning") })
+	for _, info := range capability.GetAvailableModelCapabilities() {
+		if info.ID == model.ID && info.Provider == "plugin" {
+			if info.Reasoning == nil || info.Reasoning.Supported {
+				t.Fatalf("reasoning support = %#v, want explicit false", info.Reasoning)
+			}
+			return
+		}
+	}
+	t.Fatal("registered plugin capability missing")
+}
+
+func TestCloneRegistryModelsClonesUnsupportedParameters(t *testing.T) {
+	original := []*registry.ModelInfo{{ID: "model", UnsupportedParameters: []string{"temperature"}}}
+	cloned := cloneRegistryModels(original)
+	original[0].UnsupportedParameters[0] = "mutated"
+	if cloned[0].UnsupportedParameters[0] != "temperature" {
+		t.Fatalf("clone retained unsupported-parameters alias: %#v", cloned[0])
 	}
 }
 
@@ -133,6 +178,7 @@ func TestRegisterModelsRegistersProviderModelsAndClientID(t *testing.T) {
 						ContextLength:              300,
 						MaxCompletionTokens:        400,
 						SupportedParameters:        []string{"temperature"},
+						UnsupportedParameters:      []string{"top_p"},
 						SupportedInputModalities:   []string{"text"},
 						SupportedOutputModalities:  []string{"text"},
 						Thinking: &pluginapi.ThinkingSupport{
@@ -165,7 +211,7 @@ func TestRegisterModelsRegistersProviderModelsAndClientID(t *testing.T) {
 	if model.ID != "model-1" || model.Object != "model" || model.Created != 123 || model.OwnedBy != "owner" || model.Type != "chat" ||
 		model.DisplayName != "Model One" || model.Name != "native-model-1" || model.Version != "v1" || model.Description != "description" ||
 		model.InputTokenLimit != 100 || model.OutputTokenLimit != 200 || model.ContextLength != 300 || model.MaxCompletionTokens != 400 ||
-		model.SupportedGenerationMethods[0] != "generate" || model.SupportedParameters[0] != "temperature" ||
+		model.SupportedGenerationMethods[0] != "generate" || model.SupportedParameters[0] != "temperature" || model.UnsupportedParameters[0] != "top_p" ||
 		model.SupportedInputModalities[0] != "text" || model.SupportedOutputModalities[0] != "text" || !model.UserDefined {
 		t.Fatalf("registered model = %#v, want converted fields", model)
 	}

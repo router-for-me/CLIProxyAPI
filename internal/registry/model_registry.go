@@ -65,6 +65,8 @@ type ModelInfo struct {
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// SupportedParameters lists supported parameters
 	SupportedParameters []string `json:"supported_parameters,omitempty"`
+	// UnsupportedParameters lists request parameters known to be unsupported.
+	UnsupportedParameters []string `json:"unsupported_parameters,omitempty"`
 	// SupportedInputModalities lists supported input modalities (e.g., TEXT, IMAGE, VIDEO, AUDIO)
 	SupportedInputModalities []string `json:"supportedInputModalities,omitempty"`
 	// SupportedOutputModalities lists supported output modalities (e.g., TEXT, IMAGE)
@@ -76,6 +78,8 @@ type ModelInfo struct {
 	// Thinking holds provider-specific reasoning/thinking budget capabilities.
 	// This is optional and currently used for Gemini thinking budget normalization.
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
+	// ReasoningSupported distinguishes known support from unknown metadata.
+	ReasoningSupported *bool `json:"reasoning_supported,omitempty"`
 
 	// Config holds model-specific runtime overrides loaded from models.json.
 	Config *ModelConfig `json:"config,omitempty"`
@@ -116,6 +120,30 @@ type ThinkingSupport struct {
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
 	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
+}
+
+// ModelCapability describes one provider-specific, routable model.
+// Nil fields are unknown; empty slices are known to have no values.
+type ModelCapability struct {
+	ID                    string                    `json:"id"`
+	Provider              string                    `json:"provider"`
+	ContextWindow         *int                      `json:"context_window"`
+	MaxOutputTokens       *int                      `json:"max_output_tokens"`
+	InputModalities       []string                  `json:"input_modalities"`
+	OutputModalities      []string                  `json:"output_modalities"`
+	Reasoning             *ModelReasoningCapability `json:"reasoning"`
+	SupportedParameters   []string                  `json:"supported_parameters"`
+	UnsupportedParameters []string                  `json:"unsupported_parameters"`
+}
+
+// ModelReasoningCapability describes known reasoning controls for a model.
+type ModelReasoningCapability struct {
+	Supported      bool     `json:"supported"`
+	Levels         []string `json:"levels"`
+	MinTokens      *int     `json:"min_tokens"`
+	MaxTokens      *int     `json:"max_tokens"`
+	ZeroAllowed    bool     `json:"zero_allowed"`
+	DynamicAllowed bool     `json:"dynamic_allowed"`
 }
 
 // ModelRegistration tracks a model's availability
@@ -635,6 +663,9 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	if len(model.SupportedParameters) > 0 {
 		copyModel.SupportedParameters = append([]string(nil), model.SupportedParameters...)
 	}
+	if len(model.UnsupportedParameters) > 0 {
+		copyModel.UnsupportedParameters = append([]string(nil), model.UnsupportedParameters...)
+	}
 	if len(model.SupportedInputModalities) > 0 {
 		copyModel.SupportedInputModalities = append([]string(nil), model.SupportedInputModalities...)
 	}
@@ -647,6 +678,10 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 			copyThinking.Levels = append([]string(nil), model.Thinking.Levels...)
 		}
 		copyModel.Thinking = &copyThinking
+	}
+	if model.ReasoningSupported != nil {
+		reasoningSupported := *model.ReasoningSupported
+		copyModel.ReasoningSupported = &reasoningSupported
 	}
 	if model.Config != nil {
 		copyConfig := *model.Config
@@ -1203,6 +1238,137 @@ func (r *ModelRegistry) GetAvailableModelInfos() []*ModelInfo {
 	return result
 }
 
+// GetAvailableModelCapabilities returns one row per available model/provider pair.
+// Multiple rows may share an ID when more than one provider can route that ID.
+func (r *ModelRegistry) GetAvailableModelCapabilities() []ModelCapability {
+	now := time.Now()
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	result := make([]ModelCapability, 0, len(r.models))
+	for modelID, registration := range r.models {
+		if registration == nil {
+			continue
+		}
+		for provider, count := range registration.Providers {
+			if count <= 0 || !r.modelProviderAvailableLocked(registration, provider, count, now) {
+				continue
+			}
+			info := registration.InfoByProvider[provider]
+			if info == nil {
+				info = &ModelInfo{ID: modelID}
+			}
+			result = append(result, modelCapabilityFromInfo(info, provider))
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ID == result[j].ID {
+			return result[i].Provider < result[j].Provider
+		}
+		return result[i].ID < result[j].ID
+	})
+	return result
+}
+
+func (r *ModelRegistry) modelProviderAvailableLocked(registration *ModelRegistration, provider string, count int, now time.Time) bool {
+	expiredClients := 0
+	for clientID, quotaTime := range registration.QuotaExceededClients {
+		if r.clientProviders[clientID] == provider && quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
+			expiredClients++
+		}
+	}
+
+	cooldownSuspended := 0
+	otherSuspended := 0
+	for clientID, reason := range registration.SuspendedClients {
+		if r.clientProviders[clientID] != provider {
+			continue
+		}
+		if strings.EqualFold(reason, "quota") {
+			cooldownSuspended++
+		} else {
+			otherSuspended++
+		}
+	}
+
+	effectiveClients := count - expiredClients - otherSuspended
+	return effectiveClients > 0 || (count > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0)
+}
+
+func modelCapabilityFromInfo(info *ModelInfo, provider string) ModelCapability {
+	capability := ModelCapability{
+		ID:                    strings.TrimSpace(info.ID),
+		Provider:              strings.ToLower(strings.TrimSpace(provider)),
+		InputModalities:       normalizedCapabilityStrings(info.SupportedInputModalities),
+		OutputModalities:      normalizedCapabilityStrings(info.SupportedOutputModalities),
+		SupportedParameters:   normalizedCapabilityStrings(info.SupportedParameters),
+		UnsupportedParameters: normalizedCapabilityStrings(info.UnsupportedParameters),
+	}
+
+	contextWindow := info.MaxContextLength
+	if contextWindow <= 0 {
+		contextWindow = info.ContextLength
+	}
+	if contextWindow <= 0 {
+		contextWindow = info.InputTokenLimit
+	}
+	if contextWindow > 0 {
+		capability.ContextWindow = intPointer(contextWindow)
+	}
+
+	maxOutputTokens := info.MaxCompletionTokens
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = info.OutputTokenLimit
+	}
+	if maxOutputTokens > 0 {
+		capability.MaxOutputTokens = intPointer(maxOutputTokens)
+	}
+
+	if info.ReasoningSupported != nil || info.Thinking != nil {
+		supported := info.Thinking != nil
+		if info.ReasoningSupported != nil {
+			supported = *info.ReasoningSupported
+		}
+		capability.Reasoning = &ModelReasoningCapability{
+			Supported: supported,
+			Levels:    []string{},
+		}
+		if info.Thinking != nil {
+			if levels := normalizedCapabilityStrings(info.Thinking.Levels); len(levels) > 0 {
+				capability.Reasoning.Levels = levels
+			}
+			capability.Reasoning.ZeroAllowed = info.Thinking.ZeroAllowed
+			capability.Reasoning.DynamicAllowed = info.Thinking.DynamicAllowed
+			if info.Thinking.Min > 0 {
+				capability.Reasoning.MinTokens = intPointer(info.Thinking.Min)
+			}
+			if info.Thinking.Max > 0 {
+				capability.Reasoning.MaxTokens = intPointer(info.Thinking.Max)
+			}
+		}
+	}
+	return capability
+}
+
+func normalizedCapabilityStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func intPointer(value int) *int {
+	return &value
+}
+
 func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.Time) ([]map[string]any, time.Time) {
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
@@ -1495,6 +1661,21 @@ func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 		return cloneModelInfo(reg.Info)
 	}
 	return nil
+}
+
+// GetProviderModelInfo returns metadata only when it belongs to the selected provider.
+func (r *ModelRegistry) GetProviderModelInfo(modelID, provider string) *ModelInfo {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	reg := r.models[strings.TrimSpace(modelID)]
+	if reg == nil || reg.Providers[provider] <= 0 || reg.InfoByProvider == nil {
+		return nil
+	}
+	return cloneModelInfo(reg.InfoByProvider[provider])
 }
 
 // convertModelToMap converts ModelInfo to the appropriate format for different handler types

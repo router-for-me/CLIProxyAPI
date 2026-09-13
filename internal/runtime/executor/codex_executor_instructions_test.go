@@ -121,3 +121,17 @@ func TestCodexExecutorCountTokensTreatsNullInstructionsAsEmpty(t *testing.T) {
 		t.Fatalf("token count payload mismatch:\nnull=%s\nempty=%s", string(nullResp.Payload), string(emptyResp.Payload))
 	}
 }
+
+func TestCountCodexInputTokensCountsStringInput(t *testing.T) {
+	enc, err := tokenizerForCodexModel("gpt-5.4")
+	if err != nil {
+		t.Fatalf("tokenizerForCodexModel() error: %v", err)
+	}
+	got, err := countCodexInputTokens(enc, []byte(`{"input":"hello"}`))
+	if err != nil {
+		t.Fatalf("countCodexInputTokens() error: %v", err)
+	}
+	if got == 0 {
+		t.Fatal("countCodexInputTokens() = 0, want a count for string input")
+	}
+}

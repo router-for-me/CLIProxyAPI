@@ -95,6 +95,8 @@ type RequestAfterAuthInterceptor func(context.Context, RequestAfterAuthIntercept
 
 // RequestAfterAuthInterceptRequest describes a selected-auth request before executor translation.
 type RequestAfterAuthInterceptRequest struct {
+	// Provider is the selected credential provider for this execution attempt.
+	Provider string
 	// SourceFormat is the original client protocol format.
 	SourceFormat sdktranslator.Format
 	// ToFormat is the selected upstream protocol format.

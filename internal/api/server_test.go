@@ -27,6 +27,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	claudeHandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
+	openaiHandlers "github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -48,6 +50,8 @@ type codexSearchCaptureExecutor struct {
 	statuses     []int
 	refreshCalls int
 	httpCalls    int
+	countCalls   int
+	countPayload []byte
 	beforeReturn func()
 }
 
@@ -72,7 +76,11 @@ func (e *codexSearchCaptureExecutor) Refresh(_ context.Context, a *auth.Auth) (*
 }
 
 func (e *codexSearchCaptureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
-	return coreexecutor.Response{}, nil
+	e.countCalls++
+	if len(e.countPayload) > 0 {
+		return coreexecutor.Response{Payload: e.countPayload}, nil
+	}
+	return coreexecutor.Response{Payload: []byte(`{"response":{"usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7}}}`)}, nil
 }
 
 func (e *codexSearchCaptureExecutor) PrepareRequest(req *http.Request, a *auth.Auth) error {
@@ -630,6 +638,62 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath, opts...)
+}
+
+func TestResponsesInputTokensRoute(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{ID: "input-token-auth", Provider: "codex", Status: auth.StatusActive}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential.ID) })
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/input_tokens", strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.countCalls != 1 {
+		t.Fatalf("count calls = %d, want 1", executor.countCalls)
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != `{"object":"response.input_tokens","input_tokens":7}` {
+		t.Fatalf("body = %s", got)
+	}
+}
+
+func TestResponsesInputTokensRouteEstimatesPluginZeroCount(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{countPayload: []byte(`{"total_tokens":0}`)}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{ID: "input-token-estimate-auth", Provider: "codex", Status: auth.StatusActive}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential.ID) })
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/input_tokens", strings.NewReader(`{"model":"gpt-5.4","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var body struct {
+		InputTokens int64 `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil || body.InputTokens == 0 {
+		t.Fatalf("input_tokens = 0, want a local estimate; body=%s", rr.Body.String())
+	}
 }
 
 func TestHealthz(t *testing.T) {
@@ -2225,6 +2289,39 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
 		}
+	}
+}
+
+func TestModelsCapabilitiesUsesLocalProviderRegistryWhenHomeEnabled(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	const clientID = "test-home-capability-catalog"
+	modelRegistry.RegisterClient(clientID, "factory", []*registry.ModelInfo{{
+		ID:                  "factory/home-capability-test",
+		ContextLength:       1050000,
+		MaxCompletionTokens: 128000,
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+
+	rr := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rr)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models?capabilities=true", nil)
+	server.unifiedModelsHandler(&openaiHandlers.OpenAIAPIHandler{}, &claudeHandlers.ClaudeCodeAPIHandler{})(ctx)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Object        string `json:"object"`
+		SchemaVersion int    `json:"schema_version"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Object != "model_capability_list" || response.SchemaVersion != 1 {
+		t.Fatalf("response = %#v body=%s", response, rr.Body.String())
 	}
 }
 
