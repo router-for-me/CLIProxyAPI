@@ -74,7 +74,8 @@ func summarizeOAuthRequestScopedErrorsList(list []config.RequestScopedErrorRule)
 	var b strings.Builder
 	valid := 0
 	for _, entry := range list {
-		if entry.Status <= 0 || (len(entry.Match) == 0 && len(entry.MatchRegexr) == 0) || entry.Action == "" {
+		// Status == 0 (unset) is a body-only rule and is valid; reject only negative statuses.
+		if entry.Status < 0 || (len(entry.Match) == 0 && len(entry.MatchRegexr) == 0) || entry.Action == "" {
 			continue
 		}
 		valid++
