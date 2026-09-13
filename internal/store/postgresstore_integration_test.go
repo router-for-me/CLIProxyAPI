@@ -35,6 +35,9 @@ func TestPostgresStoreConcurrentPublicationFailure(t *testing.T) {
 		{"watcher-delete", `{"value":"old"}`, "", "", "watcher"},
 		{"qualified-table", `{"value":"old"}`, `{"value":"new"}`, `{"value":"new"}`, "save"},
 		{"cancelled-publication", `{"value":"old"}`, `{"value":"new"}`, `{"value":"new"}`, "save"},
+		{"shared-failure", `{"value":"old"}`, `{"value":"first"}`, `{"value":"second"}`, "save"},
+		{"shared-success", `{"value":"old"}`, `{"value":"first"}`, `{"value":"second"}`, "save"},
+		{"shared-stale-read", `{"value":"old"}`, `{"value":"first"}`, `{"value":"old"}`, "save"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -64,6 +67,11 @@ func TestPostgresStoreConcurrentPublicationFailure(t *testing.T) {
 				return &PostgresStore{db: conn, cfg: PostgresStoreConfig{AuthTable: table}, authDir: t.TempDir()}
 			}
 			a, b := newStore(), newStore()
+			shared := strings.HasPrefix(test.name, "shared-")
+			publish := shared && test.name != "shared-failure"
+			if shared {
+				b.authDir = a.authDir
+			}
 			if test.name == "qualified-table" {
 				if err = db.QueryRowContext(ctx, "SELECT current_schema()").Scan(&b.cfg.Schema); err != nil {
 					t.Fatal(err)
@@ -87,7 +95,7 @@ func TestPostgresStoreConcurrentPublicationFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			completed := make(chan error, 1)
-			a.renameFile = func(string, string) error {
+			a.renameFile = func(oldPath, newPath string) error {
 				go func() {
 					var errWrite error
 					switch test.operation {
@@ -123,10 +131,19 @@ func TestPostgresStoreConcurrentPublicationFailure(t *testing.T) {
 				if test.name == "cancelled-publication" {
 					cancelSave()
 				}
+				if shared {
+					staged, errRead := os.ReadFile(oldPath)
+					if errRead != nil || !jsonEqual(staged, []byte(test.candidate)) {
+						t.Errorf("first staged payload = %s, error = %v, want %s", staged, errRead, test.candidate)
+					}
+				}
+				if publish {
+					return os.Rename(oldPath, newPath)
+				}
 				return errors.New("publish rejected")
 			}
 			_, err = a.Save(saveCtx, &cliproxyauth.Auth{ID: id, Storage: &postgresAuthTestStorage{data: []byte(test.candidate)}})
-			if err == nil || !strings.Contains(err.Error(), "publish rejected") || strings.Contains(err.Error(), "rollback failed") {
+			if publish && err != nil || !publish && (err == nil || !strings.Contains(err.Error(), "publish rejected") || strings.Contains(err.Error(), "rollback failed")) {
 				t.Fatalf("Save() error = %v", err)
 			}
 			select {
@@ -149,6 +166,9 @@ func TestPostgresStoreConcurrentPublicationFailure(t *testing.T) {
 			var previous []byte
 			if test.previous != "" {
 				previous = []byte(test.previous)
+			}
+			if shared {
+				previous = []byte(test.newer)
 			}
 			assertPostgresAuthLocal(t, filepath.Join(a.authDir, id), previous)
 			assertPostgresAuthNoTemp(t, filepath.Join(a.authDir, id))

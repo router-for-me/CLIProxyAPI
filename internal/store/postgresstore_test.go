@@ -626,8 +626,8 @@ func TestPostgresStoreSaveUsesTemporaryPathForTokenStorage(t *testing.T) {
 	store := newPostgresAuthStoreForTest(t, backend)
 	storage := &postgresAuthTestStorage{data: []byte(`{"type":"codex","token":"value"}`), mode: 0o644}
 	store.renameFile = func(oldPath, newPath string) error {
-		if got, want := oldPath, newPath+".tmp"; got != want {
-			t.Fatalf("temporary path = %q, want %q", got, want)
+		if !strings.HasPrefix(oldPath, newPath+".tmp-") || oldPath != storage.path {
+			t.Fatalf("temporary path = %q, want unique storage path beside %q", oldPath, newPath)
 		}
 		info, errStat := os.Stat(oldPath)
 		if errStat != nil {
@@ -648,8 +648,8 @@ func TestPostgresStoreSaveUsesTemporaryPathForTokenStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
-	if storage.path != path+".tmp" {
-		t.Fatalf("storage path = %q, want %q", storage.path, path+".tmp")
+	if !strings.HasPrefix(storage.path, path+".tmp-") {
+		t.Fatalf("storage path = %q, want unique temporary path beside %q", storage.path, path)
 	}
 	assertPostgresAuthLocal(t, path, storage.data)
 	if got := auth.Attributes[cliproxyauth.AttributeSourceBackend]; got != cliproxyauth.AuthSourcePostgres {
@@ -731,8 +731,14 @@ func assertPostgresAuthLocal(t *testing.T, path string, want []byte) {
 
 func assertPostgresAuthNoTemp(t *testing.T, path string) {
 	t.Helper()
-	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stat temp auth error = %v, want not exist", err)
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), filepath.Base(path)+".tmp") {
+			t.Errorf("temporary auth file remains: %s", entry.Name())
+		}
 	}
 }
 

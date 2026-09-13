@@ -242,22 +242,18 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
 
-	localPrevious, errReadPrevious := os.ReadFile(path)
-	localExists := errReadPrevious == nil
-	if errReadPrevious != nil && !errors.Is(errReadPrevious, fs.ErrNotExist) {
-		return "", fmt.Errorf("postgres store: read existing metadata: %w", errReadPrevious)
-	}
 	relID, err := s.relativeAuthID(path)
 	if err != nil {
 		return "", err
 	}
-	tmp := path + ".tmp"
-	if errRemove := os.Remove(tmp); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
-		return "", fmt.Errorf("postgres store: remove stale temp auth file: %w", errRemove)
+	stagedDir, errStage := os.MkdirTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if errStage != nil {
+		return "", fmt.Errorf("postgres store: create temp auth directory: %w", errStage)
 	}
+	tmp := filepath.Join(stagedDir, "auth")
 	defer func() {
-		if errRemove := os.Remove(tmp); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
-			log.WithError(errRemove).Warn("postgres store: remove temporary auth file")
+		if errRemove := os.RemoveAll(stagedDir); errRemove != nil {
+			log.WithError(errRemove).Warn("postgres store: remove temporary auth directory")
 		}
 	}()
 
@@ -295,6 +291,11 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	}
 
 	err = s.withAuthLock(ctx, relID, func(conn *sql.Conn) error {
+		localPrevious, errReadPrevious := os.ReadFile(path)
+		localExists := errReadPrevious == nil
+		if errReadPrevious != nil && !errors.Is(errReadPrevious, fs.ErrNotExist) {
+			return fmt.Errorf("postgres store: read existing metadata: %w", errReadPrevious)
+		}
 		var (
 			durablePrevious       postgresAuthRecord
 			durablePreviousExists bool
