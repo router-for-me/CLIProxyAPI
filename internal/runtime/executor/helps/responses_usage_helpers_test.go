@@ -120,6 +120,26 @@ func TestEnsureResponsesUsageDetails_HandlesNullOrEmptyDetails(t *testing.T) {
 	}
 }
 
+func TestEnsureResponsesUsageDetails_CoercesNonNumericCounters(t *testing.T) {
+	raw := []byte(`{"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":"3"},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":"5"},"total_tokens":14}}`)
+	got := EnsureResponsesUsageDetails(raw)
+	if node := gjson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens"); node.Type != gjson.Number || node.Int() != 5 {
+		t.Fatalf("reasoning_tokens = %s, want number 5", got)
+	}
+	if node := gjson.GetBytes(got, "usage.input_tokens_details.cached_tokens"); node.Type != gjson.Number || node.Int() != 3 {
+		t.Fatalf("cached_tokens = %s, want number 3", got)
+	}
+
+	invalid := []byte(`{"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":false},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":null},"completion_tokens_details":{"reasoning_tokens":7},"total_tokens":14}}`)
+	got = EnsureResponsesUsageDetails(invalid)
+	if node := gjson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens"); node.Type != gjson.Number || node.Int() != 7 {
+		t.Fatalf("null reasoning_tokens should fall back to 7, got %s", got)
+	}
+	if node := gjson.GetBytes(got, "usage.input_tokens_details.cached_tokens"); node.Type != gjson.Number || node.Int() != 0 {
+		t.Fatalf("false cached_tokens should become 0, got %s", got)
+	}
+}
+
 func TestEnsureResponsesUsageDetails_NonJSONAndDone(t *testing.T) {
 	cases := [][]byte{
 		[]byte("data: [DONE]"),
