@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +47,7 @@ type PostgresStore struct {
 	authDir       string
 	cooldownStore *postgresCooldownStateStore
 	mu            sync.Mutex
+	renameFile    func(string, string) error
 }
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.
@@ -240,6 +242,25 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
 
+	localPrevious, errReadPrevious := os.ReadFile(path)
+	localExists := errReadPrevious == nil
+	if errReadPrevious != nil && !errors.Is(errReadPrevious, fs.ErrNotExist) {
+		return "", fmt.Errorf("postgres store: read existing metadata: %w", errReadPrevious)
+	}
+	relID, err := s.relativeAuthID(path)
+	if err != nil {
+		return "", err
+	}
+	tmp := path + ".tmp"
+	if errRemove := os.Remove(tmp); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
+		return "", fmt.Errorf("postgres store: remove stale temp auth file: %w", errRemove)
+	}
+	defer func() {
+		if errRemove := os.Remove(tmp); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
+			log.WithError(errRemove).Warn("postgres store: remove temporary auth file")
+		}
+	}()
+
 	switch {
 	case auth.Storage != nil:
 		if auth.Metadata == nil {
@@ -249,7 +270,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 			setter.SetMetadata(auth.Metadata)
 		}
-		if err = auth.Storage.SaveTokenToFile(path); err != nil {
+		if err = auth.Storage.SaveTokenToFile(tmp); err != nil {
 			return "", err
 		}
 	case auth.Metadata != nil:
@@ -258,42 +279,77 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		if errMarshal != nil {
 			return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
 		}
-		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
-				return path, nil
-			}
-		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
-			return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
-		}
-		tmp := path + ".tmp"
 		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
 			return "", fmt.Errorf("postgres store: write temp auth file: %w", errWrite)
-		}
-		if errRename := os.Rename(tmp, path); errRename != nil {
-			return "", fmt.Errorf("postgres store: rename auth file: %w", errRename)
 		}
 	default:
 		return "", fmt.Errorf("postgres store: nothing to persist for %s", auth.ID)
 	}
+	if errChmod := os.Chmod(tmp, 0o600); errChmod != nil && !errors.Is(errChmod, fs.ErrNotExist) {
+		return "", fmt.Errorf("postgres store: secure temp auth file: %w", errChmod)
+	}
 
+	candidate, errReadCandidate := os.ReadFile(tmp)
+	if errReadCandidate != nil {
+		return "", fmt.Errorf("postgres store: read temp auth file: %w", errReadCandidate)
+	}
+
+	err = s.withAuthLock(ctx, relID, func(conn *sql.Conn) error {
+		var (
+			durablePrevious       []byte
+			durablePreviousExists bool
+			durableChanged        bool
+		)
+		if len(candidate) == 0 {
+			durablePrevious, durablePreviousExists, err = s.deleteAuthRecordReturning(ctx, conn, relID)
+			durableChanged = durablePreviousExists
+		} else {
+			durablePrevious, durablePreviousExists, err = s.replaceAuthRecord(ctx, conn, relID, candidate)
+			durableChanged = true
+		}
+		if err != nil {
+			return err
+		}
+		if localExists && jsonEqual(localPrevious, candidate) {
+			return nil
+		}
+		if errRename := s.renameAuthFile(tmp, path); errRename != nil {
+			if durableChanged {
+				errRollback := s.rollbackAuthRecord(context.WithoutCancel(ctx), conn, relID, candidate, durablePrevious, durablePreviousExists)
+				if errRollback != nil {
+					return errors.Join(
+						fmt.Errorf("postgres store: publish auth file: %w", errRename),
+						fmt.Errorf("postgres store: database rollback failed: %w", errRollback),
+					)
+				}
+			}
+			return fmt.Errorf("postgres store: publish auth file: %w", errRename)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	normalizeSavedPostgresAuth(auth, path)
+	return path, nil
+}
+
+func (s *PostgresStore) renameAuthFile(oldPath, newPath string) error {
+	if s.renameFile != nil {
+		return s.renameFile(oldPath, newPath)
+	}
+	return os.Rename(oldPath, newPath)
+}
+
+func normalizeSavedPostgresAuth(auth *cliproxyauth.Auth, path string) {
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
 	auth.Attributes[cliproxyauth.AttributePath] = path
 	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourcePostgres
-
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID
 	}
-
-	relID, err := s.relativeAuthID(path)
-	if err != nil {
-		return "", err
-	}
-	if err = s.upsertAuthRecord(ctx, relID, path); err != nil {
-		return "", err
-	}
-	return path, nil
 }
 
 // List enumerates all auth records stored in PostgreSQL.
@@ -539,35 +595,183 @@ func (s *PostgresStore) syncAuthFile(ctx context.Context, relID, path string) er
 	return s.persistAuth(ctx, relID, data)
 }
 
-func (s *PostgresStore) upsertAuthRecord(ctx context.Context, relID, path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("postgres store: read auth file: %w", err)
-	}
-	if len(data) == 0 {
-		return s.deleteAuthRecord(ctx, relID)
-	}
-	return s.persistAuth(ctx, relID, data)
-}
-
 func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []byte) error {
-	jsonPayload := json.RawMessage(data)
-	query := fmt.Sprintf(`
+	return s.withAuthLock(ctx, relID, func(conn *sql.Conn) error {
+		jsonPayload := json.RawMessage(data)
+		query := fmt.Sprintf(`
 		INSERT INTO %s (id, content, created_at, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
 		ON CONFLICT (id)
 		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
 	`, s.fullTableName(s.cfg.AuthTable))
-	if _, err := s.db.ExecContext(ctx, query, relID, jsonPayload); err != nil {
-		return fmt.Errorf("postgres store: upsert auth record: %w", err)
-	}
-	return nil
+		if _, err := conn.ExecContext(ctx, query, relID, jsonPayload); err != nil {
+			return fmt.Errorf("postgres store: upsert auth record: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) error {
-	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
-	if _, err := s.db.ExecContext(ctx, query, relID); err != nil {
-		return fmt.Errorf("postgres store: delete auth record: %w", err)
+	return s.withAuthLock(ctx, relID, func(conn *sql.Conn) error {
+		query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
+		if _, err := conn.ExecContext(ctx, query, relID); err != nil {
+			return fmt.Errorf("postgres store: delete auth record: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *PostgresStore) withAuthLock(ctx context.Context, relID string, save func(*sql.Conn) error) (err error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres store: acquire auth connection: %w", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil && !errors.Is(errClose, sql.ErrConnDone) {
+			err = errors.Join(err, fmt.Errorf("postgres store: close auth connection: %w", errClose))
+		}
+	}()
+	var key int64
+	if errKey := conn.QueryRowContext(ctx, "SELECT hashtextextended($1::regclass::oid::text || ':' || $2::text, 0)", s.fullTableName(s.cfg.AuthTable), relID).Scan(&key); errKey != nil {
+		return fmt.Errorf("postgres store: resolve auth lock: %w", errKey)
+	}
+	locked := false
+	// The same session must own the lock through commit, publication, and compensation.
+	defer func() {
+		var unlocked bool
+		errUnlock := conn.QueryRowContext(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", key).Scan(&unlocked)
+		if errUnlock == nil && locked && !unlocked {
+			errUnlock = errors.New("auth lock ownership lost")
+		}
+		if errUnlock != nil {
+			err = errors.Join(err, fmt.Errorf("postgres store: unlock auth record: %w", errUnlock))
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+	if _, errLock := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", key); errLock != nil {
+		return fmt.Errorf("postgres store: lock auth record: %w", errLock)
+	}
+	locked = true
+	return save(conn)
+}
+
+func (s *PostgresStore) replaceAuthRecord(ctx context.Context, conn *sql.Conn, relID string, candidate []byte) (previous []byte, previousExists bool, err error) {
+	// READ COMMITTED lets the retry observe a row that won ON CONFLICT.
+	tx, errBegin := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if errBegin != nil {
+		return nil, false, fmt.Errorf("postgres store: begin auth replacement: %w", errBegin)
+	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		if errRollback := tx.Rollback(); errRollback != nil && !errors.Is(errRollback, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("postgres store: rollback auth replacement: %w", errRollback))
+		}
+	}()
+
+	table := s.fullTableName(s.cfg.AuthTable)
+	selectQuery := fmt.Sprintf("SELECT content FROM %s WHERE id = $1 FOR UPDATE", table)
+	updateQuery := fmt.Sprintf("UPDATE %s SET content = $2, updated_at = NOW() WHERE id = $1", table)
+	insertQuery := fmt.Sprintf(`
+		INSERT INTO %s (id, content, created_at, updated_at)
+		VALUES ($1, $2, NOW(), NOW())
+		ON CONFLICT (id) DO NOTHING
+	`, table)
+	for {
+		var content string
+		errScan := tx.QueryRowContext(ctx, selectQuery, relID).Scan(&content)
+		switch {
+		case errScan == nil:
+			result, errUpdate := tx.ExecContext(ctx, updateQuery, relID, json.RawMessage(candidate))
+			if errUpdate != nil {
+				err = fmt.Errorf("postgres store: replace auth record: %w", errUpdate)
+				return nil, false, err
+			}
+			rows, errRows := result.RowsAffected()
+			if errRows != nil {
+				err = fmt.Errorf("postgres store: inspect auth replacement: %w", errRows)
+				return nil, false, err
+			}
+			if rows != 1 {
+				err = fmt.Errorf("postgres store: locked auth record disappeared before replacement")
+				return nil, false, err
+			}
+			if errCommit := tx.Commit(); errCommit != nil {
+				err = fmt.Errorf("postgres store: commit auth replacement: %w", errCommit)
+				return nil, false, err
+			}
+			return []byte(content), true, nil
+		case !errors.Is(errScan, sql.ErrNoRows):
+			err = fmt.Errorf("postgres store: lock auth record: %w", errScan)
+			return nil, false, err
+		}
+
+		result, errInsert := tx.ExecContext(ctx, insertQuery, relID, json.RawMessage(candidate))
+		if errInsert != nil {
+			err = fmt.Errorf("postgres store: insert auth record: %w", errInsert)
+			return nil, false, err
+		}
+		rows, errRows := result.RowsAffected()
+		if errRows != nil {
+			err = fmt.Errorf("postgres store: inspect auth insert: %w", errRows)
+			return nil, false, err
+		}
+		if rows == 0 {
+			continue
+		}
+		if rows != 1 {
+			err = fmt.Errorf("postgres store: inserted %d auth records, want 1", rows)
+			return nil, false, err
+		}
+		if errCommit := tx.Commit(); errCommit != nil {
+			err = fmt.Errorf("postgres store: commit auth insert: %w", errCommit)
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+}
+
+func (s *PostgresStore) deleteAuthRecordReturning(ctx context.Context, conn *sql.Conn, relID string) ([]byte, bool, error) {
+	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1 RETURNING content", s.fullTableName(s.cfg.AuthTable))
+	var content string
+	if err := conn.QueryRowContext(ctx, query, relID).Scan(&content); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("postgres store: delete auth record: %w", err)
+	}
+	return []byte(content), true, nil
+}
+
+func (s *PostgresStore) rollbackAuthRecord(ctx context.Context, conn *sql.Conn, relID string, candidate, previous []byte, previousExists bool) error {
+	var (
+		result sql.Result
+		err    error
+	)
+	if previousExists && len(candidate) == 0 {
+		query := fmt.Sprintf(`
+			INSERT INTO %s (id, content, created_at, updated_at)
+			VALUES ($1, $2, NOW(), NOW())
+			ON CONFLICT (id) DO NOTHING
+		`, s.fullTableName(s.cfg.AuthTable))
+		result, err = conn.ExecContext(ctx, query, relID, json.RawMessage(previous))
+	} else if previousExists {
+		query := fmt.Sprintf("UPDATE %s SET content = $2, updated_at = NOW() WHERE id = $1 AND content = $3", s.fullTableName(s.cfg.AuthTable))
+		result, err = conn.ExecContext(ctx, query, relID, json.RawMessage(previous), json.RawMessage(candidate))
+	} else {
+		query := fmt.Sprintf("DELETE FROM %s WHERE id = $1 AND content = $2", s.fullTableName(s.cfg.AuthTable))
+		result, err = conn.ExecContext(ctx, query, relID, json.RawMessage(candidate))
+	}
+	if err != nil {
+		return fmt.Errorf("postgres store: rollback auth record: %w", err)
+	}
+	rows, errRows := result.RowsAffected()
+	if errRows != nil {
+		return fmt.Errorf("postgres store: inspect auth rollback: %w", errRows)
+	}
+	if rows != 1 {
+		return fmt.Errorf("postgres store: auth record changed before rollback")
 	}
 	return nil
 }
