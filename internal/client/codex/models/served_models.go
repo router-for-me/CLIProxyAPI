@@ -1,5 +1,10 @@
 package models
 
+import (
+	"bytes"
+	"encoding/json"
+)
+
 // ServedModelSummary describes one model the server hands to Codex clients: the
 // catalog entry it is built from plus the fields a management UI lists.
 type ServedModelSummary struct {
@@ -27,6 +32,23 @@ type ServedModelSummary struct {
 	// Priority is the served position. A model without a catalog entry of its own
 	// is ordered after every catalog entry.
 	Priority int `json:"priority"`
+	// SupportedReasoningLevels lists the reasoning efforts the served entry offers.
+	SupportedReasoningLevels []ServedReasoningLevel `json:"supported_reasoning_levels"`
+	// ServedFields maps every field whose served value differs from the entry the
+	// catalog supplies for the model to the value Codex clients receive. The server
+	// decides those fields for the client from model metadata, provider capabilities
+	// and visibility rules, so the catalog value is not what clients see. A
+	// management UI overlays them on the catalog entry to show what clients
+	// currently receive.
+	ServedFields map[string]any `json:"served_fields,omitempty"`
+}
+
+// ServedReasoningLevel is one reasoning effort the served entry offers.
+type ServedReasoningLevel struct {
+	// Effort is the effort name clients request, for example "high".
+	Effort string `json:"effort"`
+	// Description explains the effort; the served entry may omit it.
+	Description string `json:"description,omitempty"`
 }
 
 // SummarizeServedModels reports how each available model is served to Codex
@@ -62,14 +84,101 @@ func SummarizeServedModels(availableModels []map[string]any, providersForModel P
 			DefaultReasoningLevel: stringModelValue(entry, "default_reasoning_level"),
 			Priority:              intModelValue(entry, "priority"),
 		}
-		if _, matched := templates[summary.TemplateSlug]; !matched {
+		// TemplateSlug and DefaultTemplate describe how the served entry was built.
+		// ServedFields compares against the entry a management UI lists for the
+		// model: the entry keyed by the served slug, and the template the model
+		// falls back to when the catalog has no entry for it.
+		baseEntry := defaultTemplate
+		if matched, ok := templates[summary.TemplateSlug]; ok {
+			baseEntry = matched
+		} else {
 			summary.TemplateSlug = defaultSlug
 			summary.DefaultTemplate = true
 		}
+		if matched, ok := templates[slug]; ok {
+			baseEntry = matched
+		}
+		summary.SupportedReasoningLevels = servedReasoningLevels(entry)
+		summary.ServedFields = servedFieldValues(baseEntry, entry)
 		if providersForModel != nil {
 			summary.Providers = providersForModel(slug)
 		}
 		summaries = append(summaries, summary)
 	}
 	return summaries
+}
+
+// servedReasoningLevels reads the reasoning efforts the served entry offers, in the
+// order the entry lists them.
+func servedReasoningLevels(entry map[string]any) []ServedReasoningLevel {
+	rawLevels, ok := entry["supported_reasoning_levels"].([]any)
+	if !ok {
+		return nil
+	}
+	levels := make([]ServedReasoningLevel, 0, len(rawLevels))
+	for _, rawLevel := range rawLevels {
+		levelEntry, okEntry := rawLevel.(map[string]any)
+		if !okEntry {
+			continue
+		}
+		effort := stringModelValue(levelEntry, "effort")
+		if effort == "" {
+			continue
+		}
+		levels = append(levels, ServedReasoningLevel{
+			Effort:      effort,
+			Description: stringModelValue(levelEntry, "description"),
+		})
+	}
+	return levels
+}
+
+// servedFieldValues reports the fields whose served value differs from base, the
+// entry the catalog supplies for the model, together with the value clients
+// receive. A differing field is one the server decided for the client instead of
+// reading it from the catalog entry: overriding it in the catalog may not reach
+// clients, so a management UI shows the served value as the field's default. A
+// field the served entry no longer carries keeps a nil value, which reports that
+// clients receive no value for it.
+func servedFieldValues(base, entry map[string]any) map[string]any {
+	if len(base) == 0 || len(entry) == 0 {
+		return nil
+	}
+	keys := make(map[string]struct{}, len(base)+len(entry))
+	for key := range base {
+		keys[key] = struct{}{}
+	}
+	for key := range entry {
+		keys[key] = struct{}{}
+	}
+
+	fields := make(map[string]any, 4)
+	for key := range keys {
+		// The slug identifies the entry, so it is never a served field.
+		if key == "slug" {
+			continue
+		}
+		if !servedModelValuesEqual(base[key], entry[key]) {
+			fields[key] = entry[key]
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+// servedModelValuesEqual compares two catalog values by their JSON encoding, so a
+// number the catalog decoded as float64 equals the same number built as an int, and
+// object keys compare independently of their order.
+func servedModelValuesEqual(left, right any) bool {
+	leftJSON, errLeft := json.Marshal(left)
+	if errLeft != nil {
+		return false
+	}
+	rightJSON, errRight := json.Marshal(right)
+	if errRight != nil {
+		return false
+	}
+	return bytes.Equal(leftJSON, rightJSON)
 }
