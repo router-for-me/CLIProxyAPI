@@ -21,6 +21,7 @@ import (
 // ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
+	provider                string
 	cfg                     *config.Config
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
@@ -138,7 +139,12 @@ const defaultModelMaxTokens = 1024
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
-func (e *ClaudeExecutor) Identifier() string { return "claude" }
+func (e *ClaudeExecutor) Identifier() string {
+	if e.provider != "" {
+		return e.provider
+	}
+	return "claude"
+}
 
 func (e *ClaudeExecutor) upstreamRequestLogProvider() string {
 	if provider := strings.TrimSpace(e.requestLogProvider); provider != "" {

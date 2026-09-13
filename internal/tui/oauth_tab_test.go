@@ -7,6 +7,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestCopilotUsesDeviceLoginInTUI(t *testing.T) {
+	for _, provider := range oauthProviders {
+		if provider.apiPath == "github-copilot-auth-url" {
+			if !provider.deviceFlow || provider.name != "GitHub Copilot" {
+				t.Fatal("incorrect Copilot login configuration")
+			}
+			return
+		}
+	}
+	t.Fatal("GitHub Copilot is missing from provider list")
+}
+
 func TestShouldAcceptOAuthPollFiltersStaleMessages(t *testing.T) {
 	msg := oauthPollMsg{state: "state-a", generation: 1, done: true, message: "ok"}
 

@@ -140,6 +140,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			models = registry.GetCodexProModels()
 		}
 		models = applyExcludedModels(models, excluded)
+	case "github-copilot":
+		var err error
+		models, err = s.fetchCopilotModels(ctx, a)
+		if err != nil {
+			// Preserve the existing registration. Its aliases and prefixes have
+			// already been applied and must not pass through this pipeline again.
+			return
+		}
+		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)

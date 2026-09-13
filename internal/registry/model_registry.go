@@ -25,6 +25,8 @@ const (
 
 // ModelInfo represents information about an available model
 type ModelInfo struct {
+	// UpstreamEndpoint selects the provider protocol for dynamically discovered models.
+	UpstreamEndpoint string `json:"-"`
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
 	// MetadataModelID identifies the canonical model used to resolve client metadata.
@@ -1730,6 +1732,14 @@ func (r *ModelRegistry) ClientRegistrationEpoch(clientID string) uint64 {
 		return 0
 	}
 	return r.clientEpochs[clientID]
+}
+
+// GetModelForClient returns a copy of the client's own model metadata, without
+// falling back to another client's definition of the same model.
+func (r *ModelRegistry) GetModelForClient(clientID, modelID string) *ModelInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return cloneModelInfo(r.clientModelInfos[clientID][modelID])
 }
 
 // GetModelsForClient returns the models registered for a specific client.
