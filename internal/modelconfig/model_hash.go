@@ -71,6 +71,21 @@ func ComputeCodexModelsHash(models []config.CodexModel) string {
 	return hashJoined(keys)
 }
 
+// ComputeCodeBuddyCNModelsHash returns a stable hash for CodeBuddy CN model aliases.
+func ComputeCodeBuddyCNModelsHash(models []config.CodeBuddyCNModel) string {
+	keys := modelRoutingKeys(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|" + fmt.Sprintf("force-mapping=%t", model.ForceMapping) + "|" + fmt.Sprintf("is-compat=%t", model.IsCompat) + thinkingHashSuffix(model.Thinking))
+		}
+	})
+	return hashJoined(keys)
+}
+
 // ComputeGeminiModelsHash returns a stable hash for Gemini model aliases.
 func ComputeGeminiModelsHash(models []config.GeminiModel) string {
 	keys := modelRoutingKeys(func(out func(key string)) {

@@ -194,6 +194,35 @@ func (cfg *Config) SanitizeXAIKeys() {
 	}
 }
 
+// SanitizeCodeBuddyCNKeys normalizes CodeBuddy CN (Tencent) credentials.
+// Entries missing an API key are dropped; headers and excluded models are normalized.
+func (cfg *Config) SanitizeCodeBuddyCNKeys() {
+	if cfg == nil || len(cfg.CodeBuddyCNKey) == 0 {
+		return
+	}
+	out := cfg.CodeBuddyCNKey[:0]
+	seen := make(map[string]struct{}, len(cfg.CodeBuddyCNKey))
+	for i := range cfg.CodeBuddyCNKey {
+		entry := &cfg.CodeBuddyCNKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		if entry.APIKey == "" {
+			continue
+		}
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		out = append(out, *entry)
+	}
+	cfg.CodeBuddyCNKey = out
+}
+
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	if len(entries) == 0 {
 		return entries

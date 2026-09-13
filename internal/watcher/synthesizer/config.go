@@ -16,6 +16,12 @@ import (
 // It handles Gemini, Interactions, Claude, Codex, xAI, OpenAI-compat, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
 
+// codeBuddyCNDefaultBaseURL is the Tencent CodeBuddy CN OpenAI-compatible gateway host
+// prefix used when a codebuddy-cn-api-key entry does not specify its own base-url.
+// The OpenAI-compatible executor appends "/chat/completions" to this value, yielding
+// https://copilot.tencent.com/v2/chat/completions.
+const codeBuddyCNDefaultBaseURL = "https://copilot.tencent.com/v2"
+
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
 func NewConfigSynthesizer() *ConfigSynthesizer {
 	return &ConfigSynthesizer{}
@@ -52,6 +58,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// xAI API Keys
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
+	// CodeBuddy CN API Keys
+	out = append(out, s.synthesizeCodeBuddyCNKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
@@ -207,6 +215,65 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 // synthesizeXAIKeys creates Auth entries for xAI API keys.
 func (s *ConfigSynthesizer) synthesizeXAIKeys(ctx *SynthesisContext) []*coreauth.Auth {
 	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.XAIKey, "xai")
+}
+
+// synthesizeCodeBuddyCNKeys creates Auth entries for CodeBuddy CN (Tencent) API keys.
+func (s *ConfigSynthesizer) synthesizeCodeBuddyCNKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.CodeBuddyCNKey))
+	for i := range cfg.CodeBuddyCNKey {
+		entry := cfg.CodeBuddyCNKey[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		id, token := idGen.Next("codebuddy-cn:apikey", key, baseURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:codebuddy-cn[%s]", token),
+			"api_key":      key,
+			"config_index": strconv.Itoa(i),
+		}
+		metadata := map[string]any{}
+		if entry.DisableCooling != nil {
+			metadata["disable_cooling"] = *entry.DisableCooling
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		addWeightToAttrs(entry.Weight, attrs)
+		if baseURL != "" {
+			attrs["base_url"] = baseURL
+		} else {
+			attrs["base_url"] = codeBuddyCNDefaultBaseURL
+		}
+		if hash := diff.ComputeCodeBuddyCNModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   constant.CodeBuddyCN,
+			Label:      "codebuddy-cn-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   strings.TrimSpace(entry.ProxyURL),
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {

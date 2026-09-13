@@ -174,6 +174,31 @@ func TestFileSynthesizer_Synthesize_LegacyKimiFingerprintProfile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_CodeBuddyCNOAuth(t *testing.T) {
+	tempDir := t.TempDir()
+	raw := []byte(`{"type":"codebuddy-cn","access_token":"access","refresh_token":"refresh","auth_kind":"oauth"}`)
+	if err := os.WriteFile(filepath.Join(tempDir, "codebuddy-cn.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	auths, err := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d", len(auths))
+	}
+	if got := auths[0].AuthKind(); got != coreauth.AuthKindOAuth {
+		t.Fatalf("auth kind = %q", got)
+	}
+	if got := auths[0].Attributes["base_url"]; got != "https://copilot.tencent.com/v2" {
+		t.Fatalf("base_url = %q", got)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	tempDir := t.TempDir()
 
