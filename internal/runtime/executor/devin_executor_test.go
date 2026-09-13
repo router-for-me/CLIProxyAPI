@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -717,5 +718,177 @@ func TestDevinExecutor_MaxCompletionTokensClamping(t *testing.T) {
 
 	if maxTokensFound != 64000 {
 		t.Errorf("maxTokensFound = %d, want clamped 64000", maxTokensFound)
+	}
+}
+
+func TestConsumeDevinFramesToInteractions_MultiToolCallsNoPanic(t *testing.T) {
+	// Build a stream with multiple tool calls across frames to verify slice growth doesn't panic on strings.Builder
+	var buf bytes.Buffer
+	// Frame 1: tool call 0 start + partial args
+	var tc0 []byte
+	tc0 = protowire.AppendTag(tc0, 1, protowire.BytesType)
+	tc0 = protowire.AppendString(tc0, "call_0")
+	tc0 = protowire.AppendTag(tc0, 2, protowire.BytesType)
+	tc0 = protowire.AppendString(tc0, "tool_0")
+	tc0 = protowire.AppendTag(tc0, 3, protowire.BytesType)
+	tc0 = protowire.AppendString(tc0, `{"a":`)
+	tc0 = protowire.AppendTag(tc0, 4, protowire.VarintType)
+	tc0 = protowire.AppendVarint(tc0, 0) // index 0
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 6, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, tc0)
+	buf.Write(helps.WrapConnectEnvelope(f1))
+
+	// Frame 2: tool call 1 start + partial args (triggers append(toolBuilders) and slice reallocation)
+	var tc1 []byte
+	tc1 = protowire.AppendTag(tc1, 1, protowire.BytesType)
+	tc1 = protowire.AppendString(tc1, "call_1")
+	tc1 = protowire.AppendTag(tc1, 2, protowire.BytesType)
+	tc1 = protowire.AppendString(tc1, "tool_1")
+	tc1 = protowire.AppendTag(tc1, 3, protowire.BytesType)
+	tc1 = protowire.AppendString(tc1, `{"b": 2}`)
+	tc1 = protowire.AppendTag(tc1, 4, protowire.VarintType)
+	tc1 = protowire.AppendVarint(tc1, 1) // index 1
+
+	var f2 []byte
+	f2 = protowire.AppendTag(f2, 6, protowire.BytesType)
+	f2 = protowire.AppendBytes(f2, tc1)
+	buf.Write(helps.WrapConnectEnvelope(f2))
+
+	// Frame 3: tool call 0 continuation
+	var tc0Cont []byte
+	tc0Cont = protowire.AppendTag(tc0Cont, 3, protowire.BytesType)
+	tc0Cont = protowire.AppendString(tc0Cont, `1}`)
+	tc0Cont = protowire.AppendTag(tc0Cont, 4, protowire.VarintType)
+	tc0Cont = protowire.AppendVarint(tc0Cont, 0) // index 0
+
+	var f3 []byte
+	f3 = protowire.AppendTag(f3, 6, protowire.BytesType)
+	f3 = protowire.AppendBytes(f3, tc0Cont)
+	buf.Write(helps.WrapConnectEnvelope(f3))
+
+	// EOS frame
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	interactionsJSON, respLog, err := consumeDevinFramesToInteractions(&buf, "devin/swe-2", "swe-2-high")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if respLog == nil {
+		t.Fatal("expected non-nil respLog")
+	}
+
+	root := gjson.ParseBytes(interactionsJSON)
+	steps := root.Get("steps").Array()
+	if len(steps) != 2 {
+		t.Fatalf("expected 2 function_call steps, got %d", len(steps))
+	}
+	if steps[0].Get("name").String() != "tool_0" || steps[0].Get("arguments").Raw != `{"a":1}` {
+		t.Errorf("step 0 arguments = %q, want {\"a\":1}", steps[0].Get("arguments").Raw)
+	}
+	if steps[1].Get("name").String() != "tool_1" || steps[1].Get("arguments").Raw != `{"b": 2}` {
+		t.Errorf("step 1 arguments = %q, want {\"b\": 2}", steps[1].Get("arguments").Raw)
+	}
+}
+
+func TestStreamDevinFrames_InterleavedThinkingAndContent(t *testing.T) {
+	// Frame 1: thinking part 1
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+	f1 = protowire.AppendString(f1, "thought 1")
+
+	// Frame 2: content text
+	var f2 []byte
+	f2 = protowire.AppendTag(f2, 3, protowire.BytesType)
+	f2 = protowire.AppendString(f2, "content 1")
+
+	// Frame 3: thinking part 2 (interleaved after content)
+	var f3 []byte
+	f3 = protowire.AppendTag(f3, 9, protowire.BytesType)
+	f3 = protowire.AppendString(f3, "thought 2")
+
+	// Frame 4: content text 2
+	var f4 []byte
+	f4 = protowire.AppendTag(f4, 3, protowire.BytesType)
+	f4 = protowire.AppendString(f4, "content 2")
+
+	var buf bytes.Buffer
+	buf.Write(helps.WrapConnectEnvelope(f1))
+	buf.Write(helps.WrapConnectEnvelope(f2))
+	buf.Write(helps.WrapConnectEnvelope(f3))
+	buf.Write(helps.WrapConnectEnvelope(f4))
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	e := &DevinExecutor{}
+	out := make(chan cliproxyexecutor.StreamChunk, 50)
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatInteractions,
+	}
+
+	go func() {
+		defer close(out)
+		e.streamDevinFrames(
+			context.Background(),
+			&buf,
+			cliproxyexecutor.Request{Model: "devin/swe-2"},
+			opts,
+			"swe-2-high",
+			sdktranslator.FormatInteractions,
+			nil,
+			out,
+		)
+	}()
+
+	var events []gjson.Result
+	for chunk := range out {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		raw := string(chunk.Payload)
+		if strings.HasPrefix(raw, "data: ") && !strings.Contains(raw, "[DONE]") {
+			data := strings.TrimPrefix(raw, "data: ")
+			data = strings.TrimSpace(data)
+			events = append(events, gjson.Parse(data))
+		}
+	}
+
+	// Verify step sequence:
+	// 1. step.start (0, thought)
+	// 2. step.stop (0)
+	// 3. step.start (1, model_output)
+	// 4. step.stop (1)
+	// 5. step.start (2, thought)
+	// 6. step.stop (2)
+	// 7. step.start (3, model_output)
+	// 8. step.stop (3)
+	var stepEvents []string
+	for _, ev := range events {
+		eventType := ev.Get("event_type").String()
+		if eventType == "step.start" {
+			stepEvents = append(stepEvents, fmt.Sprintf("start(%d,%s)", ev.Get("index").Int(), ev.Get("step.type").String()))
+		} else if eventType == "step.stop" {
+			stepEvents = append(stepEvents, fmt.Sprintf("stop(%d)", ev.Get("index").Int()))
+		}
+	}
+
+	expectedEvents := []string{
+		"start(0,thought)",
+		"stop(0)",
+		"start(1,model_output)",
+		"stop(1)",
+		"start(2,thought)",
+		"stop(2)",
+		"start(3,model_output)",
+		"stop(3)",
+	}
+
+	if len(stepEvents) != len(expectedEvents) {
+		t.Fatalf("got step events %v, want %v", stepEvents, expectedEvents)
+	}
+	for i := range expectedEvents {
+		if stepEvents[i] != expectedEvents[i] {
+			t.Errorf("step event %d = %s, want %s", i, stepEvents[i], expectedEvents[i])
+		}
 	}
 }

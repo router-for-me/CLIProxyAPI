@@ -103,10 +103,16 @@ func (a *DevinAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	go func() {
 		result, errWait := oauthServer.WaitForCallbackWithContext(ctx, 5*time.Minute)
 		if errWait != nil {
-			callbackErrCh <- errWait
+			select {
+			case callbackErrCh <- errWait:
+			case <-ctx.Done():
+			}
 			return
 		}
-		callbackCh <- result
+		select {
+		case callbackCh <- result:
+		case <-ctx.Done():
+		}
 	}()
 
 	var manualPromptTimer *time.Timer

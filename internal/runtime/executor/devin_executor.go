@@ -304,7 +304,9 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		helps.AppendAPIResponseChunk(ctx, e.cfg, logRespBody)
 	}
 	if errConsume != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errConsume)
+		if ctx.Err() == nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errConsume)
+		}
 		return resp, errConsume
 	}
 
@@ -602,6 +604,14 @@ func (e *DevinExecutor) streamDevinFrames(
 			accumulatedThinking.WriteString(frameRes.ThinkingText)
 			chunk := thinkingBuf.Feed([]byte(frameRes.ThinkingText))
 			if chunk != "" {
+				if contentStarted {
+					stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
+					if !emitInteractionsEvent(stopEvent) {
+						return
+					}
+					contentStarted = false
+					stepIndex++
+				}
 				if !thoughtStarted {
 					thoughtStepIndex = stepIndex
 					startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"thought"}}`), "index", stepIndex)
@@ -829,7 +839,7 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		name string
 		args strings.Builder
 	}
-	var toolBuilders []devinToolCallBuilder
+	var toolBuilders []*devinToolCallBuilder
 
 	getToolCalls := func() []helps.DevinToolCall {
 		if len(toolBuilders) == 0 {
@@ -929,7 +939,7 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 				continue
 			}
 			for len(toolBuilders) <= idx {
-				toolBuilders = append(toolBuilders, devinToolCallBuilder{})
+				toolBuilders = append(toolBuilders, &devinToolCallBuilder{})
 			}
 			if tc.ID != "" {
 				toolBuilders[idx].id = tc.ID

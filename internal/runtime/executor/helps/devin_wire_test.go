@@ -278,6 +278,18 @@ func TestParseDevinTrailerError(t *testing.T) {
 	if code != 502 {
 		t.Errorf("status code = %d, want 502 for fallback gateway error", code)
 	}
+
+	canceledJSON := []byte(`{"error":{"code":"canceled","message":"client canceled"}}`)
+	code, err = ParseDevinTrailerError(canceledJSON)
+	if code != 499 {
+		t.Errorf("status code = %d, want 499 for canceled", code)
+	}
+
+	deadlineJSON := []byte(`{"error":{"code":"deadline_exceeded","message":"upstream deadline exceeded"}}`)
+	code, err = ParseDevinTrailerError(deadlineJSON)
+	if code != 504 {
+		t.Errorf("status code = %d, want 504 for deadline_exceeded", code)
+	}
 }
 
 func TestUTF8SplitBuffer(t *testing.T) {

@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -70,15 +71,21 @@ func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxya
 	if ctx != nil {
 		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 			if tr, ok := rt.(*http.Transport); ok {
-				cloned := tr.Clone()
-				cloned.DisableCompression = true
-				return &http.Client{
-					Transport: cloned,
-					Timeout:   timeout,
+				key := fmt.Sprintf("rt:%p", tr)
+				cloned, err := devinTransportCache.Get(key, func() (*http.Transport, error) {
+					c := tr.Clone()
+					c.DisableCompression = true
+					return c, nil
+				})
+				if err == nil && cloned != nil {
+					return &http.Client{
+						Transport: cloned,
+						Timeout:   timeout,
+					}
 				}
 			}
 			return &http.Client{
-				Transport: rt,
+				Transport: devinNoGzipRoundTripper{base: rt},
 				Timeout:   timeout,
 			}
 		}
@@ -114,6 +121,17 @@ func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxya
 		Transport: tr,
 		Timeout:   timeout,
 	}
+}
+
+type devinNoGzipRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (rt devinNoGzipRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
+	return rt.base.RoundTrip(req)
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

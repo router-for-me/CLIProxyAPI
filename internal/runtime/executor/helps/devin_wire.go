@@ -223,8 +223,8 @@ func ReadConnectFrame(r io.Reader) (flag byte, payload []byte, err error) {
 		defer func() { _ = gz.Close() }()
 
 		initCap := int(length) * 4
-		if initCap > maxDecompressedFrameSize {
-			initCap = maxDecompressedFrameSize
+		if initCap > 4*1024*1024 {
+			initCap = 4 * 1024 * 1024
 		} else if initCap < 4096 {
 			initCap = 4096
 		}
@@ -807,6 +807,10 @@ func ParseDevinTrailerError(payload []byte) (statusCode int, err error) {
 		httpCode = http.StatusTooManyRequests
 	case "unavailable":
 		httpCode = http.StatusServiceUnavailable
+	case "canceled":
+		httpCode = 499
+	case "deadline_exceeded":
+		httpCode = http.StatusGatewayTimeout
 	case "failed_precondition":
 		if strings.Contains(msgLower, "quota") ||
 			strings.Contains(msgLower, "credit") ||
