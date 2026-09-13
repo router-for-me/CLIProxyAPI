@@ -1,22 +1,28 @@
 package models
 
 import (
+	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
-// servedSummaryFor registers the given models under a throwaway client and returns
-// the summary of the model named slug.
-func servedSummaryFor(t *testing.T, slug string, models []*registry.ModelInfo) ServedModelSummary {
+// servedSetsFor registers the given models under a throwaway client and returns the sets
+// the server builds for them.
+func servedSetsFor(t *testing.T, models []*registry.ModelInfo) CodexClientModelSets {
 	t.Helper()
-	clientID := "served-models-summary-test"
+	clientID := "served-models-sets-test"
 	modelRegistry := registry.GetGlobalRegistry()
 	modelRegistry.RegisterClient(clientID, "openai", models)
 	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+	return BuildCodexClientModelSets(modelRegistry.GetAvailableModels("openai"), nil, false, "")
+}
 
-	for _, summary := range SummarizeServedModels(modelRegistry.GetAvailableModels("openai"), nil, "") {
+func servedSummaryFor(t *testing.T, slug string, models []*registry.ModelInfo) ServedModelSummary {
+	t.Helper()
+	for _, summary := range servedSetsFor(t, models).Summaries {
 		if summary.Slug == slug {
 			return summary
 		}
@@ -33,10 +39,9 @@ func summariseLevels(levels []ServedReasoningLevel) string {
 	return strings.Join(efforts, ",")
 }
 
-// A model the registry knows nothing about is composed from the default template
-// alone, so the template stays the reported source of the context window and the
-// reasoning levels, and clients receive them unchanged.
-func TestSummarizeServedModels_WithoutModelMetadataFallsBackToTheTemplate(t *testing.T) {
+// A model the registry knows nothing about is composed from the default template alone,
+// so the template stays the source of its entry.
+func TestBuildCodexClientModelSets_WithoutModelMetadataUsesTheDefaultTemplate(t *testing.T) {
 	summary := servedSummaryFor(t, "served-plain-model", []*registry.ModelInfo{
 		{ID: "served-plain-model", Object: "model", OwnedBy: "deepseek", Type: "openai"},
 	})
@@ -44,20 +49,14 @@ func TestSummarizeServedModels_WithoutModelMetadataFallsBackToTheTemplate(t *tes
 	if !summary.DefaultTemplate || summary.TemplateSlug != "gpt-5.5" {
 		t.Fatalf("template provenance = %q/%v, want the default template", summary.TemplateSlug, summary.DefaultTemplate)
 	}
-	for _, field := range []string{"context_window", "max_context_window", "supported_reasoning_levels"} {
-		if _, ok := summary.ServedFields[field]; ok {
-			t.Errorf("field %q reported with a served value, but the template supplies it: %v", field, summary.ServedFields)
-		}
-	}
 	if summariseLevels(summary.SupportedReasoningLevels) != "low,medium,high,xhigh" {
 		t.Errorf("reasoning levels = %v, want the template levels", summary.SupportedReasoningLevels)
 	}
 }
 
-// Model metadata outranks the template, so the fields it supplies must be reported
-// with the value clients receive: overriding them in the catalog does not reach
-// Codex clients.
-func TestSummarizeServedModels_ReportsModelMetadataAsTheSource(t *testing.T) {
+// Model metadata shapes the assembled entry, so the summary reports the values clients
+// receive rather than what the catalog template says.
+func TestBuildCodexClientModelSets_ReportsModelMetadata(t *testing.T) {
 	summary := servedSummaryFor(t, "served-metadata-model", []*registry.ModelInfo{
 		{
 			ID:               "served-metadata-model",
@@ -79,23 +78,10 @@ func TestSummarizeServedModels_ReportsModelMetadataAsTheSource(t *testing.T) {
 	if summary.DefaultReasoningLevel != "low" {
 		t.Errorf("default reasoning level = %q, want low", summary.DefaultReasoningLevel)
 	}
-	if got := summary.ServedFields["context_window"]; got != 200000 {
-		t.Errorf("served context_window = %v, want 200000", got)
-	}
-	if got := summary.ServedFields["max_context_window"]; got != 200000 {
-		t.Errorf("served max_context_window = %v, want 200000", got)
-	}
-	if got := summary.ServedFields["default_reasoning_level"]; got != "low" {
-		t.Errorf("served default_reasoning_level = %v, want low", got)
-	}
-	if _, ok := summary.ServedFields["supported_reasoning_levels"]; !ok {
-		t.Errorf("supported_reasoning_levels is missing from the served fields: %v", summary.ServedFields)
-	}
 }
 
-// A catalog entry the model resolves to through its metadata model id supplies the
-// whole entry, so the server recomputes nothing.
-func TestSummarizeServedModels_KeepsCatalogEntryWhenMetadataModelIDMatches(t *testing.T) {
+// A model whose metadata model id names a catalog entry is assembled from that entry.
+func TestBuildCodexClientModelSets_UsesTheCatalogEntryTheMetadataNames(t *testing.T) {
 	summary := servedSummaryFor(t, "served-alias-model", []*registry.ModelInfo{
 		{
 			ID:              "served-alias-model",
@@ -109,22 +95,88 @@ func TestSummarizeServedModels_KeepsCatalogEntryWhenMetadataModelIDMatches(t *te
 	if summary.DefaultTemplate || summary.TemplateSlug != "gpt-5.6-sol" {
 		t.Fatalf("template provenance = %q/%v, want the catalog entry gpt-5.6-sol", summary.TemplateSlug, summary.DefaultTemplate)
 	}
-	if len(summary.ServedFields) != 0 {
-		t.Errorf("served fields = %v, want none", summary.ServedFields)
-	}
 	if summary.ContextWindow != 272000 || summary.MaxContextWindow != 872000 {
 		t.Errorf("context window = %d/%d, want the catalog values 272000/872000", summary.ContextWindow, summary.MaxContextWindow)
 	}
 }
 
-func TestSummarizeServedModels_ComparesNumbersAcrossJSONDecoding(t *testing.T) {
-	if !servedModelValuesEqual(float64(272000), 272000) {
-		t.Error("a catalog float64 and a built int must compare equal")
+// The local override layer is applied to the assembled entries, which are the default
+// configuration: the default entry keeps the assembled value and only the served entry
+// carries the override.
+func TestBuildCodexClientModelSets_AppliesTheLocalOverrideLayer(t *testing.T) {
+	syncCodexClientModelOverrideForTest(t, `{"served-override-model":{"display_name":"Local Name"}}`)
+
+	sets := servedSetsFor(t, []*registry.ModelInfo{
+		{ID: "served-override-model", Object: "model", OwnedBy: "deepseek", Type: "openai"},
+	})
+
+	defaults, ok := codexClientModelEntryBySlug(sets.Defaults, "served-override-model")
+	if !ok {
+		t.Fatal("the default entry is missing from the sets")
 	}
-	if !servedModelValuesEqual(map[string]any{"id": "a", "name": "b"}, map[string]any{"name": "b", "id": "a"}) {
-		t.Error("object keys must compare independently of their order")
+	if got := stringModelValue(defaults, "display_name"); got != "served-override-model" {
+		t.Fatalf("default display_name = %v, want the assembled value", got)
 	}
-	if servedModelValuesEqual([]any{}, nil) {
-		t.Error("an empty array differs from a missing field")
+	served, ok := codexClientModelEntryBySlug(sets.Served, "served-override-model")
+	if !ok {
+		t.Fatal("the served entry is missing from the sets")
+	}
+	if got := stringModelValue(served, "display_name"); got != "Local Name" {
+		t.Fatalf("served display_name = %v, want the override", got)
+	}
+	if got := sets.Origins["served-override-model"]; got != registry.CodexClientModelsOriginOverride {
+		t.Fatalf("origin = %q, want %q", got, registry.CodexClientModelsOriginOverride)
 	}
 }
+
+// A null override keeps a model out of the served list without removing its default
+// entry, and an override for a model no provider serves is reported as having no effect.
+func TestBuildCodexClientModelSets_ReportsOriginsAndIssues(t *testing.T) {
+	syncCodexClientModelOverrideForTest(t, `{"served-hidden-model":null,"nowhere-model":{"display_name":"Nowhere"}}`)
+
+	sets := servedSetsFor(t, []*registry.ModelInfo{
+		{ID: "served-hidden-model", Object: "model", OwnedBy: "deepseek", Type: "openai"},
+	})
+
+	if _, ok := codexClientModelEntryBySlug(sets.Defaults, "served-hidden-model"); !ok {
+		t.Fatal("a hidden model lost its default entry")
+	}
+	if _, ok := codexClientModelEntryBySlug(sets.Served, "served-hidden-model"); ok {
+		t.Fatal("a model a null override hides is still served")
+	}
+	if got := sets.Origins["served-hidden-model"]; got != registry.CodexClientModelsOriginRemoved {
+		t.Fatalf("origin = %q, want %q", got, registry.CodexClientModelsOriginRemoved)
+	}
+	if got := sets.Origins["nowhere-model"]; got != registry.CodexClientModelsOriginUnserved {
+		t.Fatalf("origin = %q, want %q", got, registry.CodexClientModelsOriginUnserved)
+	}
+	if len(sets.Issues) != 1 || sets.Issues[0].Slug != "nowhere-model" {
+		t.Fatalf("issues = %#v, want one issue for the model that is not served", sets.Issues)
+	}
+}
+
+// syncCodexClientModelOverrideForTest points the override layer at a temporary file and
+// installs the given document for the rest of the test.
+func syncCodexClientModelOverrideForTest(t *testing.T, document string) {
+	t.Helper()
+	dir := t.TempDir()
+	registry.SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
+	t.Cleanup(func() {
+		registry.SyncCodexClientModelsOverrideFile("")
+		_ = registry.ClearCodexClientModelsOverride()
+	})
+	if err := registry.SetCodexClientModelsOverride([]byte(document)); err != nil {
+		t.Fatalf("set override: %v", err)
+	}
+}
+
+func codexClientModelEntryBySlug(entries []map[string]any, slug string) (map[string]any, bool) {
+	for _, entry := range entries {
+		if stringModelValue(entry, "slug") == slug {
+			return entry, true
+		}
+	}
+	return nil, false
+}
+
+var _ = json.Marshal

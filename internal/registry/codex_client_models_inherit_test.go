@@ -10,21 +10,21 @@ import (
 
 func TestCodexClientModelsInheritLeafField(t *testing.T) {
 	base := testCodexClientCatalog(t,
-		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"context_window": 372000}),
-		testCodexClientModelWithExtras("gpt-5.6-sol", 2, map[string]any{"context_window": 400000}),
+		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"minimal_client_version": "0.140.0"}),
+		testCodexClientModelWithExtras("gpt-5.6-sol", 2, nil),
 	)
 
 	models, err := applyOverrideForTest(t, base, map[string]any{
 		"gpt-5.6-sol": map[string]any{
-			"$inherit": map[string]any{"context_window": "gpt-5.5"},
+			"$inherit": map[string]any{"minimal_client_version": "gpt-5.5"},
 		},
 	})
 	if err != nil {
 		t.Fatalf("apply override: %v", err)
 	}
 
-	if got := models["gpt-5.6-sol"]["context_window"]; got != float64(372000) {
-		t.Fatalf("context_window = %v, want 372000", got)
+	if got := models["gpt-5.6-sol"]["minimal_client_version"]; got != "0.140.0" {
+		t.Fatalf("minimal_client_version = %v, want 0.140.0", got)
 	}
 	if got := models["gpt-5.6-sol"]["display_name"]; got != "Test gpt-5.6-sol" {
 		t.Fatalf("display_name = %v, want the local name", got)
@@ -37,6 +37,7 @@ func TestCodexClientModelsInheritWholeEntry(t *testing.T) {
 			"context_window": 372000,
 			"extra_number":   7,
 		}),
+		testCodexClientModel("my-fast", 9),
 	)
 
 	models, err := applyOverrideForTest(t, base, map[string]any{
@@ -75,10 +76,18 @@ func TestCodexClientModelsInheritWholeEntry(t *testing.T) {
 	}
 }
 
-func TestCodexClientModelsInheritIdentityFieldsAreNeverInherited(t *testing.T) {
+func TestCodexClientModelsInheritModelFieldsAreNeverInherited(t *testing.T) {
 	base := testCodexClientCatalog(t,
-		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"context_window": 372000}),
-		testCodexClientModelWithExtras("gpt-5.6-sol", 2, map[string]any{"context_window": 400000}),
+		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{
+			"base_instructions":  "from gpt-5.5",
+			"visibility":         "hide",
+			"context_window":     100000,
+			"max_context_window": 200000,
+		}),
+		testCodexClientModelWithExtras("gpt-5.6-sol", 2, map[string]any{
+			"context_window":     300000,
+			"max_context_window": 400000,
+		}),
 	)
 
 	models, err := applyOverrideForTest(t, base, map[string]any{
@@ -95,8 +104,19 @@ func TestCodexClientModelsInheritIdentityFieldsAreNeverInherited(t *testing.T) {
 	if patched["display_name"] != "Test gpt-5.6-sol" || patched["description"] != "Test model" {
 		t.Fatalf("identity fields = %v / %v, want the base values", patched["display_name"], patched["description"])
 	}
-	if patched["context_window"] != float64(372000) {
-		t.Fatalf("context_window = %v, want the inherited 372000", patched["context_window"])
+	// Visibility, position and the context windows belong to the model, so a whole
+	// entry source leaves them alone even though it supplies everything else.
+	if patched["visibility"] != "list" {
+		t.Fatalf("visibility = %v, want the entry's own list", patched["visibility"])
+	}
+	if patched["priority"] != float64(2) {
+		t.Fatalf("priority = %v, want the entry's own 2", patched["priority"])
+	}
+	if patched["context_window"] != float64(300000) || patched["max_context_window"] != float64(400000) {
+		t.Fatalf("context windows = %v / %v, want the entry's own values", patched["context_window"], patched["max_context_window"])
+	}
+	if patched["base_instructions"] != "from gpt-5.5" {
+		t.Fatalf("base_instructions = %v, want the inherited value", patched["base_instructions"])
 	}
 }
 
@@ -111,6 +131,7 @@ func TestCodexClientModelsInheritDeeperSourceWins(t *testing.T) {
 		testCodexClientModelWithExtras("gpt-5.6-sol", 2, map[string]any{
 			"model_messages": map[string]any{"instructions_template": "from gpt-5.6-sol"},
 		}),
+		testCodexClientModel("my-mix", 9),
 	)
 
 	models, err := applyOverrideForTest(t, base, map[string]any{
@@ -206,31 +227,31 @@ func TestCodexClientModelsInheritNullRemovesInheritedField(t *testing.T) {
 
 func TestCodexClientModelsInheritChainDepth(t *testing.T) {
 	base := testCodexClientCatalog(t,
-		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"context_window": 372000}),
-		testCodexClientModelWithExtras("chain-1", 2, map[string]any{"context_window": 1}),
-		testCodexClientModelWithExtras("chain-2", 3, map[string]any{"context_window": 2}),
-		testCodexClientModelWithExtras("chain-3", 4, map[string]any{"context_window": 3}),
-		testCodexClientModelWithExtras("chain-4", 5, map[string]any{"context_window": 4}),
+		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"base_instructions": "from gpt-5.5"}),
+		testCodexClientModelWithExtras("chain-1", 2, map[string]any{"base_instructions": "from chain-1"}),
+		testCodexClientModelWithExtras("chain-2", 3, map[string]any{"base_instructions": "from chain-2"}),
+		testCodexClientModelWithExtras("chain-3", 4, map[string]any{"base_instructions": "from chain-3"}),
+		testCodexClientModelWithExtras("chain-4", 5, map[string]any{"base_instructions": "from chain-4"}),
 	)
 
 	threeHops := map[string]any{
-		"chain-1": map[string]any{"$inherit": map[string]any{"context_window": "gpt-5.5"}},
-		"chain-2": map[string]any{"$inherit": map[string]any{"context_window": "chain-1"}},
-		"chain-3": map[string]any{"$inherit": map[string]any{"context_window": "chain-2"}},
+		"chain-1": map[string]any{"$inherit": map[string]any{"base_instructions": "gpt-5.5"}},
+		"chain-2": map[string]any{"$inherit": map[string]any{"base_instructions": "chain-1"}},
+		"chain-3": map[string]any{"$inherit": map[string]any{"base_instructions": "chain-2"}},
 	}
 	models, err := applyOverrideForTest(t, base, threeHops)
 	if err != nil {
 		t.Fatalf("three hop chain rejected: %v", err)
 	}
-	if got := models["chain-3"]["context_window"]; got != float64(372000) {
-		t.Fatalf("chain-3 context_window = %v, want the value three hops away", got)
+	if got := models["chain-3"]["base_instructions"]; got != "from gpt-5.5" {
+		t.Fatalf("chain-3 base_instructions = %v, want the value three hops away", got)
 	}
 
 	fourHops := map[string]any{
-		"chain-1": map[string]any{"$inherit": map[string]any{"context_window": "gpt-5.5"}},
-		"chain-2": map[string]any{"$inherit": map[string]any{"context_window": "chain-1"}},
-		"chain-3": map[string]any{"$inherit": map[string]any{"context_window": "chain-2"}},
-		"chain-4": map[string]any{"$inherit": map[string]any{"context_window": "chain-3"}},
+		"chain-1": map[string]any{"$inherit": map[string]any{"base_instructions": "gpt-5.5"}},
+		"chain-2": map[string]any{"$inherit": map[string]any{"base_instructions": "chain-1"}},
+		"chain-3": map[string]any{"$inherit": map[string]any{"base_instructions": "chain-2"}},
+		"chain-4": map[string]any{"$inherit": map[string]any{"base_instructions": "chain-3"}},
 	}
 	if _, err = applyOverrideForTest(t, base, fourHops); err == nil {
 		t.Fatal("four hop chain accepted, want a depth error")
@@ -241,34 +262,34 @@ func TestCodexClientModelsInheritChainDepth(t *testing.T) {
 
 func TestCodexClientModelsInheritFieldLevelChainDepth(t *testing.T) {
 	base := testCodexClientCatalog(t,
-		testCodexClientModelWithExtras("gpt-5.5", 1, nil),
+		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"web_search_tool_type": "native"}),
 		testCodexClientModelWithExtras("field-a", 2, nil),
-		testCodexClientModelWithExtras("field-b", 3, map[string]any{"context_window": 1000}),
-		testCodexClientModelWithExtras("field-c", 4, map[string]any{"priority": 42}),
-		testCodexClientModelWithExtras("field-d", 5, map[string]any{"minimal_client_version": "0.150.0"}),
+		testCodexClientModelWithExtras("field-b", 3, map[string]any{"base_instructions": "from field-b"}),
+		testCodexClientModelWithExtras("field-c", 4, map[string]any{"minimal_client_version": "0.160.0"}),
+		testCodexClientModelWithExtras("field-d", 5, map[string]any{"model_specialty": "coding"}),
 	)
 
 	// Each entry borrows one field from the next model, so the entries form a four
 	// model graph while no field resolution follows more than one hop.
 	document := map[string]any{
-		"field-a": map[string]any{"$inherit": map[string]any{"context_window": "field-b"}},
-		"field-b": map[string]any{"$inherit": map[string]any{"priority": "field-c"}},
-		"field-c": map[string]any{"$inherit": map[string]any{"minimal_client_version": "field-d"}},
-		"field-d": map[string]any{"$inherit": map[string]any{"max_context_window": "gpt-5.5"}},
+		"field-a": map[string]any{"$inherit": map[string]any{"base_instructions": "field-b"}},
+		"field-b": map[string]any{"$inherit": map[string]any{"minimal_client_version": "field-c"}},
+		"field-c": map[string]any{"$inherit": map[string]any{"model_specialty": "field-d"}},
+		"field-d": map[string]any{"$inherit": map[string]any{"web_search_tool_type": "gpt-5.5"}},
 	}
 
 	models, err := applyOverrideForTest(t, base, document)
 	if err != nil {
 		t.Fatalf("field level inheritance rejected: %v", err)
 	}
-	if got := models["field-a"]["context_window"]; got != float64(1000) {
-		t.Fatalf("field-a context_window = %v, want the value one hop away", got)
+	if got := models["field-a"]["base_instructions"]; got != "from field-b" {
+		t.Fatalf("field-a base_instructions = %v, want the value one hop away", got)
 	}
-	if got := models["field-b"]["priority"]; got != float64(42) {
-		t.Fatalf("field-b priority = %v, want the value one hop away", got)
+	if got := models["field-b"]["minimal_client_version"]; got != "0.160.0" {
+		t.Fatalf("field-b minimal_client_version = %v, want the value one hop away", got)
 	}
-	if got := models["field-c"]["minimal_client_version"]; got != "0.150.0" {
-		t.Fatalf("field-c minimal_client_version = %v, want the value one hop away", got)
+	if got := models["field-c"]["model_specialty"]; got != "coding" {
+		t.Fatalf("field-c model_specialty = %v, want the value one hop away", got)
 	}
 }
 
@@ -282,7 +303,7 @@ func TestCodexClientModelsInheritCycles(t *testing.T) {
 	// path twice is a cycle.
 	legal := map[string]any{
 		"gpt-5.5":     map[string]any{"$inherit": map[string]any{"base_instructions": "gpt-5.6-sol"}},
-		"gpt-5.6-sol": map[string]any{"$inherit": map[string]any{"context_window": "gpt-5.5"}},
+		"gpt-5.6-sol": map[string]any{"$inherit": map[string]any{"minimal_client_version": "gpt-5.5"}},
 	}
 	models, err := applyOverrideForTest(t, base, legal)
 	if err != nil {
@@ -293,8 +314,8 @@ func TestCodexClientModelsInheritCycles(t *testing.T) {
 	}
 
 	cyclic := map[string]any{
-		"gpt-5.5":     map[string]any{"$inherit": map[string]any{"context_window": "gpt-5.6-sol"}},
-		"gpt-5.6-sol": map[string]any{"$inherit": map[string]any{"context_window": "gpt-5.5"}},
+		"gpt-5.5":     map[string]any{"$inherit": map[string]any{"base_instructions": "gpt-5.6-sol"}},
+		"gpt-5.6-sol": map[string]any{"$inherit": map[string]any{"base_instructions": "gpt-5.5"}},
 	}
 	if _, err = applyOverrideForTest(t, base, cyclic); err == nil {
 		t.Fatal("cycle accepted, want an error")
@@ -316,20 +337,20 @@ func TestCodexClientModelsInheritRejectsBadDirectives(t *testing.T) {
 	}{
 		{
 			name: "unknown source",
-			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"context_window": "missing"}}},
-			want: "not a known model",
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"base_instructions": "missing"}}},
+			want: "not a served model",
 		},
 		{
 			name: "removed source",
 			doc: map[string]any{
-				"gpt-5.5":     map[string]any{"$inherit": map[string]any{"context_window": "gpt-5.6-sol"}},
+				"gpt-5.5":     map[string]any{"$inherit": map[string]any{"base_instructions": "gpt-5.6-sol"}},
 				"gpt-5.6-sol": nil,
 			},
 			want: "is removed by this document",
 		},
 		{
 			name: "self reference",
-			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"context_window": "gpt-5.5"}}},
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"base_instructions": "gpt-5.5"}}},
 			want: "inherit from itself",
 		},
 		{
@@ -340,6 +361,26 @@ func TestCodexClientModelsInheritRejectsBadDirectives(t *testing.T) {
 		{
 			name: "slug field",
 			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"slug": "gpt-5.6-sol"}}},
+			want: "cannot be inherited",
+		},
+		{
+			name: "visibility field",
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"visibility": "gpt-5.6-sol"}}},
+			want: "cannot be inherited",
+		},
+		{
+			name: "priority field",
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"priority": "gpt-5.6-sol"}}},
+			want: "cannot be inherited",
+		},
+		{
+			name: "context window field",
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"context_window": "gpt-5.6-sol"}}},
+			want: "cannot be inherited",
+		},
+		{
+			name: "opt out on a model field",
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"visibility": nil}}},
 			want: "cannot be inherited",
 		},
 		{
@@ -354,7 +395,7 @@ func TestCodexClientModelsInheritRejectsBadDirectives(t *testing.T) {
 		},
 		{
 			name: "non string source",
-			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"context_window": 5}}},
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"base_instructions": 5}}},
 			want: "must name a model",
 		},
 		{
@@ -381,6 +422,92 @@ func TestCodexClientModelsInheritRejectsBadDirectives(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsInheritOptOutKeepsTheModelsOwnValue(t *testing.T) {
+	base := testCodexClientCatalog(t,
+		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{
+			"base_instructions": "from gpt-5.5",
+			"model_messages": map[string]any{
+				"instructions_template": "from gpt-5.5",
+				"guardian_v2":           map[string]any{"enabled": true},
+			},
+		}),
+		testCodexClientModelWithExtras("gpt-5.6-sol", 2, map[string]any{
+			"base_instructions": "from gpt-5.6-sol",
+		}),
+	)
+
+	// A null source opts a root field out: the model keeps its own value while the
+	// rest of the entry still comes from the source.
+	models, err := applyOverrideForTest(t, base, map[string]any{
+		"gpt-5.6-sol": map[string]any{
+			"$inherit": map[string]any{"": "gpt-5.5", "base_instructions": nil},
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply override: %v", err)
+	}
+	patched := models["gpt-5.6-sol"]
+	if patched["base_instructions"] != "from gpt-5.6-sol" {
+		t.Fatalf("base_instructions = %v, want the model's own value", patched["base_instructions"])
+	}
+	messages, _ := patched["model_messages"].(map[string]any)
+	if guardian, ok := messages["guardian_v2"].(map[string]any); !ok || guardian["enabled"] != true {
+		t.Fatalf("model_messages.guardian_v2 = %#v, want the inherited subtree", messages["guardian_v2"])
+	}
+	if messages["instructions_template"] != "from gpt-5.5" {
+		t.Fatalf("instructions_template = %v, want the inherited value", messages["instructions_template"])
+	}
+
+	// The same works below the root: the opted-out key drops the inherited value and
+	// the model has none of its own to put back.
+	models, err = applyOverrideForTest(t, base, map[string]any{
+		"gpt-5.6-sol": map[string]any{
+			"$inherit": map[string]any{"": "gpt-5.5", "model_messages.instructions_template": nil},
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply override: %v", err)
+	}
+	messages, _ = models["gpt-5.6-sol"]["model_messages"].(map[string]any)
+	if _, exists := messages["instructions_template"]; exists {
+		t.Fatalf("instructions_template = %v, want it dropped rather than inherited", messages["instructions_template"])
+	}
+	if guardian, ok := messages["guardian_v2"].(map[string]any); !ok || guardian["enabled"] != true {
+		t.Fatalf("model_messages.guardian_v2 = %#v, want the untouched inherited subtree", messages["guardian_v2"])
+	}
+}
+
+func TestCodexClientModelsInheritOptOutKeepsTheEntryValid(t *testing.T) {
+	base := testCodexClientCatalog(t,
+		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{
+			"model_messages": map[string]any{"instructions_template": "from gpt-5.5"},
+		}),
+		testCodexClientModel("my-custom", 9),
+	)
+
+	models, err := applyOverrideForTest(t, base, map[string]any{
+		"my-custom": map[string]any{
+			"$inherit":     map[string]any{"": "gpt-5.5", "model_messages": nil},
+			"display_name": "My Custom",
+			"description":  "Custom variant",
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply override: %v", err)
+	}
+
+	custom := models["my-custom"]
+	if custom == nil {
+		t.Fatal("custom model missing from the effective catalog")
+	}
+	if _, exists := custom["model_messages"]; exists {
+		t.Fatalf("model_messages = %#v, want the opted-out field dropped", custom["model_messages"])
+	}
+	if custom["base_instructions"] != "Test instructions" {
+		t.Fatalf("base_instructions = %v, want the rest of the entry inherited", custom["base_instructions"])
+	}
+}
+
 func TestCodexClientModelsInheritResilientDegradesSingleEntry(t *testing.T) {
 	base := testCodexClientCatalog(t,
 		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"context_window": 372000}),
@@ -388,25 +515,23 @@ func TestCodexClientModelsInheritResilientDegradesSingleEntry(t *testing.T) {
 	)
 
 	models, issues, err := applyResilientOverrideForTest(t, base, map[string]any{
-		"gpt-5.5":     map[string]any{"$inherit": map[string]any{"context_window": "missing"}},
-		"broken":      map[string]any{"$inherit": map[string]any{"context_window": "missing"}},
-		"custom-good": map[string]any{"$inherit": "gpt-5.6-sol", "display_name": "Good", "description": "Good"},
+		"gpt-5.5":     map[string]any{"$inherit": map[string]any{"base_instructions": "missing"}},
+		"gpt-5.6-sol": map[string]any{"display_name": "Good"},
 	})
 	if err != nil {
 		t.Fatalf("resilient apply: %v", err)
 	}
 
-	if len(issues) != 2 {
-		t.Fatalf("issues = %#v, want 2 entries", issues)
+	// Only the entry that cannot be applied is reported, and it keeps the entry the
+	// server assembled for its model.
+	if len(issues) != 1 || issues[0].Slug != "gpt-5.5" {
+		t.Fatalf("issues = %#v, want one issue for %q", issues, "gpt-5.5")
 	}
 	if got := models["gpt-5.5"]["context_window"]; got != float64(372000) {
-		t.Fatalf("gpt-5.5 context_window = %v, want the base value", got)
+		t.Fatalf("gpt-5.5 context_window = %v, want the default value", got)
 	}
-	if _, ok := models["broken"]; ok {
-		t.Fatal("broken custom entry stayed in the catalog")
-	}
-	if models["custom-good"] == nil {
-		t.Fatal("valid entry was dropped together with the broken ones")
+	if got := models["gpt-5.6-sol"]["display_name"]; got != "Good" {
+		t.Fatalf("gpt-5.6-sol display_name = %v, want the valid override applied", got)
 	}
 }
 
@@ -415,48 +540,17 @@ func TestCodexClientModelsInheritUsage(t *testing.T) {
 		"a": json.RawMessage(`{"$inherit":{"":"gpt-5.5","model_messages.x":"gpt-5.6-sol"}}`),
 		"b": json.RawMessage(`{"$inherit":"gpt-5.6-sol"}`),
 		"c": json.RawMessage(`{"display_name":"plain"}`),
+		// An opt-out names no source, so it adds no usage for the path it keeps.
+		"d": json.RawMessage(`{"$inherit":{"":"gpt-5.5","model_messages.x":null}}`),
 	}
 
 	usage := CodexClientModelsInheritUsage(doc)
-	if usage["gpt-5.5"] != 1 || usage["gpt-5.6-sol"] != 2 {
-		t.Fatalf("usage = %#v, want gpt-5.5=1 and gpt-5.6-sol=2", usage)
+	if usage["gpt-5.5"] != 2 || usage["gpt-5.6-sol"] != 2 {
+		t.Fatalf("usage = %#v, want gpt-5.5=2 and gpt-5.6-sol=2", usage)
 	}
 }
 
-func TestSyncCodexClientModelsOverrideFileDegradesSingleEntry(t *testing.T) {
-	restore := snapshotCodexClientModelsStore(t)
-	defer restore()
-
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.yaml")
-	overridePath := filepath.Join(dir, CodexClientModelsOverrideFileName)
-	base := testCodexClientCatalog(t, testCodexClientModelWithExtras("gpt-5.5", 1, nil))
-	if _, err := setCodexClientModelsBase(base, "test"); err != nil {
-		t.Fatalf("set base catalog: %v", err)
-	}
-
-	document := `{"gpt-5.5":{"display_name":"From File"},"broken":{"$inherit":{"context_window":"missing"}}}`
-	if errWrite := os.WriteFile(overridePath, []byte(document), 0o600); errWrite != nil {
-		t.Fatalf("write override file: %v", errWrite)
-	}
-	SyncCodexClientModelsOverrideFile(configPath)
-
-	state := GetCodexClientModelsState()
-	if state.OverrideError != "" {
-		t.Fatalf("override error = %q, want empty", state.OverrideError)
-	}
-	if len(state.OverrideErrors) != 1 || state.OverrideErrors[0].Slug != "broken" {
-		t.Fatalf("override errors = %#v, want one issue for %q", state.OverrideErrors, "broken")
-	}
-	if got := codexClientModelStateValue(t, state, "gpt-5.5", "display_name"); got != "From File" {
-		t.Fatalf("display_name = %v, want the valid entry to stay applied", got)
-	}
-	if len(state.Override) != 2 {
-		t.Fatalf("override entries = %d, want the file to stay on disk", len(state.Override))
-	}
-}
-
-func TestRefreshCodexClientModelsKeepsDegradedOverride(t *testing.T) {
+func TestSyncCodexClientModelsOverrideFileLoadsEveryEntry(t *testing.T) {
 	restore := snapshotCodexClientModelsStore(t)
 	defer restore()
 
@@ -470,14 +564,55 @@ func TestRefreshCodexClientModelsKeepsDegradedOverride(t *testing.T) {
 	if _, err := setCodexClientModelsBase(base, "test"); err != nil {
 		t.Fatalf("set base catalog: %v", err)
 	}
-	brokenDocument := `{"gpt-5.6-sol":{"$inherit":{"context_window":"missing"}}}`
-	if errWrite := os.WriteFile(overridePath, []byte(brokenDocument), 0o600); errWrite != nil {
+
+	document := `{"gpt-5.5":{"display_name":"From File"},"gpt-5.6-sol":{"$inherit":{"base_instructions":"missing"}}}`
+	if errWrite := os.WriteFile(overridePath, []byte(document), 0o600); errWrite != nil {
 		t.Fatalf("write override file: %v", errWrite)
 	}
 	SyncCodexClientModelsOverrideFile(configPath)
-	if len(GetCodexClientModelsState().OverrideErrors) != 1 {
-		t.Fatalf("override errors = %#v, want one issue", GetCodexClientModelsState().OverrideErrors)
+
+	state := GetCodexClientModelsState()
+	if state.OverrideError != "" {
+		t.Fatalf("override error = %q, want empty", state.OverrideError)
 	}
+	if len(state.Override) != 2 {
+		t.Fatalf("override entries = %d, want the file to be loaded as written", len(state.Override))
+	}
+	if got := codexClientModelStateValue(t, state, "gpt-5.5", "display_name"); got != "From File" {
+		t.Fatalf("display_name = %v, want the valid entry to stay applied", got)
+	}
+
+	// The entry that cannot be applied is reported when the entries are resolved, and
+	// its model keeps the entry the server assembled for it.
+	raw, _ := GetCodexClientModelsSnapshot()
+	served, issues := ResolveCodexClientModelOverrides(codexClientModelDefaultsForTest(t, raw), state.Override)
+	if len(issues) != 1 || issues[0].Slug != "gpt-5.6-sol" {
+		t.Fatalf("issues = %#v, want one issue for %q", issues, "gpt-5.6-sol")
+	}
+	if got := served["gpt-5.6-sol"]["base_instructions"]; got != "Test instructions" {
+		t.Fatalf("base_instructions = %v, want the assembled default", got)
+	}
+}
+
+func TestRefreshCodexClientModelsKeepsTheOverride(t *testing.T) {
+	restore := snapshotCodexClientModelsStore(t)
+	defer restore()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	overridePath := filepath.Join(dir, CodexClientModelsOverrideFileName)
+	base := testCodexClientCatalog(t,
+		testCodexClientModelWithExtras("gpt-5.5", 1, nil),
+		testCodexClientModelWithExtras("gpt-5.6-sol", 2, nil),
+	)
+	if _, err := setCodexClientModelsBase(base, "test"); err != nil {
+		t.Fatalf("set base catalog: %v", err)
+	}
+	document := `{"gpt-5.6-sol":{"display_name":"From File"}}`
+	if errWrite := os.WriteFile(overridePath, []byte(document), 0o600); errWrite != nil {
+		t.Fatalf("write override file: %v", errWrite)
+	}
+	SyncCodexClientModelsOverrideFile(configPath)
 
 	refreshed := testCodexClientCatalog(t,
 		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"context_window": 100}),
@@ -485,7 +620,7 @@ func TestRefreshCodexClientModelsKeepsDegradedOverride(t *testing.T) {
 	)
 	changed, err := setCodexClientModelsBase(refreshed, "https://example.test/models.json")
 	if err != nil {
-		t.Fatalf("refresh with a degraded override: %v", err)
+		t.Fatalf("refresh with an override: %v", err)
 	}
 	if !changed {
 		t.Fatal("refresh changed = false, want the new base catalog")
@@ -497,40 +632,13 @@ func TestRefreshCodexClientModelsKeepsDegradedOverride(t *testing.T) {
 	if got := codexClientModelStateValue(t, state, "gpt-5.5", "context_window"); got != float64(100) {
 		t.Fatalf("context_window = %v, want the refreshed value", got)
 	}
-	if len(state.OverrideErrors) != 1 {
-		t.Fatalf("override errors after refresh = %#v, want the issue to stay reported", state.OverrideErrors)
+	// A base refresh does not touch the override layer, so the patch still shape the
+	// refreshed entries.
+	if got := codexClientModelStateValue(t, state, "gpt-5.6-sol", "display_name"); got != "From File" {
+		t.Fatalf("display_name = %v, want the override to stay applied", got)
 	}
 }
 
-func applyResilientOverrideForTest(t *testing.T, base []byte, document map[string]any) (map[string]map[string]any, []CodexClientModelsOverrideIssue, error) {
-	t.Helper()
-	override := make(map[string]json.RawMessage, len(document))
-	for slug, patch := range document {
-		raw, errMarshal := json.Marshal(patch)
-		if errMarshal != nil {
-			t.Fatalf("marshal override patch for %q: %v", slug, errMarshal)
-		}
-		override[slug] = raw
-	}
-
-	data, issues, errApply := applyCodexClientModelsOverrideResilient(base, override)
-	if errApply != nil {
-		return nil, issues, errApply
-	}
-	if errValidate := ValidateCodexClientModelsJSON(data); errValidate != nil {
-		return nil, issues, errValidate
-	}
-	models, _, errParse := parseCodexClientModels(data)
-	if errParse != nil {
-		return nil, issues, errParse
-	}
-	bySlug := make(map[string]map[string]any, len(models))
-	for _, model := range models {
-		slug, _ := model["slug"].(string)
-		bySlug[slug] = model
-	}
-	return bySlug, issues, nil
-}
 func TestCodexClientModelsInheritRemovedSourceAncestor(t *testing.T) {
 	base := testCodexClientCatalog(t,
 		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{

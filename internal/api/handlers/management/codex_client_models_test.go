@@ -22,6 +22,13 @@ func TestCodexClientModelsEndpoints(t *testing.T) {
 	registry.SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
 	t.Cleanup(func() { _ = registry.ClearCodexClientModelsOverride() })
 
+	// A model the registry serves, so the response carries the entry the server
+	// assembled for it.
+	clientID := "codex-client-endpoints-test"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{{ID: "gpt-5.5", DisplayName: "Served 5.5"}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
 	engine := gin.New()
 	h := &Handler{
 		cfg:            &config.Config{},
@@ -56,7 +63,7 @@ func TestCodexClientModelsEndpoints(t *testing.T) {
 		t.Fatalf("PUT status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	payload = decodeCodexClientModelsResponse(t, rec)
-	if got := codexClientModelsResponseValue(t, payload, "gpt-5.5", "display_name"); got != "Endpoint Override" {
+	if got := codexClientModelsEffectiveValue(t, payload, "gpt-5.5", "display_name"); got != "Endpoint Override" {
 		t.Fatalf("display_name = %v, want %q", got, "Endpoint Override")
 	}
 	if payload.Origins["gpt-5.5"] != registry.CodexClientModelsOriginOverride {
@@ -66,9 +73,18 @@ func TestCodexClientModelsEndpoints(t *testing.T) {
 		t.Fatalf("override file was not written: %v", errStat)
 	}
 
+	// An entry the server cannot apply is stored and reported, so the model keeps the
+	// entry the server assembled for it.
 	rec = performCodexClientModelsRequest(t, engine, http.MethodPut, "/v0/management/codex-client-models/override", `{"gpt-5.5":{"slug":"other"}}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("invalid PUT status = %d, want %d (body %s)", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unstorable PUT status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	payload = decodeCodexClientModelsResponse(t, rec)
+	if len(payload.OverrideErrors) != 1 || payload.OverrideErrors[0].Slug != "gpt-5.5" {
+		t.Fatalf("override errors = %#v, want one issue for %q", payload.OverrideErrors, "gpt-5.5")
+	}
+	if got := codexClientModelsEffectiveValue(t, payload, "gpt-5.5", "display_name"); got == "other" {
+		t.Fatalf("display_name = %v, want the assembled default", got)
 	}
 	rec = performCodexClientModelsRequest(t, engine, http.MethodPut, "/v0/management/codex-client-models/override", "")
 	if rec.Code != http.StatusBadRequest {
@@ -80,7 +96,7 @@ func TestCodexClientModelsEndpoints(t *testing.T) {
 		t.Fatalf("entry PUT status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	payload = decodeCodexClientModelsResponse(t, rec)
-	if got := codexClientModelsResponseValue(t, payload, "gpt-5.5", "description"); got != "Per Slug" {
+	if got := codexClientModelsEffectiveValue(t, payload, "gpt-5.5", "description"); got != "Per Slug" {
 		t.Fatalf("description = %v, want %q", got, "Per Slug")
 	}
 
@@ -103,10 +119,28 @@ func TestCodexClientModelsEndpoints(t *testing.T) {
 }
 
 type codexClientModelsResponse struct {
-	Models       []map[string]any                            `json:"models"`
-	Origins      map[string]registry.CodexClientModelsOrigin `json:"origins"`
-	Override     map[string]json.RawMessage                  `json:"override"`
-	ServedModels []codexmodels.ServedModelSummary            `json:"served_models"`
+	Models         []map[string]any                            `json:"models"`
+	Origins        map[string]registry.CodexClientModelsOrigin `json:"origins"`
+	Override       map[string]json.RawMessage                  `json:"override"`
+	OverrideErrors []registry.CodexClientModelsOverrideIssue   `json:"override_errors"`
+	ServedModels   []codexmodels.ServedModelSummary            `json:"served_models"`
+}
+
+// codexClientModelsEffectiveValue reports the value clients receive for a slug: the
+// default entry the response carries with the response's override document applied.
+func codexClientModelsEffectiveValue(t *testing.T, payload codexClientModelsResponse, slug, field string) any {
+	t.Helper()
+	defaults := make(map[string]map[string]any, len(payload.Models))
+	for _, model := range payload.Models {
+		entrySlug, _ := model["slug"].(string)
+		defaults[strings.TrimSpace(entrySlug)] = model
+	}
+	served, _ := registry.ResolveCodexClientModelOverrides(defaults, payload.Override)
+	model, ok := served[strings.TrimSpace(slug)]
+	if !ok {
+		t.Fatalf("model %q is not served", slug)
+	}
+	return model[field]
 }
 
 func TestCodexClientModelsReportsServedModels(t *testing.T) {
@@ -160,14 +194,14 @@ func TestCodexClientModelsReportsServedModels(t *testing.T) {
 	if served.ContextWindow <= 0 || served.MaxContextWindow <= 0 {
 		t.Fatalf("context windows = %d/%d, want the served values", served.ContextWindow, served.MaxContextWindow)
 	}
-	// The catalog only defines its own entries, so the served model stays out of it
-	// until an override adds a dedicated entry.
-	if got := codexClientModelsResponseSlugs(t, payload); containsCodexClientModelsSlug(got, modelID) {
-		t.Fatalf("catalog slugs %v contain the served model %q", got, modelID)
+	// The entry the server assembles for a served model is the default configuration a
+	// management UI lists and edits against.
+	if got := codexClientModelsResponseSlugs(t, payload); !containsCodexClientModelsSlug(got, modelID) {
+		t.Fatalf("catalog slugs %v are missing the served model %q", got, modelID)
 	}
 }
 
-func TestCodexClientModelsServedModelsFollowsOverrides(t *testing.T) {
+func TestCodexClientModelsServedModelsFollowOverrides(t *testing.T) {
 	dir := t.TempDir()
 	registry.SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
 	t.Cleanup(func() { _ = registry.ClearCodexClientModelsOverride() })
@@ -202,11 +236,10 @@ func TestCodexClientModelsServedModelsFollowsOverrides(t *testing.T) {
 	if served == nil {
 		t.Fatalf("served_models is missing %q", modelID)
 	}
-	if served.DefaultTemplate {
-		t.Fatalf("default_template = true after the entry was added, want false")
-	}
-	if served.TemplateSlug != modelID {
-		t.Fatalf("template_slug = %q, want %q", served.TemplateSlug, modelID)
+	// An override shapes the assembled entry; it does not give the model a catalog
+	// template of its own, so the entry still comes from the default template.
+	if !served.DefaultTemplate || served.TemplateSlug != "gpt-5.5" {
+		t.Fatalf("template provenance = %q (default %v), want the default template", served.TemplateSlug, served.DefaultTemplate)
 	}
 	if served.ContextWindow != 128000 {
 		t.Fatalf("context_window = %d, want %d", served.ContextWindow, 128000)

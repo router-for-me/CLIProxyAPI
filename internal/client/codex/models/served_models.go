@@ -1,16 +1,18 @@
 package models
 
 import (
-	"bytes"
 	"encoding/json"
+	"sort"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
-// ServedModelSummary describes one model the server hands to Codex clients: the
-// catalog entry it is built from plus the fields a management UI lists.
+// ServedModelSummary describes one model the server hands to Codex clients: the entry
+// it serves plus the fields a management UI lists.
 type ServedModelSummary struct {
 	// Slug is the model id Codex clients request.
 	Slug string `json:"slug"`
-	// TemplateSlug is the catalog entry the served entry was built from.
+	// TemplateSlug is the catalog entry the served entry was assembled from.
 	TemplateSlug string `json:"template_slug"`
 	// DefaultTemplate reports that no catalog entry matches the model id, so the
 	// default template supplied the entry.
@@ -34,13 +36,6 @@ type ServedModelSummary struct {
 	Priority int `json:"priority"`
 	// SupportedReasoningLevels lists the reasoning efforts the served entry offers.
 	SupportedReasoningLevels []ServedReasoningLevel `json:"supported_reasoning_levels"`
-	// ServedFields maps every field whose served value differs from the entry the
-	// catalog supplies for the model to the value Codex clients receive. The server
-	// decides those fields for the client from model metadata, provider capabilities
-	// and visibility rules, so the catalog value is not what clients see. A
-	// management UI overlays them on the catalog entry to show what clients
-	// currently receive.
-	ServedFields map[string]any `json:"served_fields,omitempty"`
 }
 
 // ServedReasoningLevel is one reasoning effort the served entry offers.
@@ -51,61 +46,159 @@ type ServedReasoningLevel struct {
 	Description string `json:"description,omitempty"`
 }
 
-// SummarizeServedModels reports how each available model is served to Codex
-// clients. Summaries follow the same construction as BuildResponseForClient, so a
-// model without a matching catalog entry is reported with DefaultTemplate set and
-// the default template as its TemplateSlug.
-func SummarizeServedModels(availableModels []map[string]any, providersForModel ProvidersForModelFunc, clientVersion string) []ServedModelSummary {
-	response := BuildResponseForClient(availableModels, providersForModel, false, clientVersion)
-	entries, ok := response["models"].([]map[string]any)
-	if !ok {
-		return nil
-	}
-	templates, defaultTemplate, err := loadCodexClientModelTemplates()
-	if err != nil {
-		return nil
-	}
-	defaultSlug := stringModelValue(defaultTemplate, "slug")
+// CodexClientModelSets is what the server hands to Codex clients in the two stages a
+// management UI needs: the entries assembled from the catalog templates and the runtime
+// model metadata, which are the default configuration, and the entries the local
+// override layer produces on top of them.
+type CodexClientModelSets struct {
+	// Defaults holds one assembled entry per servable model, before overrides.
+	Defaults []map[string]any
+	// Served holds the entries the override layer produces, in served order.
+	Served []map[string]any
+	// Summaries describes each served model, in the same order.
+	Summaries []ServedModelSummary
+	// Origins maps each default slug to where its entry comes from.
+	Origins map[string]registry.CodexClientModelsOrigin
+	// Issues lists the override entries that could not be applied.
+	Issues []registry.CodexClientModelsOverrideIssue
+}
 
-	summaries := make([]ServedModelSummary, 0, len(entries))
-	for _, entry := range entries {
-		slug := stringModelValue(entry, "slug")
-		if slug == "" {
+// BuildCodexClientModelSets assembles the default entry of every model the server can
+// serve, applies the local override layer and describes both. The summaries follow the
+// order the models are served in.
+func BuildCodexClientModelSets(
+	availableModels []map[string]any,
+	providersForModel ProvidersForModelFunc,
+	optimizeMultiAgentV2 bool,
+	clientVersion string,
+) CodexClientModelSets {
+	// Capability metadata comes from the same registry the served response uses, so the sets
+	// described here match what clients receive.
+	assembled := assembleCodexClientModelDefaults(
+		availableModels,
+		providersForModel,
+		registry.GetGlobalRegistry().GetResponsesWebSearchCapability,
+		optimizeMultiAgentV2,
+		clientVersion,
+	)
+	if len(assembled.bySlug) == 0 {
+		return CodexClientModelSets{}
+	}
+
+	doc := registry.GetCodexClientModelsOverride()
+	servedBySlug, issues := registry.ResolveCodexClientModelOverrides(codexClientModelResolveBase(assembled), doc)
+
+	defaults := make([]map[string]any, 0, len(assembled.order))
+	served := make([]map[string]any, 0, len(assembled.order))
+	for _, slug := range assembled.order {
+		defaults = append(defaults, assembled.bySlug[slug])
+		entry, ok := servedBySlug[slug]
+		if !ok {
 			continue
 		}
-		summary := ServedModelSummary{
-			Slug:                  slug,
-			TemplateSlug:          codexClientMetadataModelID(slug),
-			DisplayName:           stringModelValue(entry, "display_name"),
-			Description:           stringModelValue(entry, "description"),
-			ContextWindow:         intModelValue(entry, "context_window"),
-			MaxContextWindow:      intModelValue(entry, "max_context_window"),
-			Visibility:            stringModelValue(entry, "visibility"),
-			DefaultReasoningLevel: stringModelValue(entry, "default_reasoning_level"),
-			Priority:              intModelValue(entry, "priority"),
-		}
-		// TemplateSlug and DefaultTemplate describe how the served entry was built.
-		// ServedFields compares against the entry a management UI lists for the
-		// model: the entry keyed by the served slug, and the template the model
-		// falls back to when the catalog has no entry for it.
-		baseEntry := defaultTemplate
-		if matched, ok := templates[summary.TemplateSlug]; ok {
-			baseEntry = matched
-		} else {
-			summary.TemplateSlug = defaultSlug
-			summary.DefaultTemplate = true
-		}
-		if matched, ok := templates[slug]; ok {
-			baseEntry = matched
-		}
-		summary.SupportedReasoningLevels = servedReasoningLevels(entry)
-		summary.ServedFields = servedFieldValues(baseEntry, entry)
-		if providersForModel != nil {
-			summary.Providers = providersForModel(slug)
-		}
-		summaries = append(summaries, summary)
+		served = append(served, entry)
 	}
-	return summaries
+	sortCodexClientModelsByPriority(defaults)
+	sortCodexClientModelsByPriority(served)
+
+	sets := CodexClientModelSets{
+		Defaults: defaults,
+		Served:   served,
+		Origins:  codexClientModelOrigins(assembled, doc),
+		Issues:   issues,
+	}
+	sets.Summaries = make([]ServedModelSummary, 0, len(served))
+	for _, entry := range served {
+		sets.Summaries = append(sets.Summaries, summarizeServedModel(entry, assembled, providersForModel))
+	}
+	return sets
+}
+
+// codexClientModelResolveBase is the map inheritance sources resolve against: the
+// entries the server assembled plus, for models it does not serve, the catalog template
+// they would be assembled from. A source can therefore name an official model this
+// machine happens to serve through no provider.
+func codexClientModelResolveBase(assembled codexClientModelDefaults) map[string]map[string]any {
+	base := make(map[string]map[string]any, len(assembled.bySlug)+len(assembled.templates))
+	for slug, entry := range assembled.bySlug {
+		base[slug] = entry
+	}
+	for slug, template := range assembled.templates {
+		if _, exists := base[slug]; !exists {
+			base[slug] = template
+		}
+	}
+	return base
+}
+
+func sortCodexClientModelsByPriority(entries []map[string]any) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		return codexClientModelPriority(entries[i]) < codexClientModelPriority(entries[j])
+	})
+}
+
+// summarizeServedModel describes one served entry for a management UI.
+func summarizeServedModel(entry map[string]any, assembled codexClientModelDefaults, providersForModel ProvidersForModelFunc) ServedModelSummary {
+	slug := stringModelValue(entry, "slug")
+	summary := ServedModelSummary{
+		Slug:                  slug,
+		TemplateSlug:          codexClientMetadataModelID(slug),
+		DisplayName:           stringModelValue(entry, "display_name"),
+		Description:           stringModelValue(entry, "description"),
+		ContextWindow:         intModelValue(entry, "context_window"),
+		MaxContextWindow:      intModelValue(entry, "max_context_window"),
+		Visibility:            stringModelValue(entry, "visibility"),
+		DefaultReasoningLevel: stringModelValue(entry, "default_reasoning_level"),
+		Priority:              intModelValue(entry, "priority"),
+	}
+	summary.SupportedReasoningLevels = servedReasoningLevels(entry)
+	// The base catalog may have no entry for the model, in which case the default
+	// template supplied the entry the server assembled.
+	if _, matched := assembled.templates[summary.TemplateSlug]; !matched {
+		summary.TemplateSlug = stringModelValue(assembled.defaultTemplate, "slug")
+		summary.DefaultTemplate = true
+	}
+	if providersForModel != nil {
+		summary.Providers = providersForModel(slug)
+	}
+	return summary
+}
+
+// codexClientModelOrigins reports where the catalog entry of each slug comes from. A
+// model no provider serves has no entry of its own, so an override for it has no effect
+// and is reported as such.
+func codexClientModelOrigins(assembled codexClientModelDefaults, doc map[string]json.RawMessage) map[string]registry.CodexClientModelsOrigin {
+	origins := make(map[string]registry.CodexClientModelsOrigin, len(assembled.bySlug)+len(doc))
+	for slug := range assembled.bySlug {
+		origins[slug] = registry.CodexClientModelsOriginBase
+	}
+	for slug := range assembled.bySlug {
+		if _, matched := assembled.templates[codexClientMetadataModelID(slug)]; !matched {
+			origins[slug] = registry.CodexClientModelsOriginServed
+		}
+	}
+	for slug, patch := range doc {
+		if codexClientModelPatchIsNull(patch) {
+			origins[slug] = registry.CodexClientModelsOriginRemoved
+			continue
+		}
+		if _, served := assembled.bySlug[slug]; served {
+			origins[slug] = registry.CodexClientModelsOriginOverride
+			continue
+		}
+		origins[slug] = registry.CodexClientModelsOriginUnserved
+	}
+	return origins
+}
+
+// codexClientModelPatchIsNull reports whether an override entry keeps its model out of
+// the served list.
+func codexClientModelPatchIsNull(patch json.RawMessage) bool {
+	var decoded any
+	if errUnmarshal := json.Unmarshal(patch, &decoded); errUnmarshal != nil {
+		return false
+	}
+	return decoded == nil
 }
 
 // servedReasoningLevels reads the reasoning efforts the served entry offers, in the
@@ -131,54 +224,4 @@ func servedReasoningLevels(entry map[string]any) []ServedReasoningLevel {
 		})
 	}
 	return levels
-}
-
-// servedFieldValues reports the fields whose served value differs from base, the
-// entry the catalog supplies for the model, together with the value clients
-// receive. A differing field is one the server decided for the client instead of
-// reading it from the catalog entry: overriding it in the catalog may not reach
-// clients, so a management UI shows the served value as the field's default. A
-// field the served entry no longer carries keeps a nil value, which reports that
-// clients receive no value for it.
-func servedFieldValues(base, entry map[string]any) map[string]any {
-	if len(base) == 0 || len(entry) == 0 {
-		return nil
-	}
-	keys := make(map[string]struct{}, len(base)+len(entry))
-	for key := range base {
-		keys[key] = struct{}{}
-	}
-	for key := range entry {
-		keys[key] = struct{}{}
-	}
-
-	fields := make(map[string]any, 4)
-	for key := range keys {
-		// The slug identifies the entry, so it is never a served field.
-		if key == "slug" {
-			continue
-		}
-		if !servedModelValuesEqual(base[key], entry[key]) {
-			fields[key] = entry[key]
-		}
-	}
-	if len(fields) == 0 {
-		return nil
-	}
-	return fields
-}
-
-// servedModelValuesEqual compares two catalog values by their JSON encoding, so a
-// number the catalog decoded as float64 equals the same number built as an int, and
-// object keys compare independently of their order.
-func servedModelValuesEqual(left, right any) bool {
-	leftJSON, errLeft := json.Marshal(left)
-	if errLeft != nil {
-		return false
-	}
-	rightJSON, errRight := json.Marshal(right)
-	if errRight != nil {
-		return false
-	}
-	return bytes.Equal(leftJSON, rightJSON)
 }

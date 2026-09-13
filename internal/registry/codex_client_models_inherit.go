@@ -26,9 +26,20 @@ import (
 //	  }
 //	}
 //
+// A null value opts the path out: it names no source, so the model keeps the value the
+// server assembled for that path and an ancestor directive no longer covers it:
+//
+//	{
+//	  "$inherit": {
+//	    "": "my-fast-sol",
+//	    "model_messages.guardian_v2": null
+//	  }
+//	}
+//
 // Sources are applied shallow to deep, the local patch is applied last over the
-// inherited values, and a null local value still removes the field. Model identity
-// fields (slug, display_name, description) are never taken from a source.
+// inherited values, and a null local value still removes the field. The fields that
+// describe the model itself (its identity, visibility, position and context windows)
+// are never taken from a source.
 const CodexClientModelsInheritKeyword = "$inherit"
 
 // maxCodexClientModelsInheritDepth bounds how many inheritance hops may be used to
@@ -38,6 +49,37 @@ const maxCodexClientModelsInheritDepth = 3
 // codexClientModelsIdentityFields describe a model itself. Inheritance sources never
 // supply them, so a model keeps its own name and description.
 var codexClientModelsIdentityFields = []string{"slug", "display_name", "description"}
+
+// codexClientModelsServedFields describe how a model is served rather than which model
+// it is. Inheritance sources never supply them either: they belong to the model, and an
+// entry that does not set them keeps the value the server assembled for it.
+var codexClientModelsServedFields = []string{
+	"visibility",
+	"priority",
+	"context_window",
+	"max_context_window",
+}
+
+// codexClientModelsModelFields are every field an inheritance source may not supply.
+var codexClientModelsModelFields = append(
+	append([]string(nil), codexClientModelsIdentityFields...),
+	codexClientModelsServedFields...,
+)
+
+// isCodexClientModelsModelField reports whether path names one of the fields that
+// only the model's own entry supplies. Only root level keys count: a nested key of
+// the same name is an ordinary field.
+func isCodexClientModelsModelField(segments []string) bool {
+	if len(segments) != 1 {
+		return false
+	}
+	for _, field := range codexClientModelsModelFields {
+		if segments[0] == field {
+			return true
+		}
+	}
+	return false
+}
 
 // CodexClientModelsOverrideIssue reports one override entry the catalog could not
 // apply. The entry keeps its base value, or stays out of the catalog when it is a
@@ -56,11 +98,13 @@ func (i CodexClientModelsOverrideIssue) String() string {
 }
 
 // codexClientModelsInheritSource is one inheritance directive: the value at path
-// inside slug is used for the same path of the model declaring the directive.
+// inside slug is used for the same path of the model declaring the directive. A
+// disabled source names no model: it keeps the path on the model's own value.
 type codexClientModelsInheritSource struct {
 	path     string
 	segments []string
 	slug     string
+	disabled bool
 }
 
 // splitCodexClientModelsInherit separates the inheritance directive from the local
@@ -89,6 +133,12 @@ func splitCodexClientModelsInherit(patch map[string]any) ([]codexClientModelsInh
 		directives[""] = slug
 	case map[string]any:
 		for inheritPath, value := range typed {
+			if value == nil {
+				// A null source opts the path out of inheritance. The empty slug is
+				// the marker: it can never name a model.
+				directives[inheritPath] = ""
+				continue
+			}
 			slug, ok := value.(string)
 			if !ok {
 				return nil, nil, fmt.Errorf("field %q path %q must name a model", CodexClientModelsInheritKeyword, inheritPath)
@@ -109,7 +159,12 @@ func splitCodexClientModelsInherit(patch map[string]any) ([]codexClientModelsInh
 		if errPath != nil {
 			return nil, nil, errPath
 		}
-		sources = append(sources, codexClientModelsInheritSource{path: inheritPath, segments: segments, slug: slug})
+		sources = append(sources, codexClientModelsInheritSource{
+			path:     inheritPath,
+			segments: segments,
+			slug:     slug,
+			disabled: slug == "",
+		})
 	}
 	// Shallow paths first: a deeper directive refines a subtree a shallower one
 	// already replaced, and the local patch still wins over all of them.
@@ -123,7 +178,7 @@ func splitCodexClientModelsInherit(patch map[string]any) ([]codexClientModelsInh
 }
 
 // parseCodexClientModelsInheritPath splits a dotted inheritance path. It rejects
-// array indices, empty segments and the model identity fields.
+// array indices, empty segments and the fields only the model's own entry supplies.
 func parseCodexClientModelsInheritPath(inheritPath string) ([]string, error) {
 	if inheritPath == "" {
 		return nil, nil
@@ -140,12 +195,8 @@ func parseCodexClientModelsInheritPath(inheritPath string) ([]string, error) {
 			return nil, fmt.Errorf("inheritance path %q must not target %s", inheritPath, CodexClientModelsInheritKeyword)
 		}
 	}
-	if len(segments) == 1 {
-		for _, field := range codexClientModelsIdentityFields {
-			if segments[0] == field {
-				return nil, fmt.Errorf("field %q cannot be inherited", field)
-			}
-		}
+	if isCodexClientModelsModelField(segments) {
+		return nil, fmt.Errorf("field %q cannot be inherited", segments[0])
 	}
 	return segments, nil
 }
@@ -198,6 +249,42 @@ func (r *codexClientModelsInheritance) entry(slug string) (map[string]any, error
 	return entry, nil
 }
 
+// ownValue returns the value the model supplies for a path on its own, ignoring every
+// inheritance source: the entry the server assembled for it, which is the default
+// configuration clients receive when nothing overrides the path.
+func (r *codexClientModelsInheritance) ownValue(slug string, segments []string) (any, bool, error) {
+	baseEntry, ok := r.base[slug]
+	if !ok {
+		return nil, false, nil
+	}
+	value, found := lookupCodexClientModelsPath(baseEntry, segments)
+	if !found {
+		return nil, false, nil
+	}
+	return cloneCodexClientModelsValue(value), true, nil
+}
+
+// restoreOwnValueInside puts the model's own value back at a path opted out of
+// inheritance inside a subtree a shallower source supplied, dropping the inherited
+// value when the model has none of its own.
+func (r *codexClientModelsInheritance) restoreOwnValueInside(current any, slug string, segments, sourceSegments []string) (any, error) {
+	object, okObject := current.(map[string]any)
+	if !okObject {
+		return current, nil
+	}
+	value, found, errValue := r.ownValue(slug, sourceSegments)
+	if errValue != nil {
+		return nil, errValue
+	}
+	relative := codexClientModelsPathSuffix(sourceSegments, segments)
+	if !found {
+		deleteCodexClientModelsPath(object, relative)
+		return object, nil
+	}
+	setCodexClientModelsPath(object, relative, cloneCodexClientModelsValue(value))
+	return object, nil
+}
+
 func (r *codexClientModelsInheritance) value(slug, fieldPath string) (any, bool, error) {
 	key := slug + "\x00" + fieldPath
 	if cached, ok := r.memo[key]; ok {
@@ -229,6 +316,17 @@ func (r *codexClientModelsInheritance) resolve(slug, fieldPath string) (any, boo
 			continue
 		}
 		if codexClientModelsPathHasPrefix(segments, source.segments) {
+			// A source that replaces this path or an ancestor of it supplies the whole
+			// subtree. The fields only the model itself supplies and the paths opted
+			// out of inheritance are the exception: they keep the model's own value.
+			if source.disabled || isCodexClientModelsModelField(segments) {
+				value, ok, errOwn := r.ownValue(slug, segments)
+				if errOwn != nil {
+					return nil, false, errOwn
+				}
+				current, found = value, ok
+				continue
+			}
 			// The source replaces this path or an ancestor of it, so the whole
 			// subtree comes from the source.
 			value, ok, errValue := r.value(source.slug, fieldPath)
@@ -239,6 +337,15 @@ func (r *codexClientModelsInheritance) resolve(slug, fieldPath string) (any, boo
 				return nil, false, fmt.Errorf("source model %q does not define %s", source.slug, describeCodexClientModelsPath(fieldPath))
 			}
 			current, found = cloneCodexClientModelsValue(value), true
+			continue
+		}
+
+		if source.disabled {
+			restored, errOwn := r.restoreOwnValueInside(current, slug, segments, source.segments)
+			if errOwn != nil {
+				return nil, false, errOwn
+			}
+			current = restored
 			continue
 		}
 
@@ -287,16 +394,18 @@ func (r *codexClientModelsInheritance) resolve(slug, fieldPath string) (any, boo
 		if !okEntry {
 			entry = make(map[string]any, 3)
 		}
-		for _, field := range codexClientModelsIdentityFields {
-			if baseEntry, ok := r.base[slug]; ok {
-				if value, exists := baseEntry[field]; exists {
-					entry[field] = cloneCodexClientModelsValue(value)
-					continue
-				}
+		for _, field := range codexClientModelsModelFields {
+			value, exists, errOwn := r.ownValue(slug, []string{field})
+			if errOwn != nil {
+				return nil, false, errOwn
 			}
-			delete(entry, field)
+			if !exists {
+				delete(entry, field)
+				continue
+			}
+			entry[field] = cloneCodexClientModelsValue(value)
 		}
-		for _, field := range codexClientModelsIdentityFields {
+		for _, field := range codexClientModelsModelFields {
 			value, exists := localPatch[field]
 			if !exists {
 				continue
@@ -403,6 +512,23 @@ func setCodexClientModelsPath(document map[string]any, segments []string, value 
 	current[segments[len(segments)-1]] = value
 }
 
+// deleteCodexClientModelsPath removes a path from a document, leaving the rest of the
+// document alone. A path that is not there is not an error.
+func deleteCodexClientModelsPath(document map[string]any, segments []string) {
+	if len(segments) == 0 {
+		return
+	}
+	current := document
+	for _, segment := range segments[:len(segments)-1] {
+		child, ok := current[segment].(map[string]any)
+		if !ok {
+			return
+		}
+		current = child
+	}
+	delete(current, segments[len(segments)-1])
+}
+
 func cloneCodexClientModelsValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -448,6 +574,10 @@ func codexClientModelsInheritFieldDepth(
 	longest := 0
 	resolved := true
 	for _, source := range sources[slug] {
+		if source.disabled {
+			// An opted-out path follows no source, so it adds no hop.
+			continue
+		}
 		if !codexClientModelsPathsOverlap(segments, source.segments) {
 			continue
 		}
@@ -487,6 +617,9 @@ func CodexClientModelsInheritUsage(doc map[string]json.RawMessage) map[string]in
 		}
 		seen := make(map[string]struct{}, len(sources))
 		for _, source := range sources {
+			if source.disabled {
+				continue
+			}
 			if _, ok := seen[source.slug]; ok {
 				continue
 			}

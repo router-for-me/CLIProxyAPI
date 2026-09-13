@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -79,17 +80,15 @@ func TestApplyCodexClientModelsOverrideReplacesArrays(t *testing.T) {
 	}
 }
 
-func TestApplyCodexClientModelsOverrideDeletesAndAddsEntries(t *testing.T) {
+func TestApplyCodexClientModelsOverrideRemovesFieldsAndModels(t *testing.T) {
 	base := testCodexClientCatalog(t,
 		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{"scratch": "remove-me"}),
 		testCodexClientModel("gpt-5.6-sol", 2),
 	)
 
-	custom := testCodexClientModel("local-model", 3)
 	models, err := applyOverrideForTest(t, base, map[string]any{
 		"gpt-5.5":     map[string]any{"scratch": nil},
 		"gpt-5.6-sol": nil,
-		"local-model": custom,
 	})
 	if err != nil {
 		t.Fatalf("apply override: %v", err)
@@ -99,10 +98,24 @@ func TestApplyCodexClientModelsOverrideDeletesAndAddsEntries(t *testing.T) {
 		t.Fatal("null patch did not remove the field")
 	}
 	if _, ok := models["gpt-5.6-sol"]; ok {
-		t.Fatal("null patch did not remove the model")
+		t.Fatal("null patch did not keep the model out of the served list")
 	}
-	if models["local-model"] == nil {
-		t.Fatal("override did not add the custom model")
+}
+
+func TestCodexClientModelsOverrideReportsModelsThatAreNotServed(t *testing.T) {
+	base := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
+
+	served, issues := resolveOverrideForTest(t, base, map[string]any{
+		"local-model": testCodexClientModel("local-model", 3),
+	})
+	if len(issues) != 1 || issues[0].Slug != "local-model" {
+		t.Fatalf("issues = %#v, want one issue for %q", issues, "local-model")
+	}
+	if !strings.Contains(issues[0].Error, "not served") {
+		t.Fatalf("issue = %q, want it to report that the model is not served", issues[0].Error)
+	}
+	if _, ok := served["local-model"]; ok {
+		t.Fatal("an override for a model that is not served changed the served list")
 	}
 }
 
@@ -139,10 +152,8 @@ func TestSetCodexClientModelsOverridePersistsAndApplies(t *testing.T) {
 	SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
 	beforeRevision := GetCodexClientModelsState().Revision
 
-	custom := testCodexClientModel("local-model", 3)
 	document := map[string]any{
 		"gpt-5.6-sol": map[string]any{"display_name": "Local Sol"},
-		"local-model": custom,
 	}
 	raw, errMarshal := json.Marshal(document)
 	if errMarshal != nil {
@@ -156,21 +167,11 @@ func TestSetCodexClientModelsOverridePersistsAndApplies(t *testing.T) {
 	if state.OverridePath != overridePath {
 		t.Fatalf("override path = %q, want %q", state.OverridePath, overridePath)
 	}
-	if len(state.Override) != 2 {
-		t.Fatalf("override entries = %d, want 2", len(state.Override))
+	if len(state.Override) != 1 {
+		t.Fatalf("override entries = %d, want 1", len(state.Override))
 	}
 	if state.OverrideError != "" {
 		t.Fatalf("override error = %q, want empty", state.OverrideError)
-	}
-	wantOrigins := map[string]CodexClientModelsOrigin{
-		"gpt-5.5":     CodexClientModelsOriginBase,
-		"gpt-5.6-sol": CodexClientModelsOriginOverride,
-		"local-model": CodexClientModelsOriginCustom,
-	}
-	for slug, want := range wantOrigins {
-		if got := state.Origins[slug]; got != want {
-			t.Fatalf("origin[%s] = %q, want %q", slug, got, want)
-		}
 	}
 	if got := codexClientModelStateValue(t, state, "gpt-5.6-sol", "display_name"); got != "Local Sol" {
 		t.Fatalf("gpt-5.6-sol display_name = %v, want %q", got, "Local Sol")
@@ -197,11 +198,12 @@ func TestSetCodexClientModelsOverridePersistsAndApplies(t *testing.T) {
 	if len(cleared.Override) != 0 {
 		t.Fatalf("override entries after clear = %d, want 0", len(cleared.Override))
 	}
-	if len(cleared.Models) != len(state.Models)-1 {
-		t.Fatalf("models after clear = %d, want %d", len(cleared.Models), len(state.Models)-1)
-	}
 	if cleared.Revision <= state.Revision {
 		t.Fatalf("revision after clear = %d, want > %d", cleared.Revision, state.Revision)
+	}
+	// Without the override the model is served exactly as the catalog assembles it.
+	if got := codexClientModelStateValue(t, cleared, "gpt-5.6-sol", "display_name"); got != "Test gpt-5.6-sol" {
+		t.Fatalf("display_name after clear = %v, want the assembled default", got)
 	}
 }
 
@@ -217,11 +219,9 @@ func TestSetCodexClientModelsOverrideRejectsInvalidDocument(t *testing.T) {
 	}
 	SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
 
-	before, revision := GetCodexClientModelsSnapshot()
+	// A document that is not a slug to object map is refused before anything is stored.
 	for _, document := range []string{
 		`{"gpt-5.5":"not-an-object"}`,
-		`{"gpt-5.5":{"slug":"other"}}`,
-		`{"gpt-5.5":{"context_window":null}}`,
 		`[]`,
 	} {
 		err := SetCodexClientModelsOverride([]byte(document))
@@ -232,16 +232,46 @@ func TestSetCodexClientModelsOverrideRejectsInvalidDocument(t *testing.T) {
 			t.Fatalf("SetCodexClientModelsOverride(%s) error = %v, want rejection", document, err)
 		}
 	}
-
-	after, afterRevision := GetCodexClientModelsSnapshot()
-	if string(after) != string(before) {
-		t.Fatal("invalid override replaced the effective catalog")
-	}
-	if afterRevision != revision {
-		t.Fatalf("revision after invalid override = %d, want %d", afterRevision, revision)
-	}
 	if _, errStat := os.Stat(overridePath); !os.IsNotExist(errStat) {
 		t.Fatalf("invalid override wrote %s: %v", overridePath, errStat)
+	}
+	if state := GetCodexClientModelsState(); len(state.Override) != 0 {
+		t.Fatalf("override entries = %d, want 0", len(state.Override))
+	}
+}
+
+func TestSetCodexClientModelsOverrideKeepsEntriesItCannotApply(t *testing.T) {
+	restore := snapshotCodexClientModelsStore(t)
+	defer restore()
+
+	dir := t.TempDir()
+	base := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
+	if _, err := setCodexClientModelsBase(base, "test"); err != nil {
+		t.Fatalf("set base catalog: %v", err)
+	}
+	SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
+
+	// An entry that cannot be applied is still stored, reported when the entries are
+	// resolved, and leaves its model on the entry the server assembled for it.
+	for _, document := range []string{
+		`{"gpt-5.5":{"slug":"other"}}`,
+		`{"gpt-5.5":{"display_name":"Local","context_window":null}}`,
+	} {
+		if err := SetCodexClientModelsOverride([]byte(document)); err != nil {
+			t.Fatalf("SetCodexClientModelsOverride(%s) error = %v, want the entry stored", document, err)
+		}
+		state := GetCodexClientModelsState()
+		if len(state.Override) != 1 {
+			t.Fatalf("override entries = %d, want the entry stored", len(state.Override))
+		}
+		raw, _ := GetCodexClientModelsSnapshot()
+		_, issues := ResolveCodexClientModelOverrides(codexClientModelDefaultsForTest(t, raw), state.Override)
+		if len(issues) != 1 || issues[0].Slug != "gpt-5.5" {
+			t.Fatalf("issues = %#v, want one issue for %q", issues, "gpt-5.5")
+		}
+		if got := codexClientModelStateValue(t, state, "gpt-5.5", "context_window"); got != float64(372000) {
+			t.Fatalf("context_window = %v, want the assembled default", got)
+		}
 	}
 }
 
@@ -334,45 +364,74 @@ func testCodexClientModelWithExtras(slug string, priority int, extras map[string
 	return model
 }
 
-func applyOverrideForTest(t *testing.T, base []byte, document map[string]any) (map[string]map[string]any, error) {
+// codexClientModelDefaultsForTest turns a catalog fixture into the default entries the
+// override layer is applied to: one assembled entry per slug.
+func codexClientModelDefaultsForTest(t *testing.T, catalog []byte) map[string]map[string]any {
 	t.Helper()
-	override := make(map[string]json.RawMessage, len(document))
+	models, _, errParse := parseCodexClientModels(catalog)
+	if errParse != nil {
+		t.Fatalf("parse test Codex client catalog: %v", errParse)
+	}
+	defaults := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		slug, _ := model["slug"].(string)
+		cloned, _ := cloneCodexClientModelsValue(model).(map[string]any)
+		defaults[strings.TrimSpace(slug)] = cloned
+	}
+	return defaults
+}
+
+func codexClientModelOverrideDocumentForTest(t *testing.T, document map[string]any) map[string]json.RawMessage {
+	t.Helper()
+	doc := make(map[string]json.RawMessage, len(document))
 	for slug, patch := range document {
 		raw, errMarshal := json.Marshal(patch)
 		if errMarshal != nil {
 			t.Fatalf("marshal override patch for %q: %v", slug, errMarshal)
 		}
-		override[slug] = raw
+		doc[slug] = raw
 	}
-
-	data, errApply := applyCodexClientModelsOverride(base, override)
-	if errApply != nil {
-		return nil, errApply
-	}
-	if errValidate := ValidateCodexClientModelsJSON(data); errValidate != nil {
-		return nil, errValidate
-	}
-	models, _, errParse := parseCodexClientModels(data)
-	if errParse != nil {
-		return nil, errParse
-	}
-	bySlug := make(map[string]map[string]any, len(models))
-	for _, model := range models {
-		slug, _ := model["slug"].(string)
-		bySlug[slug] = model
-	}
-	return bySlug, nil
+	return doc
 }
 
+// resolveOverrideForTest applies an override document to the entries a catalog fixture
+// stands in for: the defaults the server assembles.
+func resolveOverrideForTest(t *testing.T, catalog []byte, document map[string]any) (map[string]map[string]any, []CodexClientModelsOverrideIssue) {
+	t.Helper()
+	return ResolveCodexClientModelOverrides(
+		codexClientModelDefaultsForTest(t, catalog),
+		codexClientModelOverrideDocumentForTest(t, document),
+	)
+}
+
+func applyOverrideForTest(t *testing.T, base []byte, document map[string]any) (map[string]map[string]any, error) {
+	t.Helper()
+	served, issues := resolveOverrideForTest(t, base, document)
+	if len(issues) > 0 {
+		return served, errors.New(issues[0].String())
+	}
+	return served, nil
+}
+
+func applyResilientOverrideForTest(t *testing.T, base []byte, document map[string]any) (map[string]map[string]any, []CodexClientModelsOverrideIssue, error) {
+	t.Helper()
+	served, issues := resolveOverrideForTest(t, base, document)
+	return served, issues, nil
+}
+
+// codexClientModelStateValue reports one field of a served entry: the base catalog with
+// the state's override layer applied, which is what clients receive.
 func codexClientModelStateValue(t *testing.T, state CodexClientModelsState, slug, field string) any {
 	t.Helper()
-	for _, model := range state.Models {
-		if model["slug"] == slug {
-			return model[field]
-		}
+	raw, _ := GetCodexClientModelsSnapshot()
+	// Problems with individual entries are reported separately, so this helper looks
+	// up the served entry without turning them into a failure of its own.
+	served, _ := ResolveCodexClientModelOverrides(codexClientModelDefaultsForTest(t, raw), state.Override)
+	model, ok := served[strings.TrimSpace(slug)]
+	if !ok {
+		t.Fatalf("model %q is not served", slug)
 	}
-	t.Fatalf("model %q not found in catalog state", slug)
-	return nil
+	return model[field]
 }
 
 func decodeAndValidateOverrideForTest(t *testing.T, data []byte) error {
@@ -394,14 +453,12 @@ func snapshotCodexClientModelsStore(t *testing.T) func() {
 	store := codexClientCatalogStore
 	store.mu.Lock()
 	previous := codexClientModelsStore{
-		base:           store.base,
-		baseSource:     store.baseSource,
-		override:       cloneCodexClientModelsOverride(store.override),
-		overridePath:   store.overridePath,
-		overrideError:  store.overrideError,
-		overrideIssues: append([]CodexClientModelsOverrideIssue(nil), store.overrideIssues...),
-		data:           store.data,
-		revision:       store.revision,
+		base:          store.base,
+		baseSource:    store.baseSource,
+		override:      cloneCodexClientModelsOverride(store.override),
+		overridePath:  store.overridePath,
+		overrideError: store.overrideError,
+		revision:      store.revision,
 	}
 	store.mu.Unlock()
 
@@ -413,12 +470,10 @@ func snapshotCodexClientModelsStore(t *testing.T) func() {
 		store.override = previous.override
 		store.overridePath = previous.overridePath
 		store.overrideError = previous.overrideError
-		store.overrideIssues = previous.overrideIssues
-		store.data = previous.data
 		store.revision = previous.revision
 	}
 }
-func TestCodexClientModelsDegradedEntryKeepsBaseOrigin(t *testing.T) {
+func TestCodexClientModelsDegradedOverrideKeepsTheDefaultEntry(t *testing.T) {
 	restore := snapshotCodexClientModelsStore(t)
 	defer restore()
 
@@ -429,21 +484,20 @@ func TestCodexClientModelsDegradedEntryKeepsBaseOrigin(t *testing.T) {
 	if _, err := setCodexClientModelsBase(base, "test"); err != nil {
 		t.Fatalf("set base catalog: %v", err)
 	}
-	document := `{"gpt-5.5":{"$inherit":{"context_window":"missing-model"}}}`
+	document := `{"gpt-5.5":{"$inherit":{"base_instructions":"missing-model"}}}`
 	if errWrite := os.WriteFile(overridePath, []byte(document), 0o600); errWrite != nil {
 		t.Fatalf("write override file: %v", errWrite)
 	}
 	SyncCodexClientModelsOverrideFile(configPath)
 
 	state := GetCodexClientModelsState()
-	if len(state.OverrideErrors) != 1 || state.OverrideErrors[0].Slug != "gpt-5.5" {
-		t.Fatalf("override errors = %#v, want one issue for gpt-5.5", state.OverrideErrors)
-	}
-	if got := state.Origins["gpt-5.5"]; got != CodexClientModelsOriginBase {
-		t.Fatalf("origin[gpt-5.5] = %q, want %q while the patch is degraded", got, CodexClientModelsOriginBase)
-	}
+	// The entry that cannot be applied is reported, and the model keeps the entry the
+	// server assembled for it instead of leaving the served list.
 	if got := codexClientModelStateValue(t, state, "gpt-5.5", "context_window"); got != float64(372000) {
-		t.Fatalf("context_window = %v, want the base value", got)
+		t.Fatalf("context_window = %v, want the assembled default", got)
+	}
+	if got := codexClientModelStateValue(t, state, "gpt-5.5", "display_name"); got != "Test gpt-5.5" {
+		t.Fatalf("display_name = %v, want the assembled default", got)
 	}
 }
 
@@ -482,7 +536,7 @@ func TestCodexClientModelsOverrideFileRewriteReplacesExistingFile(t *testing.T) 
 	}
 }
 
-func TestSetCodexClientModelsOverrideClearsStaleDiagnostics(t *testing.T) {
+func TestSetCodexClientModelsOverrideClearsFileErrors(t *testing.T) {
 	restore := snapshotCodexClientModelsStore(t)
 	defer restore()
 
@@ -511,17 +565,18 @@ func TestSetCodexClientModelsOverrideClearsStaleDiagnostics(t *testing.T) {
 		t.Fatalf("override error after a successful write = %q, want empty", state.OverrideError)
 	}
 
-	// A hand edit with one bad entry reports a degraded entry diagnostic.
+	// A hand edit whose entries cannot be applied is still loaded as written: those
+	// problems are reported when the entries are resolved, so the file itself is not
+	// treated as broken.
 	if errWrite := os.WriteFile(overridePath, []byte(`{"gpt-5.6-sol":{"$inherit":"missing-model"}}`), 0o644); errWrite != nil {
 		t.Fatalf("write degraded override file: %v", errWrite)
 	}
 	SyncCodexClientModelsOverrideFile(configPath)
-	if state := GetCodexClientModelsState(); len(state.OverrideErrors) != 1 {
-		t.Fatalf("override errors = %d, want 1", len(state.OverrideErrors))
+	if state := GetCodexClientModelsState(); state.OverrideError != "" {
+		t.Fatalf("override error = %q, want empty for a readable file", state.OverrideError)
 	}
 
-	// A successful management write replaces the document, so the diagnostics that
-	// describe the previous on-disk content must not survive it.
+	// A successful management write replaces the document.
 	if err := SetCodexClientModelsOverride([]byte(`{"gpt-5.6-sol":{"display_name":"Local Sol"}}`)); err != nil {
 		t.Fatalf("set override: %v", err)
 	}
@@ -529,11 +584,11 @@ func TestSetCodexClientModelsOverrideClearsStaleDiagnostics(t *testing.T) {
 	if state.OverrideError != "" {
 		t.Fatalf("override error after a successful write = %q, want empty", state.OverrideError)
 	}
-	if len(state.OverrideErrors) != 0 {
-		t.Fatalf("override errors after a successful write = %d, want 0", len(state.OverrideErrors))
+	if len(state.Override) != 1 {
+		t.Fatalf("override entries after a successful write = %d, want 1", len(state.Override))
 	}
-	if got := state.Origins["gpt-5.6-sol"]; got != CodexClientModelsOriginOverride {
-		t.Fatalf("origin[gpt-5.6-sol] = %q, want %q", got, CodexClientModelsOriginOverride)
+	if got := codexClientModelStateValue(t, state, "gpt-5.6-sol", "display_name"); got != "Local Sol" {
+		t.Fatalf("display_name = %v, want %q", got, "Local Sol")
 	}
 }
 

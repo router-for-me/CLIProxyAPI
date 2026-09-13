@@ -22,10 +22,17 @@ const CodexClientModelsOverrideSupportHeader = "X-CPA-SUPPORT-CODEX-CLIENT-MODEL
 const CodexClientModelsInheritSupportHeader = "X-CPA-SUPPORT-CODEX-CLIENT-MODEL-INHERIT"
 
 // codexClientModelsResponseBody is the management representation of the Codex client
-// model catalog: the catalog together with the models the server currently serves to
-// Codex clients, so a client can tell which entries are actually handed out.
+// model catalog: the default entry the server assembles for every model it can serve,
+// the local override layer that shapes them, and the models it actually hands out.
 type codexClientModelsResponseBody struct {
 	registry.CodexClientModelsState
+	// Models lists the default entry of every servable model, before overrides.
+	Models []map[string]any `json:"models"`
+	// Origins maps each slug to where its entry comes from.
+	Origins map[string]registry.CodexClientModelsOrigin `json:"origins"`
+	// OverrideErrors lists the override entries that could not be applied. Every other
+	// entry of the same document still takes effect.
+	OverrideErrors []registry.CodexClientModelsOverrideIssue `json:"override_errors,omitempty"`
 	// ServedModels lists one summary per model Codex clients can request.
 	ServedModels []codexmodels.ServedModelSummary `json:"served_models"`
 }
@@ -34,19 +41,23 @@ type codexClientModelsResponseBody struct {
 // clients render the result without a second request.
 func buildCodexClientModelsResponse() codexClientModelsResponseBody {
 	modelRegistry := registry.GetGlobalRegistry()
-	served := codexmodels.SummarizeServedModels(
+	sets := codexmodels.BuildCodexClientModelSets(
 		modelRegistry.GetAvailableModels("openai"),
 		modelRegistry.GetModelProviders,
+		false,
 		"",
 	)
 	return codexClientModelsResponseBody{
 		CodexClientModelsState: registry.GetCodexClientModelsState(),
-		ServedModels:           served,
+		Models:                 sets.Defaults,
+		Origins:                sets.Origins,
+		OverrideErrors:         sets.Issues,
+		ServedModels:           sets.Summaries,
 	}
 }
 
-// GetCodexClientModels returns the effective Codex client model catalog together
-// with the local override layer applied on top of it and the served model list.
+// GetCodexClientModels returns the default catalog entries, the local override layer and
+// the served model list.
 func (h *Handler) GetCodexClientModels(c *gin.Context) {
 	c.JSON(http.StatusOK, buildCodexClientModelsResponse())
 }

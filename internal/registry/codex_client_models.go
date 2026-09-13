@@ -15,23 +15,28 @@ import (
 //go:embed models/codex_client_models.json
 var embeddedCodexClientModelsJSON []byte
 
+// codexClientModelsDefaultTemplateSlug is the catalog entry the server serves for a
+// model that has no catalog entry of its own, and the entry that stands in for the
+// fields only a model itself supplies. The catalog must always carry it.
+const codexClientModelsDefaultTemplateSlug = "gpt-5.5"
+
 type codexClientModelsPayload struct {
 	Models []map[string]any `json:"models"`
 }
 
-// codexClientModelsStore holds the base catalog fetched from the embedded file or
-// a source URL, the local override layer applied on top of it, and the effective
-// catalog served to Codex clients.
+// codexClientModelsStore holds the base catalog fetched from the embedded file or a
+// source URL together with the local override layer. The override is applied to the
+// entries the server assembles for the models it can serve, not to the base catalog,
+// so both are stored side by side: the base supplies the templates, the override
+// shapes what each model serves.
 type codexClientModelsStore struct {
-	mu             sync.RWMutex
-	base           []byte
-	baseSource     string
-	override       map[string]json.RawMessage
-	overridePath   string
-	overrideError  string
-	overrideIssues []CodexClientModelsOverrideIssue
-	data           []byte
-	revision       uint64
+	mu            sync.RWMutex
+	base          []byte
+	baseSource    string
+	override      map[string]json.RawMessage
+	overridePath  string
+	overrideError string
+	revision      uint64
 }
 
 var codexClientCatalogStore = &codexClientModelsStore{}
@@ -42,7 +47,8 @@ func init() {
 	}
 }
 
-// GetCodexClientModelsJSON returns the current Codex client model catalog.
+// GetCodexClientModelsJSON returns the base Codex client model catalog, the template
+// source the server assembles served entries from.
 func GetCodexClientModelsJSON() []byte {
 	data, _ := GetCodexClientModelsSnapshot()
 	return data
@@ -55,17 +61,18 @@ func GetCodexClientModelsRevision() uint64 {
 	return codexClientCatalogStore.revision
 }
 
-// GetCodexClientModelsSnapshot returns a consistent catalog copy and revision.
-// The revision changes only when validated catalog content changes.
+// GetCodexClientModelsSnapshot returns a consistent copy of the base catalog and the
+// current revision. The revision changes whenever validated catalog content or the
+// override layer changes, so callers may cache on it.
 func GetCodexClientModelsSnapshot() ([]byte, uint64) {
 	codexClientCatalogStore.mu.RLock()
 	defer codexClientCatalogStore.mu.RUnlock()
-	return append([]byte(nil), codexClientCatalogStore.data...), codexClientCatalogStore.revision
+	return append([]byte(nil), codexClientCatalogStore.base...), codexClientCatalogStore.revision
 }
 
-// setCodexClientModelsBase replaces the base catalog and republishes the effective
-// catalog produced by the local override layer. The base catalog is rejected when
-// the override layer cannot be applied on top of it.
+// setCodexClientModelsBase replaces the base catalog. The local override layer is
+// applied to the assembled entries later, so the base only has to satisfy the catalog
+// schema and is stored on its own.
 func setCodexClientModelsBase(data []byte, source string) (bool, error) {
 	if err := ValidateCodexClientModelsJSON(data); err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
@@ -74,24 +81,11 @@ func setCodexClientModelsBase(data []byte, source string) (bool, error) {
 
 	codexClientCatalogStore.mu.Lock()
 	defer codexClientCatalogStore.mu.Unlock()
-	effective, overrideIssues, errMerge := applyCodexClientModelsOverrideResilient(base, codexClientCatalogStore.override)
-	if errMerge != nil {
-		return false, fmt.Errorf("%s: %w", source, errMerge)
-	}
-	if errValidate := ValidateCodexClientModelsJSON(effective); errValidate != nil {
-		return false, fmt.Errorf("%s: %w", source, errValidate)
-	}
-
-	codexClientCatalogStore.base = base
-	codexClientCatalogStore.baseSource = source
-	codexClientCatalogStore.overrideIssues = overrideIssues
-	for _, issue := range overrideIssues {
-		log.Warnf("registry: %s override of Codex client model catalog ignored: %s", source, issue)
-	}
-	if bytes.Equal(codexClientCatalogStore.data, effective) {
+	if bytes.Equal(codexClientCatalogStore.base, base) {
 		return false, nil
 	}
-	codexClientCatalogStore.data = effective
+	codexClientCatalogStore.base = base
+	codexClientCatalogStore.baseSource = source
 	codexClientCatalogStore.revision++
 	return true, nil
 }
@@ -122,8 +116,8 @@ func ValidateCodexClientModelsJSON(data []byte) error {
 			return fmt.Errorf("Codex client model catalog model %q: %w", slug, err)
 		}
 	}
-	if _, ok := seen["gpt-5.5"]; !ok {
-		return fmt.Errorf("Codex client model catalog is missing default template %q", "gpt-5.5")
+	if _, ok := seen[codexClientModelsDefaultTemplateSlug]; !ok {
+		return fmt.Errorf("Codex client model catalog is missing default template %q", codexClientModelsDefaultTemplateSlug)
 	}
 	return nil
 }
@@ -193,8 +187,8 @@ func requiredCodexClientModelString(model map[string]any, field string) (string,
 }
 
 func requiredCodexClientModelInteger(model map[string]any, field string, positive bool) (int64, error) {
-	value, ok := model[field].(float64)
-	if !ok || math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || value > math.MaxInt64 {
+	value, ok := codexClientModelIntegerValue(model[field])
+	if !ok {
 		return 0, fmt.Errorf("field %q must be an integer", field)
 	}
 	if positive && value <= 0 {
@@ -203,5 +197,24 @@ func requiredCodexClientModelInteger(model map[string]any, field string, positiv
 	if !positive && value < 0 {
 		return 0, fmt.Errorf("field %q must not be negative", field)
 	}
-	return int64(value), nil
+	return value, nil
+}
+
+// codexClientModelIntegerValue reads an integer field whatever numeric type carries it: a
+// catalog decoded from JSON holds float64, while an entry the server assembled in memory
+// holds int.
+func codexClientModelIntegerValue(raw any) (int64, bool) {
+	switch typed := raw.(type) {
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || math.Trunc(typed) != typed || typed > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(typed), true
+	case int:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	default:
+		return 0, false
+	}
 }
