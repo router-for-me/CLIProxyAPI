@@ -353,8 +353,8 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 	if staticWebSearchModel == nil {
 		t.Fatal("expected static gemini-3.1-flash-lite definition")
 	}
-	if webSearchModel.ContextLength != staticWebSearchModel.ContextLength || webSearchModel.MaxCompletionTokens != staticWebSearchModel.MaxCompletionTokens {
-		t.Fatalf("static token limits should be preserved, got=%#v static=%#v", webSearchModel, staticWebSearchModel)
+	if webSearchModel.ContextLength != 1 || webSearchModel.MaxCompletionTokens != 2 {
+		t.Fatalf("fetched token limits should be applied, got=%#v static=%#v", webSearchModel, staticWebSearchModel)
 	}
 	if agentModel == nil {
 		t.Fatal("expected gemini-pro-agent to be registered")

@@ -71,22 +71,35 @@ func purgeExpiredAntigravityCacheLocked(now time.Time) {
 }
 
 type antigravityFetchAvailableModelsResponse struct {
-	WebSearchModelIDs []string `json:"webSearchModelIds"`
+	WebSearchModelIDs []string                          `json:"webSearchModelIds"`
+	Models            map[string]antigravityModelLimits `json:"models"`
+}
+
+type antigravityModelLimits struct {
+	ContextLength       int `json:"maxTokens"`
+	MaxCompletionTokens int `json:"maxOutputTokens"`
 }
 
 type antigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
+	ModelLimits       map[string]antigravityModelLimits
 }
 
 func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints {
-	if h.WebSearchModelIDs == nil {
-		return antigravityModelCapabilityHints{}
+	result := antigravityModelCapabilityHints{}
+	if h.WebSearchModelIDs != nil {
+		result.WebSearchModelIDs = make(map[string]struct{}, len(h.WebSearchModelIDs))
+		for k := range h.WebSearchModelIDs {
+			result.WebSearchModelIDs[k] = struct{}{}
+		}
 	}
-	cloned := make(map[string]struct{}, len(h.WebSearchModelIDs))
-	for k := range h.WebSearchModelIDs {
-		cloned[k] = struct{}{}
+	if h.ModelLimits != nil {
+		result.ModelLimits = make(map[string]antigravityModelLimits, len(h.ModelLimits))
+		for k, v := range h.ModelLimits {
+			result.ModelLimits[k] = v
+		}
 	}
-	return antigravityModelCapabilityHints{WebSearchModelIDs: cloned}
+	return result
 }
 
 func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Context, auth *coreauth.Auth) antigravityModelCapabilityHints {
@@ -216,7 +229,7 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 			return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
 		case res := <-ch:
 			if res.status == antigravityProbeStatusSuccess {
-				if len(res.hints.WebSearchModelIDs) > 0 {
+				if len(res.hints.WebSearchModelIDs) > 0 || len(res.hints.ModelLimits) > 0 {
 					return res.hints, antigravityProbeStatusSuccess
 				}
 				if !hadSuccess {
@@ -339,11 +352,18 @@ func parseAntigravityModelCapabilityHints(body []byte) (antigravityModelCapabili
 			webSearchModels[modelID] = struct{}{}
 		}
 	}
-	return antigravityModelCapabilityHints{WebSearchModelIDs: webSearchModels}, true
+	limits := make(map[string]antigravityModelLimits, len(parsed.Models))
+	for modelID, modelLimits := range parsed.Models {
+		modelID = normalizeAntigravityFetchedModelID(modelID)
+		if modelID != "" && (modelLimits.ContextLength > 0 || modelLimits.MaxCompletionTokens > 0) {
+			limits[modelID] = modelLimits
+		}
+	}
+	return antigravityModelCapabilityHints{WebSearchModelIDs: webSearchModels, ModelLimits: limits}, true
 }
 
 func applyAntigravityFetchedModelCapabilities(models []*ModelInfo, hints antigravityModelCapabilityHints) []*ModelInfo {
-	if len(models) == 0 || len(hints.WebSearchModelIDs) == 0 {
+	if len(models) == 0 {
 		return models
 	}
 
@@ -351,12 +371,22 @@ func applyAntigravityFetchedModelCapabilities(models []*ModelInfo, hints antigra
 		if model == nil {
 			continue
 		}
-		modelID := normalizeAntigravityFetchedModelID(model.ID)
-		if _, ok := hints.WebSearchModelIDs[modelID]; ok {
-			model.SupportsWebSearch = true
-		}
+		applyAntigravityModelHints(model, normalizeAntigravityFetchedModelID(model.ID), hints)
 	}
 	return models
+}
+
+func applyAntigravityModelHints(model *ModelInfo, upstreamID string, hints antigravityModelCapabilityHints) {
+	if _, ok := hints.WebSearchModelIDs[upstreamID]; ok {
+		model.SupportsWebSearch = true
+	}
+	limits := hints.ModelLimits[upstreamID]
+	if limits.ContextLength > 0 {
+		model.ContextLength = limits.ContextLength
+	}
+	if limits.MaxCompletionTokens > 0 {
+		model.MaxCompletionTokens = limits.MaxCompletionTokens
+	}
 }
 
 func normalizeAntigravityFetchedModelID(modelID string) string {
@@ -409,7 +439,7 @@ func (s *Service) asyncProbeAntigravityCapabilities(ctx context.Context, auth *c
 			defer s.antigravityProbeWg.Done()
 		}
 		hints := s.fetchAntigravityModelCapabilityHintsForAuth(probeCtx, authClone)
-		if len(hints.WebSearchModelIDs) == 0 {
+		if len(hints.WebSearchModelIDs) == 0 && len(hints.ModelLimits) == 0 {
 			return
 		}
 		if s == nil {
@@ -432,9 +462,7 @@ func (s *Service) asyncProbeAntigravityCapabilities(ctx context.Context, auth *c
 		// Atomically update capabilities on existing registered models if epoch matches
 		updated := GlobalModelRegistry().ApplyClientModelCapabilities(authClone.ID, expectedRegEpoch, func(modelID string, info *ModelInfo) {
 			upstreamID := resolveAntigravityUpstreamModelID(modelID, authClone.Prefix, aliasMap)
-			if _, ok := hints.WebSearchModelIDs[upstreamID]; ok {
-				info.SupportsWebSearch = true
-			}
+			applyAntigravityModelHints(info, upstreamID, hints)
 		})
 		if !updated {
 			return
