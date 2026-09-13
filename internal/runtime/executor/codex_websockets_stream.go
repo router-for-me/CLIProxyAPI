@@ -44,29 +44,40 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
+	steerRequest := isResponsesSteerPayload(originalPayload) || isResponsesSteerPayload(req.Payload)
 
-	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return nil, err
-	}
+	var body []byte
+	var originalTranslated []byte
+	var multiAgentV2Conflict bool
+	var optimizeMultiAgentV2 bool
+	var replayScope codexReasoningReplayScope
+	if !steerRequest {
+		originalTranslated, body = translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
 
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body = helps.SetStringIfDifferent(body, "model", baseModel)
-	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
-	}
-	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
-	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
-	body = helps.NormalizeCodexToolSchemas(body)
-	multiAgentV2Conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
-	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
-	if errReplay != nil {
-		return nil, errReplay
+		body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return nil, err
+		}
+
+		requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+		requestPath := helps.PayloadRequestPath(opts)
+		body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+		body = helps.SetStringIfDifferent(body, "model", baseModel)
+		body = normalizeCodexInstructions(body)
+		if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+			body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
+		}
+		body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
+		body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
+		body = helps.NormalizeCodexToolSchemas(body)
+		multiAgentV2Conflict = helps.HasCodexMultiAgentV2NamespaceConflict(body)
+		body, optimizeMultiAgentV2 = helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
+		body, replayScope, err = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		body = bytes.Clone(req.Payload)
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -75,17 +86,27 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, err
 	}
 
-	body, wsHeaders, errPromptCache := applyCodexPromptCacheHeadersWithContext(ctx, from, req, body, opts.Headers)
-	if errPromptCache != nil {
-		return nil, errPromptCache
-	}
-	clientBody := body
+	var wsHeaders http.Header
 	var identityState codexIdentityConfuseState
-	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
-	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, opts.Headers)
-	applyModelHeaderOverrides(wsHeaders, baseModel)
-	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
+	var upstreamBody []byte
+	clientBody := body
+	if !steerRequest {
+		var errPromptCache error
+		body, wsHeaders, errPromptCache = applyCodexPromptCacheHeadersWithContext(ctx, from, req, body, opts.Headers)
+		if errPromptCache != nil {
+			return nil, errPromptCache
+		}
+		clientBody = body
+		upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
+		reporter.SetTranslatedReasoningEffort(clientBody, to.String())
+		wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, opts.Headers)
+		applyModelHeaderOverrides(wsHeaders, baseModel)
+		applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
+	} else {
+		wsHeaders = applyCodexWebsocketHeaders(ctx, http.Header{}, auth, apiKey, e.cfg, opts.Headers)
+		applyModelHeaderOverrides(wsHeaders, baseModel)
+		upstreamBody = body
+	}
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID

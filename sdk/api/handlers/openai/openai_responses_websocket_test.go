@@ -185,6 +185,7 @@ func TestResponsesWebsocketRequestRequiresCurrentUpstream(t *testing.T) {
 	}{
 		{name: "incremental create", payload: `{"type":"response.create","previous_response_id":"resp-1","input":[]}`, want: true},
 		{name: "append", payload: `{"type":"response.append","input":[]}`, want: true},
+		{name: "steer", payload: `{"type":"response.steer","previous_response_id":"resp-1","input":"Be brief."}`, want: true},
 		{name: "full create", payload: `{"type":"response.create","input":[]}`, want: false},
 	}
 	for _, tc := range cases {
@@ -1203,6 +1204,68 @@ func TestNormalizeResponsesWebsocketRequestCreate(t *testing.T) {
 	}
 	if !bytes.Equal(last, normalized) {
 		t.Fatalf("last request snapshot should match normalized request")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestSteer(t *testing.T) {
+	raw := []byte(`{"type":"response.steer","previous_response_id":"resp-1","input":"Keep the scope small."}`)
+	lastRequest := []byte(`{"model":"gpt-6-astra","stream":true,"input":[]}`)
+
+	normalized, last, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, []byte("[]"))
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := gjson.GetBytes(normalized, "type").String(); got != wsRequestTypeSteer {
+		t.Fatalf("type = %q, want %q", got, wsRequestTypeSteer)
+	}
+	if gjson.GetBytes(normalized, "stream").Exists() {
+		t.Fatalf("steer request must not gain a stream field: %s", normalized)
+	}
+	if gjson.GetBytes(normalized, "model").Exists() {
+		t.Fatalf("steer request must not gain a model field: %s", normalized)
+	}
+	if gjson.GetBytes(normalized, "previous_response_id").String() != "resp-1" {
+		t.Fatalf("previous_response_id = %s, want resp-1", gjson.GetBytes(normalized, "previous_response_id").String())
+	}
+	if !bytes.Equal(last, lastRequest) {
+		t.Fatalf("steer must leave the last create snapshot unchanged")
+	}
+}
+
+func TestNormalizeResponsesWebsocketPassthroughRequestSteer(t *testing.T) {
+	raw := []byte(`{"type":"response.steer","previous_response_id":"resp-1","input":"Be brief."}`)
+
+	normalized, errMsg := normalizeResponsesWebsocketPassthroughRequest(raw, "gpt-6-astra")
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := gjson.GetBytes(normalized, "type").String(); got != wsRequestTypeSteer {
+		t.Fatalf("type = %q, want %q", got, wsRequestTypeSteer)
+	}
+	if gjson.GetBytes(normalized, "stream").Exists() {
+		t.Fatalf("passthrough steer must not add stream: %s", normalized)
+	}
+	if gjson.GetBytes(normalized, "model").Exists() {
+		t.Fatalf("passthrough steer must not add model: %s", normalized)
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestSteerRejectsEmptyInput(t *testing.T) {
+	raw := []byte(`{"type":"response.steer","previous_response_id":"resp-1","input":""}`)
+	_, _, errMsg := normalizeResponsesWebsocketRequest(raw, nil, nil)
+	if errMsg == nil {
+		t.Fatal("expected empty steer input to be rejected")
+	}
+}
+
+func TestNormalizeResponsesWebsocketRequestStillRejectsUnknownType(t *testing.T) {
+	raw := []byte(`{"type":"response.cancel","previous_response_id":"resp-1"}`)
+	_, _, errMsg := normalizeResponsesWebsocketRequest(raw, nil, nil)
+	if errMsg == nil {
+		t.Fatal("expected unknown websocket request type to be rejected")
+	}
+	if !strings.Contains(errMsg.Error.Error(), "unsupported websocket request type: response.cancel") {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
 }
 

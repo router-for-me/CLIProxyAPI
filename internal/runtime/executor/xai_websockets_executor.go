@@ -470,9 +470,19 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		baseURL = xaiauth.DefaultAPIBaseURL
 	}
 
-	prepared, err := e.prepareResponsesWebsocketRequest(ctx, req, opts)
-	if err != nil {
-		return nil, err
+	var prepared *xaiPreparedRequest
+	steerRequest := isResponsesSteerPayload(req.Payload)
+	if steerRequest {
+		prepared = &xaiPreparedRequest{
+			baseModel: strings.TrimSpace(req.Model),
+			body:      bytes.Clone(req.Payload),
+		}
+	} else {
+		var errPrepare error
+		prepared, errPrepare = e.prepareResponsesWebsocketRequest(ctx, req, opts)
+		if errPrepare != nil {
+			return nil, errPrepare
+		}
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
@@ -510,7 +520,7 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 		}
 	}
 	idMapper := newXAIWebsocketRequestIDMapper(e.idStore, stateSessionID, req.Payload)
-	if idMapper != nil {
+	if idMapper != nil && !steerRequest {
 		if websocketSessionTargetChanged(sess, authID, wsURL) {
 			idMapper.upstreamPreviousID = ""
 		}
@@ -1486,6 +1496,9 @@ func closeXAIWebsocketSession(sess *codexWebsocketSession, reason string) {
 func buildXAIWebsocketRequestBody(body []byte) []byte {
 	if len(body) == 0 {
 		return nil
+	}
+	if isResponsesSteerPayload(body) {
+		return bytes.Clone(body)
 	}
 	wsReqBody := bytes.Clone(body)
 	wsReqBody, _ = sjson.SetBytes(wsReqBody, "type", "response.create")

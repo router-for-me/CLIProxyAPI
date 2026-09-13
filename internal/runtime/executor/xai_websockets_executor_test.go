@@ -1502,6 +1502,22 @@ func TestBuildXAIWebsocketRequestBodySetsStoreAndKeepsPromptCacheKey(t *testing.
 	}
 }
 
+func TestBuildXAIWebsocketRequestBodyPreservesSteer(t *testing.T) {
+	body := []byte(`{"type":"response.steer","previous_response_id":"resp-1","input":"Keep the scope small."}`)
+
+	payload := buildXAIWebsocketRequestBody(body)
+
+	if got := gjson.GetBytes(payload, "type").String(); got != "response.steer" {
+		t.Fatalf("type = %q, want response.steer; payload=%s", got, payload)
+	}
+	if gjson.GetBytes(payload, "store").Exists() {
+		t.Fatalf("steer body must not gain store: %s", payload)
+	}
+	if gjson.GetBytes(payload, "model").Exists() {
+		t.Fatalf("steer body must not gain model: %s", payload)
+	}
+}
+
 func TestXAIWebsocketsExecuteStreamCompletesGenerateFalseWarmup(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)

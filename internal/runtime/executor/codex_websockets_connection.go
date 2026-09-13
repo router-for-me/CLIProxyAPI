@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/net/proxy"
 )
@@ -135,6 +137,10 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 		return nil
 	}
 
+	if isResponsesSteerPayload(body) {
+		return bytes.Clone(body)
+	}
+
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
@@ -144,6 +150,10 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 		return wsReqBody
 	}
 	return body
+}
+
+func isResponsesSteerPayload(body []byte) bool {
+	return strings.TrimSpace(gjson.GetBytes(body, "type").String()) == "response.steer"
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {

@@ -39,12 +39,71 @@ func normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON []byte, last
 	case wsRequestTypeAppend:
 		// log.Infof("responses websocket: response.append request")
 		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, lastResponseID, lastResponsePendingToolCallIDs, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
+	case wsRequestTypeSteer:
+		normalized, errMsg := normalizeResponsesWebsocketSteerRequest(rawJSON)
+		if errMsg != nil {
+			return nil, lastRequest, errMsg
+		}
+		return normalized, lastRequest, nil
 	default:
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
 			Error:      fmt.Errorf("unsupported websocket request type: %s", requestType),
 		}
 	}
+}
+
+func responsesWebsocketSteerRequest(rawJSON []byte) bool {
+	return strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String()) == wsRequestTypeSteer
+}
+
+// Official mid-turn steer accepts only type / previous_response_id / input.
+// Extra fields are left for upstream to reject; we must not add stream or model.
+func normalizeResponsesWebsocketSteerRequest(rawJSON []byte) ([]byte, *interfaces.ErrorMessage) {
+	if !json.Valid(rawJSON) {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("invalid websocket request JSON"),
+		}
+	}
+	if !responsesWebsocketSteerRequest(rawJSON) {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("unsupported websocket request type: %s", strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())),
+		}
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()) == "" {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("response.steer requires previous_response_id"),
+		}
+	}
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.Exists() {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("response.steer requires input"),
+		}
+	}
+	if input.IsArray() && len(input.Array()) == 0 {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("response.steer requires nonempty input"),
+		}
+	}
+	if input.Type == gjson.String && strings.TrimSpace(input.String()) == "" {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("response.steer requires nonempty input"),
+		}
+	}
+	if !input.IsArray() && input.Type != gjson.String {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("response.steer input must be a string or a nonempty array"),
+		}
+	}
+	return bytes.Clone(rawJSON), nil
 }
 
 func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
@@ -722,6 +781,8 @@ func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName str
 	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
 	switch requestType {
 	case wsRequestTypeCreate, wsRequestTypeAppend:
+	case wsRequestTypeSteer:
+		return normalizeResponsesWebsocketSteerRequest(rawJSON)
 	default:
 		return nil, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
