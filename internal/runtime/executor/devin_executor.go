@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -1491,6 +1492,24 @@ func parseSignatureBytes(sigStr string) ([]byte, string) {
 	if strings.HasPrefix(s, "sealed.v1.") {
 		return []byte(s), "sealed"
 	}
+	if strings.HasPrefix(s, "claude#") {
+		return []byte(strings.TrimPrefix(s, "claude#")), "anthropic"
+	}
+	if strings.HasPrefix(s, "gpt#") {
+		return []byte(strings.TrimPrefix(s, "gpt#")), "openai"
+	}
+	if strings.HasPrefix(s, "gemini#") {
+		return []byte(strings.TrimPrefix(s, "gemini#")), "gemini"
+	}
+	// Prioritize global signature detector for official cross-provider signatures
+	switch internalsignature.DetectSignatureProvider(s) {
+	case internalsignature.SignatureProviderClaude:
+		return []byte(s), "anthropic"
+	case internalsignature.SignatureProviderGPT:
+		return []byte(s), "openai"
+	case internalsignature.SignatureProviderGemini:
+		return []byte(s), "gemini"
+	}
 	if strings.HasPrefix(s, "AY") {
 		return []byte(s), "gemini"
 	}
@@ -1498,6 +1517,14 @@ func parseSignatureBytes(sigStr string) ([]byte, string) {
 		decStr := string(decoded)
 		if strings.HasPrefix(decStr, "sealed.v1.") {
 			return decoded, "sealed"
+		}
+		switch internalsignature.DetectSignatureProvider(decStr) {
+		case internalsignature.SignatureProviderClaude:
+			return decoded, "anthropic"
+		case internalsignature.SignatureProviderGPT:
+			return decoded, "openai"
+		case internalsignature.SignatureProviderGemini:
+			return []byte(s), "gemini"
 		}
 		if strings.HasPrefix(decStr, "CAQS") || strings.HasPrefix(decStr, "CAIS") {
 			return decoded, "anthropic"
@@ -1516,6 +1543,23 @@ func detectSignatureType(sig string) string {
 	s := strings.TrimSpace(sig)
 	if strings.HasPrefix(s, "sealed.v1.") {
 		return "sealed"
+	}
+	if strings.HasPrefix(s, "claude#") {
+		return "anthropic"
+	}
+	if strings.HasPrefix(s, "gpt#") {
+		return "openai"
+	}
+	if strings.HasPrefix(s, "gemini#") {
+		return "gemini"
+	}
+	switch internalsignature.DetectSignatureProvider(s) {
+	case internalsignature.SignatureProviderClaude:
+		return "anthropic"
+	case internalsignature.SignatureProviderGPT:
+		return "openai"
+	case internalsignature.SignatureProviderGemini:
+		return "gemini"
 	}
 	if strings.HasPrefix(s, "CAQS") || strings.HasPrefix(s, "CAIS") {
 		return "anthropic"

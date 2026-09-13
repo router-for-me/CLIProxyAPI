@@ -275,6 +275,53 @@ func TestSupplementSignaturesFromOriginal(t *testing.T) {
 	}
 }
 
+func TestDetectSignatureType_GlobalDetectorIntegration(t *testing.T) {
+	tests := []struct {
+		name     string
+		sig      string
+		wantType string
+	}{
+		{
+			name:     "Devin native sealed signature",
+			sig:      "sealed.v1.abcde12345",
+			wantType: "sealed",
+		},
+		{
+			name:     "Anthropic CAQS signature",
+			sig:      "CAQStest12345",
+			wantType: "anthropic",
+		},
+		{
+			name:     "Anthropic with claude# prefix",
+			sig:      "claude#CAQStest12345",
+			wantType: "anthropic",
+		},
+		{
+			name:     "OpenAI gAAAA Fernet signature",
+			sig:      "gAAAAABk1234567890",
+			wantType: "openai",
+		},
+		{
+			name:     "Gemini AY signature",
+			sig:      "AY12345",
+			wantType: "gemini",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectSignatureType(tt.sig)
+			if got != tt.wantType {
+				t.Errorf("detectSignatureType(%q) = %q, want %q", tt.sig, got, tt.wantType)
+			}
+			_, pType := parseSignatureBytes(tt.sig)
+			if pType != tt.wantType {
+				t.Errorf("parseSignatureBytes(%q) type = %q, want %q", tt.sig, pType, tt.wantType)
+			}
+		})
+	}
+}
+
 func TestDevinStatusError_RetryAfter(t *testing.T) {
 	// 1. HTTP 429 with integer Retry-After
 	hdr429 := http.Header{}
