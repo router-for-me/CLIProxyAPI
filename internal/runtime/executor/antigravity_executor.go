@@ -64,11 +64,18 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 }
 
 func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
-	if e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+	if e == nil {
 		return payload
 	}
-	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
-	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, matcher)
+	masked := payload
+	if e.cfg != nil && len(e.cfg.Antigravity.SensitiveWords) > 0 {
+		matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
+		masked = helps.ObfuscateSensitiveWordsInSystemInstruction(payload, matcher)
+	}
+	// Warn on what actually leaves the process, so a phrase the operator already masks is
+	// not reported as still present.
+	e.warnKnownFalse429Phrases(masked)
+	return masked
 }
 
 // Each Antigravity credential gets its own HTTP/1.1 connection pool. Sessions routed
