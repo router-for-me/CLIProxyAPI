@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"testing"
 	"time"
 
@@ -26,6 +25,39 @@ func (c socksConnectLog) String() string {
 	return fmt.Sprintf("CONNECT %s %s:%d", c.ATYP, c.Host, c.Port)
 }
 
+func TestFingerprintChromeDialerSOCKS5HIsNotDirect(t *testing.T) {
+	t.Parallel()
+
+	constructed := NewFingerprintRoundTripper("socks5h://127.0.0.1:1", http.DefaultTransport)
+	roundTripper, ok := constructed.(*fallbackRoundTripper)
+	if !ok {
+		t.Fatalf("type = %T, want *fallbackRoundTripper", constructed)
+	}
+	chrome, ok := roundTripper.chrome.(*utlsRoundTripper)
+	if !ok {
+		t.Fatalf("chrome type = %T, want *utlsRoundTripper", roundTripper.chrome)
+	}
+	if chrome.dialer == nil {
+		t.Fatal("socks5h chrome path configured a nil dialer")
+	}
+	if chrome.dialer == proxy.Direct {
+		t.Fatal("socks5h chrome path silently fell back to proxy.Direct")
+	}
+
+	directConstructed := NewFingerprintRoundTripper("direct", http.DefaultTransport)
+	directTripper, ok := directConstructed.(*fallbackRoundTripper)
+	if !ok {
+		t.Fatalf("direct type = %T, want *fallbackRoundTripper", directConstructed)
+	}
+	directChrome, ok := directTripper.chrome.(*utlsRoundTripper)
+	if !ok {
+		t.Fatalf("direct chrome type = %T, want *utlsRoundTripper", directTripper.chrome)
+	}
+	if directChrome.dialer != proxy.Direct {
+		t.Fatalf("direct chrome dialer = %T, want proxy.Direct", directChrome.dialer)
+	}
+}
+
 func TestFingerprintRoundTripperSOCKS5HUsesProxy(t *testing.T) {
 	connects := make(chan socksConnectLog, 8)
 	proxyAddr := startLoggingSOCKS5(t, connects)
@@ -38,21 +70,22 @@ func TestFingerprintRoundTripperSOCKS5HUsesProxy(t *testing.T) {
 	proxyURL := "socks5h://" + proxyAddr
 	client := &http.Client{
 		Transport: NewFingerprintRoundTripper(proxyURL, fallback),
-		Timeout:   12 * time.Second,
+		Timeout:   2 * time.Second,
 	}
 
+	// chatgpt.com is required to select the chrome fingerprint path
+	// (IsChatGPTUpstreamURL). The local SOCKS listener records CONNECT and
+	// does not dial the requested host, so this stays offline.
 	resp, errGet := client.Get("https://chatgpt.com/")
 	if resp != nil && resp.Body != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		t.Logf("GET https://chatgpt.com/ via socks5h status=%d", resp.StatusCode)
-	} else if errGet != nil {
-		t.Logf("GET https://chatgpt.com/ via socks5h error (ok if CONNECT was logged): %v", errGet)
+	} else if errGet == nil {
+		t.Fatal("expected GET through the local SOCKS sink to fail")
 	}
 
 	select {
 	case got := <-connects:
-		t.Logf("socks5h proxy log: %s", got)
 		if got.Host != "chatgpt.com" {
 			t.Fatalf("proxy CONNECT host = %q, want chatgpt.com", got.Host)
 		}
@@ -62,7 +95,7 @@ func TestFingerprintRoundTripperSOCKS5HUsesProxy(t *testing.T) {
 		if got.ATYP != "domain" {
 			t.Fatalf("proxy CONNECT atyp = %q, want domain (socks5h remote DNS)", got.ATYP)
 		}
-	case <-time.After(8 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("socks5h proxy received no CONNECT; fingerprint path bypassed the proxy")
 	}
 }
@@ -71,24 +104,57 @@ func TestFingerprintRoundTripperDirectMissesSOCKS(t *testing.T) {
 	connects := make(chan socksConnectLog, 8)
 	_ = startLoggingSOCKS5(t, connects)
 
+	// Dial a local closed port through the chrome path so Direct never leaves
+	// the machine. A chatgpt.com GET would hit the public internet via proxy.Direct.
+	local := startClosedLocalAddr(t)
 	client := &http.Client{
-		Transport: NewFingerprintRoundTripper("direct", http.DefaultTransport),
-		Timeout:   8 * time.Second,
+		Transport: NewChromeRoundTripper("direct"),
+		Timeout:   2 * time.Second,
 	}
-	resp, errGet := client.Get("https://chatgpt.com/")
+	resp, errGet := client.Get("https://" + local + "/")
 	if resp != nil && resp.Body != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		t.Logf("GET https://chatgpt.com/ via direct status=%d", resp.StatusCode)
-	} else if errGet != nil {
-		t.Logf("GET https://chatgpt.com/ via direct error: %v", errGet)
+	} else if errGet == nil {
+		t.Fatal("expected direct GET to the closed local address to fail")
 	}
 
 	select {
 	case got := <-connects:
 		t.Fatalf("direct fingerprint path unexpectedly used SOCKS: %s", got)
 	case <-time.After(200 * time.Millisecond):
-		t.Log("direct fingerprint path: proxy received no CONNECT (bypass)")
+	}
+}
+
+func TestChromeRoundTripperSOCKS5HDialsLocalHost(t *testing.T) {
+	connects := make(chan socksConnectLog, 8)
+	proxyAddr := startLoggingSOCKS5(t, connects)
+
+	client := &http.Client{
+		Transport: NewChromeRoundTripper("socks5h://" + proxyAddr),
+		Timeout:   2 * time.Second,
+	}
+	resp, errGet := client.Get("https://chatgpt.local.test/")
+	if resp != nil && resp.Body != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	} else if errGet == nil {
+		t.Fatal("expected GET through the local SOCKS sink to fail")
+	}
+
+	select {
+	case got := <-connects:
+		if got.Host != "chatgpt.local.test" {
+			t.Fatalf("proxy CONNECT host = %q, want chatgpt.local.test", got.Host)
+		}
+		if got.Port != 443 {
+			t.Fatalf("proxy CONNECT port = %d, want 443", got.Port)
+		}
+		if got.ATYP != "domain" {
+			t.Fatalf("proxy CONNECT atyp = %q, want domain (socks5h remote DNS)", got.ATYP)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("socks5h chrome path received no CONNECT")
 	}
 }
 
@@ -105,6 +171,20 @@ func TestFromURLCurrentlyAcceptsSOCKS5H(t *testing.T) {
 		return
 	}
 	t.Logf("FromURL(socks5h) succeeded with %T; BuildDialer still uses SOCKS5 helper to match BuildHTTPTransport", dialer)
+}
+
+func startClosedLocalAddr(t *testing.T) string {
+	t.Helper()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen local sink: %v", errListen)
+	}
+	addr := listener.Addr().String()
+	if errClose := listener.Close(); errClose != nil {
+		t.Fatalf("close local sink: %v", errClose)
+	}
+	return addr
 }
 
 func startLoggingSOCKS5(t *testing.T, connects chan<- socksConnectLog) string {
@@ -135,7 +215,7 @@ func startLoggingSOCKS5(t *testing.T, connects chan<- socksConnectLog) string {
 
 func handleLoggingSOCKS5(conn net.Conn, connects chan<- socksConnectLog) {
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	dest, errRead := readSOCKS5Connect(conn)
 	if errRead != nil {
@@ -149,20 +229,8 @@ func handleLoggingSOCKS5(conn net.Conn, connects chan<- socksConnectLog) {
 	if _, errWrite := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); errWrite != nil {
 		return
 	}
-
-	upstream, errDial := net.DialTimeout("tcp", net.JoinHostPort(dest.Host, strconv.Itoa(int(dest.Port))), 8*time.Second)
-	if errDial != nil {
-		return
-	}
-	defer func() { _ = upstream.Close() }()
-
-	done := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(upstream, conn)
-		close(done)
-	}()
-	_, _ = io.Copy(conn, upstream)
-	<-done
+	// Do not dial dest.Host: unit tests must stay offline even when the
+	// chrome path CONNECTs chatgpt.com for IsChatGPTUpstreamURL routing.
 }
 
 func readSOCKS5Connect(conn net.Conn) (socksConnectLog, error) {
