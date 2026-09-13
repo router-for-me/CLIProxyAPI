@@ -439,14 +439,16 @@ func (s *PostgresStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err = os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("postgres store: delete auth file: %w", err)
-	}
 	relID, err := s.relativeAuthID(path)
 	if err != nil {
 		return err
 	}
-	return s.deleteAuthRecord(ctx, relID)
+	return s.withAuthLock(ctx, relID, func(conn *sql.Conn) error {
+		if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
+			return fmt.Errorf("postgres store: delete auth file: %w", errRemove)
+		}
+		return s.deleteAuthRecord(ctx, conn, relID)
+	})
 }
 
 // PersistAuthFiles stores the provided auth file changes in PostgreSQL.
@@ -583,21 +585,17 @@ func (s *PostgresStore) syncAuthFromDatabase(ctx context.Context) error {
 }
 
 func (s *PostgresStore) syncAuthFile(ctx context.Context, relID, path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return s.deleteAuthRecord(ctx, relID)
-		}
-		return fmt.Errorf("postgres store: read auth file: %w", err)
-	}
-	if len(data) == 0 {
-		return s.deleteAuthRecord(ctx, relID)
-	}
-	return s.persistAuth(ctx, relID, data)
-}
-
-func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []byte) error {
 	return s.withAuthLock(ctx, relID, func(conn *sql.Conn) error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return s.deleteAuthRecord(ctx, conn, relID)
+			}
+			return fmt.Errorf("postgres store: read auth file: %w", err)
+		}
+		if len(data) == 0 {
+			return s.deleteAuthRecord(ctx, conn, relID)
+		}
 		jsonPayload := json.RawMessage(data)
 		query := fmt.Sprintf(`
 		INSERT INTO %s (id, content, created_at, updated_at)
@@ -612,14 +610,12 @@ func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []by
 	})
 }
 
-func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) error {
-	return s.withAuthLock(ctx, relID, func(conn *sql.Conn) error {
-		query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
-		if _, err := conn.ExecContext(ctx, query, relID); err != nil {
-			return fmt.Errorf("postgres store: delete auth record: %w", err)
-		}
-		return nil
-	})
+func (s *PostgresStore) deleteAuthRecord(ctx context.Context, conn *sql.Conn, relID string) error {
+	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
+	if _, err := conn.ExecContext(ctx, query, relID); err != nil {
+		return fmt.Errorf("postgres store: delete auth record: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresStore) withAuthLock(ctx context.Context, relID string, save func(*sql.Conn) error) (err error) {

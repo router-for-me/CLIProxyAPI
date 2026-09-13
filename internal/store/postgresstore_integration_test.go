@@ -38,6 +38,9 @@ func TestPostgresStoreConcurrentPublicationFailure(t *testing.T) {
 		{"shared-failure", `{"value":"old"}`, `{"value":"first"}`, `{"value":"second"}`, "save"},
 		{"shared-success", `{"value":"old"}`, `{"value":"first"}`, `{"value":"second"}`, "save"},
 		{"shared-stale-read", `{"value":"old"}`, `{"value":"first"}`, `{"value":"old"}`, "save"},
+		{"shared-delete", `{"value":"old"}`, `{"value":"first"}`, "", "delete"},
+		{"shared-observe-existing", `{"value":"old"}`, `{"value":"first"}`, `{"value":"first"}`, "observe"},
+		{"shared-observe-missing", "", `{"value":"first"}`, `{"value":"first"}`, "observe"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -103,6 +106,8 @@ func TestPostgresStoreConcurrentPublicationFailure(t *testing.T) {
 						_, errWrite = b.Save(ctx, &cliproxyauth.Auth{ID: id, Storage: &postgresAuthTestStorage{data: []byte(test.newer)}})
 					case "delete":
 						errWrite = b.Delete(ctx, id)
+					case "observe":
+						errWrite = b.PersistAuthFiles(ctx, "", filepath.Join(b.authDir, id))
 					case "watcher":
 						path := filepath.Join(b.authDir, id)
 						if errWrite = os.WriteFile(path, []byte(test.newer), 0o600); errWrite == nil {
@@ -169,6 +174,9 @@ func TestPostgresStoreConcurrentPublicationFailure(t *testing.T) {
 			}
 			if shared {
 				previous = []byte(test.newer)
+				if test.operation == "delete" {
+					previous = nil
+				}
 			}
 			assertPostgresAuthLocal(t, filepath.Join(a.authDir, id), previous)
 			assertPostgresAuthNoTemp(t, filepath.Join(a.authDir, id))
