@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -43,10 +44,26 @@ func TestAntigravityWarnsOnKnownFalse429Fingerprint(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("warnings = %d, want one per flagged phrase (2): %#v", len(entries), entries)
 	}
+	phrases := make(map[string]bool, len(entries))
 	for _, entry := range entries {
-		if entry.Level != log.WarnLevel || !strings.Contains(entry.Message, "antigravity.sensitive-words") {
-			t.Fatalf("warning = %#v, want a warn naming antigravity.sensitive-words", entry)
+		if entry.Level != log.WarnLevel {
+			t.Fatalf("level = %v, want warn", entry.Level)
 		}
+		if got := entry.Data["suggested_config"]; got != "antigravity.sensitive-words" {
+			t.Fatalf("suggested_config = %v, want antigravity.sensitive-words", got)
+		}
+		if got := entry.Data["upstream_status"]; got != http.StatusTooManyRequests {
+			t.Fatalf("upstream_status = %v, want %d", got, http.StatusTooManyRequests)
+		}
+		phrase, _ := entry.Data["phrase"].(string)
+		phrases[phrase] = true
+		// The diagnostic must stay queryable: the variable parts belong to the fields.
+		if strings.Contains(entry.Message, "RFC 2119") || strings.Contains(entry.Message, "system-conventions") {
+			t.Fatalf("message interpolates the phrase: %q", entry.Message)
+		}
+	}
+	if !phrases["RFC 2119"] || !phrases["system-conventions"] {
+		t.Fatalf("phrase fields = %v, want both flagged phrases", phrases)
 	}
 }
 

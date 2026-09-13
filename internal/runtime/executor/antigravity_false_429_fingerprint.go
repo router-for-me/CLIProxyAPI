@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"net/http"
 	"strings"
 	"sync"
 
@@ -74,6 +75,12 @@ func (e *AntigravityExecutor) warnKnownFalse429Phrases(payload []byte) {
 		if _, warned := antigravityFalse429Warned.LoadOrStore(phrase, struct{}{}); warned {
 			continue
 		}
-		log.Warnf("antigravity executor: system instruction contains %q, which Google Cloud Code Assist rejects with a misleading 429 RESOURCE_EXHAUSTED (\"Resource has been exhausted (e.g. check quota).\") while quota is intact, after which the credential cools down; mask it with antigravity.sensitive-words when the client prompt cannot change", phrase)
+		log.WithFields(log.Fields{
+			"executor":         "antigravity",
+			"component":        "false_429_fingerprint",
+			"phrase":           phrase,
+			"upstream_status":  http.StatusTooManyRequests,
+			"suggested_config": "antigravity.sensitive-words",
+		}).Warn("antigravity executor: system instruction carries a phrase that Cloud Code Assist rejects with a misleading 429 RESOURCE_EXHAUSTED while quota is intact; mask it with antigravity.sensitive-words when the client prompt cannot change")
 	}
 }
