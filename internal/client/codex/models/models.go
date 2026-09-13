@@ -111,6 +111,7 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
 			entry["slug"] = id
+			entry["canonical_model_id"] = canonicalModelIdentity(id)
 			info := registry.LookupModelInfo(id)
 			applyCodexClientModelCapabilities(entry, id, metadataID, info, providersForModel, clientVersion)
 			applyCodexClientDisplayName(entry, model)
@@ -118,6 +119,8 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 			applyCodexClientBaseInstructions(entry, model)
 			applyCodexClientMaxContextLengthOverride(entry, model)
 			applyCodexClientMaxTokens(entry, model)
+			applyCodexClientOutputModalities(entry, id)
+			applyProviderInputModalities(entry, id)
 			if thinkingSupport := codexClientThinkingSupport(model); thinkingSupport != nil {
 				applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
 			}
@@ -135,8 +138,11 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 		}
 
 		entry := cloneCodexClientModelMap(defaultTemplate)
+		entry["canonical_model_id"] = canonicalModelIdentity(id)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2, clientVersion)
 		applyCodexClientMaxTokens(entry, model)
+		applyCodexClientOutputModalities(entry, id)
+		applyProviderInputModalities(entry, id)
 		applyCodexClientProviderCapabilities(entry, id, false, providersForModel)
 		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
@@ -245,6 +251,16 @@ func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[str
 	codexClientDefaultTemplate = defaultTemplate
 	codexClientModelTemplatesErr = err
 	return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
+}
+
+// canonicalModelIdentity exposes only registered identity, never a suffix guess.
+func canonicalModelIdentity(id string) string {
+	if info := registry.LookupModelInfo(id); info != nil {
+		if canonical := strings.TrimSpace(info.MetadataModelID); canonical != "" {
+			return canonical
+		}
+	}
+	return id
 }
 
 func codexClientMetadataModelID(id string) string {
@@ -522,6 +538,24 @@ func applyCodexClientMaxContextLengthOverride(entry map[string]any, model map[st
 	if maxContextLength := intModelValue(model, "max_context_length"); maxContextLength > 0 {
 		entry["context_window"] = maxContextLength
 		entry["max_context_window"] = maxContextLength
+	}
+}
+
+// Preserve declared output types for catalog consumers such as OpenCode.
+// Absence is unknown; do not inherit the unrelated fallback template's types.
+func applyCodexClientOutputModalities(entry map[string]any, id string) {
+	delete(entry, "output_modalities")
+	if _, outputs := registry.GetGlobalRegistry().GetModelModalities(id); outputs != nil {
+		entry["output_modalities"] = outputs
+	}
+}
+
+// Keep the provider declaration separate from Codex's text/image projection.
+// Other catalog consumers can express audio, video, and PDF inputs natively.
+func applyProviderInputModalities(entry map[string]any, id string) {
+	delete(entry, "supported_input_modalities")
+	if inputs, _ := registry.GetGlobalRegistry().GetModelModalities(id); inputs != nil {
+		entry["supported_input_modalities"] = inputs
 	}
 }
 
