@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -79,16 +80,25 @@ func TestCodexClientModelsInheritWholeEntry(t *testing.T) {
 func TestCodexClientModelsInheritModelFieldsAreNeverInherited(t *testing.T) {
 	base := testCodexClientCatalog(t,
 		testCodexClientModelWithExtras("gpt-5.5", 1, map[string]any{
-			"base_instructions":  "from gpt-5.5",
-			"visibility":         "hide",
-			"context_window":     100000,
-			"max_context_window": 200000,
+			"base_instructions":          "from gpt-5.5",
+			"visibility":                 "hide",
+			"context_window":             100000,
+			"max_context_window":         200000,
+			"max_tokens":                 1234,
+			"auto_compact_token_limit":   5678,
+			"default_reasoning_level":    "xhigh",
+			"default_reasoning_summary":  "detailed",
+			"default_verbosity":          "high",
+			"support_verbosity":          true,
+			"supported_reasoning_levels": []map[string]any{{"effort": "xhigh", "description": "Deep"}},
 		}),
 		testCodexClientModelWithExtras("gpt-5.6-sol", 2, map[string]any{
 			"context_window":     300000,
 			"max_context_window": 400000,
+			"max_tokens":         4321,
 		}),
 	)
+	own := codexClientModelDefaultsForTest(t, base)["gpt-5.6-sol"]
 
 	models, err := applyOverrideForTest(t, base, map[string]any{
 		"gpt-5.6-sol": map[string]any{"$inherit": "gpt-5.5"},
@@ -104,8 +114,8 @@ func TestCodexClientModelsInheritModelFieldsAreNeverInherited(t *testing.T) {
 	if patched["display_name"] != "Test gpt-5.6-sol" || patched["description"] != "Test model" {
 		t.Fatalf("identity fields = %v / %v, want the base values", patched["display_name"], patched["description"])
 	}
-	// Visibility, position and the context windows belong to the model, so a whole
-	// entry source leaves them alone even though it supplies everything else.
+	// Visibility, position and the context and reasoning envelope belong to the model,
+	// so a whole entry source leaves them alone even though it supplies everything else.
 	if patched["visibility"] != "list" {
 		t.Fatalf("visibility = %v, want the entry's own list", patched["visibility"])
 	}
@@ -114,6 +124,29 @@ func TestCodexClientModelsInheritModelFieldsAreNeverInherited(t *testing.T) {
 	}
 	if patched["context_window"] != float64(300000) || patched["max_context_window"] != float64(400000) {
 		t.Fatalf("context windows = %v / %v, want the entry's own values", patched["context_window"], patched["max_context_window"])
+	}
+	// The context and reasoning envelope follows the model and the provider behind it,
+	// so a whole entry source leaves it alone too.
+	if patched["max_tokens"] != float64(4321) {
+		t.Fatalf("max_tokens = %v, want the entry's own 4321", patched["max_tokens"])
+	}
+	if patched["default_reasoning_level"] != "medium" {
+		t.Fatalf("default_reasoning_level = %v, want the entry's own medium", patched["default_reasoning_level"])
+	}
+	if !reflect.DeepEqual(patched["supported_reasoning_levels"], own["supported_reasoning_levels"]) {
+		t.Fatalf("supported_reasoning_levels = %v, want the entry's own levels", patched["supported_reasoning_levels"])
+	}
+	// A field the entry does not define stays absent rather than being filled in from
+	// the source.
+	for _, field := range []string{
+		"auto_compact_token_limit",
+		"default_reasoning_summary",
+		"default_verbosity",
+		"support_verbosity",
+	} {
+		if value, exists := patched[field]; exists {
+			t.Fatalf("%s = %v, want it absent on a model that does not define it", field, value)
+		}
 	}
 	if patched["base_instructions"] != "from gpt-5.5" {
 		t.Fatalf("base_instructions = %v, want the inherited value", patched["base_instructions"])
@@ -376,6 +409,21 @@ func TestCodexClientModelsInheritRejectsBadDirectives(t *testing.T) {
 		{
 			name: "context window field",
 			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"context_window": "gpt-5.6-sol"}}},
+			want: "cannot be inherited",
+		},
+		{
+			name: "token budget field",
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"max_tokens": "gpt-5.6-sol"}}},
+			want: "cannot be inherited",
+		},
+		{
+			name: "reasoning level field",
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"supported_reasoning_levels": "gpt-5.6-sol"}}},
+			want: "cannot be inherited",
+		},
+		{
+			name: "verbosity field",
+			doc:  map[string]any{"gpt-5.5": map[string]any{"$inherit": map[string]any{"default_verbosity": "gpt-5.6-sol"}}},
 			want: "cannot be inherited",
 		},
 		{

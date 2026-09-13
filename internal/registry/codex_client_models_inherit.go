@@ -38,33 +38,38 @@ import (
 //
 // Sources are applied shallow to deep, the local patch is applied last over the
 // inherited values, and a null local value still removes the field. The fields that
-// describe the model itself (its identity, visibility, position and context windows)
-// are never taken from a source.
+// describe the model itself, down to the context and reasoning envelope it is served
+// with, are never taken from a source.
 const CodexClientModelsInheritKeyword = "$inherit"
 
 // maxCodexClientModelsInheritDepth bounds how many inheritance hops may be used to
 // resolve a single field.
 const maxCodexClientModelsInheritDepth = 3
 
-// codexClientModelsIdentityFields describe a model itself. Inheritance sources never
-// supply them, so a model keeps its own name and description.
-var codexClientModelsIdentityFields = []string{"slug", "display_name", "description"}
-
-// codexClientModelsServedFields describe how a model is served rather than which model
-// it is. Inheritance sources never supply them either: they belong to the model, and an
-// entry that does not set them keeps the value the server assembled for it.
-var codexClientModelsServedFields = []string{
+// codexClientModelsModelFields are every field an inheritance source may not supply.
+//
+// They describe the model itself rather than a configuration another model could lend
+// it: its identity (slug, display name, description), where it sits in the served
+// catalog (visibility, priority), and its context and reasoning envelope (the windows,
+// the token budgets and the reasoning levels it supports). A source never supplies
+// them, so an entry that does not set them keeps the value the server assembled for it,
+// and a directive naming one is rejected.
+var codexClientModelsModelFields = []string{
+	"slug",
+	"display_name",
+	"description",
 	"visibility",
 	"priority",
 	"context_window",
 	"max_context_window",
+	"max_tokens",
+	"auto_compact_token_limit",
+	"supported_reasoning_levels",
+	"default_reasoning_level",
+	"default_reasoning_summary",
+	"default_verbosity",
+	"support_verbosity",
 }
-
-// codexClientModelsModelFields are every field an inheritance source may not supply.
-var codexClientModelsModelFields = append(
-	append([]string(nil), codexClientModelsIdentityFields...),
-	codexClientModelsServedFields...,
-)
 
 // isCodexClientModelsModelField reports whether path names one of the fields that
 // only the model's own entry supplies. Only root level keys count: a nested key of
