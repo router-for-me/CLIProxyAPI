@@ -148,8 +148,8 @@ func TestCodexClientModelsReportsServedModels(t *testing.T) {
 	registry.SyncCodexClientModelsOverrideFile(filepath.Join(dir, "config.yaml"))
 	t.Cleanup(func() { _ = registry.ClearCodexClientModelsOverride() })
 
-	// A model the catalog does not define is still served to Codex clients, so the
-	// state has to report it and name the default template it was built from.
+	// A model the catalog does not define is still served to Codex clients: the server
+	// assembles its entry from the default template and reports that origin.
 	clientID := "codex-client-served-summary-test"
 	modelID := clientID + "-model"
 	modelRegistry := registry.GetGlobalRegistry()
@@ -177,11 +177,8 @@ func TestCodexClientModelsReportsServedModels(t *testing.T) {
 	if served == nil {
 		t.Fatalf("served_models is missing %q: %+v", modelID, payload.ServedModels)
 	}
-	if !served.DefaultTemplate {
-		t.Fatalf("default_template = false for a model without a catalog entry, want true")
-	}
-	if served.TemplateSlug != "gpt-5.5" {
-		t.Fatalf("template_slug = %q, want %q", served.TemplateSlug, "gpt-5.5")
+	if got := payload.Origins[modelID]; got != registry.CodexClientModelsOriginServed {
+		t.Fatalf("origin = %q, want %q for a model without a catalog entry", got, registry.CodexClientModelsOriginServed)
 	}
 	if served.DisplayName != "Served Summary" {
 		t.Fatalf("display_name = %q, want %q", served.DisplayName, "Served Summary")
@@ -236,10 +233,8 @@ func TestCodexClientModelsServedModelsFollowOverrides(t *testing.T) {
 	if served == nil {
 		t.Fatalf("served_models is missing %q", modelID)
 	}
-	// An override shapes the assembled entry; it does not give the model a catalog
-	// template of its own, so the entry still comes from the default template.
-	if !served.DefaultTemplate || served.TemplateSlug != "gpt-5.5" {
-		t.Fatalf("template provenance = %q (default %v), want the default template", served.TemplateSlug, served.DefaultTemplate)
+	if got := payload.Origins[modelID]; got != registry.CodexClientModelsOriginOverride {
+		t.Fatalf("origin = %q, want %q once the override applies", got, registry.CodexClientModelsOriginOverride)
 	}
 	if served.ContextWindow != 128000 {
 		t.Fatalf("context_window = %d, want %d", served.ContextWindow, 128000)
@@ -260,8 +255,8 @@ func TestCodexClientModelsServedModelsFollowOverrides(t *testing.T) {
 	if served == nil {
 		t.Fatalf("served_models is missing %q after the override was removed", modelID)
 	}
-	if !served.DefaultTemplate || served.TemplateSlug != "gpt-5.5" {
-		t.Fatalf("template after DELETE = %q (default %v), want the default template %q", served.TemplateSlug, served.DefaultTemplate, "gpt-5.5")
+	if got := payload.Origins[modelID]; got != registry.CodexClientModelsOriginServed {
+		t.Fatalf("origin after DELETE = %q, want %q", got, registry.CodexClientModelsOriginServed)
 	}
 }
 

@@ -48,7 +48,7 @@ const (
 	// CodexClientModelsOriginOverride marks a served model with a local override.
 	CodexClientModelsOriginOverride CodexClientModelsOrigin = "override"
 	// CodexClientModelsOriginServed marks a served model the base catalog has no entry
-	// for, so the default template supplied its entry.
+	// for, so the server assembled its entry from the default template.
 	CodexClientModelsOriginServed CodexClientModelsOrigin = "served"
 	// CodexClientModelsOriginRemoved marks a served model that a null override keeps out
 	// of the served list.

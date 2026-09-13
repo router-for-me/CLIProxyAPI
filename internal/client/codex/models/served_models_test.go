@@ -40,15 +40,12 @@ func summariseLevels(levels []ServedReasoningLevel) string {
 }
 
 // A model the registry knows nothing about is composed from the default template alone,
-// so the template stays the source of its entry.
+// so it carries the capabilities of that template.
 func TestBuildCodexClientModelSets_WithoutModelMetadataUsesTheDefaultTemplate(t *testing.T) {
 	summary := servedSummaryFor(t, "served-plain-model", []*registry.ModelInfo{
 		{ID: "served-plain-model", Object: "model", OwnedBy: "deepseek", Type: "openai"},
 	})
 
-	if !summary.DefaultTemplate || summary.TemplateSlug != "gpt-5.5" {
-		t.Fatalf("template provenance = %q/%v, want the default template", summary.TemplateSlug, summary.DefaultTemplate)
-	}
 	if summariseLevels(summary.SupportedReasoningLevels) != "low,medium,high,xhigh" {
 		t.Errorf("reasoning levels = %v, want the template levels", summary.SupportedReasoningLevels)
 	}
@@ -92,9 +89,6 @@ func TestBuildCodexClientModelSets_UsesTheCatalogEntryTheMetadataNames(t *testin
 		},
 	})
 
-	if summary.DefaultTemplate || summary.TemplateSlug != "gpt-5.6-sol" {
-		t.Fatalf("template provenance = %q/%v, want the catalog entry gpt-5.6-sol", summary.TemplateSlug, summary.DefaultTemplate)
-	}
 	if summary.ContextWindow != 272000 || summary.MaxContextWindow != 872000 {
 		t.Errorf("context window = %d/%d, want the catalog values 272000/872000", summary.ContextWindow, summary.MaxContextWindow)
 	}

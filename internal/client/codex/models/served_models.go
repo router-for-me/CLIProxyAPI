@@ -12,11 +12,6 @@ import (
 type ServedModelSummary struct {
 	// Slug is the model id Codex clients request.
 	Slug string `json:"slug"`
-	// TemplateSlug is the catalog entry the served entry was assembled from.
-	TemplateSlug string `json:"template_slug"`
-	// DefaultTemplate reports that no catalog entry matches the model id, so the
-	// default template supplied the entry.
-	DefaultTemplate bool `json:"default_template"`
 	// Providers lists the providers that currently supply the model.
 	Providers []string `json:"providers,omitempty"`
 	// DisplayName is the name the served entry carries.
@@ -109,7 +104,7 @@ func BuildCodexClientModelSets(
 	}
 	sets.Summaries = make([]ServedModelSummary, 0, len(served))
 	for _, entry := range served {
-		sets.Summaries = append(sets.Summaries, summarizeServedModel(entry, assembled, providersForModel))
+		sets.Summaries = append(sets.Summaries, summarizeServedModel(entry, providersForModel))
 	}
 	return sets
 }
@@ -138,11 +133,10 @@ func sortCodexClientModelsByPriority(entries []map[string]any) {
 }
 
 // summarizeServedModel describes one served entry for a management UI.
-func summarizeServedModel(entry map[string]any, assembled codexClientModelDefaults, providersForModel ProvidersForModelFunc) ServedModelSummary {
+func summarizeServedModel(entry map[string]any, providersForModel ProvidersForModelFunc) ServedModelSummary {
 	slug := stringModelValue(entry, "slug")
 	summary := ServedModelSummary{
 		Slug:                  slug,
-		TemplateSlug:          codexClientMetadataModelID(slug),
 		DisplayName:           stringModelValue(entry, "display_name"),
 		Description:           stringModelValue(entry, "description"),
 		ContextWindow:         intModelValue(entry, "context_window"),
@@ -152,12 +146,6 @@ func summarizeServedModel(entry map[string]any, assembled codexClientModelDefaul
 		Priority:              intModelValue(entry, "priority"),
 	}
 	summary.SupportedReasoningLevels = servedReasoningLevels(entry)
-	// The base catalog may have no entry for the model, in which case the default
-	// template supplied the entry the server assembled.
-	if _, matched := assembled.templates[summary.TemplateSlug]; !matched {
-		summary.TemplateSlug = stringModelValue(assembled.defaultTemplate, "slug")
-		summary.DefaultTemplate = true
-	}
 	if providersForModel != nil {
 		summary.Providers = providersForModel(slug)
 	}
