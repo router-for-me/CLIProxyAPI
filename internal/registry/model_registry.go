@@ -1145,13 +1145,29 @@ func (r *ModelRegistry) ApplyClientModelCapabilities(clientID string, expectedEp
 	provider := r.clientProviders[clientID]
 	for id, info := range clientInfos {
 		if info != nil {
+			previousContext := info.ContextLength
+			previousOutput := info.MaxCompletionTokens
 			mutate(id, info)
 			if reg, okReg := r.models[id]; okReg && reg != nil {
+				context, output := r.modelTokenLimitsLocked(id, "")
+				providerContext, providerOutput := r.modelTokenLimitsLocked(id, provider)
 				hasWebSearch := r.hasClientSupportingWebSearchLocked(id, "", "")
 				if reg.Info != nil {
+					if info.ContextLength != previousContext {
+						reg.Info.ContextLength = context
+					}
+					if info.MaxCompletionTokens != previousOutput {
+						reg.Info.MaxCompletionTokens = output
+					}
 					reg.Info.SupportsWebSearch = hasWebSearch
 				}
 				if provider != "" && reg.InfoByProvider != nil && reg.InfoByProvider[provider] != nil {
+					if info.ContextLength != previousContext {
+						reg.InfoByProvider[provider].ContextLength = providerContext
+					}
+					if info.MaxCompletionTokens != previousOutput {
+						reg.InfoByProvider[provider].MaxCompletionTokens = providerOutput
+					}
 					reg.InfoByProvider[provider].SupportsWebSearch = r.hasClientSupportingWebSearchLocked(id, provider, "")
 				}
 			}
@@ -1159,6 +1175,36 @@ func (r *ModelRegistry) ApplyClientModelCapabilities(clientID string, expectedEp
 	}
 	r.invalidateAvailableModelsCacheLocked()
 	return true
+}
+
+// modelTokenLimitsLocked returns the smallest declared limits across every
+// exact route in the selected pool. A missing limit stays unknown (zero).
+func (r *ModelRegistry) modelTokenLimitsLocked(modelID, provider string) (context, output int) {
+	initialized := false
+	for clientID, modelIDs := range r.clientModels {
+		if provider != "" && r.clientProviders[clientID] != provider {
+			continue
+		}
+		for _, registeredID := range modelIDs {
+			if registeredID != modelID {
+				continue
+			}
+			info := r.clientModelInfos[clientID][modelID]
+			if info == nil {
+				return 0, 0
+			}
+			if !initialized {
+				context = max(0, info.ContextLength)
+				output = max(0, info.MaxCompletionTokens)
+				initialized = true
+			} else {
+				context = max(0, min(context, info.ContextLength))
+				output = max(0, min(output, info.MaxCompletionTokens))
+			}
+			break
+		}
+	}
+	return context, output
 }
 
 func (r *ModelRegistry) hasClientSupportingWebSearchLocked(modelID, provider, excludeClientID string) bool {
