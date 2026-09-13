@@ -293,3 +293,45 @@ func TestPoolBreakerWiring_Reclassified403DoesNotFeedBreaker(t *testing.T) {
 		t.Fatalf("isAuthBlockedForModel(unfailed same-pool peer) = blocked, want selectable (breaker not fed by reclassified 403s)")
 	}
 }
+
+// TestPoolBreakerWiring_QuotaLadderDoesNotFeedBreaker pins that plain 403
+// (no reclassification) and 429 land on the per-auth quota ladder only and
+// never feed the pool breaker, even past the failure threshold.
+func TestPoolBreakerWiring_QuotaLadderDoesNotFeedBreaker(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth403 := registerPoolBreakerAuth(t, manager, "auth-breaker-plain-403", "claude:11", true)
+	auth429 := registerPoolBreakerAuth(t, manager, "auth-breaker-429", "claude:12", true)
+	peer403 := registerPoolBreakerAuth(t, manager, "auth-plain-403-peer", "claude:11", true)
+	peer429 := registerPoolBreakerAuth(t, manager, "auth-429-peer", "claude:12", true)
+	cleanupPoolBreakerKeys(t, "claude:11", "claude:12")
+
+	markStatus := func(authID string, status int, code string) {
+		t.Helper()
+		manager.MarkResult(context.Background(), Result{
+			AuthID:   authID,
+			Provider: "claude",
+			Model:    "claude-sonnet-4-5",
+			Success:  false,
+			Error: &Error{
+				Code:       code,
+				Message:    "rejected",
+				HTTPStatus: status,
+			},
+		})
+	}
+	for i := 0; i < poolBreakerFailureThreshold+4; i++ {
+		markStatus(auth403.ID, http.StatusForbidden, "forbidden")
+		markStatus(auth429.ID, http.StatusTooManyRequests, "rate_limited")
+	}
+	for _, record := range PoolBreakerSnapshot() {
+		if record.PoolKey == "claude:11" || record.PoolKey == "claude:12" {
+			t.Fatalf("PoolBreakerSnapshot() contains %s after quota-ladder failures: %+v", record.PoolKey, record)
+		}
+	}
+	if blocked, _, _ := isAuthBlockedForModel(peer403, "claude-sonnet-4-5", time.Now()); blocked {
+		t.Fatalf("isAuthBlockedForModel(claude:11 peer) = blocked, want selectable (breaker not fed by plain 403s)")
+	}
+	if blocked, _, _ := isAuthBlockedForModel(peer429, "claude-sonnet-4-5", time.Now()); blocked {
+		t.Fatalf("isAuthBlockedForModel(claude:12 peer) = blocked, want selectable (breaker not fed by 429s)")
+	}
+}
