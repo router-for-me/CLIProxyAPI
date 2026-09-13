@@ -157,6 +157,7 @@ func isOpenAIImageToolResultPart(item gjson.Result) bool {
 	switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
 	case "image", "image_url", "input_image":
 		return true
+	default:
+		return false
 	}
-	return item.Get("image_url").Exists() || item.Get("input_image").Exists()
 }

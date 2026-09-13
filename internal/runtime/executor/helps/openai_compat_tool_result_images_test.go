@@ -100,6 +100,24 @@ func TestRelayOpenAIToolResultImagesLeavesUnsupportedImageShapeUnchanged(t *test
 	}
 }
 
+func TestRelayOpenAIToolResultImagesDoesNotReinterpretNonImageParts(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"tool","tool_call_id":"call_1","content":[
+		{"type":"text","text":"keep this text","image_url":"https://example.com/metadata"},
+		{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}
+	]}]}`)
+
+	got := RelayOpenAIToolResultImages(input)
+	if content := gjson.GetBytes(got, "messages.0.content"); content.Type != gjson.String || content.String() != "keep this text" {
+		t.Fatalf("tool text was not preserved: %s", got)
+	}
+	if messages := gjson.GetBytes(got, "messages").Array(); len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2; payload=%s", len(messages), got)
+	}
+	if imageURL := gjson.GetBytes(got, "messages.1.content.1.image_url.url").String(); imageURL != "data:image/png;base64,AA==" {
+		t.Fatalf("relay image URL = %q", imageURL)
+	}
+}
+
 func TestRelayOpenAIToolResultImagesLeavesTextOnlyPayloadUnchanged(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"tool","tool_call_id":"call_1","content":"plain text"}]}`)
 	got := RelayOpenAIToolResultImages(input)

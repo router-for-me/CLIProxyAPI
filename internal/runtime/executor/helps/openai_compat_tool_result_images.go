@@ -3,6 +3,7 @@ package helps
 import (
 	"strings"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -61,7 +62,7 @@ func RelayOpenAIToolResultImages(payload []byte) []byte {
 	}
 	flushImages()
 
-	updated, err := sjson.SetRawBytes(payload, "messages", joinOpenAIRawJSON(out))
+	updated, err := sjson.SetRawBytes(payload, "messages", translatorcommon.JoinRawArray(out))
 	if err != nil {
 		return payload
 	}
@@ -138,54 +139,13 @@ func splitOpenAIToolResultImages(content gjson.Result) (string, [][]byte, bool) 
 }
 
 func canRelayOpenAIToolResultImagePart(part gjson.Result) bool {
-	if !part.IsObject() {
-		return false
-	}
-
-	typeName := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
-	switch typeName {
-	case "image_url":
-		return openAICompatImageURLValue(part.Get("image_url")) != ""
-	case "input_image":
-		return openAICompatInputImageURL(part) != ""
-	case "image":
-		return openAICompatClaudeImageSourceURL(part.Get("source")) != ""
-	}
-
-	if part.Get("image_url").Exists() {
-		return openAICompatImageURLValue(part.Get("image_url")) != ""
-	}
-	if part.Get("input_image").Exists() {
-		return openAICompatImageURLValue(part.Get("input_image")) != ""
-	}
-	return false
+	_, _, ok := openAIToolResultImageFields(part)
+	return ok
 }
 
 func openAIToolResultImagePart(part gjson.Result) ([]byte, bool) {
-	if !part.IsObject() {
-		return nil, false
-	}
-
-	var imageURL, detail string
-	typeName := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
-	switch typeName {
-	case "image_url":
-		imageURL = openAICompatImageURLValue(part.Get("image_url"))
-		detail = normalizeOpenAICompatImageDetail(part.Get("image_url.detail").String())
-	case "input_image":
-		imageURL = openAICompatInputImageURL(part)
-		detail = normalizeOpenAICompatImageDetail(part.Get("detail").String())
-	case "image":
-		imageURL = openAICompatClaudeImageSourceURL(part.Get("source"))
-	default:
-		if part.Get("image_url").Exists() {
-			imageURL = openAICompatImageURLValue(part.Get("image_url"))
-			detail = normalizeOpenAICompatImageDetail(part.Get("image_url.detail").String())
-		} else if part.Get("input_image").Exists() {
-			imageURL = openAICompatImageURLValue(part.Get("input_image"))
-		}
-	}
-	if imageURL == "" {
+	imageURL, detail, ok := openAIToolResultImageFields(part)
+	if !ok {
 		return nil, false
 	}
 
@@ -195,6 +155,26 @@ func openAIToolResultImagePart(part gjson.Result) ([]byte, bool) {
 		image, _ = sjson.SetBytes(image, "image_url.detail", detail)
 	}
 	return image, true
+}
+
+func openAIToolResultImageFields(part gjson.Result) (imageURL, detail string, ok bool) {
+	if !part.IsObject() {
+		return "", "", false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(part.Get("type").String())) {
+	case "image_url":
+		imageURL = openAICompatImageURLValue(part.Get("image_url"))
+		detail = normalizeOpenAICompatImageDetail(part.Get("image_url.detail").String())
+	case "input_image":
+		imageURL = openAICompatInputImageURL(part)
+		detail = normalizeOpenAICompatImageDetail(part.Get("detail").String())
+	case "image":
+		imageURL = openAICompatClaudeImageSourceURL(part.Get("source"))
+	default:
+		return "", "", false
+	}
+	return imageURL, detail, imageURL != ""
 }
 
 func openAICompatImageURLValue(value gjson.Result) string {
@@ -269,22 +249,9 @@ func prependOpenAIToolResultImages(message []byte, images [][]byte) []byte {
 		parts = append(parts, text)
 	}
 
-	updated, err := sjson.SetRawBytes(message, "content", joinOpenAIRawJSON(parts))
+	updated, err := sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(parts))
 	if err != nil {
 		return message
 	}
 	return updated
-}
-
-func joinOpenAIRawJSON(items [][]byte) []byte {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i, item := range items {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.Write(item)
-	}
-	b.WriteByte(']')
-	return []byte(b.String())
 }
