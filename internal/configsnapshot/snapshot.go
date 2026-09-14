@@ -4,9 +4,11 @@
 //
 // A Snapshot is the unit of revision that the PostgreSQL-first control plane
 // stores, validates, projects to the ephemeral compatibility bridge, and
-// surfaces through the dashboard. The type is intentionally JSON-friendly so
-// it can be persisted as a JSONB document and exchanged with import/export
-// pipelines without further translation.
+// surfaces through the dashboard. The type is a plain Go struct without JSON
+// tags: persistence as JSONB and exchange with import/export pipelines must
+// go through the custom canonical encoder (see Checksum) rather than a raw
+// encoding/json.Marshal call, which would otherwise emit Go-style
+// capitalized keys.
 package configsnapshot
 
 import "time"

@@ -127,6 +127,24 @@ func TestChecksumDeeplyNestedKeyOrderIndependence(t *testing.T) {
 	}
 }
 
+// TestChecksumTypedMapKeyOrderIndependence asserts that a typed map
+// (map[string]int) nested inside Settings also sorts its keys
+// canonically. This pins the implicit dependency on encoding/json's
+// map-key sorting for non-any maps and protects against a future Go or
+// encoder change that would otherwise leak iteration order into the
+// digest.
+func TestChecksumTypedMapKeyOrderIndependence(t *testing.T) {
+	a := NewEmpty()
+	a.Settings["counts"] = map[string]int{"b": 2, "a": 1}
+
+	b := NewEmpty()
+	b.Settings["counts"] = map[string]int{"a": 1, "b": 2}
+
+	if a.Checksum() != b.Checksum() {
+		t.Fatalf("typed map[string]int key order changed digest: %s vs %s", a.Checksum(), b.Checksum())
+	}
+}
+
 // TestChecksumSliceOrderSensitivity asserts ResourceRefs order affects the
 // digest. Slices are semantically ordered (resource identity), so
 // reordering them must change the checksum.
