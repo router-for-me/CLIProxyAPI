@@ -34,10 +34,16 @@ func TestApplyOpenCodeSessionHeaders(t *testing.T) {
 			want:      "ses_mirror",
 		},
 		{
-			name:      "client header beats the routing session",
+			name:      "routing identity beats a conflicting client header",
 			targetURL: goURL,
 			incoming:  http.Header{"X-Opencode-Session": []string{"ses_native"}},
-			sessionID: "affinity:ses_routing",
+			sessionID: "header:ses_selector",
+			want:      "ses_selector",
+		},
+		{
+			name:      "client header is the fallback without a routing identity",
+			targetURL: goURL,
+			incoming:  http.Header{"X-Opencode-Session": []string{"ses_native"}},
 			want:      "ses_native",
 		},
 		{

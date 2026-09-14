@@ -25,9 +25,15 @@ func isOpenCodeGoUpstream(targetURL, provider string) bool {
 }
 
 // ApplyOpenCodeSessionHeaders sets the session header an OpenCode upstream rejects
-// requests for. The client's own header wins; otherwise the value comes from the
-// routing session, because a client that did not name its provider "opencode*" sends
-// x-session-affinity instead and CPA never forwards client headers on its own.
+// requests for.
+//
+// The value is the canonical routing identity, not the client's own gateway header:
+// session selection ranks X-Opencode-Session below X-Claude-Code-Session-Id, Claude
+// metadata.user_id, Session-Id and X-Session-ID, so forwarding the raw client header
+// could pin the upstream session to an identity that credential affinity did not
+// follow. The routing identity is supplied by the caller, and the client's own header
+// is only used when there is no routing identity at all (an executor invoked without
+// the routing layer).
 //
 // A header already present (operator-configured) wins, and other upstreams are left
 // untouched so session identifiers do not leak to them.
@@ -35,14 +41,14 @@ func ApplyOpenCodeSessionHeaders(r *http.Request, targetURL, provider string, in
 	if r == nil || !isOpenCodeGoUpstream(targetURL, provider) || r.Header.Get(openCodeSessionHeader) != "" {
 		return
 	}
-	value := strings.TrimSpace(incoming.Get(openCodeSessionHeader))
+	// Strip the routing prefix (affinity:, opencode:, claude:, ...) so the upstream
+	// sees the same identifier the client would have sent directly.
+	value := strings.TrimSpace(sessionID)
+	if _, rest, found := strings.Cut(value, ":"); found {
+		value = strings.TrimSpace(rest)
+	}
 	if value == "" {
-		// Strip the routing prefix (affinity:, opencode:, claude:, ...) so the upstream
-		// sees the same identifier the client would have sent directly.
-		value = strings.TrimSpace(sessionID)
-		if _, rest, found := strings.Cut(value, ":"); found {
-			value = strings.TrimSpace(rest)
-		}
+		value = strings.TrimSpace(incoming.Get(openCodeSessionHeader))
 	}
 	if value == "" {
 		return
