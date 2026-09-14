@@ -984,6 +984,16 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 		{"kimi-k2.7-code[1m](high)", "kimi-for-coding(high)"},
 		{"k2.7-code", "kimi-for-coding"},
 		{"k2.7-code-highspeed", "kimi-for-coding-highspeed"},
+		{"kimi-k2.8", "kimi-for-coding"},
+		{"kimi-k2.8-code", "kimi-for-coding"},
+		{"Kimi-K2.8", "kimi-for-coding"},
+		{"Kimi-K2.8-Code", "kimi-for-coding"},
+		{"k2.8", "kimi-for-coding"},
+		{"k2.8-code", "kimi-for-coding"},
+		{"kimi-k2.8-preview", "kimi-for-coding"},
+		{"k2.8-preview", "kimi-for-coding"},
+		{"kimi-k2.8(max)", "kimi-for-coding(max)"},
+		{"kimi-k2.8-code[1m](high)", "kimi-for-coding(high)"},
 		{"kimi-for-coding", "kimi-for-coding"},
 		{"kimi-for-coding-highspeed", "kimi-for-coding-highspeed"},
 		{"Kimi-For-Coding", "kimi-for-coding"},
@@ -1223,5 +1233,70 @@ func TestNormalizeKimiToolsDirect(t *testing.T) {
 	fnParams := gjson.GetBytes(normalized, "functions.0.parameters")
 	if got := fnParams.Get("type").String(); got != "object" {
 		t.Errorf("functions.0.parameters.type = %q, want object", got)
+	}
+}
+
+func TestNormalizeKimiTemperature(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantExist bool
+		wantVal   float64
+	}{
+		{
+			name:      "absent temperature passes through",
+			body:      `{"model":"kimi-for-coding"}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking enabled keeps valid temperature 1.0",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"enabled","effort":"high"},"temperature":1.0}`,
+			wantExist: true,
+			wantVal:   1.0,
+		},
+		{
+			name:      "thinking enabled strips invalid temperature 0.7",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"enabled","effort":"high"},"temperature":0.7}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking enabled strips invalid temperature 0.6",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"enabled","effort":"high"},"temperature":0.6}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking disabled keeps valid temperature 0.6",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"disabled"},"temperature":0.6}`,
+			wantExist: true,
+			wantVal:   0.6,
+		},
+		{
+			name:      "thinking disabled strips invalid temperature 1.0",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"disabled"},"temperature":1.0}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking disabled strips invalid temperature 0.7",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"disabled"},"temperature":0.7}`,
+			wantExist: false,
+		},
+		{
+			name:      "implicit enabled strips invalid temperature 0.5",
+			body:      `{"model":"kimi-for-coding","temperature":0.5}`,
+			wantExist: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeKimiTemperature([]byte(tt.body))
+			res := gjson.GetBytes(got, "temperature")
+			if res.Exists() != tt.wantExist {
+				t.Fatalf("temperature.Exists() = %v, want %v; body=%s", res.Exists(), tt.wantExist, string(got))
+			}
+			if tt.wantExist && res.Float() != tt.wantVal {
+				t.Fatalf("temperature = %v, want %v; body=%s", res.Float(), tt.wantVal, string(got))
+			}
+		})
 	}
 }

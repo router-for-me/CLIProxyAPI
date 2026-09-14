@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -183,5 +184,85 @@ func TestApplyOAuthModelAlias_PerAuthAlias(t *testing.T) {
 	}
 	if out[0].DisplayName != "Configured GPT Five" {
 		t.Fatalf("expected per-auth display name %q, got %q", "Configured GPT Five", out[0].DisplayName)
+	}
+	if out[0].MetadataModelID != "gpt-5.3-codex-spark" {
+		t.Fatalf("expected per-auth MetadataModelID %q, got %q", "gpt-5.3-codex-spark", out[0].MetadataModelID)
+	}
+}
+
+func TestApplyOAuthModelAlias_PreservesMetadataModelID(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {
+				{Name: "gpt-6-astra", Alias: "codex-main", Fork: true},
+				{Name: "gpt-5.6-luna", Alias: "codex-luna", Fork: false},
+			},
+		},
+	}
+	models := []*ModelInfo{
+		{ID: "gpt-6-astra", Name: "models/gpt-6-astra"},
+		{ID: "gpt-5.6-luna", Name: "models/gpt-5.6-luna"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 models (original astra + forked astra alias + renamed luna alias), got %d", len(out))
+	}
+
+	entryMap := make(map[string]*ModelInfo, len(out))
+	for _, m := range out {
+		entryMap[m.ID] = m
+	}
+
+	if astra := entryMap["gpt-6-astra"]; astra == nil {
+		t.Fatal("missing original gpt-6-astra")
+	}
+	if codexMain := entryMap["codex-main"]; codexMain == nil {
+		t.Fatal("missing alias codex-main")
+	} else if codexMain.MetadataModelID != "gpt-6-astra" {
+		t.Fatalf("codex-main MetadataModelID = %q, want gpt-6-astra", codexMain.MetadataModelID)
+	}
+
+	if codexLuna := entryMap["codex-luna"]; codexLuna == nil {
+		t.Fatal("missing alias codex-luna")
+	} else if codexLuna.MetadataModelID != "gpt-5.6-luna" {
+		t.Fatalf("codex-luna MetadataModelID = %q, want gpt-5.6-luna", codexLuna.MetadataModelID)
+	}
+}
+
+func TestApplyModelPrefixes_PreservesMetadataModelID(t *testing.T) {
+	webSearch := true
+	models := []*ModelInfo{
+		{ID: "gpt-6-astra"},
+		{ID: "codex-main", MetadataModelID: "gpt-6-astra", NativeCapabilities: &registry.NativeCapabilities{WebSearch: &webSearch}},
+	}
+
+	out := applyModelPrefixes(models, "1", false)
+	if len(out) != 4 {
+		t.Fatalf("expected 4 models (2 unprefixed + 2 prefixed), got %d", len(out))
+	}
+
+	entryMap := make(map[string]*ModelInfo, len(out))
+	for _, m := range out {
+		entryMap[m.ID] = m
+	}
+
+	if m := entryMap["1/gpt-6-astra"]; m == nil {
+		t.Fatal("missing 1/gpt-6-astra")
+	} else if m.MetadataModelID != "gpt-6-astra" {
+		t.Fatalf("1/gpt-6-astra MetadataModelID = %q, want gpt-6-astra", m.MetadataModelID)
+	}
+
+	if m := entryMap["1/codex-main"]; m == nil {
+		t.Fatal("missing 1/codex-main")
+	} else if m.MetadataModelID != "gpt-6-astra" {
+		t.Fatalf("1/codex-main MetadataModelID = %q, want gpt-6-astra", m.MetadataModelID)
+	} else if m.NativeCapabilities == nil || m.NativeCapabilities.WebSearch == nil || !*m.NativeCapabilities.WebSearch {
+		t.Fatalf("1/codex-main did not inherit native capabilities: %+v", m)
+	} else {
+		*m.NativeCapabilities.WebSearch = false
+		if !*entryMap["codex-main"].NativeCapabilities.WebSearch {
+			t.Fatal("prefixed capability metadata aliases the source model")
+		}
 	}
 }

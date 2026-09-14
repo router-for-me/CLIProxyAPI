@@ -55,10 +55,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	}
 
 	ctx, cancelCtx := context.WithCancel(parent)
-	workers := refreshMaxConcurrency
-	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
-		workers = cfg.AuthAutoRefreshWorkers
-	}
+	workers := m.refreshWorkers()
 	loop := newAuthAutoRefreshLoop(m, interval, workers)
 
 	m.mu.Lock()
@@ -354,11 +351,66 @@ func authAccessToken(auth *Auth) string {
 	return authMetadataString(auth, "accessToken")
 }
 
+func authRefreshToken(auth *Auth) string {
+	if token := authMetadataString(auth, "refresh_token"); token != "" {
+		return token
+	}
+	return authMetadataString(auth, "refreshToken")
+}
+
 func authHasRefreshCredential(auth *Auth) bool {
 	if authMetadataString(auth, "refresh_token") != "" {
 		return true
 	}
 	return authMetadataString(auth, "refreshToken") != ""
+}
+
+// CredentialsChanged reports whether authentication credentials (tokens or API keys)
+// differ between two Auth records.
+func CredentialsChanged(existing, incoming *Auth) bool {
+	if existing == nil || incoming == nil {
+		return false
+	}
+	if authAccessToken(existing) != authAccessToken(incoming) {
+		return true
+	}
+	if authRefreshToken(existing) != authRefreshToken(incoming) {
+		return true
+	}
+	existingIDToken := authMetadataString(existing, "id_token")
+	if existingIDToken == "" {
+		existingIDToken = authMetadataString(existing, "idToken")
+	}
+	incomingIDToken := authMetadataString(incoming, "id_token")
+	if incomingIDToken == "" {
+		incomingIDToken = authMetadataString(incoming, "idToken")
+	}
+	if existingIDToken != incomingIDToken {
+		return true
+	}
+	existingKey := ""
+	if existing.Attributes != nil {
+		existingKey = existing.Attributes[AttributeAPIKey]
+	}
+	if existingKey == "" {
+		existingKey = authMetadataString(existing, "api_key")
+	}
+	incomingKey := ""
+	if incoming.Attributes != nil {
+		incomingKey = incoming.Attributes[AttributeAPIKey]
+	}
+	if incomingKey == "" {
+		incomingKey = authMetadataString(incoming, "api_key")
+	}
+	if existingKey != incomingKey {
+		return true
+	}
+	return false
+}
+
+// ClearUnauthorizedModelStates resets model states whose last error was an unauthorized failure.
+func ClearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
+	return clearUnauthorizedModelStates(auth, now)
 }
 
 func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
@@ -367,10 +419,19 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 	}
 	var resumed []string
 	for model, state := range auth.ModelStates {
-		if state == nil || state.LastError == nil {
+		if state == nil {
 			continue
 		}
-		if state.LastError.StatusCode() != http.StatusUnauthorized && !strings.EqualFold(state.LastError.Code, "unauthorized") {
+		isUnauth := false
+		if state.LastError != nil {
+			if state.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(state.LastError.Code, "unauthorized") || isUnauthorizedError(state.LastError) {
+				isUnauth = true
+			}
+		}
+		if !isUnauth && strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") {
+			isUnauth = true
+		}
+		if !isUnauth {
 			continue
 		}
 		resetModelState(state, now)
@@ -585,6 +646,16 @@ func (m *Manager) ForceRefreshAuth(ctx context.Context, id string) (*Auth, error
 	return m.refreshAuthForRequest(ctx, id, "")
 }
 
+func (m *Manager) refreshWorkers() int {
+	workers := refreshMaxConcurrency
+	if m != nil {
+		if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
+			workers = cfg.AuthAutoRefreshWorkers
+		}
+	}
+	return workers
+}
+
 // ForceRefreshResult records the outcome of a forced refresh for one credential.
 type ForceRefreshResult struct {
 	ID      string `json:"id"`
@@ -597,6 +668,9 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
 	if m == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.RLock()
 	ids := make([]string, 0, len(m.auths))
 	for id, auth := range m.auths {
@@ -607,18 +681,52 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
 	m.mu.RUnlock()
 
 	results := make([]ForceRefreshResult, len(ids))
-	var wg sync.WaitGroup
+	if len(ids) == 0 {
+		return results
+	}
+
+	workers := m.refreshWorkers()
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > len(ids) {
+		workers = len(ids)
+	}
+
+	type refreshJob struct {
+		index  int
+		authID string
+	}
+
+	jobCh := make(chan refreshJob, len(ids))
 	for i, id := range ids {
+		jobCh <- refreshJob{index: i, authID: id}
+	}
+	close(jobCh)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
 		wg.Add(1)
-		go func(index int, authID string) {
+		go func() {
 			defer wg.Done()
-			_, err := m.ForceRefreshAuth(ctx, authID)
-			res := ForceRefreshResult{ID: authID, Success: err == nil}
-			if err != nil {
-				res.Error = err.Error()
+			for job := range jobCh {
+				if errCtx := ctx.Err(); errCtx != nil {
+					results[job.index] = ForceRefreshResult{
+						ID:      job.authID,
+						Success: false,
+						Error:   errCtx.Error(),
+					}
+					continue
+				}
+
+				_, err := m.ForceRefreshAuth(ctx, job.authID)
+				res := ForceRefreshResult{ID: job.authID, Success: err == nil}
+				if err != nil {
+					res.Error = err.Error()
+				}
+				results[job.index] = res
 			}
-			results[index] = res
-		}(i, id)
+		}()
 	}
 	wg.Wait()
 	return results

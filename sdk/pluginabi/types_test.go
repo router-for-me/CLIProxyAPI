@@ -111,4 +111,16 @@ func TestSchedulerPickMethodName(t *testing.T) {
 	if MethodModelRoute != "model.route" {
 		t.Fatalf("MethodModelRoute = %q", MethodModelRoute)
 	}
+	if MethodQuotaIdentifier != "quota.identifier" {
+		t.Fatalf("MethodQuotaIdentifier = %q", MethodQuotaIdentifier)
+	}
+	if MethodQuotaDescribe != "quota.describe" {
+		t.Fatalf("MethodQuotaDescribe = %q", MethodQuotaDescribe)
+	}
+	if MethodQuotaFetch != "quota.fetch" {
+		t.Fatalf("MethodQuotaFetch = %q", MethodQuotaFetch)
+	}
+	if MethodQuotaReset != "quota.reset" {
+		t.Fatalf("MethodQuotaReset = %q", MethodQuotaReset)
+	}
 }

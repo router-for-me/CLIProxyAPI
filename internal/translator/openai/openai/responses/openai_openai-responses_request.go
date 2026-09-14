@@ -349,7 +349,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
 		}
 		if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+			out, _ = sjson.SetRawBytes(out, "tool_choice", convertResponsesToolChoiceToChatCompletions(toolChoice, inputRawJSON))
 		}
 	}
 
@@ -361,6 +361,45 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func convertResponsesToolChoiceToChatCompletions(toolChoice gjson.Result, inputRawJSON []byte) []byte {
+	if !toolChoice.IsObject() {
+		return []byte(toolChoice.Raw)
+	}
+
+	choiceType := toolChoice.Get("type").String()
+	if choiceType != "function" && choiceType != "custom" {
+		return []byte(toolChoice.Raw)
+	}
+
+	name := toolChoice.Get("function.name").String()
+	if name == "" {
+		name = toolChoice.Get("custom.name").String()
+	}
+	if name == "" {
+		name = toolChoice.Get("name").String()
+	}
+	if name == "" {
+		return []byte(toolChoice.Raw)
+	}
+
+	namespace := strings.TrimSpace(toolChoice.Get("namespace").String())
+	if namespace == "" {
+		namespace = strings.TrimSpace(toolChoice.Get("function.namespace").String())
+	}
+	if namespace == "" {
+		namespace = strings.TrimSpace(toolChoice.Get("custom.namespace").String())
+	}
+	if namespace != "" {
+		name = qualifyResponsesNamespaceToolName(namespace, name)
+	} else {
+		name = canonicalResponsesToolName(inputRawJSON, name)
+	}
+
+	converted := []byte(`{"type":"function","function":{"name":""}}`)
+	converted, _ = sjson.SetBytes(converted, "function.name", name)
+	return converted
 }
 
 func convertResponsesTextFormatToChatResponseFormat(textFormat gjson.Result) []byte {

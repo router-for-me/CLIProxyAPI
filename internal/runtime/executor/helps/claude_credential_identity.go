@@ -12,6 +12,7 @@ import (
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/sjson"
 )
 
@@ -36,6 +37,32 @@ func ClaudeAgentSessionUUIDForRequest(headers http.Header, originalPayload, tran
 		translatedPayload = withoutClaudeMetadataUserID(translatedPayload)
 	}
 	return claudeAgentSessionUUID(headers, originalPayload, translatedPayload, metadataSets...)
+}
+
+type claudeExecutionMetadataKey struct{}
+
+// WithClaudeExecutionMetadata attaches whether the request had an explicit execution session metadata to ctx.
+func WithClaudeExecutionMetadata(ctx context.Context, present bool) context.Context {
+	return context.WithValue(ctx, claudeExecutionMetadataKey{}, present)
+}
+
+// ClaudeExecutionMetadataFromContext retrieves whether execution metadata was present from ctx.
+func ClaudeExecutionMetadataFromContext(ctx context.Context) bool {
+	if v, ok := ctx.Value(claudeExecutionMetadataKey{}).(bool); ok {
+		return v
+	}
+	return false
+}
+
+// ClaudeRequestHasExecutionMetadata reports whether the request explicitly carried
+// an internal execution session metadata key.
+func ClaudeRequestHasExecutionMetadata(metadataSets ...map[string]any) bool {
+	for _, metadata := range metadataSets {
+		if val, ok := metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string); ok && strings.TrimSpace(val) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeAgentSessionUUID(headers http.Header, originalPayload, translatedPayload []byte, metadataSets ...map[string]any) string {

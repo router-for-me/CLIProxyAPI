@@ -26,7 +26,7 @@ func SetResponsesToolCallIdentity(item []byte, name, namespace, itemPath string)
 
 // ExtractResponsesCallID extracts the tool call ID from a Responses API item,
 // prioritizing dedicated tool call references over generic item IDs:
-// call_id -> tool_call_id -> callId -> id
+// call_id -> tool_call_id -> callId -> id (excluding fco_ output item IDs)
 func ExtractResponsesCallID(node gjson.Result) string {
 	if callID := strings.TrimSpace(node.Get("call_id").String()); callID != "" {
 		return callID
@@ -37,7 +37,11 @@ func ExtractResponsesCallID(node gjson.Result) string {
 	if callId := strings.TrimSpace(node.Get("callId").String()); callId != "" {
 		return callId
 	}
-	return strings.TrimSpace(node.Get("id").String())
+	id := strings.TrimSpace(node.Get("id").String())
+	if strings.HasPrefix(id, "fco_") {
+		return ""
+	}
+	return id
 }
 
 // NormalizeResponsesToolCallOutputs scans a slice of Responses input items,

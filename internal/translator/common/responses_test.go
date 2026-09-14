@@ -115,6 +115,16 @@ func TestExtractResponsesCallID(t *testing.T) {
 			input:    `{"output":"result"}`,
 			expected: "",
 		},
+		{
+			name:     "fco item id is ignored",
+			input:    `{"id":"fco_01a08664-2d16-7a91-8ab2-2eccd49e4c3e"}`,
+			expected: "",
+		},
+		{
+			name:     "fco item id with explicit call_id retains call_id",
+			input:    `{"id":"fco_01a08664-2d16-7a91-8ab2-2eccd49e4c3e","call_id":"call_1"}`,
+			expected: "call_1",
+		},
 	}
 
 	for _, tt := range tests {
@@ -185,6 +195,41 @@ func TestNormalizeResponsesToolCallOutputs(t *testing.T) {
 		normalized := NormalizeResponsesToolCallOutputs(items)
 		if got := normalized[1].Get("call_id").String(); got != "call_other" {
 			t.Fatalf("normalized[1].call_id = %q, want call_other", got)
+		}
+	})
+
+	t.Run("pairs function_call_output with fco item id and no call_id using fallback", func(t *testing.T) {
+		input := []byte(`[
+			{"type":"function_call","call_id":"call_1788961125480214178_817","name":"Bash"},
+			{"type":"function_call_output","id":"fco_01a08664-2d16-7a91-8ab2-2eccd49e4c3e","output":"result"}
+		]`)
+		items := gjson.ParseBytes(input).Array()
+		normalized := NormalizeResponsesToolCallOutputs(items)
+		if len(normalized) != 2 {
+			t.Fatalf("expected 2 items, got %d", len(normalized))
+		}
+		if got := normalized[1].Get("call_id").String(); got != "call_1788961125480214178_817" {
+			t.Fatalf("normalized[1].call_id = %q, want call_1788961125480214178_817", got)
+		}
+	})
+
+	t.Run("preserves explicit call_id while pairing fco item id output via fallback", func(t *testing.T) {
+		input := []byte(`[
+			{"type":"function_call","call_id":"call_a","name":"tool_a"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b"},
+			{"type":"function_call_output","id":"fco_b","output":"result_b"},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]`)
+		items := gjson.ParseBytes(input).Array()
+		normalized := NormalizeResponsesToolCallOutputs(items)
+		if len(normalized) != 4 {
+			t.Fatalf("expected 4 items, got %d", len(normalized))
+		}
+		if got := normalized[2].Get("call_id").String(); got != "call_b" {
+			t.Fatalf("normalized[2].call_id = %q, want call_b", got)
+		}
+		if got := normalized[3].Get("call_id").String(); got != "call_a" {
+			t.Fatalf("normalized[3].call_id = %q, want call_a", got)
 		}
 	})
 }

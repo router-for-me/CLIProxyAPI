@@ -209,6 +209,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"antigravity",
 		"kimi",
 		"xai",
+		"devin",
 		"openai-compatibility",
 	}
 	auths := make([]*coreauth.Auth, 0, len(providers))
@@ -305,6 +306,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(cfg))
 	case constant.CommandCode:
 		s.coreManager.RegisterExecutor(executor.NewCommandCodeExecutor(cfg))
+	case "devin":
+		s.coreManager.RegisterExecutor(executor.NewDevinExecutor(cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {

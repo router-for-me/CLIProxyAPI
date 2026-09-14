@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1423,5 +1424,154 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_EmptyToolCallsArr
 	}
 	if got := completedData.Get("response.output.1.content.0.text").String(); got != "Hello world!" {
 		t.Fatalf("unexpected completed response message text: got %q, want %q", got, "Hello world!")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ChunkWithContentAndReasoningContent(t *testing.T) {
+	request := []byte(`{"model":"deepseek-v4-flash"}`)
+	chunks := []string{
+		`data: {"id":"chatcmpl_ds","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Thinking part 1,"},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_ds","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"Bien","reasoning_content":" Just professional."},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_ds","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":" continues here."},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var reasoningAddedCount, reasoningDoneCount int
+	var messageAddedCount, messageDoneCount int
+	var completedCount int
+	var lastReasoningSummaryText string
+	var lastMessageContentText string
+	var eventOrder []string
+	var completedData gjson.Result
+	var addedItemIDs []string
+
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "deepseek-v4-flash", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			switch event {
+			case "response.output_item.added":
+				itemType := data.Get("item.type").String()
+				itemID := data.Get("item.id").String()
+				addedItemIDs = append(addedItemIDs, itemID)
+				eventOrder = append(eventOrder, fmt.Sprintf("added:%s:%d", itemType, data.Get("output_index").Int()))
+				if itemType == "reasoning" {
+					reasoningAddedCount++
+				} else if itemType == "message" {
+					messageAddedCount++
+				}
+			case "response.output_item.done":
+				itemType := data.Get("item.type").String()
+				eventOrder = append(eventOrder, fmt.Sprintf("done:%s:%d", itemType, data.Get("output_index").Int()))
+				if itemType == "reasoning" {
+					reasoningDoneCount++
+					lastReasoningSummaryText = data.Get("item.summary.0.text").String()
+				} else if itemType == "message" {
+					messageDoneCount++
+					lastMessageContentText = data.Get("item.content.0.text").String()
+				}
+			case "response.completed":
+				completedCount++
+				completedData = data
+			}
+		}
+	}
+
+	if reasoningAddedCount != 1 {
+		t.Fatalf("expected exactly 1 reasoning output_item.added, got %d (events: %v)", reasoningAddedCount, eventOrder)
+	}
+	if reasoningDoneCount != 1 {
+		t.Fatalf("expected exactly 1 reasoning output_item.done, got %d (events: %v)", reasoningDoneCount, eventOrder)
+	}
+	if lastReasoningSummaryText != "Thinking part 1, Just professional." {
+		t.Fatalf("unexpected reasoning summary text: got %q, want %q", lastReasoningSummaryText, "Thinking part 1, Just professional.")
+	}
+	if messageAddedCount != 1 {
+		t.Fatalf("expected exactly 1 message output_item.added, got %d (events: %v)", messageAddedCount, eventOrder)
+	}
+	if messageDoneCount != 1 {
+		t.Fatalf("expected exactly 1 message output_item.done, got %d", messageDoneCount)
+	}
+	if lastMessageContentText != "Bien continues here." {
+		t.Fatalf("unexpected message content text: got %q, want %q", lastMessageContentText, "Bien continues here.")
+	}
+	if completedCount != 1 {
+		t.Fatalf("expected exactly 1 response.completed, got %d", completedCount)
+	}
+
+	// Verify strict event ordering: reasoning completes before message starts
+	wantOrder := []string{
+		"added:reasoning:0",
+		"done:reasoning:0",
+		"added:message:1",
+		"done:message:1",
+	}
+	if len(eventOrder) != len(wantOrder) {
+		t.Fatalf("unexpected event order length: got %v, want %v", eventOrder, wantOrder)
+	}
+	for i, want := range wantOrder {
+		if eventOrder[i] != want {
+			t.Fatalf("eventOrder[%d] = %q, want %q; full sequence: %v", i, eventOrder[i], want, eventOrder)
+		}
+	}
+
+	// Verify item IDs are unique
+	if len(addedItemIDs) != 2 || addedItemIDs[0] == addedItemIDs[1] {
+		t.Fatalf("expected 2 distinct item IDs, got %v", addedItemIDs)
+	}
+
+	// Verify completed response contains both outputs in ascending order
+	if got := completedData.Get("response.output.0.summary.0.text").String(); got != "Thinking part 1, Just professional." {
+		t.Fatalf("unexpected completed reasoning: got %q", got)
+	}
+	if got := completedData.Get("response.output.1.content.0.text").String(); got != "Bien continues here." {
+		t.Fatalf("unexpected completed message: got %q", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_SingleChunkWithBothContentAndReasoningContent(t *testing.T) {
+	request := []byte(`{"model":"deepseek-v4-flash"}`)
+	chunks := []string{
+		`data: {"id":"chatcmpl_single","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"Answer","reasoning_content":"Thought"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var eventOrder []string
+	var completedData gjson.Result
+
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "deepseek-v4-flash", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			switch event {
+			case "response.output_item.added":
+				eventOrder = append(eventOrder, fmt.Sprintf("added:%s:%d", data.Get("item.type").String(), data.Get("output_index").Int()))
+			case "response.output_item.done":
+				eventOrder = append(eventOrder, fmt.Sprintf("done:%s:%d", data.Get("item.type").String(), data.Get("output_index").Int()))
+			case "response.completed":
+				completedData = data
+			}
+		}
+	}
+
+	wantOrder := []string{
+		"added:reasoning:0",
+		"done:reasoning:0",
+		"added:message:1",
+		"done:message:1",
+	}
+	if len(eventOrder) != len(wantOrder) {
+		t.Fatalf("unexpected event order length: got %v, want %v", eventOrder, wantOrder)
+	}
+	for i, want := range wantOrder {
+		if eventOrder[i] != want {
+			t.Fatalf("eventOrder[%d] = %q, want %q; full sequence: %v", i, eventOrder[i], want, eventOrder)
+		}
+	}
+	if got := completedData.Get("response.output.0.summary.0.text").String(); got != "Thought" {
+		t.Fatalf("unexpected completed reasoning: got %q", got)
+	}
+	if got := completedData.Get("response.output.1.content.0.text").String(); got != "Answer" {
+		t.Fatalf("unexpected completed message: got %q", got)
 	}
 }

@@ -694,6 +694,153 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructure
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ConvertsCanonicalResponsesNamedToolChoice(t *testing.T) {
+	raw := []byte(`{
+		"model": "gpt-5.4",
+		"input": [{"role": "user", "content": "Call gateway_echo with value TOOL_OK."}],
+		"tools": [{
+			"type": "function",
+			"name": "gateway_echo",
+			"description": "Returns the given value",
+			"parameters": {
+				"type": "object",
+				"properties": {"value": {"type": "string"}},
+				"required": ["value"],
+				"additionalProperties": false
+			}
+		}],
+		"tool_choice": {"type": "function", "name": "gateway_echo"},
+		"max_output_tokens": 512
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "gateway_echo" {
+		t.Fatalf("tool_choice.function.name = %q, want gateway_echo; output=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice.name").Exists() {
+		t.Fatalf("tool_choice.name should be absent at top-level; output=%s", string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ConvertsNamespaceAndCustomToolChoice(t *testing.T) {
+	rawNamespace := []byte(`{
+		"model": "gpt-5.4",
+		"input": "test",
+		"tools": [
+			{
+				"type": "namespace",
+				"name": "service_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "lookup",
+						"parameters": {"type": "object"}
+					}
+				]
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"name": "lookup"
+		}
+	}`)
+
+	outNamespace := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", rawNamespace, false)
+	if got := gjson.GetBytes(outNamespace, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, string(outNamespace))
+	}
+	if got := gjson.GetBytes(outNamespace, "tool_choice.function.name").String(); got != "service_tools__lookup" {
+		t.Fatalf("tool_choice.function.name = %q, want service_tools__lookup; output=%s", got, string(outNamespace))
+	}
+	if declaredToolName := gjson.GetBytes(outNamespace, "tools.0.function.name").String(); declaredToolName != gjson.GetBytes(outNamespace, "tool_choice.function.name").String() {
+		t.Fatalf("tool_choice.function.name (%q) must match declared tools.0.function.name (%q); output=%s", gjson.GetBytes(outNamespace, "tool_choice.function.name").String(), declaredToolName, string(outNamespace))
+	}
+	if gjson.GetBytes(outNamespace, "tool_choice.name").Exists() {
+		t.Fatalf("tool_choice.name should be absent at top-level; output=%s", string(outNamespace))
+	}
+
+	rawExplicitNamespace := []byte(`{
+		"model": "gpt-5.4",
+		"input": "test",
+		"tools": [
+			{
+				"type": "namespace",
+				"name": "service_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "lookup",
+						"parameters": {"type": "object"}
+					}
+				]
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"name": "lookup",
+			"namespace": "service_tools"
+		}
+	}`)
+
+	outExplicitNamespace := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", rawExplicitNamespace, false)
+	if got := gjson.GetBytes(outExplicitNamespace, "tool_choice.function.name").String(); got != "service_tools__lookup" {
+		t.Fatalf("explicit namespace tool_choice.function.name = %q, want service_tools__lookup; output=%s", got, string(outExplicitNamespace))
+	}
+	if gjson.GetBytes(outExplicitNamespace, "tool_choice.namespace").Exists() {
+		t.Fatalf("tool_choice.namespace should be absent at top-level; output=%s", string(outExplicitNamespace))
+	}
+	if gjson.GetBytes(outExplicitNamespace, "tool_choice.name").Exists() {
+		t.Fatalf("tool_choice.name should be absent at top-level; output=%s", string(outExplicitNamespace))
+	}
+
+	rawCustom := []byte(`{
+		"model": "gpt-5.4",
+		"input": "test",
+		"tools": [
+			{
+				"type": "custom",
+				"name": "patch_runner",
+				"description": "Applies diff"
+			}
+		],
+		"tool_choice": {
+			"type": "custom",
+			"name": "patch_runner"
+		}
+	}`)
+
+	outCustom := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", rawCustom, false)
+	if got := gjson.GetBytes(outCustom, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, string(outCustom))
+	}
+	if got := gjson.GetBytes(outCustom, "tool_choice.function.name").String(); got != "patch_runner" {
+		t.Fatalf("tool_choice.function.name = %q, want patch_runner; output=%s", got, string(outCustom))
+	}
+
+	for _, scalar := range []string{`"auto"`, `"none"`, `"required"`} {
+		rawScalar := []byte(`{
+			"model": "gpt-5.4",
+			"input": "test",
+			"tools": [
+				{
+					"type": "function",
+					"name": "lookup",
+					"parameters": {"type": "object"}
+				}
+			],
+			"tool_choice": ` + scalar + `
+		}`)
+		outScalar := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", rawScalar, false)
+		if got := gjson.GetBytes(outScalar, "tool_choice").Raw; got != scalar {
+			t.Fatalf("tool_choice = %q, want %s; output=%s", got, scalar, string(outScalar))
+		}
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OmitsToolSettingsWithoutTools(t *testing.T) {
 	tests := []struct {
 		name string

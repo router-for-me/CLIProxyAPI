@@ -691,6 +691,7 @@ type websocketBootstrapFallbackExecutor struct {
 type websocketDirectCaptureExecutor struct {
 	mu                        sync.Mutex
 	provider                  string
+	streamItems               bool
 	failStatus                int
 	authIDs                   []string
 	models                    []string
@@ -806,7 +807,7 @@ func (e *websocketDirectCaptureExecutor) ExecuteStream(ctx context.Context, auth
 	failStatus := e.failStatus
 	e.mu.Unlock()
 
-	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks := make(chan coreexecutor.StreamChunk, 2)
 	if failStatus > 0 {
 		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
 			status: failStatus,
@@ -816,7 +817,12 @@ func (e *websocketDirectCaptureExecutor) ExecuteStream(ctx context.Context, auth
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
 	responseID := fmt.Sprintf("resp-%d", count)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"output":[{"type":"message","id":"out-%d"}]}}`, responseID, count))}
+	output := fmt.Sprintf(`[{"type":"message","id":"out-%d"}]`, count)
+	if e.streamItems {
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"out-%d"}}`, count))}
+		output = "[]"
+	}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"output":%s}}`, responseID, output))}
 	close(chunks)
 	if count >= 2 && e.done != nil {
 		e.doneOnce.Do(func() {
@@ -2456,6 +2462,15 @@ func TestRecordResponsesWebsocketCustomToolCallsFromOutputItemDoneWithCache(t *t
 }
 
 func TestForwardResponsesWebsocketRestoresAndForwardsCompletedOutput(t *testing.T) {
+	for _, preserve := range []bool{false, true} {
+		t.Run(fmt.Sprintf("preserve=%t", preserve), func(t *testing.T) {
+			testForwardResponsesWebsocketCompletedOutput(t, preserve)
+		})
+	}
+}
+
+func testForwardResponsesWebsocketCompletedOutput(t *testing.T, preserve bool) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 
 	serverErrCh := make(chan error, 1)
@@ -2491,6 +2506,7 @@ func TestForwardResponsesWebsocketRestoresAndForwardsCompletedOutput(t *testing.
 			errCh,
 			timelineLog,
 			"session-1",
+			responsesWebsocketForwardOptions{preserveCompletionOutput: func() bool { return preserve }},
 		)
 		if err != nil {
 			serverErrCh <- err
@@ -2550,7 +2566,11 @@ func TestForwardResponsesWebsocketRestoresAndForwardsCompletedOutput(t *testing.
 	if strings.Contains(string(payload), "response.done") {
 		t.Fatalf("payload unexpectedly rewrote completed event: %s", payload)
 	}
-	if got := gjson.GetBytes(payload, "response.output.0.id").String(); got != "call-1" {
+	if preserve {
+		if string(payload) != `{"type":"response.completed","response":{"id":"resp-1","output":[]}}` {
+			t.Fatalf("native completion changed: %s", payload)
+		}
+	} else if got := gjson.GetBytes(payload, "response.output.0.id").String(); got != "call-1" {
 		t.Fatalf("downstream completion output id = %q, want call-1; payload=%s", got, payload)
 	}
 
@@ -3494,8 +3514,8 @@ func TestResponsesWebsocketFullRequestCanRouteFromNativeWebsocketToBuiltInProvid
 
 	const sourceModel = "codex-provider-route-source"
 	const targetModel = "claude-provider-route-target"
-	codexExecutor := &websocketDirectCaptureExecutor{provider: "codex"}
-	claudeExecutor := &websocketDirectCaptureExecutor{provider: "claude"}
+	codexExecutor := &websocketDirectCaptureExecutor{provider: "codex", streamItems: true}
+	claudeExecutor := &websocketDirectCaptureExecutor{provider: "claude", streamItems: true}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(codexExecutor)
 	manager.RegisterExecutor(claudeExecutor)
@@ -3537,17 +3557,24 @@ func TestResponsesWebsocketFullRequestCanRouteFromNativeWebsocketToBuiltInProvid
 	}
 	defer func() { _ = conn.Close() }()
 
-	firstRequest := []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-1"}]}`, sourceModel))
+	firstRequest := []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-1"}],"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}`, sourceModel))
 	if errWrite := conn.WriteMessage(websocket.TextMessage, firstRequest); errWrite != nil {
 		t.Fatalf("write first websocket message: %v", errWrite)
 	}
 	if _, _, errRead := conn.ReadMessage(); errRead != nil {
 		t.Fatalf("read first websocket response: %v", errRead)
 	}
+	_, nativeResponse, errRead := conn.ReadMessage()
+	if errRead != nil || gjson.GetBytes(nativeResponse, "response.output").Raw != "[]" {
+		t.Fatalf("native completion = %s, error = %v", nativeResponse, errRead)
+	}
 
-	routedRequest := []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"route_to_claude":true,"input":[{"type":"message","id":"msg-routed"}]}`, sourceModel))
+	routedRequest := []byte(fmt.Sprintf(`{"type":"response.create","model":%q,"route_to_claude":true,"input":[{"type":"message","id":"msg-routed"}],"client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"}}`, sourceModel))
 	if errWrite := conn.WriteMessage(websocket.TextMessage, routedRequest); errWrite != nil {
 		t.Fatalf("write routed websocket message: %v", errWrite)
+	}
+	if _, _, errRead := conn.ReadMessage(); errRead != nil {
+		t.Fatalf("read routed output item: %v", errRead)
 	}
 	_, response, errRead := conn.ReadMessage()
 	if errRead != nil {
@@ -3555,6 +3582,10 @@ func TestResponsesWebsocketFullRequestCanRouteFromNativeWebsocketToBuiltInProvid
 	}
 	if got := gjson.GetBytes(response, "type").String(); got != wsEventTypeCompleted {
 		t.Fatalf("routed response type = %q, want %q: %s", got, wsEventTypeCompleted, response)
+	}
+	t.Logf("native completion: %s; routed completion: %s", nativeResponse, response)
+	if got := gjson.GetBytes(response, "response.output.0.id").String(); got != "out-1" {
+		t.Fatalf("cross-provider output repair lost: %s", response)
 	}
 	if got := len(codexExecutor.Payloads()); got != 1 {
 		t.Fatalf("codex payload count = %d, want 1", got)
