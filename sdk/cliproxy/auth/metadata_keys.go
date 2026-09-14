@@ -16,6 +16,8 @@ func CanonicalCredentialMetadataKey(key string) string {
 		return "fingerprint_profile"
 	case "model-aliases":
 		return "model_aliases"
+	case "model-weights":
+		return "model_weights"
 	case "proxy-url":
 		return "proxy_url"
 	case "request-retry":
