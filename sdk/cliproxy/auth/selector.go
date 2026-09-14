@@ -1043,8 +1043,16 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	isSubagent := !isFork && isSubagentSession(primaryID, fallbackID)
 	fallbackKey := ""
+	var fallbackKeys []string
 	if fallbackID != "" && fallbackID != primaryID {
 		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
+		fallbackKeys = append(fallbackKeys, fallbackKey)
+		// The child writes the parent reference, so its namespace is what the child's parent
+		// header implied, not necessarily the one the parent bound under. These sibling
+		// identities are looked up only after the declared reference misses.
+		for _, alias := range cliproxysession.ParentNamespaceAliases(primaryID, fallbackID) {
+			fallbackKeys = append(fallbackKeys, provider+"::"+alias+"::"+modelKey)
+		}
 	}
 	bind := func(authID string) {
 		if fallbackKey != "" && !isSubagent && !isFork {
@@ -1075,8 +1083,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return auth, nil
 	}
 
-	if fallbackKey != "" {
-		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
+	if len(fallbackKeys) > 0 {
+		cachedAuthID, hit := "", false
+		for _, candidate := range fallbackKeys {
+			if cachedAuthID, hit = s.cache.Get(candidate); hit {
+				break
+			}
+		}
+		if hit {
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {

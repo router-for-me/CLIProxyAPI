@@ -2713,3 +2713,49 @@ func TestExtractExplicitSessionIDs_EnhancedHarnesses(t *testing.T) {
 		t.Fatalf("subagent did not inherit parent task credential: got %s, want %s", subagentAuth.ID, parentAuth.ID)
 	}
 }
+
+// A parent that sends both the native OpenCode header and the legacy affinity header binds
+// under the OpenCode namespace, because that signal has the higher extraction priority. A
+// child that names it through X-Parent-Session-Affinity writes the affinity namespace, so an
+// exact fallback-key lookup misses and the subagent loses its parent's credential.
+func TestSessionAffinitySelector_OpenCodeParentInheritance(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-1"}, {ID: "auth-2"}}
+
+	parentOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Opencode-Session": []string{"oc-parent-100"},
+			"X-Session-Affinity": []string{"oc-parent-100"},
+		},
+	}
+	parentAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", parentOpts, auths)
+	if err != nil || parentAuth == nil {
+		t.Fatalf("parent Pick() failed: %v", err)
+	}
+	selector.OnResult(Result{
+		AuthID:   parentAuth.ID,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Success:  true,
+		Options:  parentOpts,
+	})
+
+	childOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Opencode-Session":        []string{"oc-child-101"},
+			"X-Parent-Session-Affinity": []string{"oc-parent-100"},
+		},
+	}
+	// Reverse candidate order to prove affinity, not order.
+	reverseAuths := []*Auth{{ID: "auth-2"}, {ID: "auth-1"}}
+	childAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", childOpts, reverseAuths)
+	if err != nil || childAuth == nil {
+		t.Fatalf("child Pick() failed: %v", err)
+	}
+	if childAuth.ID != parentAuth.ID {
+		t.Fatalf("child did not inherit the parent credential: got %s, want %s", childAuth.ID, parentAuth.ID)
+	}
+}

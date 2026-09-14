@@ -658,3 +658,81 @@ func TestOpenCodeSessionPrefixRegistered(t *testing.T) {
 		t.Fatalf("distinct opencode sessions share a canonical id: %q", opencodeID)
 	}
 }
+
+// A parent reference is written by the child, so its namespace can differ from the one the
+// parent bound under. Only the OpenCode family is exchanged: guessing a codex/header/slot
+// sibling would let a parent reference resolve to an unrelated session with the same bare id.
+func TestParentNamespaceAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		primaryID string
+		parentID  string
+		want      []string
+	}{
+		{
+			name:      "open code child referencing an affinity parent",
+			primaryID: "opencode:child",
+			parentID:  "affinity:parent",
+			want:      []string{"opencode:parent"},
+		},
+		{
+			name:      "affinity child referencing an open code parent",
+			primaryID: "affinity:child",
+			parentID:  "opencode:parent",
+			want:      []string{"affinity:parent"},
+		},
+		{
+			name:      "same namespace needs no alias",
+			primaryID: "opencode:child",
+			parentID:  "opencode:parent",
+		},
+		{
+			name:      "affinity child and affinity parent need no alias",
+			primaryID: "affinity:child",
+			parentID:  "affinity:parent",
+		},
+		{
+			name:      "codex child must not guess an affinity parent in its own namespace",
+			primaryID: "codex:child",
+			parentID:  "affinity:parent",
+		},
+		{
+			name:      "generic header child must not guess an affinity parent",
+			primaryID: "header:child",
+			parentID:  "affinity:parent",
+		},
+		{
+			name:      "bare parent id carries no namespace to swap",
+			primaryID: "opencode:child",
+			parentID:  "parent",
+		},
+		{
+			name:      "bare child id carries no namespace to swap",
+			primaryID: "child",
+			parentID:  "affinity:parent",
+		},
+		{
+			name:      "empty parent id",
+			primaryID: "opencode:child",
+			parentID:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ParentNamespaceAliases(tt.primaryID, tt.parentID)
+			if len(got) != len(tt.want) {
+				t.Fatalf("ParentNamespaceAliases(%q, %q) = %v, want %v", tt.primaryID, tt.parentID, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("ParentNamespaceAliases(%q, %q) = %v, want %v", tt.primaryID, tt.parentID, got, tt.want)
+				}
+			}
+		})
+	}
+}
