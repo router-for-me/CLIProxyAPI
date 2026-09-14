@@ -68,6 +68,12 @@ const (
 	// master API key) plus the last-sync outcome. Mirrors the alert_settings
 	// singleton pattern.
 	defaultLiteLLMSyncSettingsTable = "litellm_sync_settings"
+	// RuntimeConfigTable is the PG-first control-plane singleton: stores the
+	// canonical runtime configuration (settings + extra metadata + revision
+	// counter + update provenance) that supersedes the legacy config.yaml /
+	// auths/ mirror for the embedded core bridge. One row, id = 1; CHECK
+	// constraint enforces the singleton.
+	defaultRuntimeConfigTable = "runtime_config"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -239,6 +245,14 @@ type PostgresStoreConfig struct {
 	// sync settings (base URL + sealed master API key + last-sync outcome).
 	LiteLLMSyncSettingsTable string
 
+	// RuntimeConfigTable stores the PG-first control-plane singleton: one
+	// row (id = 1, CHECK enforced) holding the canonical runtime configuration
+	// (settings + extra metadata + revision counter + update provenance) that
+	// supersedes the legacy config.yaml / auths/ mirror for the embedded
+	// core bridge. No row is seeded; callers initialize the singleton on
+	// first write.
+	RuntimeConfigTable string
+
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
 	// at rest. Empty/nil disables encryption: writes stay in plaintext and
@@ -381,6 +395,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if cfg.LiteLLMSyncSettingsTable == "" {
 		cfg.LiteLLMSyncSettingsTable = defaultLiteLLMSyncSettingsTable
 	}
+	if cfg.RuntimeConfigTable == "" {
+		cfg.RuntimeConfigTable = defaultRuntimeConfigTable
+	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
 	if spoolRoot == "" {
@@ -506,6 +523,32 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	}
 	if err := s.ensureLiteLLMSchema(ctx); err != nil {
 		return err
+	}
+	if err := s.ensureRuntimeConfigSchema(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureRuntimeConfigSchema creates the PG-first control-plane singleton
+// runtime_config table. The CHECK id = 1 constraint guarantees only one
+// canonical row; callers (subsequent tasks) seed the singleton on first write.
+// No row is seeded here so this task stays purely a schema-availability step.
+func (s *PostgresStore) ensureRuntimeConfigSchema(ctx context.Context) error {
+	runtimeConfigTable := s.fullTableName(s.cfg.RuntimeConfigTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id              INTEGER PRIMARY KEY,
+			settings        JSONB NOT NULL DEFAULT '{}'::jsonb,
+			extra           JSONB NOT NULL DEFAULT '{}'::jsonb,
+			revision        BIGINT NOT NULL DEFAULT 1,
+			updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_by      TEXT,
+			updated_source  TEXT NOT NULL DEFAULT 'system',
+			CONSTRAINT runtime_config_singleton CHECK (id = 1)
+		)
+	`, runtimeConfigTable)); err != nil {
+		return fmt.Errorf("postgres store: create runtime_config table: %w", err)
 	}
 	return nil
 }
@@ -2173,6 +2216,15 @@ func (s *PostgresStore) ConfigTable() string {
 		return quoteIdentifier(defaultConfigTable)
 	}
 	return s.fullTableName(s.cfg.ConfigTable)
+}
+
+// RuntimeConfigTable returns the fully-qualified name of the PG-first
+// control-plane runtime_config singleton table.
+func (s *PostgresStore) RuntimeConfigTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultRuntimeConfigTable)
+	}
+	return s.fullTableName(s.cfg.RuntimeConfigTable)
 }
 
 // CooldownTable returns the fully-qualified name of the runtime cooldown state table.
