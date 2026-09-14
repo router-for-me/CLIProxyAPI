@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -88,5 +89,53 @@ func TestOpenAICompatExecutorForwardsSessionToOpenCode(t *testing.T) {
 				t.Fatalf("client session header leaked to %q", tt.provider)
 			}
 		})
+	}
+}
+
+// A session identity annotated on the context (extracted before protocol
+// translation on the original request) must win over re-extracting from the
+// translated body, so that translation dropping non-OpenAI session signals
+// (such as Gemini cachedContent) does not cause the session header to diverge.
+func TestOpenAICompatExecutorPrefersContextRoutingSessionOverTranslatedBody(t *testing.T) {
+	t.Parallel()
+
+	var captured []http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = append(captured, r.Header.Clone())
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c1","object":"chat.completion","created":0,"model":"test-model",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	provider := "opencode-go"
+	exec := NewOpenAICompatExecutor(provider, &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{Name: provider}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  provider,
+			"provider_key": provider,
+		},
+	}
+	payload := []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`)
+
+	ctx := util.WithSessionID(context.Background(), "affinity:ses_context_routing")
+	if _, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "test-model",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got := captured[len(captured)-1]
+	if value := got.Get("x-opencode-session"); value != "ses_context_routing" {
+		t.Fatalf("x-opencode-session = %q, want context routing session %q", value, "ses_context_routing")
 	}
 }

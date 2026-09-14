@@ -159,7 +159,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
-	helps.ApplyOpenCodeSessionHeaders(httpReq, url, e.provider, opts.Headers, cliproxyauth.ExtractSessionID(opts.Headers, translated, opts.Metadata))
+	openCodeSessionID := util.SessionIDFromContext(ctx)
+	if openCodeSessionID == "" {
+		openCodeSessionID = cliproxyauth.ExtractSessionID(opts.Headers, originalPayload, opts.Metadata)
+	}
+	helps.ApplyOpenCodeSessionHeaders(httpReq, url, e.provider, opts.Headers, openCodeSessionID)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -373,7 +377,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
-	helps.ApplyOpenCodeSessionHeaders(httpReq, url, e.provider, opts.Headers, cliproxyauth.ExtractSessionID(opts.Headers, translated, opts.Metadata))
+	openCodeStreamSessionID := util.SessionIDFromContext(ctx)
+	if openCodeStreamSessionID == "" {
+		openCodeStreamSessionID = cliproxyauth.ExtractSessionID(opts.Headers, originalPayload, opts.Metadata)
+	}
+	helps.ApplyOpenCodeSessionHeaders(httpReq, url, e.provider, opts.Headers, openCodeStreamSessionID)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string

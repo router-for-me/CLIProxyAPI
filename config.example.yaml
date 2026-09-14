@@ -690,6 +690,9 @@ nonstream-keepalive-interval: 0
 #     base-url: "https://opencode.ai/zen/go/v1" # x-opencode-session; CPA derives it from the
 #     api-key-entries: # client's routing session. A static headers: entry would pin every
 #       - api-key: "oc-..." # conversation to one session id and collapse upstream routing.
+#     models:
+#       - name: "claude-sonnet-4-6"
+#         alias: "claude-sonnet-4-6"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
