@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/toolargs"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -189,6 +190,7 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 	if outputs == nil && !usedNativeTransform {
 		outputs = [][]byte{body}
 	}
+	outputs = coerceToolCallArgumentsStream(to, from, model, originalRequestRawJSON, outputs, param)
 	if hooks != nil {
 		for i, output := range outputs {
 			outputs[i] = hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, output, true)
@@ -218,8 +220,46 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 			body = translated
 		}
 	}
+	body = coerceToolCallArgumentsNonStream(to, from, model, originalRequestRawJSON, body)
 	if hooks != nil {
 		body = hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, false)
+	}
+	return body
+}
+
+// coerceToolCallArgumentsStream normalizes integer-typed tool-call arguments that an upstream
+// emitted as whole-number floats (e.g. 14380.0) once the client-facing OpenAI-format events
+// have been produced. It runs for every provider at this single choke point, uses the ORIGINAL
+// client request to resolve each tool's declared parameter schema, and is a no-op for requests
+// without tools and for every non-OpenAI client format. See internal/toolargs.
+func coerceToolCallArgumentsStream(to, from Format, model string, originalRequestRawJSON []byte, outputs [][]byte, param *any) [][]byte {
+	if len(outputs) == 0 || !toolargs.HasFunctionTools(originalRequestRawJSON) {
+		return outputs
+	}
+	switch to {
+	case FormatOpenAI:
+		for i, output := range outputs {
+			outputs[i] = toolargs.CoerceChatCompletionsChunk(output, originalRequestRawJSON, string(from), model)
+		}
+	case FormatOpenAIResponse:
+		for i, output := range outputs {
+			outputs[i] = toolargs.CoerceResponsesEvent(output, originalRequestRawJSON, param, string(from), model)
+		}
+	}
+	return outputs
+}
+
+// coerceToolCallArgumentsNonStream is the non-streaming counterpart of
+// coerceToolCallArgumentsStream.
+func coerceToolCallArgumentsNonStream(to, from Format, model string, originalRequestRawJSON, body []byte) []byte {
+	if len(body) == 0 || !toolargs.HasFunctionTools(originalRequestRawJSON) {
+		return body
+	}
+	switch to {
+	case FormatOpenAI:
+		return toolargs.CoerceChatCompletionsBody(body, originalRequestRawJSON, string(from), model)
+	case FormatOpenAIResponse:
+		return toolargs.CoerceResponsesBody(body, originalRequestRawJSON, string(from), model)
 	}
 	return body
 }
