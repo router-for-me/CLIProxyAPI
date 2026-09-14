@@ -19,6 +19,9 @@ var levelToBudgetMap = map[string]int{
 	// "max" is used by Claude adaptive thinking effort. We map it to a large budget
 	// and rely on per-model clamping when converting to budget-only providers.
 	"max": 128000,
+	// "ultra" is the highest effort level (Codex GPT-6 Astra). We map it to the
+	// same budget as "max" and rely on per-model clamping for budget-only providers.
+	"ultra": 128000,
 }
 
 // ConvertLevelToBudget converts a thinking level to a budget value.
@@ -35,6 +38,7 @@ var levelToBudgetMap = map[string]int{
 //   - high    → 24576
 //   - xhigh   → 32768
 //   - max     → 128000
+//   - ultra   → 128000
 //
 // Returns:
 //   - budget: The converted budget value
