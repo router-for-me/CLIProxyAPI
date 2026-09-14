@@ -69,6 +69,7 @@ type Host struct {
 	activePluginPaths      map[string]string
 	cleanupFilesPending    bool
 	runtimeConfig          *config.Config
+	configPath             string
 	authManager            *coreauth.Manager
 	modelExecutor          modelExecutor
 	modelClientIDs         map[string]struct{}
@@ -125,6 +126,27 @@ func NewForTest(loader pluginLoader) *Host {
 	h := New()
 	h.loader = loader
 	return h
+}
+
+// SetConfigPath tells RPC plugins which host configuration file they may
+// migrate when their lifecycle config contains one-time plaintext values.
+func (h *Host) SetConfigPath(path string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.configPath = strings.TrimSpace(path)
+	h.mu.Unlock()
+}
+
+func (h *Host) configPathValue() string {
+	if h == nil {
+		return ""
+	}
+	h.mu.Lock()
+	path := h.configPath
+	h.mu.Unlock()
+	return path
 }
 
 func (h *Host) SetModelExecutor(executor modelExecutor) {

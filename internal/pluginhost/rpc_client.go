@@ -66,7 +66,13 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
 	}
 	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{
-		ConfigYAML:    bytes.Clone(configYAML),
+		ConfigYAML: bytes.Clone(configYAML),
+		ConfigPath: func() string {
+			if host == nil {
+				return ""
+			}
+			return host.configPathValue()
+		}(),
 		SchemaVersion: pluginabi.SchemaVersion,
 	})
 	if errCall != nil {

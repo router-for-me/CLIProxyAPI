@@ -241,6 +241,9 @@ func (b *Builder) Build() (*Service, error) {
 	if pluginHost == nil {
 		pluginHost = pluginhost.New()
 	}
+	if b.configPath != "" {
+		pluginHost.SetConfigPath(b.configPath)
+	}
 	if b.cfg != nil {
 		pluginHost.ApplyConfig(context.Background(), b.cfg)
 		pluginHost.RegisterFrontendAuthProviders()
