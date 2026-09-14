@@ -111,32 +111,38 @@ func weightedSelectorStateModel(ctx context.Context, availabilityModel string) s
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
-// P2CSelector implements the "power-of-two-choices" strategy. Until the
-// in-flight-aware scheduler selection lands (design G4, Tasks 9-10), its Pick
-// behaves exactly like FillFirstSelector: the first available auth,
-// deterministic, no randomization. The type exists now so the strategy name
-// maps to a dedicated selector instead of a placeholder alias.
+// P2CSelector implements the "power-of-two-choices" strategy. The real
+// in-flight-aware pick lives in the active scheduler (authScheduler's
+// pickReadyAtPriorityLocked) and runs on the scheduler fast path —
+// schedulerStrategy(P2CSelector) maps this type to schedulerStrategyP2C.
+// Pick here is a defensive fallback used only when a plugin scheduler or
+// other slow path bypasses the fast path; in that case it delegates to
+// FillFirstSelector (first available auth, deterministic).
 type P2CSelector struct {
 	FillFirstSelector
 }
 
-// Pick selects the first available auth, delegating to FillFirstSelector
-// until the in-flight-aware p2c pick arrives with the scheduler work.
+// Pick selects the first available auth via the embedded FillFirstSelector.
+// The scheduler fast path owns the real p2c semantics; see P2CSelector.
 func (s *P2CSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	return s.FillFirstSelector.Pick(ctx, provider, model, opts, auths)
 }
 
-// LeastUsedSelector implements the "least-used" strategy. Until the
-// in-flight-aware scheduler selection lands (design G4, Tasks 9-10), its Pick
-// behaves exactly like FillFirstSelector: the first available auth,
-// deterministic, no randomization. The type exists now so the strategy name
-// maps to a dedicated selector instead of a placeholder alias.
+// LeastUsedSelector implements the "least-used" strategy. The real
+// in-flight-aware pick lives in the active scheduler (authScheduler's
+// pickReadyAtPriorityLocked) and runs on the scheduler fast path —
+// schedulerStrategy(LeastUsedSelector) maps this type to
+// schedulerStrategyLeastUsed. Pick here is a defensive fallback used only
+// when a plugin scheduler or other slow path bypasses the fast path; in
+// that case it delegates to FillFirstSelector (first available auth,
+// deterministic).
 type LeastUsedSelector struct {
 	FillFirstSelector
 }
 
-// Pick selects the first available auth, delegating to FillFirstSelector
-// until the in-flight-aware least-used pick arrives with the scheduler work.
+// Pick selects the first available auth via the embedded FillFirstSelector.
+// The scheduler fast path owns the real least-used semantics; see
+// LeastUsedSelector.
 func (s *LeastUsedSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	return s.FillFirstSelector.Pick(ctx, provider, model, opts, auths)
 }
