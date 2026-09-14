@@ -61,6 +61,22 @@ func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Reques
 	return req.WithContext(context.WithValue(req.Context(), "gin", ginCtx))
 }
 
+// pinnedDeviceFingerprintOSArch reports the OS and arch that the pinned device
+// profile applies to unconfirmed clients, derived through the same exported
+// helper the production path uses so the value tracks any config override.
+//
+// Asserting helps.MapStainlessOS() here instead would only hold on a macOS
+// host: for unconfirmed clients ApplyClaudeLegacyDeviceHeaders deliberately
+// writes profile.OS (default "MacOS") rather than the host OS, so that a
+// third-party client cannot leak its own platform into the Claude Code
+// fingerprint. On any non-darwin machine that assertion fails spuriously.
+func pinnedDeviceFingerprintOSArch(t *testing.T, cfg *config.Config) (string, string) {
+	t.Helper()
+	probe := httptest.NewRequest(http.MethodPost, "https://example.com/v1/messages", nil)
+	helps.ApplyClaudeDefaultDeviceProfileHeaders(probe, cfg)
+	return probe.Header.Get("X-Stainless-Os"), probe.Header.Get("X-Stainless-Arch")
+}
+
 func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVersion, runtimeVersion, osName, arch string) {
 	t.Helper()
 
@@ -617,7 +633,8 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 		"X-Stainless-Arch":            []string{"x64"},
 	})
 	applyClaudeHeaders(thirdPartyReq, auth, "key-disable-stability", false, nil, nil, cfg, nil, false)
-	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", "MacOS", "arm64")
+	wantOS, wantArch := pinnedDeviceFingerprintOSArch(t, cfg)
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", wantOS, wantArch)
 
 	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
 		"User-Agent":                  []string{"claude-cli/2.1.61 (external, cli)"},
@@ -659,7 +676,8 @@ func TestApplyClaudeHeaders_LegacyModePreservesConfiguredUserAgentOverrideForCla
 	})
 	applyClaudeHeaders(req, auth, "key-legacy-ua-override", false, nil, nil, cfg, nil, true)
 
-	assertClaudeFingerprint(t, req.Header, "config-ua/1.0", "0.70.0", "v22.0.0", "MacOS", "arm64")
+	wantOS, wantArch := pinnedDeviceFingerprintOSArch(t, cfg)
+	assertClaudeFingerprint(t, req.Header, "config-ua/1.0", "0.70.0", "v22.0.0", wantOS, wantArch)
 }
 
 func TestApplyClaudeHeaders_LegacyThirdPartyUsesStableConfiguredOSArch(t *testing.T) {
@@ -816,7 +834,8 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 
-	assertClaudeFingerprint(t, seenHeaders, "claude-cli/2.1.258 (external, cli)", "0.112.1", "v26.3.0", "MacOS", "arm64")
+	wantOS, wantArch := pinnedDeviceFingerprintOSArch(t, &config.Config{})
+	assertClaudeFingerprint(t, seenHeaders, "claude-cli/2.1.258 (external, cli)", "0.112.1", "v26.3.0", wantOS, wantArch)
 	if got := seenHeaders.Get("X-App"); got != "cli" {
 		t.Fatalf("X-App = %q, want cli", got)
 	}

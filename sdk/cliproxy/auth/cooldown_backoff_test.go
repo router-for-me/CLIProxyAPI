@@ -122,9 +122,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 		t.Fatalf("expected BackoffLevel 1 after first failure, got %d", auth.Quota.BackoffLevel)
 	}
 	firstRecover := auth.Quota.NextRecoverAt
-	if !firstRecover.Equal(now.Add(time.Second)) {
-		t.Fatalf("expected first window to close at %v, got %v", now.Add(time.Second), firstRecover)
-	}
+	assertWithinJitter(t, "first window", firstRecover, now, time.Second)
 
 	// In-window failure keeps the current window and level.
 	applyAuthFailureState(auth, quotaErr, nil, now.Add(100*time.Millisecond), false)
@@ -140,9 +138,7 @@ func TestApplyAuthFailureStateQuotaBackoffOncePerWindow(t *testing.T) {
 	if auth.Quota.BackoffLevel != 2 {
 		t.Fatalf("expected BackoffLevel 2 after post-window failure, got %d", auth.Quota.BackoffLevel)
 	}
-	if !auth.Quota.NextRecoverAt.Equal(now.Add(4 * time.Second)) {
-		t.Fatalf("expected second window to close at %v, got %v", now.Add(4*time.Second), auth.Quota.NextRecoverAt)
-	}
+	assertWithinJitter(t, "second window", auth.Quota.NextRecoverAt, now.Add(2*time.Second), 2*time.Second)
 
 	// A provider supplied retry hint always takes effect, even in-window.
 	retryAfter := 10 * time.Second
@@ -306,5 +302,18 @@ func TestJitteredCooldownWaitBounds(t *testing.T) {
 	}
 	if got := jitteredCooldownWait(3, 0); got != 3 {
 		t.Fatalf("expected sub-4ns wait to stay unchanged, got %v", got)
+	}
+}
+
+// assertWithinJitter checks that got falls inside the +/-20% jitter band that
+// nextQuotaCooldown applies around a nominal backoff duration. Jitter exists so a
+// pool of credentials that exhaust quota together do not all retry in lockstep.
+func assertWithinJitter(t *testing.T, label string, got, base time.Time, nominal time.Duration) {
+	t.Helper()
+	delta := nominal / 5
+	earliest := base.Add(nominal - delta)
+	latest := base.Add(nominal + delta)
+	if got.Before(earliest) || got.After(latest) {
+		t.Fatalf("%s: expected within [%v, %v], got %v", label, earliest, latest, got)
 	}
 }
