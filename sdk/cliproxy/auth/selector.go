@@ -1048,9 +1048,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
 		fallbackKeys = append(fallbackKeys, fallbackKey)
 		// The child writes the parent reference, so its namespace is what the child's parent
-		// header implied, not necessarily the one the parent bound under. These sibling
-		// identities are looked up only after the declared reference misses.
-		for _, alias := range cliproxysession.ParentNamespaceAliases(primaryID, fallbackID) {
+		// header implied, not necessarily the one the parent bound under. This sibling
+		// identity is looked up only after the declared reference misses.
+		if alias := cliproxysession.ParentNamespaceAlias(primaryID, fallbackID); alias != "" {
 			fallbackKeys = append(fallbackKeys, provider+"::"+alias+"::"+modelKey)
 		}
 	}

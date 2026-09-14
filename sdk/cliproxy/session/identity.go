@@ -64,11 +64,17 @@ var knownSessionPrefixes = []string{
 	"pck:", "user:", "execution:", "agy:", "derived:",
 }
 
-// isOpenCodeNamespace reports whether the namespace belongs to the OpenCode client
-// family. X-Session-Affinity and X-Opencode-Session are two headers of the same family,
-// so a parent reference may legitimately be written in either namespace.
-func isOpenCodeNamespace(namespace string) bool {
-	return namespace == "opencode:" || namespace == "affinity:"
+// openCodeSiblingNamespace returns the other namespace of the OpenCode family, or "" for
+// any namespace outside it. X-Session-Affinity and X-Opencode-Session are two headers of
+// the same client family, so a parent reference may legitimately be written in either.
+func openCodeSiblingNamespace(namespace string) string {
+	switch namespace {
+	case "opencode:":
+		return "affinity:"
+	case "affinity:":
+		return "opencode:"
+	}
+	return ""
 }
 
 // sessionNamespace returns the leading registered protocol prefix of id, or "" when the
@@ -82,37 +88,39 @@ func sessionNamespace(id string) string {
 	return ""
 }
 
-// ParentNamespaceAliases returns the extra parent identities a child session should try
-// when its parent reference misses, most often at most one.
+// ParentNamespaceAlias returns the other parent identity a child session should try when
+// its declared parent reference misses, or "" when there is none.
 //
 // A child writes the parent reference itself, so the namespace in it reflects the parent
-// header the child sent, not the namespace the parent actually bound under. A parent that
-// sent both X-Opencode-Session and X-Session-Affinity registers under the OpenCode prefix,
-// while a child naming it through X-Parent-Session-Affinity asks for the affinity prefix,
-// so the exact key lookup misses and the subagent loses its parent's credential binding.
+// header the child sent, not the namespace the parent bound under. X-Session-Affinity and
+// X-Opencode-Session are two headers of one client family, and a parent may have bound
+// under either: a parent that sent both registers under the OpenCode prefix because that
+// signal has the higher extraction priority, while a parent that sent only the legacy
+// header registers under the affinity prefix. A child cannot tell the two apart, so both
+// family members are tried instead of inferring one from the parent header name.
 //
-// Only the two OpenCode namespaces are exchanged here: they describe one client family and
-// are the only pair extraction can disagree on. Trying unrelated namespaces (codex:,
-// header:, slot:, ...) could resolve a parent reference to an unrelated session that
-// merely shares the bare id.
-func ParentNamespaceAliases(primaryID, parentID string) []string {
-	childNamespace := sessionNamespace(primaryID)
+// Only the two OpenCode namespaces are exchanged: they describe one client family and are
+// the only pair extraction can disagree on. Trying unrelated namespaces (codex:, header:,
+// slot:, ...) could resolve a parent reference to an unrelated session that merely shares
+// the bare id.
+func ParentNamespaceAlias(primaryID, parentID string) string {
 	parentNamespace := sessionNamespace(parentID)
-	if childNamespace == "" || parentNamespace == "" || childNamespace == parentNamespace {
-		return nil
+	if openCodeSiblingNamespace(sessionNamespace(primaryID)) == "" {
+		return ""
 	}
-	if !isOpenCodeNamespace(childNamespace) || !isOpenCodeNamespace(parentNamespace) {
-		return nil
+	sibling := openCodeSiblingNamespace(parentNamespace)
+	if sibling == "" {
+		return ""
 	}
 	bare := strings.TrimSpace(strings.TrimPrefix(parentID, parentNamespace))
 	if bare == "" {
-		return nil
+		return ""
 	}
-	alias := childNamespace + bare
+	alias := sibling + bare
 	if alias == parentID {
-		return nil
+		return ""
 	}
-	return []string{alias}
+	return alias
 }
 
 // NormalizeToCanonicalUUID deterministically normalizes any session identifier to a

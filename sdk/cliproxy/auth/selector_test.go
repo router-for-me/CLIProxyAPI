@@ -2759,3 +2759,45 @@ func TestSessionAffinitySelector_OpenCodeParentInheritance(t *testing.T) {
 		t.Fatalf("child did not inherit the parent credential: got %s, want %s", childAuth.ID, parentAuth.ID)
 	}
 }
+
+// The same inheritance must work when the child names its parent through a family-agnostic
+// header: extraction then emits the child's own OpenCode namespace, and only the sibling
+// namespace lookup finds an affinity-bound parent.
+func TestSessionAffinitySelector_OpenCodeGenericParentHeader(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-1"}, {ID: "auth-2"}}
+
+	parentOpts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Affinity": []string{"oc-parent-200"}},
+	}
+	parentAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", parentOpts, auths)
+	if err != nil || parentAuth == nil {
+		t.Fatalf("parent Pick() failed: %v", err)
+	}
+	selector.OnResult(Result{
+		AuthID:   parentAuth.ID,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Success:  true,
+		Options:  parentOpts,
+	})
+
+	childOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Opencode-Session":  []string{"oc-child-201"},
+			"X-Parent-Session-ID": []string{"oc-parent-200"},
+		},
+	}
+	// Reverse candidate order to prove affinity, not order.
+	reverseAuths := []*Auth{{ID: "auth-2"}, {ID: "auth-1"}}
+	childAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", childOpts, reverseAuths)
+	if err != nil || childAuth == nil {
+		t.Fatalf("child Pick() failed: %v", err)
+	}
+	if childAuth.ID != parentAuth.ID {
+		t.Fatalf("child did not inherit the parent credential: got %s, want %s", childAuth.ID, parentAuth.ID)
+	}
+}
