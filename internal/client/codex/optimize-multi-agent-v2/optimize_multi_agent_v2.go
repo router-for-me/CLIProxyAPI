@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	codexclientmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -202,11 +203,13 @@ func isCodexMultiAgentClient(userAgent string) bool {
 }
 
 var (
-	codexCatalogTemplatesMu       sync.RWMutex
-	codexCatalogTemplatesLoaded   bool
-	codexCatalogTemplatesRevision uint64
-	codexCatalogTemplates         map[string]map[string]any
-	codexCatalogDefaultTemplate   map[string]any
+	codexCatalogDefaultSlug         = "gpt-5.5"
+	codexCatalogTemplatesMu         sync.RWMutex
+	codexCatalogTemplatesLoaded     bool
+	codexCatalogTemplatesRevision   uint64
+	codexCatalogTemplatesGeneration uint64
+	codexCatalogTemplates           map[string]map[string]any
+	codexCatalogDefaultTemplate     map[string]any
 
 	codexSpawnAgentCacheMu         sync.RWMutex
 	codexSpawnAgentCacheRevision   uint64
@@ -217,9 +220,12 @@ var (
 
 func loadCodexCatalogTemplates() (map[string]map[string]any, map[string]any, uint64, error) {
 	currentRevision := registry.GetCodexClientModelsRevision()
+	// The served entries depend on the models the registry currently has, so a client
+	// registering or dropping models invalidates this cache just as a catalog change does.
+	currentGeneration := registry.GetGlobalRegistry().GetGeneration()
 
 	codexCatalogTemplatesMu.RLock()
-	if codexCatalogTemplatesLoaded && codexCatalogTemplatesRevision == currentRevision {
+	if codexCatalogTemplatesLoaded && codexCatalogTemplatesRevision == currentRevision && codexCatalogTemplatesGeneration == currentGeneration {
 		templates := codexCatalogTemplates
 		defaultTemplate := codexCatalogDefaultTemplate
 		codexCatalogTemplatesMu.RUnlock()
@@ -229,22 +235,62 @@ func loadCodexCatalogTemplates() (map[string]map[string]any, map[string]any, uin
 
 	codexCatalogTemplatesMu.Lock()
 	defer codexCatalogTemplatesMu.Unlock()
-	if codexCatalogTemplatesLoaded && codexCatalogTemplatesRevision == currentRevision {
+	if codexCatalogTemplatesLoaded && codexCatalogTemplatesRevision == currentRevision && codexCatalogTemplatesGeneration == currentGeneration {
 		return codexCatalogTemplates, codexCatalogDefaultTemplate, currentRevision, nil
 	}
 
-	raw, revision := registry.GetCodexClientModelsSnapshot()
-
-	var catalog codexClientModelsCatalog
-	errUnmarshal := json.Unmarshal(raw, &catalog)
-	if errUnmarshal != nil || len(catalog.Models) == 0 {
-		codexCatalogTemplatesLoaded = true
-		codexCatalogTemplatesRevision = revision
-		codexCatalogTemplates = nil
-		codexCatalogDefaultTemplate = nil
-		return nil, nil, revision, errUnmarshal
+	// The spawn agent list describes the models the server actually serves, so it is
+	// built from the served entries: the catalog templates and the runtime model
+	// metadata are already merged there, and the local override layer has been applied.
+	modelRegistry := registry.GetGlobalRegistry()
+	sets := codexclientmodels.BuildCodexClientModelSets(
+		modelRegistry.GetAvailableModels("openai"),
+		modelRegistry.GetModelProviders,
+		false,
+		"",
+	)
+	revision := registry.GetCodexClientModelsRevision()
+	templates := make(map[string]map[string]any, len(sets.Served))
+	var defaultTemplate map[string]any
+	for _, model := range sets.Served {
+		modelID := mapString(model, "slug")
+		if modelID == "" {
+			continue
+		}
+		templates[modelID] = model
+		if modelID == codexCatalogDefaultSlug {
+			defaultTemplate = model
+		}
+	}
+	if len(templates) == 0 || defaultTemplate == nil {
+		// The default template is the entry the list falls back to for every model the
+		// catalog does not carry, so it comes from the catalog when the server does not
+		// serve a model of that slug.
+		catalogTemplates, catalogDefaultTemplate := codexCatalogTemplatesFromSnapshot()
+		if len(templates) == 0 {
+			templates = catalogTemplates
+		}
+		if defaultTemplate == nil {
+			defaultTemplate = catalogDefaultTemplate
+		}
 	}
 
+	codexCatalogTemplatesLoaded = true
+	codexCatalogTemplatesRevision = revision
+	codexCatalogTemplatesGeneration = currentGeneration
+	codexCatalogTemplates = templates
+	codexCatalogDefaultTemplate = defaultTemplate
+	return templates, defaultTemplate, revision, nil
+}
+
+// codexCatalogTemplatesFromSnapshot reads the base catalog templates without assembling
+// them, which is what the spawn agent list falls back to when no model is served yet.
+func codexCatalogTemplatesFromSnapshot() (map[string]map[string]any, map[string]any) {
+	raw, _ := registry.GetCodexClientModelsSnapshot()
+	var catalog codexClientModelsCatalog
+	if errUnmarshal := json.Unmarshal(raw, &catalog); errUnmarshal != nil || len(catalog.Models) == 0 {
+		return nil, nil
+	}
 	templates := make(map[string]map[string]any, len(catalog.Models))
 	var defaultTemplate map[string]any
 	for _, model := range catalog.Models {
@@ -253,16 +299,11 @@ func loadCodexCatalogTemplates() (map[string]map[string]any, map[string]any, uin
 			continue
 		}
 		templates[modelID] = model
-		if modelID == "gpt-5.5" {
+		if modelID == codexCatalogDefaultSlug {
 			defaultTemplate = model
 		}
 	}
-
-	codexCatalogTemplatesLoaded = true
-	codexCatalogTemplatesRevision = revision
-	codexCatalogTemplates = templates
-	codexCatalogDefaultTemplate = defaultTemplate
-	return templates, defaultTemplate, revision, nil
+	return templates, defaultTemplate
 }
 
 func codexSpawnAgentModelsAndMarkdownForRequest(ctx context.Context, headers http.Header, homeEnabled bool) ([]codexSpawnAgentModel, string) {
