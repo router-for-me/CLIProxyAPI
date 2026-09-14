@@ -28,12 +28,10 @@ import (
 // providers that require a browser-like TLS and HTTP/2 transport. Each request
 // gets a dedicated connection that is closed with the response body.
 type utlsRoundTripper struct {
-	dialer            proxy.Dialer
-	connectionTimeout time.Duration
-	rootCAs           *x509.CertPool
+	dialer  proxy.Dialer
+	rootCAs *x509.CertPool
 }
 
-const utlsConnectionTimeout = 5 * time.Second
 const utlsConnectionAttempts = 3
 
 // A setup failure is safe to retry because no HTTP request has been sent.
@@ -47,7 +45,7 @@ func (e *utlsConnectionError) StatusCode() int { return http.StatusBadGateway }
 func (e *utlsConnectionError) RetryAfter() *time.Duration {
 	// Short enough to fit the credential retry window (max-retry-interval)
 	// instead of cooling a valid credential for the generic upstream-error
-	// period. This applies only to connection setup, never to a live stream.
+	// period. Only connection setup produces this error.
 	delay := 5 * time.Second
 	return &delay
 }
@@ -69,21 +67,17 @@ func retryableUtlsConnectionError(err error) bool {
 	return errors.As(err, &operationErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
+// connectWithRetry adds no deadline of its own: each attempt runs under the
+// caller's request context, exactly like a single createConnection call.
+// Only setup failures that surface as errors (reset, EOF, OS dial timeout)
+// are retried, and nothing has been sent upstream when they occur.
 func (t *utlsRoundTripper) connectWithRetry(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
-	timeout := t.connectionTimeout
-	if timeout <= 0 {
-		timeout = utlsConnectionTimeout
-	}
 	for attempt := 1; attempt <= utlsConnectionAttempts; attempt++ {
 		if errContext := ctx.Err(); errContext != nil {
 			return nil, errContext
 		}
-		// Bound connection acquisition only. Cancellation of this child context
-		// after a successful handshake does not impose an inference/stream timeout.
 		started := time.Now()
-		setupContext, cancel := context.WithTimeout(ctx, timeout)
-		connection, errConnect := t.createConnection(setupContext, host, addr)
-		cancel()
+		connection, errConnect := t.createConnection(ctx, host, addr)
 		if errConnect == nil {
 			return connection, nil
 		}

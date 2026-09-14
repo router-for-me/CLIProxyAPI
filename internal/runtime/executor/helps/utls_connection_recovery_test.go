@@ -26,8 +26,8 @@ func recoveryTestServer(t *testing.T, handler http.Handler) (*httptest.Server, *
 }
 
 func TestUtlsRetriesFailedHandshakeBeforeSendingBody(t *testing.T) {
-	for _, stall := range []bool{false, true} {
-		t.Run(map[bool]string{false: "connection reset", true: "handshake timeout"}[stall], func(t *testing.T) {
+	for _, dialTimeout := range []bool{false, true} {
+		t.Run(map[bool]string{false: "connection reset", true: "dial timeout"}[dialTimeout], func(t *testing.T) {
 			var requests atomic.Int32
 			server, roots := recoveryTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
@@ -38,17 +38,17 @@ func TestUtlsRetriesFailedHandshakeBeforeSendingBody(t *testing.T) {
 				_, _ = w.Write([]byte("ok"))
 			}))
 			var dials atomic.Int32
-			transport := &utlsRoundTripper{rootCAs: roots, connectionTimeout: 100 * time.Millisecond}
+			transport := &utlsRoundTripper{rootCAs: roots}
 			transport.dialer = contextDialerFunc(func(ctx context.Context, network, addr string) (net.Conn, error) {
 				if dials.Add(1) == 1 {
+					if dialTimeout {
+						// What the OS reports when a SYN goes unanswered.
+						return nil, &net.OpError{Op: "dial", Net: "tcp", Err: timeoutError{}}
+					}
 					client, remote := net.Pipe()
 					go func() {
 						defer func() { _ = remote.Close() }()
-						if stall {
-							_, _ = io.Copy(io.Discard, remote)
-						} else {
-							_, _ = remote.Read(make([]byte, 4096))
-						}
+						_, _ = remote.Read(make([]byte, 4096))
 					}()
 					return client, nil
 				}
@@ -122,31 +122,45 @@ func TestUtlsConnectionRetriesAreBoundedAndClassified(t *testing.T) {
 	}
 }
 
-func TestUtlsSetupTimeoutDoesNotLimitResponseLifetime(t *testing.T) {
-	// Keep the response alive beyond the setup context without wall-clock sleeps.
-	release := make(chan struct{})
+func TestUtlsConnectionSetupUsesRequestContextWithoutOwnDeadline(t *testing.T) {
 	server, roots := recoveryTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		w.(http.Flusher).Flush()
-		<-release
-		_, _ = w.Write([]byte("still streaming"))
+		_, _ = w.Write([]byte("ok"))
 	}))
-	setupCanceled := make(chan struct{})
 	transport := &utlsRoundTripper{rootCAs: roots, dialer: contextDialerFunc(func(ctx context.Context, network, addr string) (net.Conn, error) {
-		go func() { <-ctx.Done(); close(setupCanceled) }()
+		if _, hasDeadline := ctx.Deadline(); hasDeadline {
+			t.Error("connection setup must not add a deadline to the request context")
+		}
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	})}
 	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
 	resp, errRoundTrip := transport.RoundTrip(req)
 	if errRoundTrip != nil {
-		close(release)
 		t.Fatal(errRoundTrip)
 	}
-	<-setupCanceled
-	close(release)
 	body, errRead := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if errRead != nil || string(body) != "still streaming" {
+	if errRead != nil || string(body) != "ok" {
 		t.Fatalf("body=%q error=%v", body, errRead)
 	}
 }
+
+func TestUtlsCallerCancellationStopsRetries(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	var dials atomic.Int32
+	transport := &utlsRoundTripper{dialer: contextDialerFunc(func(context.Context, string, string) (net.Conn, error) {
+		dials.Add(1)
+		cancel()
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: io.EOF}
+	})}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://chatgpt.com", nil)
+	_, errRoundTrip := transport.RoundTrip(req)
+	if !errors.Is(errRoundTrip, context.Canceled) || dials.Load() != 1 {
+		t.Fatalf("error=%v dials=%d", errRoundTrip, dials.Load())
+	}
+}
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
