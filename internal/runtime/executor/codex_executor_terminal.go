@@ -429,8 +429,8 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 			continue
 		}
 		if resetsAt := quota.Get("resets_at").Int(); resetsAt > 0 {
-			resetAtTime := time.Unix(resetsAt, 0)
-			if resetAtTime.After(now) {
+			resetAtTime := helps.UnixSecondsOrMilli(resetsAt)
+			if resetAtTime.Year() <= 2100 && resetAtTime.After(now) {
 				retryAfter := resetAtTime.Sub(now)
 				return &retryAfter
 			}
