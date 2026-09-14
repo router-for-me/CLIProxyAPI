@@ -50,6 +50,15 @@ func TestComputeOpenAICompatModelsHashIncludesModalities(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHashIncludesCompletionTokenParameter(t *testing.T) {
+	models := []config.OpenAICompatibilityModel{{Name: "reasoning-model", Alias: "claude-client"}}
+	before := ComputeOpenAICompatModelsHash(models)
+	models[0].UseMaxCompletionTokens = true
+	if before == ComputeOpenAICompatModelsHash(models) {
+		t.Fatal("changing the token parameter setting must trigger a model configuration update")
+	}
+}
+
 func TestComputeOpenAICompatModelsHashPreservesRoutingOrderAndDuplicates(t *testing.T) {
 	a := []config.OpenAICompatibilityModel{
 		{Name: "gpt-4", Alias: "gpt4"},
