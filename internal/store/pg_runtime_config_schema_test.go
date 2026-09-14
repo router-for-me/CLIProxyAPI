@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -423,20 +424,23 @@ func TestConfigImportsRoundTrip(t *testing.T) {
 
 	// Each status row carries a unique counter payload so a mistaken column
 	// shape (e.g. JSONB -> text) would surface during the read-back scan
-	// rather than at a downstream consumer.
+	// rather than at a downstream consumer. revision is a nullable
+	// BIGINT in the schema: dry_run and rejected attempts are not tied to
+	// a runtime_config row and must therefore insert NULL, not 0, so the
+	// documented nullability contract is exercised end-to-end.
 	rows := []struct {
 		status   string
-		revision int64
+		revision sql.NullInt64
 		counts   string
 		actor    string
 		mode     string
 		source   string
 		checksum string
 	}{
-		{"dry_run", 0, `{"providers":0,"keys":0}`, "tester-dry", "import-config", "config.example.yaml", "sha256:dry"},
-		{"committed", 1, `{"providers":2,"keys":3}`, "tester-commit", "import-config", "config.example.yaml", "sha256:commit"},
-		{"rejected", 0, `{"providers":1,"keys":0}`, "tester-rej", "import-config", "config.example.yaml", "sha256:rej"},
-		{"replaced", 2, `{"providers":3,"keys":4}`, "tester-rep", "import-config", "config.replaced.yaml", "sha256:rep"},
+		{"dry_run", sql.NullInt64{}, `{"providers":0,"keys":0}`, "tester-dry", "import-config", "config.example.yaml", "sha256:dry"},
+		{"committed", sql.NullInt64{Int64: 1, Valid: true}, `{"providers":2,"keys":3}`, "tester-commit", "import-config", "config.example.yaml", "sha256:commit"},
+		{"rejected", sql.NullInt64{}, `{"providers":1,"keys":0}`, "tester-rej", "import-config", "config.example.yaml", "sha256:rej"},
+		{"replaced", sql.NullInt64{Int64: 2, Valid: true}, `{"providers":3,"keys":4}`, "tester-rep", "import-config", "config.replaced.yaml", "sha256:rep"},
 	}
 
 	for _, r := range rows {
@@ -455,15 +459,17 @@ func TestConfigImportsRoundTrip(t *testing.T) {
 	// round-trip is genuinely exercised end-to-end. Comparison is
 	// JSON-decode aware because Postgres normalises JSONB whitespace and
 	// may reorder keys; the contract we are pinning here is structural
-	// equivalence, not byte-identity.
+	// equivalence, not byte-identity. revision is scanned into a
+	// sql.NullInt64 so the documented NULL contract for dry_run / rejected
+	// is exercised end-to-end instead of being silently coalesced to 0.
 	for _, r := range rows {
 		var (
 			gotStatus   string
 			gotCounts   string
-			gotRevision int64
+			gotRevision sql.NullInt64
 		)
 		if err := pg.DB().QueryRowContext(ctx,
-			`SELECT status, resource_counts::text, COALESCE(revision, 0) FROM `+pg.ConfigImportsTable()+
+			`SELECT status, resource_counts::text, revision FROM `+pg.ConfigImportsTable()+
 				` WHERE source_checksum = $1`,
 			r.checksum,
 		).Scan(&gotStatus, &gotCounts, &gotRevision); err != nil {
@@ -472,8 +478,12 @@ func TestConfigImportsRoundTrip(t *testing.T) {
 		if gotStatus != r.status {
 			t.Fatalf("status for %s = %q, want %q", r.checksum, gotStatus, r.status)
 		}
-		if gotRevision != r.revision {
-			t.Fatalf("revision for %s = %d, want %d", r.checksum, gotRevision, r.revision)
+		if gotRevision.Valid != r.revision.Valid {
+			t.Fatalf("revision.Valid for %s = %v, want %v (status=%s)",
+				r.checksum, gotRevision.Valid, r.revision.Valid, r.status)
+		}
+		if gotRevision.Valid && gotRevision.Int64 != r.revision.Int64 {
+			t.Fatalf("revision for %s = %d, want %d", r.checksum, gotRevision.Int64, r.revision.Int64)
 		}
 		var wantCounts, gotCountsJSON any
 		if err := json.Unmarshal([]byte(r.counts), &wantCounts); err != nil {
