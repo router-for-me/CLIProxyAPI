@@ -2,6 +2,7 @@ package claude
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +14,40 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
+
+type claudeFailingRequestBody struct{}
+
+func (claudeFailingRequestBody) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (claudeFailingRequestBody) Close() error { return nil }
+
+func TestClaudeRequestReadErrorsUseClaudeEnvelope(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	for name, handle := range map[string]func(*gin.Context){
+		"messages":     handler.ClaudeMessages,
+		"count tokens": handler.ClaudeCountTokens,
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			c.Request.Body = claudeFailingRequestBody{}
+			handle(c)
+			body := recorder.Body.Bytes()
+			if id := recorder.Result().Header.Get("Request-Id"); id == "" || gjson.GetBytes(body, "request_id").String() != id {
+				t.Errorf("inconsistent request ID: headers=%v body=%s", recorder.Result().Header, body)
+			}
+			if recorder.Code != http.StatusBadRequest || gjson.GetBytes(body, "type").String() != "error" || gjson.GetBytes(body, "error.type").String() != "invalid_request_error" {
+				t.Fatalf("expected Anthropic request error, got %d %s", recorder.Code, body)
+			}
+			if got := gjson.GetBytes(body, "error.message").String(); got != "Invalid request: unexpected EOF" {
+				t.Errorf("error.message = %q", got)
+			}
+		})
+	}
+}
 
 func TestClaudeErrorExtractsOpenAIStyleUpstreamJSON(t *testing.T) {
 	handler := &ClaudeCodeAPIHandler{}
@@ -67,6 +102,9 @@ func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 	body := recorder.Body.Bytes()
+	if id := recorder.Result().Header.Get("Request-Id"); id == "" || gjson.GetBytes(body, "request_id").String() != id {
+		t.Errorf("inconsistent request ID: headers=%v body=%s", recorder.Result().Header, body)
+	}
 	if got := gjson.GetBytes(body, "type").String(); got != "error" {
 		t.Fatalf("type = %q, want error; body=%s", got, body)
 	}
