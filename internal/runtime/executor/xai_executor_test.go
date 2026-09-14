@@ -347,7 +347,7 @@ func TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessage(t *testing.
 			"internal_chat_message_metadata_passthrough":{"turn_id":"019f92c3-6772-7213-8aac-8bd154d528f1"}
 		}]
 	}`)
-	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model:   "grok-4.5",
 		Payload: payload,
 	}, cliproxyexecutor.Options{
@@ -942,7 +942,7 @@ func TestXAIExecutorPrepareHonorsInjectXSearchConfig(t *testing.T) {
 			t.Parallel()
 
 			exec := NewXAIExecutor(tt.cfg)
-			prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+			prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 				Model: "grok-4.5",
 				Payload: []byte(`{
 					"model":"grok-4.5",
@@ -1075,7 +1075,7 @@ func TestXAIExecutorPrepareNormalizesClaudeWebSearchToolChoice(t *testing.T) {
 	t.Parallel()
 
 	exec := NewXAIExecutor(&config.Config{})
-	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model: "grok-4.5",
 		Payload: []byte(`{
 			"model":"grok-4.5",
@@ -1260,7 +1260,7 @@ func TestXAIExecutorPrepareKeepsNativeImageGenerationForGrok46(t *testing.T) {
 	t.Parallel()
 
 	exec := NewXAIExecutor(&config.Config{})
-	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, err := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model: "grok-4.6",
 		Payload: []byte(`{
 			"model":"grok-4.6",
@@ -1296,7 +1296,7 @@ func TestXAIExecutorPrepareRewritesImageGenerationAllowedToolsToRequired(t *test
 	t.Parallel()
 
 	exec := NewXAIExecutor(&config.Config{})
-	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, err := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model: "grok-4.6",
 		Payload: []byte(`{
 			"model":"grok-4.6",
@@ -1329,7 +1329,7 @@ func TestXAIExecutorPrepareForcedImageGenerationDropsOtherToolsAndSkipsXSearchIn
 	t.Parallel()
 
 	exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{InjectXSearch: true}})
-	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, err := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model: "grok-4.6",
 		Payload: []byte(`{
 			"model":"grok-4.6",
@@ -1362,7 +1362,7 @@ func TestXAIExecutorPrepareRewritesImageOnlyAllowedToolsAutoToAuto(t *testing.T)
 	t.Parallel()
 
 	exec := NewXAIExecutor(&config.Config{})
-	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, err := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model: "grok-4.6",
 		Payload: []byte(`{
 			"model":"grok-4.6",
@@ -1388,7 +1388,7 @@ func TestXAIExecutorPrepareStripsImageGenerationFromMixedAllowedTools(t *testing
 	t.Parallel()
 
 	exec := NewXAIExecutor(&config.Config{})
-	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, err := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model: "grok-4.6",
 		Payload: []byte(`{
 			"model":"grok-4.6",
@@ -1429,7 +1429,7 @@ func TestXAIExecutorPrepareDropsOrphanedToolChoiceBeforeXSearchInject(t *testing
 	t.Parallel()
 
 	exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{InjectXSearch: true}})
-	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, err := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model: "grok-4.5",
 		// image_generation is stripped by normalizeXAITools; without pruning, the
 		// forced choice would survive next to the injected x_search tool.
@@ -1537,7 +1537,7 @@ func TestXAIExecutorPrepareResponsesRequestPreservesSupportedOutputControls(t *t
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+			prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 				Model:   "grok-4.5",
 				Payload: tt.payload,
 			}, cliproxyexecutor.Options{
@@ -1575,7 +1575,7 @@ func TestXAIExecutorPrepareResponsesRequestDropsPayloadStopOverride(t *testing.T
 			},
 		},
 	})
-	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model:   "grok-4.5",
 		Payload: []byte(`{"model":"grok-4.5","input":"hello"}`),
 	}, cliproxyexecutor.Options{
@@ -1648,7 +1648,7 @@ func TestXAIExecutorPrepareResponsesRequestAddsObjectTypeToRootUnionBranches(t *
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+			prepared, err := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 				Model:   "grok-4.5",
 				Payload: tt.payload,
 			}, cliproxyexecutor.Options{
@@ -1699,7 +1699,7 @@ func TestXAIExecutorPrepareAllowedToolsSyncsInjectedXSearch(t *testing.T) {
 	t.Parallel()
 
 	exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{InjectXSearch: true}})
-	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, err := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model: "grok-4.5",
 		// Only image_generation remains after client filtering of tool_search-like
 		// tools is not relevant here: normalizeXAITools drops image_generation and
@@ -2344,7 +2344,7 @@ func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+			prepared, err := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 				Model:   tt.model,
 				Payload: tt.payload,
 			}, cliproxyexecutor.Options{
@@ -2663,7 +2663,7 @@ func TestXAIExecutorCompactClearsReplayBeforePostCompactTurn(t *testing.T) {
 
 	postCompactPayload := []byte(`{"model":"grok-4.3","prompt_cache_key":"compact-session","input":[{"type":"compaction","encrypted_content":""},{"type":"message","role":"user","content":[{"type":"input_text","text":"after compact"}]}]}`)
 	postCompactPayload, _ = sjson.SetBytes(postCompactPayload, "input.0.encrypted_content", compactEncryptedContent)
-	prepared, errPrepare := exec.prepareResponsesRequest(ctx, cliproxyexecutor.Request{
+	prepared, errPrepare := exec.prepareResponsesRequest(ctx, nil, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
 		Payload: postCompactPayload,
 	}, cliproxyexecutor.Options{
@@ -3873,7 +3873,7 @@ func TestXAIExecutorPrepareResponsesRequest_SimplifiesMCPCodexAppAutomationUpdat
 		}]
 	}`)
 
-	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), nil, cliproxyexecutor.Request{
 		Model:   "grok-4.6",
 		Payload: payload,
 	}, cliproxyexecutor.Options{
@@ -4379,7 +4379,7 @@ func TestPrepareResponsesRequest_CapsAt200WithInjectXSearch(t *testing.T) {
 	exec := NewXAIExecutor(&config.Config{
 		XAI: config.XAIConfig{InjectXSearch: true},
 	})
-	prepared, err := exec.prepareResponsesRequestTo(context.Background(), cliproxyexecutor.Request{
+	prepared, err := exec.prepareResponsesRequestTo(context.Background(), nil, cliproxyexecutor.Request{
 		Model:   "grok-4.6",
 		Payload: payload,
 	}, cliproxyexecutor.Options{
@@ -4854,11 +4854,11 @@ func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "grok-composer-2.5-fast", Payload: payload}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true}
 
-	first, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	first, err := exec.prepareResponsesRequest(context.Background(), nil, req, opts, true)
 	if err != nil {
 		t.Fatalf("prepareResponsesRequest first error: %v", err)
 	}
-	second, err := exec.prepareResponsesRequest(context.Background(), req, opts, true)
+	second, err := exec.prepareResponsesRequest(context.Background(), nil, req, opts, true)
 	if err != nil {
 		t.Fatalf("prepareResponsesRequest second error: %v", err)
 	}
