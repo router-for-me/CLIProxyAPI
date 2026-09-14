@@ -46,6 +46,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
+	} else if foldMidSystemMessageEnabled(e.cfg, auth) {
+		if folded, applied := foldMidSystemMessagesIntoUserTurns(body); applied {
+			body = folded
+		}
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))
 	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
@@ -152,6 +156,10 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
+	} else if foldMidSystemMessageEnabled(e.cfg, auth) {
+		if folded, applied := foldMidSystemMessagesIntoUserTurns(body); applied {
+			body = folded
+		}
 	}
 
 	directAnthropic := isAnthropicUpstreamBase(baseURL)
