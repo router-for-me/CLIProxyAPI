@@ -101,15 +101,9 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 		return NewDirectTransport(), setting.Mode, nil
 	case ModeProxy:
 		if setting.URL.Scheme == "socks5" || setting.URL.Scheme == "socks5h" {
-			var proxyAuth *proxy.Auth
-			if setting.URL.User != nil {
-				username := setting.URL.User.Username()
-				password, _ := setting.URL.User.Password()
-				proxyAuth = &proxy.Auth{User: username, Password: password}
-			}
-			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, proxy.Direct)
+			dialer, errSOCKS5 := socks5DialerFromURL(setting.URL)
 			if errSOCKS5 != nil {
-				return nil, setting.Mode, fmt.Errorf("create SOCKS5 dialer failed: %w", errSOCKS5)
+				return nil, setting.Mode, errSOCKS5
 			}
 			transport := cloneDefaultTransport()
 			transport.Proxy = nil
@@ -130,6 +124,20 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	default:
 		return nil, setting.Mode, nil
 	}
+}
+
+func socks5DialerFromURL(proxyURL *url.URL) (proxy.Dialer, error) {
+	var proxyAuth *proxy.Auth
+	if proxyURL.User != nil {
+		username := proxyURL.User.Username()
+		password, _ := proxyURL.User.Password()
+		proxyAuth = &proxy.Auth{User: username, Password: password}
+	}
+	dialer, errSOCKS5 := proxy.SOCKS5("tcp", proxyURL.Host, proxyAuth, proxy.Direct)
+	if errSOCKS5 != nil {
+		return nil, fmt.Errorf("create SOCKS5 dialer failed: %w", errSOCKS5)
+	}
+	return dialer, nil
 }
 
 func buildHTTPSProxyDialTLSContext(
@@ -199,9 +207,11 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 		if setting.URL.Scheme == "http" || setting.URL.Scheme == "https" {
 			return &httpConnectDialer{proxyURL: setting.URL, dialer: proxy.Direct}, setting.Mode, nil
 		}
-		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
-		if errDialer != nil {
-			return nil, setting.Mode, fmt.Errorf("create proxy dialer failed: %w", errDialer)
+		// socks5 and socks5h: use SOCKS5 helper (remote DNS). golang.org/x/net/proxy
+		// FromURL rejects scheme socks5h, which would make utls fall back to Direct.
+		dialer, errSOCKS5 := socks5DialerFromURL(setting.URL)
+		if errSOCKS5 != nil {
+			return nil, setting.Mode, errSOCKS5
 		}
 		return dialer, setting.Mode, nil
 	default:
