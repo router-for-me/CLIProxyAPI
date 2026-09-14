@@ -74,6 +74,12 @@ const (
 	// auths/ mirror for the embedded core bridge. One row, id = 1; CHECK
 	// constraint enforces the singleton.
 	defaultRuntimeConfigTable = "runtime_config"
+	// ConfigRevisionsTable is the PG-first control-plane append-only history
+	// table for the runtime_config singleton: one row per accepted change,
+	// keyed by a monotonic BIGINT revision. Stores the settings/resource_snapshot
+	// JSONB blobs, the checksum, and the audit metadata (created_at, created_by,
+	// reason). Writers append; nothing updates or deletes existing rows.
+	defaultConfigRevisionsTable = "config_revisions"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -252,6 +258,13 @@ type PostgresStoreConfig struct {
 	// core bridge. No row is seeded; callers initialize the singleton on
 	// first write.
 	RuntimeConfigTable string
+	// ConfigRevisionsTable stores the append-only history of every accepted
+	// runtime_config change (Phase 1 Task 2): one row per revision with the
+	// settings/resource_snapshot JSONB blobs, the checksum, and the audit
+	// metadata (created_at, created_by, reason). Keyed by a monotonic
+	// BIGINT revision so the history is replayable in order. No row is
+	// seeded; writers append on every accepted change.
+	ConfigRevisionsTable string
 
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
@@ -398,6 +411,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if cfg.RuntimeConfigTable == "" {
 		cfg.RuntimeConfigTable = defaultRuntimeConfigTable
 	}
+	if cfg.ConfigRevisionsTable == "" {
+		cfg.ConfigRevisionsTable = defaultConfigRevisionsTable
+	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
 	if spoolRoot == "" {
@@ -531,9 +547,13 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 }
 
 // ensureRuntimeConfigSchema creates the PG-first control-plane singleton
-// runtime_config table. The CHECK id = 1 constraint guarantees only one
-// canonical row; callers (subsequent tasks) seed the singleton on first write.
-// No row is seeded here so this task stays purely a schema-availability step.
+// runtime_config table and its append-only history table
+// config_revisions. The CHECK id = 1 constraint on runtime_config guarantees
+// only one canonical row; callers (subsequent tasks) seed the singleton on
+// first write. config_revisions is keyed by a monotonic BIGINT revision so
+// writers append one row per accepted change and the history stays replayable
+// in revision order. No row is seeded in either table here so this step stays
+// purely a schema-availability step.
 func (s *PostgresStore) ensureRuntimeConfigSchema(ctx context.Context) error {
 	runtimeConfigTable := s.fullTableName(s.cfg.RuntimeConfigTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
@@ -549,6 +569,40 @@ func (s *PostgresStore) ensureRuntimeConfigSchema(ctx context.Context) error {
 		)
 	`, runtimeConfigTable)); err != nil {
 		return fmt.Errorf("postgres store: create runtime_config table: %w", err)
+	}
+
+	// config_revisions is the append-only history of every accepted
+	// runtime_config change. Keyed by a monotonic BIGINT revision; the
+	// settings/resource_snapshot JSONB blobs capture the full pre-write state,
+	// checksum is the integrity handle, and reason + created_by carry the
+	// audit provenance. created_by is nullable because some writers (e.g. the
+	// boot-time loader) have no associated operator. No DEFAULT on revision
+	// so every insert is forced to pick a value explicitly — the writer is
+	// responsible for monotonically advancing it.
+	configRevisionsTable := s.fullTableName(s.cfg.ConfigRevisionsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			revision          BIGINT PRIMARY KEY,
+			settings          JSONB NOT NULL,
+			resource_snapshot JSONB NOT NULL,
+			checksum          TEXT NOT NULL,
+			created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			created_by        TEXT,
+			reason            TEXT NOT NULL
+		)
+	`, configRevisionsTable)); err != nil {
+		return fmt.Errorf("postgres store: create config_revisions table: %w", err)
+	}
+	// Idempotent DESC index over created_at to make history reads (latest
+	// first, paging by time) cheap as the table grows. The PRIMARY KEY on
+	// revision already supports revision-ordered scans; this index serves
+	// the secondary created_at-ordered access path the dashboard timeline
+	// view uses.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_config_revisions_created_at ON %s(created_at DESC)`,
+		configRevisionsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create config_revisions created_at index: %w", err)
 	}
 	return nil
 }
@@ -2225,6 +2279,15 @@ func (s *PostgresStore) RuntimeConfigTable() string {
 		return quoteIdentifier(defaultRuntimeConfigTable)
 	}
 	return s.fullTableName(s.cfg.RuntimeConfigTable)
+}
+
+// ConfigRevisionsTable returns the fully-qualified name of the PG-first
+// control-plane append-only history table for runtime_config revisions.
+func (s *PostgresStore) ConfigRevisionsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultConfigRevisionsTable)
+	}
+	return s.fullTableName(s.cfg.ConfigRevisionsTable)
 }
 
 // CooldownTable returns the fully-qualified name of the runtime cooldown state table.
