@@ -9,10 +9,10 @@ import (
 
 const openCodeSessionHeader = "x-opencode-session"
 
-// isOpenCodeGoUpstream reports whether the target is the OpenCode (Go/Zen) gateway.
+// isOpenCodeUpstream reports whether the target is an OpenCode gateway.
 // The provider name covers self-hosted mirrors of the endpoint, the host covers
 // entries configured under a different name.
-func isOpenCodeGoUpstream(targetURL, provider string) bool {
+func isOpenCodeUpstream(targetURL, provider string) bool {
 	if parsed, errParse := url.Parse(strings.TrimSpace(targetURL)); errParse == nil {
 		// Exact host or a subdomain: a bare suffix would also match lookalikes
 		// such as evilopencode.ai, matching IsAnthropicUpstreamURL's exact-host policy.
@@ -38,7 +38,7 @@ func isOpenCodeGoUpstream(targetURL, provider string) bool {
 // A header already present (operator-configured) wins, and other upstreams are left
 // untouched so session identifiers do not leak to them.
 func ApplyOpenCodeSessionHeaders(r *http.Request, targetURL, provider string, incoming http.Header, sessionID string) {
-	if r == nil || !isOpenCodeGoUpstream(targetURL, provider) || r.Header.Get(openCodeSessionHeader) != "" {
+	if r == nil || !isOpenCodeUpstream(targetURL, provider) || r.Header.Get(openCodeSessionHeader) != "" {
 		return
 	}
 	// Strip the routing prefix (affinity:, opencode:, claude:, ...) so the upstream
