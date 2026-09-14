@@ -403,6 +403,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			var event bytes.Buffer
 			var upstreamMessageID string
 			upstreamCompleted := false
+			streamTerminal := false
 			flushEvent := func() bool {
 				if event.Len() == 0 {
 					return true
@@ -418,7 +419,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			for scanner.Scan() {
 				line := scanner.Bytes()
-				observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
+				if observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted) {
+					streamTerminal = true
+				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				streamUsage.ObserveClaudeStream(line)
 				restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
@@ -429,9 +432,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				line = e.restoreResponseModel(restoredLine, req.Model)
 				event.Write(line)
 				event.WriteByte('\n')
-				if len(bytes.TrimSpace(line)) == 0 && !flushEvent() {
+				if len(bytes.TrimSpace(line)) != 0 {
+					continue
+				}
+				if !flushEvent() {
 					emitCancellation(ctx.Err())
 					return
+				}
+				if streamTerminal {
+					break
 				}
 			}
 			if !flushEvent() {
@@ -465,7 +474,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		upstreamCompleted := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
+			terminal := observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			streamUsage.ObserveClaudeStream(line)
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
@@ -496,6 +505,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					emitCancellation(ctx.Err())
 					return
 				}
+			}
+			if terminal {
+				break
 			}
 		}
 		if emitCancellation(scanner.Err()) {
