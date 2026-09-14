@@ -10,12 +10,40 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 type stubCompatExecutor struct {
 	id           string
 	executeCalls int
 	refreshCalls int
+}
+
+type legacyFormatCompatExecutor struct{ stubCompatExecutor }
+
+func (*legacyFormatCompatExecutor) RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format {
+	return sdktranslator.FormatClaude
+}
+
+func TestPluginRefreshCompatExecutorPreservesLegacyFormatResolver(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		inner coreauth.ProviderExecutor
+		want  sdktranslator.Format
+	}{
+		{name: "legacy resolver", inner: &legacyFormatCompatExecutor{}, want: sdktranslator.FormatClaude},
+		{name: "provider fallback", inner: &stubCompatExecutor{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapped := NewPluginRefreshCompatExecutor(tt.inner, nil, nil)
+			resolver := wrapped.(interface {
+				RequestToFormatWithAuth(*coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format
+			})
+			if got := resolver.RequestToFormatWithAuth(nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); got != tt.want {
+				t.Fatalf("format = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func (e *stubCompatExecutor) Identifier() string { return e.id }
