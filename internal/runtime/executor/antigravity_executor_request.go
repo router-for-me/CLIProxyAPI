@@ -31,7 +31,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	base := strings.TrimSuffix(baseURL, "/")
 	if base == "" {
-		base = buildBaseURL(auth)
+		base = resolveAntigravityRequestBaseURL(auth)
 	}
 	path := antigravityGeneratePath
 	if stream {
@@ -383,9 +383,12 @@ func antigravityRequestNeedsSchemaSanitization(payload []byte) bool {
 	}
 	return false
 }
-func buildBaseURL(auth *cliproxyauth.Auth) string {
-	if baseURLs := antigravityBaseURLFallbackOrder(auth); len(baseURLs) > 0 {
-		return baseURLs[0]
+
+// resolveAntigravityRequestBaseURL selects one request endpoint without cross-tier fallback.
+// Consumer credentials default to daily; enterprise/GCP credentials can set base_url explicitly.
+func resolveAntigravityRequestBaseURL(auth *cliproxyauth.Auth) string {
+	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
+		return base
 	}
 	return antigravityBaseURLDaily
 }
@@ -431,17 +434,6 @@ func antigravityConfiguredUserAgent(auth *cliproxyauth.Auth) string {
 		}
 	}
 	return raw
-}
-
-var antigravityBaseURLFallbackOrder = func(auth *cliproxyauth.Auth) []string {
-	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
-		return []string{base}
-	}
-	return []string{
-		antigravityBaseURLDaily,
-		antigravityBaseURLProd,
-		// antigravitySandboxBaseURLDaily,
-	}
 }
 
 func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {

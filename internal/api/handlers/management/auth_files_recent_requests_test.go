@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -24,6 +25,22 @@ func TestListAuthFiles_IncludesRecentRequestsBuckets(t *testing.T) {
 		},
 		Metadata: map[string]any{
 			"type": "codex",
+		},
+		Quota: coreauth.QuotaState{
+			ObservedAt: time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC),
+			Signals: map[string]string{
+				"X-Codex-Primary-Used-Percent": "58",
+			},
+		},
+		ModelStates: map[string]*coreauth.ModelState{
+			"gpt-5": {
+				Quota: coreauth.QuotaState{
+					ObservedAt: time.Date(2026, 8, 22, 0, 1, 0, 0, time.UTC),
+					Signals: map[string]string{
+						"Retry-After": "120",
+					},
+				},
+			},
 		},
 	}
 	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
@@ -66,6 +83,31 @@ func TestListAuthFiles_IncludesRecentRequestsBuckets(t *testing.T) {
 	}
 	if _, ok := fileEntry["failed"].(float64); !ok {
 		t.Fatalf("expected failed number, got %#v", fileEntry["failed"])
+	}
+
+	quota, ok := fileEntry["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected quota observation object, got %#v", fileEntry["quota"])
+	}
+	if _, ok := quota["observed_at"].(string); !ok {
+		t.Fatalf("expected quota observed_at string, got %#v", quota["observed_at"])
+	}
+	quotaSignals, ok := quota["signals"].(map[string]any)
+	if !ok || quotaSignals["X-Codex-Primary-Used-Percent"] != "58" {
+		t.Fatalf("expected auth quota signals, got %#v", quota["signals"])
+	}
+
+	modelQuotas, ok := fileEntry["model_quotas"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected model_quotas object, got %#v", fileEntry["model_quotas"])
+	}
+	modelQuota, ok := modelQuotas["gpt-5"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected gpt-5 quota observation, got %#v", modelQuotas["gpt-5"])
+	}
+	modelSignals, ok := modelQuota["signals"].(map[string]any)
+	if !ok || modelSignals["Retry-After"] != "120" {
+		t.Fatalf("expected model quota signals, got %#v", modelQuota["signals"])
 	}
 
 	recentRaw, ok := fileEntry["recent_requests"].([]any)

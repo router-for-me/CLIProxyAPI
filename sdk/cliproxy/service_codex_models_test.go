@@ -29,7 +29,7 @@ func TestRegisterModelsForAuthCodexAPIKeyModels(t *testing.T) {
 			name:        "defaults without explicit models",
 			entry:       config.CodexKey{APIKey: "default-key"},
 			wantIDs:     codexModelIDSet(defaultModels),
-			wantPresent: []string{"gpt-image-1.5", "gpt-image-2"},
+			wantPresent: []string{"gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5"},
 		},
 		{
 			name: "only explicitly configured models",
@@ -40,7 +40,7 @@ func TestRegisterModelsForAuthCodexAPIKeyModels(t *testing.T) {
 				}},
 			},
 			wantIDs:    map[string]struct{}{"configured-codex": {}},
-			wantAbsent: []string{"gpt-image-1.5", "gpt-image-2"},
+			wantAbsent: []string{"gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5"},
 		},
 		{
 			name: "exclusions apply to defaults",
@@ -245,7 +245,7 @@ func TestRegisterConfigAPIKeyAuthsCodexModelModes(t *testing.T) {
 					t.Errorf("missing registered model %q", modelID)
 				}
 			}
-			for _, modelID := range []string{"gpt-image-1.5", "gpt-image-2"} {
+			for _, modelID := range []string{"gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5"} {
 				_, registered := registeredIDs[modelID]
 				if registered != testCase.wantImages {
 					t.Errorf("registered model %q = %t, want %t", modelID, registered, testCase.wantImages)

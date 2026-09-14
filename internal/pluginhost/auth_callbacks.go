@@ -199,6 +199,9 @@ func (h *Host) listAuthFilesFromDisk() ([]pluginapi.HostAuthFileEntry, error) {
 				if note, ok := metadata["note"].(string); ok {
 					fileEntry.Note = strings.TrimSpace(note)
 				}
+				if baseURL, ok := metadata["base_url"].(string); ok {
+					fileEntry.BaseURL = strings.TrimSpace(baseURL)
+				}
 				if websockets, okWebsockets := parseWebsocketsValue(metadata["websockets"]); okWebsockets {
 					fileEntry.Websockets = websockets
 				}
@@ -317,6 +320,7 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		return nil, fmt.Errorf("invalid auth file: %w", errUnmarshal)
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	provider, _ := metadata["type"].(string)
 	if strings.TrimSpace(provider) == "" {
 		provider = "unknown"
@@ -471,6 +475,13 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 	} else if auth.Metadata != nil {
 		if rawNote, ok := auth.Metadata["note"].(string); ok {
 			entry.Note = strings.TrimSpace(rawNote)
+		}
+	}
+	if baseURL := strings.TrimSpace(authAttribute(auth, "base_url")); baseURL != "" {
+		entry.BaseURL = baseURL
+	} else if auth.Metadata != nil {
+		if rawBaseURL, ok := auth.Metadata["base_url"].(string); ok {
+			entry.BaseURL = strings.TrimSpace(rawBaseURL)
 		}
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {

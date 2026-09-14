@@ -137,10 +137,34 @@ type XAIConfig struct {
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
 }
 
+// DevinConfig configures provider-wide Devin request behavior.
+type DevinConfig struct {
+	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.
+	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+}
+
 // AntigravityConfig configures provider-wide Antigravity request behavior.
 type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
+	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+}
+
+// AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.
+type AntigravityConnectionPoolConfig struct {
+	// Enabled controls whether upstream connection pooling is enabled.
+	// Defaults to false (short-lived connection mode). Set to true to enable connection pooling.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// IdleConnTimeout specifies how long an idle connection stays in the pool before expiring.
+	// Defaults to "30s". Capped at 210s to prevent exceeding Google Frontend (GFE) 240s cutoff.
+	IdleConnTimeout string `yaml:"idle-conn-timeout,omitempty" json:"idle-conn-timeout,omitempty"`
+
+	// MaxIdleConnsPerHost specifies the maximum number of idle connections to retain per host per credential.
+	// Defaults to 2.
+	MaxIdleConnsPerHost *int `yaml:"max-idle-conns-per-host,omitempty" json:"max-idle-conns-per-host,omitempty"`
 }
 
 // CodexConfig configures provider-wide Codex request behavior.
@@ -148,8 +172,21 @@ type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
+	// StreamBootstrapBuffering holds back initial handshake events (response.created,
+	// response.in_progress and the websocket metadata frames) until the first generated event
+	// arrives. The upstream delivers server_is_overloaded rejections inside an HTTP 200 stream
+	// right after those handshake events instead of returning 503 on the wire, so buffering them
+	// keeps the downstream response headers uncommitted long enough to retry on another credential.
+	// Trade-off: the response headers are delayed until the upstream starts generating, which can
+	// trip client or reverse-proxy read timeouts. Default is false.
+	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	// OrphanDelegationCompatibility enables opt-in compatibility for orphan Codex delegation outputs.
+	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`
+	// ModelLevelCooling scopes Codex usage_limit_reached quota cooldowns to the requested model
+	// rather than cooling down the entire credential across all sibling models.
+	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }
@@ -237,6 +274,13 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// SessionAffinitySubagents controls whether subagents (child sessions with parent references)
+	// inherit and bind to the parent's upstream credential across all providers (Claude, Codex,
+	// Antigravity, Gemini), maximizing prompt and KV cache reuse.
+	// When false, subagents are distributed across the credential pool via the fallback selector.
+	// Default: true. Ignored when SessionAffinity is false.
+	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -309,6 +353,7 @@ type PayloadModelRule struct {
 // Cloaking disguises API requests to appear as originating from the official Claude Code CLI.
 type CloakConfig struct {
 	// Mode controls cloaking behavior: "auto" (default), "always", or "never".
+	// Supplying this CloakConfig explicitly enables cloaking for an unprofiled API key.
 	// - "auto": cloak unless strong request signals identify a verified native entrypoint
 	// - "always": cloak every unconfirmed client; confirmed native Claude Code remains passthrough
 	// - "never": never apply cloaking
@@ -369,7 +414,7 @@ type ClaudeKey struct {
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
 	// RequestRetry optionally overrides the global request-retry for this credential.
-	// Nil or a negative value means "use the global request-retry". 0 disables retries.
+	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
 	// RequestScopedErrors configures custom classification rules for upstream errors.
@@ -377,6 +422,21 @@ type ClaudeKey struct {
 
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
+
+	// FingerprintProfile selects the Claude Code request fingerprint for this
+	// credential on Anthropic Messages. Empty/default keeps the caller request
+	// fingerprint and headers, including first-party api.anthropic.com API keys.
+	// "claude-code-cli" opts official Anthropic API keys, custom gateways, and
+	// delegated providers such as Kimi into the Claude Code OAuth CLI Messages
+	// shape (OAuth betas, CCH signing, stable CLI identity) without treating the
+	// credential as a real OAuth token for refresh/profile/runtime semantics.
+	// CCH is a per-request hash and follows the native gate: it is emitted only on
+	// api.anthropic.com and Vertex, so an opt-in on any other gateway sends the
+	// billing block unsigned and cannot bust that gateway's prompt cache. Kimi
+	// strips the attribution entirely by default and keeps it, unsigned, after an
+	// explicit opt-in. count_tokens keeps the native model/messages/tools shape.
+	// Recognized values are defined by NormalizeClaudeFingerprintProfile.
+	FingerprintProfile string `yaml:"fingerprint-profile,omitempty" json:"fingerprint-profile,omitempty"`
 
 	// ExperimentalCCHSigning is retained for configuration compatibility.
 	// CCH signing is automatic for Claude OAuth and supported direct upstreams.
@@ -472,7 +532,7 @@ type CodexKey struct {
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
 	// RequestRetry optionally overrides the global request-retry for this credential.
-	// Nil or a negative value means "use the global request-retry". 0 disables retries.
+	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
 	// RequestScopedErrors configures custom classification rules for upstream errors.
@@ -569,7 +629,7 @@ type GeminiKey struct {
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
 	// RequestRetry optionally overrides the global request-retry for this credential.
-	// Nil or a negative value means "use the global request-retry". 0 disables retries.
+	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
 	// RequestScopedErrors configures custom classification rules for upstream errors.
@@ -656,7 +716,7 @@ type OpenAICompatibility struct {
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
 	// RequestRetry optionally overrides the global request-retry for this provider.
-	// Nil or a negative value means "use the global request-retry". 0 disables retries.
+	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
 	// RequestScopedErrors configures custom classification rules for upstream errors.

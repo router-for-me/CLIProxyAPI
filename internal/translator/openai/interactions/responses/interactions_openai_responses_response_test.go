@@ -3,6 +3,7 @@ package responses
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -223,9 +224,19 @@ data: {"index":0,"event_type":"step.stop"}
 	}
 }
 
+func testGPTResponsesReasoningSignature() string {
+	payload := make([]byte, 1+8+16+16+32)
+	payload[0] = 0x80
+	payload[8] = 1
+	for i := 9; i < len(payload); i++ {
+		payload[i] = byte(i)
+	}
+	return base64.URLEncoding.EncodeToString(payload)
+}
+
 func TestConvertInteractionsResponseToOpenAIResponsesStreamPreservesThoughtSignature(t *testing.T) {
 	var param any
-	signature := "EtoRtestThoughtSignature"
+	signature := testGPTResponsesReasoningSignature()
 	var out [][]byte
 	for _, raw := range [][]byte{
 		[]byte(`event: step.start
@@ -269,6 +280,69 @@ data: {"interaction":{"id":"interaction_1","status":"completed","object":"intera
 	completedPayload := findResponsesEventPayload(out, "response.completed")
 	if got := gjson.GetBytes(completedPayload, "response.output.0.encrypted_content").String(); got != signature {
 		t.Fatalf("completed encrypted_content = %q, want %q. Payload: %s", got, signature, string(completedPayload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesStreamDropsForeignThoughtSignature(t *testing.T) {
+	var param any
+	foreignSignature := "foreign-gemini-signature"
+	var out [][]byte
+	for _, raw := range [][]byte{
+		[]byte(`event: step.start
+data: {"index":0,"step":{"type":"thought"},"event_type":"step.start"}
+
+`),
+		[]byte(`event: step.delta
+data: {"index":0,"delta":{"content":{"text":"thinking","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}
+
+`),
+		[]byte(`event: step.delta
+data: {"index":0,"delta":{"signature":"` + foreignSignature + `","type":"thought_signature"},"event_type":"step.delta"}
+
+`),
+		[]byte(`event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+`),
+		[]byte(`event: interaction.completed
+data: {"interaction":{"id":"interaction_1","status":"completed","object":"interaction","model":"gpt-test"},"event_type":"interaction.completed"}
+
+`),
+	} {
+		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, raw, &param)...)
+	}
+
+	donePayload := findResponsesEventPayload(out, "response.output_item.done")
+	if got := gjson.GetBytes(donePayload, "item.encrypted_content").String(); got != "" {
+		t.Fatalf("done encrypted_content = %q, want empty for foreign signature. Payload: %s", got, string(donePayload))
+	}
+	if got := gjson.GetBytes(donePayload, "item.summary.0.text").String(); got != "thinking" {
+		t.Fatalf("done summary = %q, want thinking. Payload: %s", got, string(donePayload))
+	}
+	completedPayload := findResponsesEventPayload(out, "response.completed")
+	if got := gjson.GetBytes(completedPayload, "response.output.0.encrypted_content").String(); got != "" {
+		t.Fatalf("completed encrypted_content = %q, want empty for foreign signature. Payload: %s", got, string(completedPayload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesNonStreamThoughtSignature(t *testing.T) {
+	validSig := testGPTResponsesReasoningSignature()
+	rawValid := []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"thought","signature":"` + validSig + `","content":[{"type":"text","text":"thinking"}]}],"usage":{"total_tokens":1}}`)
+	outValid := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, rawValid, nil)
+	if got := gjson.GetBytes(outValid, "output.0.encrypted_content").String(); got != validSig {
+		t.Fatalf("valid encrypted_content = %q, want %q. Output: %s", got, validSig, string(outValid))
+	}
+	if got := gjson.GetBytes(outValid, "output.0.summary.0.text").String(); got != "thinking" {
+		t.Fatalf("summary = %q, want thinking. Output: %s", got, string(outValid))
+	}
+
+	rawForeign := []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"thought","thought_signature":"foreign-gemini-signature","content":[{"type":"text","text":"thinking"}]}],"usage":{"total_tokens":1}}`)
+	outForeign := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, rawForeign, nil)
+	if got := gjson.GetBytes(outForeign, "output.0.encrypted_content").String(); got != "" {
+		t.Fatalf("foreign encrypted_content = %q, want empty. Output: %s", got, string(outForeign))
+	}
+	if got := gjson.GetBytes(outForeign, "output.0.summary.0.text").String(); got != "thinking" {
+		t.Fatalf("summary = %q, want thinking. Output: %s", got, string(outForeign))
 	}
 }
 
@@ -522,6 +596,61 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamSkipsCompletedTextAft
 	}
 }
 
+func TestConvertOpenAIResponsesResponseToInteractionsIncompleteTerminal(t *testing.T) {
+	t.Run("NonStream", func(t *testing.T) {
+		raw := []byte(`{"id":"resp_1","status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
+		out := ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
+		if got := gjson.GetBytes(out, "status").String(); got != "incomplete" {
+			t.Fatalf("status = %q, want incomplete. Output: %s", got, string(out))
+		}
+		if gotText := gjson.GetBytes(out, "steps.0.content.0.text").String(); gotText != "partial" {
+			t.Fatalf("step text = %q, want partial. Output: %s", gotText, string(out))
+		}
+		if gotTokens := gjson.GetBytes(out, "usage.total_tokens").Int(); gotTokens != 3 {
+			t.Fatalf("total_tokens = %d, want 3. Output: %s", gotTokens, string(out))
+		}
+	})
+
+	t.Run("Stream", func(t *testing.T) {
+		var param any
+		raw := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","output":[{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"partial"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+		out := ConvertOpenAIResponsesResponseToInteractions(context.Background(), "gpt-test", nil, nil, raw, &param)
+		if got := countInteractionsEventType(out, "interaction.completed"); got != 1 {
+			t.Fatalf("interaction.completed count = %d, want 1", got)
+		}
+		if got := countInteractionsEventType(out, "done"); got != 1 {
+			t.Fatalf("done count = %d, want 1", got)
+		}
+		deltaPayload := findInteractionsStepDeltaPayload(out)
+		if gotText := gjson.GetBytes(deltaPayload, "delta.text").String(); gotText != "partial" {
+			t.Fatalf("delta.text = %q, want partial. Payload: %s", gotText, string(deltaPayload))
+		}
+		completedPayload := findInteractionsEventPayload(out, "interaction.completed")
+		if got := gjson.GetBytes(completedPayload, "interaction.status").String(); got != "incomplete" {
+			t.Fatalf("interaction.status = %q, want incomplete. Payload: %s", got, string(completedPayload))
+		}
+		if gotTokens := gjson.GetBytes(completedPayload, "interaction.usage.total_tokens").Int(); gotTokens != 3 {
+			t.Fatalf("total_tokens = %d, want 3. Payload: %s", gotTokens, string(completedPayload))
+		}
+
+		doneOut := ConvertOpenAIResponsesResponseToInteractions(context.Background(), "gpt-test", nil, nil, []byte(`data: [DONE]`), &param)
+		if got := countInteractionsEventType(doneOut, "interaction.completed"); got != 0 {
+			t.Fatalf("subsequent done interaction.completed count = %d, want 0", got)
+		}
+		if got := countInteractionsEventType(doneOut, "done"); got != 0 {
+			t.Fatalf("subsequent done event count = %d, want 0", got)
+		}
+	})
+
+	t.Run("CompletedControl", func(t *testing.T) {
+		raw := []byte(`{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
+		out := ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
+		if got := gjson.GetBytes(out, "status").String(); got != "completed" {
+			t.Fatalf("status = %q, want completed. Output: %s", got, string(out))
+		}
+	})
+}
+
 func findInteractionsStepDeltaPayload(events [][]byte) []byte {
 	return findInteractionsEventPayload(events, "step.delta")
 }
@@ -627,5 +756,68 @@ func TestConvertInteractionsResponseToOpenAIResponsesStream_PreservesEnvironment
 	completedPayload := findResponsesEventPayload(out, "response.completed")
 	if got := gjson.GetBytes(completedPayload, "response.environment_id").String(); got != "env_stream123" {
 		t.Fatalf("response.completed environment_id = %q, want env_stream123. Payload: %s", got, string(completedPayload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesNonStreamRestoresAntigravityToolName(t *testing.T) {
+	raw := []byte(`{
+		"id":"interaction_1",
+		"model":"antigravity-preview-05-2026",
+		"steps":[
+			{"type":"function_call","id":"call_1","name":"external_read_file","arguments":{"path":"/etc/hosts"}}
+		]
+	}`)
+	out := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, raw, nil)
+	if got := gjson.GetBytes(out, "output.0.name").String(); got != "read_file" {
+		t.Fatalf("output.0.name = %q, want read_file. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesStreamRestoresAntigravityToolName(t *testing.T) {
+	var param any
+	var out [][]byte
+	rawEvents := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_1\",\"model\":\"antigravity-preview-05-2026\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"function_call\",\"id\":\"call_1\",\"name\":\"external_read_file\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"path\\\":\\\"/etc/hosts\\\"}\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_1\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+	for _, raw := range rawEvents {
+		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, raw, &param)...)
+	}
+
+	addedPayload := findResponsesEventPayload(out, "response.output_item.added")
+	if got := gjson.GetBytes(addedPayload, "item.name").String(); got != "read_file" {
+		t.Fatalf("stream item.name = %q, want read_file. Payload: %s", got, string(addedPayload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesPreservesNonCollidingAndNonAntigravityNames(t *testing.T) {
+	// 1. Antigravity model with non-colliding external_ name: external_lookup must NOT be stripped.
+	rawNonColliding := []byte(`{
+		"id":"interaction_1",
+		"model":"antigravity-preview-05-2026",
+		"steps":[
+			{"type":"function_call","id":"call_1","name":"external_lookup","arguments":{"q":"test"}}
+		]
+	}`)
+	outNonColliding := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, rawNonColliding, nil)
+	if got := gjson.GetBytes(outNonColliding, "output.0.name").String(); got != "external_lookup" {
+		t.Fatalf("output.0.name = %q, want external_lookup (preserved). Output: %s", got, string(outNonColliding))
+	}
+
+	// 2. Non-antigravity model with external_read_file: must NOT be stripped.
+	rawNonAnti := []byte(`{
+		"id":"interaction_2",
+		"model":"gemini-3.1-flash-lite",
+		"steps":[
+			{"type":"function_call","id":"call_2","name":"external_read_file","arguments":{"path":"/etc/hosts"}}
+		]
+	}`)
+	outNonAnti := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.1-flash-lite", []byte(`{"model":"gemini-3.1-flash-lite"}`), nil, rawNonAnti, nil)
+	if got := gjson.GetBytes(outNonAnti, "output.0.name").String(); got != "external_read_file" {
+		t.Fatalf("output.0.name = %q, want external_read_file (preserved for non-antigravity). Output: %s", got, string(outNonAnti))
 	}
 }

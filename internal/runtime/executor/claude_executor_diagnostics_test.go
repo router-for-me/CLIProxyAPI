@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -108,4 +109,158 @@ func TestClaudeMessageIDFromSSECommitsOnlyCompletedMessage(t *testing.T) {
 	if got := claudeMessageIDFromSSE(incomplete); got != "" {
 		t.Fatalf("incomplete SSE message ID = %q, want empty", got)
 	}
+}
+
+func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *testing.T) {
+	var capturedBillingHeaders []string
+	call := 0
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		billing := gjson.GetBytes(body, "system.0.text").String()
+		capturedBillingHeaders = append(capturedBillingHeaders, billing)
+		call++
+		response := `{"id":"msg_turn_` + string(rune('0'+call)) + `","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`
+		header := http.Header{
+			"Content-Type": []string{"application/json"},
+			"request-id":   []string{fmt.Sprintf("req_upstream_turn_%d", call)},
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(response)), Request: req}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	deviceIDs := []string{"0000000000000000000000000000000000000000000000000000000000000000"}
+	testID := uuid.NewString()
+	auth := &cliproxyauth.Auth{
+		ID:         "continuity-test-" + testID,
+		Attributes: map[string]string{"api_key": "sk-ant-oat-continuity-test"},
+		Metadata: map[string]any{
+			"account_uuid":                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			claudeauth.ClaudeDeviceIDsMetadataKey: deviceIDs,
+		},
+	}
+	executor := NewClaudeExecutor(&config.Config{})
+	options := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata:     map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "continuity-conv-" + testID},
+	}
+
+	// Turn 1: User prompt
+	req1 := cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn 1 prompt"}],"max_tokens":100}`)}
+	if _, err := executor.Execute(ctx, auth, req1, options); err != nil {
+		t.Fatalf("turn 1 failed: %v", err)
+	}
+
+	// Turn 2: User prompt in same conversation
+	req2 := cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn 1 prompt"},{"role":"assistant","content":"ok"},{"role":"user","content":"turn 2 prompt"}],"max_tokens":100}`)}
+	if _, err := executor.Execute(ctx, auth, req2, options); err != nil {
+		t.Fatalf("turn 2 failed: %v", err)
+	}
+
+	// Turn 2.1: Tool result continuation within turn 2
+	req2Tool := cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn 1 prompt"},{"role":"assistant","content":"ok"},{"role":"user","content":"turn 2 prompt"},{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"tool output"}]}],"max_tokens":100}`)}
+	if _, err := executor.Execute(ctx, auth, req2Tool, options); err != nil {
+		t.Fatalf("turn 2.1 tool failed: %v", err)
+	}
+
+	// Turn 3: Probe request (max_tokens: 1)
+	reqProbe := cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"probe"}],"max_tokens":1}`)}
+	if _, err := executor.Execute(ctx, auth, reqProbe, options); err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+
+	// Turn 4: Subagent request (carrying X-Claude-Code-Agent-Id)
+	subagentOptions := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Headers:      http.Header{"X-Claude-Code-Agent-Id": []string{"subagent-worker-1"}},
+		Metadata:     map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "continuity-subagent-" + testID},
+	}
+	reqSubagent := cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"subagent prompt"}],"max_tokens":100}`)}
+	if _, err := executor.Execute(ctx, auth, reqSubagent, subagentOptions); err != nil {
+		t.Fatalf("subagent failed: %v", err)
+	}
+
+	// Turn 5: Resumed main session user prompt after probe (must chain from turn 2.1, NOT from probe turn 3)
+	req5 := cliproxyexecutor.Request{Model: "claude-sonnet-5", Payload: []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"turn 5 prompt"}],"max_tokens":100}`)}
+	if _, err := executor.Execute(ctx, auth, req5, options); err != nil {
+		t.Fatalf("turn 5 failed: %v", err)
+	}
+
+	if len(capturedBillingHeaders) != 6 {
+		t.Fatalf("captured %d billing headers, want 6", len(capturedBillingHeaders))
+	}
+
+	// Verify Turn 1:
+	h1 := capturedBillingHeaders[0]
+	if !strings.Contains(h1, "cc_version=2.1.258.") || !strings.Contains(h1, "cc_entrypoint=cli;") || !strings.Contains(h1, "cch=") {
+		t.Fatalf("h1 invalid: %s", h1)
+	}
+	if strings.Contains(h1, "cc_prev_req=") {
+		t.Fatalf("h1 must not contain cc_prev_req: %s", h1)
+	}
+	if !strings.Contains(h1, "cc_prompt_id=") {
+		t.Fatalf("h1 must contain cc_prompt_id: %s", h1)
+	}
+	prompt1 := extractTag(h1, "cc_prompt_id=")
+
+	// Verify Turn 2:
+	h2 := capturedBillingHeaders[1]
+	if !strings.Contains(h2, "cc_prev_req=req_upstream_turn_1;") {
+		t.Fatalf("h2 must contain cc_prev_req=req_upstream_turn_1;, got: %s", h2)
+	}
+	if !strings.Contains(h2, "cc_prompt_id=") {
+		t.Fatalf("h2 must contain cc_prompt_id: %s", h2)
+	}
+	prompt2 := extractTag(h2, "cc_prompt_id=")
+	if prompt2 == prompt1 {
+		t.Fatalf("h2 promptID (%s) must differ from h1 promptID (%s)", prompt2, prompt1)
+	}
+
+	// Verify Turn 2.1 (tool continuation):
+	h2Tool := capturedBillingHeaders[2]
+	if !strings.Contains(h2Tool, "cc_prev_req=req_upstream_turn_2;") {
+		t.Fatalf("h2Tool must contain cc_prev_req=req_upstream_turn_2;, got: %s", h2Tool)
+	}
+	prompt2Tool := extractTag(h2Tool, "cc_prompt_id=")
+	if prompt2Tool != prompt2 {
+		t.Fatalf("h2Tool promptID (%s) must match turn 2 promptID (%s)", prompt2Tool, prompt2)
+	}
+
+	// Verify Turn 3 (probe with max_tokens: 1):
+	hProbe := capturedBillingHeaders[3]
+	if strings.Contains(hProbe, "cc_prev_req=") || strings.Contains(hProbe, "cc_prompt_id=") {
+		t.Fatalf("probe must not contain cc_prev_req or cc_prompt_id: %s", hProbe)
+	}
+
+	// Verify Turn 4 (subagent):
+	hSubagent := capturedBillingHeaders[4]
+	if !strings.Contains(hSubagent, "cc_is_subagent=true;") {
+		t.Fatalf("hSubagent must contain cc_is_subagent=true;, got: %s", hSubagent)
+	}
+	if !strings.Contains(hSubagent, "cc_prompt_id=") {
+		t.Fatalf("hSubagent must contain cc_prompt_id: %s", hSubagent)
+	}
+
+	// Verify Turn 5 (main turn after probe):
+	// Must chain to turn 2.1's response (req_upstream_turn_3), bypassing probe turn 3 (req_upstream_turn_4)!
+	h5 := capturedBillingHeaders[5]
+	if !strings.Contains(h5, "cc_prev_req=req_upstream_turn_3;") {
+		t.Fatalf("h5 must contain cc_prev_req=req_upstream_turn_3; (bypassing probe turn 4), got: %s", h5)
+	}
+	if !strings.Contains(h5, "cc_prompt_id=") {
+		t.Fatalf("h5 must contain cc_prompt_id: %s", h5)
+	}
+}
+
+func extractTag(header, prefix string) string {
+	idx := strings.Index(header, prefix)
+	if idx < 0 {
+		return ""
+	}
+	val := header[idx+len(prefix):]
+	if end := strings.IndexByte(val, ';'); end >= 0 {
+		val = val[:end]
+	}
+	return val
 }

@@ -2,12 +2,14 @@ package executor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -343,13 +345,23 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.alias))
-			if _, errReverse := reverseRemapOAuthToolNames(response, reverseMap); errReverse == nil || !strings.Contains(errReverse.Error(), test.wantError) {
+			_, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			if errReverse == nil || !strings.Contains(errReverse.Error(), test.wantError) {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v, want %q", errReverse, test.wantError)
+			}
+			var requestErr cliproxyexecutor.RequestScopedError
+			if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
+				t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
 			}
 
 			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.alias))
-			if _, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap); errStream == nil || !strings.Contains(errStream.Error(), test.wantError) {
+			_, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errStream == nil || !strings.Contains(errStream.Error(), test.wantError) {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, test.wantError)
+			}
+			requestErr = nil
+			if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
+				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
 			}
 		})
 	}
@@ -541,4 +553,195 @@ func TestRemapKeepsReverseMapEmptyWhenOnlyCallerMCPToolsArePresent(t *testing.T)
 	if !bytes.Equal(out, body) {
 		t.Fatalf("body = %s, want unchanged %s", out, body)
 	}
+}
+
+func TestReverseRemapOAuthToolNamesMarksTrailingMarkupFailureRequestScoped(t *testing.T) {
+	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_clear_thinking"
+	malformedAlias := alias + "</parameter>\n<parameter name=\"merge\""
+	reverseMap := map[string]string{alias: "clear_thinking"}
+
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, malformedAlias))
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse == nil {
+		t.Fatal("reverseRemapOAuthToolNames() error = nil, want fail-closed alias error")
+	}
+	if !bytes.Equal(restored, response) {
+		t.Fatalf("reverseRemapOAuthToolNames() returned modified response: %s", restored)
+	}
+	var requestErr cliproxyexecutor.RequestScopedError
+	if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
+	}
+
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, malformedAlias))
+	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	if errStream == nil {
+		t.Fatal("reverseRemapOAuthToolNamesFromStreamLine() error = nil, want fail-closed alias error")
+	}
+	if !bytes.Equal(restoredLine, line) {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() returned modified line: %s", restoredLine)
+	}
+	requestErr = nil
+	if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
+	}
+}
+
+func TestReverseRemapOAuthToolNames_ToolSearchResult_NonStream(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"task_list","input_schema":{"type":"object"}},{"name":"fetch_url","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "tool-search-caller"})
+	taskAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	fetchAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+
+	if taskAlias == "task_list" || fetchAlias == "fetch_url" {
+		t.Fatalf("tools were not aliased: task=%q, fetch=%q", taskAlias, fetchAlias)
+	}
+
+	// 1. Successful search result with multiple tool_references
+	resp := []byte(fmt.Sprintf(`{
+		"id": "msg_01HczuyKgD1KCUuVzvZEH3WN",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{
+				"type": "tool_search_tool_result",
+				"tool_use_id": "srvtoolu_01HczuyKgD1KCUuVzvZEH3WN",
+				"content": {
+					"type": "tool_search_tool_search_result",
+					"tool_references": [
+						{"type": "tool_reference", "tool_name": %q},
+						{"type": "tool_reference", "tool_name": %q}
+					]
+				}
+			},
+			{
+				"type": "tool_use",
+				"id": "toolu_01",
+				"name": %q,
+				"input": {"action": "list"}
+			}
+		]
+	}`, taskAlias, fetchAlias, taskAlias))
+
+	restored, err := reverseRemapOAuthToolNames(resp, reverseMap)
+	if err != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", err)
+	}
+
+	ref0 := gjson.GetBytes(restored, "content.0.content.tool_references.0.tool_name").String()
+	ref1 := gjson.GetBytes(restored, "content.0.content.tool_references.1.tool_name").String()
+	toolUseName := gjson.GetBytes(restored, "content.1.name").String()
+
+	if ref0 != "task_list" {
+		t.Errorf("ref0 = %q, want task_list", ref0)
+	}
+	if ref1 != "fetch_url" {
+		t.Errorf("ref1 = %q, want fetch_url", ref1)
+	}
+	if toolUseName != "task_list" {
+		t.Errorf("toolUseName = %q, want task_list", toolUseName)
+	}
+
+	// 2. Error variant (tool_search_tool_result_error) without tool_references should pass cleanly
+	errorResp := []byte(`{
+		"id": "msg_02",
+		"type": "message",
+		"role": "assistant",
+		"content": [
+			{
+				"type": "tool_search_tool_result",
+				"tool_use_id": "srvtoolu_02",
+				"content": {
+					"type": "tool_search_tool_result_error",
+					"error_code": "regex_compilation_failed"
+				}
+			}
+		]
+	}`)
+
+	restoredErr, err := reverseRemapOAuthToolNames(errorResp, reverseMap)
+	if err != nil {
+		t.Fatalf("reverseRemapOAuthToolNames(errorResp) error = %v", err)
+	}
+	if !bytes.Equal(restoredErr, errorResp) {
+		t.Fatalf("errorResp altered: %s", string(restoredErr))
+	}
+}
+
+func TestReverseRemapOAuthToolNamesFromStreamLine_ToolSearchResult_Stream(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"task_list","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "tool-search-stream-caller"})
+	taskAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_01","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":%q}]}}}`, taskAlias))
+
+	restoredLine, err := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	if err != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", err)
+	}
+
+	if !bytes.HasPrefix(restoredLine, []byte("data: ")) {
+		t.Fatalf("restoredLine lost data: prefix: %s", string(restoredLine))
+	}
+	gotToolName := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.content.tool_references.0.tool_name").String()
+	if gotToolName != "task_list" {
+		t.Fatalf("stream restored tool_name = %q, want task_list", gotToolName)
+	}
+}
+
+func TestRemapOAuthToolNames_ToolSearchResultInMessageHistory(t *testing.T) {
+	body := []byte(`{
+		"tools": [
+			{"name": "task_list", "input_schema": {"type": "object"}},
+			{"type": "advisor_20260301", "name": "advisor", "model": "claude-haiku-4-5-20251001"},
+			{"type": "agent_toolset_20260401"}
+		],
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "tool_search_tool_result",
+						"tool_use_id": "srvtoolu_01",
+						"content": {
+							"type": "tool_search_tool_search_result",
+							"tool_references": [
+								{"type": "tool_reference", "tool_name": "task_list"}
+							]
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "history-caller"})
+	taskAlias := reverseMapKeyFor(reverseMap, "task_list")
+	if taskAlias == "" {
+		t.Fatal("task_list was not aliased")
+	}
+
+	// Verify server tools were preserved
+	tools := gjson.GetBytes(remapped, "tools")
+	if tools.Get("1.type").String() != "advisor_20260301" || tools.Get("1.name").String() != "advisor" {
+		t.Fatalf("advisor server tool was altered: %s", tools.Get("1").Raw)
+	}
+	if tools.Get("2.type").String() != "agent_toolset_20260401" {
+		t.Fatalf("agent_toolset was altered: %s", tools.Get("2").Raw)
+	}
+
+	// Verify tool_search_tool_result in messages was remapped
+	gotHistoryToolName := gjson.GetBytes(remapped, "messages.0.content.0.content.tool_references.0.tool_name").String()
+	if gotHistoryToolName != taskAlias {
+		t.Fatalf("history tool_name = %q, want aliased %q", gotHistoryToolName, taskAlias)
+	}
+}
+
+func reverseMapKeyFor(m map[string]string, val string) string {
+	for k, v := range m {
+		if v == val && k != val {
+			return k
+		}
+	}
+	return ""
 }

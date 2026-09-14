@@ -1,12 +1,12 @@
 package responses
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
+	"strconv"
 	"strings"
+	"unicode/utf16"
 
-	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -16,10 +16,9 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-var (
-	user    = ""
-	account = ""
-	session = ""
+const (
+	defaultClaudeResponsesMaxTokens = 32000
+	defaultFableResponsesMaxTokens  = 64000
 )
 
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
@@ -44,24 +43,14 @@ func ConvertOpenAIResponsesRequestToClaudeWithCompat(modelName string, inputRawJ
 }
 
 func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := normalizeCodexAgentMessages(inputRawJSON)
 
-	if account == "" {
-		u, _ := uuid.NewRandom()
-		account = u.String()
-	}
-	if session == "" {
-		u, _ := uuid.NewRandom()
-		session = u.String()
-	}
-	if user == "" {
-		sum := sha256.Sum256([]byte(account + session))
-		user = hex.EncodeToString(sum[:])
-	}
-	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
+	userID := common.DeriveClaudeUserID(rawJSON)
 
 	// Base Claude message payload
-	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
+	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
+	out, _ = sjson.SetBytes(out, "metadata.user_id", userID)
+	out, _ = sjson.SetBytes(out, "max_tokens", defaultClaudeResponsesMaxTokensForModel(modelName))
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -118,8 +107,12 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Max tokens
-	if mot := root.Get("max_output_tokens"); mot.Exists() {
-		out, _ = sjson.SetBytes(out, "max_tokens", mot.Int())
+	if mot := root.Get("max_output_tokens"); mot.Exists() && mot.Type != gjson.Null {
+		val := mot.Int()
+		if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && val > int64(info.MaxCompletionTokens) {
+			val = int64(info.MaxCompletionTokens)
+		}
+		out, _ = sjson.SetBytes(out, "max_tokens", val)
 	}
 
 	// Stream
@@ -186,6 +179,14 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		})
 	}
 
+	formatResult := root.Get("text.format")
+	if !formatResult.Exists() {
+		formatResult = root.Get("response_format")
+	}
+	if formatInstruction := common.BuildClaudeStructuredOutputInstruction(formatResult); formatInstruction != "" {
+		appendSystemText(formatInstruction, gjson.Result{})
+	}
+
 	// input array processing
 	var pendingRole string
 	var pendingParts [][]byte
@@ -210,7 +211,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			msg, _ = sjson.SetBytes(msg, "role", pendingRole)
 			if len(parts) == 1 {
 				part := gjson.ParseBytes(parts[0])
-				if part.Get("type").String() == "text" && !part.Get("cache_control").Exists() {
+				if part.Get("type").String() == "text" && !part.Get("cache_control").Exists() && !part.Get("citations").Exists() {
 					msg, _ = sjson.SetBytes(msg, "content", part.Get("text").String())
 				} else {
 					msg, _ = sjson.SetRawBytes(msg, "content", common.JoinRawArray(parts))
@@ -245,107 +246,119 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		pendingRole = "assistant"
 		pendingToolUseParts = append(pendingToolUseParts, toolUse)
 	}
+	appendReasoning := func(reasoningPart []byte) {
+		if len(reasoningPart) == 0 {
+			return
+		}
+		if pendingRole != "" && pendingRole != "assistant" {
+			flushPendingMessage()
+		}
+		pendingRole = "assistant"
+
+		// Client tool calls normally stay at the end of an assistant message, but
+		// a later reasoning item makes them a real separator between thinking blocks.
+		if len(pendingToolUseParts) > 0 {
+			pendingParts = append(pendingParts, pendingToolUseParts...)
+			pendingToolUseParts = nil
+		}
+
+		currentType := gjson.GetBytes(reasoningPart, "type").String()
+		if currentType == "thinking" && len(pendingParts) > 0 {
+			lastIdx := len(pendingParts) - 1
+			if gjson.GetBytes(pendingParts[lastIdx], "type").String() == "thinking" {
+				pendingParts[lastIdx] = reasoningPart
+				return
+			}
+		}
+		pendingParts = append(pendingParts, reasoningPart)
+	}
+
+	var inputItems []gjson.Result
+	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		inputItems = common.NormalizeResponsesToolCallOutputs(input.Array())
+	}
 
 	lastToolResult := map[string]gjson.Result{}
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			switch item.Get("type").String() {
-			case "function_call_output", "custom_tool_call_output":
-				rawID := item.Get("call_id").String()
-				if rawID != "" {
-					lastToolResult[rawID] = item
-				}
+	for _, item := range inputItems {
+		switch item.Get("type").String() {
+		case "function_call_output", "custom_tool_call_output":
+			rawID := common.ExtractResponsesCallID(item)
+			if rawID != "" {
+				lastToolResult[rawID] = item
 			}
-			return true
-		})
+		}
 	}
 	emittedToolResults := map[string]struct{}{}
 
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			// System-level items already became top-level system blocks.
-			if isResponsesSystemLevelRole(item.Get("role").String()) {
-				return true
-			}
-			typ := item.Get("type").String()
-			if typ == "" && item.Get("role").String() != "" {
-				typ = "message"
-			}
-			switch typ {
-			case "message":
-				// Determine role and construct Claude-compatible content parts.
-				var role string
-				var partsJSON [][]byte
-				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
-					parts.ForEach(func(_, part gjson.Result) bool {
-						ptype := part.Get("type").String()
-						switch ptype {
-						case "input_text", "output_text":
-							if t := part.Get("text"); t.Exists() {
-								txt := t.String()
-								contentPart := []byte(`{"type":"text","text":""}`)
-								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
-								contentPart = common.AttachCacheControl(contentPart, part)
-								partsJSON = append(partsJSON, contentPart)
-							}
-							if ptype == "input_text" {
-								role = "user"
-							} else {
-								role = "assistant"
-							}
-						case "input_image":
-							url := part.Get("image_url").String()
-							if url == "" {
-								url = part.Get("url").String()
-							}
-							if url != "" {
-								var contentPart []byte
-								if strings.HasPrefix(url, "data:") {
-									trimmed := strings.TrimPrefix(url, "data:")
-									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-									mediaType := "application/octet-stream"
-									data := ""
-									if len(mediaAndData) == 2 {
-										if mediaAndData[0] != "" {
-											mediaType = mediaAndData[0]
-										}
-										data = mediaAndData[1]
-									}
-									if data != "" {
-										contentPart = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
-										contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
-										contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
-									}
-								} else {
-									contentPart = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
-									contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
-								}
-								if len(contentPart) > 0 {
-									contentPart = common.AttachCacheControl(contentPart, part)
-									partsJSON = append(partsJSON, contentPart)
-									if role == "" {
-										role = "user"
-									}
-								}
-							}
-						case "input_file":
-							fileData := part.Get("file_data").String()
-							if fileData != "" {
+	for _, item := range inputItems {
+		// System-level items already became top-level system blocks.
+		if isResponsesSystemLevelRole(item.Get("role").String()) {
+			continue
+		}
+		typ := item.Get("type").String()
+		if typ == "" && item.Get("role").String() != "" {
+			typ = "message"
+		}
+		switch typ {
+		case "message":
+			// Determine role and construct Claude-compatible content parts.
+			var role string
+			var partsJSON [][]byte
+			if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
+				parts.ForEach(func(_, part gjson.Result) bool {
+					ptype := part.Get("type").String()
+					switch ptype {
+					case "input_text", "output_text":
+						if t := part.Get("text"); t.Exists() {
+							txt := t.String()
+							contentPart := []byte(`{"type":"text","text":""}`)
+							contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
+							contentPart = attachClaudeCitations(contentPart, part.Get("annotations"))
+							contentPart = common.AttachCacheControl(contentPart, part)
+							partsJSON = append(partsJSON, contentPart)
+						}
+						if ptype == "input_text" {
+							role = "user"
+						} else {
+							role = "assistant"
+						}
+					case "refusal":
+						// Claude has no refusal block; the text keeps the turn intact.
+						if t := part.Get("refusal"); t.Exists() && t.String() != "" {
+							contentPart := []byte(`{"type":"text","text":""}`)
+							contentPart, _ = sjson.SetBytes(contentPart, "text", t.String())
+							contentPart = common.AttachCacheControl(contentPart, part)
+							partsJSON = append(partsJSON, contentPart)
+						}
+						role = "assistant"
+					case "input_image":
+						url := part.Get("image_url").String()
+						if url == "" {
+							url = part.Get("url").String()
+						}
+						if url != "" {
+							var contentPart []byte
+							if strings.HasPrefix(url, "data:") {
+								trimmed := strings.TrimPrefix(url, "data:")
+								mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
 								mediaType := "application/octet-stream"
-								data := fileData
-								if strings.HasPrefix(fileData, "data:") {
-									trimmed := strings.TrimPrefix(fileData, "data:")
-									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-									if len(mediaAndData) == 2 {
-										if mediaAndData[0] != "" {
-											mediaType = mediaAndData[0]
-										}
-										data = mediaAndData[1]
+								data := ""
+								if len(mediaAndData) == 2 {
+									if mediaAndData[0] != "" {
+										mediaType = mediaAndData[0]
 									}
+									data = mediaAndData[1]
 								}
-								contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
-								contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
-								contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+								if data != "" {
+									contentPart = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+									contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+									contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+								}
+							} else {
+								contentPart = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
+							}
+							if len(contentPart) > 0 {
 								contentPart = common.AttachCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, contentPart)
 								if role == "" {
@@ -353,99 +366,141 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								}
 							}
 						}
-						return true
-					})
-				} else if parts.Type == gjson.String && parts.String() != "" {
-					contentPart := []byte(`{"type":"text","text":""}`)
-					contentPart, _ = sjson.SetBytes(contentPart, "text", parts.String())
-					partsJSON = append(partsJSON, contentPart)
-				}
-
-				// Fallback to given role if content types not decisive
-				if role == "" {
-					r := item.Get("role").String()
-					switch r {
-					case "user", "assistant":
-						role = r
-					default:
-						role = "user"
-					}
-				}
-
-				if len(partsJSON) > 0 {
-					lastIdx := len(partsJSON) - 1
-					if !gjson.GetBytes(partsJSON[lastIdx], "cache_control").Exists() {
-						partsJSON[lastIdx] = common.AttachCacheControl(partsJSON[lastIdx], item)
-					}
-					appendParts(role, partsJSON...)
-				}
-
-			case "reasoning":
-				if thinkingPart := convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks); len(thinkingPart) > 0 {
-					appendParts("assistant", thinkingPart)
-				}
-
-			case "function_call", "custom_tool_call":
-				// Map to assistant tool_use. Freeform custom input is wrapped in an
-				// object because Claude tool_use input must be a JSON object.
-				callID := item.Get("call_id").String()
-				if callID == "" {
-					callID = common.GenerateClaudeToolCallID()
-				}
-				callID = util.SanitizeClaudeToolID(callID)
-				name := item.Get("name").String()
-				if namespaceName := strings.TrimSpace(item.Get("namespace").String()); namespaceName != "" {
-					// Rebuild the qualified name emitted by the previous Responses turn.
-					name = qualifyResponsesNamespaceToolName(namespaceName, name)
-				}
-				isCustomToolCall := typ == "custom_tool_call"
-
-				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
-				toolUse, _ = sjson.SetBytes(toolUse, "name", name)
-				if isCustomToolCall {
-					toolUse, _ = sjson.SetBytes(toolUse, "input.input", item.Get("input").String())
-				} else {
-					argsStr := item.Get("arguments").String()
-					if argsStr != "" && gjson.Valid(argsStr) {
-						argsJSON := gjson.Parse(argsStr)
-						if argsJSON.IsObject() {
-							toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+					case "input_file":
+						fileData := part.Get("file_data").String()
+						if fileData != "" {
+							mediaType := "application/octet-stream"
+							data := fileData
+							if strings.HasPrefix(fileData, "data:") {
+								trimmed := strings.TrimPrefix(fileData, "data:")
+								mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+								if len(mediaAndData) == 2 {
+									if mediaAndData[0] != "" {
+										mediaType = mediaAndData[0]
+									}
+									data = mediaAndData[1]
+								}
+							}
+							contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
+							contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+							contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+							contentPart = common.AttachCacheControl(contentPart, part)
+							partsJSON = append(partsJSON, contentPart)
+							if role == "" {
+								role = "user"
+							}
 						}
 					}
-				}
-
-				appendToolUse(toolUse)
-
-			case "function_call_output", "custom_tool_call_output":
-				// Map to user tool_result
-				rawID := item.Get("call_id").String()
-				callID := util.SanitizeClaudeToolID(rawID)
-				if rawID != "" {
-					if _, exists := emittedToolResults[rawID]; exists {
-						return true
-					}
-					emittedToolResults[rawID] = struct{}{}
-				}
-				output := item.Get("output")
-				if rawID != "" {
-					if lastItem, exists := lastToolResult[rawID]; exists {
-						output = lastItem.Get("output")
-					}
-				}
-				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
-				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
-				toolResult = applyResponsesToolResultContent(toolResult, output)
-
-				appendParts("user", toolResult)
+					return true
+				})
+			} else if parts.Type == gjson.String && parts.String() != "" {
+				contentPart := []byte(`{"type":"text","text":""}`)
+				contentPart, _ = sjson.SetBytes(contentPart, "text", parts.String())
+				partsJSON = append(partsJSON, contentPart)
 			}
-			return true
-		})
+
+			// Fallback to given role if content types not decisive
+			if role == "" {
+				r := item.Get("role").String()
+				switch r {
+				case "user", "assistant":
+					role = r
+				default:
+					role = "user"
+				}
+			}
+
+			if len(partsJSON) > 0 {
+				lastIdx := len(partsJSON) - 1
+				if !gjson.GetBytes(partsJSON[lastIdx], "cache_control").Exists() {
+					partsJSON[lastIdx] = common.AttachCacheControl(partsJSON[lastIdx], item)
+				}
+				appendParts(role, partsJSON...)
+			}
+
+		case "web_search_call":
+			// Rebuild the Claude server-side search pair so the replayed turn
+			// still shows the search and its hits.
+			if blocks := convertResponsesWebSearchCallToClaudeBlocks(item); len(blocks) > 0 {
+				appendParts("assistant", blocks...)
+			}
+
+		case "reasoning":
+			appendReasoning(convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks))
+
+		case "function_call", "custom_tool_call":
+			// Map to assistant tool_use. Freeform custom input is wrapped in an
+			// object because Claude tool_use input must be a JSON object.
+			callID := common.ExtractResponsesCallID(item)
+			if callID == "" {
+				callID = common.GenerateClaudeToolCallID()
+			}
+			callID = util.SanitizeClaudeToolID(callID)
+			name := item.Get("name").String()
+			if namespaceName := strings.TrimSpace(item.Get("namespace").String()); namespaceName != "" {
+				// Rebuild the qualified name emitted by the previous Responses turn.
+				name = qualifyResponsesNamespaceToolName(namespaceName, name)
+			}
+			isCustomToolCall := typ == "custom_tool_call"
+
+			toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+			toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
+			toolUse, _ = sjson.SetBytes(toolUse, "name", name)
+			if isCustomToolCall {
+				toolUse, _ = sjson.SetBytes(toolUse, "input.input", item.Get("input").String())
+			} else {
+				argsStr := item.Get("arguments").String()
+				if argsStr != "" && gjson.Valid(argsStr) {
+					argsJSON := gjson.Parse(argsStr)
+					if argsJSON.IsObject() {
+						toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+					}
+				}
+			}
+
+			appendToolUse(toolUse)
+
+		case "function_call_output", "custom_tool_call_output":
+			// Map to user tool_result
+			rawID := common.ExtractResponsesCallID(item)
+			callID := util.SanitizeClaudeToolID(rawID)
+			if rawID != "" {
+				if _, exists := emittedToolResults[rawID]; exists {
+					continue
+				}
+				emittedToolResults[rawID] = struct{}{}
+			}
+			output := item.Get("output")
+			if rawID != "" {
+				if lastItem, exists := lastToolResult[rawID]; exists {
+					output = lastItem.Get("output")
+				}
+			}
+			toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+			toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
+			toolResult = applyResponsesToolResultContent(toolResult, output)
+
+			appendParts("user", toolResult)
+
+		default:
+			// Reachability guard: Claude only ever receives the item types this
+			// switch handles. A new one means the client gained a capability
+			// whose Claude counterpart still has to be decided, so make the gap
+			// visible instead of dropping the turn content in silence.
+			if typ := item.Get("type").String(); typ != "" {
+				log.Debugf("responses->claude: unmapped input item type %q", typ)
+			}
+		}
 	}
 	flushPendingMessage()
-	// Preserve a minimal conversational turn for system-only inputs so downstream
-	// validation still sees a Claude-shaped request.
-	if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
+	hadMessages := len(messageBlocks) > 0
+	if !preserveEmptyThinkingBlocks {
+		messageBlocks = stripTrailingClaudeThinkingBlocks(messageBlocks)
+		messageBlocks = dropUnsupportedClaudeAssistantPrefill(modelName, messageBlocks)
+	}
+	// Preserve a minimal conversational turn for system-only inputs or when messages became empty
+	// so downstream validation still sees a Claude-shaped request.
+	if len(messageBlocks) == 0 && (len(systemBlocks) > 0 || hadMessages) {
 		messageBlocks = append(messageBlocks, []byte(`{"role":"user","content":[{"type":"text","text":""}]}`))
 	}
 	out = common.SetRawArrayItems(out, "messages", messageBlocks)
@@ -532,6 +587,17 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	return out
 }
 
+func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
+	maxTokens := defaultClaudeResponsesMaxTokens
+	if strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "fable") {
+		maxTokens = defaultFableResponsesMaxTokens
+	}
+	if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && info.MaxCompletionTokens < maxTokens {
+		return info.MaxCompletionTokens
+	}
+	return maxTokens
+}
+
 // isResponsesSystemLevelRole reports whether an input item carries system-level
 // authority. The Responses API ranks developer and system instructions above
 // user content, so both map to Claude's system slot rather than a user turn.
@@ -542,6 +608,84 @@ func isResponsesSystemLevelRole(role string) bool {
 	default:
 		return false
 	}
+}
+
+// dropUnsupportedClaudeAssistantPrefill removes a trailing assistant message for
+// Claude model families that reject assistant message prefill (e.g., Fable,
+// Opus 5, Sonnet 4.6).
+func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) [][]byte {
+	if !claudeModelRejectsAssistantPrefill(modelName) || len(messages) == 0 {
+		return messages
+	}
+	last := gjson.ParseBytes(messages[len(messages)-1])
+	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
+		return messages
+	}
+	return messages[:len(messages)-1]
+}
+
+// stripTrailingClaudeThinkingBlocks removes trailing thinking and
+// redacted_thinking blocks from the final assistant message. Anthropic rejects
+// requests whose final assistant content block is thinking. If no content
+// blocks remain after stripping, the assistant message itself is dropped.
+func stripTrailingClaudeThinkingBlocks(messages [][]byte) [][]byte {
+	if len(messages) == 0 {
+		return messages
+	}
+	lastIdx := len(messages) - 1
+	last := gjson.ParseBytes(messages[lastIdx])
+	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
+		return messages
+	}
+	content := last.Get("content")
+	if !content.IsArray() {
+		return messages
+	}
+	parts := content.Array()
+	end := len(parts)
+	for end > 0 {
+		partType := strings.TrimSpace(parts[end-1].Get("type").String())
+		if partType == "thinking" || partType == "redacted_thinking" {
+			end--
+		} else {
+			break
+		}
+	}
+	if end == len(parts) {
+		return messages
+	}
+	if end == 0 {
+		return messages[:lastIdx]
+	}
+	remainingParts := make([][]byte, end)
+	for i := 0; i < end; i++ {
+		remainingParts[i] = []byte(parts[i].Raw)
+	}
+	var updatedMsg []byte
+	if end == 1 {
+		part := parts[0]
+		if part.Get("type").String() == "text" && !part.Get("cache_control").Exists() && !part.Get("citations").Exists() {
+			updatedMsg, _ = sjson.SetBytes(messages[lastIdx], "content", part.Get("text").String())
+		} else {
+			updatedMsg, _ = sjson.SetRawBytes(messages[lastIdx], "content", common.JoinRawArray(remainingParts))
+		}
+	} else {
+		updatedMsg, _ = sjson.SetRawBytes(messages[lastIdx], "content", common.JoinRawArray(remainingParts))
+	}
+	messages[lastIdx] = updatedMsg
+	return messages
+}
+
+// claudeModelRejectsAssistantPrefill reports whether a Claude model family
+// disallows trailing assistant prefill in its conversation history.
+func claudeModelRejectsAssistantPrefill(modelName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	for _, family := range []string{"fable", "opus-5", "sonnet-4-6"} {
+		if strings.Contains(normalized, family) {
+			return true
+		}
+	}
+	return false
 }
 
 // responsesSystemUnsupportedBlock represents a system-level content part that
@@ -946,11 +1090,76 @@ func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
 }
 
 func unwrapCustomToolInput(arguments string) string {
-	if v := gjson.Get(arguments, "input"); v.Exists() {
+	trimmed := strings.TrimSpace(arguments)
+	if v := gjson.Get(trimmed, "input"); v.Exists() {
 		if v.Type == gjson.String {
 			return v.String()
 		}
 		return v.Raw
+	}
+	idx := strings.Index(trimmed, `"input"`)
+	if idx >= 0 {
+		rest := strings.TrimSpace(trimmed[idx+7:])
+		if strings.HasPrefix(rest, ":") {
+			rest = strings.TrimSpace(rest[1:])
+			if strings.HasPrefix(rest, `"`) {
+				content := rest[1:]
+				var unescaped strings.Builder
+				inEscape := false
+				for i := 0; i < len(content); i++ {
+					c := content[i]
+					if inEscape {
+						switch c {
+						case '"', '\\', '/':
+							unescaped.WriteByte(c)
+						case 'b':
+							unescaped.WriteByte('\b')
+						case 'f':
+							unescaped.WriteByte('\f')
+						case 'n':
+							unescaped.WriteByte('\n')
+						case 'r':
+							unescaped.WriteByte('\r')
+						case 't':
+							unescaped.WriteByte('\t')
+						case 'u':
+							if i+4 < len(content) {
+								if r, err := strconv.ParseUint(content[i+1:i+5], 16, 16); err == nil {
+									if utf16.IsSurrogate(rune(r)) && i+10 < len(content) && content[i+5:i+7] == `\u` {
+										if r2, err2 := strconv.ParseUint(content[i+7:i+11], 16, 16); err2 == nil {
+											unescaped.WriteRune(utf16.DecodeRune(rune(r), rune(r2)))
+											i += 10
+											inEscape = false
+											continue
+										}
+									}
+									unescaped.WriteRune(rune(r))
+									i += 4
+									inEscape = false
+									continue
+								}
+							}
+							unescaped.WriteByte('\\')
+							unescaped.WriteByte('u')
+						default:
+							unescaped.WriteByte('\\')
+							unescaped.WriteByte(c)
+						}
+						inEscape = false
+					} else if c == '\\' {
+						inEscape = true
+					} else if c == '"' {
+						break
+					} else {
+						unescaped.WriteByte(c)
+					}
+				}
+				if inEscape {
+					unescaped.WriteByte('\\')
+				}
+				return unescaped.String()
+			}
+		}
 	}
 	return arguments
 }
@@ -1085,4 +1294,57 @@ func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {
 	default:
 		return false
 	}
+}
+
+// normalizeCodexAgentMessages rewrites Codex multi-agent v2 "agent_message"
+// input items into plain user "message" items so the Claude translator does
+// not drop the delegated task text. Encrypted content parts are surfaced as
+// input_text, mirroring the multi-agent v2 optimizer used for other upstreams.
+func normalizeCodexAgentMessages(payload []byte) []byte {
+	input := gjson.GetBytes(payload, "input")
+	if !input.IsArray() {
+		return payload
+	}
+	updated := payload
+	changed := false
+	for itemIndex, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
+			continue
+		}
+		itemPath := "input." + strconv.Itoa(itemIndex)
+		var errSet error
+		if content := item.Get("content"); content.IsArray() {
+			for partIndex, part := range content.Array() {
+				if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
+					continue
+				}
+				enc := part.Get("encrypted_content")
+				if enc.Type != gjson.String {
+					continue
+				}
+				partPath := itemPath + ".content." + strconv.Itoa(partIndex)
+				if updated, errSet = sjson.SetBytes(updated, partPath+".type", "input_text"); errSet != nil {
+					return payload
+				}
+				if updated, errSet = sjson.SetBytes(updated, partPath+".text", enc.String()); errSet != nil {
+					return payload
+				}
+				var errDelete error
+				if updated, errDelete = sjson.DeleteBytes(updated, partPath+".encrypted_content"); errDelete != nil {
+					return payload
+				}
+			}
+		}
+		if updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user"); errSet != nil {
+			return payload
+		}
+		if updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message"); errSet != nil {
+			return payload
+		}
+		changed = true
+	}
+	if !changed {
+		return payload
+	}
+	return updated
 }

@@ -30,6 +30,48 @@ func (e *ClaudeExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool 
 	return helps.ClaudeCredentialAccountUUID(auth) == ""
 }
 
+func isClaudeSetupToken(auth *cliproxyauth.Auth, apiKey string) bool {
+	if !isClaudeOAuthToken(apiKey) || auth == nil {
+		return false
+	}
+	if skip, _ := auth.Metadata["skip_account_profile"].(bool); skip {
+		return true
+	}
+	if isSetup, _ := auth.Metadata["is_setup_token"].(bool); isSetup {
+		return true
+	}
+	if isSetup, _ := auth.Metadata["setup_token"].(bool); isSetup {
+		return true
+	}
+	if kind := strings.ToLower(auth.Attributes["auth_kind"]); kind == "setup_token" || kind == "setup-token" {
+		return true
+	}
+	scopes := strings.ToLower(claudeauth.ReadMetadataString(&auth.Metadata, "scopes"))
+	if scopes == "" {
+		scopes = strings.ToLower(claudeauth.ReadMetadataString(&auth.Metadata, "scope"))
+	}
+	if scopes != "" && !strings.Contains(scopes, "user:profile") && !strings.Contains(scopes, "user:office") {
+		return true
+	}
+	return false
+}
+
+func isClaudeOAuthScope403(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "status 403") ||
+		strings.Contains(msg, "403 forbidden") ||
+		strings.Contains(msg, "403") ||
+		strings.Contains(msg, "forbidden") ||
+		strings.Contains(msg, "permission_error") ||
+		strings.Contains(msg, "scope requirement") ||
+		strings.Contains(msg, "insufficient_scope") ||
+		strings.Contains(msg, "user:profile") ||
+		strings.Contains(msg, "user:office")
+}
+
 func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if auth == nil || !e.ShouldPrepareRequestAuth(auth) {
 		return auth, nil
@@ -43,15 +85,42 @@ func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxya
 		return auth, nil
 	}
 
+	if isClaudeSetupToken(auth, apiKey) {
+		seed := helps.ClaudeCLIAuthIdentitySeed(auth)
+		if seed == "" {
+			seed = "claude-setup-token|" + apiKey
+		}
+		claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", helps.StableClaudeCLIAccountUUID(seed))
+		claudeauth.StoreMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey, time.Now().UTC().Format(time.RFC3339))
+		return auth, nil
+	}
+
 	profile, errProfile := e.fetchClaudeOAuthProfile(ctx, auth, apiKey)
 	if errProfile != nil {
 		if errContext := ctx.Err(); errContext != nil {
 			return nil, errContext
 		}
+		if isClaudeOAuthScope403(errProfile) {
+			log.Debugf("Claude OAuth account profile lookup returned 403 for auth %s: %v (falling back to stable credential identity)", auth.ID, errProfile)
+			seed := helps.ClaudeCLIAuthIdentitySeed(auth)
+			if seed == "" {
+				seed = "claude-oauth-fallback|" + apiKey
+			}
+			claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", helps.StableClaudeCLIAccountUUID(seed))
+			claudeauth.StoreMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey, time.Now().UTC().Format(time.RFC3339))
+			return auth, nil
+		}
 		return nil, fmt.Errorf("populate Claude OAuth account profile: %w", errProfile)
 	}
 	if profile == nil || strings.TrimSpace(profile.Account.UUID) == "" {
-		return nil, fmt.Errorf("populate Claude OAuth account profile: account UUID is empty")
+		log.Debugf("Claude OAuth account profile lookup returned empty account UUID for auth %s (falling back to stable credential identity)", auth.ID)
+		seed := helps.ClaudeCLIAuthIdentitySeed(auth)
+		if seed == "" {
+			seed = "claude-oauth-fallback|" + apiKey
+		}
+		claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", helps.StableClaudeCLIAccountUUID(seed))
+		claudeauth.StoreMetadataString(&auth.Metadata, claudeAccountProfileCheckedAtKey, time.Now().UTC().Format(time.RFC3339))
+		return auth, nil
 	}
 	claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", profile.Account.UUID)
 	claudeauth.StoreMetadataString(&auth.Metadata, "email", profile.Account.Email)
@@ -86,6 +155,9 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		return nil, fmt.Errorf("claude executor: auth is nil")
 	}
 	refreshToken := claudeauth.ReadMetadataString(&auth.Metadata, "refresh_token")
+	if refreshToken == "" {
+		refreshToken = claudeauth.ReadMetadataString(&auth.Metadata, "refreshToken")
+	}
 	if refreshToken == "" {
 		return auth, nil
 	}

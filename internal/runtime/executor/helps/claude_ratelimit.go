@@ -17,15 +17,13 @@ const (
 )
 
 // ClaudeHeadersIndicateUnifiedRateLimitRejection reports whether response headers explicitly
-// declare an Anthropic unified 5h or 7d rate-limit rejection.
+// declare an Anthropic shared 5h or 7d rate-limit rejection. A Fable-only 7d_oi rejection
+// remains model-scoped when both shared windows are explicitly allowed (status "allowed" or "allowed_warning").
 func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 	if headers == nil {
 		return false
 	}
 	unifiedStatus := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Status")))
-	if unifiedStatus == "rejected" {
-		return true
-	}
 	status5h := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Status")))
 	if status5h == "rejected" {
 		return true
@@ -34,11 +32,23 @@ func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 	if status7d == "rejected" {
 		return true
 	}
-	return false
+	if unifiedStatus != "rejected" {
+		return false
+	}
+	status7dOI := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status")))
+	return !isFableOnlyRejection(status5h, status7d, status7dOI)
 }
 
-// ParseClaudeRateLimitReset inspects Anthropic response headers for unified rate-limit
-// and standard Retry-After reset information, returning the conservative cooldown
+func isClaudeWindowAllowed(status string) bool {
+	return status == "allowed" || status == "allowed_warning"
+}
+
+func isFableOnlyRejection(status5h, status7d, status7dOI string) bool {
+	return isClaudeWindowAllowed(status5h) && isClaudeWindowAllowed(status7d) && status7dOI == "rejected"
+}
+
+// ParseClaudeRateLimitReset inspects Anthropic response headers for shared and Fable-specific
+// unified rate-limit and standard Retry-After reset information, returning the conservative cooldown
 // duration including a bounded non-negative random grace period.
 // If no valid future reset information is present, it returns nil.
 func ParseClaudeRateLimitReset(headers http.Header, now time.Time) *time.Duration {
@@ -53,6 +63,8 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 	unifiedStatus := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Status")))
 	status5h := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Status")))
 	status7d := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d-Status")))
+	status7dOI := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status")))
+	fableOnlyRejection := isFableOnlyRejection(status5h, status7d, status7dOI)
 
 	var candidateDeadlines []time.Time
 	var rejectedWindows []string
@@ -65,6 +77,9 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 	}
 	if status7d == "rejected" {
 		rejectedWindows = append(rejectedWindows, "7d")
+	}
+	if status7dOI == "rejected" {
+		rejectedWindows = append(rejectedWindows, "7d_oi")
 	}
 
 	// 1. Retry-After header
@@ -95,9 +110,18 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 		}
 	}
 
-	// 4. Unified reset header:
-	unifiedRejected := unifiedStatus == "rejected" || status5h == "rejected" || status7d == "rejected" ||
-		(unifiedStatus == "" && status5h != "allowed" && status7d != "allowed")
+	// 4. Fable-specific 7-day window reset (only when rejected and not a Fable-only rejection)
+	if status7dOI == "rejected" && !fableOnlyRejection {
+		if raw := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Reset"); raw != "" {
+			if t, ok := parseUnixOrTimestamp(raw); ok && t.After(now) {
+				candidateDeadlines = append(candidateDeadlines, t)
+			}
+		}
+	}
+
+	// 5. Unified reset header:
+	unifiedRejected := !fableOnlyRejection && (unifiedStatus == "rejected" || status5h == "rejected" || status7d == "rejected" || status7dOI == "rejected" ||
+		(unifiedStatus == "" && !isClaudeWindowAllowed(status5h) && !isClaudeWindowAllowed(status7d)))
 
 	if unifiedRejected {
 		if raw := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Reset"); raw != "" {

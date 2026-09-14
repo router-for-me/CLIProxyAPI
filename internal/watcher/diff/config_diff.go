@@ -108,6 +108,34 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !reflect.DeepEqual(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: %d -> %d", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
 	}
+	if !reflect.DeepEqual(oldCfg.Devin.SensitiveWords, newCfg.Devin.SensitiveWords) {
+		changes = append(changes, fmt.Sprintf("devin.sensitive-words: %d -> %d", len(oldCfg.Devin.SensitiveWords), len(newCfg.Devin.SensitiveWords)))
+	}
+	oldEnabled := "<nil>"
+	if oldCfg.Antigravity.ConnectionPool.Enabled != nil {
+		oldEnabled = fmt.Sprintf("%t", *oldCfg.Antigravity.ConnectionPool.Enabled)
+	}
+	newEnabled := "<nil>"
+	if newCfg.Antigravity.ConnectionPool.Enabled != nil {
+		newEnabled = fmt.Sprintf("%t", *newCfg.Antigravity.ConnectionPool.Enabled)
+	}
+	if oldEnabled != newEnabled {
+		changes = append(changes, fmt.Sprintf("antigravity.connection-pool.enabled: %s -> %s", oldEnabled, newEnabled))
+	}
+	if oldCfg.Antigravity.ConnectionPool.IdleConnTimeout != newCfg.Antigravity.ConnectionPool.IdleConnTimeout {
+		changes = append(changes, fmt.Sprintf("antigravity.connection-pool.idle-conn-timeout: %q -> %q", oldCfg.Antigravity.ConnectionPool.IdleConnTimeout, newCfg.Antigravity.ConnectionPool.IdleConnTimeout))
+	}
+	oldMaxIdle := "<nil>"
+	if oldCfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost != nil {
+		oldMaxIdle = fmt.Sprintf("%d", *oldCfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost)
+	}
+	newMaxIdle := "<nil>"
+	if newCfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost != nil {
+		newMaxIdle = fmt.Sprintf("%d", *newCfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost)
+	}
+	if oldMaxIdle != newMaxIdle {
+		changes = append(changes, fmt.Sprintf("antigravity.connection-pool.max-idle-conns-per-host: %s -> %s", oldMaxIdle, newMaxIdle))
+	}
 
 	if oldCfg.Codex.IdentityConfuse != newCfg.Codex.IdentityConfuse {
 		changes = append(changes, fmt.Sprintf("codex.identity-confuse: %t -> %t", oldCfg.Codex.IdentityConfuse, newCfg.Codex.IdentityConfuse))
@@ -115,8 +143,14 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Codex.DisableCodexCloaking != newCfg.Codex.DisableCodexCloaking {
 		changes = append(changes, fmt.Sprintf("codex.disable-codex-cloaking: %t -> %t", oldCfg.Codex.DisableCodexCloaking, newCfg.Codex.DisableCodexCloaking))
 	}
+	if oldCfg.Codex.StreamBootstrapBuffering != newCfg.Codex.StreamBootstrapBuffering {
+		changes = append(changes, fmt.Sprintf("codex.stream-bootstrap-buffering: %t -> %t", oldCfg.Codex.StreamBootstrapBuffering, newCfg.Codex.StreamBootstrapBuffering))
+	}
 	if oldCfg.Codex.OptimizeMultiAgentV2 != newCfg.Codex.OptimizeMultiAgentV2 {
 		changes = append(changes, fmt.Sprintf("codex.optimize-multi-agent-v2: %t -> %t", oldCfg.Codex.OptimizeMultiAgentV2, newCfg.Codex.OptimizeMultiAgentV2))
+	}
+	if oldCfg.Codex.OrphanDelegationCompatibility != newCfg.Codex.OrphanDelegationCompatibility {
+		changes = append(changes, fmt.Sprintf("codex.orphan-delegation-compatibility: %t -> %t", oldCfg.Codex.OrphanDelegationCompatibility, newCfg.Codex.OrphanDelegationCompatibility))
 	}
 	if oldCfg.XAI.InjectXSearch != newCfg.XAI.InjectXSearch {
 		changes = append(changes, fmt.Sprintf("xai.inject-x-search: %t -> %t", oldCfg.XAI.InjectXSearch, newCfg.XAI.InjectXSearch))
@@ -265,6 +299,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if o.RebuildMidSystemMessage != n.RebuildMidSystemMessage {
 				changes = append(changes, fmt.Sprintf("claude[%d].rebuild-mid-system-message: %t -> %t", i, o.RebuildMidSystemMessage, n.RebuildMidSystemMessage))
 			}
+			if strings.TrimSpace(o.FingerprintProfile) != strings.TrimSpace(n.FingerprintProfile) {
+				changes = append(changes, fmt.Sprintf("claude[%d].fingerprint-profile: %s -> %s", i, strings.TrimSpace(o.FingerprintProfile), strings.TrimSpace(n.FingerprintProfile)))
+			}
 			changes = appendOptionalIntChange(changes, fmt.Sprintf("claude[%d].request-retry", i), o.RequestRetry, n.RequestRetry)
 			if o.Cloak != nil && n.Cloak != nil {
 				if strings.TrimSpace(o.Cloak.Mode) != strings.TrimSpace(n.Cloak.Mode) {
@@ -370,6 +407,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, entries...)
 	}
 	if entries, _ := DiffOAuthModelAliasChanges(oldCfg.OAuthModelAlias, newCfg.OAuthModelAlias); len(entries) > 0 {
+		changes = append(changes, entries...)
+	}
+	if entries, _ := DiffOAuthRequestScopedErrorsChanges(oldCfg.OAuthRequestScopedErrors, newCfg.OAuthRequestScopedErrors); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
 

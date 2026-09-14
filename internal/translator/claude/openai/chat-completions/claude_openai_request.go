@@ -6,24 +6,14 @@
 package chat_completions
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-)
-
-var (
-	user    = ""
-	account = ""
-	session = ""
 )
 
 // ConvertOpenAIRequestToClaude parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
@@ -56,22 +46,11 @@ func ConvertOpenAIRequestToClaudeWithCompat(modelName string, inputRawJSON []byt
 func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
 	rawJSON := inputRawJSON
 
-	if account == "" {
-		u, _ := uuid.NewRandom()
-		account = u.String()
-	}
-	if session == "" {
-		u, _ := uuid.NewRandom()
-		session = u.String()
-	}
-	if user == "" {
-		sum := sha256.Sum256([]byte(account + session))
-		user = hex.EncodeToString(sum[:])
-	}
-	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
+	userID := common.DeriveClaudeUserID(rawJSON)
 
 	// Base Claude Code API template with default max_tokens value
-	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
+	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
+	out, _ = sjson.SetBytes(out, "metadata.user_id", userID)
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -158,6 +137,9 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	// Stream configuration to enable or disable streaming responses
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
+	systemBlocks := make([][]byte, 0)
+	messageBlocks := make([][]byte, 0)
+
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		lastToolMessage := map[string]gjson.Result{}
@@ -172,7 +154,6 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		})
 		emittedToolResults := map[string]struct{}{}
 
-		systemBlocks := make([][]byte, 0)
 		messageAccumulator := common.NewClaudeMessageAccumulator(int(root.Get("messages.#").Int()))
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
@@ -312,20 +293,26 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			return true
 		})
 
-		messageBlocks := messageAccumulator.Messages()
+		messageBlocks = messageAccumulator.Messages()
+	}
 
-		// Preserve a minimal conversational turn for system-only inputs.
-		// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
-		if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
-			messageBlocks = append(messageBlocks, []byte(`{"role":"user","content":[{"type":"text","text":""}]}`))
-		}
+	if formatInstruction := common.BuildClaudeStructuredOutputInstruction(root.Get("response_format")); formatInstruction != "" {
+		systemBlock := []byte(`{"type":"text","text":""}`)
+		systemBlock, _ = sjson.SetBytes(systemBlock, "text", formatInstruction)
+		systemBlocks = append(systemBlocks, systemBlock)
+	}
 
-		if len(systemBlocks) > 0 {
-			out, _ = sjson.SetRawBytes(out, "system", common.JoinRawArray(systemBlocks))
-		}
-		if len(messageBlocks) > 0 {
-			out = common.SetRawArrayItems(out, "messages", messageBlocks)
-		}
+	// Preserve a minimal conversational turn for system-only inputs.
+	// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
+	if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
+		messageBlocks = append(messageBlocks, []byte(`{"role":"user","content":[{"type":"text","text":""}]}`))
+	}
+
+	if len(systemBlocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "system", common.JoinRawArray(systemBlocks))
+	}
+	if len(messageBlocks) > 0 {
+		out = common.SetRawArrayItems(out, "messages", messageBlocks)
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools

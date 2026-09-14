@@ -237,11 +237,26 @@ func decodeHomeDispatchError(raw []byte) error {
 	switch strings.ToLower(code) {
 	case "model_not_found":
 		result.HTTPStatus = http.StatusNotFound
+	case "model_cooldown":
+		result.HTTPStatus = http.StatusTooManyRequests
+		cooldownErr := &homeDispatchRetryAfterError{cause: result}
+		if detail.RetryAfterMS > 0 {
+			cooldownErr.retryAfter = time.Duration(detail.RetryAfterMS) * time.Millisecond
+		}
+		if detail.RequestRetry != nil && *detail.RequestRetry >= 0 {
+			cooldownErr.requestRetry = *detail.RequestRetry
+			cooldownErr.hasRequestRetry = true
+		}
+		return cooldownErr
 	case "authentication_error", "unauthorized", "no_credentials", "invalid_credential":
 		result.HTTPStatus = http.StatusUnauthorized
 	case "credential_concurrency_exceeded", "credential_model_concurrency_exceeded":
 		result.HTTPStatus = http.StatusTooManyRequests
 		return newHomeConcurrencyBusyError(result, time.Duration(detail.RetryAfterMS)*time.Millisecond)
+	case "user_credits_insufficient":
+		result.HTTPStatus = http.StatusPaymentRequired
+	case "user_period_limit_exceeded":
+		result.HTTPStatus = http.StatusTooManyRequests
 	case "auth_not_found", "auth_unavailable", "refresh_temporarily_unavailable", "home_unavailable",
 		"concurrency_protocol_required", "concurrency_tracker_unavailable", "concurrency_node_unavailable":
 		result.HTTPStatus = http.StatusServiceUnavailable
@@ -263,13 +278,34 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 	return nil
 }
 
-// SafeResponseHeaders returns trusted response headers only for CPA's concrete Home busy error.
+// SafeResponseHeaders returns trusted response headers only for concrete
+// retry/cooldown errors.
 func SafeResponseHeaders(err error) http.Header {
 	var busy *HomeConcurrencyBusyError
-	if !errors.As(err, &busy) || busy == nil {
-		return nil
+	if errors.As(err, &busy) && busy != nil {
+		return busy.SafeResponseHeaders()
 	}
-	return busy.SafeResponseHeaders()
+	var exhausted *homeRetryRoundExhaustedError
+	if errors.As(err, &exhausted) && exhausted != nil {
+		retryAfter := exhausted.RetryAfter()
+		if retryAfter == nil {
+			return nil
+		}
+		return safeRetryAfterHeader(*retryAfter)
+	}
+	var cooldown *homeDispatchRetryAfterError
+	if errors.As(err, &cooldown) && cooldown != nil {
+		retryAfter := cooldown.RetryAfter()
+		if retryAfter == nil {
+			return nil
+		}
+		return safeRetryAfterHeader(*retryAfter)
+	}
+	var modelCooldown *modelCooldownError
+	if errors.As(err, &modelCooldown) && modelCooldown != nil {
+		return modelCooldown.Headers()
+	}
+	return nil
 }
 
 func safeRetryAfterHeader(retryAfter time.Duration) http.Header {

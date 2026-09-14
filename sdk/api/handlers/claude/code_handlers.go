@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -155,7 +156,7 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 	disableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
-	c.JSON(http.StatusOK, claudemodels.BuildResponse(h.Models(), disableCloaking))
+	h.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(h.Models(), disableCloaking))
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.
@@ -381,6 +382,11 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		c.Status(status)
 		_, _ = c.Writer.Write(body)
 		return
+	}
+	if msg != nil && msg.Error != nil {
+		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
+			c.Writer.Header().Add("Retry-After", value)
+		}
 	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {

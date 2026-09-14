@@ -43,7 +43,14 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 
 	for i := range cfg.GeminiKey {
 		entry := &cfg.GeminiKey[i]
-		id, _ := idGen.Next("gemini:apikey", entry.APIKey, entry.BaseURL)
+		key := strings.TrimSpace(entry.APIKey)
+		base := strings.TrimSpace(entry.BaseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		prefix := strings.TrimSpace(entry.Prefix)
+		if key == "" && base == "" {
+			continue
+		}
+		id, _ := idGen.Next("gemini:apikey", key, base, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers))
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil
@@ -51,7 +58,14 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 	}
 	for i := range cfg.InteractionsKey {
 		entry := &cfg.InteractionsKey[i]
-		id, _ := idGen.Next("gemini-interactions:apikey", entry.APIKey, entry.BaseURL)
+		key := strings.TrimSpace(entry.APIKey)
+		base := strings.TrimSpace(entry.BaseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		prefix := strings.TrimSpace(entry.Prefix)
+		if key == "" && base == "" {
+			continue
+		}
+		id, _ := idGen.Next("gemini-interactions:apikey", key, base, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers))
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil
@@ -59,7 +73,14 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
-		id, _ := idGen.Next("claude:apikey", entry.APIKey, entry.BaseURL)
+		key := strings.TrimSpace(entry.APIKey)
+		base := strings.TrimSpace(entry.BaseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		prefix := strings.TrimSpace(entry.Prefix)
+		if key == "" && base == "" {
+			continue
+		}
+		id, _ := idGen.Next("claude:apikey", key, base, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers))
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil
@@ -67,7 +88,14 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 	}
 	for i := range cfg.CodexKey {
 		entry := &cfg.CodexKey[i]
-		id, _ := idGen.Next("codex:apikey", entry.APIKey, entry.BaseURL)
+		key := strings.TrimSpace(entry.APIKey)
+		base := strings.TrimSpace(entry.BaseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		prefix := strings.TrimSpace(entry.Prefix)
+		if key == "" && base == "" {
+			continue
+		}
+		id, _ := idGen.Next("codex:apikey", key, base, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers))
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil
@@ -75,7 +103,14 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 	}
 	for i := range cfg.XAIKey {
 		entry := &cfg.XAIKey[i]
-		id, _ := idGen.Next("xai:apikey", entry.APIKey, entry.BaseURL)
+		key := strings.TrimSpace(entry.APIKey)
+		base := strings.TrimSpace(entry.BaseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		prefix := strings.TrimSpace(entry.Prefix)
+		if key == "" && base == "" {
+			continue
+		}
+		id, _ := idGen.Next("xai:apikey", key, base, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers))
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil
@@ -83,7 +118,10 @@ func toggleConfigAPIKeyExcludedAll(cfg *config.Config, auth *coreauth.Auth, disa
 	}
 	for i := range cfg.VertexCompatAPIKey {
 		entry := &cfg.VertexCompatAPIKey[i]
-		id, _ := idGen.Next("vertex:apikey", entry.APIKey, entry.BaseURL, entry.ProxyURL)
+		key := strings.TrimSpace(entry.APIKey)
+		base := strings.TrimSpace(entry.BaseURL)
+		proxy := strings.TrimSpace(entry.ProxyURL)
+		id, _ := idGen.Next("vertex:apikey", key, base, proxy)
 		if id == authID {
 			entry.ExcludedModels = setConfigAPIKeyExcludedAll(entry.ExcludedModels, disable)
 			return true, nil

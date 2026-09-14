@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -136,17 +137,40 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if plugin == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "UsagePlugin.HandleUsage", recovered)
 		}
 	}()
+	sessionID := strings.TrimSpace(record.SessionID)
+	parentSessionID := strings.TrimSpace(record.ParentSessionID)
+	if sessionID == "" {
+		clientMeta := logging.GetClientRequestMetadata(ctx)
+		sessionID = strings.TrimSpace(clientMeta.SessionID)
+		parentSessionID = strings.TrimSpace(clientMeta.ParentSessionID)
+	} else if parentSessionID == "" {
+		clientMeta := logging.GetClientRequestMetadata(ctx)
+		if sessionID == strings.TrimSpace(clientMeta.SessionID) {
+			parentSessionID = strings.TrimSpace(clientMeta.ParentSessionID)
+		}
+	}
+	if sessionID == "" || sessionID == parentSessionID {
+		parentSessionID = ""
+	}
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
 		Provider:        record.Provider,
+		BaseURL:         record.BaseURL,
 		ExecutorType:    record.ExecutorType,
 		Model:           record.Model,
 		Alias:           record.Alias,
 		APIKey:          record.APIKey,
+		SessionID:       sessionID,
+		ParentSessionID: parentSessionID,
 		AuthID:          record.AuthID,
 		AuthIndex:       record.AuthIndex,
 		AuthType:        record.AuthType,

@@ -158,6 +158,7 @@ func (s *Service) refreshPluginModelRegistrations(ctx context.Context) {
 		return
 	}
 	s.registerModelsForAuthBatch(ctx, s.coreManager.List())
+	s.waitAntigravityProbesContext(ctx)
 }
 
 func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*coreauth.Auth) {

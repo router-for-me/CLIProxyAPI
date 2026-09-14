@@ -1,6 +1,7 @@
 package config
 
 import (
+	"sort"
 	"strings"
 
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
@@ -101,6 +102,54 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 	cfg.OAuthModelAlias = out
 }
 
+// SanitizeOAuthRequestScopedErrors normalizes and validates global OAuth request-scoped error rules.
+// It trims whitespace, normalizes channel keys to lower-case, validates status/action, and drops invalid rules.
+func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
+	if cfg == nil || len(cfg.OAuthRequestScopedErrors) == 0 {
+		return
+	}
+	out := make(map[string][]RequestScopedErrorRule, len(cfg.OAuthRequestScopedErrors))
+	for rawChannel, rules := range cfg.OAuthRequestScopedErrors {
+		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if channel == "" || len(rules) == 0 {
+			continue
+		}
+		clean := make([]RequestScopedErrorRule, 0, len(rules))
+		for _, r := range rules {
+			action := strings.ToLower(strings.TrimSpace(r.Action))
+			match := make([]string, 0, len(r.Match))
+			for _, m := range r.Match {
+				if tm := strings.TrimSpace(m); tm != "" {
+					match = append(match, tm)
+				}
+			}
+			matchRegexr := make([]string, 0, len(r.MatchRegexr))
+			for _, re := range r.MatchRegexr {
+				if tre := strings.TrimSpace(re); tre != "" {
+					matchRegexr = append(matchRegexr, tre)
+				}
+			}
+			if r.Status <= 0 || (len(match) == 0 && len(matchRegexr) == 0) || action == "" {
+				continue
+			}
+			clean = append(clean, RequestScopedErrorRule{
+				Status:      r.Status,
+				Match:       match,
+				MatchRegexr: matchRegexr,
+				Action:      action,
+			})
+		}
+		if len(clean) > 0 {
+			out[channel] = clean
+		}
+	}
+	if len(out) == 0 {
+		cfg.OAuthRequestScopedErrors = nil
+		return
+	}
+	cfg.OAuthRequestScopedErrors = out
+}
+
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
 // not actionable, specifically those missing a BaseURL. It trims whitespace before
 // evaluation and preserves the relative order of remaining entries.
@@ -174,6 +223,14 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		// Only a recognized value is rewritten. An unrecognized one is preserved as
+		// written so sanitizing a config file never destroys operator input; the
+		// request path falls back to the default profile and reports it once.
+		if normalized, ok := NormalizeClaudeFingerprintProfile(entry.FingerprintProfile); ok {
+			entry.FingerprintProfile = normalized
+		} else {
+			entry.FingerprintProfile = strings.TrimSpace(entry.FingerprintProfile)
+		}
 	}
 }
 
@@ -183,15 +240,15 @@ func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
 	for i := range entries {
 		entry := entries[i]
 		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		if entry.APIKey == "" {
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		if entry.APIKey == "" && entry.BaseURL == "" {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
-		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		uniqueKey := formatGeminiKeyDedupID(entry)
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}
@@ -201,8 +258,42 @@ func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
 	return out
 }
 
+func formatGeminiKeyDedupID(entry GeminiKey) string {
+	var b strings.Builder
+	b.WriteString(entry.APIKey)
+	b.WriteByte(0)
+	b.WriteString(entry.BaseURL)
+	b.WriteByte(0)
+	b.WriteString(entry.ProxyURL)
+	b.WriteByte(0)
+	b.WriteString(entry.Prefix)
+	b.WriteByte(0)
+	b.WriteString(FormatSortedHeaders(entry.Headers))
+	return b.String()
+}
+
+// FormatSortedHeaders serializes headers deterministically with null byte separators.
+func FormatSortedHeaders(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte(0)
+		b.WriteString(headers[k])
+		b.WriteByte(0)
+	}
+	return b.String()
+}
+
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
-// It uses API key + base URL as the uniqueness key.
+// It uses API key, base URL, proxy URL, prefix, and custom headers as the uniqueness key.
 func (cfg *Config) SanitizeGeminiKeys() {
 	if cfg == nil {
 		return
@@ -211,7 +302,7 @@ func (cfg *Config) SanitizeGeminiKeys() {
 }
 
 // SanitizeInteractionsKeys deduplicates and normalizes native Interactions credentials.
-// It uses API key + base URL as the uniqueness key.
+// It uses API key, base URL, proxy URL, prefix, and custom headers as the uniqueness key.
 func (cfg *Config) SanitizeInteractionsKeys() {
 	if cfg == nil {
 		return

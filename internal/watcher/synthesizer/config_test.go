@@ -229,6 +229,7 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 					BaseURL:                 "https://api.anthropic.com",
 					DisableCooling:          boolPointer(true),
 					RebuildMidSystemMessage: true,
+					FingerprintProfile:      "claude-code-cli",
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
 						{Name: "claude-3-sonnet"},
@@ -268,6 +269,9 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 	if got := auths[0].Attributes["rebuild_mid_system_message"]; got != "true" {
 		t.Errorf("expected rebuild_mid_system_message=true, got %s", got)
+	}
+	if got := auths[0].Attributes["fingerprint_profile"]; got != "claude-code-cli" {
+		t.Errorf("expected fingerprint_profile=claude-code-cli, got %s", got)
 	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
@@ -405,13 +409,141 @@ func TestConfigSynthesizer_XAIKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_XAIKeys_AllowsEmptyAPIKeyWithBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			XAIKey: []config.CodexKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-xai.example.com",
+					Headers: map[string]string{"Custom-Auth": "secret"},
+				},
+				{
+					APIKey:  "   ",
+					BaseURL: "https://custom-xai-2.example.com",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths for empty API keys with base URL, got %d", len(auths))
+	}
+	if auths[0].Attributes["base_url"] != "https://custom-xai.example.com" {
+		t.Fatalf("expected base_url=https://custom-xai.example.com, got %s", auths[0].Attributes["base_url"])
+	}
+	if auths[0].Attributes["header:Custom-Auth"] != "secret" {
+		t.Fatalf("expected header:Custom-Auth=secret, got %s", auths[0].Attributes["header:Custom-Auth"])
+	}
+	if auths[0].Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("expected auth_kind=apikey, got %s", auths[0].Attributes["auth_kind"])
+	}
+	if _, exists := auths[0].Attributes["api_key"]; exists {
+		t.Fatalf("expected no api_key attribute for empty key, got %s", auths[0].Attributes["api_key"])
+	}
+}
+
+func TestConfigSynthesizer_ClaudeKeys_AllowsEmptyAPIKeyWithBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-claude.example.com",
+					Headers: map[string]string{"Custom-Auth": "secret"},
+				},
+				{
+					APIKey:  "   ",
+					BaseURL: "https://custom-claude-2.example.com",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths for empty API keys with base URL, got %d", len(auths))
+	}
+	if auths[0].Attributes["base_url"] != "https://custom-claude.example.com" {
+		t.Fatalf("expected base_url=https://custom-claude.example.com, got %s", auths[0].Attributes["base_url"])
+	}
+	if auths[0].Attributes["header:Custom-Auth"] != "secret" {
+		t.Fatalf("expected header:Custom-Auth=secret, got %s", auths[0].Attributes["header:Custom-Auth"])
+	}
+	if auths[0].Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("expected auth_kind=apikey, got %s", auths[0].Attributes["auth_kind"])
+	}
+	if _, exists := auths[0].Attributes["api_key"]; exists {
+		t.Fatalf("expected no api_key attribute for empty key, got %s", auths[0].Attributes["api_key"])
+	}
+}
+
+func TestConfigSynthesizer_GeminiKeys_AllowsEmptyAPIKeyWithBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-gemini.example.com",
+					Headers: map[string]string{"Custom-Auth": "secret"},
+				},
+			},
+			InteractionsKey: []config.GeminiKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-interactions.example.com",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths for empty API keys with base URL, got %d", len(auths))
+	}
+	if auths[0].Attributes["base_url"] != "https://custom-gemini.example.com" {
+		t.Fatalf("expected base_url=https://custom-gemini.example.com, got %s", auths[0].Attributes["base_url"])
+	}
+	if auths[0].Attributes["header:Custom-Auth"] != "secret" {
+		t.Fatalf("expected header:Custom-Auth=secret, got %s", auths[0].Attributes["header:Custom-Auth"])
+	}
+	if auths[0].Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("expected auth_kind=apikey, got %s", auths[0].Attributes["auth_kind"])
+	}
+	if _, exists := auths[0].Attributes["api_key"]; exists {
+		t.Fatalf("expected no api_key attribute for empty key, got %s", auths[0].Attributes["api_key"])
+	}
+	if auths[1].Attributes["base_url"] != "https://custom-interactions.example.com" {
+		t.Fatalf("expected base_url=https://custom-interactions.example.com, got %s", auths[1].Attributes["base_url"])
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
 		Config: &config.Config{
 			CodexKey: []config.CodexKey{
-				{APIKey: ""},   // empty, should be skipped
-				{APIKey: "  "}, // whitespace, should be skipped
+				{APIKey: ""},   // empty key without base URL, should be skipped
+				{APIKey: "  "}, // whitespace key without base URL, should be skipped
 				{APIKey: "valid-key", Headers: map[string]string{"Authorization": "Bearer xyz"}},
 			},
 		},
@@ -431,6 +563,47 @@ func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	}
 	if _, exists := auths[0].Attributes[coreauth.AttributeCodexAlphaSearch]; exists {
 		t.Fatal("default alpha-search=false unexpectedly generated codex_alpha_search")
+	}
+}
+
+func TestConfigSynthesizer_CodexKeys_AllowsEmptyAPIKeyWithBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			CodexKey: []config.CodexKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-codex.example.com",
+					Headers: map[string]string{"Custom-Auth": "secret"},
+				},
+				{
+					APIKey:  "   ",
+					BaseURL: "https://custom-codex-2.example.com",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths for empty API keys with base URL, got %d", len(auths))
+	}
+	if auths[0].Attributes["base_url"] != "https://custom-codex.example.com" {
+		t.Fatalf("expected base_url=https://custom-codex.example.com, got %s", auths[0].Attributes["base_url"])
+	}
+	if auths[0].Attributes["header:Custom-Auth"] != "secret" {
+		t.Fatalf("expected header:Custom-Auth=secret, got %s", auths[0].Attributes["header:Custom-Auth"])
+	}
+	if auths[0].Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("expected auth_kind=apikey, got %s", auths[0].Attributes["auth_kind"])
+	}
+	if _, exists := auths[0].Attributes["api_key"]; exists {
+		t.Fatalf("expected no api_key attribute for empty key, got %s", auths[0].Attributes["api_key"])
 	}
 }
 

@@ -371,10 +371,6 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 	if imageURL != "" && len(referenceImages) > 0 {
 		return nil, xaiVideoCreateMetadata{}, fmt.Errorf("image and reference_images cannot be combined on xAI")
 	}
-	if len(referenceImages) > 0 && duration > 10 {
-		duration = 10
-		seconds = "10"
-	}
 
 	videoModel := canonicalXAIVideosModel(model)
 	req := []byte(`{}`)

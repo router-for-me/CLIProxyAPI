@@ -81,6 +81,7 @@ func main() {
 	var antigravityLogin bool
 	var kimiLogin bool
 	var xaiLogin bool
+	var devinLogin bool
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
@@ -100,6 +101,7 @@ func main() {
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
+	flag.BoolVar(&devinLogin, "devin-login", false, "Login to Devin using OAuth")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
@@ -307,7 +309,7 @@ func main() {
 			parsed = &config.Config{}
 		}
 		parsed.Home = homeCfg
-		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
+		parsed.Port = config.NormalizeHomePort(parsed.Port)
 		parsed.UsageStatisticsEnabled = true
 		pluginSyncCfg := *parsed
 		parsed.Plugins.StoreAuth = nil
@@ -588,7 +590,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || devinLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -662,6 +664,8 @@ func main() {
 		cmd.DoKimiLogin(cfg, options)
 	} else if xaiLogin {
 		cmd.DoXAILogin(cfg, options)
+	} else if devinLogin {
+		cmd.DoDevinLogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
@@ -758,19 +762,22 @@ func main() {
 }
 
 // modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
-// Codex client templates still refresh under Home mode because the model list
-// comes from Home IDs while template metadata stays edge-local.
-func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient bool) {
+// Codex client and Devin catalogs still refresh under Home mode because
+// template metadata and Devin models stay edge-local.
+func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient, startDevin bool) {
 	if localModel {
-		return false, false
+		return false, false, false
 	}
-	return !homeEnabled, true
+	return !homeEnabled, true, true
 }
 
 func startModelCatalogUpdaters(localModel, homeEnabled bool) {
-	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
+	startModels, startCodexClient, startDevin := modelCatalogUpdaterPlan(localModel, homeEnabled)
 	if startCodexClient {
 		registry.StartCodexClientModelsUpdater(context.Background())
+	}
+	if startDevin {
+		registry.StartDevinModelsUpdater(context.Background())
 	}
 	if startModels {
 		registry.StartModelsUpdater(context.Background())

@@ -1770,6 +1770,86 @@ func TestStreamChunkRequestBodyPolicyBySchemaVersion(t *testing.T) {
 	}
 }
 
+func TestStreamChunkHistoryPolicyBySchemaVersion(t *testing.T) {
+	var legacyGot, modernGot pluginapi.StreamChunkInterceptRequest
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "legacy",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: 4,
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							legacyGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+				},
+			},
+		},
+		capabilityRecord{
+			id: "modern",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitHistory,
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							modernGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+				},
+			},
+		},
+	)
+	if !host.StreamChunkPayloadIncludesHistory() {
+		t.Fatal("StreamChunkPayloadIncludesHistory() = false, want true when legacy stream interceptor is active")
+	}
+
+	_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		HistoryChunks: [][]byte{[]byte("first")},
+		Body:          []byte("chunk"),
+		ChunkIndex:    0,
+	})
+	if len(legacyGot.HistoryChunks) != 1 || string(legacyGot.HistoryChunks[0]) != "first" {
+		t.Fatalf("legacy payload history = %#v, want preserved", legacyGot.HistoryChunks)
+	}
+	if len(modernGot.HistoryChunks) != 0 {
+		t.Fatalf("modern payload history = %#v, want omitted", modernGot.HistoryChunks)
+	}
+
+	legacyGot = pluginapi.StreamChunkInterceptRequest{}
+	modernGot = pluginapi.StreamChunkInterceptRequest{}
+	_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		HistoryChunks: [][]byte{[]byte("first")},
+		Body:          []byte("chunk"),
+		ChunkIndex:    pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if len(legacyGot.HistoryChunks) != 1 || string(legacyGot.HistoryChunks[0]) != "first" {
+		t.Fatalf("legacy init history = %#v, want preserved", legacyGot.HistoryChunks)
+	}
+	if len(modernGot.HistoryChunks) != 1 || string(modernGot.HistoryChunks[0]) != "first" {
+		t.Fatalf("modern init history = %#v, want preserved", modernGot.HistoryChunks)
+	}
+
+	modernOnly := newHostWithRecords(capabilityRecord{
+		id: "modern-only",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitHistory,
+			Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						return pluginapi.StreamChunkInterceptResponse{}, nil
+					},
+				},
+			},
+		},
+	})
+	if modernOnly.StreamChunkPayloadIncludesHistory() {
+		t.Fatal("StreamChunkPayloadIncludesHistory() = true, want false for schema v5+ only")
+	}
+}
+
 func TestHasRequestInterceptorsReflectsActiveRequestInterceptors(t *testing.T) {
 	responseOnly := newHostWithRecords(capabilityRecord{
 		id: "response",
@@ -2257,6 +2337,32 @@ func TestUsageAdapterNormalizesOmittedGenerateToTrue(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterPropagatesBaseURL(t *testing.T) {
+	var gotBaseURL string
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotBaseURL = record.BaseURL
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-base-url",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-base-url",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+		BaseURL:  "https://custom-proxy.example.com/v1",
+	})
+	if gotBaseURL != "https://custom-proxy.example.com/v1" {
+		t.Fatalf("plugin BaseURL = %q, want https://custom-proxy.example.com/v1", gotBaseURL)
+	}
+}
+
 func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	var gotGenerate bool
 	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
@@ -2280,6 +2386,49 @@ func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	})
 	if gotGenerate {
 		t.Fatalf("plugin Generate = %v, want false", gotGenerate)
+	}
+}
+
+func TestUsageAdapterDetachesContext(t *testing.T) {
+	var receivedCtx context.Context
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		receivedCtx = ctx
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-detach",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-detach",
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	adapter.HandleUsage(canceledCtx, coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+	})
+	if receivedCtx == nil {
+		t.Fatal("plugin did not receive context")
+	}
+	if errCtx := receivedCtx.Err(); errCtx != nil {
+		t.Fatalf("expected detached context without error, got ctx.Err() = %v", errCtx)
+	}
+
+	receivedCtx = nil
+	adapter.HandleUsage(nil, coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+	})
+	if receivedCtx == nil {
+		t.Fatal("plugin did not receive context for nil input")
+	}
+	if errCtx := receivedCtx.Err(); errCtx != nil {
+		t.Fatalf("expected non-nil context without error for nil input, got ctx.Err() = %v", errCtx)
 	}
 }
 
@@ -3165,7 +3314,7 @@ func setHostSnapshotForTest(host *Host, enabled bool, records ...capabilityRecor
 	sortRecords(records)
 	host.mu.Lock()
 	host.rebuildActivePluginMapsLocked(records)
-	host.snapshot.Store(&Snapshot{enabled: enabled, records: records})
+	host.snapshot.Store(&Snapshot{enabled: enabled, records: records, quotaSupportedProviders: make(map[string][]string)})
 	host.mu.Unlock()
 }
 

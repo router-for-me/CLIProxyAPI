@@ -2,6 +2,7 @@ package misc
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,8 +43,22 @@ func TestAntigravityLatestVersionUsesCurrentHubFallback(t *testing.T) {
 	defer restore()
 
 	version := AntigravityLatestVersion()
-	if version != "2.2.1" {
-		t.Fatalf("AntigravityLatestVersion() = %q, want %q", version, "2.2.1")
+	if version != antigravityFallbackVersion {
+		t.Fatalf("AntigravityLatestVersion() = %q, want %q", version, antigravityFallbackVersion)
+	}
+}
+
+// Cloud Code resolves newer models only for clients reporting at least 2.9.0;
+// older versions get 404 Requested entity was not found.
+func TestAntigravityFallbackVersionMeetsBackendFloor(t *testing.T) {
+	const floorMajor, floorMinor = 2, 9
+
+	var major, minor, patch int
+	if _, err := fmt.Sscanf(antigravityFallbackVersion, "%d.%d.%d", &major, &minor, &patch); err != nil {
+		t.Fatalf("antigravityFallbackVersion = %q is not a dotted version: %v", antigravityFallbackVersion, err)
+	}
+	if major < floorMajor || (major == floorMajor && minor < floorMinor) {
+		t.Fatalf("antigravityFallbackVersion = %q, want at least %d.%d.0", antigravityFallbackVersion, floorMajor, floorMinor)
 	}
 }
 

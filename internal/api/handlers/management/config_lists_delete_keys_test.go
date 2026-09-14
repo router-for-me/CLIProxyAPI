@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -76,6 +77,110 @@ func TestDeleteGeminiKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 	}
 	if got := h.cfg.GeminiKey[0].BaseURL; got != "https://b.example.com" {
 		t.Fatalf("remaining base-url = %q, want %q", got, "https://b.example.com")
+	}
+}
+
+func TestDeleteGeminiStyleKeyRejectsAmbiguousRoutingIdentity(t *testing.T) {
+	tests := []struct {
+		name         string
+		interactions bool
+	}{
+		{name: "Gemini"},
+		{name: "Interactions", interactions: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := []config.GeminiKey{
+				{APIKey: "shared-key", BaseURL: "https://shared.example.com", Prefix: "team-a"},
+				{APIKey: "shared-key", BaseURL: "https://shared.example.com", Prefix: "team-b"},
+			}
+			cfg := &config.Config{}
+			path := "/v0/management/gemini-api-key?api-key=shared-key&base-url=https://shared.example.com"
+			if tc.interactions {
+				cfg.InteractionsKey = entries
+				path = "/v0/management/interactions-api-key?api-key=shared-key&base-url=https://shared.example.com"
+			} else {
+				cfg.GeminiKey = entries
+			}
+			handler := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodDelete, path, nil)
+
+			if tc.interactions {
+				handler.DeleteInteractionsKey(ctx)
+			} else {
+				handler.DeleteGeminiKey(ctx)
+			}
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			remaining := cfg.GeminiKey
+			if tc.interactions {
+				remaining = cfg.InteractionsKey
+			}
+			if len(remaining) != 2 {
+				t.Fatalf("remaining credential count = %d, want 2", len(remaining))
+			}
+		})
+	}
+}
+
+func TestPatchGeminiStyleKeyRoutingIdentity(t *testing.T) {
+	tests := []struct {
+		name         string
+		interactions bool
+		firstBase    string
+		wantStatus   int
+	}{
+		{name: "Gemini unique base URL", firstBase: "https://first.example.com", wantStatus: http.StatusOK},
+		{name: "Gemini ambiguous base URL", firstBase: "https://shared.example.com", wantStatus: http.StatusBadRequest},
+		{name: "Interactions unique base URL", interactions: true, firstBase: "https://first.example.com", wantStatus: http.StatusOK},
+		{name: "Interactions ambiguous base URL", interactions: true, firstBase: "https://shared.example.com", wantStatus: http.StatusBadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := []config.GeminiKey{
+				{APIKey: "shared-key", BaseURL: tc.firstBase, Prefix: "team-a"},
+				{APIKey: "shared-key", BaseURL: "https://shared.example.com", Prefix: "team-b"},
+			}
+			cfg := &config.Config{}
+			path := "/v0/management/gemini-api-key?base-url=https://shared.example.com"
+			if tc.interactions {
+				cfg.InteractionsKey = entries
+				path = "/v0/management/interactions-api-key?base-url=https://shared.example.com"
+			} else {
+				cfg.GeminiKey = entries
+			}
+			handler := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPatch, path, strings.NewReader(`{"match":"shared-key","value":{"prefix":"updated"}}`))
+
+			if tc.interactions {
+				handler.PatchInteractionsKey(ctx)
+			} else {
+				handler.PatchGeminiKey(ctx)
+			}
+
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, tc.wantStatus, recorder.Body.String())
+			}
+			remaining := cfg.GeminiKey
+			if tc.interactions {
+				remaining = cfg.InteractionsKey
+			}
+			if tc.wantStatus == http.StatusOK {
+				if remaining[0].Prefix != "team-a" || remaining[1].Prefix != "updated" {
+					t.Fatalf("prefixes = %q, %q; want team-a, updated", remaining[0].Prefix, remaining[1].Prefix)
+				}
+			} else if remaining[0].Prefix != "team-a" || remaining[1].Prefix != "team-b" {
+				t.Fatalf("ambiguous patch changed prefixes to %q, %q", remaining[0].Prefix, remaining[1].Prefix)
+			}
+		})
 	}
 }
 

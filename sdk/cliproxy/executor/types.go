@@ -45,7 +45,29 @@ const (
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
 	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.
+	// It may be used to derive a provider session identity.
 	DerivedSessionIDMetadataKey = "derived_session_id"
+	// LCPAffinitySessionIDMetadataKey stores an LCP-only routing identity. Executors
+	// must not use it as a provider conversation or execution-session identity. The
+	// current phase also keeps it out of SessionTree topology until downstream wiring exists.
+	LCPAffinitySessionIDMetadataKey = "lcp_affinity_session_id"
+	// CanonicalSessionIDMetadataKey stores the single unified session identity reconciled
+	// across explicit harness headers, body fields, execution sessions, LCP inference,
+	// and fallback context derivation for unified debugging and cross-subsystem tracing.
+	CanonicalSessionIDMetadataKey = "canonical_session_id"
+	// ParentSessionIDMetadataKey stores the parent session identity for hierarchical sessions and forks.
+	// For top-level Merkle LCP forks, it represents the deterministic Merkle prefix hash at the divergence point.
+	ParentSessionIDMetadataKey = "parent_session_id"
+	// IsForkMetadataKey indicates whether the request represents a conversational branch or fork.
+	IsForkMetadataKey = "is_fork"
+	// LCPAccessGenerationMetadataKey stores the monotonic access generation when an LCP entry was touched or bound.
+	LCPAccessGenerationMetadataKey = "lcp_access_generation"
+	// LCPFingerprintMetadataKey stores bounded request-scoped turn fingerprints so
+	// SessionAffinitySelector.OnResult can avoid reparsing the original payload.
+	LCPFingerprintMetadataKey = "lcp_fingerprints"
+	// LCPMinPrefixLengthMetadataKey stores the minimum eligible prefix boundary for
+	// the bounded LCP fingerprint sequence.
+	LCPMinPrefixLengthMetadataKey = "lcp_min_prefix_length"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
 	// SessionAffinityProviderMetadataKey carries the affinity selection namespace
@@ -144,6 +166,25 @@ func (e *RequestTerminatedError) ResponseBody() []byte {
 	return append([]byte(nil), e.Body...)
 }
 
+// WebSocketResponseEvent describes an upstream WebSocket response event received during execution.
+type WebSocketResponseEvent struct {
+	RequestID      string
+	TraceID        string
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Provider       string
+	AuthID         string
+	AuthLabel      string
+	AuthType       string
+	EventType      string
+	Payload        []byte
+	Metadata       map[string]any
+}
+
+// WebSocketResponseObserver receives upstream WebSocket response events during execution.
+type WebSocketResponseObserver func(context.Context, WebSocketResponseEvent)
+
 // Options controls execution behavior for both streaming and non-streaming calls.
 type Options struct {
 	// Stream toggles streaming mode.
@@ -165,6 +206,8 @@ type Options struct {
 	Metadata map[string]any
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
+	// WebSocketResponseObserver receives upstream WebSocket response events during execution.
+	WebSocketResponseObserver WebSocketResponseObserver
 	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
 	ExecutionLifecycle ExecutionLifecycle
 }

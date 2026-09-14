@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -279,4 +280,194 @@ func BenchmarkSetStringIfDifferentLargeCanonicalPayload(b *testing.B) {
 	for b.Loop() {
 		benchmarkPayloadMutationOutput = SetStringIfDifferent(input, "model", "gpt-test")
 	}
+}
+
+func TestConfigExampleDocumentsCodexAdditionalToolsPayloadFilter(t *testing.T) {
+	data, err := os.ReadFile("../../../../config.example.yaml")
+	if err != nil {
+		t.Fatalf("failed to read config.example.yaml: %v", err)
+	}
+	content := string(data)
+	const expectedPath = `'input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="apply_patch")#'`
+	if !strings.Contains(content, expectedPath) {
+		t.Fatalf("config.example.yaml does not contain expected additional_tools path: %s", expectedPath)
+	}
+}
+
+func TestApplyPayloadConfig_CodexAdditionalToolsFilter(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Filter: []config.PayloadFilterRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "gpt-*", Protocol: "codex"}},
+					Params: []string{
+						`input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="apply_patch")#`,
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("removes target tool and preserves other tools across namespaces", func(t *testing.T) {
+		input := []byte(`{
+			"model": "gpt-5-codex",
+			"input": [
+				{
+					"type": "additional_tools",
+					"role": "developer",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [
+								{"type": "custom", "name": "apply_patch", "description": "patch"},
+								{"type": "custom", "name": "exec_command", "description": "exec"}
+							]
+						},
+						{
+							"type": "namespace",
+							"name": "collaboration",
+							"tools": [
+								{"type": "custom", "name": "share", "description": "share"}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-5-codex", "codex", "", input, nil, "", "")
+
+		var structured struct {
+			Input []struct {
+				Type  string `json:"type"`
+				Tools []struct {
+					Name  string `json:"name"`
+					Tools []struct {
+						Name string `json:"name"`
+					} `json:"tools"`
+				} `json:"tools"`
+			} `json:"input"`
+		}
+		if errUnmarshal := json.Unmarshal(output, &structured); errUnmarshal != nil {
+			t.Fatalf("failed to unmarshal output: %v", errUnmarshal)
+		}
+		if len(structured.Input) != 1 {
+			t.Fatalf("input len = %d, want 1", len(structured.Input))
+		}
+		if len(structured.Input[0].Tools) != 2 {
+			t.Fatalf("namespaces len = %d, want 2", len(structured.Input[0].Tools))
+		}
+		fnNamespace := structured.Input[0].Tools[0]
+		if fnNamespace.Name != "functions" || len(fnNamespace.Tools) != 1 || fnNamespace.Tools[0].Name != "exec_command" {
+			t.Fatalf("functions namespace tools = %+v, want only exec_command", fnNamespace.Tools)
+		}
+		collabNamespace := structured.Input[0].Tools[1]
+		if collabNamespace.Name != "collaboration" || len(collabNamespace.Tools) != 1 || collabNamespace.Tools[0].Name != "share" {
+			t.Fatalf("collaboration namespace tools = %+v, want share", collabNamespace.Tools)
+		}
+	})
+
+	t.Run("non-matching target tool is a no-op", func(t *testing.T) {
+		input := []byte(`{
+			"model": "gpt-5-codex",
+			"input": [
+				{
+					"type": "additional_tools",
+					"role": "developer",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [
+								{"type": "custom", "name": "exec_command", "description": "exec"}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-5-codex", "codex", "", input, nil, "", "")
+		if !bytes.Equal(output, input) {
+			t.Fatalf("expected payload to be untouched when rule does not match, got: %s", string(output))
+		}
+	})
+
+	t.Run("removes matches across multiple additional_tools elements", func(t *testing.T) {
+		input := []byte(`{
+			"model": "gpt-5-codex",
+			"input": [
+				{
+					"type": "additional_tools",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [{"type": "custom", "name": "apply_patch"}]
+						}
+					]
+				},
+				{
+					"type": "message",
+					"role": "user",
+					"content": "hello"
+				},
+				{
+					"type": "additional_tools",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [
+								{"type": "custom", "name": "apply_patch"},
+								{"type": "custom", "name": "view_image"}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-5-codex", "codex", "", input, nil, "", "")
+		if strings.Contains(string(output), "apply_patch") {
+			t.Fatalf("apply_patch remained after multi-element filter: %s", string(output))
+		}
+		if !strings.Contains(string(output), "view_image") {
+			t.Fatalf("view_image was removed: %s", string(output))
+		}
+		if !strings.Contains(string(output), "hello") {
+			t.Fatalf("user message was removed: %s", string(output))
+		}
+	})
+
+	t.Run("removes multiple matches within the same namespace array", func(t *testing.T) {
+		input := []byte(`{
+			"model": "gpt-5-codex",
+			"input": [
+				{
+					"type": "additional_tools",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [
+								{"type": "custom", "name": "apply_patch", "id": "p1"},
+								{"type": "custom", "name": "exec_command"},
+								{"type": "custom", "name": "apply_patch", "id": "p2"}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-5-codex", "codex", "", input, nil, "", "")
+		if strings.Contains(string(output), "apply_patch") {
+			t.Fatalf("apply_patch remained after multi-match array filter: %s", string(output))
+		}
+		if !strings.Contains(string(output), "exec_command") {
+			t.Fatalf("exec_command was removed: %s", string(output))
+		}
+	})
 }

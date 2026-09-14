@@ -192,3 +192,155 @@ func TestClaudeExecutorPrepareRequestAuthIgnoresFreshTimestampWithoutIdentity(t 
 		t.Fatalf("profile checked timestamp = %q, want prior value preserved without suppressing retry", got)
 	}
 }
+
+func TestClaudeExecutorPrepareRequestAuthSetupTokenBypassesProfile(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	executor.oauthProfileFetcher = func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error) {
+		t.Fatal("profile fetcher should NOT be called for setup-tokens")
+		return nil, nil
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "claude-setuptoken.json",
+		Attributes: map[string]string{
+			"api_key": "sk-ant-oat01-test-setup-token-value",
+		},
+		Metadata: map[string]any{
+			"type":   "claude",
+			"scopes": "user:inference user:ccr_inference user:file_upload",
+		},
+	}
+
+	if !executor.ShouldPrepareRequestAuth(auth) {
+		t.Fatal("ShouldPrepareRequestAuth() = false for missing setup-token identity")
+	}
+	prepared, errPrepare := executor.PrepareRequestAuth(context.Background(), auth)
+	if errPrepare != nil {
+		t.Fatalf("PrepareRequestAuth() error = %v", errPrepare)
+	}
+	if prepared == nil {
+		t.Fatal("prepared auth is nil")
+	}
+	accountUUID := claudeauth.ReadMetadataString(&prepared.Metadata, "account_uuid")
+	if accountUUID == "" {
+		t.Fatal("account_uuid is empty after setup-token preparation")
+	}
+	deviceIDs := claudeauth.NormalizeDeviceIDPool(prepared.Metadata[claudeauth.ClaudeDeviceIDsMetadataKey])
+	if len(deviceIDs) != 1 {
+		t.Fatalf("device pool length = %d, want 1", len(deviceIDs))
+	}
+	if executor.ShouldPrepareRequestAuth(prepared) {
+		t.Fatal("ShouldPrepareRequestAuth() = true after setup-token identity was populated")
+	}
+}
+
+func TestClaudeExecutorPrepareRequestAuth403ScopeFallback(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	fetchCalls := 0
+	executor.oauthProfileFetcher = func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error) {
+		fetchCalls++
+		return nil, fmt.Errorf("fetch Claude OAuth profile failed with status 403: permission_error: OAuth token does not meet scope requirement any_of(user:profile, user:office)")
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "claude-scope-restricted-credential",
+		Attributes: map[string]string{
+			"api_key": "sk-ant-oat01-scope-restricted",
+		},
+		Metadata: map[string]any{
+			"type":          "claude",
+			"refresh_token": "dummy-refresh-token",
+		},
+	}
+
+	if !executor.ShouldPrepareRequestAuth(auth) {
+		t.Fatal("ShouldPrepareRequestAuth() = false for missing identity")
+	}
+	prepared, errPrepare := executor.PrepareRequestAuth(context.Background(), auth)
+	if errPrepare != nil {
+		t.Fatalf("PrepareRequestAuth() with 403 error = %v, want fallback success", errPrepare)
+	}
+	if prepared == nil {
+		t.Fatal("prepared auth is nil")
+	}
+	if fetchCalls != 1 {
+		t.Fatalf("fetchCalls = %d, want 1", fetchCalls)
+	}
+	accountUUID := claudeauth.ReadMetadataString(&prepared.Metadata, "account_uuid")
+	if accountUUID == "" {
+		t.Fatal("account_uuid is empty after 403 fallback")
+	}
+	if executor.ShouldPrepareRequestAuth(prepared) {
+		t.Fatal("ShouldPrepareRequestAuth() = true after 403 identity was populated")
+	}
+}
+
+func TestClaudeExecutorPrepareRequestAuthSkipAccountProfileConfig(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	executor.oauthProfileFetcher = func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error) {
+		t.Fatal("profile fetcher should NOT be called when skip_account_profile is true")
+		return nil, nil
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "claude-skip-profile.json",
+		Attributes: map[string]string{
+			"api_key": "sk-ant-oat01-skip-profile",
+		},
+		Metadata: map[string]any{
+			"type":                 "claude",
+			"skip_account_profile": true,
+		},
+	}
+
+	if !executor.ShouldPrepareRequestAuth(auth) {
+		t.Fatal("ShouldPrepareRequestAuth() = false for missing identity")
+	}
+	prepared, errPrepare := executor.PrepareRequestAuth(context.Background(), auth)
+	if errPrepare != nil {
+		t.Fatalf("PrepareRequestAuth() error = %v", errPrepare)
+	}
+	if prepared == nil {
+		t.Fatal("prepared auth is nil")
+	}
+	accountUUID := claudeauth.ReadMetadataString(&prepared.Metadata, "account_uuid")
+	if accountUUID == "" {
+		t.Fatal("account_uuid is empty after skip_account_profile preparation")
+	}
+	if executor.ShouldPrepareRequestAuth(prepared) {
+		t.Fatal("ShouldPrepareRequestAuth() = true after identity was populated")
+	}
+}
+
+func TestClaudeExecutorPrepareRequestAuthEmptyAccountUUIDInProfileFallback(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	fetchCalls := 0
+	executor.oauthProfileFetcher = func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error) {
+		fetchCalls++
+		return &claudeauth.OAuthProfile{}, nil
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "claude-empty-uuid-in-profile",
+		Attributes: map[string]string{
+			"api_key": "sk-ant-oat01-empty-uuid",
+		},
+		Metadata: map[string]any{
+			"type": "claude",
+		},
+	}
+
+	prepared, errPrepare := executor.PrepareRequestAuth(context.Background(), auth)
+	if errPrepare != nil {
+		t.Fatalf("PrepareRequestAuth() error = %v, want fallback on empty UUID", errPrepare)
+	}
+	if prepared == nil {
+		t.Fatal("prepared auth is nil")
+	}
+	if fetchCalls != 1 {
+		t.Fatalf("fetchCalls = %d, want 1", fetchCalls)
+	}
+	accountUUID := claudeauth.ReadMetadataString(&prepared.Metadata, "account_uuid")
+	if accountUUID == "" {
+		t.Fatal("account_uuid is empty after fallback")
+	}
+	if executor.ShouldPrepareRequestAuth(prepared) {
+		t.Fatal("ShouldPrepareRequestAuth() = true after identity was populated")
+	}
+}

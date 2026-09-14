@@ -132,6 +132,48 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_LegacyKimiFingerprintProfile(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":                "kimi",
+		"access_token":        "kimi-access-token",
+		"refresh_token":       "kimi-refresh-token",
+		"fingerprint-profile": "claude-code-cli",
+	}
+	data, errMarshal := json.Marshal(authData)
+	if errMarshal != nil {
+		t.Fatalf("marshal kimi auth: %v", errMarshal)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "kimi-auth.json"), data, 0644); err != nil {
+		t.Fatalf("failed to write kimi auth file: %v", err)
+	}
+
+	auths, err := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Provider != "kimi" {
+		t.Fatalf("provider = %q, want kimi", auths[0].Provider)
+	}
+	if got := auths[0].Attributes["fingerprint_profile"]; got != "claude-code-cli" {
+		t.Fatalf("attributes fingerprint_profile = %q, want claude-code-cli", got)
+	}
+	if got, _ := auths[0].Metadata["fingerprint_profile"].(string); got != "claude-code-cli" {
+		t.Fatalf("metadata fingerprint_profile = %q, want claude-code-cli", got)
+	}
+	if _, exists := auths[0].Metadata["fingerprint-profile"]; exists {
+		t.Fatalf("legacy fingerprint-profile was not normalized: %#v", auths[0].Metadata)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	tempDir := t.TempDir()
 
@@ -639,7 +681,7 @@ func TestFileSynthesizer_Synthesize_OAuthModelAliases(t *testing.T) {
 	authData := map[string]any{
 		"type":  "codex",
 		"email": "codex@example.com",
-		"model-aliases": []map[string]any{
+		"model_aliases": []map[string]any{
 			{"name": " gpt-5.3-codex-spark ", "alias": " gpt-5.5 "},
 			{"name": "gpt-5.3-codex-spark", "alias": "gpt-5.4", "fork": true},
 			{"name": "gpt-5.3-codex-spark", "alias": "gpt-5.5"},

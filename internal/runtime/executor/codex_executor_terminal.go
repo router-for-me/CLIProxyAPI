@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -26,6 +27,21 @@ func newCodexIncompleteStreamError() codexIncompleteStreamError {
 }
 
 func (codexIncompleteStreamError) IsRequestScoped() bool {
+	return true
+}
+
+type codexEmptyIncompleteStreamError struct {
+	statusErr
+}
+
+func newCodexEmptyIncompleteStreamError() codexEmptyIncompleteStreamError {
+	return codexEmptyIncompleteStreamError{statusErr: statusErr{
+		code: http.StatusBadGateway,
+		msg:  helps.CodexEmptyIncompleteStreamMessage,
+	}}
+}
+
+func (codexEmptyIncompleteStreamError) IsRequestScoped() bool {
 	return true
 }
 
@@ -132,22 +148,30 @@ func codexTerminalStreamContextLengthErr(eventData []byte) (statusErr, bool) {
 }
 
 func codexTerminalStreamErr(eventData []byte) (statusErr, []byte, bool) {
+	return codexTerminalStreamErrWithCooling(eventData, false)
+}
+
+func codexTerminalStreamErrWithCooling(eventData []byte, modelLevelCooling bool) (statusErr, []byte, bool) {
 	body, ok := codexTerminalFailureBody(eventData)
 	if !ok || !codexTerminalStreamErrShouldHandle(body) {
 		return statusErr{}, nil, false
 	}
-	return newCodexStatusErr(http.StatusBadRequest, body), body, true
+	return newCodexStatusErrWithCooling(http.StatusBadRequest, body, modelLevelCooling), body, true
 }
 
 func codexTerminalFailureErr(eventData []byte) (statusErr, []byte, bool) {
-	if streamErr, body, ok := codexTerminalStreamErr(eventData); ok {
+	return codexTerminalFailureErrWithCooling(eventData, false)
+}
+
+func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool) (statusErr, []byte, bool) {
+	if streamErr, body, ok := codexTerminalStreamErrWithCooling(eventData, modelLevelCooling); ok {
 		return streamErr, body, true
 	}
 	body, ok := codexTerminalFailureBody(eventData)
 	if !ok {
 		return statusErr{}, nil, false
 	}
-	return newCodexStatusErr(codexTerminalFailureStatus(body), body), body, true
+	return newCodexStatusErrWithCooling(codexTerminalFailureStatus(body), body, modelLevelCooling), body, true
 }
 
 func codexTerminalFailureStatus(body []byte) int {
@@ -162,16 +186,16 @@ func codexTerminalFailureStatus(body []byte) int {
 	switch {
 	case errorCode == "cyber_policy":
 		return http.StatusBadRequest
-	case errorType == "invalid_request_error", errorType == "bad_request_error":
-		return http.StatusBadRequest
+	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
+		return http.StatusNotFound
 	case errorType == "authentication_error", errorCode == "invalid_api_key", errorCode == "unauthorized":
 		return http.StatusUnauthorized
 	case errorType == "permission_error", errorCode == "forbidden", errorCode == "permission_denied":
 		return http.StatusForbidden
-	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
-		return http.StatusNotFound
 	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
 		return http.StatusTooManyRequests
+	case errorType == "invalid_request_error", errorType == "bad_request_error":
+		return http.StatusBadRequest
 	default:
 		return http.StatusBadGateway
 	}
@@ -196,6 +220,9 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 	}
 	if len(body) == 0 {
 		body = []byte(`{"error":{"message":"upstream stream failed without error details"}}`)
+	}
+	if seq := gjson.GetBytes(eventData, "sequence_number"); seq.Exists() {
+		body, _ = sjson.SetBytes(body, "sequence_number", seq.Int())
 	}
 	return body, true
 }
@@ -283,12 +310,18 @@ func codexTerminalErrorIsContextLength(body []byte) bool {
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
+	return newCodexStatusErrWithCooling(statusCode, body, false)
+}
+
+func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling bool) statusErr {
 	errCode := statusCode
-	if isCodexModelCapacityError(body) || isCodexUsageLimitError(body) {
+	isUsageLimit := isCodexUsageLimitError(body)
+	credentialScoped := isUsageLimit && !modelLevelCooling
+	if isCodexModelCapacityError(body) || isUsageLimit {
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body)}
+	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
@@ -355,8 +388,10 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 		if lower == "" {
 			continue
 		}
-		if strings.Contains(lower, "selected model is at capacity") ||
-			strings.Contains(lower, "model is at capacity. please try a different model") {
+		if strings.Contains(lower, "model is at capacity") ||
+			strings.Contains(lower, "model_at_capacity") ||
+			strings.Contains(lower, "model_is_at_capacity") ||
+			(strings.Contains(lower, "model") && strings.Contains(lower, "at capacity")) {
 			return true
 		}
 	}
@@ -389,19 +424,83 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
 		return nil
 	}
-	if strings.TrimSpace(gjson.GetBytes(errorBody, "error.type").String()) != "usage_limit_reached" {
-		return nil
-	}
-	if resetsAt := gjson.GetBytes(errorBody, "error.resets_at").Int(); resetsAt > 0 {
-		resetAtTime := time.Unix(resetsAt, 0)
-		if resetAtTime.After(now) {
-			retryAfter := resetAtTime.Sub(now)
+	for _, quota := range []gjson.Result{gjson.GetBytes(errorBody, "error"), gjson.ParseBytes(errorBody)} {
+		if !strings.EqualFold(strings.TrimSpace(quota.Get("type").String()), "usage_limit_reached") {
+			continue
+		}
+		if resetsAt := quota.Get("resets_at").Int(); resetsAt > 0 {
+			resetAtTime := time.Unix(resetsAt, 0)
+			if resetAtTime.After(now) {
+				retryAfter := resetAtTime.Sub(now)
+				return &retryAfter
+			}
+		}
+		if resetsInSeconds := quota.Get("resets_in_seconds").Int(); resetsInSeconds > 0 {
+			retryAfter := time.Duration(resetsInSeconds) * time.Second
 			return &retryAfter
 		}
 	}
-	if resetsInSeconds := gjson.GetBytes(errorBody, "error.resets_in_seconds").Int(); resetsInSeconds > 0 {
-		retryAfter := time.Duration(resetsInSeconds) * time.Second
-		return &retryAfter
-	}
 	return nil
+}
+
+// codexBootstrapMaxBufferedEvents bounds how many handshake metadata events may be held
+// back while probing for an upstream rejection embedded in an HTTP 200 stream. The websocket
+// transport prefixes response events with codex.response.metadata and codex.rate_limits frames,
+// so the limit must comfortably exceed the four handshake frames observed in practice. Once the
+// limit is reached the stream is released and the original unbuffered semantics apply.
+const codexBootstrapMaxBufferedEvents = 16
+
+// isCodexHandshakeMetadataEvent reports whether an event carries no generated output and is
+// therefore safe to hold back before the downstream response headers are committed. Keeping a type
+// allow-list rather than a fixed event count matters for the websocket transport, where the
+// handshake frames arrive before response.created and would otherwise exhaust a small counter
+// before the rejection event is seen.
+func isCodexHandshakeMetadataEvent(eventType string) bool {
+	switch eventType {
+	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata":
+		return true
+	default:
+		return false
+	}
+}
+
+// observeCodexTokenEvent inspects a stream payload and marks TTFT on the first substantive token event.
+func observeCodexTokenEvent(reporter *helps.UsageReporter, payload []byte) {
+	helps.ObserveResponsesTokenEvent(reporter, payload)
+}
+
+// newCodexBootstrapOverloadErr reports a buffered overload rejection with its real status.
+//
+// The status is deliberately produced here instead of in codexTerminalFailureStatus: that mapping
+// is shared with the unbuffered path, where the rejection is delivered in-stream and a status
+// change would alter cooldown classification and retry-after parsing for everyone. Keeping 503
+// scoped to this path means disabling the feature restores the previous behaviour exactly.
+func newCodexBootstrapOverloadErr(body []byte) statusErr {
+	return newCodexStatusErr(http.StatusServiceUnavailable, body)
+}
+
+// isCodexOverloadBootstrapFailure reports whether a terminal failure delivered inside an HTTP 200
+// stream is a transient capacity rejection that a different credential may be able to serve.
+// Only these failures justify replacing the whole attempt during bootstrap; every other terminal
+// failure keeps the original in-stream delivery semantics so downstream behaviour is unchanged.
+func isCodexOverloadBootstrapFailure(body []byte) bool {
+	if isCodexModelCapacityError(body) {
+		return true
+	}
+	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
+	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	errorMessage := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	if errorMessage == "" {
+		errorMessage = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "message").String()))
+	}
+	switch {
+	case errorType == "service_unavailable_error", errorCode == "server_is_overloaded":
+		return true
+	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
+		return true
+	case (errorType == "server_error" || errorCode == "server_error") && strings.Contains(errorMessage, "you can retry your request"):
+		return true
+	default:
+		return false
+	}
 }

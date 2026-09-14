@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/net/context"
@@ -18,6 +19,51 @@ type preparedModelRouteContextKey struct{}
 type executionSessionContextKey struct{}
 
 type disallowFreeAuthContextKey struct{}
+
+type nestedExecutionTrackerKey struct{}
+
+type nestedExecutionTracker struct {
+	mu     sync.Mutex
+	called bool
+}
+
+func (t *nestedExecutionTracker) mark() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.called = true
+	t.mu.Unlock()
+}
+
+func (t *nestedExecutionTracker) hasNestedExecution() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.called
+}
+
+func withNestedExecutionTracker(ctx context.Context) (context.Context, *nestedExecutionTracker) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if existing, ok := ctx.Value(nestedExecutionTrackerKey{}).(*nestedExecutionTracker); ok && existing != nil {
+		return ctx, existing
+	}
+	tracker := &nestedExecutionTracker{}
+	return context.WithValue(ctx, nestedExecutionTrackerKey{}, tracker), tracker
+}
+
+func markNestedExecution(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if tracker, ok := ctx.Value(nestedExecutionTrackerKey{}).(*nestedExecutionTracker); ok && tracker != nil {
+		tracker.mark()
+	}
+}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {

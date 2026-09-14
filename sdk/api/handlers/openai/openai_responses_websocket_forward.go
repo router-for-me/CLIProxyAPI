@@ -15,14 +15,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 type responsesWebsocketForwardOptions struct {
-	toolCacheTurn *responsesWebsocketToolCacheTurn
-	suppressError func(*interfaces.ErrorMessage) bool
+	preserveCompletionOutput func() bool
+	toolCacheTurn            *responsesWebsocketToolCacheTurn
+	suppressError            func(*interfaces.ErrorMessage) bool
+	keepAliveInterval        *time.Duration
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
@@ -51,11 +54,31 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
 	}
 
+	var keepAliveTicker *time.Ticker
+	var keepAliveC <-chan time.Time
+	keepAliveInterval := time.Duration(0)
+	if h != nil {
+		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.Cfg)
+	}
+	if opts.keepAliveInterval != nil {
+		keepAliveInterval = *opts.keepAliveInterval
+	}
+	if keepAliveInterval > 0 {
+		keepAliveTicker = time.NewTicker(keepAliveInterval)
+		defer keepAliveTicker.Stop()
+		keepAliveC = keepAliveTicker.C
+	}
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
+		case <-keepAliveC:
+			if errPing := writer.writePing(); errPing != nil {
+				cancel(errPing)
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errPing
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -111,12 +134,15 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				cancel(nil)
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
 			}
+			if keepAliveTicker != nil && keepAliveInterval > 0 {
+				keepAliveTicker.Reset(keepAliveInterval)
+			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				eventType := gjson.GetBytes(payloads[i], "type").String()
-				if isResponsesWebsocketCompletionEvent(eventType) {
+				if isResponsesWebsocketCompletionEvent(eventType) && (opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
 					payloads[i] = restoreResponsesWebsocketCompletionOutput(payloads[i], outputItemsByIndex, outputItemsFallback)
 				}
 				if toolCacheTurn != nil {
@@ -205,6 +231,9 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
+	}
+	if coreauth.IsTerminalAuthError(errMsg.Error) {
+		return true
 	}
 	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
 }
@@ -538,7 +567,11 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		}
 	}
 
-	body := handlers.BuildErrorResponseBody(status, errText)
+	var errCause error
+	if errMsg != nil {
+		errCause = errMsg.Error
+	}
+	body := handlers.BuildErrorResponseBodyWithError(status, errText, errCause)
 	payload := []byte(`{}`)
 	var errSet error
 	payload, errSet = sjson.SetBytes(payload, "type", wsEventTypeError)

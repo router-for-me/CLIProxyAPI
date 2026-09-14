@@ -27,6 +27,7 @@ const (
 	xaiToolSearchType          = "tool_search"
 	xaiWebSearchToolType       = "web_search"
 	xaiXSearchToolType         = "x_search"
+	xaiMaxTools                = 200
 	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
 	// schema. xAI's free/build Responses path accepts the HTTP request but never
 	// emits SSE when that schema is present, so Desktop hangs on "thinking".
@@ -52,7 +53,7 @@ const (
 	xaiClientIdentifierValue      = "grok-shell"
 	xaiAuthenticateResponseHeader = "x-authenticateresponse"
 	xaiAuthenticateResponseValue  = "authenticate-response"
-	// xaiUsingAPIAttr enables the official API path for non-media HTTP chat.
+	// xaiUsingAPIAttr enables the official API path for HTTP chat and media.
 	xaiUsingAPIAttr = "using_api"
 )
 
@@ -83,6 +84,8 @@ func (e *XAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth)
 	token, _ := xaiCreds(auth)
 	if strings.TrimSpace(token) != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		req.Header.Del("Authorization")
 	}
 	var attrs map[string]string
 	if auth != nil {

@@ -3,6 +3,7 @@ package claude
 import (
 	"testing"
 
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/tidwall/gjson"
 )
 
@@ -145,31 +146,145 @@ func TestConvertClaudeRequestToGemini_ConvertsMessageSystemRoleToUserContent(t *
 	}
 
 	contents := gjson.GetBytes(output, "contents").Array()
-	if len(contents) != 3 {
-		t.Fatalf("Expected the user and message-level system turns in contents, got %d: %s", len(contents), gjson.GetBytes(output, "contents").Raw)
+	if len(contents) != 1 {
+		t.Fatalf("Expected consecutive user and message-level system turns to be merged into a single user turn, got %d: %s", len(contents), gjson.GetBytes(output, "contents").Raw)
 	}
 	if got := contents[0].Get("role").String(); got != "user" {
 		t.Fatalf("Expected first content role user, got %q", got)
 	}
-	if got := contents[1].Get("role").String(); got != "user" {
-		t.Fatalf("Expected message-level string system content to be downgraded to user role, got %q", got)
+	parts := contents[0].Get("parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("Expected 3 parts in merged user content, got %d: %s", len(parts), contents[0].Get("parts").Raw)
 	}
-	if got := contents[1].Get("parts.0.text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
+	if got := parts[0].Get("text").String(); got != "Hello" {
+		t.Fatalf("Unexpected initial user prompt text: %q", got)
+	}
+	if got := parts[1].Get("text").String(); got != "<system-reminder>\nString mid-conversation rule\n</system-reminder>" {
 		t.Fatalf("Unexpected string message-level system content text: %q", got)
 	}
-	if got := contents[2].Get("role").String(); got != "user" {
-		t.Fatalf("Expected message-level array system content to be downgraded to user role, got %q", got)
-	}
-	if got := contents[2].Get("parts.0.text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
+	if got := parts[2].Get("text").String(); got != "<system-reminder>\nArray mid-conversation rule\n</system-reminder>" {
 		t.Fatalf("Unexpected array message-level system content text: %q", got)
 	}
 
-	parts := gjson.GetBytes(output, "systemInstruction.parts").Array()
-	if len(parts) != 1 {
-		t.Fatalf("Expected only top-level system parts, got %d: %s", len(parts), gjson.GetBytes(output, "systemInstruction.parts").Raw)
+	systemInstructionParts := gjson.GetBytes(output, "systemInstruction.parts").Array()
+	if len(systemInstructionParts) != 1 {
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(systemInstructionParts), gjson.GetBytes(output, "systemInstruction.parts").Raw)
 	}
-	if got := parts[0].Get("text").String(); got != "Top-level rules" {
+	if got := systemInstructionParts[0].Get("text").String(); got != "Top-level rules" {
 		t.Fatalf("Unexpected first system part: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToGemini_MessageLevelDeveloperInstructionsBecomeMergedUserReminder(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"system": "Top-level rules",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+			{"role": "developer", "content": "String mid-conversation developer rule"},
+			{"role": "developer", "content": [{"type": "text", "text": "Array mid-conversation developer rule"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	if devContent := gjson.GetBytes(output, `contents.#(role=="developer")`); devContent.Exists() {
+		t.Fatalf("developer role should not be emitted in contents: %s", devContent.Raw)
+	}
+
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("Expected consecutive user and developer turns to be merged into a single user turn, got %d: %s", len(contents), gjson.GetBytes(output, "contents").Raw)
+	}
+	if got := contents[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected first content role user, got %q", got)
+	}
+	parts := contents[0].Get("parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("Expected 3 parts in merged user content, got %d: %s", len(parts), contents[0].Get("parts").Raw)
+	}
+	if got := parts[0].Get("text").String(); got != "Hello" {
+		t.Fatalf("Unexpected initial user prompt text: %q", got)
+	}
+	if got := parts[1].Get("text").String(); got != "<system-reminder>\nString mid-conversation developer rule\n</system-reminder>" {
+		t.Fatalf("Unexpected string developer content text: %q", got)
+	}
+	if got := parts[2].Get("text").String(); got != "<system-reminder>\nArray mid-conversation developer rule\n</system-reminder>" {
+		t.Fatalf("Unexpected array developer content text: %q", got)
+	}
+
+	systemInstructionParts := gjson.GetBytes(output, "systemInstruction.parts").Array()
+	if len(systemInstructionParts) != 1 {
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(systemInstructionParts), gjson.GetBytes(output, "systemInstruction.parts").Raw)
+	}
+	if got := systemInstructionParts[0].Get("text").String(); got != "Top-level rules" {
+		t.Fatalf("Unexpected first system part: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToGemini_PreservesToolPairingWithInterveningSystemMessage(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Run two tools"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_1", "name": "tool_one", "input": {"a": 1}},
+					{"type": "tool_use", "id": "toolu_2", "name": "tool_two", "input": {"b": 2}}
+				]
+			},
+			{
+				"role": "system",
+				"content": "Context reminder between tool_use and tool_result"
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_2", "content": "result 2"},
+					{"type": "tool_result", "tool_use_id": "toolu_1", "content": "result 1"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v\noutput: %s", errPairing, output)
+	}
+
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 merged contents (user, model, user), got %d: %s", len(contents), output)
+	}
+
+	// First turn: user
+	if contents[0].Get("role").String() != "user" {
+		t.Fatalf("expected turn 0 role user, got %s", contents[0].Get("role").String())
+	}
+	// Second turn: model (2 function calls)
+	if contents[1].Get("role").String() != "model" {
+		t.Fatalf("expected turn 1 role model, got %s", contents[1].Get("role").String())
+	}
+	// Third turn: user (1 system reminder + 2 aligned function responses)
+	if contents[2].Get("role").String() != "user" {
+		t.Fatalf("expected turn 2 role user, got %s", contents[2].Get("role").String())
+	}
+
+	// Verify response ordering matches call ordering (toolu_1, then toolu_2)
+	parts := contents[2].Get("parts").Array()
+	var respIDs []string
+	for _, p := range parts {
+		if id := p.Get("functionResponse.id").String(); id != "" {
+			respIDs = append(respIDs, id)
+		}
+	}
+	if len(respIDs) != 2 || respIDs[0] != "toolu_1" || respIDs[1] != "toolu_2" {
+		t.Fatalf("expected responses ordered [toolu_1, toolu_2], got %v", respIDs)
 	}
 }
 
@@ -245,6 +360,56 @@ func TestConvertClaudeRequestToGemini_StructuredToolResult(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToGemini_AlignsPermutedParallelToolResultsWithMixedText(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gemini-3.7-flash-high",
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_1","name":"Read","input":{"file_path":"/tmp/1"}},
+				{"type":"tool_use","id":"call_2","name":"Read","input":{"file_path":"/tmp/2"}},
+				{"type":"tool_use","id":"call_3","name":"Read","input":{"file_path":"/tmp/3"}}
+			]},
+			{"role":"user","content":[
+				{"type":"text","text":"Results arrived."},
+				{"type":"tool_result","tool_use_id":"call_3","content":"three"},
+				{"type":"tool_result","tool_use_id":"call_1","content":"one"},
+				{"type":"tool_result","tool_use_id":"call_2","content":"two"},
+				{"type":"text","text":"Continue."}
+			]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3.7-flash-high", inputJSON, false)
+	callParts := gjson.GetBytes(output, "contents.0.parts").Array()
+	responseParts := gjson.GetBytes(output, "contents.1.parts").Array()
+	if len(callParts) != 3 || len(responseParts) != 5 {
+		t.Fatalf("translated parts = %d calls and %d response-turn parts; output=%s", len(callParts), len(responseParts), output)
+	}
+	for index, wantID := range []string{"call_1", "call_2", "call_3"} {
+		if gotID := callParts[index].Get("functionCall.id").String(); gotID != wantID {
+			t.Fatalf("functionCall[%d].id = %q, want %q; output=%s", index, gotID, wantID, output)
+		}
+	}
+	if got := responseParts[0].Get("text").String(); got != "Results arrived." {
+		t.Fatalf("leading text = %q; output=%s", got, output)
+	}
+	if got := responseParts[1].Get("text").String(); got != "Continue." {
+		t.Fatalf("trailing text reordered before functionResponse = %q; output=%s", got, output)
+	}
+	for index, wantID := range []string{"call_1", "call_2", "call_3"} {
+		responsePart := responseParts[index+2]
+		if gotID := responsePart.Get("functionResponse.id").String(); gotID != wantID {
+			t.Fatalf("functionResponse[%d].id = %q, want %q; output=%s", index, gotID, wantID, output)
+		}
+		if gotName := responsePart.Get("functionResponse.name").String(); gotName != "Read" {
+			t.Fatalf("functionResponse[%d].name = %q, want Read; output=%s", index, gotName, output)
+		}
+	}
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
+		t.Fatalf("translated parallel tool history is invalid: %v; output=%s", errPairing, output)
+	}
+}
+
 func TestConvertClaudeRequestToGemini_StringToolResult(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash-preview",
@@ -273,5 +438,57 @@ func TestConvertClaudeRequestToGemini_StringToolResult(t *testing.T) {
 	// String content must not be double-encoded: result should be exactly "alpha".
 	if got := fr.Get("response.result").String(); got != "alpha" {
 		t.Fatalf("expected result 'alpha', got '%s' (raw=%s)", got, fr.Get("response.result").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToGemini_ToolResultWithTrailingSystemReminderReordersParts(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.8-flash",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Read the file"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_01_read", "name": "Read", "input": {"path": "main.go"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_01_read", "content": "package main"},
+					{"type": "text", "text": "<system-reminder>\n<total_tokens>1234</total_tokens>\n</system-reminder>"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3.8-flash", inputJSON, false)
+
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents turns, got %d: %s", len(contents), output)
+	}
+
+	userParts := contents[2].Get("parts").Array()
+	if len(userParts) != 2 {
+		t.Fatalf("expected 2 parts in user response turn, got %d: %s", len(userParts), contents[2].Raw)
+	}
+
+	// Text part must precede functionResponse part to prevent Vertex AI 400
+	// ("Requests ending with a model turn are not supported").
+	if !userParts[0].Get("text").Exists() {
+		t.Fatalf("expected parts[0] to be text part, got: %s", userParts[0].Raw)
+	}
+	if gotText := userParts[0].Get("text").String(); gotText != "<system-reminder>\n<total_tokens>1234</total_tokens>\n</system-reminder>" {
+		t.Fatalf("unexpected text in parts[0]: %q", gotText)
+	}
+	if !userParts[1].Get("functionResponse").Exists() {
+		t.Fatalf("expected parts[1] to be functionResponse part, got: %s", userParts[1].Raw)
+	}
+	if gotID := userParts[1].Get("functionResponse.id").String(); gotID != "toolu_01_read" {
+		t.Fatalf("unexpected functionResponse.id in parts[1]: %q", gotID)
 	}
 }

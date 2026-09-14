@@ -182,6 +182,47 @@ func TestConvertInteractionsResponseToOpenAIStream_PreservesEnvironmentID(t *tes
 	}
 }
 
+func TestConvertInteractionsResponseToOpenAINonStreamRestoresAntigravityToolName(t *testing.T) {
+	raw := []byte(`{"id":"i1","model":"antigravity-preview-05-2026","steps":[{"type":"function_call","id":"call_1","name":"external_read_file","arguments":{"path":"/etc/hosts"}}],"usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5}}`)
+	out := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "antigravity-preview-05-2026", nil, nil, raw, nil)
+	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.name").String(); got != "read_file" {
+		t.Fatalf("tool name = %q, want read_file (restored from external_read_file). Output: %s", got, string(out))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIStreamRestoresAntigravityToolName(t *testing.T) {
+	var param any
+	chunks := [][]byte{
+		[]byte(`data: {"event_type":"interaction.created","interaction":{"id":"i1","model":"antigravity-preview-05-2026"}}`),
+		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","name":"external_read_file","arguments":{}}}`),
+		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"path\":\"/etc/hosts\"}"}}`),
+		[]byte(`data: {"event_type":"step.stop","index":0}`),
+		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"requires_action"}}`),
+	}
+	var out [][]byte
+	for _, chunk := range chunks {
+		out = append(out, ConvertInteractionsResponseToOpenAI(context.Background(), "antigravity-preview-05-2026", nil, nil, chunk, &param)...)
+	}
+	toolStart := findOpenAIChatChunk(out, "choices.0.delta.tool_calls.0.function.name")
+	if got := gjson.GetBytes(toolStart, "choices.0.delta.tool_calls.0.function.name").String(); got != "read_file" {
+		t.Fatalf("stream tool name = %q, want read_file (restored from external_read_file). Payload: %s", got, string(toolStart))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIPreservesNonCollidingAndNonAntigravityNames(t *testing.T) {
+	rawNonColliding := []byte(`{"id":"i1","model":"antigravity-preview-05-2026","steps":[{"type":"function_call","id":"call_1","name":"external_lookup","arguments":{"q":"test"}}]}`)
+	outNonColliding := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "antigravity-preview-05-2026", nil, nil, rawNonColliding, nil)
+	if got := gjson.GetBytes(outNonColliding, "choices.0.message.tool_calls.0.function.name").String(); got != "external_lookup" {
+		t.Fatalf("tool name = %q, want external_lookup (preserved). Output: %s", got, string(outNonColliding))
+	}
+
+	rawNonAnti := []byte(`{"id":"i2","model":"gemini-3.1-flash-lite","steps":[{"type":"function_call","id":"call_2","name":"external_read_file","arguments":{"path":"/etc/hosts"}}]}`)
+	outNonAnti := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, rawNonAnti, nil)
+	if got := gjson.GetBytes(outNonAnti, "choices.0.message.tool_calls.0.function.name").String(); got != "external_read_file" {
+		t.Fatalf("tool name = %q, want external_read_file (preserved for non-antigravity). Output: %s", got, string(outNonAnti))
+	}
+}
+
 func findInteractionsEventPayload(events [][]byte, eventType string) []byte {
 	for _, event := range events {
 		payload := interactionsSSEPayload(event)

@@ -6,9 +6,7 @@
 package gemini
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
 	"strconv"
 	"strings"
 
@@ -65,23 +63,12 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		}
 	}
 
-	// helper for generating paired call IDs in the form: call_<alphanum>
+	// helper for generating paired call IDs in the form: call_gemini_<seq>
 	// Gemini uses sequential pairing across possibly multiple in-flight
 	// functionCalls, so we keep a FIFO queue of generated call IDs and
 	// consume them in order when functionResponses arrive.
 	var pendingCallIDs []string
-
-	// genCallID creates a random call id like: call_<8chars>
-	genCallID := func() string {
-		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-		var b strings.Builder
-		// 8 chars random suffix
-		for i := 0; i < 24; i++ {
-			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-			b.WriteByte(letters[n.Int64()])
-		}
-		return "call_" + b.String()
-	}
+	callCounter := 0
 
 	getGeminiCallID := func(value gjson.Result) string {
 		if callID := strings.TrimSpace(value.Get("id").String()); callID != "" {
@@ -198,7 +185,8 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					// Reuse gateway-provided IDs when present, otherwise generate one for pairing.
 					id := getGeminiCallID(fc)
 					if id == "" {
-						id = genCallID()
+						callCounter++
+						id = fmt.Sprintf("call_gemini_%016d", callCounter)
 					}
 					fn, _ = sjson.SetBytes(fn, "call_id", id)
 					pendingCallIDs = append(pendingCallIDs, id)
@@ -227,7 +215,8 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						// pop the first element
 						pendingCallIDs = pendingCallIDs[1:]
 					} else {
-						id = genCallID()
+						callCounter++
+						id = fmt.Sprintf("call_gemini_%016d", callCounter)
 					}
 					fno, _ = sjson.SetBytes(fno, "call_id", id)
 					inputItems = append(inputItems, fno)

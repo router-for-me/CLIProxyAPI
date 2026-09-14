@@ -298,6 +298,36 @@ func resolveResponsesQualifiedToolIdentity(root gjson.Result, qualifiedName stri
 	return name, namespace, found
 }
 
+// canonicalResponsesToolName restores an omitted namespace only when the current
+// request declares exactly one matching local name. Exact emitted names win;
+// ambiguous names remain unresolved rather than being dispatched to another tool.
+func canonicalResponsesToolName(requestRawJSON []byte, name string) string {
+	root := gjson.ParseBytes(requestRawJSON)
+	if _, _, found := resolveResponsesQualifiedToolIdentity(root, name); found {
+		return name
+	}
+	seen := make(map[string]struct{})
+	candidate := ""
+	ambiguous := false
+	walkResponsesToolDeclarations(root, func(declaration responsesToolDeclaration) bool {
+		if _, duplicate := seen[declaration.chatName]; duplicate {
+			return true
+		}
+		seen[declaration.chatName] = struct{}{}
+		if declaration.localName == name {
+			if candidate != "" {
+				ambiguous = true
+			}
+			candidate = declaration.chatName
+		}
+		return true
+	})
+	if candidate != "" && !ambiguous {
+		return candidate
+	}
+	return name
+}
+
 func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
 	qualifiedName = strings.TrimSpace(qualifiedName)
 	if qualifiedName == "" {

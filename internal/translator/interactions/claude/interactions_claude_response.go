@@ -68,6 +68,9 @@ func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName s
 			for _, text := range interactionsContentTexts(step.Get("content")) {
 				block := []byte(`{"type":"thinking","thinking":""}`)
 				block, _ = sjson.SetBytes(block, "thinking", text)
+				if signature := interactionsSignature(step); signature != "" {
+					block, _ = sjson.SetBytes(block, "signature", signature)
+				}
 				contentBlocks = append(contentBlocks, block)
 			}
 		case "function_call":

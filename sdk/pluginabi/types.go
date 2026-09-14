@@ -10,14 +10,31 @@ const (
 	// Version 3 omits OriginalRequest/RequestBody on payload stream chunks
 	// (ChunkIndex >= 0); those fields remain on StreamChunkHeaderInitIndex only.
 	// Plugins that still need per-chunk request bodies should keep schema_version < 3.
-	SchemaVersion uint32 = 3
+	// Version 4 adds upstream WebSocket response event observation.
+	// Version 5 omits HistoryChunks on payload stream chunks (ChunkIndex >= 0);
+	// those fields remain on StreamChunkHeaderInitIndex only. Plugins that still need
+	// per-chunk history chunks should keep schema_version < 5.
+	// Version 6 preserves raw JSON bodies for plugin management responses.
+	// Plugins that still require HTML entity escaping on JSON response strings
+	// should keep schema_version < 6.
+	SchemaVersion uint32 = 6
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
+	// SchemaVersionWebSocketResponseObserver is the first schema version that supports
+	// upstream WebSocket response event observation.
+	SchemaVersionWebSocketResponseObserver uint32 = 4
+	// SchemaVersionStreamChunkOmitHistory is the first schema version that omits
+	// history chunks on payload stream-chunk interceptor calls.
+	SchemaVersionStreamChunkOmitHistory uint32 = 5
+	// SchemaVersionRawManagementResponse is the first schema version where plugin
+	// management JSON responses are preserved without HTML-escaping strings.
+	SchemaVersionRawManagementResponse uint32 = 6
 )
 
 const (
 	MethodPluginRegister    = "plugin.register"
+	MethodPluginQuiesce     = "plugin.quiesce"
 	MethodPluginReconfigure = "plugin.reconfigure"
 	MethodPluginShutdown    = "plugin.shutdown"
 
@@ -57,6 +74,8 @@ const (
 	MethodResponseInterceptAfter       = "response.intercept_after"
 	MethodResponseInterceptStreamChunk = "response.intercept_stream_chunk"
 
+	MethodWebSocketResponseEvent = "websocket.response_event"
+
 	MethodThinkingIdentifier = "thinking.identifier"
 	MethodThinkingApply      = "thinking.apply"
 
@@ -67,6 +86,11 @@ const (
 
 	MethodManagementRegister = "management.register"
 	MethodManagementHandle   = "management.handle"
+
+	MethodQuotaIdentifier = "quota.identifier"
+	MethodQuotaDescribe   = "quota.describe"
+	MethodQuotaFetch      = "quota.fetch"
+	MethodQuotaReset      = "quota.reset"
 
 	MethodHostHTTPDo             = "host.http.do"
 	MethodHostHTTPDoStream       = "host.http.do_stream"
@@ -83,6 +107,7 @@ const (
 	MethodHostAuthGet            = "host.auth.get"
 	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
 	MethodHostAuthSave           = "host.auth.save"
+	MethodHostAffinityLookup     = "host.affinity.lookup"
 )
 
 type Envelope struct {
