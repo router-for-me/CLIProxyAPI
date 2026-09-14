@@ -80,6 +80,14 @@ const (
 	// JSONB blobs, the checksum, and the audit metadata (created_at, created_by,
 	// reason). Writers append; nothing updates or deletes existing rows.
 	defaultConfigRevisionsTable = "config_revisions"
+	// ConfigImportsTable is the PG-first control-plane audit table for every
+	// import attempt (Phase 1 Task 3). One row per outcome — dry_run,
+	// committed, rejected, or replaced — with the source + canonical
+	// checksums, the runtime_config revision when relevant, a JSONB
+	// resource_counts payload, an optional error_summary, the actor, and the
+	// mode that triggered the import (e.g. "import-config"). No row is
+	// seeded; writers append per attempt.
+	defaultConfigImportsTable = "config_imports"
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -265,6 +273,14 @@ type PostgresStoreConfig struct {
 	// BIGINT revision so the history is replayable in order. No row is
 	// seeded; writers append on every accepted change.
 	ConfigRevisionsTable string
+	// ConfigImportsTable stores the audit trail of every runtime_config
+	// import attempt (Phase 1 Task 3): one row per outcome (dry_run,
+	// committed, rejected, or replaced) with the source + canonical
+	// checksums, the runtime_config revision when relevant, a JSONB
+	// resource_counts payload, an optional error_summary, the actor, and the
+	// mode that triggered the import. No row is seeded; writers append per
+	// attempt.
+	ConfigImportsTable string
 
 	// UsageEncryptionKey is the passphrase used to derive an AES-256-GCM
 	// key for sealing sensitive columns (api_key_principal in usage_events)
@@ -414,6 +430,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	if cfg.ConfigRevisionsTable == "" {
 		cfg.ConfigRevisionsTable = defaultConfigRevisionsTable
 	}
+	if cfg.ConfigImportsTable == "" {
+		cfg.ConfigImportsTable = defaultConfigImportsTable
+	}
 
 	spoolRoot := strings.TrimSpace(cfg.SpoolDir)
 	if spoolRoot == "" {
@@ -547,13 +566,17 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 }
 
 // ensureRuntimeConfigSchema creates the PG-first control-plane singleton
-// runtime_config table and its append-only history table
-// config_revisions. The CHECK id = 1 constraint on runtime_config guarantees
-// only one canonical row; callers (subsequent tasks) seed the singleton on
-// first write. config_revisions is keyed by a monotonic BIGINT revision so
-// writers append one row per accepted change and the history stays replayable
-// in revision order. No row is seeded in either table here so this step stays
-// purely a schema-availability step.
+// runtime_config table, its append-only history table config_revisions, and
+// the config_imports audit table. The CHECK id = 1 constraint on
+// runtime_config guarantees only one canonical row; callers (subsequent
+// tasks) seed the singleton on first write. config_revisions is keyed by a
+// monotonic BIGINT revision so writers append one row per accepted change and
+// the history stays replayable in revision order. config_imports records one
+// row per import attempt — dry_run, committed, rejected, or replaced — and
+// carries the source + canonical checksums, the runtime_config revision when
+// relevant, and a JSONB resource_counts payload for downstream analysis. No
+// row is seeded in any table here so this step stays purely a
+// schema-availability step.
 func (s *PostgresStore) ensureRuntimeConfigSchema(ctx context.Context) error {
 	runtimeConfigTable := s.fullTableName(s.cfg.RuntimeConfigTable)
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
@@ -603,6 +626,47 @@ func (s *PostgresStore) ensureRuntimeConfigSchema(ctx context.Context) error {
 		configRevisionsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: create config_revisions created_at index: %w", err)
+	}
+
+	// config_imports is the per-attempt audit table for the import-config /
+	// export-config / verify-config CLI surface. BIGSERIAL keeps the inserts
+	// idempotent under repeated dry-runs; status is a free-form TEXT so the
+	// existing four values (dry_run, committed, rejected, replaced) can
+	// evolve without a schema change. mode captures the calling CLI
+	// surface, and resource_counts is a JSONB blob so structured counters
+	// round-trip without lossy stringification. revision is nullable
+	// because dry_run and rejected attempts are not associated with a
+	// runtime_config row. error_summary is nullable for the same reason on
+	// the happy path. No DEFAULT on status or mode: the writer must always
+	// pick a value explicitly so the audit trail stays unambiguous.
+	configImportsTable := s.fullTableName(s.cfg.ConfigImportsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                  BIGSERIAL PRIMARY KEY,
+			source_label        TEXT,
+			source_checksum     TEXT,
+			canonical_checksum  TEXT,
+			status              TEXT NOT NULL,
+			revision            BIGINT,
+			resource_counts     JSONB NOT NULL DEFAULT '{}'::jsonb,
+			error_summary       TEXT,
+			actor               TEXT,
+			mode                TEXT NOT NULL,
+			created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, configImportsTable)); err != nil {
+		return fmt.Errorf("postgres store: create config_imports table: %w", err)
+	}
+	// Idempotent DESC index over created_at so listing the most recent
+	// import outcomes is index-driven rather than a sequential scan. The
+	// BIGSERIAL id already supports id-ordered scans; this index serves the
+	// secondary created_at-ordered access path the dashboard timeline view
+	// uses.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE INDEX IF NOT EXISTS idx_config_imports_created_at ON %s(created_at DESC)`,
+		configImportsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: create config_imports created_at index: %w", err)
 	}
 	return nil
 }
@@ -2288,6 +2352,17 @@ func (s *PostgresStore) ConfigRevisionsTable() string {
 		return quoteIdentifier(defaultConfigRevisionsTable)
 	}
 	return s.fullTableName(s.cfg.ConfigRevisionsTable)
+}
+
+// ConfigImportsTable returns the fully-qualified name of the PG-first
+// control-plane audit table for runtime_config import attempts (dry_run,
+// committed, rejected, or replaced). Phase 1 writers append one row per
+// attempt; the table is the source of truth for the import timeline view.
+func (s *PostgresStore) ConfigImportsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultConfigImportsTable)
+	}
+	return s.fullTableName(s.cfg.ConfigImportsTable)
 }
 
 // CooldownTable returns the fully-qualified name of the runtime cooldown state table.

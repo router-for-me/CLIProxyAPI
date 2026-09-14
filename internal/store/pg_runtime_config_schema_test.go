@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -314,5 +316,222 @@ func TestConfigRevisionsTableAccessor(t *testing.T) {
 	got := pg.ConfigRevisionsTable()
 	if got != want {
 		t.Fatalf("ConfigRevisionsTable() = %q, want %q", got, want)
+	}
+}
+
+// TestConfigImportsSchemaCreated verifies that EnsureSchema materializes the
+// config_imports audit table (PG-first control plane; Phase 1 Task 3). The
+// table records every import attempt — dry_run, committed, rejected, or
+// replaced — and links back to the runtime_config revision when relevant.
+// No row is seeded; writers insert once per import outcome.
+func TestConfigImportsSchemaCreated(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_config_imports_schema")
+	t.Cleanup(func() { _ = pg.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Table existence is qualified by the per-test schema so cross-test
+	// contamination cannot pass the check.
+	var tableExists bool
+	if err := pg.DB().QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM information_schema.tables
+		WHERE table_schema = $1 AND table_name = $2)`,
+		pg.cfg.Schema, pg.cfg.ConfigImportsTable,
+	).Scan(&tableExists); err != nil {
+		t.Fatalf("query config_imports existence: %v", err)
+	}
+	if !tableExists {
+		t.Fatalf("config_imports table missing in schema %q", pg.cfg.Schema)
+	}
+
+	// Verify the canonical columns are present with the expected types. JSONB
+	// on resource_counts + TEXT status/mode mirror the design doc's
+	// audit-trail intent. The BIGSERIAL id keeps inserts idempotent over
+	// repeated dry-runs.
+	wantColumns := map[string]string{
+		"id":                 "bigint",
+		"source_label":       "text",
+		"source_checksum":    "text",
+		"canonical_checksum": "text",
+		"status":             "text",
+		"revision":           "bigint",
+		"resource_counts":    "jsonb",
+		"error_summary":      "text",
+		"actor":              "text",
+		"mode":               "text",
+		"created_at":         "timestamp with time zone",
+	}
+	for col, wantType := range wantColumns {
+		var gotType string
+		if err := pg.DB().QueryRowContext(ctx, `SELECT data_type FROM information_schema.columns
+			WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
+			pg.cfg.Schema, pg.cfg.ConfigImportsTable, col,
+		).Scan(&gotType); err != nil {
+			t.Fatalf("config_imports.%s column missing: %v", col, err)
+		}
+		if gotType != wantType {
+			t.Fatalf("config_imports.%s type = %q, want %q", col, gotType, wantType)
+		}
+	}
+
+	// The idx_config_imports_created_at index must exist so listing the most
+	// recent imports is index-driven rather than a sequential scan.
+	var indexExists bool
+	if err := pg.DB().QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM pg_indexes WHERE schemaname = $1 AND indexname = $2)`,
+		pg.cfg.Schema, "idx_config_imports_created_at",
+	).Scan(&indexExists); err != nil {
+		t.Fatalf("query config_imports created_at index existence: %v", err)
+	}
+	if !indexExists {
+		t.Fatalf("idx_config_imports_created_at index missing in schema %q", pg.cfg.Schema)
+	}
+
+	// No row is seeded; the table exists but stays empty until writers
+	// record an import outcome.
+	var rowCount int
+	if err := pg.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM `+pg.ConfigImportsTable(),
+	).Scan(&rowCount); err != nil {
+		t.Fatalf("count config_imports rows: %v", err)
+	}
+	if rowCount != 0 {
+		t.Fatalf("config_imports row count = %d, want 0 (no seed)", rowCount)
+	}
+}
+
+// TestConfigImportsRoundTrip exercises every required status value
+// (dry_run, committed, rejected, replaced) by inserting one row per status
+// and reading them back. JSONB resource_counts is verified to round-trip
+// intact so import reports can carry structured counters without lossy
+// re-encoding.
+func TestConfigImportsRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_config_imports_roundtrip")
+	t.Cleanup(func() { _ = pg.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Clear any prior runs; schema-per-test isolation should make this a
+	// no-op on a fresh database but be defensive against shared schemas.
+	if _, err := pg.DB().ExecContext(ctx,
+		`DELETE FROM `+pg.ConfigImportsTable(),
+	); err != nil {
+		t.Fatalf("clear config_imports: %v", err)
+	}
+
+	// Each status row carries a unique counter payload so a mistaken column
+	// shape (e.g. JSONB -> text) would surface during the read-back scan
+	// rather than at a downstream consumer.
+	rows := []struct {
+		status   string
+		revision int64
+		counts   string
+		actor    string
+		mode     string
+		source   string
+		checksum string
+	}{
+		{"dry_run", 0, `{"providers":0,"keys":0}`, "tester-dry", "import-config", "config.example.yaml", "sha256:dry"},
+		{"committed", 1, `{"providers":2,"keys":3}`, "tester-commit", "import-config", "config.example.yaml", "sha256:commit"},
+		{"rejected", 0, `{"providers":1,"keys":0}`, "tester-rej", "import-config", "config.example.yaml", "sha256:rej"},
+		{"replaced", 2, `{"providers":3,"keys":4}`, "tester-rep", "import-config", "config.replaced.yaml", "sha256:rep"},
+	}
+
+	for _, r := range rows {
+		if _, err := pg.DB().ExecContext(ctx,
+			`INSERT INTO `+pg.ConfigImportsTable()+
+				` (source_label, source_checksum, status, revision, resource_counts, actor, mode) `+
+				`VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+			r.source, r.checksum, r.status, r.revision, r.counts, r.actor, r.mode,
+		); err != nil {
+			t.Fatalf("insert config_imports status=%s: %v", r.status, err)
+		}
+	}
+
+	// Read back and verify each status row's resource_counts JSONB shape
+	// survives the round-trip. Casting through jsonb on read so the
+	// round-trip is genuinely exercised end-to-end. Comparison is
+	// JSON-decode aware because Postgres normalises JSONB whitespace and
+	// may reorder keys; the contract we are pinning here is structural
+	// equivalence, not byte-identity.
+	for _, r := range rows {
+		var (
+			gotStatus   string
+			gotCounts   string
+			gotRevision int64
+		)
+		if err := pg.DB().QueryRowContext(ctx,
+			`SELECT status, resource_counts::text, COALESCE(revision, 0) FROM `+pg.ConfigImportsTable()+
+				` WHERE source_checksum = $1`,
+			r.checksum,
+		).Scan(&gotStatus, &gotCounts, &gotRevision); err != nil {
+			t.Fatalf("scan config_imports checksum=%s: %v", r.checksum, err)
+		}
+		if gotStatus != r.status {
+			t.Fatalf("status for %s = %q, want %q", r.checksum, gotStatus, r.status)
+		}
+		if gotRevision != r.revision {
+			t.Fatalf("revision for %s = %d, want %d", r.checksum, gotRevision, r.revision)
+		}
+		var wantCounts, gotCountsJSON any
+		if err := json.Unmarshal([]byte(r.counts), &wantCounts); err != nil {
+			t.Fatalf("decode want resource_counts for %s: %v", r.checksum, err)
+		}
+		if err := json.Unmarshal([]byte(gotCounts), &gotCountsJSON); err != nil {
+			t.Fatalf("decode got resource_counts for %s: %v", r.checksum, err)
+		}
+		if !reflect.DeepEqual(wantCounts, gotCountsJSON) {
+			t.Fatalf("resource_counts for %s = %v, want %v", r.checksum, gotCountsJSON, wantCounts)
+		}
+	}
+
+	// Sanity: every required status must be present in the table at this
+	// point. This guards against a future edit that drops a status from the
+	// acceptance contract without the surrounding tests catching it.
+	expectedStatuses := map[string]bool{
+		"dry_run":   false,
+		"committed": false,
+		"rejected":  false,
+		"replaced":  false,
+	}
+	rowsIter, err := pg.DB().QueryContext(ctx,
+		`SELECT status FROM `+pg.ConfigImportsTable(),
+	)
+	if err != nil {
+		t.Fatalf("iterate config_imports statuses: %v", err)
+	}
+	defer rowsIter.Close()
+	for rowsIter.Next() {
+		var s string
+		if err := rowsIter.Scan(&s); err != nil {
+			t.Fatalf("scan status: %v", err)
+		}
+		if _, ok := expectedStatuses[s]; ok {
+			expectedStatuses[s] = true
+		}
+	}
+	if err := rowsIter.Err(); err != nil {
+		t.Fatalf("iterate config_imports statuses err: %v", err)
+	}
+	for status, seen := range expectedStatuses {
+		if !seen {
+			t.Fatalf("required status %q not present after round-trip", status)
+		}
+	}
+}
+
+// TestConfigImportsTableAccessor verifies the fully-qualified table name
+// returned by ConfigImportsTable() matches the configured table and respects
+// the schema prefix. Mirrors TestConfigRevisionsTableAccessor.
+func TestConfigImportsTableAccessor(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_config_imports_accessor")
+	t.Cleanup(func() { _ = pg.Close() })
+
+	want := pg.fullTableName(pg.cfg.ConfigImportsTable)
+	got := pg.ConfigImportsTable()
+	if got != want {
+		t.Fatalf("ConfigImportsTable() = %q, want %q", got, want)
 	}
 }
