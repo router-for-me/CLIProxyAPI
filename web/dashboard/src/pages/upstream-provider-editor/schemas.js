@@ -72,7 +72,7 @@ export const ROUTING_STRATEGY_OPTIONS = [
   { value: 'least-used', label: 'Least used' },
   { value: 'failover', label: 'Failover' },
 ];
-export const ROUTING_STRATEGY_HINT = 'Empty = follow the global routing strategy. Any value enables aggressive in-pool failover: on any entry error the next entry is tried first; errors surface only after the whole pool is exhausted. Fill-first ≈ priority, failover ≈ round-robin within a priority tier.';
+export const ROUTING_STRATEGY_HINT = 'Empty = follow the global routing strategy. Any value enables aggressive in-pool failover: on any entry error the next entry is tried first; errors surface only after the whole pool is exhausted. Fill-first ≈ priority, failover ≈ round-robin within a priority tier. Power of two choices and least used currently fall back to the deterministic fill-first behavior until the in-flight-aware scheduler (Task 10) lands.';
 
 // MAX_ENTRY_WEIGHT matches config.MaxCredentialWeight (1,000,000). The
 // scheduler normalizes anything above that out, but the editor must
