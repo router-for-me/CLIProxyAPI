@@ -114,15 +114,15 @@ func TestRuntimeConfigSchemaEnsureIdempotent(t *testing.T) {
 
 // TestRuntimeConfigTableAccessor verifies the fully-qualified table name
 // returned by RuntimeConfigTable() matches the configured table and respects
-// the schema prefix.
+// the schema prefix. The accessor delegates to fullTableName, which
+// quote-identifier-wraps both the schema and the table name; the expected
+// value must use the same quoting semantics so the comparison succeeds
+// against a live Postgres.
 func TestRuntimeConfigTableAccessor(t *testing.T) {
 	pg := newTestPostgresStore(t, "test_runtime_config_accessor")
 	t.Cleanup(func() { _ = pg.Close() })
 
-	want := pg.Schema() + "." + pg.cfg.RuntimeConfigTable
-	if pg.Schema() == "" {
-		want = pg.cfg.RuntimeConfigTable
-	}
+	want := pg.fullTableName(pg.cfg.RuntimeConfigTable)
 	got := pg.RuntimeConfigTable()
 	if got != want {
 		t.Fatalf("RuntimeConfigTable() = %q, want %q", got, want)
