@@ -178,6 +178,46 @@ func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Contex
 	return result.hints.clone()
 }
 
+// antigravityModelCapabilityHintsForAuth merges upstream capability hints with
+// explicit operator overrides. Overrides remain effective when the remote model
+// catalog is unavailable or returns no webSearchModelIds.
+func (s *Service) antigravityModelCapabilityHintsForAuth(ctx context.Context, auth *coreauth.Auth) antigravityModelCapabilityHints {
+	hints := s.fetchAntigravityModelCapabilityHintsForAuth(ctx, auth)
+	overrides := s.antigravityWebSearchModelOverrides()
+	if len(overrides) == 0 {
+		return hints
+	}
+	if hints.WebSearchModelIDs == nil {
+		hints.WebSearchModelIDs = make(map[string]struct{}, len(overrides))
+	}
+	for modelID := range overrides {
+		hints.WebSearchModelIDs[modelID] = struct{}{}
+	}
+	return hints
+}
+
+func (s *Service) antigravityWebSearchModelOverrides() map[string]struct{} {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	if s.cfg == nil || len(s.cfg.Antigravity.WebSearchModels) == 0 {
+		return nil
+	}
+	overrides := make(map[string]struct{}, len(s.cfg.Antigravity.WebSearchModels))
+	for _, modelID := range s.cfg.Antigravity.WebSearchModels {
+		modelID = normalizeAntigravityFetchedModelID(modelID)
+		if modelID != "" {
+			overrides[modelID] = struct{}{}
+		}
+	}
+	if len(overrides) == 0 {
+		return nil
+	}
+	return overrides
+}
+
 func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth *coreauth.Auth, baseURLs []string, proxyURL string, accessToken string) (antigravityModelCapabilityHints, antigravityProbeStatus) {
 	probeCtx := context.Background()
 	var cancel context.CancelFunc
@@ -408,7 +448,7 @@ func (s *Service) asyncProbeAntigravityCapabilities(ctx context.Context, auth *c
 		if s != nil {
 			defer s.antigravityProbeWg.Done()
 		}
-		hints := s.fetchAntigravityModelCapabilityHintsForAuth(probeCtx, authClone)
+		hints := s.antigravityModelCapabilityHintsForAuth(probeCtx, authClone)
 		if len(hints.WebSearchModelIDs) == 0 {
 			return
 		}
