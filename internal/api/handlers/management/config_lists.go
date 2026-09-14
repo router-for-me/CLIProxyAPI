@@ -801,6 +801,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Models                *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers               *map[string]string                  `json:"headers"`
 		SupportPromptCacheKey *bool                               `json:"support-prompt-cache-key"`
+		NonStreamToolCalls    *bool                               `json:"non-stream-tool-calls"`
 		RequestRetry          *int                                `json:"request-retry"`
 		RequestScopedErrors   *[]config.RequestScopedErrorRule    `json:"request-scoped-errors"`
 	}
@@ -877,6 +878,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.SupportPromptCacheKey != nil {
 		entry.SupportPromptCacheKey = *body.Value.SupportPromptCacheKey
+	}
+	if body.Value.NonStreamToolCalls != nil {
+		entry.NonStreamToolCalls = *body.Value.NonStreamToolCalls
 	}
 	if body.Value.RequestScopedErrors != nil {
 		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
