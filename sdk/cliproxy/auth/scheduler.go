@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"math/rand/v2"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategyP2C                schedulerStrategy = 4
+	schedulerStrategyLeastUsed          schedulerStrategy = 5
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -189,6 +192,17 @@ func (s *authScheduler) adjustInFlight(authID string, delta int) {
 	s.inFlight[authID] = next
 }
 
+func (s *authScheduler) inFlightSnapshot() map[string]int {
+	if s == nil || len(s.inFlight) == 0 {
+		return nil
+	}
+	snapshot := make(map[string]int, len(s.inFlight))
+	for authID, count := range s.inFlight {
+		snapshot[authID] = count
+	}
+	return snapshot
+}
+
 // inFlightForAuth returns the auth's current in-flight count (0 when unknown).
 func (s *authScheduler) inFlightForAuth(authID string) int {
 	if s == nil {
@@ -219,6 +233,10 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 		return schedulerStrategyFillFirst
 	case *WeightedRoundRobinSelector:
 		return schedulerStrategyWeightedRoundRobin
+	case *P2CSelector:
+		return schedulerStrategyP2C
+	case *LeastUsedSelector:
+		return schedulerStrategyLeastUsed
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
@@ -296,6 +314,13 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	return s.pickSingleWithStrategy(ctx, provider, model, opts, tried, schedulerStrategyCurrent)
 }
 
+func (s *authScheduler) pickReadyLookup(snapshot map[string]int) func(string) int {
+	if snapshot == nil {
+		return func(string) int { return 0 }
+	}
+	return func(authID string) int { return snapshot[authID] }
+}
+
 func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, error) {
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -320,7 +345,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot())); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -381,7 +406,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot())); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -421,7 +446,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot()))
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -460,6 +485,41 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 		state.prepare(scheduledWeightVectorMatching(entries, predicate))
 		picked := pickSmoothWeightedScheduled(entries, state.current, predicate)
+		if picked != nil && picked.meta != nil {
+			return picked.auth, picked.meta.providerKey, nil
+		}
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
+
+	if strategy == schedulerStrategyP2C || strategy == schedulerStrategyLeastUsed {
+		entries := make([]*scheduledAuth, 0)
+		for _, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			bucket := shard.readyByPriority[bestPriority]
+			if bucket == nil {
+				continue
+			}
+			entries = append(entries, bucket.all.flat...)
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i] == nil || entries[i].auth == nil {
+				return false
+			}
+			if entries[j] == nil || entries[j].auth == nil {
+				return true
+			}
+			return entries[i].auth.ID < entries[j].auth.ID
+		})
+		view := readyView{flat: entries}
+		var picked *scheduledAuth
+		switch strategy {
+		case schedulerStrategyP2C:
+			picked = view.pickPowerOfTwo(predicate, s.pickReadyLookup(s.inFlightSnapshot()))
+		case schedulerStrategyLeastUsed:
+			picked = view.pickLeastUsed(predicate, s.pickReadyLookup(s.inFlightSnapshot()))
+		}
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
@@ -511,7 +571,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate, s.pickReadyLookup(s.inFlightSnapshot()))
 		if picked == nil {
 			continue
 		}
@@ -878,7 +938,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, inFlightCount func(string) int) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -887,7 +947,7 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 	if !okPriority {
 		return nil
 	}
-	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate)
+	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate, inFlightCount)
 }
 
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
@@ -924,7 +984,7 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, inFlightCount func(string) int) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -942,6 +1002,10 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		picked = view.pickFirst(predicate)
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
+	case schedulerStrategyP2C:
+		picked = view.pickPowerOfTwo(predicate, inFlightCount)
+	case schedulerStrategyLeastUsed:
+		picked = view.pickLeastUsed(predicate, inFlightCount)
 	default:
 		picked = view.pickRoundRobin(predicate)
 	}
@@ -949,6 +1013,105 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	return picked.auth
+}
+
+// pickPowerOfTwo samples two distinct matching entries and returns the one
+// with fewer in-flight requests — classic power-of-two-choices. When only one
+// candidate matches it returns it; with none it returns nil. An in-flight tie
+// keeps the earlier flat-view entry (stable, index-based; weights are a
+// WRR-only concept and are deliberately ignored here).
+func (v *readyView) pickPowerOfTwo(predicate func(*scheduledAuth) bool, inFlightCount func(string) int) *scheduledAuth {
+	if v == nil || len(v.flat) == 0 {
+		return nil
+	}
+	candidates := make([]*scheduledAuth, 0, len(v.flat))
+	for _, entry := range v.flat {
+		if predicate == nil || predicate(entry) {
+			candidates = append(candidates, entry)
+		}
+	}
+	switch len(candidates) {
+	case 0:
+		return nil
+	case 1:
+		return candidates[0]
+	}
+	first := rand.IntN(len(candidates))
+	second := rand.IntN(len(candidates) - 1)
+	if second >= first {
+		second++
+	}
+	a, b := candidates[first], candidates[second]
+	aIndex, bIndex := first, second
+	if bIndex < aIndex {
+		a, b = b, a
+		aIndex, bIndex = bIndex, aIndex
+	}
+	return resolvePowerOfTwoPair(a, aIndex, b, bIndex, inFlightCount)
+}
+
+// resolvePowerOfTwoPair returns the entry with fewer in-flight requests,
+// preferring the earlier flat-view index on a tie. Split out from
+// pickPowerOfTwo so the comparison rule is testable deterministically.
+func resolvePowerOfTwoPair(a *scheduledAuth, aIndex int, b *scheduledAuth, bIndex int, inFlightCount func(string) int) *scheduledAuth {
+	var aCount, bCount int
+	if inFlightCount != nil {
+		aCount = inFlightCount(a.auth.ID)
+		bCount = inFlightCount(b.auth.ID)
+	}
+	switch {
+	case aCount < bCount:
+		return a
+	case bCount < aCount:
+		return b
+	}
+	if aIndex <= bIndex {
+		return a
+	}
+	return b
+}
+
+// pickLeastUsed returns the matching entry with the minimum in-flight count.
+// Ties rotate through the view cursor (round-robin among equals) so repeated
+// picks spread instead of pinning on the first. Like p2c it ignores entry
+// weights — weights are a WRR-only concept.
+func (v *readyView) pickLeastUsed(predicate func(*scheduledAuth) bool, inFlightCount func(string) int) *scheduledAuth {
+	if v == nil || len(v.flat) == 0 {
+		return nil
+	}
+	var best *scheduledAuth
+	bestCount := -1
+	tiedIndexes := make([]int, 0, len(v.flat))
+	for i, entry := range v.flat {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		count := 0
+		if inFlightCount != nil {
+			count = inFlightCount(entry.auth.ID)
+		}
+		switch {
+		case bestCount < 0 || count < bestCount:
+			best = entry
+			bestCount = count
+			tiedIndexes = tiedIndexes[:0]
+			tiedIndexes = append(tiedIndexes, i)
+		case count == bestCount:
+			tiedIndexes = append(tiedIndexes, i)
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	if len(tiedIndexes) <= 1 {
+		return best
+	}
+	pickIndex := tiedIndexes[v.cursor%len(tiedIndexes)]
+	v.cursor++
+	if v.cursor >= len(tiedIndexes) {
+		v.cursor = 0
+	}
+	return v.flat[pickIndex]
 }
 
 func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) int {

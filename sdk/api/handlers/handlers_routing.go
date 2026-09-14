@@ -133,7 +133,8 @@ func (h *BaseAPIHandler) applyPinnedRoute(ctx context.Context, providers []strin
 		strategy = h.poolStrategyForProviders(filtered)
 	}
 	switch strategy {
-	case "priority", "failover", "round-robin", "fill-first", "weighted-round-robin":
+	case "priority", "failover", "round-robin", "fill-first", "weighted-round-robin",
+		"power-of-two-choices", "least-used":
 		filtered = orderProvidersByPriority(filtered, route.Priorities)
 		stashRouteStrategy(ctx, strategy)
 	}

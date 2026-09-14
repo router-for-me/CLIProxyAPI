@@ -1238,10 +1238,11 @@ func isFreeCodexAuth(auth *Auth) bool {
 // highest-priority provider (fill-first); "failover" enables round-robin
 // across providers with the existing inner-loop failover on error. The
 // canonical pool strategy spellings ("round-robin", "fill-first",
-// "weighted-round-robin") map to their scheduler counterparts so a pool row's
-// strategy can serve as a route's default without translation. Any other
-// value (including absence) yields schedulerStrategyCurrent, which means the
-// configured global routing.strategy applies unchanged.
+// "weighted-round-robin", "power-of-two-choices", "least-used") map to their
+// scheduler counterparts so a pool row's strategy can serve as a route's
+// default without translation. Any other value (including absence) yields
+// schedulerStrategyCurrent, which means the configured global
+// routing.strategy applies unchanged.
 func routeStrategyFromMetadata(meta map[string]any) schedulerStrategy {
 	if len(meta) == 0 {
 		return schedulerStrategyCurrent
@@ -1266,6 +1267,10 @@ func routeStrategyFromMetadata(meta map[string]any) schedulerStrategy {
 		return schedulerStrategyRoundRobin
 	case "weighted-round-robin":
 		return schedulerStrategyWeightedRoundRobin
+	case "power-of-two-choices", "p2c", "two-random-choices":
+		return schedulerStrategyP2C
+	case "least-used", "least-busy":
+		return schedulerStrategyLeastUsed
 	default:
 		return schedulerStrategyCurrent
 	}
