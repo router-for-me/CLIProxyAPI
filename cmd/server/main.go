@@ -185,6 +185,7 @@ func main() {
 	}
 
 	pluginHost := pluginhost.New()
+	pluginHost.SetConfigPath(configPath)
 	if !isDiscoverMode {
 		if bootstrapCfg := loadPluginBootstrapConfig(pluginBootstrapConfigPath(os.Args[1:], DefaultConfigPath)); bootstrapCfg != nil {
 			pluginHost.ApplyConfig(context.Background(), bootstrapCfg)
@@ -194,6 +195,7 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+	pluginHost.SetConfigPath(configPath)
 
 	if discoverGateways || discoverJSON {
 		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
@@ -674,6 +676,7 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
+	pluginHost.SetConfigPath(configFilePath)
 	pluginHost.ApplyConfig(context.Background(), cfg)
 	if configLoadedFromHome && homePluginStatusReady {
 		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
