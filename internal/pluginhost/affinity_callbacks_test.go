@@ -23,8 +23,11 @@ func TestHostAffinityLookupCallback_Contract(t *testing.T) {
 	host := New()
 	manager := coreauth.NewManager(nil, nil, nil)
 	selector := coreauth.NewSessionAffinitySelector(nil)
+	defer selector.Stop()
 	manager.SetSelector(selector)
 	host.SetAuthManager(manager)
+	// Builder and Service attach the host even when no scheduler plugin is active.
+	manager.SetPluginScheduler(host)
 
 	authA := &coreauth.Auth{
 		ID:       "claude-owner-a@example.com.json",
@@ -529,4 +532,69 @@ func TestHostAffinityLookupCallback_Contract(t *testing.T) {
 		}
 		wg.Wait()
 	})
+}
+
+func TestHostAffinityLookupSchedulerCapability(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		scheduler bool
+		fused     bool
+		want      string
+	}{
+		{name: "ordinary plugin", want: pluginapi.HostAffinityStatusBound},
+		{name: "active scheduler", scheduler: true, want: pluginapi.HostAffinityStatusUnsupported},
+		{name: "fused scheduler", scheduler: true, fused: true, want: pluginapi.HostAffinityStatusBound},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var schedulerCalls int
+			capabilities := pluginapi.Capabilities{}
+			if tt.scheduler {
+				capabilities.Scheduler = schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+					schedulerCalls++
+					return pluginapi.SchedulerPickResponse{}, nil
+				})
+			}
+			host := newHostWithRecords(capabilityRecord{id: "observer-test", plugin: pluginapi.Plugin{Capabilities: capabilities}})
+			if tt.fused {
+				host.fusePlugin("observer-test", "Scheduler.Pick", "test scheduler failure")
+			}
+			selector := coreauth.NewSessionAffinitySelector(nil)
+			defer selector.Stop()
+			manager := coreauth.NewManager(nil, selector, nil)
+			manager.SetPluginScheduler(host)
+			host.SetAuthManager(manager)
+			auth := &coreauth.Auth{ID: "affinity-observer-auth", Provider: "codex", Status: coreauth.StatusActive}
+			auth.EnsureIndex()
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			_, errPick := selector.Pick(context.Background(), "codex", "test-model", cliproxyexecutor.Options{
+				Headers: map[string][]string{"Session-Id": {"test-session"}},
+			}, []*coreauth.Auth{auth})
+			if errPick != nil {
+				t.Fatal(errPick)
+			}
+			payload := []byte(`{"provider":"codex","model":"test-model","session_id":"test-session"}`)
+			raw, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAffinityLookup, payload)
+			if errCall != nil {
+				t.Fatal(errCall)
+			}
+			response, errDecode := decodeRPCEnvelope[pluginapi.HostAffinityLookupResponse](raw)
+			if errDecode != nil {
+				t.Fatal(errDecode)
+			}
+			if response.Status != tt.want {
+				t.Errorf("status = %q, want %q", response.Status, tt.want)
+			}
+			if tt.want == pluginapi.HostAffinityStatusBound && response.AuthIndex != auth.Index {
+				t.Errorf("auth_index = %q, want %q", response.AuthIndex, auth.Index)
+			}
+			if tt.want != pluginapi.HostAffinityStatusBound && response.AuthIndex != "" {
+				t.Error("unsupported lookup returned a credential")
+			}
+			if schedulerCalls != 0 {
+				t.Errorf("observation invoked scheduler %d times", schedulerCalls)
+			}
+		})
+	}
 }
