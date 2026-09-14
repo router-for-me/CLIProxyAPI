@@ -40,8 +40,8 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "claude":
 		IterateStreamLines(payload, func(line []byte) {
-			if detail, ok := parseClaudeStreamLine(line); ok {
-				ObserveMergedStreamUsage(buffer, detail)
+			if update, ok := parseClaudeStreamLine(line); ok {
+				observeClaudeUsageUpdate(buffer, update)
 			}
 		})
 	case "gemini":
@@ -111,20 +111,12 @@ func parseClaudePayloadUsage(payload []byte) usage.Detail {
 	return ParseClaudeUsage([]byte(`{"usage":` + usageNode.Raw + `}`))
 }
 
-func parseClaudeStreamLine(line []byte) (usage.Detail, bool) {
-	payload := ExtractStreamJSONPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return usage.Detail{}, false
+func parseClaudeStreamLine(line []byte) (claudeUsageUpdate, bool) {
+	usageNode, ok := claudeStreamUsageNode(line)
+	if !ok {
+		return claudeUsageUpdate{}, false
 	}
-	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
-		usageNode = gjson.GetBytes(payload, "message.usage")
-	}
-	if !usageNode.Exists() {
-		return usage.Detail{}, false
-	}
-	detail := ParseClaudeUsage([]byte(`{"usage":` + usageNode.Raw + `}`))
-	return detail, true
+	return parseClaudeUsageUpdate(usageNode), true
 }
 
 // ObserveMergedStreamUsage updates buffer with merged usage details.

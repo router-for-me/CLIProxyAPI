@@ -710,13 +710,28 @@ func (b *StreamUsageBuffer) ObserveOpenAIStream(line []byte) {
 }
 
 // ObserveClaudeStream records and merges usage from a Claude SSE line.
+// Present fields, including explicit zeros, overwrite prior values; omitted or
+// JSON-null fields keep the previously observed value.
 func (b *StreamUsageBuffer) ObserveClaudeStream(line []byte) {
 	if b == nil {
 		return
 	}
-	if detail, ok := ParseClaudeStreamUsage(line); ok {
-		ObserveMergedStreamUsage(b, detail)
+	usageNode, ok := claudeStreamUsageNode(line)
+	if !ok {
+		return
 	}
+	observeClaudeUsageUpdate(b, parseClaudeUsageUpdate(usageNode))
+}
+
+func observeClaudeUsageUpdate(b *StreamUsageBuffer, update claudeUsageUpdate) {
+	if b == nil {
+		return
+	}
+	if existing, ok := b.Detail(); ok {
+		b.Observe(mergeClaudeStreamUsage(existing, update), true)
+		return
+	}
+	b.Observe(update.detail, true)
 }
 
 // Publish emits the latest observed usage detail, if any.
@@ -905,36 +920,111 @@ func ParseClaudeUsage(data []byte) usage.Detail {
 }
 
 func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
+	usageNode, ok := claudeStreamUsageNode(line)
+	if !ok {
+		return usage.Detail{}, false
+	}
+	return parseClaudeUsageNode(usageNode), true
+}
+
+func claudeStreamUsageNode(line []byte) (gjson.Result, bool) {
 	payload := jsonPayload(line)
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return usage.Detail{}, false
+		return gjson.Result{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !usageNode.Exists() {
 		usageNode = gjson.GetBytes(payload, "message.usage")
 	}
 	if !usageNode.Exists() {
-		return usage.Detail{}, false
+		return gjson.Result{}, false
 	}
-	return parseClaudeUsageNode(usageNode), true
+	return usageNode, true
 }
 
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
-	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
-	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
-	rawOutputTokens := usageNode.Get("output_tokens").Int()
+	return parseClaudeUsageUpdate(usageNode).detail
+}
+
+type claudeUsageUpdate struct {
+	detail           usage.Detail
+	hasInput         bool
+	hasOutput        bool
+	hasCacheRead     bool
+	hasCacheCreation bool
+	hasReasoning     bool
+}
+
+func claudeUsageFieldPresent(node gjson.Result) bool {
+	return node.Exists() && node.Type != gjson.Null
+}
+
+func parseClaudeUsageUpdate(usageNode gjson.Result) claudeUsageUpdate {
+	inputNode := usageNode.Get("input_tokens")
+	outputNode := usageNode.Get("output_tokens")
+	cacheReadNode := usageNode.Get("cache_read_input_tokens")
+	cacheCreationNode := usageNode.Get("cache_creation_input_tokens")
 	// Anthropic reports thinking as a subset of output_tokens. Prefer the official
 	// nested field, then fall back to legacy aliases used by some gateways.
-	reasoningNode := firstExistingUsageNode(
+	reasoningNode := firstPresentClaudeUsageNode(
 		usageNode,
 		"output_tokens_details.thinking_tokens",
 		"output_tokens_details.reasoning_tokens",
 		"thinking_tokens",
 	)
-	reasoningTokens := reasoningNode.Int()
-	if reasoningTokens < 0 {
-		reasoningTokens = 0
+	detail := usage.Detail{
+		InputTokens:         inputNode.Int(),
+		OutputTokens:        outputNode.Int(),
+		ReasoningTokens:     reasoningNode.Int(),
+		CacheReadTokens:     cacheReadNode.Int(),
+		CacheCreationTokens: cacheCreationNode.Int(),
 	}
+	return claudeUsageUpdate{
+		detail:           finalizeClaudeUsageDetail(detail),
+		hasInput:         claudeUsageFieldPresent(inputNode),
+		hasOutput:        claudeUsageFieldPresent(outputNode),
+		hasCacheRead:     claudeUsageFieldPresent(cacheReadNode),
+		hasCacheCreation: claudeUsageFieldPresent(cacheCreationNode),
+		hasReasoning:     claudeUsageFieldPresent(reasoningNode),
+	}
+}
+
+func firstPresentClaudeUsageNode(root gjson.Result, paths ...string) gjson.Result {
+	for _, path := range paths {
+		node := root.Get(path)
+		if claudeUsageFieldPresent(node) {
+			return node
+		}
+	}
+	return gjson.Result{}
+}
+
+func mergeClaudeStreamUsage(existing usage.Detail, update claudeUsageUpdate) usage.Detail {
+	merged := existing
+	if update.hasInput {
+		merged.InputTokens = update.detail.InputTokens
+	}
+	if update.hasOutput {
+		merged.OutputTokens = update.detail.OutputTokens
+	}
+	if update.hasCacheRead {
+		merged.CacheReadTokens = update.detail.CacheReadTokens
+	}
+	if update.hasCacheCreation {
+		merged.CacheCreationTokens = update.detail.CacheCreationTokens
+	}
+	if update.hasReasoning {
+		merged.ReasoningTokens = update.detail.ReasoningTokens
+	}
+	return finalizeClaudeUsageDetail(merged)
+}
+
+func finalizeClaudeUsageDetail(detail usage.Detail) usage.Detail {
+	if detail.ReasoningTokens < 0 {
+		detail.ReasoningTokens = 0
+	}
+	rawOutputTokens := detail.OutputTokens
+	reasoningTokens := detail.ReasoningTokens
 	nonReasoningOutput := rawOutputTokens
 	if reasoningTokens > 0 && reasoningTokens <= rawOutputTokens {
 		nonReasoningOutput = rawOutputTokens - reasoningTokens
@@ -944,14 +1034,7 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		// is inconsistent.
 		nonReasoningOutput = 0
 	}
-	detail := usage.Detail{
-		InputTokens:         usageNode.Get("input_tokens").Int(),
-		OutputTokens:        rawOutputTokens,
-		ReasoningTokens:     reasoningTokens,
-		CachedTokens:        cacheReadTokens,
-		CacheReadTokens:     cacheReadTokens,
-		CacheCreationTokens: cacheCreationTokens,
-	}
+	detail.CachedTokens = detail.CacheReadTokens
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
 	}
