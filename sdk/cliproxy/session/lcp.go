@@ -904,6 +904,30 @@ func (m *MerklePrefixMatcher) InvalidateAuth(authID string) {
 	}
 }
 
+// InvalidateSession removes every LCP binding whose derived session identifier
+// equals sessionID and reports how many groups were dropped.
+//
+// LCP session identifiers are minted by the matcher itself (see bindLocked), so
+// this is the counterpart of InvalidateAuth for callers that want to release a
+// single conversation instead of an entire credential.
+func (m *MerklePrefixMatcher) InvalidateSession(sessionID string) int {
+	if m == nil || sessionID == "" {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	removed := 0
+	for _, namespace := range m.groups {
+		for _, group := range namespace.groups {
+			if group.sessionID == sessionID {
+				m.removeGroupLocked(group)
+				removed++
+			}
+		}
+	}
+	return removed
+}
+
 // Clear removes all remembered prefix bindings.
 func (m *MerklePrefixMatcher) Clear() {
 	if m == nil {

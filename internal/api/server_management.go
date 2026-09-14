@@ -190,6 +190,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/devin-auth-url", s.mgmt.RequestDevinToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
+		mgmt.DELETE("/session-affinity", s.mgmt.DeleteSessionAffinity)
 	}
 }
 
