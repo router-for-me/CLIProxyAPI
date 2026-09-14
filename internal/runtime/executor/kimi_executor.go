@@ -408,6 +408,7 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
+	body = helps.NormalizeKimiResponsesTools(body)
 	body = normalizeKimiTools(body)
 	body = normalizeKimiTemperature(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
@@ -517,6 +518,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
+	body = helps.NormalizeKimiResponsesTools(body)
 	body = normalizeKimiTools(body)
 	body = normalizeKimiTemperature(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
@@ -1133,6 +1135,11 @@ func normalizeKimiTools(body []byte) []byte {
 	}
 	body = normalizeKimiToolList(body, "tools", true)
 	body = normalizeKimiToolList(body, "functions", false)
+	for index, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == "additional_tools" {
+			body = normalizeKimiToolList(body, fmt.Sprintf("input.%d.tools", index), true)
+		}
+	}
 	return body
 }
 
@@ -1150,6 +1157,13 @@ func normalizeKimiToolList(body []byte, arrayKey string, isTools bool) []byte {
 	var updatedItems []string
 	for _, item := range arr {
 		itemRaw := item.Raw
+		if isTools && item.Get("type").String() == "namespace" {
+			normalized := normalizeKimiToolList([]byte(itemRaw), "tools", true)
+			if string(normalized) != itemRaw {
+				itemRaw = string(normalized)
+				changed = true
+			}
+		}
 		var paramPath string
 		if isTools && item.Get("function.parameters").Exists() {
 			paramPath = "function.parameters"
