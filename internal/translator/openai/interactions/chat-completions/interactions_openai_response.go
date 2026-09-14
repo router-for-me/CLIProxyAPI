@@ -370,9 +370,10 @@ func setInteractionsUsageFromOpenAIChat(out []byte, path string, usage gjson.Res
 		out, _ = sjson.SetBytes(out, path+".cached_tokens", value.Int())
 		out, _ = sjson.SetBytes(out, path+".total_cached_tokens", value.Int())
 	}
-	if value := usage.Get("completion_tokens_details.reasoning_tokens"); value.Exists() {
-		out, _ = sjson.SetBytes(out, path+".reasoning_tokens", value.Int())
-		out, _ = sjson.SetBytes(out, path+".total_thought_tokens", value.Int())
+	reasoningTokens, hasReasoningTokens := interactionsUsageInt(usage, "completion_tokens_details.reasoning_tokens", "output_tokens_details.reasoning_tokens", "reasoning_tokens")
+	if hasReasoningTokens {
+		out, _ = sjson.SetBytes(out, path+".reasoning_tokens", reasoningTokens)
+		out, _ = sjson.SetBytes(out, path+".total_thought_tokens", reasoningTokens)
 	}
 	return out
 }
