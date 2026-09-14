@@ -304,6 +304,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 			}
 		}
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(cfg))
+	case constant.CommandCode:
+		s.coreManager.RegisterExecutor(executor.NewCommandCodeExecutor(cfg))
 	case "devin":
 		s.coreManager.RegisterExecutor(executor.NewDevinExecutor(cfg))
 	default:

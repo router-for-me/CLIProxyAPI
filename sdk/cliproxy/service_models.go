@@ -164,6 +164,17 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case constant.CommandCode:
+		models = registry.GetCommandCodeModels()
+		if entry := s.resolveConfigCommandCodeKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildCodexConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	case "devin":
 		models = registry.GetDevinModels()
 		models = applyExcludedModels(models, excluded)
@@ -507,6 +518,13 @@ func (s *Service) resolveConfigXAIKey(auth *coreauth.Auth) *config.XAIKey {
 		return nil
 	}
 	return resolveConfigCodexStyleKey(auth, s.cfg.XAIKey, false)
+}
+
+func (s *Service) resolveConfigCommandCodeKey(auth *coreauth.Auth) *config.CommandCodeKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigCodexStyleKey(auth, s.cfg.CommandCodeKey, false)
 }
 
 func resolveConfigCodexStyleKey(auth *coreauth.Auth, entries []config.CodexKey, validateIndexCredentials bool) *config.CodexKey {

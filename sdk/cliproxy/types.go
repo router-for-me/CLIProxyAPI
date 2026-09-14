@@ -68,6 +68,9 @@ type APIKeyClientResult struct {
 	// XAIKeyCount is the number of xAI API keys loaded
 	XAIKeyCount int
 
+	// CommandCodeKeyCount is the number of Command Code API keys loaded
+	CommandCodeKeyCount int
+
 	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
 	OpenAICompatCount int
 }
