@@ -46,7 +46,7 @@ var canonicalUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0
 var CandidateSessionPrefixes = []string{
 	"lcp:v1:", "lcp:",
 	"codex:", "claude:", "header:", "session:",
-	"affinity:", "slot:", "task:", "conv:",
+	"affinity:", "opencode:", "slot:", "task:", "conv:",
 	"thread:", "clientreq:", "geminicache:",
 	"pck:", "user:", "execution:", "agy:", "derived:",
 }
@@ -59,7 +59,7 @@ var knownSessionPrefixes = []string{
 	"lcp:v1:", "lcp:",
 	"ctx:v1:", "ctx:",
 	"codex:", "claude:", "header:", "session:",
-	"affinity:", "slot:", "task:", "conv:",
+	"affinity:", "opencode:", "slot:", "task:", "conv:",
 	"thread:", "clientreq:", "geminicache:",
 	"pck:", "user:", "execution:", "agy:", "derived:",
 }

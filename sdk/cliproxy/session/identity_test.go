@@ -498,7 +498,7 @@ func TestNormalizeToCanonicalUUID(t *testing.T) {
 		"lcp:v1:", "lcp:",
 		"ctx:v1:", "ctx:",
 		"codex:", "claude:", "header:", "session:",
-		"affinity:", "slot:", "task:", "conv:",
+		"affinity:", "opencode:", "slot:", "task:", "conv:",
 		"thread:", "clientreq:", "geminicache:",
 		"pck:", "user:", "execution:", "agy:", "derived:",
 		"slot:   ",
@@ -624,5 +624,37 @@ func TestNormalizeToCanonicalUUID(t *testing.T) {
 	derivedUUID := "derived:ctx:v1:01a07e72-c84d-7fd3-8207-d217b41cc649"
 	if got := NormalizeToCanonicalUUID(derivedUUID); got != "01a07e72-c84d-7fd3-8207-d217b41cc649" {
 		t.Fatalf("NormalizeToCanonicalUUID(%q) = %q, want 01a07e72-c84d-7fd3-8207-d217b41cc649", derivedUUID, got)
+	}
+}
+
+// The OpenCode gateway signal must be a registered prefix in both tables: affinity
+// lookup expands bare IDs with CandidateSessionPrefixes, and canonical projection
+// strips knownSessionPrefixes. An unregistered prefix strands its bindings, because
+// LookupAffinity never expands to it and the canonical UUID differs from the same
+// logical session named through another namespace.
+func TestOpenCodeSessionPrefixRegistered(t *testing.T) {
+	t.Parallel()
+
+	registered := false
+	for _, prefix := range CandidateSessionPrefixes {
+		if prefix == "opencode:" {
+			registered = true
+			break
+		}
+	}
+	if !registered {
+		t.Fatalf("CandidateSessionPrefixes is missing %q: %v", "opencode:", CandidateSessionPrefixes)
+	}
+
+	const bare = "ses_opencode_alias"
+	opencodeID := NormalizeToCanonicalUUID("opencode:" + bare)
+	if opencodeID == "" {
+		t.Fatal("NormalizeToCanonicalUUID(opencode:<id>) must not be empty")
+	}
+	if affinityID := NormalizeToCanonicalUUID("affinity:" + bare); opencodeID != affinityID {
+		t.Fatalf("namespaces must project to one canonical id: opencode=%q affinity=%q", opencodeID, affinityID)
+	}
+	if otherID := NormalizeToCanonicalUUID("opencode:ses_other"); otherID == opencodeID {
+		t.Fatalf("distinct opencode sessions share a canonical id: %q", opencodeID)
 	}
 }

@@ -454,21 +454,26 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	if sid := sessionHeaderValue(headers, "X-Opencode-Session"); sid != "" {
 		info.ClientType = "opencode"
 		info.SessionID = "opencode:" + sid
+		// A parent reference must carry the namespace the parent was bound under, or the
+		// selector cannot find its binding: X-Parent-Session-Affinity names a parent that
+		// registered as affinity:<id>. The generic parent headers keep this branch's own
+		// namespace, matching the sibling session branches.
+		parentPrefix := "opencode:"
 		parentSID := sessionHeaderValue(headers, "X-Parent-Session-Affinity")
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Session-ID")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
+		if parentSID != "" {
+			parentPrefix = "affinity:"
+		} else {
+			for _, parentHeader := range []string{"X-Parent-Session-ID", "X-Parent-ID", "X-Parent-Id"} {
+				if parentSID = sessionHeaderValue(headers, parentHeader); parentSID != "" {
+					break
+				}
+			}
 		}
 		if parentSID != "" && parentSID != sid {
-			info.ParentSessionID = "opencode:" + parentSID
+			info.ParentSessionID = parentPrefix + parentSID
 			info.AgentName = "subagent"
 		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "opencode:" + parentCandidate
+			info.ParentSessionID = parentPrefix + parentCandidate
 			info.AgentName = "subagent"
 		} else {
 			info.AgentName = "main"
