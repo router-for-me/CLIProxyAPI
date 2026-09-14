@@ -133,7 +133,7 @@ func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (clipro
 }
 
 func hasExplicitSession(headers map[string][]string, payload []byte) bool {
-	for _, header := range []string{"X-Claude-Code-Session-Id", "X-Session-ID", "Session-Id", "Session_id", "X-Session-Affinity", "X-Client-Request-Id"} {
+	for _, header := range []string{"X-Claude-Code-Session-Id", "X-Session-ID", "Session-Id", "Session_id", "X-Opencode-Session", "X-Session-Affinity", "X-Client-Request-Id"} {
 		if NormalizeExplicitID(headerValue(headers, header)) != "" {
 			return true
 		}

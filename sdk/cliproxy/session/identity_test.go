@@ -151,6 +151,11 @@ func TestEnrichSkipsDerivationForExplicitSessions(t *testing.T) {
 			headers: http.Header{"X-Session-Affinity": []string{"opencode-session"}},
 		},
 		{
+			name:    "OpenCode session header",
+			payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+			headers: http.Header{"X-Opencode-Session": []string{"opencode-session"}},
+		},
+		{
 			name:    "Responses conversation object",
 			payload: []byte(`{"conversation":{"id":"conversation-session"},"messages":[{"role":"user","content":"hello"}]}`),
 		},

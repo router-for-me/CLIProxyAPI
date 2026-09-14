@@ -1990,6 +1990,11 @@ func TestExtractSessionIDNativeSignals(t *testing.T) {
 			want:    "affinity:ses_opencode",
 		},
 		{
+			name:    "open code session header",
+			headers: http.Header{"X-Opencode-Session": []string{"ses_opencode"}},
+			want:    "opencode:ses_opencode",
+		},
+		{
 			name:    "prompt cache key",
 			payload: `{"prompt_cache_key":"prompt-session"}`,
 			want:    "pck:prompt-session",
@@ -2056,6 +2061,14 @@ func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
 				"X-Session-Affinity": []string{"affinity-session"},
 			},
 			want: "header:generic-session",
+		},
+		{
+			name: "opencode session beats affinity",
+			headers: http.Header{
+				"X-Opencode-Session": []string{"opencode-session"},
+				"X-Session-Affinity": []string{"affinity-session"},
+			},
+			want: "opencode:opencode-session",
 		},
 		{
 			name:    "prompt cache key beats conversation id",

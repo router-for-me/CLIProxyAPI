@@ -846,14 +846,15 @@ func sessionHeaderValue(headers http.Header, name string) string {
 //  2. Claude Code metadata.user_id session
 //  3. Session-Id / Session_id (Codex and compatible clients)
 //  4. X-Session-ID
-//  5. X-Session-Affinity (OpenCode)
-//  6. X-Client-Request-Id (pi Responses)
-//  7. session_id / sessionId
-//  8. prompt_cache_key, with conversation / conversation.id as an alias
-//  9. metadata.user_id and conversation_id legacy body fields
-//  10. explicit execution session metadata
-//  11. stable context-derived session identity
-//  12. stable hash from initial message content
+//  5. X-Opencode-Session (OpenCode gateway clients)
+//  6. X-Session-Affinity (OpenCode)
+//  7. X-Client-Request-Id (pi Responses)
+//  8. session_id / sessionId
+//  9. prompt_cache_key, with conversation / conversation.id as an alias
+//  10. metadata.user_id and conversation_id legacy body fields
+//  11. explicit execution session metadata
+//  12. stable context-derived session identity
+//  13. stable hash from initial message content
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -877,6 +878,9 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 	}
 	if sid := sessionHeaderValue(headers, "X-Session-ID"); sid != "" {
 		return "header:" + sid, ""
+	}
+	if sid := sessionHeaderValue(headers, "X-Opencode-Session"); sid != "" {
+		return "opencode:" + sid, ""
 	}
 	if sid := sessionHeaderValue(headers, "X-Session-Affinity"); sid != "" {
 		return "affinity:" + sid, ""

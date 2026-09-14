@@ -158,6 +158,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	helps.ApplyOpenCodeSessionHeaders(httpReq, url, e.provider, opts.Headers, cliproxyauth.ExtractSessionID(opts.Headers, translated, opts.Metadata))
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -370,6 +371,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	helps.ApplyOpenCodeSessionHeaders(httpReq, url, e.provider, opts.Headers, cliproxyauth.ExtractSessionID(opts.Headers, translated, opts.Metadata))
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string

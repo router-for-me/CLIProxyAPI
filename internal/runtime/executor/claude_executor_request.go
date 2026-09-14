@@ -786,6 +786,9 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 		identityHeader("X-Claude-Code-Session-Id", sessionID)
 	}
+	// The OpenCode gateway rejects requests without its own session header; a client that
+	// did not name its provider "opencode*" only sent x-session-affinity.
+	helps.ApplyOpenCodeSessionHeaders(r, r.URL.String(), "", incomingHeaders, cliproxyauth.ExtractSessionID(incomingHeaders, body, nil))
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
 	// identityHeader prefers the incoming value for a confirmed client, so a confirmed
 	// helper keeps its own native request ID and this fresh UUID only covers a caller
