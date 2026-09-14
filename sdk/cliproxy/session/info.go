@@ -454,7 +454,20 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	if sid := sessionHeaderValue(headers, "X-Opencode-Session"); sid != "" {
 		info.ClientType = "opencode"
 		info.SessionID = "opencode:" + sid
-		if parentCandidate != "" && parentCandidate != sid {
+		parentSID := sessionHeaderValue(headers, "X-Parent-Session-Affinity")
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-Session-ID")
+		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
+		}
+		if parentSID == "" {
+			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
+		}
+		if parentSID != "" && parentSID != sid {
+			info.ParentSessionID = "opencode:" + parentSID
+			info.AgentName = "subagent"
+		} else if parentCandidate != "" && parentCandidate != sid {
 			info.ParentSessionID = "opencode:" + parentCandidate
 			info.AgentName = "subagent"
 		} else {

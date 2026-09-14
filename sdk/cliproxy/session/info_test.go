@@ -104,7 +104,17 @@ func TestExtractSessionInfoAllClients(t *testing.T) {
 		t.Errorf("OpenCode mismatch: %+v", info)
 	}
 
-	// 4b. Body-only fork in thread_id
+	// 4b. OpenCode gateway native session header with a parent hierarchy header
+	opencodeNativeHeaders := http.Header{
+		"X-Opencode-Session":        []string{"oc-native-222"},
+		"X-Parent-Session-Affinity": []string{"oc-native-parent-111"},
+	}
+	info, ok = ExtractSessionInfo(opencodeNativeHeaders, nil, nil)
+	if !ok || info.ClientType != "opencode" || info.SessionID != "opencode:oc-native-222" || info.ParentSessionID != "opencode:oc-native-parent-111" || info.AgentName != "subagent" {
+		t.Errorf("OpenCode native header mismatch: %+v", info)
+	}
+
+	// 4c. Body-only fork in thread_id
 	bodyForkPayload := []byte(`{"thread_id":"child-thread-01","forked_from_thread_id":"parent-thread-00"}`)
 	info, ok = ExtractSessionInfo(nil, bodyForkPayload, nil)
 	if !ok || info.SessionID != "thread:child-thread-01" || info.ParentSessionID != "thread:parent-thread-00" || !info.IsFork || info.IsSubagent {
