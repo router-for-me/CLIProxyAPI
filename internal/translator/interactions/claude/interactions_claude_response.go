@@ -98,11 +98,30 @@ func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName s
 	if len(contentBlocks) > 0 {
 		out = translatorcommon.SetRawArrayItems(out, "content", contentBlocks)
 	}
-	if sawToolCall {
-		out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
-	}
+	out, _ = sjson.SetBytes(out, "stop_reason", resolveClaudeStopReason(interaction, root, sawToolCall))
 	out = setClaudeUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root))
 	return out
+}
+
+// resolveClaudeStopReason maps the interactions completion metadata to a Claude
+// stop_reason. An explicit normalized stop_reason (or status=incomplete) from the
+// executor takes precedence over the tool-call heuristic so truncated outputs
+// surface as max_tokens instead of a misleading end_turn/tool_use.
+func resolveClaudeStopReason(interaction, root gjson.Result, sawToolCall bool) string {
+	explicit := strings.ToLower(strings.TrimSpace(firstNonEmpty(interaction.Get("stop_reason").String(), root.Get("stop_reason").String())))
+	switch explicit {
+	case "length", "max_tokens":
+		return "max_tokens"
+	case "content_filter":
+		return "refusal"
+	}
+	if status := strings.ToLower(strings.TrimSpace(firstNonEmpty(interaction.Get("status").String(), root.Get("status").String()))); status == "incomplete" {
+		return "max_tokens"
+	}
+	if sawToolCall {
+		return "tool_use"
+	}
+	return "end_turn"
 }
 
 func convertInteractionsEventToClaude(modelName string, rawJSON []byte, st *interactionsToClaudeStreamState) [][]byte {
@@ -274,9 +293,7 @@ func appendClaudeMessageDelta(out [][]byte, root gjson.Result, st *interactionsT
 	out = appendClaudeMessageStart(out, st)
 	out = appendClaudeContentBlockStop(out, st)
 	payload := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-	if st.SawToolCall {
-		payload, _ = sjson.SetBytes(payload, "delta.stop_reason", "tool_use")
-	}
+	payload, _ = sjson.SetBytes(payload, "delta.stop_reason", resolveClaudeStopReason(root.Get("interaction"), root, st.SawToolCall))
 	payload = setClaudeUsageFromInteractions(payload, "usage", translatorcommon.InteractionsUsage(root))
 	out = append(out, translatorcommon.AppendSSEEventBytes(nil, "message_delta", payload, 3))
 	st.Completed = true
