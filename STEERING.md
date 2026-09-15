@@ -18,18 +18,20 @@ ends, allowing automatic successors and client tool results on the same socket.
 
 - Each connection stays bound to its selected account and model. Reconnect and
   restore context to change models or select a different account.
-- There is no reconnect, cross-account failover, or replay after duplex handoff.
-  Only upstream acknowledgements establish ownership of steering input.
+- Initial rejections before the first response is created use the existing
+  authentication/quota cooldown and failover policy. Once a response is visible
+  downstream, there is no reconnect, cross-account failover, or replay. Only
+  upstream acknowledgements establish ownership of steering input.
 - Disabling the selected credential rejects subsequent client frames and closes
   the connection. A new client connection may select another enabled account.
 - Subsequent creates reuse the executor's request preparation, but do not
   re-enter per-request plugin interception. This mode is intended for native
   Codex requests without per-request plugins.
-- Stream bootstrap buffering is bypassed after duplex handoff. Upstream errors
-  remain visible instead of being silently retried.
+- Stream bootstrap buffering is bypassed after duplex handoff. Initial terminal
+  failures are returned to the conductor as errors, with their status, retry
+  delay, and credential scope preserved.
 - A transport failure closes the connection without cooling an otherwise
-  healthy shared credential. Initial authentication and quota failures keep
-  the existing handshake policy.
+  healthy shared credential.
 - Normal per-response accounting and steering control frames are distinct:
   acknowledgements do not represent a successful completed response.
 
@@ -45,7 +47,10 @@ go build -o test-output ./cmd/server
 
 Coverage includes steering during generation, multiple submissions, automatic
 successors, tool-result pending states, credential disablement, and disconnects
-without replay. These tests do not claim GUI behavior, model quality, or Fast
+without replay. Initial rejection tests cover authentication and quota errors,
+error metadata, stream closure, account cooldown, and failover to a healthy
+account without waiting for the rejected socket to close. These tests do not
+claim GUI behavior, model quality, or Fast
 performance equivalence.
 
 Protocol reference: https://developers.openai.com/api/docs/guides/steering
