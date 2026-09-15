@@ -71,6 +71,17 @@ func TestCallPluginReturnsPluginErrorWithoutMethodWrapper(t *testing.T) {
 	}
 }
 
+func TestMarshalRPCErrorPreservesHTTPStatus(t *testing.T) {
+	raw := marshalRPCError("host_call_failed", "usage limit reached", http.StatusTooManyRequests)
+	var envelope pluginabi.Envelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("error = %#v, want HTTP status %d", envelope.Error, http.StatusTooManyRequests)
+	}
+}
+
 func TestIsPluginErrorEnvelopeAcceptsNonzeroReturnEnvelope(t *testing.T) {
 	raw := marshalRPCError("plugin_error", "upstream failed")
 	if !isPluginErrorEnvelope(raw) {
