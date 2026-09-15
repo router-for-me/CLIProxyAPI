@@ -155,6 +155,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		current := initial
 		reporter := initialReporter
 		firstResponse := true
+		responseID := ""
+		responseActive := false
 		outputItems := make(map[int64][]byte)
 		var outputFallback [][]byte
 		for {
@@ -189,6 +191,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					reporter.StartResponseTTFT()
 				}
 				firstResponse = false
+				responseID = gjson.GetBytes(payload, "response.id").String()
+				responseActive = true
 				outputItems = make(map[int64][]byte)
 				outputFallback = nil
 			}
@@ -203,30 +207,63 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				continue
 			}
-			payload = applyCodexIdentityConfuseResponsePayload(payload, current.identityState)
-			restoreMultiAgent := !current.multiAgentV2Conflict && (current.optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
-			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgent)
-			if firstResponse {
-				// Before response.created, a rejection belongs to stream bootstrap.
-				// Return the parsed error so the conductor can record auth/quota
-				// failures and apply its existing retry policy. Once a response is
-				// visible downstream, this path never replaces or replays it.
-				var initialErr error
-				if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
-					initialErr = wsErr
-					if errClearReplay := clearCodexReasoningReplayOnWebsocketError(ctx, current.replayScope, payload); errClearReplay != nil {
-						initialErr = errClearReplay
-					}
-				} else if streamErr, body, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
-					initialErr = streamErr
-					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, current.replayScope, streamErr.StatusCode(), body); errClearReplay != nil {
-						initialErr = errClearReplay
-					}
+			eventPrepared, eventReporter := current, reporter
+			if !firstResponse && (eventType == "response.failed" || eventType == "error") {
+				failedID := gjson.GetBytes(payload, "response.id").String()
+				if failedID == "" {
+					failedID = gjson.GetBytes(payload, "response_id").String()
 				}
-				if initialErr != nil {
-					helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", initialErr)
-					reporter.PublishFailure(ctx, initialErr)
-					send(cliproxyexecutor.StreamChunk{Err: initialErr})
+				metadataMu.Lock()
+				// A failure for the running response must not consume a queued create.
+				// A rejection before response.created instead owns the oldest pending
+				// create, including its identity mapping and reasoning replay scope.
+				currentFailure := failedID != "" && failedID == responseID
+				ambiguous := len(pending) > 0 && responseActive && failedID == ""
+				if len(pending) > 0 && !currentFailure && !ambiguous {
+					eventPrepared, pending = pending[0], pending[1:]
+					eventReporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
+					eventReporter.SetTranslatedReasoningEffort(eventPrepared.clientBody, eventPrepared.to.String())
+				} else if !ambiguous {
+					responseActive = false
+				}
+				metadataMu.Unlock()
+				if ambiguous {
+					// Without a response ID, assigning this failure could corrupt
+					// either request. Preserve the event and fail the socket without
+					// guessing a scope, replaying input, or cooling the credential.
+					connectionErr := &codexDuplexConnectionError{cause: fmt.Errorf("cannot associate websocket failure with a response or pending create")}
+					reporter.PublishFailure(ctx, connectionErr)
+					if send(cliproxyexecutor.StreamChunk{Payload: payload}) {
+						send(cliproxyexecutor.StreamChunk{Err: connectionErr})
+					}
+					return
+				}
+			}
+			payload = applyCodexIdentityConfuseResponsePayload(payload, eventPrepared.identityState)
+			restoreMultiAgent := !eventPrepared.multiAgentV2Conflict && (eventPrepared.optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
+			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgent)
+			// Parse and invalidate replay for every rejected request, using the
+			// metadata that belongs to this event. Only the first rejection can
+			// enter conductor bootstrap retry; later failures stay on this socket.
+			var terminalErr, replayErr error
+			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+				terminalErr = wsErr
+				replayErr = clearCodexReasoningReplayOnWebsocketError(ctx, eventPrepared.replayScope, payload)
+			} else if streamErr, body, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+				terminalErr = streamErr
+				replayErr = clearCodexReasoningReplayOnInvalidSignature(ctx, eventPrepared.replayScope, streamErr.StatusCode(), body)
+			}
+			if replayErr != nil {
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", replayErr)
+				eventReporter.PublishFailure(ctx, replayErr)
+				send(cliproxyexecutor.StreamChunk{Err: replayErr})
+				return
+			}
+			if terminalErr != nil {
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", terminalErr)
+				eventReporter.PublishFailure(ctx, terminalErr)
+				if firstResponse {
+					send(cliproxyexecutor.StreamChunk{Err: terminalErr})
 					return
 				}
 			}
@@ -234,6 +271,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				collectCodexOutputItemDone(payload, outputItems, &outputFallback)
 			}
 			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
+				responseActive = false
 				payload = normalizeCodexWebsocketCompletion(payload)
 				if !current.preserveNativeOutput {
 					payload = patchCodexCompletedOutput(payload, outputItems, outputFallback)
@@ -246,12 +284,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				} else {
 					reporter.EnsurePublished(ctx)
 				}
-			} else if eventType == "response.failed" || eventType == "error" {
-				if streamErr, _, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
-					reporter.PublishFailure(ctx, streamErr)
-				}
 			}
-			payload = applyCodexIdentityExposeResponsePayload(payload, current.identityState)
+			payload = applyCodexIdentityExposeResponsePayload(payload, eventPrepared.identityState)
 			if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(payload)}) {
 				return
 			}
