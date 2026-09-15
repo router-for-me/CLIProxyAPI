@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelmatch"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
@@ -981,40 +982,5 @@ func PayloadRequestPath(opts cliproxyexecutor.Options) string {
 //	"gpt-*" matches "gpt-5" and "gpt-4"
 //	"gemini-*-pro" matches "gemini-2.5-pro" and "gemini-3-pro".
 func matchModelPattern(pattern, model string) bool {
-	pattern = strings.TrimSpace(pattern)
-	model = strings.TrimSpace(model)
-	if pattern == "" {
-		return false
-	}
-	if pattern == "*" {
-		return true
-	}
-	// Iterative glob-style matcher supporting only '*' wildcard.
-	pi, si := 0, 0
-	starIdx := -1
-	matchIdx := 0
-	for si < len(model) {
-		if pi < len(pattern) && (pattern[pi] == model[si]) {
-			pi++
-			si++
-			continue
-		}
-		if pi < len(pattern) && pattern[pi] == '*' {
-			starIdx = pi
-			matchIdx = si
-			pi++
-			continue
-		}
-		if starIdx != -1 {
-			pi = starIdx + 1
-			matchIdx++
-			si = matchIdx
-			continue
-		}
-		return false
-	}
-	for pi < len(pattern) && pattern[pi] == '*' {
-		pi++
-	}
-	return pi == len(pattern)
+	return modelmatch.Match(pattern, model)
 }

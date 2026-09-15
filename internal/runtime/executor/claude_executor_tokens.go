@@ -40,7 +40,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	stream := from != to
 	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, stream, helps.APIKeyModelIsCompat(req))
 	var errThinking error
-	body, errThinking = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
+	body, errThinking = helps.ApplyRequestThinking(e.cfg, body, req, opts, from.String(), to.String(), e.Identifier())
 	if errThinking != nil {
 		return cliproxyexecutor.Response{}, errThinking
 	}
@@ -146,7 +146,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, stream, helps.APIKeyModelIsCompat(req))
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 	var errThinking error
-	body, errThinking = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
+	body, errThinking = helps.ApplyRequestThinking(e.cfg, body, req, opts, from.String(), to.String(), e.Identifier())
 	if errThinking != nil {
 		return cliproxyexecutor.Response{}, errThinking
 	}
