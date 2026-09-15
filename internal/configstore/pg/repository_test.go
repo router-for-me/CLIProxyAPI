@@ -260,6 +260,38 @@ func TestSaveReturnsCustomAuditSource(t *testing.T) {
 	}
 }
 
+// TestSaveDoesNotMutateCallerSnapshot verifies that Save returns a committed
+// copy without overwriting fields on the caller's candidate when the audit
+// actor is omitted.
+func TestSaveDoesNotMutateCallerSnapshot(t *testing.T) {
+	repo, _ := newTestRepo(t, "test_repo_save_caller_immutable")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	candidate := configsnapshot.NewEmpty()
+	candidate.Settings["port"] = 8317
+	candidate.UpdatedBy = "alice"
+	candidate.UpdatedSource = "manual"
+
+	saved, err := repo.Save(ctx, 0, &candidate, configstore.SaveAudit{})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if candidate.UpdatedBy != "alice" {
+		t.Fatalf("candidate.UpdatedBy = %q, want unchanged alice", candidate.UpdatedBy)
+	}
+	if candidate.UpdatedSource != "manual" {
+		t.Fatalf("candidate.UpdatedSource = %q, want unchanged manual", candidate.UpdatedSource)
+	}
+	if saved.UpdatedBy != "" {
+		t.Fatalf("saved.UpdatedBy = %q, want persisted empty actor", saved.UpdatedBy)
+	}
+	if saved.UpdatedSource != "dashboard" {
+		t.Fatalf("saved.UpdatedSource = %q, want dashboard", saved.UpdatedSource)
+	}
+}
+
 // TestSaveIncrementsRevision verifies the happy-path increment: a second
 // Save with expected=1 (matching the current revision) succeeds and bumps the
 // revision to 2. A second config_revisions row is appended.
@@ -593,6 +625,57 @@ func TestRollbackCopiesSettingsAndPreservesHistory(t *testing.T) {
 	}
 	if !strings.Contains(reasonText, "rollback") {
 		t.Fatalf("rollback reason = %q, want contains 'rollback'", reasonText)
+	}
+}
+
+// TestRollbackReturnsCommittedSnapshotDespiteConcurrentSave verifies that
+// Rollback returns the revision it committed rather than a later revision
+// written by another Save after the transaction commits.
+func TestRollbackReturnsCommittedSnapshotDespiteConcurrentSave(t *testing.T) {
+	repo, _ := newTestRepo(t, "test_repo_rollback_return_race")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	first := configsnapshot.NewEmpty()
+	first.Settings["port"] = 8317
+	if _, err := repo.Save(ctx, 0, &first, configstore.SaveAudit{Actor: "tester", Reason: "first"}); err != nil {
+		t.Fatalf("first Save: %v", err)
+	}
+	second := configsnapshot.NewEmpty()
+	second.Settings["port"] = 9000
+	if _, err := repo.Save(ctx, 1, &second, configstore.SaveAudit{Actor: "tester", Reason: "second"}); err != nil {
+		t.Fatalf("second Save: %v", err)
+	}
+
+	competing := configsnapshot.NewEmpty()
+	competing.Settings["port"] = 10000
+	competingDone := make(chan error, 1)
+	go func() {
+		_, err := repo.Save(ctx, 2, &competing, configstore.SaveAudit{Actor: "competitor", Reason: "competing"})
+		competingDone <- err
+	}()
+
+	if err := <-competingDone; err != nil {
+		t.Fatalf("competing Save: %v", err)
+	}
+
+	rolled, err := repo.Rollback(ctx, 1, "user request", "tester")
+	if err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if rolled.Revision != 4 {
+		t.Fatalf("rolled.Revision = %d, want committed rollback revision 4", rolled.Revision)
+	}
+	port, ok := rolled.Settings["port"].(int)
+	if !ok {
+		t.Fatalf("rolled.Settings[port] has type %T, want int", rolled.Settings["port"])
+	}
+	if port != 8317 {
+		t.Fatalf("rolled.Settings[port] = %d, want rolled-back value 8317", port)
+	}
+	if rolled.UpdatedSource != "rollback" {
+		t.Fatalf("rolled.UpdatedSource = %q, want rollback", rolled.UpdatedSource)
 	}
 }
 

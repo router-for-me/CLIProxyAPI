@@ -100,12 +100,13 @@ func (r *pgRepo) Save(ctx context.Context, expected int64, candidate *configsnap
 	if len(candidate.Settings) == 0 {
 		return nil, fmt.Errorf("configstore.pg: empty settings rejected")
 	}
+	candidateCopy := *candidate
 
-	settingsJSON, err := marshalMap(candidate.Settings)
+	settingsJSON, err := marshalMap(candidateCopy.Settings)
 	if err != nil {
 		return nil, fmt.Errorf("configstore.pg: marshal settings: %w", err)
 	}
-	extraJSON, err := marshalMap(candidate.Extra)
+	extraJSON, err := marshalMap(candidateCopy.Extra)
 	if err != nil {
 		return nil, fmt.Errorf("configstore.pg: marshal extra: %w", err)
 	}
@@ -178,7 +179,7 @@ func (r *pgRepo) Save(ctx context.Context, expected int64, candidate *configsnap
 	// the canonical projection of normalised tables. Persisting a literal
 	// '{}' keeps the column populated and the checksum stable.
 	resourceSnapshot := []byte("{}")
-	checksumSnapshot := *candidate
+	checksumSnapshot := candidateCopy
 	checksumSnapshot.UpdatedAt = committedAt
 	if committedBy.Valid {
 		checksumSnapshot.UpdatedBy = committedBy.String
@@ -198,15 +199,15 @@ func (r *pgRepo) Save(ctx context.Context, expected int64, candidate *configsnap
 		return nil, fmt.Errorf("configstore.pg: commit: %w", err)
 	}
 
-	candidate.Revision = newRevision
-	candidate.UpdatedAt = committedAt
+	candidateCopy.Revision = newRevision
+	candidateCopy.UpdatedAt = committedAt
 	if committedBy.Valid {
-		candidate.UpdatedBy = committedBy.String
+		candidateCopy.UpdatedBy = committedBy.String
 	} else {
-		candidate.UpdatedBy = ""
+		candidateCopy.UpdatedBy = ""
 	}
-	candidate.UpdatedSource = committedSource
-	return snapshotPtr(*candidate), nil
+	candidateCopy.UpdatedSource = committedSource
+	return snapshotPtr(candidateCopy), nil
 }
 
 // Rollback copies the settings stored in config_revisions at targetRevision
@@ -262,7 +263,12 @@ func (r *pgRepo) Rollback(ctx context.Context, targetRevision int64, reason, act
 	}
 
 	newRevision := current + 1
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+	var (
+		committedAt     time.Time
+		committedBy     sql.NullString
+		committedSource string
+	)
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, settings, extra, revision, updated_at, updated_by, updated_source)
 		VALUES (1, $1::jsonb, '{}'::jsonb, $2, NOW(), $3, 'rollback')
 		ON CONFLICT (id) DO UPDATE SET
@@ -272,7 +278,10 @@ func (r *pgRepo) Rollback(ctx context.Context, targetRevision int64, reason, act
 			updated_at = NOW(),
 			updated_by = EXCLUDED.updated_by,
 			updated_source = EXCLUDED.updated_source
-	`, r.table), settingsJSON, newRevision, actorArg); err != nil {
+		RETURNING updated_at, updated_by, updated_source
+	`, r.table), settingsJSON, newRevision, actorArg).Scan(
+		&committedAt, &committedBy, &committedSource,
+	); err != nil {
 		return nil, fmt.Errorf("configstore.pg: write rollback to runtime_config: %w", err)
 	}
 
@@ -291,11 +300,18 @@ func (r *pgRepo) Rollback(ctx context.Context, targetRevision int64, reason, act
 		return nil, fmt.Errorf("configstore.pg: commit rollback: %w", err)
 	}
 
-	loaded, err := r.Load(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("configstore.pg: reload after rollback: %w", err)
+	rollbackSnapshot := configsnapshot.NewEmpty()
+	if err := unmarshalMap(settingsJSON, &rollbackSnapshot.Settings); err != nil {
+		return nil, fmt.Errorf("configstore.pg: decode rollback settings: %w", err)
 	}
-	return loaded, nil
+	rollbackSnapshot.Extra = map[string]any{}
+	rollbackSnapshot.Revision = newRevision
+	rollbackSnapshot.UpdatedAt = committedAt
+	if committedBy.Valid {
+		rollbackSnapshot.UpdatedBy = committedBy.String
+	}
+	rollbackSnapshot.UpdatedSource = committedSource
+	return snapshotPtr(rollbackSnapshot), nil
 }
 
 // snapshotPtr returns a pointer to the value. The interface contract
