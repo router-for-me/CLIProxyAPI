@@ -220,7 +220,7 @@ func decideAntigravity429(body []byte) antigravity429Decision {
 	}
 
 	if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
-		decision.retryAfter = retryAfter
+		decision.retryAfter = capAntigravityRetryAfter(retryAfter)
 	}
 
 	status := strings.TrimSpace(gjson.GetBytes(body, "error.status").String())
@@ -251,7 +251,10 @@ func decideAntigravity429(body []byte) antigravity429Decision {
 				case *decision.retryAfter < antigravityShortQuotaCooldownThreshold:
 					decision.kind = antigravity429DecisionShortCooldownSwitchAuth
 				default:
-					decision.kind = antigravity429DecisionFullQuotaExhausted
+					// Long per-model capacity resets (weekly ~166h) are still
+					// RATE_LIMIT_EXCEEDED. Rotate this model; do not treat the
+					// credential as fully exhausted.
+					decision.kind = antigravity429DecisionShortCooldownSwitchAuth
 				}
 				return decision
 			}
@@ -337,10 +340,21 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
-			err.retryAfter = retryAfter
+			err.retryAfter = capAntigravityRetryAfter(retryAfter)
 		}
 	}
 	return err
+}
+
+func capAntigravityRetryAfter(d *time.Duration) *time.Duration {
+	if d == nil {
+		return nil
+	}
+	if *d <= antigravityQuotaCooldownCeiling {
+		return d
+	}
+	capped := antigravityQuotaCooldownCeiling
+	return &capped
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
