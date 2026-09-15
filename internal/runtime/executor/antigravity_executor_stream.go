@@ -43,6 +43,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if helps.HasResponsesCompactionTrigger(req.Payload) || helps.HasResponsesCompactionTrigger(opts.OriginalRequest) {
 		return e.executeCompactionStream(ctx, auth, req, opts)
 	}
+	if helps.SyntheticCompactionSupported(req.Payload, opts) {
+		return helps.ExecuteSyntheticCompactionStream(ctx, e, auth, req, opts)
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	ctx = context.WithValue(ctx, "alt", "")

@@ -39,7 +39,21 @@ func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header,
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
 // input before translating it to a non-Codex target protocol.
 func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
+	payload = rewriteCompactionForNonCodexTarget(from, to, payload)
 	return multiagentv2.TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream)
+}
+
+// rewriteCompactionForNonCodexTarget restores proxy-produced compaction
+// summaries before a Responses payload is translated for an upstream that
+// cannot read compaction items natively.
+func rewriteCompactionForNonCodexTarget(from, to sdktranslator.Format, payload []byte) []byte {
+	if from != sdktranslator.FormatOpenAIResponse {
+		return payload
+	}
+	if to == sdktranslator.FormatCodex || to == sdktranslator.FormatOpenAIResponse {
+		return payload
+	}
+	return RewriteSyntheticCompactionInput(payload)
 }
 
 // TranslateRequestPairWithCodexMultiAgentV2 translates the untouched baseline
@@ -78,6 +92,7 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 	if !isCompat {
 		return TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream)
 	}
+	payload = rewriteCompactionForNonCodexTarget(from, to, payload)
 	if from == sdktranslator.FormatOpenAIResponse {
 		payload = RewriteCodexOrphanDelegationInput(ctx, headers, payload, cfg)
 		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
