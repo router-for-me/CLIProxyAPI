@@ -64,6 +64,18 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 		for _, knob := range []string{"temperature", "top_p", "top_k", "stop_sequences", "max_output_tokens", "presence_penalty", "frequency_penalty", "candidate_count"} {
 			out, _ = sjson.DeleteBytes(out, "generation_config."+knob)
 		}
+	} else {
+		// Mirror the chat-completions request translator so Responses clients can
+		// bound output length; executors read generation_config.max_output_tokens.
+		if maxOutputTokens := firstExisting(root.Get("max_output_tokens"), root.Get("max_completion_tokens"), root.Get("max_tokens")); maxOutputTokens.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generation_config.max_output_tokens", []byte(maxOutputTokens.Raw))
+		}
+		if temperature := root.Get("temperature"); temperature.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generation_config.temperature", []byte(temperature.Raw))
+		}
+		if topP := root.Get("top_p"); topP.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generation_config.top_p", []byte(topP.Raw))
+		}
 	}
 	return out
 }

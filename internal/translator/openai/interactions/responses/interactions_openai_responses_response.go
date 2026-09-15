@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ type interactionsToResponsesStreamState struct {
 	ReasoningSummaries map[int][]string
 	TextOutputs        map[int]*strings.Builder
 	Seq                int
+	Completed          bool
 	Done               bool
 }
 
@@ -86,9 +88,15 @@ func ConvertInteractionsResponseToOpenAIResponsesNonStream(ctx context.Context, 
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
-	out := []byte(`{"id":"","object":"response","status":"completed","model":"","output":[]}`)
+	out := []byte(`{"id":"","object":"response","status":"completed","model":"","output":[],"incomplete_details":null,"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`)
 	out, _ = sjson.SetBytes(out, "id", firstNonEmpty(root.Get("id").String(), root.Get("interaction.id").String()))
 	out, _ = sjson.SetBytes(out, "model", responseModel(modelName, root))
+	if _, status, incompleteReason := responsesTerminalState(root.Get("interaction"), root); status != "completed" {
+		out, _ = sjson.SetBytes(out, "status", status)
+		if incompleteReason != "" {
+			out, _ = sjson.SetBytes(out, "incomplete_details.reason", incompleteReason)
+		}
+	}
 	steps := root.Get("steps")
 	if !steps.Exists() {
 		steps = root.Get("interaction.steps")
@@ -137,7 +145,7 @@ func convertInteractionsEventToResponses(modelName string, originalRequestRawJSO
 	case "step.stop":
 		return interactionsStepStopToResponses(root, st)
 	case "interaction.completed", "finish":
-		return [][]byte{responsesCompletedEvent(modelName, root, st)}
+		return responsesCompletedEvents(modelName, root, st)
 	case "done":
 		if st.Done {
 			return nil
@@ -190,7 +198,14 @@ func interactionsStepToResponsesOutput(step gjson.Result, forAntigravity bool) (
 		}
 		return item, true
 	case "function_call":
-		return interactionsFunctionCallToResponses(step, forAntigravity), true
+		item := interactionsFunctionCallToResponses(step, forAntigravity)
+		// Response output items carry an id and a status; OpenAI Responses clients
+		// (e.g. the AI SDK) validate function_call items strictly.
+		if id := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String()); id != "" {
+			item, _ = sjson.SetBytes(item, "id", id)
+		}
+		item, _ = sjson.SetBytes(item, "status", "completed")
+		return item, true
 	}
 	return nil, false
 }
@@ -259,7 +274,7 @@ func interactionsStepStartToResponses(modelName string, root gjson.Result, st *i
 			call.Arguments.WriteString(jsonStringValue(args, "{}"))
 		}
 		st.FunctionCalls[index] = call
-		added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"function_call","call_id":"","name":"","arguments":""}}`)
+		added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","call_id":"","name":"","arguments":""}}`)
 		added, _ = sjson.SetBytes(added, "sequence_number", nextResponsesSeq(st))
 		added, _ = sjson.SetBytes(added, "output_index", index)
 		added, _ = sjson.SetBytes(added, "item.id", itemID)
@@ -359,29 +374,7 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 		done, _ = sjson.SetRawBytes(done, "item.content.-1", outputText)
 		return [][]byte{emitResponsesEvent("response.output_text.done", textDone), emitResponsesEvent("response.content_part.done", part), emitResponsesEvent("response.output_item.done", done)}
 	case "function_call":
-		call := st.FunctionCalls[index]
-		if call == nil {
-			call = &interactionsFunctionCallState{ID: itemID}
-			st.FunctionCalls[index] = call
-		}
-		if call.ItemDoneEmitted {
-			return nil
-		}
-		events := make([][]byte, 0, 2)
-		arguments := responsesFunctionCallArguments(call)
-		if !call.ArgumentsDoneEmitted {
-			events = append(events, responsesFunctionCallArgumentsDoneToResponses(index, itemID, arguments, st))
-			call.ArgumentsDoneEmitted = true
-		}
-		done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"","type":"function_call","call_id":"","name":"","arguments":""}}`)
-		done, _ = sjson.SetBytes(done, "sequence_number", nextResponsesSeq(st))
-		done, _ = sjson.SetBytes(done, "output_index", index)
-		done, _ = sjson.SetBytes(done, "item.id", itemID)
-		done, _ = sjson.SetBytes(done, "item.call_id", itemID)
-		done, _ = sjson.SetBytes(done, "item.name", call.Name)
-		done, _ = translatorcommon.SetStringWithoutHTMLEscape(done, "item.arguments", arguments)
-		call.ItemDoneEmitted = true
-		return append(events, emitResponsesEvent("response.output_item.done", done))
+		return responsesFunctionCallDoneEvents(index, itemID, st)
 	default:
 		done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{}}`)
 		done, _ = sjson.SetBytes(done, "sequence_number", nextResponsesSeq(st))
@@ -391,10 +384,70 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 	}
 }
 
-func responsesCompletedEvent(modelName string, root gjson.Result, st *interactionsToResponsesStreamState) []byte {
-	payload := []byte(`{"type":"response.completed","response":{"id":"","object":"response","status":"completed","model":"","output":[],"usage":{}}}`)
-	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
+// responsesFunctionCallDoneEvents emits response.function_call_arguments.done and
+// response.output_item.done for the function_call at the given step index.
+// The done item must carry status "completed": OpenAI Responses clients such as
+// the AI SDK validate it strictly and silently drop the whole frame otherwise,
+// which loses the tool call entirely.
+func responsesFunctionCallDoneEvents(index int, itemID string, st *interactionsToResponsesStreamState) [][]byte {
+	call := st.FunctionCalls[index]
+	if call == nil {
+		call = &interactionsFunctionCallState{ID: itemID}
+		st.FunctionCalls[index] = call
+	}
+	if call.ItemDoneEmitted {
+		return nil
+	}
+	if itemID == "" {
+		itemID = firstNonEmpty(call.ID, st.ItemIDs[index], fmt.Sprintf("item_%d", index))
+	}
+	events := make([][]byte, 0, 2)
+	arguments := responsesFunctionCallArguments(call)
+	if !call.ArgumentsDoneEmitted {
+		events = append(events, responsesFunctionCallArgumentsDoneToResponses(index, itemID, arguments, st))
+		call.ArgumentsDoneEmitted = true
+	}
+	done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"","type":"function_call","status":"completed","call_id":"","name":"","arguments":""}}`)
+	done, _ = sjson.SetBytes(done, "sequence_number", nextResponsesSeq(st))
+	done, _ = sjson.SetBytes(done, "output_index", index)
+	done, _ = sjson.SetBytes(done, "item.id", itemID)
+	done, _ = sjson.SetBytes(done, "item.call_id", itemID)
+	done, _ = sjson.SetBytes(done, "item.name", call.Name)
+	done, _ = translatorcommon.SetStringWithoutHTMLEscape(done, "item.arguments", arguments)
+	call.ItemDoneEmitted = true
+	return append(events, emitResponsesEvent("response.output_item.done", done))
+}
+
+// responsesCompletedEvents closes any function_call items that never received a
+// step.stop, then emits the terminal response.completed / response.incomplete
+// event. Truncation (stop_reason=length or status=incomplete on the interaction)
+// is reported through response.incomplete with incomplete_details.reason set to
+// max_output_tokens, which clients map to finish_reason "length".
+func responsesCompletedEvents(modelName string, root gjson.Result, st *interactionsToResponsesStreamState) [][]byte {
+	if st.Completed {
+		return nil
+	}
+	var out [][]byte
+	openIndexes := make([]int, 0, len(st.FunctionCalls))
+	for index, call := range st.FunctionCalls {
+		if call != nil && !call.ItemDoneEmitted {
+			openIndexes = append(openIndexes, index)
+		}
+	}
+	sort.Ints(openIndexes)
+	for _, index := range openIndexes {
+		out = append(out, responsesFunctionCallDoneEvents(index, st.ItemIDs[index], st)...)
+	}
+
 	interaction := root.Get("interaction")
+	eventType, status, incompleteReason := responsesTerminalState(interaction, root)
+	payload := []byte(`{"type":"response.completed","response":{"id":"","object":"response","status":"completed","model":"","output":[],"incomplete_details":null,"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+	payload, _ = sjson.SetBytes(payload, "type", eventType)
+	payload, _ = sjson.SetBytes(payload, "response.status", status)
+	if incompleteReason != "" {
+		payload, _ = sjson.SetBytes(payload, "response.incomplete_details.reason", incompleteReason)
+	}
+	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
 	payload, _ = sjson.SetBytes(payload, "response.id", firstNonEmpty(interaction.Get("id").String(), root.Get("id").String()))
 	payload, _ = sjson.SetBytes(payload, "response.model", firstNonEmpty(interaction.Get("model").String(), modelName))
 	envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String())
@@ -406,7 +459,24 @@ func responsesCompletedEvent(modelName string, root gjson.Result, st *interactio
 	}
 	payload = setResponsesCompletedOutput(payload, st)
 	payload = setResponsesUsageFromInteractions(payload, "response.usage", translatorcommon.InteractionsUsage(root))
-	return emitResponsesEvent("response.completed", payload)
+	st.Completed = true
+	return append(out, emitResponsesEvent(eventType, payload))
+}
+
+// responsesTerminalState maps interaction completion metadata to the Responses
+// terminal event type, response.status and incomplete_details.reason.
+func responsesTerminalState(interaction, root gjson.Result) (eventType, status, incompleteReason string) {
+	explicit := strings.ToLower(strings.TrimSpace(firstNonEmpty(interaction.Get("stop_reason").String(), root.Get("stop_reason").String())))
+	switch explicit {
+	case "length", "max_tokens", "max_output_tokens":
+		return "response.incomplete", "incomplete", "max_output_tokens"
+	case "content_filter":
+		return "response.incomplete", "incomplete", "content_filter"
+	}
+	if s := strings.ToLower(strings.TrimSpace(firstNonEmpty(interaction.Get("status").String(), root.Get("status").String()))); s == "incomplete" {
+		return "response.incomplete", "incomplete", "max_output_tokens"
+	}
+	return "response.completed", "completed", ""
 }
 
 func interactionsThoughtSignature(step gjson.Result) string {
@@ -515,7 +585,7 @@ func responsesCompletedOutputItem(index int, itemType string, st *interactionsTo
 	case "thought":
 		return responsesReasoningItem(index, st), true
 	case "function_call":
-		item := []byte(`{"id":"","type":"function_call","call_id":"","name":"","arguments":"{}"}`)
+		item := []byte(`{"id":"","type":"function_call","status":"completed","call_id":"","name":"","arguments":"{}"}`)
 		itemID := st.ItemIDs[index]
 		item, _ = sjson.SetBytes(item, "id", itemID)
 		item, _ = sjson.SetBytes(item, "call_id", itemID)
