@@ -1015,6 +1015,150 @@ func TestStreamUsageBufferObserveClaudeStream_MergesStartAndDelta(t *testing.T) 
 	}
 }
 
+func TestStreamUsageBufferObserveClaudeStream_ExplicitZeroOverwritesPrior(t *testing.T) {
+	var buffer StreamUsageBuffer
+
+	lineStart := []byte(`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-opus-5","usage":{"input_tokens":2095,"cache_creation_input_tokens":7185,"cache_read_input_tokens":100,"output_tokens":1}}}`)
+	buffer.ObserveClaudeStream(lineStart)
+
+	// Full cache hit: final usage reports explicit zeros for uncached input and
+	// cache creation, with cache_read covering the prompt.
+	lineDelta := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":93780,"output_tokens":15}}`)
+	buffer.ObserveClaudeStream(lineDelta)
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("expected buffer to contain usage detail")
+	}
+	if detail.InputTokens != 0 {
+		t.Errorf("InputTokens = %d, want 0", detail.InputTokens)
+	}
+	if detail.OutputTokens != 15 {
+		t.Errorf("OutputTokens = %d, want 15", detail.OutputTokens)
+	}
+	if detail.CacheReadTokens != 93780 {
+		t.Errorf("CacheReadTokens = %d, want 93780", detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 0 {
+		t.Errorf("CacheCreationTokens = %d, want 0", detail.CacheCreationTokens)
+	}
+	if detail.CachedTokens != 93780 {
+		t.Errorf("CachedTokens = %d, want 93780", detail.CachedTokens)
+	}
+	wantTotal := int64(0 + 15 + 93780 + 0)
+	if detail.TotalTokens != wantTotal {
+		t.Errorf("TotalTokens = %d, want %d", detail.TotalTokens, wantTotal)
+	}
+}
+
+func TestStreamUsageBufferObserveClaudeStream_NullInputPreservesStart(t *testing.T) {
+	var buffer StreamUsageBuffer
+
+	lineStart := []byte(`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-opus-5","usage":{"input_tokens":2095,"cache_creation_input_tokens":7185,"cache_read_input_tokens":355598,"output_tokens":1}}}`)
+	buffer.ObserveClaudeStream(lineStart)
+
+	lineDelta := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":null,"output_tokens":15}}`)
+	buffer.ObserveClaudeStream(lineDelta)
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("expected buffer to contain usage detail")
+	}
+	if detail.InputTokens != 2095 {
+		t.Errorf("InputTokens = %d, want 2095", detail.InputTokens)
+	}
+	if detail.OutputTokens != 15 {
+		t.Errorf("OutputTokens = %d, want 15", detail.OutputTokens)
+	}
+	if detail.CacheReadTokens != 355598 {
+		t.Errorf("CacheReadTokens = %d, want 355598", detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 7185 {
+		t.Errorf("CacheCreationTokens = %d, want 7185", detail.CacheCreationTokens)
+	}
+}
+
+func TestStreamUsageBufferObserveClaudeStream_OmittedLaterUsagePreservesPrior(t *testing.T) {
+	var buffer StreamUsageBuffer
+
+	lineStart := []byte(`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-opus-5","usage":{"input_tokens":2095,"cache_creation_input_tokens":7185,"cache_read_input_tokens":355598,"output_tokens":1}}}`)
+	buffer.ObserveClaudeStream(lineStart)
+
+	buffer.ObserveClaudeStream([]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`))
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("expected buffer to contain usage detail")
+	}
+	if detail.InputTokens != 2095 {
+		t.Errorf("InputTokens = %d, want 2095", detail.InputTokens)
+	}
+	if detail.OutputTokens != 1 {
+		t.Errorf("OutputTokens = %d, want 1", detail.OutputTokens)
+	}
+	if detail.CacheReadTokens != 355598 {
+		t.Errorf("CacheReadTokens = %d, want 355598", detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 7185 {
+		t.Errorf("CacheCreationTokens = %d, want 7185", detail.CacheCreationTokens)
+	}
+}
+
+func TestStreamUsageBufferObserveClaudeStream_LatePositiveInputReplaces(t *testing.T) {
+	var buffer StreamUsageBuffer
+
+	lineStart := []byte(`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-opus-5","usage":{"input_tokens":2095,"cache_creation_input_tokens":7185,"cache_read_input_tokens":355598,"output_tokens":1}}}`)
+	buffer.ObserveClaudeStream(lineStart)
+
+	lineDelta := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":42,"output_tokens":15}}`)
+	buffer.ObserveClaudeStream(lineDelta)
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("expected buffer to contain usage detail")
+	}
+	if detail.InputTokens != 42 {
+		t.Errorf("InputTokens = %d, want 42", detail.InputTokens)
+	}
+	if detail.OutputTokens != 15 {
+		t.Errorf("OutputTokens = %d, want 15", detail.OutputTokens)
+	}
+	if detail.CacheReadTokens != 355598 {
+		t.Errorf("CacheReadTokens = %d, want 355598", detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 7185 {
+		t.Errorf("CacheCreationTokens = %d, want 7185", detail.CacheCreationTokens)
+	}
+	wantTotal := int64(42 + 15 + 355598 + 7185)
+	if detail.TotalTokens != wantTotal {
+		t.Errorf("TotalTokens = %d, want %d", detail.TotalTokens, wantTotal)
+	}
+}
+
+func TestObservePluginExecutorStreamUsage_ClaudeExplicitZeroOverwritesPrior(t *testing.T) {
+	var buffer StreamUsageBuffer
+	payload := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-opus-5\",\"usage\":{\"input_tokens\":2095,\"cache_creation_input_tokens\":7185,\"cache_read_input_tokens\":100,\"output_tokens\":1}}}\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":93780,\"output_tokens\":15}}\n")
+	ObservePluginExecutorStreamUsage("claude", payload, &buffer)
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("expected buffer to contain usage detail")
+	}
+	if detail.InputTokens != 0 {
+		t.Errorf("InputTokens = %d, want 0", detail.InputTokens)
+	}
+	if detail.OutputTokens != 15 {
+		t.Errorf("OutputTokens = %d, want 15", detail.OutputTokens)
+	}
+	if detail.CacheReadTokens != 93780 {
+		t.Errorf("CacheReadTokens = %d, want 93780", detail.CacheReadTokens)
+	}
+	if detail.CacheCreationTokens != 0 {
+		t.Errorf("CacheCreationTokens = %d, want 0", detail.CacheCreationTokens)
+	}
+}
+
 func TestStreamUsageBufferObserveClaudeStream_FailurePreservesUsage(t *testing.T) {
 	var buffer StreamUsageBuffer
 
