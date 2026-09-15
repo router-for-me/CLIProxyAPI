@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -342,6 +343,15 @@ func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Reque
 	if sessionID := xaiExecutionSessionID(req, opts); sessionID != "" {
 		return sessionID, nil
 	}
+	// Derive a conversation ID from the client's own session headers so that
+	// x-grok-conv-id can be sent for every xAI model, not just composer ones.
+	// xAI routes requests sharing a conversation ID to the same server, and
+	// cache entries are stored per-server, so omitting the header scatters a
+	// conversation across servers and prevents prompt cache reuse. This matters
+	// most for large retained contexts, where a miss costs a full prefill.
+	if sessionID := xaiClientConversationID(ctx, opts); sessionID != "" {
+		return sessionID, nil
+	}
 	if !xaiRequiresIsolatedConversation(baseModel) {
 		return "", nil
 	}
@@ -368,6 +378,35 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 		}
 	}
 	return helps.DerivedSessionUUID("xai", opts.Metadata, req.Metadata)
+}
+
+// xaiClientConversationID derives a stable conversation identifier from the
+// client's session headers, mirroring the sources the Codex executor already
+// uses. The value is hashed into a UUID so the upstream never sees raw client
+// identifiers, and it stays constant across turns of the same conversation.
+func xaiClientConversationID(ctx context.Context, opts cliproxyexecutor.Options) string {
+	headers := opts.Headers
+	if headers == nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			headers = ginCtx.Request.Header
+		}
+	}
+	if headers == nil {
+		return ""
+	}
+	if turnMetadata := strings.TrimSpace(helps.HeaderValueCaseInsensitive(headers, "X-Codex-Turn-Metadata")); turnMetadata != "" {
+		for _, field := range []string{"prompt_cache_key", "thread_id", "session_id"} {
+			if value := strings.TrimSpace(gjson.Get(turnMetadata, field).String()); value != "" {
+				return helps.StableXAIConversationUUID(field + ":" + value)
+			}
+		}
+	}
+	for _, headerName := range []string{"Session-Id", "session_id", "Session_id", "Conversation_id"} {
+		if value := strings.TrimSpace(helps.HeaderValueCaseInsensitive(headers, headerName)); value != "" {
+			return helps.StableXAIConversationUUID("header:" + value)
+		}
+	}
+	return ""
 }
 
 func xaiRequiresIsolatedConversation(model string) bool {

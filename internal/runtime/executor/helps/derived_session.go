@@ -64,3 +64,9 @@ func metadataString(metadata map[string]any, key string) string {
 	value, _ := metadata[key].(string)
 	return strings.TrimSpace(value)
 }
+
+// StableXAIConversationUUID maps a client conversation identity to a stable
+// UUID used as the xAI x-grok-conv-id header value.
+func StableXAIConversationUUID(identityValue string) string {
+	return stableProviderSessionUUID("xai", "client-conversation", identityValue)
+}
