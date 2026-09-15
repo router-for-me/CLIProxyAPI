@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -253,21 +254,17 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 	}
 	s.resetUpstreamDisconnectError(conn)
 	conn.SetPingHandler(func(appData string) error {
-		sessionID := ""
-		if s != nil {
-			sessionID = s.sessionID
-		}
 		sessionKind := sessionObjectKind(s)
-		log.Debugf("codex websockets: upstream ping received session=%s session_object=%s ping_bytes=%d", sessionID, sessionKind, len(appData))
-		log.Debugf("codex websockets: upstream pong write started session=%s session_object=%s", sessionID, sessionKind)
+		log.WithFields(log.Fields{"provider": "codex", "session_object": sessionKind, "ping_bytes": len(appData)}).Debug("codex websockets: upstream ping received")
+		log.WithFields(log.Fields{"provider": "codex", "session_object": sessionKind}).Debug("codex websockets: upstream pong write started")
 		start := time.Now()
 		// Gorilla websocket allows concurrent WriteControl with WriteMessage.
 		// Avoid writeMu here so keepalive pongs are not starved by long payload writes.
 		errPong := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
 		if errPong != nil {
-			log.Warnf("codex websockets: upstream pong write failed session=%s session_object=%s duration=%v err=%v", sessionID, sessionKind, time.Since(start), errPong)
+			log.WithFields(log.Fields{"provider": "codex", "session_object": sessionKind, "duration": time.Since(start), "diagnostic": helps.SafeWebsocketErrorDiagnostic(errPong)}).Warn("codex websockets: upstream pong write failed")
 		} else {
-			log.Debugf("codex websockets: upstream pong replied session=%s session_object=%s duration=%v", sessionID, sessionKind, time.Since(start))
+			log.WithFields(log.Fields{"provider": "codex", "session_object": sessionKind, "duration": time.Since(start)}).Debug("codex websockets: upstream pong replied")
 		}
 		return errPong
 	})
@@ -435,14 +432,14 @@ func configureRawCodexWebsocketConn(conn *websocket.Conn, authID string, wsURL s
 		return
 	}
 	conn.SetPingHandler(func(appData string) error {
-		log.Debugf("codex websockets: upstream ping received session= session_object=none ping_bytes=%d", len(appData))
-		log.Debugf("codex websockets: upstream pong write started session= session_object=none")
+		log.WithFields(log.Fields{"provider": "codex", "session_object": "none", "ping_bytes": len(appData)}).Debug("codex websockets: upstream ping received")
+		log.WithFields(log.Fields{"provider": "codex", "session_object": "none"}).Debug("codex websockets: upstream pong write started")
 		start := time.Now()
 		errPong := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
 		if errPong != nil {
-			log.Warnf("codex websockets: upstream pong write failed session= session_object=none duration=%v err=%v", time.Since(start), errPong)
+			log.WithFields(log.Fields{"provider": "codex", "session_object": "none", "duration": time.Since(start), "diagnostic": helps.SafeWebsocketErrorDiagnostic(errPong)}).Warn("codex websockets: upstream pong write failed")
 		} else {
-			log.Debugf("codex websockets: upstream pong replied session= session_object=none duration=%v", time.Since(start))
+			log.WithFields(log.Fields{"provider": "codex", "session_object": "none", "duration": time.Since(start)}).Debug("codex websockets: upstream pong replied")
 		}
 		return errPong
 	})
@@ -636,7 +633,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 		previousCloser := sess.connCloser
 		sess.connMu.Unlock()
 		if errClose := closer.Close(); errClose != nil {
-			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+			logCodexWebsocketCloseFailure("duplicate", errClose)
 		}
 		logCodexWebsocketConnectedWithReused(sess, sess.sessionID, authID, wsURL, true)
 		return previous, previousCloser, nil, nil
@@ -762,7 +759,7 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	}
 	if closer != nil {
 		if errClose := closer.Close(); errClose != nil {
-			log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+			logCodexWebsocketCloseFailure("active", errClose)
 		}
 	}
 	if lifecycle != nil {
@@ -854,7 +851,7 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 		logCodexWebsocketDisconnectedWithLastEvent(sess, sessionID, authID, wsURL, reason, lastEvent, nil)
 		if closer != nil {
 			if errClose := closer.Close(); errClose != nil {
-				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
+				logCodexWebsocketCloseFailure("session_close", errClose)
 			}
 		}
 	}
@@ -877,14 +874,12 @@ func logCodexWebsocketConnected(sessionID string, authID string, wsURL string) {
 	logCodexWebsocketConnectedWithReused(nil, sessionID, authID, wsURL, false)
 }
 
-func logCodexWebsocketConnectedWithReused(sess *codexWebsocketSession, sessionID string, authID string, wsURL string, reused bool) {
-	sessionStr := strings.TrimSpace(sessionID)
-	sessionKind := sessionObjectKind(sess)
-	if reused {
-		log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s session_object=%s reused=true", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind)
-		return
-	}
-	log.Infof("codex websockets: upstream connected session=%s auth=%s url=%s session_object=%s reused=false", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind)
+func logCodexWebsocketConnectedWithReused(sess *codexWebsocketSession, _ string, _ string, _ string, reused bool) {
+	log.WithFields(log.Fields{
+		"provider":       "codex",
+		"session_object": sessionObjectKind(sess),
+		"reused":         reused,
+	}).Info("codex websockets: upstream connected")
 }
 
 func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
@@ -900,23 +895,38 @@ func isTerminalEvent(eventType string) bool {
 	}
 }
 
-func logCodexWebsocketDisconnectedWithLastEvent(sess *codexWebsocketSession, sessionID string, authID string, wsURL string, reason string, lastEvent string, err error) {
-	sessionStr := strings.TrimSpace(sessionID)
-	sessionKind := sessionObjectKind(sess)
-	terminalStatus := isTerminalEvent(lastEvent)
+func logCodexWebsocketDisconnectedWithLastEvent(sess *codexWebsocketSession, _ string, _ string, _ string, reason string, lastEvent string, err error) {
+	status := "ok"
 	if err != nil {
-		if lastEvent != "" {
-			log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s session_object=%s reason=%s last_event=%s is_terminal=%t err=%v", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind, strings.TrimSpace(reason), lastEvent, terminalStatus, err)
-			return
-		}
-		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s session_object=%s reason=%s is_terminal=false err=%v", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind, strings.TrimSpace(reason), err)
-		return
+		status = "error"
 	}
-	if lastEvent != "" {
-		log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s session_object=%s reason=%s last_event=%s is_terminal=%t", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind, strings.TrimSpace(reason), lastEvent, terminalStatus)
-		return
+	fields := log.Fields{
+		"provider":       "codex",
+		"session_object": sessionObjectKind(sess),
+		"reason":         helps.SafeWebsocketLifecycleReason(reason),
+		"status":         status,
+		"diagnostic":     helps.SafeWebsocketErrorDiagnostic(err),
+		"is_terminal":    isTerminalEvent(lastEvent),
 	}
-	log.Infof("codex websockets: upstream disconnected session=%s auth=%s url=%s session_object=%s reason=%s is_terminal=false", sessionStr, strings.TrimSpace(authID), strings.TrimSpace(wsURL), sessionKind, strings.TrimSpace(reason))
+	if strings.TrimSpace(lastEvent) != "" {
+		fields["last_event"] = helps.SafeWebsocketEventType(lastEvent)
+	}
+	log.WithFields(fields).Info("codex websockets: upstream disconnected")
+}
+
+func logCodexWebsocketStreamStart(model string) {
+	log.WithFields(log.Fields{
+		"provider": "codex",
+		"model":    helps.SafeWebsocketModel("codex", model),
+	}).Debug("codex websockets: executing stream request")
+}
+
+func logCodexWebsocketCloseFailure(stage string, err error) {
+	log.WithFields(log.Fields{
+		"provider":   "codex",
+		"stage":      helps.SafeWebsocketCloseStage(stage),
+		"diagnostic": helps.SafeWebsocketErrorDiagnostic(err),
+	}).Error("codex websockets: close upstream connection failed")
 }
 
 // CloseCodexWebsocketSessionsForAuthID closes all active Codex upstream websocket sessions
