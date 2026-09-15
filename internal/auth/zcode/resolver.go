@@ -221,7 +221,11 @@ func (r *Resolver) ResolveZaiCredential(ctx context.Context, accessToken string)
 	if login.AccessToken == "" {
 		return nil, fmt.Errorf("zcode: z/login returned no biz token")
 	}
-	auth := "Bearer " + login.AccessToken
+	auth := login.AccessToken
+
+	// resolveCustomerInfo/findOrCreateAPIKey/copySecret already prepend the
+	// "Bearer " scheme inside doJSON; pass the raw token only (a pre-suffixed
+	// "Bearer Bearer ..." prefix is rejected upstream with 401).
 	orgID, projectID, err := r.resolveCustomerInfo(ctx, auth)
 	if err != nil {
 		return nil, err

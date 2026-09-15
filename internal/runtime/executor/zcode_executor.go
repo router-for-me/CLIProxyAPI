@@ -105,7 +105,10 @@ func requestPathMetadata(opts cliproxyexecutor.Options) string {
 }
 
 // zcodeCreds extracts the API key and base URL from the auth attributes, falling
-// back to the metadata for either when the attribute is absent.
+// back to the metadata for either when the attribute is absent. When only the raw
+// credential is available in metadata (auth reloaded from file, where Attributes
+// are not persisted), the FullKey form api_key.secret is reconstructed: the plain
+// endpoint rejects the bare api_key with 401 and requires the secret suffix.
 func zcodeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	if a == nil {
 		return "", ""
@@ -118,6 +121,9 @@ func zcodeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		if apiKey == "" {
 			if v, ok := a.Metadata["api_key"].(string); ok {
 				apiKey = v
+			}
+			if v, ok := a.Metadata["secret"].(string); ok && v != "" {
+				apiKey = apiKey + "." + v
 			}
 		}
 		if baseURL == "" {
