@@ -47,6 +47,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 	// inherit the preceding response settings, just as they do upstream.
 	var metadataMu sync.Mutex
 	pending := []*codexWebsocketPrepared{initial}
+	// Do not consume follow-ups until bootstrap succeeds. A rejected initial
+	// request may retry on another credential using the same input channel.
+	inputReady := make(chan struct{})
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
@@ -56,6 +59,25 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			default:
 			}
 			cancel()
+		}
+		reject := func(message string) bool {
+			payload, _ := json.Marshal(map[string]any{
+				"type": "error", "status": http.StatusBadRequest,
+				"error": map[string]string{"type": "invalid_request_error", "message": message},
+			})
+			// Reader cleanup joins this writer before closing out. Cancellation must
+			// also release a local error blocked behind a disconnected downstream.
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
+				return true
+			case <-streamCtx.Done():
+				return false
+			}
+		}
+		select {
+		case <-streamCtx.Done():
+			return
+		case <-inputReady:
 		}
 		for {
 			select {
@@ -78,8 +100,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				payload := message.Payload
 				if !json.Valid(payload) {
-					fail(fmt.Errorf("invalid websocket request JSON"))
-					return
+					if !reject("invalid websocket request JSON") {
+						return
+					}
+					continue
 				}
 				switch gjson.GetBytes(payload, "type").String() {
 				case "response.steer":
@@ -119,8 +143,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 						sess.setMultiAgentV2Optimized(conn, prepared.optimizeMultiAgentV2 && !prepared.multiAgentV2Conflict)
 					}
 				default:
-					fail(fmt.Errorf("unsupported websocket request type: %s", gjson.GetBytes(payload, "type").String()))
-					return
+					if !reject(fmt.Sprintf("unsupported websocket request type: %s", gjson.GetBytes(payload, "type").String())) {
+						return
+					}
+					continue
 				}
 				helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
 					URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
@@ -179,6 +205,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			payload = bytes.TrimSpace(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
+			establishing := firstResponse && eventType == "response.created"
 			if eventType == "response.created" {
 				metadataMu.Lock()
 				if len(pending) > 0 {
@@ -288,6 +315,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			payload = applyCodexIdentityExposeResponsePayload(payload, eventPrepared.identityState)
 			if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(payload)}) {
 				return
+			}
+			if establishing {
+				// Deliver response.created before any locally generated error so the
+				// downstream handler also observes successful bootstrap first.
+				close(inputReady)
 			}
 		}
 	}()
