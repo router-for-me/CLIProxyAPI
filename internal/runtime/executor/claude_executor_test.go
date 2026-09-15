@@ -9327,3 +9327,30 @@ func TestClaudeExecutor_CloakModePrefersStoredPrevReqOverCallerFake(t *testing.T
 		t.Fatalf("CPA must not use fake caller cc_prev_req, got: %s", turn2System)
 	}
 }
+
+func TestApplyClaudeHeaders_ConfigInjectedContext1MBeta(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-ctx-1m", "cloak_mode": "always"}}
+
+	t.Run("confirmed claude code keeps injected context-1m on anthropic base", func(t *testing.T) {
+		extraBetas, body := extractAndRemoveBetas([]byte(`{"model":"claude-sonnet-5","betas":["context-1m-2025-08-07"]}`))
+		incoming := http.Header{"Anthropic-Beta": []string{"claude-code-20250219,interleaved-thinking-2025-05-14"}}
+		req := newClaudeHeaderTestRequest(t, incoming)
+		if errApply := applyClaudeHeaders(req, auth, "key-ctx-1m", false, extraBetas, body, nil, incoming, true); errApply != nil {
+			t.Fatalf("applyClaudeHeaders() error = %v", errApply)
+		}
+		if got := req.Header.Get("Anthropic-Beta"); !strings.Contains(got, claudeContext1MBeta) {
+			t.Fatalf("Anthropic-Beta = %q, want it to contain %q", got, claudeContext1MBeta)
+		}
+	})
+
+	t.Run("unknown body beta still dropped on anthropic base", func(t *testing.T) {
+		extraBetas, body := extractAndRemoveBetas([]byte(`{"model":"claude-sonnet-5","betas":["totally-made-up-2030-01-01"]}`))
+		req := newClaudeHeaderTestRequest(t, nil)
+		if errApply := applyClaudeHeaders(req, auth, "key-ctx-1m", false, extraBetas, body, nil, nil, false); errApply != nil {
+			t.Fatalf("applyClaudeHeaders() error = %v", errApply)
+		}
+		if got := req.Header.Get("Anthropic-Beta"); strings.Contains(got, "totally-made-up") {
+			t.Fatalf("Anthropic-Beta = %q, unknown caller beta must not be smuggled", got)
+		}
+	})
+}

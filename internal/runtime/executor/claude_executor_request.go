@@ -1038,6 +1038,17 @@ func applyClaudeHeadersWithNativeProfile(
 			for _, beta := range extraBetas {
 				appendBeta(beta)
 			}
+		} else {
+			// Body-lifted betas on a direct Anthropic upstream come from
+			// operator payload rules, not from the caller fingerprint.
+			// context-1m is a shape real Claude Code sends for [1m] variants,
+			// so honoring just that beta keeps wire parity while letting
+			// config force 1M context behind the -latest aliases.
+			for _, beta := range extraBetas {
+				if beta == claudeContext1MBeta {
+					appendBeta(beta)
+				}
+			}
 		}
 	}
 	applyBetaHeader := func() {
