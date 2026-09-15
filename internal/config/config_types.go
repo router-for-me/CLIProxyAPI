@@ -152,6 +152,10 @@ type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 
+	// WebSearchModels marks model IDs as web-search capable even when the remote
+	// Antigravity catalog omits them from webSearchModelIds.
+	WebSearchModels []string `yaml:"web-search-models,omitempty" json:"web-search-models,omitempty"`
+
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
 }
@@ -274,7 +278,7 @@ type TLSConfig struct {
 type PprofConfig struct {
 	// Enable toggles the pprof HTTP debug server.
 	Enable bool `yaml:"enable" json:"enable"`
-	// Addr is the host:port address for the pprof HTTP server.
+	// Addr is the host:port address for the pprof HTTP debug server.
 	Addr string `yaml:"addr" json:"addr"`
 }
 
