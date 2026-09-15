@@ -87,6 +87,7 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 		"aistudio",
 		"antigravity",
 		"kimi",
+		"zcode",
 		"xai",
 		"openai-compatibility",
 		"plugin-provider",
@@ -188,5 +189,25 @@ func openAICompatKimiAuth() *coreauth.Auth {
 			"compat_name":  "kimi",
 			"provider_key": "kimi",
 		},
+	}
+}
+
+func TestService_RegistersZCodeExecutor(t *testing.T) {
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+		pluginHost:  pluginhost.New(),
+	}
+
+	service.registerAvailableExecutors(context.Background(), executorRegistrationOptions{
+		includeBaseline: true,
+	})
+
+	executor, ok := service.coreManager.Executor("zcode")
+	if !ok {
+		t.Fatal("zcode executor not registered")
+	}
+	if _, isZCode := executor.(*runtimeexecutor.ZCodeExecutor); !isZCode {
+		t.Fatalf("executor type = %T, want *executor.ZCodeExecutor", executor)
 	}
 }
