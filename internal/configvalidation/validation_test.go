@@ -11,8 +11,9 @@ import (
 )
 
 // TestValidateNilSnapshot asserts that a nil Snapshot is rejected with a
-// contextual error prefixed by "configvalidation:" so callers can distinguish
-// validation-time rejections from internal config errors.
+// contextual error prefixed by "configvalidation:" and matching the
+// exported ErrNilSnapshot sentinel so callers can discriminate the
+// missing-snapshot class via errors.Is.
 func TestValidateNilSnapshot(t *testing.T) {
 	cfg, err := configvalidation.Validate(nil)
 	if err == nil {
@@ -24,8 +25,8 @@ func TestValidateNilSnapshot(t *testing.T) {
 	if !strings.HasPrefix(err.Error(), "configvalidation:") {
 		t.Errorf("Validate(nil) error prefix = %q; want %q", err.Error(), "configvalidation:")
 	}
-	if !errors.Is(err, err) {
-		t.Errorf("Validate(nil) must return a non-nil error that supports errors.Is; got %T", err)
+	if !errors.Is(err, configvalidation.ErrNilSnapshot) {
+		t.Errorf("Validate(nil) error = %v; want errors.Is(err, configvalidation.ErrNilSnapshot)", err)
 	}
 }
 
@@ -108,7 +109,8 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 
 // TestValidateDoesNotMutateInput asserts that Validate does not mutate the
 // input Snapshot. Calling Validate twice on the same Snapshot must produce
-// equal Config values and leave the input Snapshot structurally identical.
+// equal Config values and leave the input Snapshot structurally identical
+// across Settings, Extra, and a populated ResourceRefs slice.
 func TestValidateDoesNotMutateInput(t *testing.T) {
 	snap := configsnapshot.NewEmpty()
 	snap.Settings["port"] = 9000
@@ -117,11 +119,24 @@ func TestValidateDoesNotMutateInput(t *testing.T) {
 			"max-wait-ms": 15000,
 		},
 	}
+	snap.Extra["future-section"] = map[string]any{
+		"flag": true,
+	}
+	snap.ResourceRefs = append(snap.ResourceRefs, configsnapshot.ResourceRef{
+		Kind:      "upstream_provider",
+		ID:        "abc-123",
+		StableKey: "primary",
+		Projection: map[string]any{
+			"name":     "primary",
+			"disabled": false,
+		},
+	})
+
 	// Snapshot the input shape so we can detect any mutation Validate might
 	// perform through the YAML round-trip.
 	originalSettings := snapcopy(snap.Settings)
 	originalExtra := snapcopy(snap.Extra)
-	originalRefs := len(snap.ResourceRefs)
+	originalRefs := append([]configsnapshot.ResourceRef(nil), snap.ResourceRefs...)
 
 	cfg1, err := configvalidation.Validate(&snap)
 	if err != nil {
@@ -134,8 +149,11 @@ func TestValidateDoesNotMutateInput(t *testing.T) {
 	if cfg1.Port != cfg2.Port || cfg1.Routing.CooldownWait.MaxWaitMS != cfg2.Routing.CooldownWait.MaxWaitMS {
 		t.Errorf("Validate is non-deterministic: cfg1=%+v cfg2=%+v", cfg1, cfg2)
 	}
-	if len(snap.ResourceRefs) != originalRefs {
-		t.Errorf("ResourceRefs length changed: got %d, want %d", len(snap.ResourceRefs), originalRefs)
+	if len(snap.ResourceRefs) != len(originalRefs) {
+		t.Errorf("ResourceRefs length changed: got %d, want %d", len(snap.ResourceRefs), len(originalRefs))
+	}
+	if !reflect.DeepEqual(snap.ResourceRefs, originalRefs) {
+		t.Errorf("ResourceRefs mutated by Validate; before=%v after=%v", originalRefs, snap.ResourceRefs)
 	}
 	if !mapsEqual(originalSettings, snap.Settings) {
 		t.Errorf("snap.Settings mutated by Validate; before=%v after=%v", originalSettings, snap.Settings)
@@ -169,6 +187,40 @@ func TestValidatePreservesNestedMaps(t *testing.T) {
 	}
 	if got := cfg.Routing.CooldownWait.MaxAttempts; got != 7 {
 		t.Errorf("MaxAttempts = %d; want 7", got)
+	}
+}
+
+// TestValidateDeterministicAcrossSettingsOrder pins the determinism claim
+// the package doc makes: two Snapshots built with the same Settings keys
+// in opposite insertion orders must produce identical Configs. Go map
+// iteration order is not stable, so the snapshot projection must sort keys
+// before emitting YAML; if the package ever drops that invariant, this
+// test catches it.
+func TestValidateDeterministicAcrossSettingsOrder(t *testing.T) {
+	snapAB := configsnapshot.NewEmpty()
+	snapAB.Settings["a"] = 1
+	snapAB.Settings["b"] = 2
+	snapAB.Settings["routing"] = map[string]any{
+		"strategy": "round-robin",
+	}
+
+	snapBA := configsnapshot.NewEmpty()
+	snapBA.Settings["routing"] = map[string]any{
+		"strategy": "round-robin",
+	}
+	snapBA.Settings["b"] = 2
+	snapBA.Settings["a"] = 1
+
+	cfgAB, errAB := configvalidation.Validate(&snapAB)
+	if errAB != nil {
+		t.Fatalf("Validate(snapAB) error = %v", errAB)
+	}
+	cfgBA, errBA := configvalidation.Validate(&snapBA)
+	if errBA != nil {
+		t.Fatalf("Validate(snapBA) error = %v", errBA)
+	}
+	if !reflect.DeepEqual(cfgAB, cfgBA) {
+		t.Errorf("Validate is order-sensitive: cfgAB=%+v cfgBA=%+v", cfgAB, cfgBA)
 	}
 }
 

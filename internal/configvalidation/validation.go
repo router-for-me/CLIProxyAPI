@@ -15,11 +15,20 @@
 package configvalidation
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/configsnapshot"
 )
+
+// ErrNilSnapshot is the sentinel returned (wrapped) by Validate when the
+// caller passes a nil Snapshot. Callers can use errors.Is to discriminate
+// the missing-snapshot class from marshal or parse failures that also
+// surface through Validate. The error's message starts with the
+// "configvalidation:" namespace prefix so log scrapers can route it
+// alongside other validation rejections.
+var ErrNilSnapshot = errors.New("configvalidation: snapshot is required")
 
 // Validate serialises snap through the deterministic configsnapshot
 // projection and runs the resulting YAML through config.ParseConfigBytes.
@@ -36,7 +45,7 @@ import (
 // auditing while handing a usable runtime view to the next layer.
 func Validate(snap *configsnapshot.Snapshot) (*config.Config, error) {
 	if snap == nil {
-		return nil, fmt.Errorf("configvalidation: snapshot is required")
+		return nil, fmt.Errorf("%w", ErrNilSnapshot)
 	}
 
 	data, errMarshal := configsnapshot.MarshalYAML(snap)
