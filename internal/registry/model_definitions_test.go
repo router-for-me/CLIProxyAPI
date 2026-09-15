@@ -104,3 +104,13 @@ func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing
 		t.Fatalf("unknown model should not get Antigravity web search model, got %q", got)
 	}
 }
+
+func TestGetZCodeModels(t *testing.T) {
+	models := GetZCodeModels()
+	if len(models) == 0 {
+		t.Fatal("no zcode models")
+	}
+	if models[0].ID == "" {
+		t.Fatal("model missing id")
+	}
+}

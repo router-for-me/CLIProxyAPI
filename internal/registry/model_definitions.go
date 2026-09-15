@@ -30,6 +30,7 @@ type staticModelsJSON struct {
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
+	ZCode       []*ModelInfo `json:"zcode"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -75,6 +76,11 @@ func GetCodexProModels() []*ModelInfo {
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
+}
+
+// GetZCodeModels returns the standard ZCode (Zhipu GLM) model definitions.
+func GetZCodeModels() []*ModelInfo {
+	return cloneModelInfos(getModels().ZCode)
 }
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
@@ -305,6 +311,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - kimi
 //   - antigravity
 //   - xai
+//   - zcode
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -324,6 +331,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "zcode":
+		return GetZCodeModels()
 	default:
 		return nil
 	}
@@ -346,6 +355,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
+		data.ZCode,
 	}
 	for _, models := range allModels {
 		for _, m := range models {
