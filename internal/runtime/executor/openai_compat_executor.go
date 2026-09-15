@@ -127,6 +127,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = normalizeOpenAICompatClaudeSampling(translated, originalPayloadSource, from)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
@@ -342,6 +343,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = normalizeOpenAICompatClaudeSampling(translated, originalPayloadSource, from)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
@@ -570,6 +572,38 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// Claude clients may send top_k together with extended/adaptive thinking. The
+// OpenAI-compatible translation can otherwise preserve that knob all the way
+// to a Claude-backed compatibility route, where Anthropic rejects the pair.
+// Run this after payload overrides so they cannot reintroduce the invalid
+// combination. Non-Claude callers and non-thinking Claude requests are kept.
+func normalizeOpenAICompatClaudeSampling(body, source []byte, from sdktranslator.Format) []byte {
+	if !sourceFormatEqual(from, sdktranslator.FormatClaude) {
+		return body
+	}
+	thinkingActive := false
+	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(source, "thinking.type").String())) {
+	case "enabled", "adaptive", "auto":
+		thinkingActive = true
+	}
+	if !thinkingActive {
+		for _, path := range []string{"output_config.effort", "reasoning_effort", "reasoning.effort"} {
+			value := strings.ToLower(strings.TrimSpace(gjson.GetBytes(source, path).String()))
+			if value == "" {
+				value = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, path).String()))
+			}
+			if value != "" && value != "none" {
+				thinkingActive = true
+				break
+			}
+		}
+	}
+	if thinkingActive {
+		body, _ = sjson.DeleteBytes(body, "top_k")
+	}
+	return body
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
