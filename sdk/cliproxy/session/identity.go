@@ -64,15 +64,35 @@ var knownSessionPrefixes = []string{
 	"pck:", "user:", "execution:", "agy:", "derived:",
 }
 
-// openCodeSiblingNamespace returns the other namespace of the OpenCode family, or "" for
-// any namespace outside it. X-Session-Affinity and X-Opencode-Session are two headers of
-// the same client family, so a parent reference may legitimately be written in either.
+// openCodeFamilyNamespaces lists the namespaces that describe one client family.
+// X-Session-Affinity and X-Opencode-Session are two headers of the same OpenCode client, so
+// a parent reference may name the family member the parent did not bind under. Both the
+// parent lookup and the hierarchy classification must treat the group as one family, which
+// is why the family is listed once, here.
+var openCodeFamilyNamespaces = []string{"opencode:", "affinity:"}
+
+// SessionNamespaceFamily returns the client-family key of a session namespace. Members of one
+// family share a key, so a mixed OpenCode/affinity parent pair is classified as a hierarchy
+// instead of as two unrelated prefixes.
+func SessionNamespaceFamily(namespace string) string {
+	for _, member := range openCodeFamilyNamespaces {
+		if member == namespace {
+			return openCodeFamilyNamespaces[0]
+		}
+	}
+	return namespace
+}
+
+// openCodeSiblingNamespace returns the other namespace of the OpenCode family, or "" for any
+// namespace outside it.
 func openCodeSiblingNamespace(namespace string) string {
-	switch namespace {
-	case "opencode:":
-		return "affinity:"
-	case "affinity:":
-		return "opencode:"
+	if SessionNamespaceFamily(namespace) != openCodeFamilyNamespaces[0] {
+		return ""
+	}
+	for _, member := range openCodeFamilyNamespaces {
+		if member != namespace {
+			return member
+		}
 	}
 	return ""
 }

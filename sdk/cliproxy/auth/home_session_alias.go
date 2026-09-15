@@ -243,7 +243,12 @@ func isHierarchyParent(primary, fallback string) bool {
 	}
 	idx1 := strings.Index(primary, ":")
 	idx2 := strings.Index(fallback, ":")
-	if idx1 > 0 && idx2 > 0 && primary[:idx1] == fallback[:idx2] {
+	// Compare client families, not raw prefixes: the OpenCode gateway names one session in
+	// either of two namespaces, and a mixed pair is a parent/child hierarchy rather than two
+	// unrelated sessions. Treating it as unrelated both bypasses the subagent-affinity setting
+	// and lets Home merge the parent as an alias over the child's own identity.
+	if idx1 > 0 && idx2 > 0 &&
+		cliproxysession.SessionNamespaceFamily(primary[:idx1+1]) == cliproxysession.SessionNamespaceFamily(fallback[:idx2+1]) {
 		return true
 	}
 	if idx1 == -1 && idx2 == -1 {

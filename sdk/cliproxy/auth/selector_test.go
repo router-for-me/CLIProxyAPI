@@ -2801,3 +2801,77 @@ func TestSessionAffinitySelector_OpenCodeGenericParentHeader(t *testing.T) {
 		t.Fatalf("child did not inherit the parent credential: got %s, want %s", childAuth.ID, parentAuth.ID)
 	}
 }
+
+// The two OpenCode namespaces describe one client family, so a mixed pair is a parent/child
+// hierarchy rather than two unrelated prefixes. The classification gates subagent affinity,
+// which the operator can disable.
+func TestIsHierarchyParentOpenCodeFamily(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		primary  string
+		fallback string
+		want     bool
+	}{
+		{name: "open code child with affinity parent", primary: "opencode:child", fallback: "affinity:parent", want: true},
+		{name: "affinity child with open code parent", primary: "affinity:child", fallback: "opencode:parent", want: true},
+		{name: "same namespace", primary: "opencode:child", fallback: "opencode:parent", want: true},
+		{name: "codex child with affinity parent stays unrelated", primary: "codex:child", fallback: "affinity:parent", want: false},
+		{name: "both bare", primary: "child", fallback: "parent", want: true},
+		{name: "bare child with namespaced parent stays unrelated", primary: "child", fallback: "affinity:parent", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := isHierarchyParent(tt.primary, tt.fallback); got != tt.want {
+				t.Fatalf("isHierarchyParent(%q, %q) = %v, want %v", tt.primary, tt.fallback, got, tt.want)
+			}
+		})
+	}
+}
+
+// Disabling subagent affinity must hold across the OpenCode namespaces: before the family
+// classification, the mixed pair was not recognized as a subagent and inherited anyway.
+func TestSessionAffinitySelector_SubagentAffinityDisabledAcrossNamespaces(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:         &RoundRobinSelector{},
+		SubagentAffinity: &disabled,
+	})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "auth-1"}, {ID: "auth-2"}}
+
+	parentOpts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Opencode-Session": []string{"oc-parent-300"}},
+	}
+	parentAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", parentOpts, auths)
+	if err != nil || parentAuth == nil {
+		t.Fatalf("parent Pick() failed: %v", err)
+	}
+	selector.OnResult(Result{
+		AuthID:   parentAuth.ID,
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Success:  true,
+		Options:  parentOpts,
+	})
+
+	childOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Opencode-Session":        []string{"oc-child-301"},
+			"X-Parent-Session-Affinity": []string{"oc-parent-300"},
+		},
+	}
+	childAuth, err := selector.Pick(context.Background(), "openai", "gpt-5.4", childOpts, []*Auth{{ID: "auth-1"}, {ID: "auth-2"}})
+	if err != nil || childAuth == nil {
+		t.Fatalf("child Pick() failed: %v", err)
+	}
+	if childAuth.ID == parentAuth.ID {
+		t.Fatalf("subagent affinity is disabled but the child inherited credential %s", parentAuth.ID)
+	}
+}

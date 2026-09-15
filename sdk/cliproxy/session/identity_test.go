@@ -732,3 +732,29 @@ func TestParentNamespaceAlias(t *testing.T) {
 		})
 	}
 }
+
+// Namespaces that describe one client family must share a family key, so hierarchy
+// classification and the parent lookup agree; unrelated namespaces must stay distinct.
+func TestSessionNamespaceFamily(t *testing.T) {
+	t.Parallel()
+
+	for _, a := range openCodeFamilyNamespaces {
+		for _, b := range openCodeFamilyNamespaces {
+			if SessionNamespaceFamily(a) != SessionNamespaceFamily(b) {
+				t.Fatalf("SessionNamespaceFamily(%q) = %q, want the same key as %q", a, SessionNamespaceFamily(a), b)
+			}
+		}
+	}
+	if family := SessionNamespaceFamily(openCodeFamilyNamespaces[0]); family == "" {
+		t.Fatal("the OpenCode family must have a non-empty key")
+	}
+
+	for _, namespace := range []string{"codex:", "header:", "claude:", "slot:", ""} {
+		if got := SessionNamespaceFamily(namespace); got != namespace {
+			t.Fatalf("SessionNamespaceFamily(%q) = %q, want the namespace unchanged", namespace, got)
+		}
+	}
+	if SessionNamespaceFamily("codex:") == SessionNamespaceFamily("header:") {
+		t.Fatal("unrelated namespaces must not share a family key")
+	}
+}

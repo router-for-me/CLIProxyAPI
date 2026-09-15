@@ -642,3 +642,37 @@ func TestHomeDispatchSessionIDsNestedRequestSubagent(t *testing.T) {
 		t.Fatalf("subParentID = %q, want session:root", subParentID)
 	}
 }
+
+// A native OpenCode child naming an affinity-bound parent must keep its own canonical id.
+// Classifying the mixed namespaces as unrelated made Home merge the parent as an alias,
+// which replaced the child's canonical id with the parent's; that id is later used as the
+// child's x-opencode-session and collapses the upstream child session into its parent.
+func TestHomeDispatchSessionIDsKeepsOpenCodeChildIdentity(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home:    internalconfig.HomeConfig{Enabled: true},
+		Routing: internalconfig.RoutingConfig{SessionAffinityTTL: "1h"},
+	})
+
+	rootOpts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Opencode-Session": []string{"oc-home-root-1"}},
+	}
+	rootID, rootParent := manager.homeDispatchSessionIDs(rootOpts)
+	if rootID != "opencode:oc-home-root-1" || rootParent != "" {
+		t.Fatalf("root session = (%q, %q), want (opencode:oc-home-root-1, \"\")", rootID, rootParent)
+	}
+
+	childOpts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"X-Opencode-Session":        []string{"oc-home-child-2"},
+			"X-Parent-Session-Affinity": []string{"oc-home-root-1"},
+		},
+	}
+	childID, childParent := manager.homeDispatchSessionIDs(childOpts)
+	if childID != "opencode:oc-home-child-2" {
+		t.Fatalf("child canonical = %q, want opencode:oc-home-child-2 (the parent id must not replace it)", childID)
+	}
+	if childParent == "" {
+		t.Fatal("child has no parent_session_id: the parent was merged as an alias instead of a hierarchy")
+	}
+}
