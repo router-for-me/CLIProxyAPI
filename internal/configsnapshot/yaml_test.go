@@ -298,3 +298,128 @@ func TestUnmarshalYAMLMalformedErrorType(t *testing.T) {
 		t.Fatalf("error should mention yaml; got %v", err)
 	}
 }
+
+// TestUnmarshalYAMLRejectsNonMappingExtraEnvelope is a regression test for
+// the silent-drop bug: a top-level __extra key whose value is not a YAML
+// mapping must surface a contextual error rather than vanish during
+// unmarshalling. The envelope is reserved for nested maps.
+func TestUnmarshalYAMLRejectsNonMappingExtraEnvelope(t *testing.T) {
+	cases := []string{
+		"__extra: 7\n",
+		"__extra: \"hello\"\n",
+		"__extra:\n  - one\n  - two\n",
+		"__extra: true\n",
+	}
+	for _, raw := range cases {
+		var snap Snapshot
+		err := UnmarshalYAML([]byte(raw), &snap)
+		if err == nil {
+			t.Fatalf("expected error for non-mapping __extra=%q", raw)
+		}
+		if !strings.Contains(err.Error(), "configsnapshot") {
+			t.Fatalf("error must be tagged configsnapshot; got %v", err)
+		}
+		if !strings.Contains(err.Error(), "__extra") {
+			t.Fatalf("error must mention __extra; got %v", err)
+		}
+	}
+}
+
+// TestMarshalYAMLRejectsReservedExtraInSettings protects the round-trip
+// invariant: a programmatic Snapshot that places __extra under Settings
+// would otherwise bubble up as a top-level __extra: key in the YAML, which
+// a future parser would re-divert into Extra. That round-trip is lossy
+// because the original semantic (Settings vs Extra) is dropped. Reject
+// the ambiguous state explicitly.
+func TestMarshalYAMLRejectsReservedExtraInSettings(t *testing.T) {
+	snap := NewEmpty()
+	snap.Settings["__extra"] = map[string]any{"x": 1}
+	_, err := MarshalYAML(&snap)
+	if err == nil {
+		t.Fatal("MarshalYAML must reject Settings containing reserved __extra key")
+	}
+	if !strings.Contains(err.Error(), "__extra") {
+		t.Fatalf("error must mention __extra; got %v", err)
+	}
+}
+
+// TestMarshalYAMLNormalizesExtraReservedKey is the symmetric counterpart:
+// if a caller mistakenly places __extra under Extra, MarshalYAML still
+// emits the rest of Extra but strips the reserved envelope rather than
+// emitting an ambiguous duplicate.
+func TestMarshalYAMLNormalizesExtraReservedKey(t *testing.T) {
+	snap := NewEmpty()
+	snap.Extra["__extra"] = "should-be-dropped"
+	snap.Extra["forward-key"] = "kept"
+	out, err := MarshalYAML(&snap)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+	body := string(out)
+	if strings.Contains(body, "should-be-dropped") {
+		t.Fatalf("nested __extra under Extra should be elided, got:\n%s", body)
+	}
+	if !strings.Contains(body, "forward-key") {
+		t.Fatalf("forward-key missing from output:\n%s", body)
+	}
+}
+
+// TestUnmarshalYAMLRejectsNonStringMapKey is a regression test for the
+// silent-coercion bug: yaml.v3 can decode nested mappings with non-string
+// keys (e.g. {1: value}) when the target is interface{}. Previously the
+// helper rendered such keys via fmt.Sprintf("%v", k), which produced a
+// string that passed the type assertion but silently lost the original
+// key identity. Now the helper must reject non-string keys with a
+// contextual error so callers can surface a clear failure rather than
+// round-tripping a lossy representation.
+func TestUnmarshalYAMLRejectsNonStringMapKey(t *testing.T) {
+	cases := []string{
+		// ints as mapping keys
+		"routing:\n  strategy: round-robin\n  1: bad\n",
+		// bool as mapping key
+		"routing:\n  true: bad\n",
+		// float as mapping key
+		"routing:\n  1.5: bad\n",
+	}
+	for _, raw := range cases {
+		var snap Snapshot
+		err := UnmarshalYAML([]byte(raw), &snap)
+		if err == nil {
+			t.Fatalf("expected error for non-string nested map key in raw=%q", raw)
+		}
+		if !strings.Contains(err.Error(), "configsnapshot") {
+			t.Fatalf("error must be tagged configsnapshot; got %v", err)
+		}
+		if !strings.Contains(err.Error(), "string") && !strings.Contains(err.Error(), "key") {
+			t.Fatalf("error must mention non-string key; got %v", err)
+		}
+	}
+}
+
+// TestNormalizeStringKeyedNestedMapsSurvive pins that the rejection path
+// does not regress normal string-keyed nested map/list handling. These
+// shapes must still survive UnmarshalYAML and MarshalYAML untouched.
+func TestNormalizeStringKeyedNestedMapsSurvive(t *testing.T) {
+	raw := []byte("port: 9000\nrouting:\n  strategy: round-robin\n  cooldown-wait:\n    max-wait-ms: 15000\n    max-attempts: 3\n")
+	var snap Snapshot
+	if err := UnmarshalYAML(raw, &snap); err != nil {
+		t.Fatalf("UnmarshalYAML: %v", err)
+	}
+	routing, ok := snap.Settings["routing"].(map[string]any)
+	if !ok {
+		t.Fatalf("routing not a map[string]any; got %T", snap.Settings["routing"])
+	}
+	if _, ok := routing["cooldown-wait"].(map[string]any); !ok {
+		t.Fatalf("cooldown-wait not preserved as map[string]any; got %T", routing["cooldown-wait"])
+	}
+	out, err := MarshalYAML(&snap)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+	body := string(out)
+	for _, want := range []string{"strategy", "cooldown-wait", "max-wait-ms: 15000", "max-attempts: 3"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in output:\n%s", want, body)
+		}
+	}
+}

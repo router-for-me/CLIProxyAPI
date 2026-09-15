@@ -9,13 +9,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// scalarKeys is the Phase-1 projection of top-level Config fields that the
-// snapshot can round-trip through YAML. Unknown top-level keys fall through
-// to Snapshot.Extra so the projection can widen in Phase 2 without breaking
-// users that added their own fields. Keep this list aligned with the yaml
-// tags declared on internal/config.Config and its nested structs; it is a
-// hand-maintained allowlist, not a reflection over internal/config (which
-// would couple this package to a different module dependency).
+// scalarKeys is the explicit Phase-1 projection of top-level Config fields
+// that the snapshot round-trips through YAML. This is intentionally a small
+// runtime-settings subset: server binding, TLS, logging, usage/quotas,
+// cooling/retry, routing, ws-auth, antigravity switches, xai/codex/claude
+// provider-wide blocks, claude/codex header defaults, oauth-excluded-models,
+// oauth-model-alias, payload, debug, pprof, branding, commercial-mode,
+// credential-concurrency, credential-in-flight, plugins, remote-management.
+//
+// Provider credential arrays (claude-api-key, codex-api-key, xai-api-key,
+// gemini-api-key, interactions-api-key, openai-compatibility, opencode-go,
+// vertex-api-key) and other fields belonging to normalised resource tables
+// (api_keys, upstream_providers, proxy_pools, model_groups, internal_users,
+// auto_routers) are deliberately absent here. They travel through the
+// normalised resource tables and ResourceRefs, not through Snapshot
+// Settings; unknown fields fall into Extra until a future phase introduces a
+// dedicated section. Do not expand this list to encode credential arrays —
+// that work belongs to MapResources in Task 8 and its successors, not in the
+// scalar projection.
 var scalarKeys = []string{
 	// Server binding.
 	"host",
@@ -99,62 +110,125 @@ func sortedKeys(m map[string]any) []string {
 	return out
 }
 
+// errNonStringMapKey is the sentinel that normalizeYAMLValue returns to
+// callers via *nonStringMapKeyError so the error chain can be inspected
+// programmatically if future callers want to distinguish lossy-key
+// rejections from other decode failures.
+type nonStringMapKeyError struct {
+	parent any
+	key    any
+}
+
+func (e *nonStringMapKeyError) Error() string {
+	return fmt.Sprintf("configsnapshot: non-string map key %v at parent %T; nested mapping keys must be strings so the round-trip is lossless", e.key, e.parent)
+}
+
 // normalizeYAMLValue recursively walks a value decoded by yaml.v3 and
-// converts any map[any]any or yaml.MapSlice containers into map[string]any.
-// yaml.v3 decodes into map[string]any when the target is map[string]any,
-// but when the target is interface{} the inner maps come back as
-// map[any]any, which MarshalYAML cannot emit back to YAML.
-func normalizeYAMLValue(v any) any {
+// converts map[any]any containers into map[string]any. yaml.v3 decodes
+// into map[string]any when the target is map[string]any, but when the
+// target is interface{} the inner maps come back as map[any]any, which
+// MarshalYAML cannot emit back to YAML without a lossy key coercion.
+//
+// Non-string mapping keys are rejected with *nonStringMapKeyError rather
+// than silently converted to "%v": coercing them would change the
+// canonical identity of the value and break the deterministic checksum,
+// so callers must fix the upstream payload (yaml.v3 itself refuses to
+// encode non-string mapping keys). String-keyed nested maps, slices, and
+// scalars pass through unchanged.
+func normalizeYAMLValue(v any) (any, error) {
 	switch t := v.(type) {
 	case map[any]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {
 			ks, ok := k.(string)
 			if !ok {
-				ks = fmt.Sprintf("%v", k)
+				return nil, &nonStringMapKeyError{parent: t, key: k}
 			}
-			out[ks] = normalizeYAMLValue(val)
+			nv, err := normalizeYAMLValue(val)
+			if err != nil {
+				return nil, err
+			}
+			out[ks] = nv
 		}
-		return out
+		return out, nil
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, val := range t {
-			out[k] = normalizeYAMLValue(val)
+			nv, err := normalizeYAMLValue(val)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = nv
 		}
-		return out
+		return out, nil
 	case []any:
 		out := make([]any, len(t))
 		for i, item := range t {
-			out[i] = normalizeYAMLValue(item)
+			nv, err := normalizeYAMLValue(item)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = nv
 		}
-		return out
+		return out, nil
 	default:
-		return v
+		return v, nil
 	}
 }
 
+// extraEnvelope is the reserved sentinel under which forward-compatible
+// fields are grouped when eminemitted to YAML. Programmatic callers must
+// not place "extra" under Settings: that would emit an ambiguous "extra"
+// key at the top level which UnmarshalYAML would re-divert into Extra, a
+// loss-lossy that flattens Settings vs Extra semantics.
+const extraEnvelope = "__extra"
+
 // buildRoot composes the ordered root map that MarshalYAML hands to the
 // yaml.v3 encoder. Known Settings come first, in scalarKeys order; unknown
-// Extra keys follow in sorted order under a synthetic __extra envelope so
+// Extra keys follow in sorted order under the reserved __extra envelope so
 // a future parser can detect forward-compatible fields without losing them.
 // The result is a deterministic Go map. The yaml.v3 encoder sorts map
 // keys at the encoding boundary, so emission is stable.
+//
+// A Snapshot whose Settings contains a top-level __extra key is rejected:
+// the round-trip would be lossy (Settings vs Extra semantics collapse)
+// and there is no clean way to disambiguate the two channels at parse time.
 func buildRoot(snap *Snapshot) (map[string]any, error) {
 	if snap == nil {
 		return nil, errors.New("configsnapshot: nil snapshot")
 	}
+	if _, ok := snap.Settings[extraEnvelope]; ok {
+		return nil, fmt.Errorf("configsnapshot: %s is a reserved envelope key and must not appear under Settings; place forward-compatible fields under Snapshot.Extra instead", extraEnvelope)
+	}
 	root := make(map[string]any, len(snap.Settings)+1)
 	for _, k := range scalarKeys {
 		if v, ok := snap.Settings[k]; ok {
-			root[k] = normalizeYAMLValue(v)
+			nv, err := normalizeYAMLValue(v)
+			if err != nil {
+				return nil, err
+			}
+			root[k] = nv
 		}
 	}
 	if len(snap.Extra) > 0 {
 		extra := make(map[string]any, len(snap.Extra))
 		for _, k := range sortedKeys(snap.Extra) {
-			extra[k] = normalizeYAMLValue(snap.Extra[k])
+			if k == extraEnvelope {
+				// Drop nested __extra entries: the envelope is owned by
+				// MarshalYAML itself. Preserving them would emit
+				// "extra:\n  extra: ..." which UnmarshalYAML cannot
+				// reliably unwind.
+				continue
+			}
+			nv, err := normalizeYAMLValue(snap.Extra[k])
+			if err != nil {
+				return nil, err
+			}
+			extra[k] = nv
 		}
-		root["__extra"] = extra
+		if len(extra) > 0 {
+			root[extraEnvelope] = extra
+		}
 	}
 	return root, nil
 }
@@ -196,8 +270,13 @@ func MarshalYAML(snap *Snapshot) ([]byte, error) {
 // initialised to non-nil maps when they are nil. Empty or whitespace-only
 // input is rejected to match internal/config.ParseConfigBytes.
 //
-// The function normalises yaml.v3's map[any]any / yaml.MapSlice shapes into
-// map[string]any so subsequent MarshalYAML calls can encode them.
+// The function normalises yaml.v3's map[any]any shapes into map[string]any
+// so subsequent MarshalYAML calls can encode them, and refuses non-string
+// nested mapping keys with a contextual error rather than coercing them.
+//
+// The reserved __extra envelope must map to another mapping; scalar or
+// sequence values are rejected so forward-compatible fields cannot be
+// hidden behind a wrong-shape envelope.
 func UnmarshalYAML(data []byte, snap *Snapshot) error {
 	if snap == nil {
 		return errors.New("configsnapshot: nil snapshot target")
@@ -211,7 +290,10 @@ func UnmarshalYAML(data []byte, snap *Snapshot) error {
 	if err := dec.Decode(&raw); err != nil {
 		return fmt.Errorf("configsnapshot: decode yaml: %w", err)
 	}
-	normalized := normalizeYAMLValue(raw)
+	normalized, err := normalizeYAMLValue(raw)
+	if err != nil {
+		return err
+	}
 	nm, ok := normalized.(map[string]any)
 	if !ok {
 		return fmt.Errorf("configsnapshot: top-level yaml must decode to a mapping, got %T", normalized)
@@ -228,11 +310,19 @@ func UnmarshalYAML(data []byte, snap *Snapshot) error {
 		}
 	}
 	for k, v := range nm {
-		if k == "__extra" {
-			if extra, ok := v.(map[string]any); ok {
-				for ek, ev := range extra {
-					snap.Extra[ek] = ev
+		if k == extraEnvelope {
+			extra, ok := v.(map[string]any)
+			if !ok {
+				return fmt.Errorf("configsnapshot: %s envelope must be a mapping; got %T", extraEnvelope, v)
+			}
+			for ek, ev := range extra {
+				// The envelope may not contain a nested __extra key:
+				// nesting would create the same ambiguity that the
+				// top-level guard prevents.
+				if ek == extraEnvelope {
+					return fmt.Errorf("configsnapshot: nested %s key inside %s envelope is reserved", extraEnvelope, extraEnvelope)
 				}
+				snap.Extra[ek] = ev
 			}
 			continue
 		}
