@@ -108,10 +108,13 @@ func HasLevel(levels []string, target string) bool {
 }
 
 // MapToClaudeEffort maps a generic thinking level string to a Claude adaptive
-// thinking effort value (low/medium/high/max).
+// thinking effort value (low/medium/high/xhigh/max).
 //
-// supportsMax indicates whether the target model supports "max" effort.
-// Returns the mapped effort and true if the level is valid, or ("", false) otherwise.
+// supportsMax indicates whether the target model supports "max" effort, which
+// every Claude model with xhigh also supports. xhigh is passed through on such
+// models; when the exact model lacks xhigh (Opus 4.6, Sonnet 4.6), ApplyThinking
+// clamps it to max after translation. Returns the mapped effort and true if the
+// level is valid, or ("", false) otherwise.
 func MapToClaudeEffort(level string, supportsMax bool) (string, bool) {
 	level = strings.ToLower(strings.TrimSpace(level))
 	switch level {
@@ -123,7 +126,7 @@ func MapToClaudeEffort(level string, supportsMax bool) (string, bool) {
 		return level, true
 	case "xhigh", "max":
 		if supportsMax {
-			return "max", true
+			return level, true
 		}
 		return "high", true
 	case "auto":
