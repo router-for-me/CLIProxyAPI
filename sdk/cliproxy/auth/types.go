@@ -284,13 +284,14 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 	return out
 }
 
-// Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
+// Clone shallow copies Auth, duplicating maps and error details to avoid accidental mutation.
 func (a *Auth) Clone() *Auth {
 	if a == nil {
 		return nil
 	}
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
+	copyAuth.LastError = cloneError(a.LastError)
 	if len(a.Attributes) > 0 {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		for key, value := range a.Attributes {
