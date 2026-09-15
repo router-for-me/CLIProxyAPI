@@ -303,7 +303,7 @@ func (a *Auth) Clone() *Auth {
 			copyAuth.Metadata[key] = value
 		}
 	}
-	if len(a.ModelStates) > 0 {
+	if a.ModelStates != nil {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()
