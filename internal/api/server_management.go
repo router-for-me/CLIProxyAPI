@@ -44,6 +44,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/plugins/:id/quota", s.mgmt.ResetPluginQuota)
 		mgmt.POST("/plugins/:id/quota/reset", s.mgmt.ResetPluginQuota)
 
+		mgmt.GET("/claude-client-versions", s.mgmt.GetClaudeClientVersions)
+
 		mgmt.GET("/debug", s.mgmt.GetDebug)
 		mgmt.PUT("/debug", s.mgmt.PutDebug)
 		mgmt.PATCH("/debug", s.mgmt.PutDebug)
