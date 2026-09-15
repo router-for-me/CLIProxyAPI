@@ -233,6 +233,7 @@ var claudeCodeMessagesHeaderOrder = []string{
 	"User-Agent",
 	"X-Claude-Code-Session-Id",
 	"X-Stainless-Arch",
+	"X-Stainless-Helper-Method",
 	"X-Stainless-Lang",
 	"X-Stainless-OS",
 	"X-Stainless-Package-Version",

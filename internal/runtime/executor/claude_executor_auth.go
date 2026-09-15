@@ -73,6 +73,9 @@ func isClaudeOAuthScope403(err error) bool {
 }
 
 func (e *ClaudeExecutor) PrepareRequestAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if err := rejectPlaceholderClaudeAPIKey(auth); err != nil {
+		return nil, err
+	}
 	if auth == nil || !e.ShouldPrepareRequestAuth(auth) {
 		return auth, nil
 	}
