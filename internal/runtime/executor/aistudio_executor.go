@@ -317,7 +317,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				helps.RecordAPIResponseError(ctx, e.cfg, event.Err)
 				reporter.PublishFailure(ctx, event.Err)
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}:
+				case out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %w", event.Err)}:
 				case <-ctx.Done():
 				}
 				return false
