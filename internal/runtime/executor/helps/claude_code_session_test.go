@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func TestExtractClaudeCodeSessionIDFromPayloadJSON(t *testing.T) {
@@ -118,5 +119,43 @@ func TestClaudeCodePromptCacheDeterministicAndAgentScoped(t *testing.T) {
 	otherModel, ok, errModel := ClaudeCodePromptCache(context.Background(), "gpt-5.5", nil, rootHeaders)
 	if errModel != nil || !ok || otherModel.ID == rootFirst.ID {
 		t.Fatalf("other model cache = %#v, %v, %v; root ID %q", otherModel, ok, errModel, rootFirst.ID)
+	}
+}
+
+func TestClaudeCodePromptCacheSharesPartitionWhenPerAgentDisabled(t *testing.T) {
+	rootHeaders := http.Header{}
+	rootHeaders.Set(ClaudeCodeSessionHeader, "session-shared-partition")
+	childA := rootHeaders.Clone()
+	childA.Set(ClaudeCodeAgentHeader, "agent-a")
+	childB := rootHeaders.Clone()
+	childB.Set(ClaudeCodeAgentHeader, "agent-b")
+
+	perAgent := false
+	cfg := &config.Config{CodexCacheKeyPerAgent: &perAgent}
+
+	root, ok, err := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, rootHeaders, cfg)
+	if err != nil || !ok {
+		t.Fatalf("root cache = %#v, %v, %v", root, ok, err)
+	}
+	for name, headers := range map[string]http.Header{"agent-a": childA, "agent-b": childB} {
+		got, ok, errAgent := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, headers, cfg)
+		if errAgent != nil || !ok || got.ID != root.ID {
+			t.Fatalf("%s cache = %#v, %v, %v; want root ID %q", name, got, ok, errAgent, root.ID)
+		}
+	}
+
+	// A different session must still get its own partition.
+	otherSession := http.Header{}
+	otherSession.Set(ClaudeCodeSessionHeader, "session-other")
+	other, ok, errOther := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, otherSession, cfg)
+	if errOther != nil || !ok || other.ID == root.ID {
+		t.Fatalf("other session cache = %#v, %v, %v; root ID %q", other, ok, errOther, root.ID)
+	}
+
+	// Reasoning-replay scope stays agent-qualified regardless of the flag.
+	scopeA, _ := ClaudeCodeExecutionScope(context.Background(), nil, childA)
+	scopeB, _ := ClaudeCodeExecutionScope(context.Background(), nil, childB)
+	if scopeA == scopeB {
+		t.Fatalf("execution scopes collapsed: a=%q b=%q", scopeA, scopeB)
 	}
 }
