@@ -22,17 +22,19 @@ import (
 
 // OAuth configuration constants for OpenAI Codex
 const (
-	AuthURL             = "https://auth.openai.com/oauth/authorize"
-	TokenURL            = "https://auth.openai.com/oauth/token"
-	ClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
-	RedirectURI         = "http://localhost:1455/auth/callback"
-	codexRefreshTimeout = 30 * time.Second
+	AuthURL                   = "https://auth.openai.com/oauth/authorize"
+	TokenURL                  = "https://auth.openai.com/oauth/token"
+	ClientID                  = "app_EMoamEEZ73f0CkXaXp7hrann"
+	RedirectURI               = "http://localhost:1455/auth/callback"
+	codexRefreshTimeout       = 30 * time.Second
+	defaultCodexAuthUserAgent = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
 // It manages the HTTP client and provides methods for generating authorization URLs,
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
+	cfg        *config.Config
 	httpClient *http.Client
 }
 
@@ -57,8 +59,18 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
 	return &CodexAuth{
+		cfg:        cfg,
 		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
 	}
+}
+
+func (o *CodexAuth) effectiveUserAgent() string {
+	if o != nil && o.cfg != nil {
+		if ua := strings.TrimSpace(o.cfg.CodexHeaderDefaults.UserAgent); ua != "" {
+			return ua
+		}
+	}
+	return defaultCodexAuthUserAgent
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).
@@ -120,6 +132,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", o.effectiveUserAgent())
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
@@ -225,6 +238,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", o.effectiveUserAgent())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {

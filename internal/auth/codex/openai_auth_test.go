@@ -193,3 +193,48 @@ func TestNewCodexAuthWithProxyURL_OverrideProxyTakesPrecedence(t *testing.T) {
 		t.Fatalf("proxy URL = %v, want http://override.example.com:8081", proxyURL)
 	}
 }
+
+func TestCodexAuth_EffectiveUserAgent(t *testing.T) {
+	// 1. Default fallback
+	authDefault := NewCodexAuth(nil)
+	if got := authDefault.effectiveUserAgent(); got != defaultCodexAuthUserAgent {
+		t.Fatalf("effectiveUserAgent() = %q, want default %q", got, defaultCodexAuthUserAgent)
+	}
+
+	// 2. Config override
+	customUA := "codex-test/1.0.0"
+	cfg := &config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: customUA,
+		},
+	}
+	authCustom := NewCodexAuth(cfg)
+	if got := authCustom.effectiveUserAgent(); got != customUA {
+		t.Fatalf("effectiveUserAgent() = %q, want custom %q", got, customUA)
+	}
+}
+
+func TestRefreshTokens_SetsUserAgent(t *testing.T) {
+	resetCodexRefreshGroupForTest()
+	defer resetCodexRefreshGroupForTest()
+
+	var capturedUA string
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				capturedUA = req.Header.Get("User-Agent")
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader(`{"error":"test_probe"}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	_, _ = auth.RefreshTokens(context.Background(), "test-token")
+	if capturedUA != defaultCodexAuthUserAgent {
+		t.Fatalf("captured User-Agent = %q, want %q", capturedUA, defaultCodexAuthUserAgent)
+	}
+}
