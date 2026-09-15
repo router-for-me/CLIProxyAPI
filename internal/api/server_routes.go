@@ -789,6 +789,12 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		if entry.ownedBy != "" {
 			model["owned_by"] = entry.ownedBy
 		}
+		if entry.contextLength > 0 {
+			model["context_length"] = entry.contextLength
+		}
+		if entry.maxCompletionTokens > 0 {
+			model["max_completion_tokens"] = entry.maxCompletionTokens
+		}
 		filtered = append(filtered, model)
 	}
 	s.writeModelListResponse(c, "openai", gin.H{
