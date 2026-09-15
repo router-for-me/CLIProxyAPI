@@ -5,12 +5,25 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
+
+// stubZCodeRouter is a spy router that never touches the network: Refresh is a
+// no-op and BaseURL returns a fixed pinned base (used to prove the request was
+// routed to the ultra gateway / test server).
+type stubZCodeRouter struct {
+	base string
+}
+
+func (s *stubZCodeRouter) Refresh(context.Context) error { return nil }
+func (s *stubZCodeRouter) BaseURL(_ *cliproxyauth.Auth, _ string) string {
+	return s.base
+}
 
 func TestZCodeExecutor_RequestToFormat(t *testing.T) {
 	e := NewZCodeExecutor(nil)
@@ -48,12 +61,80 @@ func TestZCodeExecutor_SendsIdentityHeaders(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "glm-5.3", Payload: reqBody, Format: sdktranslator.FormatClaude}
 
 	e := NewZCodeExecutor(nil)
+	// Hermetic: a stub router whose Refresh never touches the network (the auth
+	// pins the test server base, so BaseURL is simply never used).
+	e.routes = &stubZCodeRouter{base: srv.URL}
 	resp, err := e.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if len(resp.Payload) == 0 {
 		t.Fatal("expected non-empty response payload")
+	}
+	if gotHeaders.Get("User-Agent") != "ZCode/3.12.0" {
+		t.Fatalf("User-Agent = %q", gotHeaders.Get("User-Agent"))
+	}
+	if gotHeaders.Get("X-ZCode-Agent") != "glm" {
+		t.Fatalf("X-ZCode-Agent = %q", gotHeaders.Get("X-ZCode-Agent"))
+	}
+	if gotHeaders.Get("X-Client-Lang") != "zh-CN" {
+		t.Fatalf("X-Client-Lang = %q", gotHeaders.Get("X-Client-Lang"))
+	}
+	if gotHeaders.Get("X-Client-Timezone") != "Asia/Shanghai" {
+		t.Fatalf("X-Client-Timezone = %q", gotHeaders.Get("X-Client-Timezone"))
+	}
+}
+
+func TestZCodeExecutor_ExecuteStream_RoutesToUltraAndSendsIdentityHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"glm-5.3\"}}\n\ndata: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	// Pin the canonical default base so the executor's routing logic runs, and
+	// inject a stub router that maps it to the test server (proving the routed
+	// ultra-gateway base is applied on the streaming path).
+	auth := &cliproxyauth.Auth{
+		ID: "zcode.json", Provider: "zcode",
+		Attributes: map[string]string{
+			"api_key":                  "k.s",
+			"base_url":                 "https://api.z.ai/api/anthropic",
+			"header:User-Agent":        "ZCode/3.12.0",
+			"header:X-ZCode-Agent":     "glm",
+			"header:X-Client-Lang":     "zh-CN",
+			"header:X-Client-Timezone": "Asia/Shanghai",
+		},
+	}
+	reqBody, _ := json.Marshal(map[string]any{
+		"model":      "glm-5.3",
+		"max_tokens": 1024,
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+	})
+	req := cliproxyexecutor.Request{Model: "glm-5.3", Payload: reqBody, Format: sdktranslator.FormatClaude}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+
+	e := NewZCodeExecutor(nil)
+	e.routes = &stubZCodeRouter{base: srv.URL}
+
+	res, err := e.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("execute stream: %v", err)
+	}
+	var chunks []string
+	for c := range res.Chunks {
+		if c.Err != nil {
+			t.Fatalf("stream chunk error: %v", c.Err)
+		}
+		if len(c.Payload) > 0 {
+			chunks = append(chunks, string(c.Payload))
+		}
+	}
+	joined := strings.Join(chunks, "")
+	if !strings.Contains(joined, "message_start") {
+		t.Fatalf("expected streamed message_start, got: %q", joined)
 	}
 	if gotHeaders.Get("User-Agent") != "ZCode/3.12.0" {
 		t.Fatalf("User-Agent = %q", gotHeaders.Get("User-Agent"))

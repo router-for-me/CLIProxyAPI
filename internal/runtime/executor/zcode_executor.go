@@ -17,6 +17,14 @@ import (
 // honored verbatim.
 const zcodeDefaultAnthropicEndpoint = "https://api.z.ai/api/anthropic"
 
+// zcodeRouter resolves the coding-plan base URL to the ultra gateway. It is an
+// interface so tests can inject a stub whose Refresh is a no-op, keeping unit
+// tests hermetic (no network).
+type zcodeRouter interface {
+	Refresh(ctx context.Context) error
+	BaseURL(auth *cliproxyauth.Auth, path string) string
+}
+
 // ZCodeExecutor forwards Anthropic-format requests to the ZCode coding API,
 // presenting the native ZCode client identity headers (stored as header:*
 // attributes at login). It delegates the wire protocol to ClaudeExecutor, which
@@ -25,7 +33,7 @@ const zcodeDefaultAnthropicEndpoint = "https://api.z.ai/api/anthropic"
 type ZCodeExecutor struct {
 	*ClaudeExecutor
 	cfg    *config.Config
-	routes *helps.ZCodeRouteResolver
+	routes zcodeRouter
 }
 
 // NewZCodeExecutor constructs the executor.
@@ -50,10 +58,28 @@ func (e *ZCodeExecutor) RequestToFormat(_ cliproxyexecutor.Request, _ cliproxyex
 
 // Execute resolves the routed base URL, refreshes the routing snapshot, then
 // delegates to ClaudeExecutor with a per-request clone of the auth whose
-// attributes carry the resolved base_url and the preserved api_key. ClaudeExecutor
-// reads base_url/api_key from the passed auth's Attributes and applies the
-// header:* attrs, so delegating the inherited Execute covers both paths.
+// attributes carry the resolved base_url and the preserved api_key.
 func (e *ZCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	authClone := e.routedAuth(ctx, auth, opts)
+	return e.ClaudeExecutor.Execute(ctx, authClone, req, opts)
+}
+
+// ExecuteStream mirrors Execute on the streaming path: it resolves the routed
+// base URL and delegates to ClaudeExecutor's streaming implementation so the
+// ultra-gateway routing and identity headers apply to streaming requests too —
+// without this override, method promotion would call ClaudeExecutor.ExecuteStream
+// with the raw, un-routed auth and bypass routing entirely.
+func (e *ZCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	authClone := e.routedAuth(ctx, auth, opts)
+	return e.ClaudeExecutor.ExecuteStream(ctx, authClone, req, opts)
+}
+
+// routedAuth refreshes the routing snapshot (fail-open), resolves the routed
+// base URL for the request, and returns a per-request clone of the auth carrying
+// the resolved base_url and api_key. ClaudeExecutor reads base_url/api_key from
+// the passed auth's Attributes and applies the header:* attrs, so a shared helper
+// drives both the stream and non-stream paths with identical routing.
+func (e *ZCodeExecutor) routedAuth(ctx context.Context, auth *cliproxyauth.Auth, opts cliproxyexecutor.Options) *cliproxyauth.Auth {
 	if err := e.routes.Refresh(ctx); err != nil {
 		// Fail-open: the requested route stays on the pinned/fallback endpoint.
 		log.WithError(err).Debug("zcode executor: route refresh failed, keeping pinned/fallback endpoint")
@@ -68,7 +94,7 @@ func (e *ZCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			base = zcodeDefaultAnthropicEndpoint
 		}
 	}
-	return e.ClaudeExecutor.Execute(ctx, withBaseURL(auth, base, apiKey), req, opts)
+	return withBaseURL(auth, base, apiKey)
 }
 
 // requestPathMetadata extracts the inbound request path when available; the
