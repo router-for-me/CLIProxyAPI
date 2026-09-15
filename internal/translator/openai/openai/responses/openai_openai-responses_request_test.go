@@ -1680,3 +1680,52 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongDeclarationDoe
 		}
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_AmbiguousLongLocalNameStaysUnresolved(t *testing.T) {
+	// Two namespace declarations sharing the same >64-byte local name, with a
+	// replayed call that omits the namespace: resolution is ambiguous, and the
+	// capped fallback must not land on either declaration's alias, or the call
+	// would silently invoke that namespace's tool.
+	longLocal := "shared_" + strings.Repeat("x", 60)
+	toolsJSON := `[
+		{
+			"type":"namespace",
+			"name":"mcp__alpha",
+			"tools":[{"type":"function","name":"` + longLocal + `","parameters":{"type":"object"}}]
+		},
+		{
+			"type":"namespace",
+			"name":"mcp__beta",
+			"tools":[{"type":"function","name":"` + longLocal + `","parameters":{"type":"object"}}]
+		}
+	]`
+
+	replay := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"` + longLocal + `","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": ` + toolsJSON + `
+	}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", replay, false)
+
+	declaredAliases := map[string]bool{}
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		declaredAliases[tool.Get("function.name").String()] = true
+	}
+	if len(declaredAliases) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(declaredAliases), out)
+	}
+	replayedName := ""
+	for _, m := range gjson.GetBytes(out, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			replayedName = m.Get("tool_calls.0.function.name").String()
+		}
+	}
+	if len(replayedName) > 64 {
+		t.Fatalf("replayed ambiguous name %q (len %d) exceeds 64; output=%s", replayedName, len(replayedName), out)
+	}
+	if declaredAliases[replayedName] {
+		t.Fatalf("ambiguous replayed call resolved to declared alias %q, silently invoking one namespace's tool; output=%s", replayedName, out)
+	}
+}

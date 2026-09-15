@@ -400,8 +400,9 @@ func resolveResponsesQualifiedToolIdentity(root gjson.Result, qualifiedName stri
 // calls stay consistent with their declarations even when a collision renamed
 // the tool. Unknown identities fall back to plain namespace qualification.
 func chatNameForResponsesNamespaceToolCall(requestRawJSON []byte, namespace, localName string) string {
+	root := gjson.ParseBytes(requestRawJSON)
 	qualified := ""
-	walkResponsesToolDeclarations(gjson.ParseBytes(requestRawJSON), func(declaration responsesToolDeclaration) bool {
+	walkResponsesToolDeclarations(root, func(declaration responsesToolDeclaration) bool {
 		if declaration.namespace == namespace && declaration.localName == localName {
 			qualified = declaration.chatName
 			return false
@@ -411,7 +412,10 @@ func chatNameForResponsesNamespaceToolCall(requestRawJSON []byte, namespace, loc
 	if qualified != "" {
 		return qualified
 	}
-	return qualifyResponsesNamespaceToolName(namespace, localName)
+	// An identity no current declaration backs (history from an older build,
+	// or a foreign client) still needs a chat-legal name, but not one that a
+	// real declaration owns — that would attribute the call to that tool.
+	return avoidResponsesDeclaredChatAliases(root, qualifyResponsesNamespaceToolName(namespace, localName))
 }
 
 // canonicalResponsesToolName restores an omitted namespace only when the current
@@ -459,9 +463,34 @@ func canonicalResponsesToolName(requestRawJSON []byte, name string) string {
 	if chatName != "" {
 		return chatName
 	}
-	// An uncapped name that no current declaration produced: still enforce the
-	// chat tool name limit so the request cannot be rejected wholesale.
-	return capResponsesChatToolName(name)
+	// A name that no current declaration produced (unresolved or ambiguous
+	// local-name matches above, or history from an older build): still enforce
+	// the chat tool name limit, but never land on a declared alias — that
+	// would attribute the call to whichever declaration happens to own the
+	// capped value.
+	return avoidResponsesDeclaredChatAliases(root, capResponsesChatToolName(name))
+}
+
+// avoidResponsesDeclaredChatAliases keeps a fallback name (the blind cap of an
+// unresolved or ambiguous name) from colliding with any alias the request's
+// declarations actually emit. Dispatching such a call to a real declaration
+// would silently invoke the wrong tool; a distinct name keeps the identity
+// unresolved instead, which upstreams and clients can surface properly.
+func avoidResponsesDeclaredChatAliases(root gjson.Result, candidate string) string {
+	claimed := make(map[string]struct{})
+	walkResponsesToolDeclarations(root, func(declaration responsesToolDeclaration) bool {
+		claimed[declaration.chatName] = struct{}{}
+		return true
+	})
+	if _, taken := claimed[candidate]; !taken {
+		return candidate
+	}
+	for suffix := 1; ; suffix++ {
+		variant := capResponsesChatToolName(candidate + "_" + strconv.Itoa(suffix))
+		if _, taken := claimed[variant]; !taken {
+			return variant
+		}
+	}
 }
 
 func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
