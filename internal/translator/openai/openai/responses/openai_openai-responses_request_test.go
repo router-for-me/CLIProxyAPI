@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -1585,5 +1586,97 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DisambiguatesTrunc
 	}
 	if replayedName != second {
 		t.Fatalf("replayed collision-suffixed call name = %q, want %q to match the tools array; output=%s", replayedName, second, replayOut)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongDeclarationDoesNotDisplaceShortOriginal(t *testing.T) {
+	// A long namespace declaration whose capped tail equals a later flat
+	// declaration's original name must take the suffix itself: the flat tool's
+	// original name is what replayed calls and tool_choice carry, so
+	// displacing it would dispatch those calls to the wrong tool.
+	longNamespace := "mcp__a__" + strings.Repeat("b", 60)
+	longChild := "child_tool"
+	qualified := longNamespace + "__" + longChild
+	flatName := capResponsesChatToolName(qualified)
+	if len(qualified) <= 64 || len(flatName) != 64 || flatName == qualified {
+		t.Fatalf("fixture drift: qualified %q (len %d) must exceed the cap and cap to 64 chars", qualified, len(qualified))
+	}
+	suffixed := capResponsesChatToolName(flatName + "_1")
+
+	toolsJSON := `[
+		{
+			"type":"namespace",
+			"name":"` + longNamespace + `",
+			"tools":[{"type":"function","name":"` + longChild + `","parameters":{"type":"object"}}]
+		},
+		{"type":"function","name":"` + flatName + `","parameters":{"type":"object"}}
+	]`
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": ` + toolsJSON + `
+	}`), false)
+	emitted := gjson.GetBytes(out, "tools").Array()
+	if len(emitted) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(emitted), out)
+	}
+	if got := emitted[1].Get("function.name").String(); got != flatName {
+		t.Fatalf("flat declaration was displaced: its name is %q, want its original %q; output=%s", got, flatName, out)
+	}
+	if got := emitted[0].Get("function.name").String(); got != suffixed {
+		t.Fatalf("long declaration name = %q, want suffixed %q; output=%s", got, suffixed, out)
+	}
+	for _, tool := range emitted {
+		if name := tool.Get("function.name").String(); len(name) > 64 {
+			t.Errorf("function.name %q (len %d) exceeds 64; output=%s", name, len(name), out)
+		}
+	}
+
+	// Replayed calls and tool_choice for the flat tool carry its original
+	// name; they must resolve to the flat declaration, not to the long
+	// declaration that caps onto it.
+	replay := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"` + flatName + `","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": ` + toolsJSON + `
+	}`)
+	replayOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", replay, false)
+	for _, m := range gjson.GetBytes(replayOut, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			if got := m.Get("tool_calls.0.function.name").String(); got != flatName {
+				t.Fatalf("replayed flat call resolved to %q, want %q; output=%s", got, flatName, replayOut)
+			}
+		}
+	}
+
+	forcedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": ` + toolsJSON + `,
+		"tool_choice": {"type":"function","function":{"name":"` + flatName + `"}}
+	}`), false)
+	if got := gjson.GetBytes(forcedOut, "tool_choice.function.name").String(); got != flatName {
+		t.Fatalf("tool_choice for the flat tool resolved to %q, want %q; output=%s", got, flatName, forcedOut)
+	}
+
+	// A replayed call carrying the long declaration's fully-qualified
+	// uncapped name (history from an older build or a foreign client that
+	// flattened the name itself) must resolve to the suffixed chat name,
+	// not to the capped tail that now belongs to the flat tool.
+	longReplay := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_2","name":"` + qualified + `","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_2","output":"ok"}
+		],
+		"tools": ` + toolsJSON + `
+	}`)
+	longReplayOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", longReplay, false)
+	for _, m := range gjson.GetBytes(longReplayOut, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			if got := m.Get("tool_calls.0.function.name").String(); got != suffixed {
+				t.Fatalf("replayed long-qualified call resolved to %q, want %q; output=%s", got, suffixed, longReplayOut)
+			}
+		}
 	}
 }

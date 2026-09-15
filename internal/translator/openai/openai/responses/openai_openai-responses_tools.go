@@ -96,15 +96,22 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 	}
 }
 
-// disambiguateResponsesChatToolNames rewrites flattened names in place when two
+// disambiguateResponsesChatToolNames rewrites flattened names in place when
 // distinct declarations collapse onto the same capped Chat Completions name.
 // Identity is the pre-cap qualified name: declarations that qualified to the
 // same name before the cap (one tool delivered through both "tools" and
-// "additional_tools", or a flat tool colliding with a namespace child) are the
-// same upstream tool and keep the shared first-wins name, while distinct names
-// that only collide through truncation get "_1"-style suffixes so the
-// deduplication downstream never silently drops a real tool. Suffixed variants
-// stay within the name cap, and every variant is claimed in the same pass so a
+// "additional_tools", or a flat tool colliding with a namespace child) are
+// the same upstream tool and keep the shared first-wins name, while distinct
+// names that only collide through truncation get "_1"-style suffixes so the
+// deduplication downstream never silently drops a real tool.
+//
+// Qualified names that fit the cap unchanged are claimed before any
+// truncation alias is assigned (equal raw names are one identity, so those
+// claims cannot conflict). A long declaration whose capped tail lands on such
+// a name therefore takes the suffix itself, instead of displacing a
+// declaration whose original name — the name replayed calls, tool_choice, and
+// reverse resolution carry — fits the limit unchanged. Suffixed variants stay
+// within the name cap, and every variant is claimed in the same pass so a
 // later declaration cannot resurrect a collision.
 func disambiguateResponsesChatToolNames(declarations []responsesToolDeclaration) {
 	claimed := make(map[string]string, len(declarations))
@@ -116,7 +123,16 @@ func disambiguateResponsesChatToolNames(declarations []responsesToolDeclaration)
 			return owner == identity
 		}
 	}
+	longDeclarations := make([]int, 0)
 	for i := range declarations {
+		identity := rawResponsesNamespaceQualifiedName(declarations[i].namespace, declarations[i].localName)
+		if len(identity) > responsesChatToolNameLimit {
+			longDeclarations = append(longDeclarations, i)
+			continue
+		}
+		claim(identity, identity)
+	}
+	for _, i := range longDeclarations {
 		identity := rawResponsesNamespaceQualifiedName(declarations[i].namespace, declarations[i].localName)
 		name := declarations[i].chatName
 		if claim(name, identity) {
@@ -425,10 +441,26 @@ func canonicalResponsesToolName(requestRawJSON []byte, name string) string {
 	if candidate != "" && !ambiguous {
 		return candidate
 	}
-	// A replayed call may carry a name that no current declaration produced
-	// (e.g. history recorded by an older build, or a foreign client that
-	// flattened the qualified name itself). Still enforce the chat tool name
-	// limit so the request cannot be rejected wholesale.
+	// A replayed call may carry the fully-qualified uncapped name of a long
+	// declaration (history recorded by an older build, or a foreign client
+	// that flattened the qualified name itself). Resolve it to that
+	// declaration's emitted chat name before applying the blind cap, which
+	// could otherwise collide with a different declaration whose original
+	// name equals the long declaration's capped tail.
+	rawQualified := name
+	chatName := ""
+	walkResponsesToolDeclarations(root, func(declaration responsesToolDeclaration) bool {
+		if rawResponsesNamespaceQualifiedName(declaration.namespace, declaration.localName) == rawQualified {
+			chatName = declaration.chatName
+			return false
+		}
+		return true
+	})
+	if chatName != "" {
+		return chatName
+	}
+	// An uncapped name that no current declaration produced: still enforce the
+	// chat tool name limit so the request cannot be rejected wholesale.
 	return capResponsesChatToolName(name)
 }
 
