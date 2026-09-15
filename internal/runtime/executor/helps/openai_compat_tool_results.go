@@ -26,7 +26,7 @@ func ShouldNormalizeOpenAIToolResultsForModel(compat *config.OpenAICompatibility
 	return normalize
 }
 
-// NormalizeOpenAIToolResultsTextOnly converts tool message content to strings.
+// NormalizeOpenAIToolResultsTextOnly converts tool result content to strings.
 // Text parts are preserved and image parts are replaced with a short marker.
 func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 	messages := gjson.GetBytes(payload, "messages")
@@ -37,13 +37,13 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 	out := payload
 	messageIndex := 0
 	messages.ForEach(func(_, message gjson.Result) bool {
-		if message.Get("role").String() == "tool" {
-			content := message.Get("content")
-			if content.Exists() && content.Type != gjson.String {
-				path := fmt.Sprintf("messages.%d.content", messageIndex)
-				if updated, errSet := sjson.SetBytes(out, path, flattenOpenAIToolResultContent(content)); errSet == nil {
-					out = updated
-				}
+		role := message.Get("role").String()
+		content := message.Get("content")
+		isRelayedUserContent := role == "user" && content.IsArray() && content.Get("0.text").String() == openAIToolResultImageRelayNotice
+		if (role == "tool" && content.Exists() && content.Type != gjson.String) || isRelayedUserContent {
+			path := fmt.Sprintf("messages.%d.content", messageIndex)
+			if updated, errSet := sjson.SetBytes(out, path, flattenOpenAIToolResultContent(content)); errSet == nil {
+				out = updated
 			}
 		}
 		messageIndex++
@@ -157,6 +157,7 @@ func isOpenAIImageToolResultPart(item gjson.Result) bool {
 	switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
 	case "image", "image_url", "input_image":
 		return true
+	default:
+		return false
 	}
-	return item.Get("image_url").Exists() || item.Get("input_image").Exists()
 }

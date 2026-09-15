@@ -19,12 +19,12 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 		name            string
 		stream          bool
 		inputModalities []string
-		wantString      bool
+		textOnly        bool
 	}{
-		{name: "non-stream text-only", stream: false, inputModalities: []string{"text"}, wantString: true},
-		{name: "stream text-only", stream: true, inputModalities: []string{"text"}, wantString: true},
-		{name: "non-stream multimodal", stream: false, inputModalities: []string{"text", "image"}, wantString: false},
-		{name: "non-stream unspecified", stream: false, inputModalities: nil, wantString: false},
+		{name: "non-stream text-only", stream: false, inputModalities: []string{"text"}, textOnly: true},
+		{name: "stream text-only", stream: true, inputModalities: []string{"text"}, textOnly: true},
+		{name: "non-stream multimodal", stream: false, inputModalities: []string{"text", "image"}},
+		{name: "non-stream unspecified", stream: false, inputModalities: nil},
 	}
 
 	for _, tt := range tests {
@@ -84,16 +84,18 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 			}
 
 			toolContent := gjson.GetBytes(gotBody, "messages.1.content")
-			if tt.wantString {
-				if toolContent.Type != gjson.String {
-					t.Fatalf("tool content type = %s, want string; body=%s", toolContent.Type, string(gotBody))
+			if toolContent.Type != gjson.String || toolContent.String() != "image inspected" {
+				t.Fatalf("tool content = %s, want %q; body=%s", toolContent.Raw, "image inspected", string(gotBody))
+			}
+
+			relayContent := gjson.GetBytes(gotBody, "messages.2.content")
+			if tt.textOnly {
+				want := "Images returned by the preceding tool call(s):\n\n[image omitted: unsupported by upstream]"
+				if relayContent.Type != gjson.String || relayContent.String() != want {
+					t.Fatalf("relay content = %s, want %q; body=%s", relayContent.Raw, want, string(gotBody))
 				}
-				want := "image inspected\n\n[image omitted: unsupported by upstream]"
-				if toolContent.String() != want {
-					t.Fatalf("tool content = %q, want %q", toolContent.String(), want)
-				}
-			} else if !toolContent.IsArray() {
-				t.Fatalf("tool content type = %s, want array; body=%s", toolContent.Type, string(gotBody))
+			} else if imageURL := relayContent.Get("1.image_url.url").String(); imageURL != "data:image/png;base64,AA==" {
+				t.Fatalf("relay image URL = %q; body=%s", imageURL, string(gotBody))
 			}
 		})
 	}
