@@ -493,7 +493,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		// supports compaction replay.
 		observedCompactionReplayAuthID := ""
 		observedCompactionSupported := false
-		if observedCompaction.modelName != "" &&
+		if inputContainsFullTranscript(gjson.GetBytes(payload, "input")) &&
+			observedCompaction.modelName != "" &&
 			responsesWebsocketResolvedModelName(observedCompaction.modelName) == responsesWebsocketResolvedModelName(requestModelName) {
 			if isPluginExecutorRoute {
 				if observedCompaction.pluginID != "" && observedCompaction.pluginID == pluginExecutorID {
