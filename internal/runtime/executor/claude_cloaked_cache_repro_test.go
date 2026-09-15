@@ -15,6 +15,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // TestClaudeBillingFingerprintMultiTurnUsesFirstUserText verifies that in a multi-turn conversation,
@@ -222,7 +223,7 @@ func TestClaudeCloakedSingleTurnPrefixStabilityWithPinnedSession(t *testing.T) {
 
 // TestClaudeCloakedMultiTurnPrefixStability verifies that across turns in a multi-turn conversation:
 //  1. The top-level system prefix fields (including cc_version buildHash, cc_prompt_id, and system.1 identity)
-//     and messages[0]/messages[1] remain invariant between Turn 1, Turn 2, and Turn 3.
+//     and messages[0]/messages[1] remain invariant apart from the rolling cache marker.
 //  2. Neither turn injects dynamic cc_prev_req into the cloaked system header.
 //  3. Repeated requests of the exact same multi-turn history produce 100% byte-identical upstream bodies.
 func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
@@ -312,9 +313,21 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 		t.Fatalf("system.1 identity block differs across turns:\nTurn 1: %s\nTurn 2: %s", agent1, agent2)
 	}
 
-	// 3. Verify messages[0] (the first user message anchor) matches across turns
+	// 3. The first user content remains stable while its first-turn rolling marker
+	// advances to the latest message instead of becoming a stale first-user marker.
 	msg1User := gjson.GetBytes(body1, "messages.0").Raw
 	msg2User := gjson.GetBytes(body2, "messages.0").Raw
+	if gjson.Get(msg1User, "content.1.cache_control.type").String() != "ephemeral" {
+		t.Fatalf("first turn is missing its rolling cache marker: %s", msg1User)
+	}
+	if gjson.Get(msg2User, "content.1.cache_control").Exists() {
+		t.Fatalf("second turn kept a stale first-user cache marker: %s", msg2User)
+	}
+	var errDelete error
+	msg1User, errDelete = sjson.Delete(msg1User, "content.1.cache_control")
+	if errDelete != nil {
+		t.Fatal(errDelete)
+	}
 	if msg1User != msg2User {
 		t.Fatalf("messages.0 differs across turns:\nTurn 1: %s\nTurn 2: %s", msg1User, msg2User)
 	}
