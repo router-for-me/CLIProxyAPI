@@ -19,9 +19,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zcode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -715,6 +717,95 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		response["expires_in"] = deviceFlow.ExpiresIn
 	}
 	c.JSON(200, response)
+}
+
+// zcodeLoginTimeout bounds how long the ZCode server-mediated OAuth flow waits
+// for the user to authorize.
+const zcodeLoginTimeout = 5 * time.Minute
+
+var (
+	// newZCodeLogin and newZCodeResolver build the ZCode login and credential
+	// resolver. They are package-level so tests can point them at a fake server.
+	newZCodeLogin    = func() *zcode.ZaiCliLogin { return &zcode.ZaiCliLogin{} }
+	newZCodeResolver = func() *zcode.Resolver { return &zcode.Resolver{} }
+)
+
+// RequestZCodeToken starts the ZCode server-mediated OAuth login and returns the
+// authorize URL. A background goroutine polls the flow, resolves the static
+// coding-plan credential and saves the auth file (mirroring RequestKimiToken).
+func (h *Handler) RequestZCodeToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing ZCode authentication...")
+
+	state := fmt.Sprintf("zcd-%d", time.Now().UnixNano())
+
+	login := newZCodeLogin()
+	flow, errStart := login.Start(ctx)
+	if errStart != nil {
+		log.WithError(errStart).Error("failed to generate ZCode authorization URL")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+	authURL := ""
+	if flow != nil {
+		authURL = flow.AuthorizeURL
+	}
+
+	RegisterOAuthSession(state, "zcode")
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "zcode")
+
+		fmt.Println("Waiting for authorization...")
+		tokens, errComplete := login.Complete(pollCtx, flow, zcodeLoginTimeout)
+		if errComplete != nil {
+			if !IsOAuthSessionPending(state, "zcode") {
+				return
+			}
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errComplete))
+			fmt.Printf("Authentication failed: %v\n", errComplete)
+			return
+		}
+		if !IsOAuthSessionPending(state, "zcode") {
+			return
+		}
+
+		cred, errResolve := newZCodeResolver().ResolveZaiCredential(pollCtx, tokens.AccessToken)
+		if errResolve != nil {
+			if !IsOAuthSessionPending(state, "zcode") {
+				return
+			}
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errResolve))
+			fmt.Printf("Authentication failed: %v\n", errResolve)
+			return
+		}
+		cred.JWT = tokens.JWT
+		cred.UserID = tokens.UserID
+
+		// Reuse the shared credential builder so the auth file matches the CLI
+		// login runner exactly (Attributes api_key/base_url/header:* and Metadata
+		// type/api_key/secret/jwt/user_id/device_mid).
+		record := sdkAuth.BuildZCodeAuth(cred, cred.JWT, cred.UserID)
+		if errGuard := guardOAuthSessionPendingForSave(state, "zcode"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.WithError(errSave).Error("failed to save ZCode authentication tokens")
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use ZCode services through this CLI")
+		CompleteOAuthSession(state)
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
 // watchOAuthSessionCancel cancels pollCtx once the OAuth session is no longer pending.

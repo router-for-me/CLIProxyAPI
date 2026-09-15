@@ -80,6 +80,16 @@ func runZCodeLogin(ctx context.Context, cfg *config.Config, opts *LoginOptions) 
 	cred.JWT = tokens.JWT
 	cred.UserID = tokens.UserID
 
+	return BuildZCodeAuth(cred, cred.JWT, cred.UserID), nil
+}
+
+// BuildZCodeAuth builds the *coreauth.Auth credential record for ZCode from the
+// resolved static credential and CLI tokens. It is shared by the CLI login
+// runner (runZCodeLogin) and the management web/TUI login handler so both
+// produce identical credential shapes: Attributes (api_key, base_url, header:*)
+// consumed by the ZCode executor and Metadata (type, api_key, secret, jwt,
+// user_id, device_mid) persisted to the auth file.
+func BuildZCodeAuth(cred *zcode.Credential, jwt, userID string) *coreauth.Auth {
 	deviceMid := uuid.NewString()
 	fileName := fmt.Sprintf("zcode-%d.json", time.Now().UnixMilli())
 
@@ -103,8 +113,8 @@ func runZCodeLogin(ctx context.Context, cfg *config.Config, opts *LoginOptions) 
 		"type":       "zcode",
 		"api_key":    cred.APIKey,
 		"secret":     cred.Secret,
-		"jwt":        cred.JWT,
-		"user_id":    cred.UserID,
+		"jwt":        jwt,
+		"user_id":    userID,
 		"device_mid": deviceMid,
 		"timestamp":  time.Now().UnixMilli(),
 	}
@@ -114,10 +124,10 @@ func runZCodeLogin(ctx context.Context, cfg *config.Config, opts *LoginOptions) 
 		Provider:   "zcode",
 		FileName:   fileName,
 		Label:      "ZCode User",
-		Storage:    &zcode.TokenStorage{APIKey: cred.APIKey, Secret: cred.Secret, JWT: cred.JWT, UserID: cred.UserID, DeviceMid: deviceMid, Provider: "zcode"},
+		Storage:    &zcode.TokenStorage{APIKey: cred.APIKey, Secret: cred.Secret, JWT: jwt, UserID: userID, DeviceMid: deviceMid, Provider: "zcode"},
 		Metadata:   metadata,
 		Attributes: attrs,
-	}, nil
+	}
 }
 
 func runtimeGOOS() string {
