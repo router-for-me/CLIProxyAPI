@@ -1469,3 +1469,121 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MixedMissingAndExp
 		t.Fatalf("result for call_b = %q, want result_b", got)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_CapsLongNamespaceToolNames(t *testing.T) {
+	// Codex Desktop MCP namespaces flatten to names that exceed the Chat
+	// Completions 64-character function-name limit and are rejected wholesale
+	// by strict upstreams (observed with z-ai/glm-5.3-free via a tokenrouter
+	// openai-compatibility provider).
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"hi"}
+		],
+		"tools": [
+			{"type":"function","name":"exec_command","parameters":{"type":"object"}},
+			{
+				"type":"namespace",
+				"name":"mcp__codex_apps__codex_document_control",
+				"tools":[
+					{"type":"function","name":"_execute_document_command","parameters":{"type":"object"}},
+					{"type":"function","name":"_get_document_tool_schemas","parameters":{"type":"object"}}
+				]
+			},
+			{
+				"type":"namespace",
+				"name":"mcp__codex_apps__safety_settings",
+				"tools":[
+					{"type":"function","name":"_prepare_parental_control_update","parameters":{"type":"object"}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", raw, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 4 {
+		t.Fatalf("tools count = %d, want 4; output=%s", len(tools), out)
+	}
+	seen := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		name := tool.Get("function.name").String()
+		if len(name) > 64 {
+			t.Errorf("function.name %q (len %d) exceeds the 64-character limit; output=%s", name, len(name), out)
+		}
+		if seen[name] {
+			t.Errorf("duplicate function.name %q after flattening; output=%s", name, out)
+		}
+		seen[name] = true
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DisambiguatesTruncationCollisions(t *testing.T) {
+	// Two distinct namespace tools whose qualified names both truncate to the
+	// same 64-char tail must survive as two usable chat tools, not be merged
+	// or silently dropped by the first-wins deduplication.
+	filler := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"hi"}
+		],
+		"tools": [
+			{
+				"type":"namespace",
+				"name":"mcp__server_one__` + filler + `",
+				"tools":[{"type":"function","name":"_same_tail_tool_name","parameters":{"type":"object"}}]
+			},
+			{
+				"type":"namespace",
+				"name":"mcp__server_two__` + filler + `",
+				"tools":[{"type":"function","name":"_same_tail_tool_name","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", raw, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(tools), out)
+	}
+	first := tools[0].Get("function.name").String()
+	second := tools[1].Get("function.name").String()
+	if first == second {
+		t.Fatalf("truncation collision was not disambiguated: both tools are %q; output=%s", first, out)
+	}
+	for _, name := range []string{first, second} {
+		if len(name) > 64 {
+			t.Errorf("disambiguated name %q (len %d) exceeds 64; output=%s", name, len(name), out)
+		}
+	}
+
+	// A replayed call to the renamed declaration must resolve to the renamed
+	// chat name so the assistant history matches the tools array.
+	merged := []byte(`{
+		"input": [
+			{"type":"custom_tool_call","namespace":"mcp__server_two__` + filler + `","name":"_same_tail_tool_name","call_id":"call_1","input":"x"},
+			{"type":"custom_tool_call_output","call_id":"call_1","output":"y"}
+		],
+		"tools": [
+			{
+				"type":"namespace",
+				"name":"mcp__server_one__` + filler + `",
+				"tools":[{"type":"function","name":"_same_tail_tool_name","parameters":{"type":"object"}}]
+			},
+			{
+				"type":"namespace",
+				"name":"mcp__server_two__` + filler + `",
+				"tools":[{"type":"function","name":"_same_tail_tool_name","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+	replayOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", merged, false)
+	replayedName := ""
+	for _, m := range gjson.GetBytes(replayOut, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			replayedName = m.Get("tool_calls.0.function.name").String()
+		}
+	}
+	if replayedName != second {
+		t.Fatalf("replayed collision-suffixed call name = %q, want %q to match the tools array; output=%s", replayedName, second, replayOut)
+	}
+}

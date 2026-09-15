@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"strconv"
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
@@ -26,15 +27,14 @@ type responsesToolDeclaration struct {
 // children in declaration order. Declarations that produce no Chat Completions
 // tool are skipped. Visiting stops early once visit returns false.
 //
-// Request conversion, reverse name resolution and freeform tool classification
-// all traverse through here, so they cannot disagree about which declaration
-// backs a given Chat Completions tool name.
+// The emitted chatName is namespace-qualified, capped to the Chat Completions
+// function-name limit, and disambiguated when two distinct declarations flatten
+// onto the same name. Request conversion, reverse name resolution and freeform
+// tool classification all traverse through here, so they cannot disagree about
+// which declaration backs a given Chat Completions tool name.
 func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDeclaration) bool) {
-	proceed := true
+	var declarations []responsesToolDeclaration
 	emit := func(tool gjson.Result, namespaceName string) {
-		if !proceed {
-			return
-		}
 		var custom bool
 		switch strings.TrimSpace(tool.Get("type").String()) {
 		case "", "function":
@@ -47,7 +47,7 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 		if localName == "" {
 			return
 		}
-		proceed = visit(responsesToolDeclaration{
+		declarations = append(declarations, responsesToolDeclaration{
 			tool:      tool,
 			chatName:  qualifyResponsesNamespaceToolName(namespaceName, localName),
 			localName: localName,
@@ -56,7 +56,7 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 		})
 	}
 	scan := func(tools gjson.Result) {
-		if !proceed || !tools.Exists() || !tools.IsArray() {
+		if !tools.Exists() || !tools.IsArray() {
 			return
 		}
 		tools.ForEach(func(_, tool gjson.Result) bool {
@@ -65,13 +65,13 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 					namespaceName := strings.TrimSpace(tool.Get("name").String())
 					children.ForEach(func(_, child gjson.Result) bool {
 						emit(child, namespaceName)
-						return proceed
+						return true
 					})
 				}
-				return proceed
+				return true
 			}
 			emit(tool, "")
-			return proceed
+			return true
 		})
 	}
 
@@ -81,8 +81,54 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 			if item.Get("type").String() == "additional_tools" {
 				scan(item.Get("tools"))
 			}
-			return proceed
+			return true
 		})
+	}
+
+	disambiguateResponsesChatToolNames(declarations)
+
+	proceed := true
+	for _, declaration := range declarations {
+		if !proceed {
+			break
+		}
+		proceed = visit(declaration)
+	}
+}
+
+// disambiguateResponsesChatToolNames rewrites flattened names in place when two
+// distinct declarations collapse onto the same capped Chat Completions name.
+// Identity is the pre-cap qualified name: declarations that qualified to the
+// same name before the cap (one tool delivered through both "tools" and
+// "additional_tools", or a flat tool colliding with a namespace child) are the
+// same upstream tool and keep the shared first-wins name, while distinct names
+// that only collide through truncation get "_1"-style suffixes so the
+// deduplication downstream never silently drops a real tool. Suffixed variants
+// stay within the name cap, and every variant is claimed in the same pass so a
+// later declaration cannot resurrect a collision.
+func disambiguateResponsesChatToolNames(declarations []responsesToolDeclaration) {
+	claimed := make(map[string]string, len(declarations))
+	claim := func(candidate, identity string) bool {
+		if owner, taken := claimed[candidate]; !taken {
+			claimed[candidate] = identity
+			return true
+		} else {
+			return owner == identity
+		}
+	}
+	for i := range declarations {
+		identity := rawResponsesNamespaceQualifiedName(declarations[i].namespace, declarations[i].localName)
+		name := declarations[i].chatName
+		if claim(name, identity) {
+			continue
+		}
+		for suffix := 1; ; suffix++ {
+			candidate := capResponsesChatToolName(name + "_" + strconv.Itoa(suffix))
+			if claim(candidate, identity) {
+				declarations[i].chatName = candidate
+				break
+			}
+		}
 	}
 }
 
@@ -265,7 +311,19 @@ func unwrapCustomToolInput(arguments string) string {
 	return arguments
 }
 
+// responsesChatToolNameLimit is the Chat Completions function name limit enforced
+// by strict upstreams (e.g. z-ai/glm). Responses namespace tools routinely
+// flatten to names longer than this.
+const responsesChatToolNameLimit = 64
+
 func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
+	return capResponsesChatToolName(rawResponsesNamespaceQualifiedName(namespaceName, childName))
+}
+
+// rawResponsesNamespaceQualifiedName is qualifyResponsesNamespaceToolName
+// without the length cap, so disambiguation can tell a genuine name apart
+// from a truncation-induced collision.
+func rawResponsesNamespaceQualifiedName(namespaceName, childName string) string {
 	childName = strings.TrimSpace(childName)
 	if childName == "" || namespaceName == "" || strings.HasPrefix(childName, "mcp__") {
 		return childName
@@ -277,6 +335,27 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 		return namespaceName + childName
 	}
 	return namespaceName + "__" + childName
+}
+
+// capResponsesChatToolName truncates a flattened Responses tool name to the
+// Chat Completions limit while keeping the tail, which carries the most
+// identifying part of the name (the tool's local name). Namespace-qualified
+// names share a long "mcp__<server>" prefix, so keeping the tail preserves more
+// usable signal than keeping the head. Truncation can leave a partial "_"/"-"
+// run at the start; leading separators are stripped because some strict
+// upstreams reject names that do not begin with an alphanumeric character.
+// This is a pure function of the input name, so every path that derives a
+// chat function name (declarations, replayed calls, tool_choice, reverse
+// resolution) stays consistent with every other.
+func capResponsesChatToolName(name string) string {
+	if len(name) <= responsesChatToolNameLimit {
+		return name
+	}
+	truncated := name[len(name)-responsesChatToolNameLimit:]
+	if trimmed := strings.TrimLeft(truncated, "_-"); trimmed != "" {
+		return trimmed
+	}
+	return truncated
 }
 
 // resolveResponsesQualifiedToolIdentity maps an emitted Chat Completions
@@ -296,6 +375,27 @@ func resolveResponsesQualifiedToolIdentity(root gjson.Result, qualifiedName stri
 		return false
 	})
 	return name, namespace, found
+}
+
+// chatNameForResponsesNamespaceToolCall returns the Chat Completions name the
+// request's declarations assign to the (namespace, localName) identity of a
+// replayed or forced tool call. Declaration-derived names carry the same
+// 64-character cap and disambiguation as the outgoing tools array, so replayed
+// calls stay consistent with their declarations even when a collision renamed
+// the tool. Unknown identities fall back to plain namespace qualification.
+func chatNameForResponsesNamespaceToolCall(requestRawJSON []byte, namespace, localName string) string {
+	qualified := ""
+	walkResponsesToolDeclarations(gjson.ParseBytes(requestRawJSON), func(declaration responsesToolDeclaration) bool {
+		if declaration.namespace == namespace && declaration.localName == localName {
+			qualified = declaration.chatName
+			return false
+		}
+		return true
+	})
+	if qualified != "" {
+		return qualified
+	}
+	return qualifyResponsesNamespaceToolName(namespace, localName)
 }
 
 // canonicalResponsesToolName restores an omitted namespace only when the current
@@ -325,7 +425,11 @@ func canonicalResponsesToolName(requestRawJSON []byte, name string) string {
 	if candidate != "" && !ambiguous {
 		return candidate
 	}
-	return name
+	// A replayed call may carry a name that no current declaration produced
+	// (e.g. history recorded by an older build, or a foreign client that
+	// flattened the qualified name itself). Still enforce the chat tool name
+	// limit so the request cannot be rejected wholesale.
+	return capResponsesChatToolName(name)
 }
 
 func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
