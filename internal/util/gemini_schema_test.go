@@ -1583,6 +1583,106 @@ func TestCleanJSONSchemaStripsEncryptedMetadata(t *testing.T) {
 	}
 }
 
+// TestCleanJSONSchemaStripsReadOnlyWriteOnly covers tool schemas that carry the JSON Schema
+// annotation keywords "readOnly"/"writeOnly" (e.g. opencode / MCP tool definitions). The Gemini
+// backend strictly rejects unknown schema fields with an INVALID_ARGUMENT 400.
+func TestCleanJSONSchemaStripsReadOnlyWriteOnly(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"api_key": {
+				"type": "string",
+				"description": "API credential",
+				"readOnly": true
+			},
+			"timeout": {
+				"type": "integer",
+				"writeOnly": false
+			},
+			"nested": {
+				"type": "object",
+				"properties": {
+					"secret": {
+						"type": "string",
+						"readOnly": true
+					}
+				}
+			},
+			"records": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"id": {
+							"type": "integer",
+							"readOnly": true
+						}
+					}
+				}
+			}
+		},
+		"required": ["api_key"]
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"gemini":              CleanJSONSchemaForGemini,
+		"antigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+	} {
+		got := clean(input)
+		if strings.Contains(got, `"readOnly"`) || strings.Contains(got, `"writeOnly"`) {
+			t.Errorf("%s: 'readOnly'/'writeOnly' marker survived cleaning: %s", cleaner, got)
+		}
+		parsed := gjson.Parse(got)
+		if !parsed.Get("properties.api_key.type").Exists() || parsed.Get("properties.api_key.description").String() != "API credential" {
+			t.Errorf("%s: api_key schema was corrupted: %s", cleaner, got)
+		}
+		if !parsed.Get("properties.nested.properties.secret.type").Exists() {
+			t.Errorf("%s: nested property secret was corrupted: %s", cleaner, got)
+		}
+		if parsed.Get(`properties.records.items.properties.id.type`).String() != "integer" {
+			t.Errorf("%s: array item schema was corrupted: %s", cleaner, got)
+		}
+	}
+}
+
+// TestCleanJSONSchemaKeepsPropertyNamedReadOnly guards the legitimate case where a tool
+// parameter itself is named "readOnly" (e.g. properties.readOnly: {"type": "boolean"}).
+func TestCleanJSONSchemaKeepsPropertyNamedReadOnly(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"readOnly": {
+				"type": "boolean",
+				"description": "Whether the field is read only",
+				"readOnly": true
+			},
+			"data": {
+				"type": "string"
+			}
+		},
+		"required": ["readOnly"]
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity": CleanJSONSchemaForAntigravity,
+		"gemini":      CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+		if !parsed.Get("properties.readOnly").Exists() {
+			t.Errorf("%s: property named 'readOnly' was removed: %s", cleaner, got)
+		}
+		if parsed.Get("properties.readOnly.type").String() != "boolean" {
+			t.Errorf("%s: property named 'readOnly' type corrupted: %s", cleaner, got)
+		}
+		if parsed.Get("properties.readOnly.readOnly").Exists() {
+			t.Errorf("%s: inner 'readOnly' attribute survived: %s", cleaner, got)
+		}
+	}
+}
+
 // TestCleanJSONSchemaKeepsPropertyNamedEncrypted guards the legitimate case where a tool
 // parameter itself is named "encrypted" (e.g. properties.encrypted: {"type": "boolean"}).
 func TestCleanJSONSchemaKeepsPropertyNamedEncrypted(t *testing.T) {
