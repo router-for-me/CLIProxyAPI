@@ -189,9 +189,80 @@ func TestSaveFirstRevision(t *testing.T) {
 	}
 }
 
+// TestSaveDefaultsReasonAndReturnsCommittedAuditMetadata verifies that a
+// blank audit reason is persisted as the stable default and that Save returns
+// the audit metadata committed to runtime_config.
+func TestSaveDefaultsReasonAndReturnsCommittedAuditMetadata(t *testing.T) {
+	repo, pg := newTestRepo(t, "test_repo_save_audit_defaults")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	candidate := configsnapshot.NewEmpty()
+	candidate.Settings["port"] = 8317
+
+	saved, err := repo.Save(ctx, 0, &candidate, configstore.SaveAudit{Actor: "tester"})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if saved.UpdatedBy != "tester" {
+		t.Fatalf("saved.UpdatedBy = %q, want tester", saved.UpdatedBy)
+	}
+	if saved.UpdatedSource != "dashboard" {
+		t.Fatalf("saved.UpdatedSource = %q, want dashboard", saved.UpdatedSource)
+	}
+	if saved.UpdatedAt.IsZero() {
+		t.Fatal("saved.UpdatedAt is zero; want committed timestamp")
+	}
+
+	var reason string
+	if err := pg.DB().QueryRowContext(ctx,
+		"SELECT reason FROM "+pg.ConfigRevisionsTable()+" WHERE revision = 1",
+	).Scan(&reason); err != nil {
+		t.Fatalf("scan default config_revisions.reason: %v", err)
+	}
+	if reason != "configstore update" {
+		t.Fatalf("config_revisions.reason = %q, want configstore update", reason)
+	}
+
+	var persistedChecksum string
+	if err := pg.DB().QueryRowContext(ctx,
+		"SELECT checksum FROM "+pg.ConfigRevisionsTable()+" WHERE revision = 1",
+	).Scan(&persistedChecksum); err != nil {
+		t.Fatalf("scan persisted checksum: %v", err)
+	}
+	if persistedChecksum != saved.Checksum() {
+		t.Fatalf("persisted checksum = %q, saved checksum = %q", persistedChecksum, saved.Checksum())
+	}
+}
+
+// TestSaveReturnsCustomAuditSource verifies that a caller-provided source is
+// reflected on the Snapshot returned by Save.
+func TestSaveReturnsCustomAuditSource(t *testing.T) {
+	repo, _ := newTestRepo(t, "test_repo_save_audit_source")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	candidate := configsnapshot.NewEmpty()
+	candidate.Settings["port"] = 8317
+
+	saved, err := repo.Save(ctx, 0, &candidate, configstore.SaveAudit{
+		Actor:  "tester",
+		Reason: "imported",
+		Source: "cli-import",
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if saved.UpdatedSource != "cli-import" {
+		t.Fatalf("saved.UpdatedSource = %q, want cli-import", saved.UpdatedSource)
+	}
+}
+
 // TestSaveIncrementsRevision verifies the happy-path increment: a second
-// Save with expected=1 (matching the current revision) succeeds and bumps
-// the revision to 2. A second config_revisions row is appended.
+// Save with expected=1 (matching the current revision) succeeds and bumps the
+// revision to 2. A second config_revisions row is appended.
 func TestSaveIncrementsRevision(t *testing.T) {
 	repo, pg := newTestRepo(t, "test_repo_save_increment")
 
@@ -452,8 +523,12 @@ func TestRollbackCopiesSettingsAndPreservesHistory(t *testing.T) {
 	if rolled.Revision != 3 {
 		t.Fatalf("rolled.Revision = %d, want 3", rolled.Revision)
 	}
-	if got := rolled.Settings["port"]; got != 8317 {
-		t.Fatalf("rolled.Settings[port] = %v, want 8317", got)
+	port, ok := rolled.Settings["port"].(int)
+	if !ok {
+		t.Fatalf("rolled.Settings[port] has type %T, want int", rolled.Settings["port"])
+	}
+	if port != 8317 {
+		t.Fatalf("rolled.Settings[port] = %d, want 8317", port)
 	}
 	if rolled.UpdatedSource != "rollback" {
 		t.Fatalf("rolled.UpdatedSource = %q, want rollback", rolled.UpdatedSource)

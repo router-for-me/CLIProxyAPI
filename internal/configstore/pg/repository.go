@@ -8,11 +8,15 @@
 package pg
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/configsnapshot"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/configstore"
@@ -111,17 +115,17 @@ func (r *pgRepo) Save(ctx context.Context, expected int64, candidate *configsnap
 		source = "dashboard"
 	}
 
-	// Audit fields are nullable on the database side; map empty strings to
-	// NULL so the repository does not record empty-string actors.
+	// Actor is nullable on the database side; map an empty actor to NULL so
+	// the repository does not record an empty-string actor. reason is NOT NULL
+	// in config_revisions, so use a stable default for callers that omit it.
 	actor := audit.Actor
 	var actorArg any
 	if actor != "" {
 		actorArg = actor
 	}
 	reason := audit.Reason
-	var reasonArg any
-	if reason != "" {
-		reasonArg = reason
+	if strings.TrimSpace(reason) == "" {
+		reason = "configstore update"
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -148,7 +152,12 @@ func (r *pgRepo) Save(ctx context.Context, expected int64, candidate *configsnap
 	}
 
 	newRevision := current + 1
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+	var (
+		committedAt     time.Time
+		committedBy     sql.NullString
+		committedSource string
+	)
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, settings, extra, revision, updated_at, updated_by, updated_source)
 		VALUES (1, $1::jsonb, $2::jsonb, $3, NOW(), $4, $5)
 		ON CONFLICT (id) DO UPDATE SET
@@ -158,7 +167,10 @@ func (r *pgRepo) Save(ctx context.Context, expected int64, candidate *configsnap
 			updated_at = NOW(),
 			updated_by = EXCLUDED.updated_by,
 			updated_source = EXCLUDED.updated_source
-	`, r.table), settingsJSON, extraJSON, newRevision, actorArg, source); err != nil {
+		RETURNING updated_at, updated_by, updated_source
+	`, r.table), settingsJSON, extraJSON, newRevision, actorArg, source).Scan(
+		&committedAt, &committedBy, &committedSource,
+	); err != nil {
 		return nil, fmt.Errorf("configstore.pg: upsert runtime_config: %w", err)
 	}
 
@@ -166,11 +178,19 @@ func (r *pgRepo) Save(ctx context.Context, expected int64, candidate *configsnap
 	// the canonical projection of normalised tables. Persisting a literal
 	// '{}' keeps the column populated and the checksum stable.
 	resourceSnapshot := []byte("{}")
-	checksum := candidate.Checksum()
+	checksumSnapshot := *candidate
+	checksumSnapshot.UpdatedAt = committedAt
+	if committedBy.Valid {
+		checksumSnapshot.UpdatedBy = committedBy.String
+	} else {
+		checksumSnapshot.UpdatedBy = ""
+	}
+	checksumSnapshot.UpdatedSource = committedSource
+	checksum := checksumSnapshot.Checksum()
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (revision, settings, resource_snapshot, checksum, created_at, created_by, reason)
 		VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW(), $5, $6)
-	`, r.revisions), newRevision, settingsJSON, resourceSnapshot, checksum, actorArg, reasonArg); err != nil {
+	`, r.revisions), newRevision, settingsJSON, resourceSnapshot, checksum, actorArg, reason); err != nil {
 		return nil, fmt.Errorf("configstore.pg: insert config_revisions: %w", err)
 	}
 
@@ -179,6 +199,13 @@ func (r *pgRepo) Save(ctx context.Context, expected int64, candidate *configsnap
 	}
 
 	candidate.Revision = newRevision
+	candidate.UpdatedAt = committedAt
+	if committedBy.Valid {
+		candidate.UpdatedBy = committedBy.String
+	} else {
+		candidate.UpdatedBy = ""
+	}
+	candidate.UpdatedSource = committedSource
 	return snapshotPtr(*candidate), nil
 }
 
@@ -298,16 +325,109 @@ func marshalMap(m map[string]any) ([]byte, error) {
 // allocates a non-nil empty map when the input is "null" or empty so the
 // snapshot keeps the invariant that Load never returns nil Settings/Extra
 // maps.
+//
+// Decoding goes through json.Decoder.UseNumber() so JSON numbers are
+// preserved as json.Number rather than collapsing to float64; the
+// normalizeJSON walk then classifies each number into int / int64 /
+// uint64 / float64, matching the numeric semantics of
+// configsnapshot.UnmarshalYAML (which preserves YAML's int/float
+// distinction). Without the normalization a YAML-loaded integer like
+// "port: 8317" would round-trip through JSONB as float64 and fail the
+// existing snapshot type assertions.
 func unmarshalMap(raw []byte, m *map[string]any) error {
 	if len(raw) == 0 {
 		*m = map[string]any{}
 		return nil
 	}
-	if err := json.Unmarshal(raw, m); err != nil {
+	var holder any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&holder); err != nil {
 		return err
 	}
-	if *m == nil {
-		*m = map[string]any{}
+	normalized, err := normalizeJSONValue(holder)
+	if err != nil {
+		return err
 	}
+	if normalized == nil {
+		*m = map[string]any{}
+		return nil
+	}
+	out, ok := normalized.(map[string]any)
+	if !ok {
+		return fmt.Errorf("configstore.pg: top-level jsonb must be an object, got %T", normalized)
+	}
+	*m = out
 	return nil
+}
+
+// normalizeJSONValue recursively walks a value decoded with
+// json.Decoder.UseNumber() and converts json.Number scalars into the
+// narrowest Go numeric type that still preserves the value:
+//
+//   - Numbers without a fractional part become int when they fit in the
+//     platform int range, int64 otherwise, and uint64 when the value is
+//     non-negative and fits in uint64. This matches YAML's default
+//     integer handling so a YAML round-trip and a PG JSONB round-trip
+//     agree on scalar types.
+//   - Numbers with a fractional part (or in scientific notation with a
+//     negative exponent) become float64.
+//
+// Maps are normalized as map[string]any; slices and the rest pass through
+// unchanged. JSON object keys are strings by definition, so this walk keeps
+// the JSONB shape without any key coercion.
+func normalizeJSONValue(v any) (any, error) {
+	switch t := v.(type) {
+	case json.Number:
+		return classifyJSONNumber(t)
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			nv, err := normalizeJSONValue(val)
+			if err != nil {
+				return nil, err
+			}
+			out[k] = nv
+		}
+		return out, nil
+	case []any:
+		out := make([]any, len(t))
+		for i, item := range t {
+			nv, err := normalizeJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = nv
+		}
+		return out, nil
+	default:
+		return v, nil
+	}
+}
+
+// classifyJSONNumber converts a json.Number into the narrowest Go numeric
+// type that preserves the value. Integer strings become int when the value
+// fits in the platform int range, int64 otherwise, or uint64 for non-negative
+// values above MaxInt64. Decimal and exponent forms become float64, matching
+// the distinction made by configsnapshot.UnmarshalYAML between YAML integer
+// and floating-point scalars.
+func classifyJSONNumber(n json.Number) (any, error) {
+	s := n.String()
+	if !strings.ContainsAny(s, ".eE") {
+		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+			maxInt := int64(^uint(0) >> 1)
+			minInt := -maxInt - 1
+			if i >= minInt && i <= maxInt {
+				return int(i), nil
+			}
+			return i, nil
+		}
+		if u, err := strconv.ParseUint(s, 10, 64); err == nil {
+			return u, nil
+		}
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f, nil
+	}
+	return nil, fmt.Errorf("configstore.pg: cannot decode json number %q", s)
 }
