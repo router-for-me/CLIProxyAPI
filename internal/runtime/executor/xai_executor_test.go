@@ -329,6 +329,30 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorPrepareResponsesRequestShortensPairedCallIDs(t *testing.T) {
+	longCallID := strings.Repeat("cursor-call-", 8)
+	exec := NewXAIExecutor(&config.Config{})
+
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.3",
+		Payload: []byte(`{"model":"grok-4.3","input":[` +
+			`{"type":"function_call","call_id":"` + longCallID + `","name":"lookup","arguments":"{}"},` +
+			`{"type":"function_call_output","call_id":"` + longCallID + `","output":"done"}` +
+			`]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, true)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	callID := gjson.GetBytes(prepared.body, "input.0.call_id").String()
+	if callID == longCallID || len([]rune(callID)) != 64 {
+		t.Fatalf("overlong function call ID was not shortened: %q; body=%s", callID, prepared.body)
+	}
+	if outputCallID := gjson.GetBytes(prepared.body, "input.1.call_id").String(); outputCallID != callID {
+		t.Fatalf("paired call IDs differ: %q != %q; body=%s", callID, outputCallID, prepared.body)
+	}
+}
+
 func TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessage(t *testing.T) {
 	t.Parallel()
 
