@@ -69,6 +69,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
 		return merged
 	}
+	merged.Quota = mergeQuotaObservation(current.Quota, updated.Quota)
 
 	// 1. Refresh Lifecycle Timestamps
 	if !updated.LastRefreshedAt.IsZero() {
