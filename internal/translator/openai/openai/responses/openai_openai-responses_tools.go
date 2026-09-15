@@ -107,12 +107,16 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 //
 // Qualified names that fit the cap unchanged are claimed before any
 // truncation alias is assigned (equal raw names are one identity, so those
-// claims cannot conflict). A long declaration whose capped tail lands on such
-// a name therefore takes the suffix itself, instead of displacing a
-// declaration whose original name — the name replayed calls, tool_choice, and
-// reverse resolution carry — fits the limit unchanged. Suffixed variants stay
-// within the name cap, and every variant is claimed in the same pass so a
-// later declaration cannot resurrect a collision.
+// claims cannot conflict). Local names that fit the cap are reserved the
+// same way: a replayed call or tool_choice that omits the namespace carries
+// the local name, and local-name recovery resolves it to the declaration,
+// so a capped alias occupying that name would win the earlier
+// exact-emitted-alias match and attribute those calls to the wrong tool. A
+// long declaration whose capped tail lands on any reserved name therefore
+// takes the suffix itself. Shared local names reserve first-wins (claim
+// ignores conflicting identities), which only strengthens the reservation.
+// Suffixed variants stay within the name cap, and every variant is claimed
+// in the same pass so a later declaration cannot resurrect a collision.
 func disambiguateResponsesChatToolNames(declarations []responsesToolDeclaration) {
 	claimed := make(map[string]string, len(declarations))
 	claim := func(candidate, identity string) bool {
@@ -128,9 +132,12 @@ func disambiguateResponsesChatToolNames(declarations []responsesToolDeclaration)
 		identity := rawResponsesNamespaceQualifiedName(declarations[i].namespace, declarations[i].localName)
 		if len(identity) > responsesChatToolNameLimit {
 			longDeclarations = append(longDeclarations, i)
-			continue
+		} else {
+			claim(identity, identity)
 		}
-		claim(identity, identity)
+		if local := declarations[i].localName; local != identity && len(local) <= responsesChatToolNameLimit {
+			claim(local, identity)
+		}
 	}
 	for _, i := range longDeclarations {
 		identity := rawResponsesNamespaceQualifiedName(declarations[i].namespace, declarations[i].localName)

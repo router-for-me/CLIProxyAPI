@@ -1729,3 +1729,72 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_AmbiguousLongLocal
 		t.Fatalf("ambiguous replayed call resolved to declared alias %q, silently invoking one namespace's tool; output=%s", replayedName, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongAliasDoesNotDisplaceNamespacedLocalName(t *testing.T) {
+	// A long declaration's capped alias must not occupy the (<=64-char) local
+	// name of a namespaced declaration whose qualified identity exceeds the
+	// cap: replayed calls and tool_choice that omit the namespace carry the
+	// bare local name, and local-name recovery must resolve them to the
+	// namespaced tool instead of to the earlier long declaration's alias.
+	localName := "l" + strings.Repeat("m", 63) // 64 chars
+	longFlatName := strings.Repeat("n", 11) + localName
+	if len(longFlatName) <= 64 || capResponsesChatToolName(longFlatName) != localName {
+		t.Fatalf("fixture drift: cap(%q) = %q, want %q", longFlatName, capResponsesChatToolName(longFlatName), localName)
+	}
+	// mcp__beta__localName is 75 chars, so the namespaced declaration is
+	// itself long and its capped alias is localName[11:], distinct from localName.
+	toolsJSON := `[
+		{"type":"function","name":"` + longFlatName + `","parameters":{"type":"object"}},
+		{
+			"type":"namespace",
+			"name":"mcp__beta",
+			"tools":[{"type":"function","name":"` + localName + `","parameters":{"type":"object"}}]
+		}
+	]`
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": ` + toolsJSON + `
+	}`), false)
+	emitted := gjson.GetBytes(out, "tools").Array()
+	if len(emitted) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(emitted), out)
+	}
+	if got := emitted[0].Get("function.name").String(); got == localName {
+		t.Fatalf("long declaration claimed the namespaced local name %q as its capped alias; output=%s", localName, out)
+	}
+	namespacedAlias := emitted[1].Get("function.name").String()
+	for i, tool := range emitted {
+		if name := tool.Get("function.name").String(); len(name) > 64 {
+			t.Errorf("tools[%d].function.name %q (len %d) exceeds 64; output=%s", i, name, len(name), out)
+		}
+	}
+
+	// A replayed call omitting the namespace carries the bare local name and
+	// must resolve to the namespaced declaration's alias, not the long one.
+	replay := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"` + localName + `","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": ` + toolsJSON + `
+	}`)
+	replayOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", replay, false)
+	for _, m := range gjson.GetBytes(replayOut, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			if got := m.Get("tool_calls.0.function.name").String(); got != namespacedAlias {
+				t.Fatalf("replayed bare local name resolved to %q, want the namespaced alias %q; output=%s", got, namespacedAlias, replayOut)
+			}
+		}
+	}
+
+	// tool_choice carrying the bare local name must resolve the same way.
+	forcedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": ` + toolsJSON + `,
+		"tool_choice": {"type":"function","function":{"name":"` + localName + `"}}
+	}`), false)
+	if got := gjson.GetBytes(forcedOut, "tool_choice.function.name").String(); got != namespacedAlias {
+		t.Fatalf("tool_choice bare local name resolved to %q, want the namespaced alias %q; output=%s", got, namespacedAlias, forcedOut)
+	}
+}
