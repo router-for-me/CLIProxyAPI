@@ -115,6 +115,7 @@ func SafeErrorDiagnostic(err error) string {
 		{needle: "invalid character", label: "invalid_response_json"},
 		{needle: "cannot unmarshal", label: "invalid_response_json"},
 		{needle: "invalid_grant", label: "oauth_error=invalid_grant"},
+		{needle: "invalid_refresh_token", label: "oauth_error=invalid_refresh_token"},
 		{needle: "refresh_token_expired", label: "oauth_error=refresh_token_expired"},
 		{needle: "refresh_token_revoked", label: "oauth_error=refresh_token_revoked"},
 		{needle: "refresh_token_reused", label: "oauth_error=refresh_token_reused"},

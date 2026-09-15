@@ -122,3 +122,29 @@ func TestLogFormatterOmitsGenericPathField(t *testing.T) {
 		}
 	}
 }
+
+func TestLogFormatterQuotesProviderField(t *testing.T) {
+	entry := log.NewEntry(log.New())
+	entry.Time = time.Date(2026, 9, 11, 16, 40, 0, 0, time.Local)
+	entry.Level = log.WarnLevel
+	entry.Message = "credential refresh failed"
+	entry.Data["provider"] = "antigravity\n"
+	entry.Data["auth_file"] = "account.json"
+	entry.Data["diagnostic"] = "oauth_error=invalid_refresh_token"
+
+	formatted, errFormat := (&LogFormatter{}).Format(entry)
+	if errFormat != nil {
+		t.Fatalf("Format() error = %v", errFormat)
+	}
+
+	line := string(formatted)
+	if !strings.Contains(line, `provider="antigravity\n"`) {
+		t.Fatalf("formatted line %q missing quoted provider field", line)
+	}
+	if !strings.Contains(line, `auth_file="account.json"`) {
+		t.Fatalf("formatted line %q missing quoted auth_file field", line)
+	}
+	if strings.Count(line, "\n") != 1 {
+		t.Fatalf("formatted line contains an unescaped newline: %q", line)
+	}
+}
