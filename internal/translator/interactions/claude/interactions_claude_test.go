@@ -40,23 +40,80 @@ func TestConvertClaudeRequestToInteractionsMapsToolUseAndResult(t *testing.T) {
 	if got := gjson.GetBytes(out, "input.0.type").String(); got != "function_call" {
 		t.Fatalf("input.0.type = %q, want function_call. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "input.0.call_id").String(); got != "toolu_1" {
-		t.Fatalf("call_id = %q, want toolu_1. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "input.0.id").String(); got != "toolu_1" {
+		t.Fatalf("id = %q, want toolu_1. Output: %s", got, string(out))
 	}
-	if gjson.GetBytes(out, "input.0.id").Exists() {
-		t.Fatalf("function_call id should be omitted. Output: %s", string(out))
+	if gjson.GetBytes(out, "input.0.call_id").Exists() {
+		t.Fatalf("function_call should not have call_id parameter. Output: %s", string(out))
 	}
 	if got := gjson.GetBytes(out, "input.1.type").String(); got != "function_result" {
 		t.Fatalf("input.1.type = %q, want function_result. Output: %s", got, string(out))
 	}
+	if got := gjson.GetBytes(out, "input.1.name").String(); got != "get_weather" {
+		t.Fatalf("name = %q, want get_weather. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.1.call_id").String(); got != "toolu_1" {
+		t.Fatalf("call_id = %q, want toolu_1. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "input.1.id").Exists() {
+		t.Fatalf("function_result should not have id parameter. Output: %s", string(out))
+	}
 	if got := gjson.GetBytes(out, "input.1.result").String(); got != "晴" {
 		t.Fatalf("result = %q, want 晴. Output: %s", got, string(out))
 	}
-	if gjson.GetBytes(out, "input.1.id").Exists() {
-		t.Fatalf("function_result id should be omitted. Output: %s", string(out))
+}
+
+func TestConvertClaudeRequestToInteractionsInfersToolNamesForOutOfOrderResults(t *testing.T) {
+	raw := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"q": "x"}},
+					{"type": "tool_use", "id": "toolu_2", "name": "weather", "input": {"city": "bj"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_2", "content": "sunny"},
+					{"type": "tool_result", "tool_use_id": "toolu_1", "content": "found"}
+				]
+			}
+		]
+	}`)
+	out := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	// Since AlignClaudeToolResults aligns tool results with tool_use order (toolu_1 then toolu_2):
+	// input.0: function_call toolu_1 (lookup)
+	// input.1: function_call toolu_2 (weather)
+	// input.2: function_result toolu_1 (lookup)
+	// input.3: function_result toolu_2 (weather)
+	if got := gjson.GetBytes(out, "input.2.call_id").String(); got != "toolu_1" {
+		t.Fatalf("input.2.call_id = %q, want toolu_1. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "input.1.call_id").String(); got != "toolu_1" {
-		t.Fatalf("result call_id = %q, want toolu_1. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "input.2.name").String(); got != "lookup" {
+		t.Fatalf("input.2.name = %q, want lookup. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.3.call_id").String(); got != "toolu_2" {
+		t.Fatalf("input.3.call_id = %q, want toolu_2. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.3.name").String(); got != "weather" {
+		t.Fatalf("input.3.name = %q, want weather. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertClaudeRequestToInteractionsPropagatesIsError(t *testing.T) {
+	raw := []byte(`{"model":"gemini-3.1-flash-lite","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_err","content":"command failed","is_error":true}]}]}`)
+	out := ConvertClaudeRequestToInteractions("gemini-3.1-flash-lite", raw, false)
+	if !gjson.GetBytes(out, "input.0.is_error").Bool() {
+		t.Fatalf("expected input.0.is_error = true. Output: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "input.0.call_id").String(); got != "toolu_err" {
+		t.Fatalf("call_id = %q, want toolu_err. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "input.0.id").Exists() {
+		t.Fatalf("input.0.id must not exist on function_result. Output: %s", string(out))
 	}
 }
 

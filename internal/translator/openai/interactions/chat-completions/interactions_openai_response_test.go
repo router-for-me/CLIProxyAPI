@@ -80,11 +80,33 @@ func TestConvertOpenAIResponseToInteractionsNonStreamDirectToolCall(t *testing.T
 	if got := gjson.GetBytes(out, "steps.0.type").String(); got != "function_call" {
 		t.Fatalf("step type = %q, want function_call. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "steps.0.call_id").String(); got != "call_1" {
-		t.Fatalf("call_id = %q, want call_1. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "steps.0.id").String(); got != "call_1" {
+		t.Fatalf("id = %q, want call_1. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "steps.0.call_id").Exists() {
+		t.Fatalf("steps.0 should not have call_id parameter. Output: %s", string(out))
 	}
 	if got := gjson.GetBytes(out, "steps.0.arguments.q").String(); got != "x" {
 		t.Fatalf("arguments.q = %q, want x. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponseToInteractionsStreamToolCall(t *testing.T) {
+	var param any
+	raw := []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":null}]}`)
+	out := ConvertOpenAIResponseToInteractions(context.Background(), "gpt-test", nil, nil, raw, &param)
+	payload := findInteractionsEventPayload(out, "step.start")
+	if got := gjson.GetBytes(payload, "step.type").String(); got != "function_call" {
+		t.Fatalf("step.type = %q, want function_call. Payload: %s", got, string(payload))
+	}
+	if got := gjson.GetBytes(payload, "step.id").String(); got != "call_1" {
+		t.Fatalf("step.id = %q, want call_1. Payload: %s", got, string(payload))
+	}
+	if gjson.GetBytes(payload, "step.call_id").Exists() {
+		t.Fatalf("step.call_id must be omitted in stream. Payload: %s", string(payload))
+	}
+	if got := gjson.GetBytes(payload, "step.name").String(); got != "lookup" {
+		t.Fatalf("step.name = %q, want lookup. Payload: %s", got, string(payload))
 	}
 }
 

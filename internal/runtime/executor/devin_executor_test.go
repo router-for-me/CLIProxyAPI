@@ -152,7 +152,7 @@ func TestParseInteractionsPayload(t *testing.T) {
 			{"type":"thought","content":[{"type":"text","text":"planning..."}],"signature":"c2VhbGVkLnYxLnRlc3Q="},
 			{"type":"model_output","content":[{"type":"text","text":"I can help with that."}]},
 			{"type":"function_call","name":"read_file","id":"call_1","arguments":{"path":"main.go"}},
-			{"type":"function_result","id":"call_1","result":"package main\n"}
+			{"type":"function_result","call_id":"call_1","result":"package main\n"}
 		],
 		"tools": [
 			{"name":"read_file","description":"Read file content","parameters":{"type":"object"}}
@@ -1224,5 +1224,59 @@ func TestStreamDevinFrames_SameIDDoesNotDuplicateStart(t *testing.T) {
 	}
 	if startCount != 1 {
 		t.Fatalf("step.start should only be emitted once for the same tool call, got %d", startCount)
+	}
+}
+
+func TestDevinExecutorClaudeToolUseAndResultViaInteractions(t *testing.T) {
+	claudePayload := []byte(`{
+		"model": "devin/swe-2",
+		"messages": [
+			{"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_abc_123", "name": "bash", "input": {"command": "ls"}}]},
+			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_abc_123", "content": "file.txt"}]}
+		]
+	}`)
+	interactionsJSON := sdktranslator.TranslateRequest(sdktranslator.FormatClaude, sdktranslator.FormatInteractions, "devin/swe-2", claudePayload, false)
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, nil)
+	if len(prompts) != 2 {
+		t.Fatalf("prompts len = %d, want 2", len(prompts))
+	}
+	if len(prompts[0].ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1", len(prompts[0].ToolCalls))
+	}
+	if got := prompts[0].ToolCalls[0].ID; got != "toolu_abc_123" {
+		t.Fatalf("tool call id = %q, want toolu_abc_123", got)
+	}
+	if got := prompts[1].ToolCallID; got != "toolu_abc_123" {
+		t.Fatalf("tool result id = %q, want toolu_abc_123", got)
+	}
+	if got := prompts[1].Content; got != "file.txt" {
+		t.Fatalf("tool result content = %q, want file.txt", got)
+	}
+}
+
+func TestDevinExecutorOpenAIToolCallAndResultViaInteractions(t *testing.T) {
+	openAIPayload := []byte(`{
+		"model": "devin/swe-2",
+		"messages": [
+			{"role": "assistant", "tool_calls": [{"id": "call_xyz_456", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"main.go\"}"}}]},
+			{"role": "tool", "tool_call_id": "call_xyz_456", "content": "package main"}
+		]
+	}`)
+	interactionsJSON := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAI, sdktranslator.FormatInteractions, "devin/swe-2", openAIPayload, false)
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, nil)
+	if len(prompts) != 2 {
+		t.Fatalf("prompts len = %d, want 2", len(prompts))
+	}
+	if len(prompts[0].ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1", len(prompts[0].ToolCalls))
+	}
+	if got := prompts[0].ToolCalls[0].ID; got != "call_xyz_456" {
+		t.Fatalf("tool call id = %q, want call_xyz_456", got)
+	}
+	if got := prompts[1].ToolCallID; got != "call_xyz_456" {
+		t.Fatalf("tool result id = %q, want call_xyz_456", got)
+	}
+	if got := prompts[1].Content; got != "package main" {
+		t.Fatalf("tool result content = %q, want package main", got)
 	}
 }

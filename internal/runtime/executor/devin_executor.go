@@ -1307,7 +1307,7 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 				}
 
 			case "function_result":
-				id := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String())
+				id := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String())
 				resText := firstNonEmpty(
 					step.Get("result").String(),
 					step.Get("output").String(),

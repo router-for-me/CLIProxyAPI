@@ -872,9 +872,6 @@ func TestGeminiExecutorNativeInteractionsStripsClaudeToolIDsBeforeUpstream(t *te
 	foundCall := false
 	foundResult := false
 	for i, item := range inputs {
-		if item.Get("id").Exists() {
-			t.Fatalf("input[%d].id = %q, want omitted. Body: %s", i, item.Get("id").String(), upstreamBody)
-		}
 		for j, part := range item.Get("content").Array() {
 			if part.Get("id").Exists() {
 				t.Fatalf("input[%d].content[%d].id = %q, want omitted. Body: %s", i, j, part.Get("id").String(), upstreamBody)
@@ -883,13 +880,23 @@ func TestGeminiExecutorNativeInteractionsStripsClaudeToolIDsBeforeUpstream(t *te
 		switch item.Get("type").String() {
 		case "function_call":
 			foundCall = true
-			if got := item.Get("call_id").String(); got != "toolu_1" {
-				t.Fatalf("function_call call_id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			if got := item.Get("id").String(); got != "toolu_1" {
+				t.Fatalf("function_call id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			}
+			if item.Get("call_id").Exists() {
+				t.Fatalf("function_call call_id must be omitted. Body: %s", upstreamBody)
 			}
 		case "function_result":
 			foundResult = true
 			if got := item.Get("call_id").String(); got != "toolu_1" {
 				t.Fatalf("function_result call_id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			}
+			if item.Get("id").Exists() {
+				t.Fatalf("function_result id must be omitted. Body: %s", upstreamBody)
+			}
+		default:
+			if item.Get("id").Exists() {
+				t.Fatalf("input[%d].id = %q, want omitted. Body: %s", i, item.Get("id").String(), upstreamBody)
 			}
 		}
 	}
@@ -962,7 +969,7 @@ func TestGeminiExecutorNativeInteractionsStripsPassthroughInputIDsBeforeUpstream
 				t.Fatalf("upstream input count = %d, want 3. Body: %s", len(inputs), upstreamBody)
 			}
 			for i, item := range inputs {
-				if item.Get("id").Exists() {
+				if item.Get("type").String() != "function_call" && item.Get("id").Exists() {
 					t.Fatalf("input[%d].id = %q, want omitted. Body: %s", i, item.Get("id").String(), upstreamBody)
 				}
 				for j, part := range item.Get("content").Array() {
@@ -974,11 +981,17 @@ func TestGeminiExecutorNativeInteractionsStripsPassthroughInputIDsBeforeUpstream
 			if got := gjson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "hi" {
 				t.Fatalf("user text = %q, want hi. Body: %s", got, upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "input.1.call_id").String(); got != "toolu_1" {
-				t.Fatalf("function_call call_id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			if got := gjson.GetBytes(upstreamBody, "input.1.id").String(); got != "toolu_1" {
+				t.Fatalf("function_call id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			}
+			if gjson.GetBytes(upstreamBody, "input.1.call_id").Exists() {
+				t.Fatalf("function_call call_id must be omitted. Body: %s", upstreamBody)
 			}
 			if got := gjson.GetBytes(upstreamBody, "input.2.call_id").String(); got != "toolu_1" {
 				t.Fatalf("function_result call_id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			}
+			if gjson.GetBytes(upstreamBody, "input.2.id").Exists() {
+				t.Fatalf("function_result id must be omitted. Body: %s", upstreamBody)
 			}
 		})
 	}

@@ -268,6 +268,9 @@ func appendInteractionsFunctionCallToClaude(accumulator *translatorcommon.Claude
 func appendInteractionsFunctionResultToClaude(accumulator *translatorcommon.ClaudeMessageAccumulator, step gjson.Result) {
 	toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 	toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", interactionsClaudeToolID(step))
+	if isError := step.Get("is_error"); isError.Exists() && isError.Bool() {
+		toolResult, _ = sjson.SetBytes(toolResult, "is_error", true)
+	}
 	result := step.Get("result")
 	if !result.Exists() {
 		result = step.Get("output")

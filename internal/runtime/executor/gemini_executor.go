@@ -805,17 +805,29 @@ func nativeInteractionsSourceFormat(format sdktranslator.Format) bool {
 	}
 }
 
-// sanitizeGeminiInteractionsUnsupportedInputIDs drops request input item/content
-// `id` fields. Gemini Interactions rejects them as unknown parameters while still
-// accepting `call_id` for function_call/function_result pairing.
+// sanitizeGeminiInteractionsUnsupportedInputIDs aligns input step IDs with the
+// official Gemini Interactions API schema:
+// - `function_call` (FunctionCallStep) requires `id` and rejects `call_id`
+// - `function_result` (FunctionResultStep) requires `call_id` and rejects `id`
+// - other steps and content parts do not support `id`
 func sanitizeGeminiInteractionsUnsupportedInputIDs(body []byte) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.IsArray() {
 		return body
 	}
 	for i, item := range input.Array() {
-		if item.Get("id").Exists() {
-			body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.id", i))
+		stepType := item.Get("type").String()
+		if stepType == "function_call" {
+			if !item.Get("id").Exists() && item.Get("call_id").Exists() {
+				body, _ = sjson.SetBytes(body, fmt.Sprintf("input.%d.id", i), item.Get("call_id").String())
+			}
+			if item.Get("call_id").Exists() {
+				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.call_id", i))
+			}
+		} else {
+			if item.Get("id").Exists() {
+				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.id", i))
+			}
 		}
 		content := item.Get("content")
 		if !content.IsArray() {

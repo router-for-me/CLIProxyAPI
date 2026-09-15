@@ -129,6 +129,7 @@ func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, prese
 	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
 	var pendingToolUseIDs []string
 	var pendingSystemReminders [][]byte
+	toolNamesByID := make(map[string]string)
 
 	messages.ForEach(func(_, message gjson.Result) bool {
 		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
@@ -151,7 +152,7 @@ func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, prese
 		}
 		pendingToolUseIDs = nil
 
-		appendClaudeMessageToInteractions(&inputItems, &pendingToolUseIDs, &pendingSystemReminders, role, content, preserveEmptyThinkingBlocks)
+		appendClaudeMessageToInteractions(&inputItems, &pendingToolUseIDs, &pendingSystemReminders, toolNamesByID, role, content, preserveEmptyThinkingBlocks)
 		if len(pendingSystemReminders) > 0 {
 			inputItems = append(inputItems, pendingSystemReminders...)
 			pendingSystemReminders = nil
@@ -165,7 +166,7 @@ func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, prese
 	return out
 }
 
-func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]string, pendingSystemReminders *[][]byte, role string, content gjson.Result, preserveEmptyThinkingBlocks bool) {
+func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]string, pendingSystemReminders *[][]byte, toolNamesByID map[string]string, role string, content gjson.Result, preserveEmptyThinkingBlocks bool) {
 	defaultStepType := "user_input"
 	if role == "assistant" {
 		defaultStepType = "model_output"
@@ -228,13 +229,20 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 			}
 		case "tool_use":
 			flushContent()
-			if id := part.Get("id").String(); id != "" && pendingToolUseIDs != nil {
-				*pendingToolUseIDs = append(*pendingToolUseIDs, id)
+			if id := part.Get("id").String(); id != "" {
+				if pendingToolUseIDs != nil {
+					*pendingToolUseIDs = append(*pendingToolUseIDs, id)
+				}
+				if toolNamesByID != nil {
+					if name := part.Get("name").String(); name != "" {
+						toolNamesByID[id] = name
+					}
+				}
 			}
 			*items = append(*items, claudeToolUseToInteractions(part))
 		case "tool_result":
 			flushContent()
-			*items = append(*items, claudeToolResultToInteractions(part))
+			*items = append(*items, claudeToolResultToInteractions(part, toolNamesByID))
 		}
 		return true
 	})
@@ -259,7 +267,7 @@ func claudeToolUseToInteractions(part gjson.Result) []byte {
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
 	step, _ = sjson.SetBytes(step, "name", part.Get("name").String())
 	if id := part.Get("id").String(); id != "" {
-		step, _ = sjson.SetBytes(step, "call_id", id)
+		step, _ = sjson.SetBytes(step, "id", id)
 	}
 	input := part.Get("input")
 	if input.Exists() && input.IsObject() {
@@ -268,10 +276,21 @@ func claudeToolUseToInteractions(part gjson.Result) []byte {
 	return step
 }
 
-func claudeToolResultToInteractions(part gjson.Result) []byte {
+func claudeToolResultToInteractions(part gjson.Result, toolNamesByID map[string]string) []byte {
 	step := []byte(`{"type":"function_result","call_id":"","result":""}`)
-	if id := part.Get("tool_use_id").String(); id != "" {
+	id := part.Get("tool_use_id").String()
+	if id != "" {
 		step, _ = sjson.SetBytes(step, "call_id", id)
+	}
+	name := part.Get("name").String()
+	if name == "" && id != "" && toolNamesByID != nil {
+		name = toolNamesByID[id]
+	}
+	if name != "" {
+		step, _ = sjson.SetBytes(step, "name", name)
+	}
+	if isError := part.Get("is_error"); isError.Exists() && isError.Bool() {
+		step, _ = sjson.SetBytes(step, "is_error", true)
 	}
 	result := part.Get("content")
 	if result.Exists() {
