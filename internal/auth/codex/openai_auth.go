@@ -328,12 +328,25 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
 }
 
+// isNonRetryableRefreshErr reports rejected refresh grants that should stop
+// immediate replay within the current RefreshTokensWithRetry operation. It does
+// not change later scheduled refresh attempts or credential state.
 func isNonRetryableRefreshErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "refresh_token_reused")
+	for _, terminal := range []string{
+		"refresh_token_reused",
+		"refresh_token_invalidated",
+		"token_invalidated",
+		"invalid_grant",
+	} {
+		if strings.Contains(raw, terminal) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
