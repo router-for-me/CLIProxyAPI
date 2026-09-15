@@ -53,8 +53,10 @@ func TestResponsesSteeringLocalValidationRecovery(t *testing.T) {
 			t.Errorf("expected corrected steering, got %s", p)
 			return
 		}
-		write(`{"type":"response.steer.accepted","steering_id":"corrected","response_id":"first"}`)
+		write(`{"type":"response.steer.accepted","steer":{"id":"corrected","previous_response_id":"first"}}`)
 		write(`{"type":"response.completed","response":{"id":"first","output":[]}}`)
+		write(`{"type":"response.created","response":{"id":"steered","previous_response_id":"first","output":[]}}`)
+		write(`{"type":"response.completed","response":{"id":"steered","output":[]}}`)
 		if p := read(); gjson.GetBytes(p, "type").String() != "response.create" {
 			t.Errorf("expected corrected create, got %s", p)
 			return
@@ -131,7 +133,7 @@ func TestResponsesSteeringLocalValidationRecovery(t *testing.T) {
 		case "response.completed":
 			if gjson.GetBytes(p, "response.id").String() == "first" {
 				send(create)
-			} else {
+			} else if gjson.GetBytes(p, "response.id").String() == "second" {
 				completed = true
 			}
 		}

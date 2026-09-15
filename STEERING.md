@@ -34,6 +34,14 @@ ends, allowing automatic successors and client tool results on the same socket.
   delay, and credential scope preserved.
 - A transport failure closes the connection without cooling an otherwise
   healthy shared credential.
+- Explicit creates wait while steering is awaiting acknowledgement or an
+  automatic successor. A tool-result continuation can be submitted early; it is
+  released when upstream reports the required-input boundary. Steering waits
+  for already-submitted explicit creates to receive their creation events.
+- Automatic successors use their parent's response settings. The connection
+  retains 16 recent lightweight settings snapshots; in-flight steering pins its
+  parent independently. If an automatic successor refers to unavailable parent
+  settings, the socket fails rather than applying another request's metadata.
 - Rejections before a later create is established consume that create's pending
   metadata. Failures identified as the current response leave queued creates
   intact. Invalid reasoning replay is cleared only for the failing scope.
@@ -44,8 +52,13 @@ ends, allowing automatic successors and client tool results on the same socket.
 - Malformed JSON and unsupported client event types receive a local 400 error
   without closing the established socket or forwarding the invalid frame. The
   client can send corrected steering or a create on the same connection.
+- Later authentication, permission, and rate/quota failures (401/403/429) retain
+  their status, headers, cooldown and quota scope through the auth manager. The
+  original failure is forwarded before closing; the started response is not
+  retried. Ordinary request-shape errors remain recoverable.
 - If a failure has no response ID while both an active response and a pending
-  create exist, the connection closes after forwarding the failure. The proxy
+  create exist, or a steering submission is awaiting acknowledgement, the
+  connection closes after forwarding the failure. The proxy
   does not guess which request owns it or replay either request.
 - Normal per-response accounting and steering control frames are distinct:
   acknowledgements do not represent a successful completed response.
