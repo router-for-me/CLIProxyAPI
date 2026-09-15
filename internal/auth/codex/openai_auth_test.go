@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -197,8 +198,8 @@ func TestNewCodexAuthWithProxyURL_OverrideProxyTakesPrecedence(t *testing.T) {
 func TestCodexAuth_EffectiveUserAgent(t *testing.T) {
 	// 1. Default fallback
 	authDefault := NewCodexAuth(nil)
-	if got := authDefault.effectiveUserAgent(); got != defaultCodexAuthUserAgent {
-		t.Fatalf("effectiveUserAgent() = %q, want default %q", got, defaultCodexAuthUserAgent)
+	if got := authDefault.effectiveUserAgent(); got != constant.DefaultCodexUserAgent {
+		t.Fatalf("effectiveUserAgent() = %q, want default %q", got, constant.DefaultCodexUserAgent)
 	}
 
 	// 2. Config override
@@ -234,7 +235,30 @@ func TestRefreshTokens_SetsUserAgent(t *testing.T) {
 	}
 
 	_, _ = auth.RefreshTokens(context.Background(), "test-token")
-	if capturedUA != defaultCodexAuthUserAgent {
-		t.Fatalf("captured User-Agent = %q, want %q", capturedUA, defaultCodexAuthUserAgent)
+	if capturedUA != constant.DefaultCodexUserAgent {
+		t.Fatalf("captured User-Agent = %q, want %q", capturedUA, constant.DefaultCodexUserAgent)
+	}
+}
+
+func TestExchangeCodeForTokens_SetsUserAgent(t *testing.T) {
+	var capturedUA string
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				capturedUA = req.Header.Get("User-Agent")
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Body:       io.NopCloser(strings.NewReader(`{"error":"test_probe"}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	pkce := &PKCECodes{CodeVerifier: "test-verifier"}
+	_, _ = auth.ExchangeCodeForTokensWithRedirect(context.Background(), "test-code", "http://localhost:1455/auth/callback", pkce)
+	if capturedUA != constant.DefaultCodexUserAgent {
+		t.Fatalf("captured User-Agent = %q, want %q", capturedUA, constant.DefaultCodexUserAgent)
 	}
 }

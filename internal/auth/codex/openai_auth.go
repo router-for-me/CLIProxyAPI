@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
@@ -22,12 +23,11 @@ import (
 
 // OAuth configuration constants for OpenAI Codex
 const (
-	AuthURL                   = "https://auth.openai.com/oauth/authorize"
-	TokenURL                  = "https://auth.openai.com/oauth/token"
-	ClientID                  = "app_EMoamEEZ73f0CkXaXp7hrann"
-	RedirectURI               = "http://localhost:1455/auth/callback"
-	codexRefreshTimeout       = 30 * time.Second
-	defaultCodexAuthUserAgent = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
+	AuthURL             = "https://auth.openai.com/oauth/authorize"
+	TokenURL            = "https://auth.openai.com/oauth/token"
+	ClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
+	RedirectURI         = "http://localhost:1455/auth/callback"
+	codexRefreshTimeout = 30 * time.Second
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -70,7 +70,7 @@ func (o *CodexAuth) effectiveUserAgent() string {
 			return ua
 		}
 	}
-	return defaultCodexAuthUserAgent
+	return constant.DefaultCodexUserAgent
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).
