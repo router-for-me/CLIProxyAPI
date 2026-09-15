@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -158,6 +159,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	engine.Use(corsMiddleware())
+	engine.Use(usageCoverageMiddleware())
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = configFilePath
@@ -234,6 +236,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// or when a local management password is provided (e.g. TUI mode).
 	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != ""
 	s.managementRoutesEnabled.Store(hasManagementSecret)
+	if strings.TrimSpace(configFilePath) != "" {
+		redisqueue.ConfigureUsageJournal(filepath.Join(filepath.Dir(configFilePath), "usage-journal"))
+	}
 	redisqueue.SetEnabled(hasManagementSecret || (cfg != nil && cfg.Home.Enabled))
 	if hasManagementSecret {
 		s.registerManagementRoutes()

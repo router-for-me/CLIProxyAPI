@@ -2,6 +2,7 @@ package helps
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -37,6 +38,7 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 	if buffer == nil || len(payload) == 0 {
 		return
 	}
+	IterateStreamLines(payload, buffer.ObserveBillingPayload)
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "claude":
 		IterateStreamLines(payload, func(line []byte) {
@@ -143,6 +145,28 @@ func ObserveMergedStreamUsage(buffer *StreamUsageBuffer, update usage.Detail) {
 // MergeStreamUsageDetail merges existing stream usage with a newer update.
 func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	merged := update
+	var rawExisting, rawUpdate map[string]json.RawMessage
+	if json.Unmarshal([]byte(existing.RawUsage), &rawExisting) == nil && json.Unmarshal([]byte(update.RawUsage), &rawUpdate) == nil {
+		for key, value := range rawUpdate {
+			rawExisting[key] = value
+		}
+		if encoded, errEncode := json.Marshal(rawExisting); errEncode == nil {
+			merged.RawUsage = string(encoded)
+		}
+	} else if merged.RawUsage == "" {
+		merged.RawUsage = existing.RawUsage
+	}
+	merged.UsageObserved = existing.UsageObserved || update.UsageObserved
+	if merged.CacheCreation5mTokens == 0 {
+		merged.CacheCreation5mTokens = existing.CacheCreation5mTokens
+	}
+	if merged.CacheCreation1hTokens == 0 {
+		merged.CacheCreation1hTokens = existing.CacheCreation1hTokens
+	}
+	if merged.CostUSD == nil {
+		merged.CostUSD = existing.CostUSD
+	}
+
 	if merged.InputTokens == 0 && existing.InputTokens > 0 {
 		merged.InputTokens = existing.InputTokens
 	}

@@ -495,6 +495,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				} else {
 					reporter.EnsurePublished(ctx)
 				}
+				publishCodexImageToolUsage(ctx, reporter, body, completedPayload)
 			}
 
 			var currentChunks [][]byte
@@ -732,6 +733,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				} else {
 					reporter.EnsurePublished(ctx)
 				}
+				publishCodexImageToolUsage(ctx, reporter, body, completedPayload)
 			}
 
 			clientPayload := applyCodexIdentityExposeResponsePayload(payload, identityState)

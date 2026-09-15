@@ -159,6 +159,7 @@ func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc 
 func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
+			c.Set(usageRequestAcceptedKey, true)
 			c.Next()
 			return
 		}
@@ -172,6 +173,7 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 					c.Set("accessMetadata", result.Metadata)
 				}
 			}
+			c.Set(usageRequestAcceptedKey, true)
 			c.Next()
 			return
 		}
@@ -228,6 +230,7 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		c.Set("accessProvider", provider)
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)
+		c.Set(usageRequestAcceptedKey, true)
 		c.Next()
 	}
 }

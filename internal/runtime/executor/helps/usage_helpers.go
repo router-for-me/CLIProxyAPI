@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -24,6 +25,12 @@ import (
 )
 
 type UsageReporter struct {
+	generationID string
+	transport    string
+	endpoint     string
+	kind         string
+	attemptID    string
+
 	provider            string
 	baseURL             string
 	executorType        string
@@ -63,6 +70,9 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 	}
 	reporter := NewUsageReporter(ctx, provider, model, auth)
 	reporter.executorType = ExecutorTypeName(executor)
+	if strings.Contains(strings.ToLower(reporter.executorType), "websocket") {
+		reporter.transport = "websocket"
+	}
 	return reporter
 }
 
@@ -94,6 +104,9 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		}
 	}
 	reporter := &UsageReporter{
+		attemptID:       uuid.NewString(),
+		generationID:    usage.GenerationFromContext(ctx),
+		kind:            "attempt",
 		provider:        provider,
 		baseURL:         baseURL,
 		model:           model,
@@ -366,7 +379,10 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(model, detail, false, usage.Failure{}), true
+	record := r.buildRecordForModel(model, detail, false, usage.Failure{})
+	record.Kind = "tool"
+	record.Alias = model
+	return record, true
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
@@ -401,7 +417,7 @@ func normalizeUsageDetailTotal(detail usage.Detail, provider, executorType strin
 }
 
 func hasNonZeroTokenUsage(detail usage.Detail) bool {
-	return detail.InputTokens != 0 ||
+	return detail.CostUSD != nil || detail.InputTokens != 0 ||
 		detail.OutputTokens != 0 ||
 		detail.ReasoningTokens != 0 ||
 		detail.CachedTokens != 0 ||
@@ -445,6 +461,12 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	return usage.Record{
+		EventID:             uuid.NewString(),
+		GenerationID:        r.generationID,
+		AttemptID:           r.attemptID,
+		Kind:                r.kind,
+		Endpoint:            r.endpoint,
+		Transport:           r.transport,
 		Provider:            r.provider,
 		BaseURL:             r.baseURL,
 		ExecutorType:        r.executorType,
@@ -646,8 +668,9 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 
 // StreamUsageBuffer keeps the latest usage detail observed in a stream.
 type StreamUsageBuffer struct {
-	detail usage.Detail
-	ok     bool
+	detail  usage.Detail
+	ok      bool
+	billing UsageBillingMetadata
 }
 
 var (
@@ -660,8 +683,9 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	if b == nil || !ok {
 		return
 	}
+	detail = b.billing.Apply(detail)
 	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
-	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) {
+	if responseServiceTier == "" || hasUsageDetail(detail) {
 		preservedTier := b.detail.ResponseServiceTier
 		b.detail = detail
 		if b.detail.ResponseServiceTier == "" {
@@ -673,12 +697,29 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	b.ok = true
 }
 
+// ObserveBillingPayload preserves billing metadata even when this frame has no
+// token usage, or the translator later removes provisional usage metadata.
+func (b *StreamUsageBuffer) ObserveBillingPayload(payload []byte) {
+	if b == nil {
+		return
+	}
+	b.billing.ObservePayload(payload)
+	if len(b.billing.fields) == 0 {
+		return
+	}
+	b.detail = b.billing.Apply(b.detail)
+	// Billing metadata is publishable even when token measurements are absent.
+	// UsageObserved remains the separate indicator for measured token counters.
+	b.ok = true
+}
+
 // ObserveOpenAIStream records response-tier state and the latest usage from an
 // OpenAI-style stream while avoiding JSON parsing for irrelevant chunks.
 func (b *StreamUsageBuffer) ObserveOpenAIStream(line []byte) {
 	if b == nil {
 		return
 	}
+	b.ObserveBillingPayload(line)
 	payload := jsonPayload(line)
 	if len(payload) == 0 {
 		return
@@ -728,6 +769,14 @@ func (b *StreamUsageBuffer) Publish(ctx context.Context, reporter *UsageReporter
 	return true
 }
 
+// EnsurePublished retains any billing metadata before falling back to an
+// unmeasured request record when the stream supplies no accounting details.
+func (b *StreamUsageBuffer) EnsurePublished(ctx context.Context, reporter *UsageReporter) {
+	if reporter != nil && !b.Publish(ctx, reporter) {
+		reporter.EnsurePublished(ctx)
+	}
+}
+
 // PublishFailure emits the latest observed usage detail together with failure details.
 func (b *StreamUsageBuffer) PublishFailure(ctx context.Context, reporter *UsageReporter, errs ...error) bool {
 	if b == nil || reporter == nil {
@@ -756,7 +805,7 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
 	detail.ResponseServiceTier = responseServiceTier
-	return detail, true
+	return withResponseBilling(detail, gjson.GetBytes(data, "response")), true
 }
 
 func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
@@ -775,14 +824,14 @@ func ParseOpenAIUsage(data []byte) usage.Detail {
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
 	detail.ResponseServiceTier = responseServiceTier
-	return detail
+	return withResponseBilling(detail, gjson.ParseBytes(data))
 }
 
 func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
 	if !usageNode.Exists() || !usageNode.IsObject() {
 		return false
 	}
-	return usageNode.Get("total_tokens").Exists() || hasOpenAIStyleUsageBucketFields(usageNode)
+	return usageNode.Get("cost_in_usd_ticks").Exists() || usageNode.Get("total_tokens").Exists() || hasOpenAIStyleUsageBucketFields(usageNode)
 }
 
 func hasOpenAIStyleUsageBucketFields(usageNode gjson.Result) bool {
@@ -817,6 +866,12 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
+	}
+	if !cached.Exists() {
+		cached = usageNode.Get("input_token_details.cached_tokens")
+	}
+	if !cached.Exists() {
+		cached = usageNode.Get("prompt_cache_hit_tokens")
 	}
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
@@ -875,7 +930,7 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.TokenBreakdown.TotalTokens
 	}
-	return detail
+	return withUsageMeasurements(detail, usageNode)
 }
 
 func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
@@ -893,7 +948,7 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	detail := parseOpenAIStyleUsageNode(usageNode)
 	detail.ResponseServiceTier = responseServiceTier
-	return detail, true
+	return withResponseBilling(detail, gjson.ParseBytes(payload)), true
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {
@@ -966,7 +1021,7 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		detail.ReasoningTokens,
 		detail.TotalTokens,
 	)
-	return detail
+	return withUsageMeasurements(detail, usageNode)
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
@@ -983,7 +1038,7 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	}
 	if !okInput {
 		detail.TokenBreakdown = invalidUsageTokenBreakdown(detail.TotalTokens)
-		return detail
+		return withUsageMeasurements(detail, node)
 	}
 	if detail.TotalTokens == 0 {
 		var okTotal bool
@@ -991,7 +1046,7 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 		if !okTotal {
 			detail.TotalTokens = 0
 			detail.TokenBreakdown = invalidUsageTokenBreakdown(0)
-			return detail
+			return withUsageMeasurements(detail, node)
 		}
 	}
 	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
@@ -1002,7 +1057,7 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 		detail.ReasoningTokens,
 		detail.TotalTokens,
 	)
-	return detail
+	return withUsageMeasurements(detail, node)
 }
 
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
@@ -1023,7 +1078,7 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 	}
 	if !okInput {
 		detail.TokenBreakdown = invalidUsageTokenBreakdown(detail.TotalTokens)
-		return detail
+		return withUsageMeasurements(detail, node)
 	}
 	if !cacheRead.Exists() && detail.CachedTokens > 0 {
 		detail.CacheReadTokens = detail.CachedTokens
@@ -1034,7 +1089,7 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 		if !okTotal {
 			detail.TotalTokens = 0
 			detail.TokenBreakdown = invalidUsageTokenBreakdown(0)
-			return detail
+			return withUsageMeasurements(detail, node)
 		}
 	}
 	detail.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
@@ -1045,11 +1100,11 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 		detail.ReasoningTokens,
 		detail.TotalTokens,
 	)
-	return detail
+	return withUsageMeasurements(detail, node)
 }
 
 func hasUsageDetail(detail usage.Detail) bool {
-	return hasNonZeroTokenUsage(detail)
+	return detail.UsageObserved || hasNonZeroTokenUsage(detail)
 }
 
 func ParseInteractionsUsage(data []byte) usage.Detail {
@@ -1108,7 +1163,7 @@ func ParseGeminiUsage(data []byte) usage.Detail {
 	if !node.Exists() {
 		return usage.Detail{}
 	}
-	return parseGeminiFamilyUsageDetail(node)
+	return withResponseBilling(parseGeminiFamilyUsageDetail(node), usageNode)
 }
 
 func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
@@ -1123,8 +1178,8 @@ func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 	if !node.Exists() {
 		return usage.Detail{}, false
 	}
-	detail := parseGeminiFamilyUsageDetail(node)
-	if !hasNonZeroTokenUsage(detail) {
+	detail := withResponseBilling(parseGeminiFamilyUsageDetail(node), gjson.ParseBytes(payload))
+	if !detail.UsageObserved {
 		return usage.Detail{}, false
 	}
 	return detail, true
@@ -1175,7 +1230,11 @@ func ParseAntigravityUsage(data []byte) usage.Detail {
 	if !node.Exists() {
 		return usage.Detail{}
 	}
-	return parseGeminiFamilyUsageDetail(node)
+	root := usageNode
+	if response := root.Get("response"); response.IsObject() {
+		root = response
+	}
+	return withResponseBilling(parseGeminiFamilyUsageDetail(node), root)
 }
 
 func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
@@ -1193,7 +1252,11 @@ func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
 	if !node.Exists() {
 		return usage.Detail{}, false
 	}
-	return parseGeminiFamilyUsageDetail(node), true
+	root := gjson.ParseBytes(payload)
+	if response := root.Get("response"); response.IsObject() {
+		root = response
+	}
+	return withResponseBilling(parseGeminiFamilyUsageDetail(node), root), true
 }
 
 var stopChunkWithoutUsage sync.Map
@@ -1369,4 +1432,17 @@ func jsonPayload(line []byte) []byte {
 		return nil
 	}
 	return trimmed
+}
+
+func (r *UsageReporter) SetOperation(kind, endpoint string) {
+	if r != nil {
+		r.kind = kind
+		r.endpoint = endpoint
+	}
+}
+
+func (r *UsageReporter) SetTransport(transport string) {
+	if r != nil {
+		r.transport = transport
+	}
 }
