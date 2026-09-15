@@ -34,6 +34,7 @@ const (
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
 	minQuotaCooldownFloor     = 10 * time.Second
+	maxQuotaCooldownCeiling   = time.Hour
 	transientErrorCooldown    = time.Minute
 )
 

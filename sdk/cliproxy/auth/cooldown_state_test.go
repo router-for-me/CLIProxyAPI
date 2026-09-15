@@ -566,18 +566,19 @@ func TestManager_RestoreCooldownStates(t *testing.T) {
 
 func TestManager_RestoreCooldownStatesCanonicalizesThinkingSuffixes(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	laterRetry := now.Add(2 * time.Hour)
+	earlierRetry := now.Add(30 * time.Minute)
+	laterRetry := now.Add(45 * time.Minute)
 	store := &recordingCooldownStateStore{
 		load: []CooldownStateRecord{
 			{
 				Provider:       "gemini",
 				AuthID:         "auth-thinking",
 				Model:          "gemini-3.1-pro-preview(high)",
-				NextRetryAfter: now.Add(time.Hour),
+				NextRetryAfter: earlierRetry,
 				Quota: QuotaState{
 					Exceeded:      true,
 					Reason:        "quota",
-					NextRecoverAt: now.Add(time.Hour),
+					NextRecoverAt: earlierRetry,
 				},
 				UpdatedAt: now,
 			},

@@ -370,11 +370,19 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
 		quota.NextRecoverAt = record.NextRetryAfter
 	}
+	restoredRetryAfter := record.NextRetryAfter
+	if quota.Exceeded {
+		quotaNext := quota.NextRecoverAt
+		quota.NextRecoverAt = clampQuotaCooldown(quotaNext, now)
+		if !quotaNext.IsZero() && !restoredRetryAfter.After(quotaNext) {
+			restoredRetryAfter = clampQuotaCooldown(restoredRetryAfter, now)
+		}
+	}
 
 	if model == "" {
 		auth.Unavailable = true
 		auth.Status = StatusError
-		auth.NextRetryAfter = record.NextRetryAfter
+		auth.NextRetryAfter = restoredRetryAfter
 		applyCooldownFields(&auth.Quota, quota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
 		auth.Generation++
@@ -391,7 +399,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		Unavailable:    true,
 		Status:         StatusError,
 		StatusMessage:  reason,
-		NextRetryAfter: record.NextRetryAfter,
+		NextRetryAfter: restoredRetryAfter,
 		Quota:          quota,
 		LastError:      cloneError(record.LastError),
 		UpdatedAt:      updatedAt,
@@ -558,6 +566,28 @@ func modelsForRegisteredAuth(authID string) []string {
 		models = append(models, canonicalModelKey(supportedModel.ID))
 	}
 	return models
+}
+
+// clampQuotaCooldown bounds a computed quota cooldown deadline to
+// maxQuotaCooldownCeiling past now.
+//
+// The clamp is applied to the final deadline rather than to the provider-supplied
+// retry-after, because both quota paths take the maximum of the new deadline and the
+// credential's existing NextRecoverAt in order to preserve an active cooldown across
+// subsequent failures. Clamping only the incoming value would let a previously stored
+// long deadline win and re-extend the cooldown unbounded.
+//
+// A zero deadline means "no cooldown" (cooling disabled) and is returned untouched, and
+// a deadline already inside the ceiling is left exactly as the provider reported it.
+func clampQuotaCooldown(next, now time.Time) time.Time {
+	if next.IsZero() {
+		return next
+	}
+	ceiling := now.Add(maxQuotaCooldownCeiling)
+	if next.After(ceiling) {
+		return ceiling
+	}
+	return next
 }
 
 func (m *Manager) persistCooldownStates(ctx context.Context) {
@@ -881,6 +911,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
 								}
+								next = clampQuotaCooldown(next, now)
 							}
 							state.NextRetryAfter = next
 							applyCooldownFields(&state.Quota, QuotaState{
@@ -898,6 +929,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherQuotaNext) {
 											otherQuotaNext = otherState.Quota.NextRecoverAt
 										}
+										otherQuotaNext = clampQuotaCooldown(otherQuotaNext, now)
 										otherRetryAfter := otherQuotaNext
 										// Propagation only extends a sibling's still-live
 										// per-model deadline; it never shortens one.
@@ -920,6 +952,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if auth.Quota.NextRecoverAt.After(authNext) {
 									authNext = auth.Quota.NextRecoverAt
 								}
+								authNext = clampQuotaCooldown(authNext, now)
 								auth.Quota.NextRecoverAt = authNext
 								auth.NextRetryAfter = authNext
 							}
@@ -945,6 +978,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// clears the deadline.
 					if !state.NextRetryAfter.IsZero() && prevModelRetryAfter.After(state.NextRetryAfter) && prevModelRetryAfter.After(now) {
 						state.NextRetryAfter = prevModelRetryAfter
+					}
+					if statusCode == 429 {
+						state.NextRetryAfter = clampQuotaCooldown(state.NextRetryAfter, now)
 					}
 					auth.Status = StatusError
 					updateAggregatedAvailability(auth, now)
@@ -1345,7 +1381,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		if auth.Quota.NextRecoverAt.After(quotaRecover) {
 			quotaRecover = auth.Quota.NextRecoverAt
 		}
-		auth.Quota.NextRecoverAt = quotaRecover
+		auth.Quota.NextRecoverAt = clampQuotaCooldown(quotaRecover, now)
 		auth.Quota.BackoffLevel = maxBackoffLevel
 	} else if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
 		// Retain active auth-level quota cooldown
@@ -2227,6 +2263,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
 				}
+				next = clampQuotaCooldown(next, now)
 			}
 			auth.Quota.NextRecoverAt = next
 			auth.NextRetryAfter = next
@@ -2246,6 +2283,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	// deliberate zero write (disableCooling) still clears it.
 	if !auth.NextRetryAfter.IsZero() && prevAuthRetryAfter.After(auth.NextRetryAfter) && prevAuthRetryAfter.After(now) {
 		auth.NextRetryAfter = prevAuthRetryAfter
+	}
+	if statusCode == 429 {
+		auth.NextRetryAfter = clampQuotaCooldown(auth.NextRetryAfter, now)
 	}
 	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
 		auth.NextRetryAfter = now.Add(transientErrorCooldown)
