@@ -96,6 +96,96 @@ func TestConvertInteractionsResponseToOpenAIResponsesStream_LengthStopReasonEmit
 	if got := gjson.GetBytes(incomplete, "response.usage.output_tokens").Int(); got != 65536 {
 		t.Fatalf("usage.output_tokens = %d, want 65536", got)
 	}
+	// The call was cut mid-arguments: the done item (emitted at step.stop, before
+	// the stop reason is known) and the terminal output must not present it as an
+	// executable completed call.
+	done := findResponsesEventPayload(out, "response.output_item.done")
+	if got := gjson.GetBytes(done, "item.status").String(); got != "incomplete" {
+		t.Fatalf("truncated done item.status = %q, want incomplete. Payload: %s", got, done)
+	}
+	if got := gjson.GetBytes(incomplete, "response.output.0.status").String(); got != "incomplete" {
+		t.Fatalf("terminal output function_call status = %q, want incomplete. Payload: %s", got, incomplete)
+	}
+}
+
+// A call whose arguments are complete but which never received step.stop before
+// an incomplete interaction is force-closed as incomplete; the same call under a
+// completed interaction stays completed (covered by the dangling test below).
+func TestConvertInteractionsResponseToOpenAIResponsesStream_ForcedCloseUnderIncompleteIsIncomplete(t *testing.T) {
+	out := runInteractionsToResponses(t,
+		`data: {"event_type":"interaction.created","interaction":{"id":"i1","model":"devin/swe-2"}}`,
+		`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_a","name":"write_file","arguments":{}}}`,
+		`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"path\":\"a.html\"}"}}`,
+		`data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"incomplete","stop_reason":"length"}}`,
+	)
+	got := strings.Join(responsesEventNames(out), ",")
+	want := "response.created,response.output_item.added,response.function_call_arguments.delta,response.function_call_arguments.done,response.output_item.done,response.incomplete"
+	if got != want {
+		t.Fatalf("events = %s, want %s", got, want)
+	}
+	done := findResponsesEventPayload(out, "response.output_item.done")
+	if s := gjson.GetBytes(done, "item.status").String(); s != "incomplete" {
+		t.Fatalf("forced-close done item.status = %q, want incomplete", s)
+	}
+	incomplete := findResponsesEventPayload(out, "response.incomplete")
+	if s := gjson.GetBytes(incomplete, "response.output.0.status").String(); s != "incomplete" {
+		t.Fatalf("terminal output status = %q, want incomplete. Payload: %s", s, incomplete)
+	}
+}
+
+// Only the truncated call is incomplete: a call that finished normally before the
+// budget ran out keeps status "completed" both on its done item and in the
+// terminal output, even though the response itself is incomplete.
+func TestConvertInteractionsResponseToOpenAIResponsesStream_IncompleteOnlyDemotesTruncatedCall(t *testing.T) {
+	out := runInteractionsToResponses(t,
+		`data: {"event_type":"interaction.created","interaction":{"id":"i1","model":"devin/swe-2"}}`,
+		`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_a","name":"read_file","arguments":{}}}`,
+		`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"path\":\"a.go\"}"}}`,
+		`data: {"event_type":"step.stop","index":0}`,
+		`data: {"event_type":"step.start","index":1,"step":{"type":"function_call","id":"call_b","name":"write_file","arguments":{}}}`,
+		`data: {"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"path\":\"b.go\",\"content\":\"partial"}}`,
+		`data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"incomplete","stop_reason":"length"}}`,
+	)
+	var doneStatuses []string
+	for _, event := range out {
+		payload := ssePayload(event)
+		if gjson.GetBytes(payload, "type").String() == "response.output_item.done" && gjson.GetBytes(payload, "item.type").String() == "function_call" {
+			doneStatuses = append(doneStatuses, gjson.GetBytes(payload, "item.status").String())
+		}
+	}
+	if got := strings.Join(doneStatuses, ","); got != "completed,incomplete" {
+		t.Fatalf("done item statuses = %s, want completed,incomplete", got)
+	}
+	incomplete := findResponsesEventPayload(out, "response.incomplete")
+	if incomplete == nil {
+		t.Fatalf("response.incomplete missing: %v", responsesEventNames(out))
+	}
+	if got := gjson.GetBytes(incomplete, "response.output.0.status").String(); got != "completed" {
+		t.Fatalf("output.0.status = %q, want completed. Payload: %s", got, incomplete)
+	}
+	if got := gjson.GetBytes(incomplete, "response.output.1.status").String(); got != "incomplete" {
+		t.Fatalf("output.1.status = %q, want incomplete. Payload: %s", got, incomplete)
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponsesStream_TruncatedArgumentsAtStepStopAreIncomplete(t *testing.T) {
+	// No stop reason at all on the interaction; the only signal is that the
+	// arguments never became valid JSON.
+	out := runInteractionsToResponses(t,
+		`data: {"event_type":"interaction.created","interaction":{"id":"i1","model":"devin/swe-2"}}`,
+		`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_a","name":"write_file","arguments":{}}}`,
+		`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"path\":\"a.html\",\"content\":\"partial"}}`,
+		`data: {"event_type":"step.stop","index":0}`,
+		`data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"completed"}}`,
+	)
+	done := findResponsesEventPayload(out, "response.output_item.done")
+	if s := gjson.GetBytes(done, "item.status").String(); s != "incomplete" {
+		t.Fatalf("done item.status = %q, want incomplete. Payload: %s", s, done)
+	}
+	completed := findResponsesEventPayload(out, "response.completed")
+	if s := gjson.GetBytes(completed, "response.output.0.status").String(); s != "incomplete" {
+		t.Fatalf("terminal output status = %q, want incomplete. Payload: %s", s, completed)
+	}
 }
 
 // If the upstream never closed the function_call step, the terminal event must

@@ -3,6 +3,7 @@ package responses
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -34,6 +35,10 @@ type interactionsFunctionCallState struct {
 	InitialArgumentsEmitted bool
 	ArgumentsDoneEmitted    bool
 	ItemDoneEmitted         bool
+	// Incomplete is set once the call was reported with status "incomplete"
+	// (truncated arguments or interaction ended incomplete) so the terminal
+	// output mirrors the same status.
+	Incomplete bool
 }
 
 type responsesToInteractionsStreamState struct {
@@ -374,7 +379,7 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 		done, _ = sjson.SetRawBytes(done, "item.content.-1", outputText)
 		return [][]byte{emitResponsesEvent("response.output_text.done", textDone), emitResponsesEvent("response.content_part.done", part), emitResponsesEvent("response.output_item.done", done)}
 	case "function_call":
-		return responsesFunctionCallDoneEvents(index, itemID, st)
+		return responsesFunctionCallDoneEvents(index, itemID, st, false)
 	default:
 		done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{}}`)
 		done, _ = sjson.SetBytes(done, "sequence_number", nextResponsesSeq(st))
@@ -384,12 +389,23 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 	}
 }
 
+// responsesFunctionCallStatus returns the Responses item status for a function
+// call. A call is "incomplete" when the interaction ended incomplete (forced
+// close at completion) or when its accumulated arguments are not valid JSON,
+// which only happens when the upstream stopped mid-call; clients must not treat
+// such a call as executable. Otherwise the item is "completed" — Responses
+// clients validate this field strictly and drop frames with unknown values.
+func responsesFunctionCallStatus(call *interactionsFunctionCallState, arguments string, forceIncomplete bool) string {
+	if forceIncomplete || call.Incomplete || !json.Valid([]byte(arguments)) {
+		call.Incomplete = true
+		return "incomplete"
+	}
+	return "completed"
+}
+
 // responsesFunctionCallDoneEvents emits response.function_call_arguments.done and
 // response.output_item.done for the function_call at the given step index.
-// The done item must carry status "completed": OpenAI Responses clients such as
-// the AI SDK validate it strictly and silently drop the whole frame otherwise,
-// which loses the tool call entirely.
-func responsesFunctionCallDoneEvents(index int, itemID string, st *interactionsToResponsesStreamState) [][]byte {
+func responsesFunctionCallDoneEvents(index int, itemID string, st *interactionsToResponsesStreamState, forceIncomplete bool) [][]byte {
 	call := st.FunctionCalls[index]
 	if call == nil {
 		call = &interactionsFunctionCallState{ID: itemID}
@@ -413,20 +429,27 @@ func responsesFunctionCallDoneEvents(index int, itemID string, st *interactionsT
 	done, _ = sjson.SetBytes(done, "item.id", itemID)
 	done, _ = sjson.SetBytes(done, "item.call_id", itemID)
 	done, _ = sjson.SetBytes(done, "item.name", call.Name)
+	done, _ = sjson.SetBytes(done, "item.status", responsesFunctionCallStatus(call, arguments, forceIncomplete))
 	done, _ = translatorcommon.SetStringWithoutHTMLEscape(done, "item.arguments", arguments)
 	call.ItemDoneEmitted = true
 	return append(events, emitResponsesEvent("response.output_item.done", done))
 }
 
-// responsesCompletedEvents closes any function_call items that never received a
-// step.stop, then emits the terminal response.completed / response.incomplete
-// event. Truncation (stop_reason=length or status=incomplete on the interaction)
-// is reported through response.incomplete with incomplete_details.reason set to
-// max_output_tokens, which clients map to finish_reason "length".
+// responsesCompletedEvents resolves the terminal state first, closes any
+// function_call items that never received a step.stop (marked incomplete when
+// the interaction ended incomplete), then emits response.completed or
+// response.incomplete. Truncation (stop_reason=length or status=incomplete on
+// the interaction) is reported through response.incomplete with
+// incomplete_details.reason set to max_output_tokens, which clients map to
+// finish_reason "length".
 func responsesCompletedEvents(modelName string, root gjson.Result, st *interactionsToResponsesStreamState) [][]byte {
 	if st.Completed {
 		return nil
 	}
+	interaction := root.Get("interaction")
+	eventType, status, incompleteReason := responsesTerminalState(interaction, root)
+	terminalIncomplete := status == "incomplete"
+
 	var out [][]byte
 	openIndexes := make([]int, 0, len(st.FunctionCalls))
 	for index, call := range st.FunctionCalls {
@@ -436,11 +459,9 @@ func responsesCompletedEvents(modelName string, root gjson.Result, st *interacti
 	}
 	sort.Ints(openIndexes)
 	for _, index := range openIndexes {
-		out = append(out, responsesFunctionCallDoneEvents(index, st.ItemIDs[index], st)...)
+		out = append(out, responsesFunctionCallDoneEvents(index, st.ItemIDs[index], st, terminalIncomplete)...)
 	}
 
-	interaction := root.Get("interaction")
-	eventType, status, incompleteReason := responsesTerminalState(interaction, root)
 	payload := []byte(`{"type":"response.completed","response":{"id":"","object":"response","status":"completed","model":"","output":[],"incomplete_details":null,"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 	payload, _ = sjson.SetBytes(payload, "type", eventType)
 	payload, _ = sjson.SetBytes(payload, "response.status", status)
@@ -457,7 +478,7 @@ func responsesCompletedEvents(modelName string, root gjson.Result, st *interacti
 	if envID != "" {
 		payload, _ = sjson.SetBytes(payload, "response.environment_id", envID)
 	}
-	payload = setResponsesCompletedOutput(payload, st)
+	payload = setResponsesCompletedOutput(payload, st, terminalIncomplete)
 	payload = setResponsesUsageFromInteractions(payload, "response.usage", translatorcommon.InteractionsUsage(root))
 	st.Completed = true
 	return append(out, emitResponsesEvent(eventType, payload))
@@ -540,7 +561,7 @@ func recordResponsesTextOutput(st *interactionsToResponsesStreamState, index int
 	st.TextOutputs[index].WriteString(text)
 }
 
-func setResponsesCompletedOutput(payload []byte, st *interactionsToResponsesStreamState) []byte {
+func setResponsesCompletedOutput(payload []byte, st *interactionsToResponsesStreamState, terminalIncomplete bool) []byte {
 	maxIndex := -1
 	for index := range st.ItemTypes {
 		if index > maxIndex {
@@ -553,7 +574,7 @@ func setResponsesCompletedOutput(payload []byte, st *interactionsToResponsesStre
 		if !ok {
 			continue
 		}
-		item, ok := responsesCompletedOutputItem(index, itemType, st)
+		item, ok := responsesCompletedOutputItem(index, itemType, st, terminalIncomplete)
 		if ok {
 			outputItems = append(outputItems, item)
 		}
@@ -571,7 +592,7 @@ func responsesFunctionCallArguments(call *interactionsFunctionCallState) string 
 	return call.Arguments.String()
 }
 
-func responsesCompletedOutputItem(index int, itemType string, st *interactionsToResponsesStreamState) ([]byte, bool) {
+func responsesCompletedOutputItem(index int, itemType string, st *interactionsToResponsesStreamState, terminalIncomplete bool) ([]byte, bool) {
 	switch itemType {
 	case "model_output":
 		item := []byte(`{"id":"","type":"message","status":"completed","role":"assistant","content":[]}`)
@@ -590,8 +611,16 @@ func responsesCompletedOutputItem(index int, itemType string, st *interactionsTo
 		item, _ = sjson.SetBytes(item, "id", itemID)
 		item, _ = sjson.SetBytes(item, "call_id", itemID)
 		if call := st.FunctionCalls[index]; call != nil {
+			// Dangling calls were already force-closed by responsesCompletedEvents, so
+			// every call has emitted its done item; mirror that status here instead of
+			// re-applying the terminal state, which would demote calls that finished
+			// normally before the truncation.
+			arguments := responsesFunctionCallArguments(call)
 			item, _ = sjson.SetBytes(item, "name", call.Name)
-			item, _ = translatorcommon.SetStringWithoutHTMLEscape(item, "arguments", responsesFunctionCallArguments(call))
+			item, _ = sjson.SetBytes(item, "status", responsesFunctionCallStatus(call, arguments, false))
+			item, _ = translatorcommon.SetStringWithoutHTMLEscape(item, "arguments", arguments)
+		} else if terminalIncomplete {
+			item, _ = sjson.SetBytes(item, "status", "incomplete")
 		}
 		return item, true
 	}
