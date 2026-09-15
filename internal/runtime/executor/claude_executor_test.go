@@ -1633,6 +1633,99 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_BypassesUnknownModelSignatureMa
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstream_RepairsDanglingToolUse(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]},
+			{"role":"user","content":"stop and look at this"}
+		]
+	}`)
+
+	t.Run("claude family", func(t *testing.T) {
+		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "claude-sonnet-4-5")
+		assertSanitizedInterruptedToolResult(t, output, "t1", "stop and look at this")
+	})
+	t.Run("non-claude messages upstream", func(t *testing.T) {
+		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "kimi-k2.5")
+		assertSanitizedInterruptedToolResult(t, output, "t1", "stop and look at this")
+	})
+	t.Run("canonical carrier compatibility fields and invalid content", func(t *testing.T) {
+		input := []byte(`{
+			"model":"claude-sonnet-4-5",
+			"messages":[
+				{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]},
+				{"role":"user","tool_call_id":"top-alias","name":"legacy","content":[{"type":"tool_result","tool_use_id":"t1","call_id":"block-alias","content":42}]}
+			]
+		}`)
+		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), input, "claude-sonnet-4-5")
+		message := gjson.GetBytes(output, "messages.1")
+		if message.Get("tool_call_id").Exists() || message.Get("name").Exists() {
+			t.Fatalf("sanitized carrier retained top-level compatibility fields: %s", message.Raw)
+		}
+		result := message.Get("content.0")
+		if result.Get("tool_use_id").String() != "t1" || result.Get("content").Type != gjson.String || result.Get("content").String() != "42" {
+			t.Fatalf("sanitized carrier retained invalid tool result content: %s", result.Raw)
+		}
+		if result.Get("call_id").Exists() {
+			t.Fatalf("sanitized result retained a block-level compatibility field: %s", result.Raw)
+		}
+	})
+	t.Run("real result across a mid-conversation system turn renormalizes cache TTL", func(t *testing.T) {
+		midSystemBody := []byte(`{
+			"model": "claude-opus-5",
+			"messages": [
+				{"role":"user","content":"start"},
+				{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]},
+				{"role":"system","content":[{"type":"text","text":"new context","cache_control":{"type":"ephemeral","ttl":"1h"}}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"real output","cache_control":{"type":"ephemeral"}}]}
+			]
+		}`)
+		output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), midSystemBody, "claude-opus-5")
+		messages := gjson.GetBytes(output, "messages").Array()
+		if len(messages) != 4 {
+			t.Fatalf("message count = %d, want 4: %s", len(messages), output)
+		}
+		result := messages[2].Get("content.0")
+		if result.Get("tool_use_id").String() != "t1" || result.Get("content").String() != "real output" || result.Get("is_error").Bool() {
+			t.Fatalf("real result was not preserved: %s", result.Raw)
+		}
+		if messages[3].Get("role").String() != "system" || messages[3].Get("content.0.text").String() != "new context" {
+			t.Fatalf("mid-conversation system turn was not replayed after the result: %s", output)
+		}
+		if got := messages[3].Get("content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("system cache_control.type = %q, want ephemeral: %s", got, output)
+		}
+		if messages[3].Get("content.0.cache_control.ttl").Exists() {
+			t.Fatalf("replayed system retained a 1h TTL after a 5m result: %s", output)
+		}
+	})
+}
+
+func assertSanitizedInterruptedToolResult(t *testing.T, output []byte, toolUseID, userText string) {
+	t.Helper()
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2: %s", len(messages), output)
+	}
+	blocks := messages[1].Get("content").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("user blocks = %d, want 2: %s", len(blocks), messages[1].Raw)
+	}
+	if blocks[0].Get("type").String() != "tool_result" || blocks[0].Get("tool_use_id").String() != toolUseID {
+		t.Fatalf("expected synth tool_result for %s: %s", toolUseID, blocks[0].Raw)
+	}
+	if !blocks[0].Get("is_error").Bool() {
+		t.Fatalf("synth tool_result must set is_error: %s", blocks[0].Raw)
+	}
+	if blocks[0].Get("content").String() != "[operation interrupted by user]" {
+		t.Fatalf("synth content = %q", blocks[0].Get("content").String())
+	}
+	if blocks[1].Get("type").String() != "text" || blocks[1].Get("text").String() != userText {
+		t.Fatalf("user text not preserved: %s", blocks[1].Raw)
+	}
+}
+
 func TestClaudeExecutor_ExecuteBypassesSignatureSanitizerForUnknownModel(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
