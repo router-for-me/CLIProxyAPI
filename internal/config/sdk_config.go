@@ -6,6 +6,10 @@ package config
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
+	// CodexResponseSteering enables full-duplex Codex WebSockets, bound to one
+	// upstream model/account/socket for their entire lifetime. Default is false.
+	CodexResponseSteering bool `yaml:"codex-response-steering" json:"codex-response-steering"`
+
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 

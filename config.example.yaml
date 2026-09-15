@@ -41,6 +41,11 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Experimental full-duplex Codex Responses WebSocket steering (default: false).
+# Keeps one upstream account/model per socket; accepted input is never replayed.
+# See STEERING.md for limitations.
+codex-response-steering: false
+
 # Enable debug logging
 debug: false
 
