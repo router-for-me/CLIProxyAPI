@@ -36,7 +36,10 @@ type ZCodeRouteResolver struct {
 	retryAt  time.Time
 }
 
-// NewZCodeRouteResolver constructs a resolver. cfg may be nil.
+// NewZCodeRouteResolver constructs a resolver. cfg may be nil. The 3s client
+// timeout is an INTENTIONAL exception (see AGENTS.md): it bounds this small
+// control-plane metadata fetch (analogous to the management APICall timeout) and
+// is never applied to the model connection, which sets no timeout.
 func NewZCodeRouteResolver(cfg *config.Config) *ZCodeRouteResolver {
 	return &ZCodeRouteResolver{
 		cfg:       cfg,
@@ -85,11 +88,17 @@ func (r *ZCodeRouteResolver) Refresh(ctx context.Context) error {
 			} `json:"proxyEndpoint"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil || env.Code != 0 {
+	if err := json.Unmarshal(raw, &env); err != nil {
 		r.mu.Lock()
 		r.retryAt = time.Now().Add(zcodeRouteCooldown)
 		r.mu.Unlock()
-		return fmt.Errorf("zcode: config fetch failed: code=%d err=%v", env.Code, err)
+		return fmt.Errorf("zcode: config fetch failed: %w", err)
+	}
+	if env.Code != 0 {
+		r.mu.Lock()
+		r.retryAt = time.Now().Add(zcodeRouteCooldown)
+		r.mu.Unlock()
+		return fmt.Errorf("zcode: config fetch failed: code=%d", env.Code)
 	}
 	next := map[string]string{}
 	for from, to := range env.Data.ProxyEndpoint.Mapping {
@@ -109,9 +118,10 @@ func (r *ZCodeRouteResolver) BaseURL(_ *cliproxyauth.Auth, path string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	// Map the plain coding endpoint to the ultra gateway, if a snapshot exists.
+	// `path` is intentionally unused: routing is keyed solely on the default base,
+	// and the signature stays fixed to match the internal zcodeRouter interface.
 	from := zcodeDefaultBase
 	if to, ok := r.mapping[from]; ok {
-		_ = path
 		return to
 	}
 	return from

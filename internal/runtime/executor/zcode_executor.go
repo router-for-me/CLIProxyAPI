@@ -32,7 +32,6 @@ type zcodeRouter interface {
 // custom header it finds there on both streaming and non-streaming paths.
 type ZCodeExecutor struct {
 	*ClaudeExecutor
-	cfg    *config.Config
 	routes zcodeRouter
 }
 
@@ -43,7 +42,6 @@ func NewZCodeExecutor(cfg *config.Config) *ZCodeExecutor {
 			cfg:                cfg,
 			requestLogProvider: "zcode",
 		},
-		cfg:    cfg,
 		routes: helps.NewZCodeRouteResolver(cfg),
 	}
 }

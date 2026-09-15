@@ -107,7 +107,12 @@ func BuildZCodeAuth(cred *zcode.Credential, jwt, userID string) *coreauth.Auth {
 		"header:X-Client-Timezone":   "Asia/Shanghai",
 		"header:X-Platform":          runtimeGOOS() + "-" + runtimeGOARCH(),
 		"header:X-Os-Category":       osCategory(),
-		"header:X-ZCode-Device-Mid":  deviceMid,
+		// X-ZCode-Device-Mid follows the ZCode client LLM identity convention:
+		// the spec (docs/superpowers/specs/2026-09-15-zcode-provider.md) documents
+		// control-plane X-Device-Mid, which the LLM path omits; this header is sent
+		// under a different name X-ZCode-Device-Mid and is the intended native
+		// identity set for the LLM path.
+		"header:X-ZCode-Device-Mid": deviceMid,
 	}
 	metadata := map[string]any{
 		"type":       "zcode",
