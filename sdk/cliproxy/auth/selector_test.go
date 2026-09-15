@@ -2215,6 +2215,11 @@ func TestExtractSessionIDNativeSignals(t *testing.T) {
 			want:    "affinity:ses_opencode",
 		},
 		{
+			name:    "OpenCode native session header",
+			headers: http.Header{"X-Opencode-Session": []string{"ses_opencode_native"}},
+			want:    "affinity:ses_opencode_native",
+		},
+		{
 			name:    "prompt cache key",
 			payload: `{"prompt_cache_key":"prompt-session"}`,
 			want:    "pck:prompt-session",
