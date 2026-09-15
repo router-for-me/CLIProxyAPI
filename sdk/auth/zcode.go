@@ -94,25 +94,16 @@ func BuildZCodeAuth(cred *zcode.Credential, jwt, userID string) *coreauth.Auth {
 	fileName := fmt.Sprintf("zcode-%d.json", time.Now().UnixMilli())
 
 	// Identity headers carried on every upstream request (native ZCode client
-	// fidelity). Stored as header:* attributes consumed by ApplyCustomHeadersFromAttrs.
+	// fidelity). Stored as header:* attributes consumed by ApplyCustomHeadersFromAttrs
+	// and mirrored into metadata/storage (headers) so they survive a restart and are
+	// reconstructed back into header:* attrs by ApplyCustomHeadersFromMetadata.
+	identity := identityHeaders(deviceMid)
 	attrs := map[string]string{
-		"api_key":                    cred.FullKey(),
-		"base_url":                   "https://api.z.ai/api/anthropic",
-		"header:User-Agent":          "ZCode/" + zCodeVersion,
-		"header:X-Title":             "ZCode",
-		"header:HTTP-Referer":        "https://zcode.z.ai",
-		"header:X-ZCode-Agent":       "glm",
-		"header:X-ZCode-App-Version": zCodeVersion,
-		"header:X-Client-Language":   "zh-CN",
-		"header:X-Client-Timezone":   "Asia/Shanghai",
-		"header:X-Platform":          runtimeGOOS() + "-" + runtimeGOARCH(),
-		"header:X-Os-Category":       osCategory(),
-		// X-ZCode-Device-Mid follows the ZCode client LLM identity convention:
-		// the spec (docs/superpowers/specs/2026-09-15-zcode-provider.md) documents
-		// control-plane X-Device-Mid, which the LLM path omits; this header is sent
-		// under a different name X-ZCode-Device-Mid and is the intended native
-		// identity set for the LLM path.
-		"header:X-ZCode-Device-Mid": deviceMid,
+		"api_key":  cred.FullKey(),
+		"base_url": "https://api.z.ai/api/anthropic",
+	}
+	for name, value := range identity {
+		attrs["header:"+name] = value
 	}
 	metadata := map[string]any{
 		"type":       "zcode",
@@ -121,6 +112,8 @@ func BuildZCodeAuth(cred *zcode.Credential, jwt, userID string) *coreauth.Auth {
 		"jwt":        jwt,
 		"user_id":    userID,
 		"device_mid": deviceMid,
+		"base_url":   "https://api.z.ai/api/anthropic",
+		"headers":    identityHeaders(deviceMid),
 		"timestamp":  time.Now().UnixMilli(),
 	}
 
@@ -129,9 +122,29 @@ func BuildZCodeAuth(cred *zcode.Credential, jwt, userID string) *coreauth.Auth {
 		Provider:   "zcode",
 		FileName:   fileName,
 		Label:      "ZCode User",
-		Storage:    &zcode.TokenStorage{APIKey: cred.APIKey, Secret: cred.Secret, JWT: jwt, UserID: userID, DeviceMid: deviceMid, Provider: "zcode"},
+		Storage:    &zcode.TokenStorage{APIKey: cred.APIKey, Secret: cred.Secret, JWT: jwt, UserID: userID, DeviceMid: deviceMid, Provider: "zcode", BaseURL: "https://api.z.ai/api/anthropic", Headers: identityHeaders(deviceMid)},
 		Metadata:   metadata,
 		Attributes: attrs,
+	}
+}
+
+func identityHeaders(deviceMid string) map[string]string {
+	return map[string]string{
+		// X-ZCode-Device-Mid follows the ZCode client LLM identity convention:
+		// the spec (docs/superpowers/specs/2026-09-15-zcode-provider.md) documents
+		// control-plane X-Device-Mid, which the LLM path omits; this header is sent
+		// under a different name X-ZCode-Device-Mid and is the intended native
+		// identity set for the LLM path.
+		"User-Agent":          "ZCode/" + zCodeVersion,
+		"X-Title":             "ZCode",
+		"HTTP-Referer":        "https://zcode.z.ai",
+		"X-ZCode-Agent":       "glm",
+		"X-ZCode-App-Version": zCodeVersion,
+		"X-Client-Language":   "zh-CN",
+		"X-Client-Timezone":   "Asia/Shanghai",
+		"X-Platform":          runtimeGOOS() + "-" + runtimeGOARCH(),
+		"X-Os-Category":       osCategory(),
+		"X-ZCode-Device-Mid":  deviceMid,
 	}
 }
 

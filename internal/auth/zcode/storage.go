@@ -6,13 +6,18 @@ import (
 )
 
 // TokenStorage persists the static ZCode credential plus the stable device id.
+// Headers and BaseURL are persisted so the native identity-header set and the
+// anthropic endpoint survive a server restart (Attributes are in-memory only and
+// are reconstructed from this file via ApplyCustomHeadersFromMetadata).
 type TokenStorage struct {
-	APIKey    string `json:"api_key"`
-	Secret    string `json:"secret,omitempty"`
-	JWT       string `json:"jwt,omitempty"`
-	UserID    string `json:"user_id,omitempty"`
-	DeviceMid string `json:"device_mid,omitempty"`
-	Provider  string `json:"type"`
+	APIKey    string            `json:"api_key"`
+	Secret    string            `json:"secret,omitempty"`
+	JWT       string            `json:"jwt,omitempty"`
+	UserID    string            `json:"user_id,omitempty"`
+	DeviceMid string            `json:"device_mid,omitempty"`
+	Provider  string            `json:"type"`
+	BaseURL   string            `json:"base_url,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
 
 	Metadata map[string]any `json:"-"`
 }
