@@ -537,6 +537,8 @@ func (e *DevinExecutor) streamDevinFrames(
 	thoughtStepIndex := -1
 	var streamErr error
 	sawEOS := false
+	var lastStopReason uint64
+	sawStopReason := false
 
 	// 2. Consume streaming Connect-proto frames
 	for {
@@ -623,6 +625,11 @@ func (e *DevinExecutor) streamDevinFrames(
 		}
 		if frameRes.DeltaSignatureType != "" {
 			signatureType = frameRes.DeltaSignatureType
+		}
+		// Field #5 StopReason is only meaningful when non-zero; the last one wins.
+		if frameRes.StopReason != helps.DevinStopReasonUnspecified {
+			lastStopReason = frameRes.StopReason
+			sawStopReason = true
 		}
 
 		// Emit thinking delta
@@ -823,6 +830,14 @@ func (e *DevinExecutor) streamDevinFrames(
 	completedEvent := []byte(`{"event_type":"interaction.completed","interaction":{"id":"","model":"","status":"completed","usage":{"total_input_tokens":0,"total_output_tokens":0,"total_cached_tokens":0}}}`)
 	completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.id", interactionID)
 	completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.model", req.Model)
+	if sawStopReason {
+		// Propagate the upstream stop reason so downstream translators can emit
+		// finish_reason=length / stop_reason=max_tokens instead of a fake "stop".
+		status, stopReason := helps.DevinStopReasonToInteractions(lastStopReason)
+		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.status", status)
+		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.stop_reason", stopReason)
+		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.stop_reason_code", lastStopReason)
+	}
 	if finalUsage != nil {
 		totalInput := finalUsage.PromptTokens + finalUsage.CachedTokens
 		totalOutput := finalUsage.CompletionTokens
@@ -923,6 +938,8 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 	seenUnknown := make(map[int]bool)
 	framesCount := 0
 	sawEOS := false
+	var lastStopReason uint64
+	sawStopReason := false
 
 	for {
 		flag, payload, errRead := helps.ReadConnectFrame(body)
@@ -1028,6 +1045,10 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		if frameRes.DeltaSignatureType != "" {
 			signatureType = frameRes.DeltaSignatureType
 		}
+		if frameRes.StopReason != helps.DevinStopReasonUnspecified {
+			lastStopReason = frameRes.StopReason
+			sawStopReason = true
+		}
 		if frameRes.ThinkingText != "" {
 			thinkingParts = append(thinkingParts, frameRes.ThinkingText)
 		}
@@ -1086,6 +1107,12 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 	out := []byte(`{"id":"","model":"","status":"completed","steps":[],"usage":{"total_input_tokens":0,"total_output_tokens":0,"total_cached_tokens":0}}`)
 	out, _ = sjson.SetBytes(out, "id", interactionID)
 	out, _ = sjson.SetBytes(out, "model", model)
+	if sawStopReason {
+		status, stopReason := helps.DevinStopReasonToInteractions(lastStopReason)
+		out, _ = sjson.SetBytes(out, "status", status)
+		out, _ = sjson.SetBytes(out, "stop_reason", stopReason)
+		out, _ = sjson.SetBytes(out, "stop_reason_code", lastStopReason)
+	}
 
 	var steps [][]byte
 

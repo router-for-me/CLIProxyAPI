@@ -3,6 +3,7 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -13,18 +14,26 @@ import (
 )
 
 type interactionsToOpenAIChatStreamState struct {
-	ID              string
-	Model           string
-	EnvironmentID   string
-	Created         int64
-	Started         bool
-	Completed       bool
-	SawToolCall     bool
+	ID            string
+	Model         string
+	EnvironmentID string
+	Created       int64
+	Started       bool
+	Completed     bool
+	SawToolCall   bool
+	// StepTypes/ToolIDs/ToolNames/ToolArguments/TextByStepIndex are keyed by the
+	// interactions step index (which counts thought/model_output/function_call
+	// steps alike).
 	StepTypes       map[int]string
 	ToolIDs         map[int]string
 	ToolNames       map[int]string
 	ToolArguments   map[int]*strings.Builder
 	TextByStepIndex map[int]*strings.Builder
+	// ToolOrdinals maps an interactions step index to the OpenAI tool_calls[]
+	// index. OpenAI requires tool_calls indices to be 0-based and contiguous
+	// per response, independent of any preceding text/thought steps.
+	ToolOrdinals    map[int]int
+	NextToolOrdinal int
 }
 
 func ConvertInteractionsResponseToOpenAI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
@@ -93,13 +102,51 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 	}
 	if sawToolCall {
 		out, _ = sjson.SetBytes(out, "choices.0.message.content", nil)
-		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
 	}
+	out, _ = sjson.SetBytes(out, "choices.0.finish_reason", resolveOpenAIChatFinishReason(interaction, root, sawToolCall, false))
 	if envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String(), root.Get("interaction.environment_id").String()); envID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", envID)
 	}
 	out = setOpenAIChatUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root))
 	return out
+}
+
+// resolveOpenAIChatFinishReason derives the OpenAI finish_reason for a completed
+// interaction. Precedence:
+//  1. An explicit normalized stop_reason on the interaction (emitted by executors
+//     that know the upstream stop reason, e.g. Devin's StopReason enum).
+//  2. status == "incomplete" (used by the Interactions format for truncation).
+//  3. A tool call whose accumulated arguments are not valid JSON, which can only
+//     happen when the upstream stream was cut mid-call.
+//  4. tool_calls when a tool call was seen, otherwise stop.
+func resolveOpenAIChatFinishReason(interaction, root gjson.Result, sawToolCall, truncatedToolCall bool) string {
+	explicit := strings.ToLower(strings.TrimSpace(firstNonEmpty(interaction.Get("stop_reason").String(), root.Get("stop_reason").String())))
+	switch explicit {
+	case "length", "max_tokens":
+		return "length"
+	case "content_filter":
+		return "content_filter"
+	case "tool_calls", "stop":
+		// Trust what we actually streamed over the upstream label: some upstreams
+		// report FUNCTION_CALL even when the call was dropped, and vice versa.
+		if sawToolCall {
+			if truncatedToolCall {
+				return "length"
+			}
+			return "tool_calls"
+		}
+		return "stop"
+	}
+	if status := strings.ToLower(strings.TrimSpace(firstNonEmpty(interaction.Get("status").String(), root.Get("status").String()))); status == "incomplete" {
+		return "length"
+	}
+	if sawToolCall {
+		if truncatedToolCall {
+			return "length"
+		}
+		return "tool_calls"
+	}
+	return "stop"
 }
 
 func convertInteractionsEventToOpenAIChat(modelName string, rawJSON []byte, st *interactionsToOpenAIChatStreamState) [][]byte {
@@ -130,6 +177,12 @@ func convertInteractionsEventToOpenAIChat(modelName string, rawJSON []byte, st *
 			st.EnvironmentID = envID
 		}
 		return appendOpenAIChatCompleted(nil, root, st)
+	case "response.failed", "interaction.failed":
+		// The executor surfaces the failure through the stream error channel, which
+		// the HTTP handler renders as a terminal error frame. Mark the stream as
+		// finished so no synthetic finish_reason="stop" can follow the failure.
+		st.Completed = true
+		return nil
 	case "done":
 		return nil
 	}
@@ -146,7 +199,8 @@ func interactionsStepStartToOpenAIChat(modelName string, root gjson.Result, st *
 	switch stepType {
 	case "function_call":
 		st.SawToolCall = true
-		st.ToolIDs[index] = firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), fmt.Sprintf("call_%d", index))
+		ordinal := st.toolOrdinal(index)
+		st.ToolIDs[index] = firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), fmt.Sprintf("call_%d", ordinal))
 		name := step.Get("name").String()
 		if isAntigravityModel(modelName) || (st != nil && isAntigravityModel(st.Model)) {
 			name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
@@ -182,6 +236,7 @@ func interactionsStepDeltaToOpenAIChat(modelName string, root gjson.Result, st *
 			st.ToolArguments[index] = &strings.Builder{}
 		}
 		st.ToolArguments[index].WriteString(args)
+		st.SawToolCall = true
 		return append(out, openAIChatToolCallArgumentsChunk(st, index, args))
 	default:
 		text := delta.Get("text").String()
@@ -212,14 +267,41 @@ func appendOpenAIChatCompleted(out [][]byte, root gjson.Result, st *interactions
 	}
 	out = ensureOpenAIChatStarted(out, st)
 	chunk := openAIChatBaseChunk(st)
-	finishReason := "stop"
-	if st.SawToolCall {
-		finishReason = "tool_calls"
-	}
+	finishReason := resolveOpenAIChatFinishReason(root.Get("interaction"), root, st.SawToolCall, st.hasTruncatedToolCall())
 	chunk, _ = sjson.SetBytes(chunk, "choices.0.finish_reason", finishReason)
 	chunk = setOpenAIChatUsageFromInteractions(chunk, "usage", translatorcommon.InteractionsUsage(root))
 	st.Completed = true
 	return append(out, chunk)
+}
+
+// toolOrdinal returns the OpenAI tool_calls[] index for an interactions step
+// index, allocating the next contiguous ordinal on first sight.
+func (st *interactionsToOpenAIChatStreamState) toolOrdinal(stepIndex int) int {
+	if ordinal, ok := st.ToolOrdinals[stepIndex]; ok {
+		return ordinal
+	}
+	ordinal := st.NextToolOrdinal
+	st.ToolOrdinals[stepIndex] = ordinal
+	st.NextToolOrdinal++
+	return ordinal
+}
+
+// hasTruncatedToolCall reports whether any streamed tool call ended with
+// arguments that do not parse as JSON, i.e. the upstream stopped mid-call.
+func (st *interactionsToOpenAIChatStreamState) hasTruncatedToolCall() bool {
+	for _, builder := range st.ToolArguments {
+		if builder == nil {
+			continue
+		}
+		args := strings.TrimSpace(builder.String())
+		if args == "" {
+			continue
+		}
+		if !json.Valid([]byte(args)) {
+			return true
+		}
+	}
+	return false
 }
 
 func openAIChatBaseChunk(st *interactionsToOpenAIChatStreamState) []byte {
@@ -239,20 +321,26 @@ func openAIChatDeltaChunk(st *interactionsToOpenAIChatStreamState, field, value 
 	return chunk
 }
 
+// openAIChatToolCallStartChunk emits the first tool_calls delta for the given
+// interactions step index. The OpenAI "index" is the tool ordinal, not the
+// step index: a function_call that follows a thought step and a model_output
+// step is still tool_calls[0].
 func openAIChatToolCallStartChunk(st *interactionsToOpenAIChatStreamState, index int) []byte {
+	ordinal := st.toolOrdinal(index)
 	chunk := openAIChatBaseChunk(st)
 	toolCall := []byte(`{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`)
-	toolCall, _ = sjson.SetBytes(toolCall, "index", index)
-	toolCall, _ = sjson.SetBytes(toolCall, "id", firstNonEmpty(st.ToolIDs[index], fmt.Sprintf("call_%d", index)))
+	toolCall, _ = sjson.SetBytes(toolCall, "index", ordinal)
+	toolCall, _ = sjson.SetBytes(toolCall, "id", firstNonEmpty(st.ToolIDs[index], fmt.Sprintf("call_%d", ordinal)))
 	toolCall, _ = sjson.SetBytes(toolCall, "function.name", st.ToolNames[index])
 	chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.tool_calls.-1", toolCall)
 	return chunk
 }
 
 func openAIChatToolCallArgumentsChunk(st *interactionsToOpenAIChatStreamState, index int, arguments string) []byte {
+	ordinal := st.toolOrdinal(index)
 	chunk := openAIChatBaseChunk(st)
 	toolCall := []byte(`{"index":0,"function":{"arguments":""}}`)
-	toolCall, _ = sjson.SetBytes(toolCall, "index", index)
+	toolCall, _ = sjson.SetBytes(toolCall, "index", ordinal)
 	toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments)
 	chunk, _ = sjson.SetRawBytes(chunk, "choices.0.delta.tool_calls.-1", toolCall)
 	return chunk
@@ -366,5 +454,8 @@ func (st *interactionsToOpenAIChatStreamState) ensureMaps() {
 	}
 	if st.TextByStepIndex == nil {
 		st.TextByStepIndex = make(map[int]*strings.Builder)
+	}
+	if st.ToolOrdinals == nil {
+		st.ToolOrdinals = make(map[int]int)
 	}
 }
