@@ -325,32 +325,102 @@ func TestSaveRejectsEmptySettings(t *testing.T) {
 	}
 }
 
-// TestSaveTransactionalIntegrityOnFailure forces a failure path inside the
-// Save transaction (by passing audit values that violate an upstream
-// constraint after the upsert succeeds is non-trivial to engineer against
-// the production schema, so the test exercises a controlled failure by
-// closing the database mid-transaction) and asserts that no partial state
-// was committed.
+// TestSaveTransactionalIntegrityOnFailure exercises the real
+// transactional-integrity contract: the upsert of runtime_config and the
+// append of config_revisions happen in one transaction, so a failure on
+// the inner config_revisions insert must roll back the runtime_config
+// update too.
+//
+// Strategy: seed revision 1 via the repository (clean state), then INSERT
+// a sentinel row into config_revisions with revision = 2 outside the
+// repository. The next repository.Save(expected=1, ...) derives
+// newRevision = 2 and trips the config_revisions PRIMARY KEY constraint
+// inside the transaction. We assert the call errors, the active row stays
+// at revision 1, and exactly one config_revisions row carries revision 2
+// (the sentinel, not a duplicate from the failed insert).
 func TestSaveTransactionalIntegrityOnFailure(t *testing.T) {
 	repo, pg := newTestRepo(t, "test_repo_tx_integrity")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Seed revision 1 via the production path so the active row and
+	// config_revisions are in a known-good state before the trip wire.
 	first := configsnapshot.NewEmpty()
 	first.Settings["port"] = 8317
-	if _, err := repo.Save(ctx, 0, &first, configstore.SaveAudit{Actor: "tester"}); err != nil {
-		t.Fatalf("first Save: %v", err)
+	if _, err := repo.Save(ctx, 0, &first, configstore.SaveAudit{Actor: "tester", Reason: "seed"}); err != nil {
+		t.Fatalf("seed Save: %v", err)
 	}
 
-	// Force a failure by closing the DB. Any subsequent Save must fail and
-	// the active row must remain at revision 1.
-	_ = pg.Close()
+	// Install a sentinel config_revisions row that will collide with the
+	// next repository Save's inner INSERT (which would otherwise write
+	// revision 2). Capture the sentinel row's settings so the cleanup
+	// hook can verify the trip-wire row was the only revision-2 row.
+	sentinelSettings := []byte(`{"port": 8317}`)
+	if _, err := pg.DB().ExecContext(ctx,
+		`INSERT INTO `+pg.ConfigRevisionsTable()+
+			` (revision, settings, resource_snapshot, checksum, created_at, created_by, reason) `+
+			`VALUES (2, $1::jsonb, '{}'::jsonb, '', NOW(), 'trip-wire', 'integrity-fixture')`,
+		sentinelSettings,
+	); err != nil {
+		t.Fatalf("insert sentinel config_revisions row: %v", err)
+	}
+	// Clean up the trip wire so the schema stays tidy for subsequent
+	// tests. The cleanup runs after the test body, even on failure.
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := pg.DB().ExecContext(cleanupCtx,
+			`DELETE FROM `+pg.ConfigRevisionsTable()+` WHERE revision = 2 AND created_by = 'trip-wire'`,
+		); err != nil {
+			t.Logf("cleanup trip-wire row (best-effort): %v", err)
+		}
+	})
 
-	stale := configsnapshot.NewEmpty()
-	stale.Settings["port"] = 9000
-	if _, err := repo.Save(ctx, 1, &stale, configstore.SaveAudit{Actor: "tester"}); err == nil {
-		t.Fatal("expected error after DB close, got nil")
+	// The next Save: expected=1 matches the active revision, the
+	// repository derives newRevision = 2, and the inner INSERT collides
+	// with the sentinel PK. The whole transaction must roll back.
+	collision := configsnapshot.NewEmpty()
+	collision.Settings["port"] = 9000
+	if _, err := repo.Save(ctx, 1, &collision, configstore.SaveAudit{Actor: "tester", Reason: "collision"}); err == nil {
+		t.Fatal("expected Save to fail on PK collision, got nil")
+	}
+
+	// runtime_config must still report revision 1; the in-tx upsert must
+	// have been rolled back alongside the failed config_revisions insert.
+	var activeRevision int64
+	if err := pg.DB().QueryRowContext(ctx,
+		"SELECT revision FROM "+pg.RuntimeConfigTable()+" WHERE id = 1",
+	).Scan(&activeRevision); err != nil {
+		t.Fatalf("scan runtime_config.revision: %v", err)
+	}
+	if activeRevision != 1 {
+		t.Fatalf("runtime_config.revision = %d after failed Save, want 1", activeRevision)
+	}
+
+	// config_revisions must carry exactly one row with revision = 2: the
+	// sentinel. A second row would mean the failed repository Save leaked
+	// a partial commit into the history table.
+	var revisionTwoCount int
+	if err := pg.DB().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+pg.ConfigRevisionsTable()+" WHERE revision = 2",
+	).Scan(&revisionTwoCount); err != nil {
+		t.Fatalf("count config_revisions.revision=2: %v", err)
+	}
+	if revisionTwoCount != 1 {
+		t.Fatalf("config_revisions rows at revision 2 = %d, want 1 (sentinel only)", revisionTwoCount)
+	}
+
+	// Sanity: the total config_revisions row count is exactly 2 (the seed
+	// plus the sentinel); no extra row was leaked by the rolled-back Save.
+	var totalCount int
+	if err := pg.DB().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+pg.ConfigRevisionsTable(),
+	).Scan(&totalCount); err != nil {
+		t.Fatalf("count config_revisions total: %v", err)
+	}
+	if totalCount != 2 {
+		t.Fatalf("config_revisions total rows = %d, want 2", totalCount)
 	}
 }
 
