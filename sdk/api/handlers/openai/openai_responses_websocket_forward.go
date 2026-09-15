@@ -140,6 +140,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
+				if gjson.GetBytes(payloads[i], "type").String() == "response.created" {
+					completed = false
+					outputItemsByIndex = make(map[int64][]byte)
+					outputItemsFallback = nil
+					pendingToolCallIDs = make(map[string]struct{})
+				}
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				eventType := gjson.GetBytes(payloads[i], "type").String()
 				if isResponsesWebsocketCompletionEvent(eventType) && (opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
