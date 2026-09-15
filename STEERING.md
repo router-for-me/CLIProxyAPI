@@ -35,6 +35,10 @@ ends, allowing automatic successors and client tool results on the same socket.
 - Rejections before a later create is established consume that create's pending
   metadata. Failures identified as the current response leave queued creates
   intact. Invalid reasoning replay is cleared only for the failing scope.
+- After a response has started on the opted-in Codex duplex route, top-level
+  error payloads are forwarded without closing the downstream connection, so
+  clients can correct a rejected create. Initial errors, executor stream errors,
+  and non-duplex routes retain terminal handling.
 - If a failure has no response ID while both an active response and a pending
   create exist, the connection closes after forwarding the failure. The proxy
   does not guess which request owns it or replay either request.
