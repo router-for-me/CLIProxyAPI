@@ -1124,6 +1124,39 @@ func normalizeXAIToolsWithFold(body []byte, shouldFold bool) []byte {
 	return body
 }
 
+// xaiFunctionToolNameSet collects every function tool name declared in the
+// request, both from the top-level tools array and from any additional_tools
+// input items. Callers that need to test many names against an unchanging body
+// should build this set once instead of calling xaiHasFunctionToolNamed in a
+// loop, which rescans the whole payload on every probe.
+func xaiFunctionToolNameSet(body []byte) map[string]struct{} {
+	names := make(map[string]struct{})
+	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
+		for _, tool := range tools.Array() {
+			if tool.Get("type").String() == xaiFunctionToolType {
+				if name := tool.Get("name").String(); name != "" {
+					names[name] = struct{}{}
+				}
+			}
+		}
+	}
+	if input := gjson.GetBytes(body, "input"); input.IsArray() {
+		for _, item := range input.Array() {
+			if item.Get("type").String() != "additional_tools" {
+				continue
+			}
+			for _, tool := range item.Get("tools").Array() {
+				if tool.Get("type").String() == xaiFunctionToolType {
+					if name := tool.Get("name").String(); name != "" {
+						names[name] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	return names
+}
+
 func xaiHasFunctionToolNamed(body []byte, name string) bool {
 	if name == "" {
 		return false

@@ -292,29 +292,37 @@ func normalizeXAIInputNamespaceToolCallsWithFold(body []byte, shouldFold bool) [
 	if !input.Exists() || !input.IsArray() {
 		return body
 	}
-	for index, item := range input.Array() {
+
+	// The declared tool set is unaffected by the rewrites below (they only touch
+	// name/arguments/namespace on function_call items), so probe it once instead
+	// of rescanning the whole payload per item.
+	toolNames := xaiFunctionToolNameSet(body)
+
+	arr := input.Array()
+	items := make([]json.RawMessage, 0, len(arr))
+	changed := false
+	for _, item := range arr {
 		if item.Get("type").String() != "function_call" {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
 		namespaceName := strings.TrimSpace(item.Get("namespace").String())
 		toolName := strings.TrimSpace(item.Get("name").String())
 		if namespaceName == "" {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
 		qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
 		var isFolded bool
-		if xaiHasFunctionToolNamed(body, namespaceName) {
+		if _, ok := toolNames[namespaceName]; ok {
 			isFolded = true
-		} else if xaiHasFunctionToolNamed(body, qualifiedName) {
+		} else if _, ok := toolNames[qualifiedName]; ok {
 			isFolded = false
 		} else {
 			isFolded = shouldFold
 		}
-		if isFolded {
-			namePath := fmt.Sprintf("input.%d.name", index)
-			namespacePath := fmt.Sprintf("input.%d.namespace", index)
-			argsPath := fmt.Sprintf("input.%d.arguments", index)
 
+		if isFolded {
 			dispatcherArgs := map[string]any{
 				"name": toolName,
 			}
@@ -327,41 +335,59 @@ func normalizeXAIInputNamespaceToolCallsWithFold(body []byte, shouldFold bool) [
 			}
 			encodedArgs, errMarshal := json.Marshal(dispatcherArgs)
 			if errMarshal != nil {
+				items = append(items, json.RawMessage(item.Raw))
 				continue
 			}
-
-			updated, errSet := sjson.SetBytes(body, namePath, namespaceName)
+			updated, errSet := sjson.SetBytes([]byte(item.Raw), "name", namespaceName)
 			if errSet != nil {
+				items = append(items, json.RawMessage(item.Raw))
 				continue
 			}
-			updated, errSet = sjson.SetBytes(updated, argsPath, string(encodedArgs))
+			updated, errSet = sjson.SetBytes(updated, "arguments", string(encodedArgs))
 			if errSet != nil {
+				items = append(items, json.RawMessage(item.Raw))
 				continue
 			}
-			updated, errDelete := sjson.DeleteBytes(updated, namespacePath)
+			updated, errDelete := sjson.DeleteBytes(updated, "namespace")
 			if errDelete != nil {
+				items = append(items, json.RawMessage(item.Raw))
 				continue
 			}
-			body = updated
+			items = append(items, json.RawMessage(updated))
+			changed = true
 			continue
 		}
 
 		if qualifiedName == "" {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
-		namePath := fmt.Sprintf("input.%d.name", index)
-		namespacePath := fmt.Sprintf("input.%d.namespace", index)
-		updated, errSet := sjson.SetBytes(body, namePath, qualifiedName)
+		updated, errSet := sjson.SetBytes([]byte(item.Raw), "name", qualifiedName)
 		if errSet != nil {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
-		updated, errDelete := sjson.DeleteBytes(updated, namespacePath)
+		updated, errDelete := sjson.DeleteBytes(updated, "namespace")
 		if errDelete != nil {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
-		body = updated
+		items = append(items, json.RawMessage(updated))
+		changed = true
 	}
-	return body
+	if !changed {
+		return body
+	}
+
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
+	}
+	return updated
 }
 
 type xaiNamespaceRestorer struct {
@@ -703,27 +729,50 @@ func normalizeXAIInputReasoningItems(body []byte) []byte {
 		return body
 	}
 
-	updated := body
-	for i, item := range input.Array() {
+	// Strip null content/encrypted_content from reasoning items.
+	//
+	// Each edit is applied to the individual item's raw JSON and the input
+	// array is rebuilt once at the end. Probing and deleting against the whole
+	// body inside the loop costs O(N*M) in both scanning and copying, which
+	// pins a CPU core for minutes on multi-megabyte reasoning histories.
+	arr := input.Array()
+	items := make([]json.RawMessage, 0, len(arr))
+	changed := false
+	for _, item := range arr {
 		if item.Get("type").String() != "reasoning" {
+			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}
-		contentPath := fmt.Sprintf("input.%d.content", i)
-		if content := gjson.GetBytes(updated, contentPath); content.Exists() && content.Type == gjson.Null {
-			updatedBody, errDel := sjson.DeleteBytes(updated, contentPath)
+		current := []byte(item.Raw)
+		if content := item.Get("content"); content.Exists() && content.Type == gjson.Null {
+			next, errDel := sjson.DeleteBytes(current, "content")
 			if errDel != nil {
 				return body
 			}
-			updated = updatedBody
+			current = next
+			changed = true
 		}
-		encryptedContentPath := fmt.Sprintf("input.%d.encrypted_content", i)
-		if encryptedContent := gjson.GetBytes(updated, encryptedContentPath); encryptedContent.Exists() && encryptedContent.Type == gjson.Null {
-			updatedBody, errDel := sjson.DeleteBytes(updated, encryptedContentPath)
+		if encryptedContent := item.Get("encrypted_content"); encryptedContent.Exists() && encryptedContent.Type == gjson.Null {
+			next, errDel := sjson.DeleteBytes(current, "encrypted_content")
 			if errDel != nil {
 				return body
 			}
-			updated = updatedBody
+			current = next
+			changed = true
 		}
+		items = append(items, json.RawMessage(current))
+	}
+	if !changed {
+		return mergeAdjacentXAIInputReasoningSummaries(body)
+	}
+
+	rawInput, errMarshal := json.Marshal(items)
+	if errMarshal != nil {
+		return body
+	}
+	updated, errSet := sjson.SetRawBytes(body, "input", rawInput)
+	if errSet != nil {
+		return body
 	}
 	return mergeAdjacentXAIInputReasoningSummaries(updated)
 }
