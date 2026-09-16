@@ -49,6 +49,25 @@ pprof:
   enable: false
   addr: "127.0.0.1:8316"
 
+# Enable local network mDNS / DNS-SD service discovery (RFC 6762 / RFC 6763).
+# When enabled, broadcasts _ai-gateway._tcp with API protocol subtypes on the local network.
+# NOTE for Docker users: Link-local multicast (224.0.0.251) cannot cross default NAT bridge networks.
+# To broadcast across the physical LAN, run the container with host networking (--net=host / network_mode: host).
+discovery:
+  enabled: false
+  # service-name: ""                  # Optional name prefix. Advertised as CPA-<ShortID> or <name>-<ShortID> (e.g. office-8F3B)
+  # service-type: "_ai-gateway._tcp"  # Service type (RFC 6335 compliant)
+  # subtypes:                         # DNS-SD API protocol subtypes to advertise
+  #   - "_chat-completions"
+  #   - "_responses"
+  #   - "_messages"
+  #   - "_generate-content"
+  #   - "_interactions"
+  # interfaces:
+  #   include: []                     # White-listed interfaces (empty: auto-detect physical interfaces)
+  #   exclude: []                     # Additional interface patterns to exclude
+  # auth-required: true               # Advertise that credentials are required
+
 # Credential concurrency is configured by Home in Home mode. The synthesized Home config is
 # authoritative and local values, including the values below, are ignored. Do not use local
 # configuration to override a Home concurrency policy.
@@ -246,17 +265,69 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
-  # Hold back the initial handshake events (response.created, response.in_progress and the
-  # websocket metadata frames) until the upstream emits its first generated event.
+  # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
+  # response.in_progress, the websocket metadata frames), keepalive heartbeats, and the *.added
+  # announcements of an item or part that is still empty - until the upstream emits its first
+  # generated event. Anything else, including a server-side tool item such as web_search_call and
+  # any frame not on that list, releases the stream immediately. On the SSE transport the lines that
+  # are not `data:` frames - comments, `event:` lines, blank separators - are held alongside them.
+  # The hold is bounded by a frame budget and a 1 MiB byte budget, not by wall-clock time: an
+  # upstream that trickles frames holds the response headers for as long as the client will wait.
   # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
   # right after those handshake events, instead of returning 503 on the wire. Buffering them
   # keeps the downstream response headers uncommitted long enough to transparently retry on
-  # another credential. Only overload/rate-limit rejections trigger failover; every other
-  # terminal failure is still delivered in-stream exactly as before.
-  # Trade-off: response headers are delayed until generation starts, which can trip client or
-  # reverse-proxy read timeouts (e.g. nginx proxy_read_timeout) on long reasoning requests.
+  # another credential. Only overload/rate-limit rejections trigger failover; every other terminal
+  # failure is still delivered in-stream exactly as before. One pre-existing behaviour is worth
+  # knowing, because this option makes the window it lives in much longer: if the stream ends while
+  # the bootstrap is still holding, the attempt ends instead of the error reaching the client, and
+  # whether another credential is then tried depends on how it ended. A clean end with no terminal
+  # event is request-scoped on SSE, so nothing else is tried; a websocket close, or a transport error
+  # such as a dropped connection on either transport, is not, so the request may be retried on
+  # another credential. None of that is new, but before this option the hold ended at the first
+  # keepalive, so it was rare; now it can span the whole reasoning phase.
+  # Trade-off: response headers are delayed until generation starts. Because heartbeats are held
+  # too, the delay now ends at the first generated token rather than at the first heartbeat. The
+  # budget bounds how much is held, not how long: 48 SSE lines, which measures out as 15 heartbeats
+  # of the three-line event:/data:/blank shape, 23 of a two-line ": keepalive" comment followed by
+  # its blank separator, or 47 of a bare ": keepalive" with no separator - one short of the obvious
+  # division, because the rejection frame's own event: line comes out of the same budget before its
+  # data: line is parsed. An upstream that sends the rejection as a bare data: line with no event:
+  # line gets the round number instead. At a 10s upstream heartbeat that is 150s, 230s or 470s of
+  # uncommitted response headers depending on the framing the upstream picks, all of it past nginx's
+  # 60s default proxy_read_timeout, so raise the timeouts in front of the proxy before enabling this.
+  # Those seconds bound what the buffer holds, not when the response headers are committed. Headers
+  # are committed on the first chunk the downstream translator actually produces, so for a format
+  # that renders the handshake as nothing - Chat Completions and Gemini do - they stay uncommitted
+  # past the budget, until the first generated token. That is not specific to the budget: any frame
+  # that releases the buffer has always behaved this way.
+  # The websocket transport spends the same 48 differently - one per message read, whether the loop
+  # holds it or skips it, with no framing to divide by - so there it is 48 heartbeats, about 480s.
+  # Two cases no budget covers: a websocket peer that sends only ping frames, which the library
+  # answers inside the read call, leaving only the 5 minute websocket read deadline; and an upstream
+  # that stops mid-line on SSE, where the scanner never returns and only the request context ends the
+  # wait. Neither is made worse by this option - with it off the same stalled line stalls the
+  # conductor instead, which waits on the same context - but a client-side request timeout, not
+  # proxy_read_timeout, is what bounds them.
   # Default: false
   stream-bootstrap-buffering: false
+  # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.
+  # When set (e.g. "20s"), if the time ceiling is reached before the first generated token,
+  # the stream is released to the client and further in-stream overloads are delivered rather
+  # than failed over. This bounds how long trickled heartbeats or early empty frames can delay
+  # response headers before streaming begins.
+  # Recommendation: If your CPA is deployed behind a reverse proxy with a strict read timeout
+  # (e.g. Nginx default proxy_read_timeout 60s or Cloudflare 100s timeout), setting this to "20s"
+  # is strongly recommended to guarantee headers commit well before proxy timeouts while retaining
+  # a comfortable 20s window to fail over early scheduling overloads.
+  # Note: The timeout check is evaluated as upstream frames arrive; it never aborts the upstream
+  # connection. Downstream headers are committed as soon as the downstream translator emits chunks
+  # (for formats that render handshake/heartbeats, headers commit immediately on release; for
+  # formats like Chat Completions and Gemini that render nothing until the first text token, headers
+  # commit when that first token arrives).
+  # When unset or set to "0", "0s", "none", "unlimited", "disabled", "off", or "never", no time ceiling
+  # is applied, and buffering relies purely on the 48-frame and 1MB byte budget.
+  # Default: "0" (unlimited)
+  stream-bootstrap-timeout: "0"
   # When true, optimize Codex Desktop, codex-tui, and codex_cli_rs requests for multi-agent v2.
   # This refreshes Codex spawn_agent model details, removes message parameter encryption,
   # normalizes encrypted agent_message content for Codex, and converts agent_message input
@@ -488,6 +559,22 @@ nonstream-keepalive-interval: 0
 #     excluded-models:
 #       - "grok-4.1"             # exclude specific models (exact match)
 #       - "grok-3-*"             # wildcard matching prefix
+#
+# Meta API keys (Muse Code)
+# Uses the native Meta executor targeting https://api.meta.ai/v1.
+# meta-api-key:
+#   - api-key: "..."
+#     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#     prefix: "meta" # optional: require calls like "meta/muse-spark-1.3" to target this credential
+#     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
+#     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#     base-url: "https://api.meta.ai/v1" # optional: defaults to https://api.meta.ai/v1
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models:
+#       - name: "muse-spark-1.3" # upstream model name
+#         alias: "muse-latest"   # client alias mapped to the upstream model
+#     excluded-models:
+#       - "muse-spark-1.1"
 
 # Claude API keys
 # claude-api-key:
@@ -716,8 +803,8 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
-# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
+# Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+# NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, meta-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. For strict backend pinning, use
 # unique aliases/prefixes or avoid overlapping names.
@@ -763,6 +850,9 @@ nonstream-keepalive-interval: 0
 #   xai:
 #     - name: "grok-4.3"
 #       alias: "grok-latest"
+#   meta:
+#     - name: "muse-spark-1.3"
+#       alias: "muse-latest"
 #   sample-provider:                  # plugin provider keys are supported for OAuth plugins
 #     - name: "sample-model-latest"
 #       alias: "sample-latest"
@@ -783,6 +873,8 @@ nonstream-keepalive-interval: 0
 #     - "kimi-k2-thinking"
 #   xai:
 #     - "grok-3-mini"
+#   meta:
+#     - "muse-spark-1.1"
 
 # OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
 # oauth-request-scoped-errors:
@@ -824,6 +916,11 @@ nonstream-keepalive-interval: 0
 #     - status: 400
 #       match:
 #         - "max_tokens_exceeded"
+#       action: "stop"
+#   meta:
+#     - status: 400
+#       match:
+#         - "context_length_exceeded"
 #       action: "stop"
 
 # Optional payload configuration

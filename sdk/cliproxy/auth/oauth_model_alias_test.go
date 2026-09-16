@@ -80,6 +80,15 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 			want:    "kimi-k2.5(high)",
 		},
 		{
+			name: "meta suffix preserved",
+			aliases: map[string][]internalconfig.OAuthModelAlias{
+				"meta": {{Name: "muse-spark-1.3", Alias: "muse-latest"}},
+			},
+			channel: "meta",
+			input:   "muse-latest(high)",
+			want:    "muse-spark-1.3(high)",
+		},
+		{
 			name: "case insensitive alias lookup with suffix",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
 				"antigravity": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "Gemini-2.5-Pro"}},
@@ -157,6 +166,8 @@ func createAuthForChannel(channel string) *Auth {
 		return &Auth{Provider: "aistudio"}
 	case "kimi":
 		return &Auth{Provider: "kimi"}
+	case "meta":
+		return &Auth{Provider: "meta", Attributes: map[string]string{"auth_kind": "oauth"}}
 	default:
 		return &Auth{Provider: channel}
 	}
@@ -175,6 +186,17 @@ func TestOAuthModelAliasChannel_Kimi(t *testing.T) {
 
 	if got := OAuthModelAliasChannel("kimi", "oauth"); got != "kimi" {
 		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "kimi")
+	}
+}
+
+func TestOAuthModelAliasChannel_Meta(t *testing.T) {
+	t.Parallel()
+
+	if got := OAuthModelAliasChannel("meta", "oauth"); got != "meta" {
+		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "meta")
+	}
+	if got := OAuthModelAliasChannel("meta", "api_key"); got != "" {
+		t.Fatalf("OAuthModelAliasChannel() = %q, want empty channel for meta-api-key", got)
 	}
 }
 
@@ -339,6 +361,57 @@ func TestApplyOAuthModelAlias_Devin(t *testing.T) {
 	}
 	if result.OriginalAlias != "fable-5-1" {
 		t.Errorf("OriginalAlias = %q, want %q", result.OriginalAlias, "fable-5-1")
+	}
+}
+
+func TestApplyOAuthModelAlias_Meta(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"meta": {
+			{
+				Name:         "muse-spark-1.3",
+				Alias:        "muse-latest",
+				Fork:         true,
+				ForceMapping: true,
+			},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	// Meta OAuth credentials mint an LLM API key; aliases must still apply.
+	auth := &Auth{
+		ID:       "meta-auth",
+		Provider: "meta",
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"api_key":   "LLM|minted",
+			"dca_token": "dca:token",
+		},
+	}
+
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "muse-latest")
+	if resolvedModel != "muse-spark-1.3" {
+		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "muse-spark-1.3")
+	}
+
+	suffixed := mgr.applyOAuthModelAlias(auth, "muse-latest(max)")
+	if suffixed != "muse-spark-1.3(max)" {
+		t.Errorf("applyOAuthModelAlias() suffixed model = %q, want %q", suffixed, "muse-spark-1.3(max)")
+	}
+
+	result := mgr.applyOAuthModelAliasWithResult(auth, "muse-latest(max)")
+	if result.UpstreamModel != "muse-spark-1.3(max)" {
+		t.Errorf("UpstreamModel = %q, want %q", result.UpstreamModel, "muse-spark-1.3(max)")
+	}
+	if !result.ForceMapping {
+		t.Errorf("ForceMapping = false, want true")
+	}
+	if result.OriginalAlias != "muse-latest" {
+		t.Errorf("OriginalAlias = %q, want %q", result.OriginalAlias, "muse-latest")
 	}
 }
 

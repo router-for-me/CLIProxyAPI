@@ -1917,3 +1917,78 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_SharedLocalNameIsN
 		t.Fatalf("namespaced tool_choice resolved to %q, want %q; output=%s", got, betaAlias, forcedAlpha)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OrphanFunctionCallOutputBecomesUserMessage(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"role":"user","content":[{"type":"input_text","text":"Task initialization"}]},
+			{"type":"function_call_output","id":"fco_01a09fca-8d33-73a1-97fd-4d83ecc02f9d","name":"send_message_to_thread","output":"<codex_delegation>\n  <source_thread_id>01a022d7-d4d0-72b2-8571-4590484ccaee</source_thread_id>\n  <input>Execute sub-task</input>\n</codex_delegation>"},
+			{"type":"function_call","call_id":"call_1789387253098037589_85","name":"Bash","arguments":"{\"command\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1789387253098037589_85","id":"fco_01a09fca-a5f0-7b40-9943-21fbc923c537","output":"/Users/developer"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	delegationFound := false
+	bashToolFound := false
+	for _, message := range messages {
+		role := message.Get("role").String()
+		if role == "tool" && strings.TrimSpace(message.Get("tool_call_id").String()) == "" {
+			t.Fatalf("orphan output emitted as tool message with empty tool_call_id: %s", string(out))
+		}
+		if role == "user" && strings.Contains(message.Get("content").String(), "<codex_delegation>") {
+			delegationFound = true
+		}
+		if role == "tool" && message.Get("tool_call_id").String() == "call_1789387253098037589_85" {
+			bashToolFound = true
+			if got := message.Get("content").String(); got != "/Users/developer" {
+				t.Fatalf("bash tool content = %q, want /Users/developer; output=%s", got, string(out))
+			}
+		}
+	}
+	if !delegationFound {
+		t.Fatalf("expected orphan send_message_to_thread output as user content; output=%s", string(out))
+	}
+	if !bashToolFound {
+		t.Fatalf("expected paired Bash tool message; output=%s", string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_UnpairedExplicitCallIDBecomesUserMessage(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"role":"user","content":[{"type":"input_text","text":"Task initialization"}]},
+			{"type":"function_call_output","call_id":"call_missing","name":"send_message_to_thread","output":"<codex_delegation>Execute sub-task</codex_delegation>"},
+			{"type":"function_call","call_id":"call_1789387253098037589_85","name":"Bash","arguments":"{\"command\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1789387253098037589_85","output":"/Users/developer"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	delegationFound := false
+	bashToolFound := false
+	for _, message := range messages {
+		role := message.Get("role").String()
+		if role == "tool" && message.Get("tool_call_id").String() == "call_missing" {
+			t.Fatalf("unpaired output emitted as tool message: %s", string(out))
+		}
+		if role == "user" && strings.Contains(message.Get("content").String(), "<codex_delegation>") {
+			delegationFound = true
+		}
+		if role == "tool" && message.Get("tool_call_id").String() == "call_1789387253098037589_85" {
+			bashToolFound = true
+		}
+	}
+	if !delegationFound {
+		t.Fatalf("expected unpaired send_message_to_thread output as user content; output=%s", string(out))
+	}
+	if !bashToolFound {
+		t.Fatalf("expected paired Bash tool message; output=%s", string(out))
+	}
+}

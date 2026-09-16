@@ -259,7 +259,6 @@ func claudeToolUseToInteractions(part gjson.Result) []byte {
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
 	step, _ = sjson.SetBytes(step, "name", part.Get("name").String())
 	if id := part.Get("id").String(); id != "" {
-		step, _ = sjson.SetBytes(step, "id", id)
 		step, _ = sjson.SetBytes(step, "call_id", id)
 	}
 	input := part.Get("input")
@@ -272,7 +271,6 @@ func claudeToolUseToInteractions(part gjson.Result) []byte {
 func claudeToolResultToInteractions(part gjson.Result) []byte {
 	step := []byte(`{"type":"function_result","call_id":"","result":""}`)
 	if id := part.Get("tool_use_id").String(); id != "" {
-		step, _ = sjson.SetBytes(step, "id", id)
 		step, _ = sjson.SetBytes(step, "call_id", id)
 	}
 	result := part.Get("content")

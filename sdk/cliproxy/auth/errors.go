@@ -19,6 +19,12 @@ const ErrorCodeConnectionLifecycle = "connection_lifecycle"
 
 const connectionLifecycleErrorCode = ErrorCodeConnectionLifecycle
 
+// ErrorCodeTransientTransport marks pre-HTTP dial/TLS/DNS/reset failures that
+// must skip credential cooldown and remain eligible for request-retry rounds.
+const ErrorCodeTransientTransport = "transient_transport"
+
+const transientTransportErrorCode = ErrorCodeTransientTransport
+
 // ErrorCodeForceCooldown marks failures that must enforce credential cooldown.
 const ErrorCodeForceCooldown = "force_cooldown"
 

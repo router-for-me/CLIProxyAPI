@@ -580,7 +580,7 @@ func interactionsFunctionCallToResponses(item gjson.Result, forAntigravity bool)
 		name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
 	}
 	out, _ = sjson.SetBytes(out, "name", name)
-	out, _ = sjson.SetBytes(out, "arguments", jsonStringValue(item.Get("arguments"), "{}"))
+	out, _ = translatorcommon.SetStringWithoutHTMLEscape(out, "arguments", jsonStringValue(item.Get("arguments"), "{}"))
 	return out
 }
 

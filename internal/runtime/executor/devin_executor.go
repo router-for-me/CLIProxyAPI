@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -455,7 +456,12 @@ func (e *DevinExecutor) streamDevinFrames(
 	stepIndex := 0
 	thoughtStarted := false
 	contentStarted := false
-	toolCallSteps := make(map[int]int) // maps tc.Index -> stepIndex
+	type devinActiveToolSlot struct {
+		stepIndex int
+		id        string
+		name      string
+	}
+	activeToolSlots := make(map[int]*devinActiveToolSlot)
 	thinkingBuf := &helps.UTF8SplitBuffer{}
 	contentBuf := &helps.UTF8SplitBuffer{}
 	var accumulatedThinking strings.Builder
@@ -722,11 +728,24 @@ func (e *DevinExecutor) streamDevinFrames(
 				stepIndex++
 			}
 
-			sIdx, exists := toolCallSteps[tc.Index]
+			slot, exists := activeToolSlots[tc.Index]
+			if exists && slot.id != "" && tc.ID != "" && tc.ID != slot.id {
+				stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", slot.stepIndex)
+				if !emitInteractionsEvent(stopEvent) {
+					return
+				}
+				exists = false
+			}
+
 			if !exists {
-				sIdx = stepIndex
+				sIdx := stepIndex
 				stepIndex++
-				toolCallSteps[tc.Index] = sIdx
+				slot = &devinActiveToolSlot{
+					stepIndex: sIdx,
+					id:        tc.ID,
+					name:      tc.Name,
+				}
+				activeToolSlots[tc.Index] = slot
 				startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","name":"","id":"","call_id":"","arguments":{}}}`), "index", sIdx)
 				startEvent, _ = sjson.SetBytes(startEvent, "step.name", tc.Name)
 				startEvent, _ = sjson.SetBytes(startEvent, "step.id", tc.ID)
@@ -734,17 +753,28 @@ func (e *DevinExecutor) streamDevinFrames(
 				if !emitInteractionsEvent(startEvent) {
 					return
 				}
-			} else if tc.Name != "" || tc.ID != "" {
-				updateEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","name":"","id":"","call_id":"","arguments":{}}}`), "index", sIdx)
-				updateEvent, _ = sjson.SetBytes(updateEvent, "step.name", tc.Name)
-				updateEvent, _ = sjson.SetBytes(updateEvent, "step.id", tc.ID)
-				updateEvent, _ = sjson.SetBytes(updateEvent, "step.call_id", tc.ID)
-				_ = emitInteractionsEvent(updateEvent)
+			} else {
+				updated := false
+				if slot.id == "" && tc.ID != "" {
+					slot.id = tc.ID
+					updated = true
+				}
+				if slot.name == "" && tc.Name != "" {
+					slot.name = tc.Name
+					updated = true
+				}
+				if updated {
+					updateEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","name":"","id":"","call_id":"","arguments":{}}}`), "index", slot.stepIndex)
+					updateEvent, _ = sjson.SetBytes(updateEvent, "step.name", slot.name)
+					updateEvent, _ = sjson.SetBytes(updateEvent, "step.id", slot.id)
+					updateEvent, _ = sjson.SetBytes(updateEvent, "step.call_id", slot.id)
+					_ = emitInteractionsEvent(updateEvent)
+				}
 			}
 
 			if tc.Arguments != "" {
-				deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":""}}`), "index", sIdx)
-				deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.arguments", tc.Arguments)
+				deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":""}}`), "index", slot.stepIndex)
+				deltaEvent, _ = translatorcommon.SetStringWithoutHTMLEscape(deltaEvent, "delta.arguments", tc.Arguments)
 				if !emitInteractionsEvent(deltaEvent) {
 					return
 				}
@@ -757,10 +787,10 @@ func (e *DevinExecutor) streamDevinFrames(
 		stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
 		_ = emitInteractionsEvent(stopEvent)
 	}
-	if len(toolCallSteps) > 0 {
-		sortedIndices := make([]int, 0, len(toolCallSteps))
-		for _, sIdx := range toolCallSteps {
-			sortedIndices = append(sortedIndices, sIdx)
+	if len(activeToolSlots) > 0 {
+		sortedIndices := make([]int, 0, len(activeToolSlots))
+		for _, slot := range activeToolSlots {
+			sortedIndices = append(sortedIndices, slot.stepIndex)
 		}
 		sort.Ints(sortedIndices)
 		for _, sIdx := range sortedIndices {
@@ -862,6 +892,7 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		args strings.Builder
 	}
 	var toolBuilders []*devinToolCallBuilder
+	slotToBuilderIndex := make(map[int]int)
 
 	getToolCalls := func() []helps.DevinToolCall {
 		if len(toolBuilders) == 0 {
@@ -1004,22 +1035,32 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 			textParts = append(textParts, frameRes.ContentText)
 		}
 		for _, tc := range frameRes.ToolCallDeltas {
-			idx := tc.Index
-			if idx < 0 || idx >= maxDevinToolCalls {
-				log.Warnf("devin executor: tool call index %d out of bounds (max %d), dropping", idx, maxDevinToolCalls)
+			slotIdx := tc.Index
+			if slotIdx < 0 || slotIdx >= maxDevinToolCalls {
+				log.Warnf("devin executor: tool call index %d out of bounds (max %d), dropping", slotIdx, maxDevinToolCalls)
 				continue
 			}
-			for len(toolBuilders) <= idx {
+			bIdx, exists := slotToBuilderIndex[slotIdx]
+			if exists && tc.ID != "" && toolBuilders[bIdx].id != "" && tc.ID != toolBuilders[bIdx].id {
+				exists = false
+			}
+			if !exists {
+				if len(toolBuilders) >= maxDevinToolCalls {
+					log.Warnf("devin executor: total tool calls exceeded max %d, dropping", maxDevinToolCalls)
+					continue
+				}
+				bIdx = len(toolBuilders)
 				toolBuilders = append(toolBuilders, &devinToolCallBuilder{})
+				slotToBuilderIndex[slotIdx] = bIdx
 			}
 			if tc.ID != "" {
-				toolBuilders[idx].id = tc.ID
+				toolBuilders[bIdx].id = tc.ID
 			}
 			if tc.Name != "" {
-				toolBuilders[idx].name = tc.Name
+				toolBuilders[bIdx].name = tc.Name
 			}
 			if tc.Arguments != "" {
-				toolBuilders[idx].args.WriteString(tc.Arguments)
+				toolBuilders[bIdx].args.WriteString(tc.Arguments)
 			}
 		}
 	}

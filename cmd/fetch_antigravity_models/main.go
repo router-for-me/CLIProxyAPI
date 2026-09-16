@@ -113,6 +113,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: failed to resolve auth directory: %v\n", err)
 		os.Exit(1)
 	}
+	if _, errStat := os.Stat(authsDir); errStat != nil && !authsDirOverridden {
+		localAuths := filepath.Join(wd, "auths")
+		if fi, errLocal := os.Stat(localAuths); errLocal == nil && fi.IsDir() {
+			authsDir = localAuths
+		}
+	}
+	if realDir, errSym := filepath.EvalSymlinks(authsDir); errSym == nil {
+		authsDir = realDir
+	}
 	if !filepath.IsAbs(outputPath) {
 		outputPath = filepath.Join(wd, outputPath)
 	}
@@ -134,35 +143,48 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Find the first enabled antigravity auth.
-	var chosen *coreauth.Auth
+	// Find enabled antigravity auths.
+	var agAuths []*coreauth.Auth
 	for _, a := range auths {
 		if a == nil || a.Disabled {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(a.Provider), "antigravity") {
-			chosen = a
-			break
+			if !strings.Contains(a.ID, ".back") {
+				agAuths = append(agAuths, a)
+			}
 		}
 	}
-	if chosen == nil {
+	if len(agAuths) == 0 {
+		for _, a := range auths {
+			if a != nil && !a.Disabled && strings.EqualFold(strings.TrimSpace(a.Provider), "antigravity") {
+				agAuths = append(agAuths, a)
+			}
+		}
+	}
+	if len(agAuths) == 0 {
 		fmt.Fprintf(os.Stderr, "error: no enabled antigravity auth found in %s\n", authsDir)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Using auth: id=%s label=%s\n", chosen.ID, chosen.Label)
+	// Fetch models from the upstream Antigravity API using available auths.
+	var models []modelEntry
+	for _, chosen := range agAuths {
+		fmt.Printf("Using auth: id=%s label=%s\n", chosen.ID, chosen.Label)
+		fmt.Println("Fetching Antigravity model list from upstream...")
 
-	// Fetch models from the upstream Antigravity API.
-	fmt.Println("Fetching Antigravity model list from upstream...")
+		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		models = fetchModels(fetchCtx, chosen)
+		cancel()
 
-	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	models := fetchModels(fetchCtx, chosen)
+		if len(models) > 0 {
+			fmt.Printf("Fetched %d models.\n", len(models))
+			break
+		}
+		fmt.Fprintln(os.Stderr, "warning: no models returned from this auth, trying next...")
+	}
 	if len(models) == 0 {
-		fmt.Fprintln(os.Stderr, "warning: no models returned (API may be unavailable or token expired)")
-	} else {
-		fmt.Printf("Fetched %d models.\n", len(models))
+		fmt.Fprintln(os.Stderr, "warning: no models returned from any auth (API may be unavailable or tokens expired)")
 	}
 
 	// Build the output payload.

@@ -68,17 +68,41 @@ func (s *DevinAuthService) SetServerBaseURL(url string) {
 	}
 }
 
-// BuildAuthorizationURL constructs the PKCE login URL.
-func (s *DevinAuthService) BuildAuthorizationURL(redirectURI, codeChallenge, state string) string {
-	q := url.Values{}
-	q.Set("redirect_uri", redirectURI)
-	q.Set("code_challenge", codeChallenge)
-	q.Set("code_challenge_method", "S256")
-	q.Set("prompt", "select_account")
-	if state != "" {
-		q.Set("state", state)
+// SetAPIBaseURL overrides the token exchange and profile API base URL (used in tests).
+func (s *DevinAuthService) SetAPIBaseURL(url string) {
+	if s != nil && strings.TrimSpace(url) != "" {
+		s.apiBaseURL = strings.TrimRight(strings.TrimSpace(url), "/")
 	}
-	return fmt.Sprintf("%s/auth/cli/continue?%s", strings.TrimRight(s.appBaseURL, "/"), q.Encode())
+}
+
+// SetAppBaseURL overrides the user-facing OAuth authorization base URL (used in tests).
+func (s *DevinAuthService) SetAppBaseURL(url string) {
+	if s != nil && strings.TrimSpace(url) != "" {
+		s.appBaseURL = strings.TrimRight(strings.TrimSpace(url), "/")
+	}
+}
+
+// BuildAuthorizationURL constructs the PKCE login URL. When redirectURI is empty,
+// it generates a headless manual code URL (with cli_pkce_marker=1) matching the exact
+// query parameter ordering of the official Devin CLI binary.
+func (s *DevinAuthService) BuildAuthorizationURL(redirectURI, codeChallenge, state string) string {
+	trimmedRedirect := strings.TrimSpace(redirectURI)
+	var queryParts []string
+	if trimmedRedirect != "" {
+		queryParts = append(queryParts, "redirect_uri="+url.QueryEscape(trimmedRedirect))
+	}
+	if state != "" {
+		queryParts = append(queryParts, "state="+url.QueryEscape(state))
+	}
+	queryParts = append(queryParts,
+		"prompt=select_account",
+		"code_challenge="+url.QueryEscape(codeChallenge),
+		"code_challenge_method=S256",
+	)
+	if trimmedRedirect == "" {
+		queryParts = append(queryParts, "cli_pkce_marker=1")
+	}
+	return fmt.Sprintf("%s/auth/cli/continue?%s", strings.TrimRight(s.appBaseURL, "/"), strings.Join(queryParts, "&"))
 }
 
 // ExchangeCodeForToken exchanges the authorization code for a session token.

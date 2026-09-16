@@ -343,21 +343,31 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					}
 				}
 
+				var standaloneOutputContents [][]byte
+				appendStandaloneOutput := func(out gjson.Result) {
+					// Orphan outputs (no matching function_call, e.g. Codex
+					// send_message_to_thread cards) must not become unpaired
+					// functionResponse parts. Surface them as user text instead.
+					if parts := buildOpenAIResponsesStandaloneToolOutputTextParts(out); len(parts) > 0 {
+						standaloneOutputContents = append(standaloneOutputContents, geminiContent("user", parts))
+					}
+				}
 				for _, out := range orderedOutputs {
 					id := extractOpenAIResponsesCallID(out)
 					if _, remaining := outputByCallID[id]; remaining {
-						responseParts = append(responseParts, buildOpenAIResponsesFunctionResponseParts(out, functionNamesByCallID)...)
+						appendStandaloneOutput(out)
 						delete(outputByCallID, id)
 					}
 				}
 				for _, out := range extraOutputs {
-					responseParts = append(responseParts, buildOpenAIResponsesFunctionResponseParts(out, functionNamesByCallID)...)
+					appendStandaloneOutput(out)
 				}
 
 				pendingFunctionCallIDs = stillPending
 				if len(responseParts) > 0 {
 					contentItems = append(contentItems, geminiContent("user", responseParts))
 				}
+				contentItems = append(contentItems, standaloneOutputContents...)
 				if len(pendingFunctionCallIDs) == 0 && len(pendingDeveloperParts) > 0 {
 					contentItems = append(contentItems, geminiContent("user", pendingDeveloperParts))
 					pendingDeveloperParts = nil
@@ -1008,6 +1018,34 @@ func responsesHasSubsequentTurn(items []gjson.Result) bool {
 		}
 	}
 	return false
+}
+
+func buildOpenAIResponsesStandaloneToolOutputTextParts(item gjson.Result) [][]byte {
+	output := item.Get("output")
+	if !output.Exists() {
+		return nil
+	}
+	if output.IsArray() {
+		var parts [][]byte
+		output.ForEach(func(_, part gjson.Result) bool {
+			text := part.Get("text").String()
+			if strings.TrimSpace(text) == "" {
+				return true
+			}
+			textPart := []byte(`{"text":""}`)
+			textPart, _ = sjson.SetBytes(textPart, "text", text)
+			parts = append(parts, textPart)
+			return true
+		})
+		return parts
+	}
+	text := output.String()
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	textPart := []byte(`{"text":""}`)
+	textPart, _ = sjson.SetBytes(textPart, "text", text)
+	return [][]byte{textPart}
 }
 
 func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesByCallID map[string]string) [][]byte {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -819,5 +820,120 @@ func TestConvertInteractionsResponseToOpenAIResponsesPreservesNonCollidingAndNon
 	outNonAnti := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.1-flash-lite", []byte(`{"model":"gemini-3.1-flash-lite"}`), nil, rawNonAnti, nil)
 	if got := gjson.GetBytes(outNonAnti, "output.0.name").String(); got != "external_read_file" {
 		t.Fatalf("output.0.name = %q, want external_read_file (preserved for non-antigravity). Output: %s", got, string(outNonAnti))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_PreservesHTMLCharactersInToolCallArguments(t *testing.T) {
+	command := `gh issue view 5802 --json number,title,body,url,state,labels,assignees 2>&1 | head -100`
+
+	// 1. Non-stream test: function_call with 2>&1
+	rawNonStream := []byte(fmt.Sprintf(`{
+		"id":"interaction_test",
+		"model":"devin/swe-2",
+		"steps":[
+			{"type":"function_call","id":"bash_1","name":"bash","arguments":{"command":%q,"timeout":60}}
+		]
+	}`, command))
+	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/swe-2", nil, nil, rawNonStream, nil)
+	outNonStreamStr := string(outNonStream)
+	if strings.Contains(outNonStreamStr, `\u003e`) || strings.Contains(outNonStreamStr, `\u0026`) {
+		t.Fatalf("non-stream output contains escaped HTML characters: %s", outNonStreamStr)
+	}
+	if !strings.Contains(outNonStreamStr, "2>&1") {
+		t.Fatalf("non-stream output should contain '2>&1': %s", outNonStreamStr)
+	}
+
+	// 2. Stream test: function_call delta and done with 2>&1
+	var param any
+	var outStream [][]byte
+	rawEvents := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_test\",\"model\":\"devin/swe-2\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":1,\"step\":{\"type\":\"function_call\",\"id\":\"bash_1\",\"name\":\"bash\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte(fmt.Sprintf("event: step.delta\ndata: {\"index\":1,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"command\\\":\\\"%s\\\",\\\"timeout\\\":60}\"},\"event_type\":\"step.delta\"}\n\n", command)),
+		[]byte("event: step.stop\ndata: {\"index\":1,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_test\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+	for _, raw := range rawEvents {
+		outStream = append(outStream, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", nil, nil, raw, &param)...)
+	}
+
+	for _, frame := range outStream {
+		frameStr := string(frame)
+		if strings.Contains(frameStr, `\u003e`) || strings.Contains(frameStr, `\u0026`) {
+			t.Fatalf("stream frame contains escaped HTML characters: %s", frameStr)
+		}
+	}
+
+	donePayload := findResponsesEventPayload(outStream, "response.function_call_arguments.done")
+	if donePayload == nil {
+		t.Fatalf("missing response.function_call_arguments.done event")
+	}
+	if !strings.Contains(string(donePayload), "2>&1") {
+		t.Fatalf("function_call_arguments.done should contain '2>&1': %s", string(donePayload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_LogReplayTwoToolCalls(t *testing.T) {
+	// Replay the exact scenario from the log with separated tool calls:
+	// Step 0: thought
+	// Step 1: title_0 (title: Triage issue 5802)
+	// Step 2: bash_1 (gh issue view ... 2>&1 | head -100)
+	command := `gh issue view 5802 --json number,title,body,url,state,labels,assignees 2>&1 | head -100`
+
+	var param any
+	var outStream [][]byte
+	rawEvents := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_69c3126a-ab3\",\"model\":\"devin/swe-2\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"thought\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_summary\",\"text\":\"I need to triage GitHub issue 5802.\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"),
+		// Tool call 1: title
+		[]byte("event: step.start\ndata: {\"index\":1,\"step\":{\"type\":\"function_call\",\"id\":\"title_0\",\"call_id\":\"title_0\",\"name\":\"title\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":1,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"title\\\": \\\"Triage issue 5802\\\"}\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":1,\"event_type\":\"step.stop\"}\n\n"),
+		// Tool call 2: bash
+		[]byte("event: step.start\ndata: {\"index\":2,\"step\":{\"type\":\"function_call\",\"id\":\"bash_1\",\"call_id\":\"bash_1\",\"name\":\"bash\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte(fmt.Sprintf("event: step.delta\ndata: {\"index\":2,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"command\\\": \\\"%s\\\", \\\"timeout\\\": 60}\"},\"event_type\":\"step.delta\"}\n\n", command)),
+		[]byte("event: step.stop\ndata: {\"index\":2,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_69c3126a-ab3\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+
+	for _, raw := range rawEvents {
+		outStream = append(outStream, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", nil, nil, raw, &param)...)
+	}
+
+	for _, frame := range outStream {
+		frameStr := string(frame)
+		if strings.Contains(frameStr, `\u003e`) || strings.Contains(frameStr, `\u0026`) {
+			t.Fatalf("stream frame contains escaped HTML characters: %s", frameStr)
+		}
+	}
+
+	completedPayload := findResponsesEventPayload(outStream, "response.completed")
+	if completedPayload == nil {
+		t.Fatalf("missing response.completed event")
+	}
+
+	outputItems := gjson.GetBytes(completedPayload, "response.output").Array()
+	if len(outputItems) != 3 {
+		t.Fatalf("expected 3 output items (thought, title, bash), got %d: %s", len(outputItems), string(completedPayload))
+	}
+
+	titleItem := outputItems[1]
+	if titleItem.Get("name").String() != "title" || titleItem.Get("call_id").String() != "title_0" {
+		t.Errorf("title item mismatch: %s", titleItem.Raw)
+	}
+	if titleItem.Get("arguments").String() != `{"title": "Triage issue 5802"}` {
+		t.Errorf("title arguments = %s", titleItem.Get("arguments").String())
+	}
+
+	bashItem := outputItems[2]
+	if bashItem.Get("name").String() != "bash" || bashItem.Get("call_id").String() != "bash_1" {
+		t.Errorf("bash item mismatch: %s", bashItem.Raw)
+	}
+	if !strings.Contains(bashItem.Get("arguments").String(), "2>&1") {
+		t.Errorf("bash arguments should contain '2>&1': %s", bashItem.Get("arguments").String())
 	}
 }
