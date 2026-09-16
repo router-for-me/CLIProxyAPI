@@ -699,6 +699,100 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresCappedNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"deepseek-v4-flash",
+		"tools":[
+			{
+				"type":"namespace",
+				"name":"mcp__codex_apps__codex_document_control",
+				"tools":[{"type":"function","name":"_execute_document_command","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+	// The 66-char flattened name is capped to 64 chars.
+	chatName := capResponsesChatToolName("mcp__codex_apps__codex_document_control___execute_document_command")
+	chunks := []string{
+		`data: {"id":"chatcmpl_capped_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_capped","type":"function","function":{"name":"` + chatName + `","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_capped_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"run\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var added gjson.Result
+	var done gjson.Result
+	var completed gjson.Result
+	for _, line := range chunks {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, nil, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			switch event {
+			case "response.output_item.added":
+				if data.Get("item.type").String() == "function_call" {
+					added = data
+				}
+			case "response.output_item.done":
+				if data.Get("item.type").String() == "function_call" {
+					done = data
+				}
+			case "response.completed":
+				completed = data
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		label string
+		got   gjson.Result
+	}{
+		{"added", added},
+		{"done", done},
+	} {
+		if !tc.got.Exists() {
+			t.Fatalf("expected function_call %s event", tc.label)
+		}
+		if got := tc.got.Get("item.name").String(); got != "_execute_document_command" {
+			t.Fatalf("%s item.name = %q, want _execute_document_command", tc.label, got)
+		}
+		if got := tc.got.Get("item.namespace").String(); got != "mcp__codex_apps__codex_document_control" {
+			t.Fatalf("%s item.namespace = %q, want mcp__codex_apps__codex_document_control", tc.label, got)
+		}
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+	if got := completed.Get("response.output.0.name").String(); got != "_execute_document_command" {
+		t.Fatalf("completed output name = %q, want _execute_document_command", got)
+	}
+	if got := completed.Get("response.output.0.namespace").String(); got != "mcp__codex_apps__codex_document_control" {
+		t.Fatalf("completed output namespace = %q, want mcp__codex_apps__codex_document_control", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_RestoresCappedNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{
+		"model":"deepseek-v4-flash",
+		"tools":[
+			{
+				"type":"namespace",
+				"name":"mcp__codex_apps__codex_document_control",
+				"tools":[{"type":"function","name":"_execute_document_command","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+	chatName := capResponsesChatToolName("mcp__codex_apps__codex_document_control___execute_document_command")
+	raw := []byte(`{"id":"chatcmpl_capped_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_capped","type":"function","function":{"name":"` + chatName + `","arguments":"{\"cmd\":\"run\"}"}}]},"finish_reason":"tool_calls"}]}`)
+
+	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, nil, raw, nil)
+	data := gjson.ParseBytes(resp)
+
+	if got := data.Get("output.0.name").String(); got != "_execute_document_command" {
+		t.Fatalf("non-stream output name = %q, want _execute_document_command; response=%s", got, resp)
+	}
+	if got := data.Get("output.0.namespace").String(); got != "mcp__codex_apps__codex_document_control" {
+		t.Fatalf("non-stream output namespace = %q, want mcp__codex_apps__codex_document_control; response=%s", got, resp)
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameArrivesLate(t *testing.T) {
 	originalRequest := []byte(`{
 		"model":"gpt-5.4",

@@ -32,6 +32,7 @@ type modelRegistrationTask struct {
 	phase    int
 	category string
 	run      func(*openAICompatibilityRegistrationCache)
+	done     func()
 }
 
 type executorRegistrationOptions struct {
@@ -47,6 +48,11 @@ var registerPluginExecutors = func(host *pluginhost.Host, manager *coreauth.Mana
 	}
 	host.RegisterExecutors(manager, registry.GetGlobalRegistry())
 }
+
+// modelRegistrationTaskHook, if set, runs after auth-update commits and before
+// model registration workers start. Tests use it to prove registration no longer
+// holds authUpdateMu.
+var modelRegistrationTaskHook func()
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
@@ -244,12 +250,20 @@ func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []mod
 			go func() {
 				defer wg.Done()
 				for task := range taskCh {
-					select {
-					case <-ctx.Done():
-						return
-					default:
-					}
-					task.run(compatCache)
+					func(task modelRegistrationTask) {
+						if task.done != nil {
+							defer task.done()
+						}
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+						if modelRegistrationTaskHook != nil {
+							modelRegistrationTaskHook()
+						}
+						task.run(compatCache)
+					}(task)
 				}
 			}()
 		}

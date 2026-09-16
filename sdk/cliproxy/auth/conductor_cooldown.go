@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -1470,6 +1472,10 @@ func resultErrorFromError(err error) *Error {
 		if resultErr.Code == "" || resultErr.Code == connectionLifecycleErrorCode {
 			resultErr.Code = connectionLifecycleErrorCode
 		}
+	case isTransientTransportError(err):
+		if resultErr.Code == "" || resultErr.Code == transientTransportErrorCode {
+			resultErr.Code = transientTransportErrorCode
+		}
 	}
 	return resultErr
 }
@@ -1481,7 +1487,7 @@ func shouldSkipCredentialCooldown(err *Error) bool {
 	if err != nil && err.Code == ErrorCodeForceCooldown {
 		return false
 	}
-	return isRequestScopedResultError(err) || isConnectionLifecycleResultError(err)
+	return isRequestScopedResultError(err) || isConnectionLifecycleResultError(err) || isTransientTransportResultError(err)
 }
 
 // isConnectionLifecycleError reports transport/session lifecycle failures that must
@@ -1544,6 +1550,95 @@ func isConnectionLifecycleMessage(message string) bool {
 		return true
 	}
 	return false
+}
+
+// isTransientTransportError reports pre-HTTP dial/TLS/DNS/reset failures that
+// should retry under request-retry without cooling the selected credential.
+func isTransientTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// HTTP-status failures stay on the credential/status retry path.
+	if statusCodeFromError(err) != 0 {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr != nil && (dnsErr.IsTimeout || dnsErr.IsTemporary || dnsErr.Timeout()) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr != nil && netErr.Timeout() {
+		return true
+	}
+	if isTransientSyscallError(err) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr != nil {
+		return true
+	}
+	return isTransientTransportMessage(err.Error())
+}
+
+func isTransientTransportResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if err.Code == transientTransportErrorCode {
+		return true
+	}
+	if statusCodeFromResult(err) != 0 {
+		return false
+	}
+	return isTransientTransportMessage(err.Message)
+}
+
+func isTransientSyscallError(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	switch errno {
+	case syscall.ECONNREFUSED, syscall.ECONNRESET, syscall.ECONNABORTED,
+		syscall.ETIMEDOUT, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.EPIPE:
+		return true
+	default:
+		return false
+	}
+}
+
+func isTransientTransportMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	switch {
+	case strings.Contains(lower, "tls: tls handshake"),
+		strings.Contains(lower, "tls handshake timeout"),
+		strings.Contains(lower, "wsarecv"),
+		strings.Contains(lower, "wsasend"),
+		strings.Contains(lower, "a connection attempt failed"),
+		strings.Contains(lower, "connection refused"),
+		strings.Contains(lower, "connection reset"),
+		strings.Contains(lower, "i/o timeout"),
+		strings.Contains(lower, "no such host"),
+		strings.Contains(lower, "server misbehaving"),
+		strings.Contains(lower, "network is unreachable"),
+		strings.Contains(lower, "no route to host"),
+		strings.Contains(lower, "broken pipe"),
+		strings.Contains(lower, "connection aborted"),
+		strings.Contains(lower, "use of closed network connection"),
+		strings.Contains(lower, "unexpected eof"):
+		return true
+	default:
+		return false
+	}
 }
 
 func isUnauthorizedError(err error) bool {

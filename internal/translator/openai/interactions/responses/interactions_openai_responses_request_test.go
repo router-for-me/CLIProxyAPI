@@ -413,3 +413,23 @@ func TestConvertOpenAIResponsesRequestToInteractionsRenamesConflictingToolChoice
 		t.Fatalf("gemini tool_choice.name = %q, want read_file (no rename). Output: %s", got, string(outNonAnti))
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToInteractions_NonAntigravityGenerationConfig(t *testing.T) {
+	raw := []byte(`{
+		"model":"devin/swe-2",
+		"input":[{"type":"message","role":"user","content":"write a poem"}],
+		"max_output_tokens":400,
+		"temperature":0.7,
+		"top_p":0.95
+	}`)
+	out := ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", raw, false)
+	if got := gjson.GetBytes(out, "generation_config.max_output_tokens").Int(); got != 400 {
+		t.Fatalf("generation_config.max_output_tokens = %d, want 400. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "generation_config.temperature").Float(); got != 0.7 {
+		t.Fatalf("generation_config.temperature = %f, want 0.7. Output: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "generation_config.top_p").Float(); got != 0.95 {
+		t.Fatalf("generation_config.top_p = %f, want 0.95. Output: %s", got, string(out))
+	}
+}

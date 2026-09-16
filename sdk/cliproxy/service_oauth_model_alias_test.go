@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -121,6 +122,38 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 	}
 }
 
+func TestApplyOAuthModelAlias_Meta(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"meta": {
+				{Name: "muse-spark-1.3", Alias: "muse-latest", DisplayName: "Muse Latest"},
+			},
+		},
+	}
+	models := []*ModelInfo{
+		{ID: "muse-spark-1.3", Name: "models/muse-spark-1.3", DisplayName: "Muse Spark 1.3"},
+	}
+
+	out := applyOAuthModelAlias(cfg, "meta", "oauth", models)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(out))
+	}
+	if out[0].ID != "muse-latest" {
+		t.Fatalf("expected model id %q, got %q", "muse-latest", out[0].ID)
+	}
+	if out[0].Name != "models/muse-latest" {
+		t.Fatalf("expected model name %q, got %q", "models/muse-latest", out[0].Name)
+	}
+	if out[0].DisplayName != "Muse Latest" {
+		t.Fatalf("expected display name %q, got %q", "Muse Latest", out[0].DisplayName)
+	}
+
+	apiKeyOut := applyOAuthModelAlias(cfg, "meta", "apikey", models)
+	if len(apiKeyOut) != 1 || apiKeyOut[0].ID != "muse-spark-1.3" {
+		t.Fatalf("expected meta-api-key models to remain unchanged, got %#v", apiKeyOut)
+	}
+}
+
 func TestApplyOAuthModelAlias_PluginProvider(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
@@ -230,9 +263,10 @@ func TestApplyOAuthModelAlias_PreservesMetadataModelID(t *testing.T) {
 }
 
 func TestApplyModelPrefixes_PreservesMetadataModelID(t *testing.T) {
+	webSearch := true
 	models := []*ModelInfo{
 		{ID: "gpt-6-astra"},
-		{ID: "codex-main", MetadataModelID: "gpt-6-astra"},
+		{ID: "codex-main", MetadataModelID: "gpt-6-astra", NativeCapabilities: &registry.NativeCapabilities{WebSearch: &webSearch}},
 	}
 
 	out := applyModelPrefixes(models, "1", false)
@@ -255,5 +289,12 @@ func TestApplyModelPrefixes_PreservesMetadataModelID(t *testing.T) {
 		t.Fatal("missing 1/codex-main")
 	} else if m.MetadataModelID != "gpt-6-astra" {
 		t.Fatalf("1/codex-main MetadataModelID = %q, want gpt-6-astra", m.MetadataModelID)
+	} else if m.NativeCapabilities == nil || m.NativeCapabilities.WebSearch == nil || !*m.NativeCapabilities.WebSearch {
+		t.Fatalf("1/codex-main did not inherit native capabilities: %+v", m)
+	} else {
+		*m.NativeCapabilities.WebSearch = false
+		if !*entryMap["codex-main"].NativeCapabilities.WebSearch {
+			t.Fatal("prefixed capability metadata aliases the source model")
+		}
 	}
 }

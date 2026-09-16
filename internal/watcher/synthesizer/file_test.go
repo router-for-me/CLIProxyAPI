@@ -676,6 +676,50 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_MetaOAuthExcludedModelsMerged(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":            "meta",
+		"auth_kind":       "oauth",
+		"api_key":         "LLM|minted",
+		"excluded_models": []string{"muse-spark-1.2"},
+	}
+	data, _ := json.Marshal(authData)
+	errWriteFile := os.WriteFile(filepath.Join(tempDir, "meta.json"), data, 0644)
+	if errWriteFile != nil {
+		t.Fatalf("failed to write auth file: %v", errWriteFile)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OAuthExcludedModels: map[string][]string{
+				"meta": {"muse-spark-1.1"},
+			},
+		},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if gotKind := auths[0].Attributes["auth_kind"]; gotKind != "oauth" {
+		t.Fatalf("expected auth_kind=oauth, got %q", gotKind)
+	}
+
+	got := auths[0].Attributes["excluded_models"]
+	want := "muse-spark-1.1,muse-spark-1.2"
+	if got != want {
+		t.Fatalf("expected excluded_models %q, got %q", want, got)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_OAuthModelAliases(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{

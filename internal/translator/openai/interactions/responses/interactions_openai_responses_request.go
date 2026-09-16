@@ -64,6 +64,25 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 		for _, knob := range []string{"temperature", "top_p", "top_k", "stop_sequences", "max_output_tokens", "presence_penalty", "frequency_penalty", "candidate_count"} {
 			out, _ = sjson.DeleteBytes(out, "generation_config."+knob)
 		}
+	} else {
+		if maxOutputTokens := firstExisting(root.Get("max_output_tokens"), root.Get("max_tokens"), root.Get("max_completion_tokens")); maxOutputTokens.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.max_output_tokens", maxOutputTokens.Int())
+		}
+		if temp := root.Get("temperature"); temp.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.temperature", temp.Float())
+		}
+		if topP := root.Get("top_p"); topP.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.top_p", topP.Float())
+		}
+		if presencePenalty := root.Get("presence_penalty"); presencePenalty.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.presence_penalty", presencePenalty.Float())
+		}
+		if frequencyPenalty := root.Get("frequency_penalty"); frequencyPenalty.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.frequency_penalty", frequencyPenalty.Float())
+		}
+		if stop := root.Get("stop"); stop.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generation_config.stop_sequences", []byte(stop.Raw))
+		}
 	}
 	return out
 }
@@ -580,7 +599,7 @@ func interactionsFunctionCallToResponses(item gjson.Result, forAntigravity bool)
 		name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
 	}
 	out, _ = sjson.SetBytes(out, "name", name)
-	out, _ = sjson.SetBytes(out, "arguments", jsonStringValue(item.Get("arguments"), "{}"))
+	out, _ = translatorcommon.SetStringWithoutHTMLEscape(out, "arguments", jsonStringValue(item.Get("arguments"), "{}"))
 	return out
 }
 
