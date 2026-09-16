@@ -103,6 +103,43 @@ func TestSanitizeProviderForLogStripsControlCharacters(t *testing.T) {
 	}
 }
 
+func TestLogCredentialRefreshFailureOmitsRawAuthID(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	secretID := "sk-live-plugin-api-key-should-not-log"
+	auth := &Auth{
+		ID:       secretID,
+		Provider: "antigravity",
+	}
+	logCredentialRefreshFailure(auth, errors.New("token refresh failed with status 400: invalid_refresh_token"), false)
+
+	var saw bool
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.WarnLevel || !strings.Contains(entry.Message, "credential refresh failed") {
+			continue
+		}
+		saw = true
+		got, _ := entry.Data["auth_file"].(string)
+		if got != "unknown" {
+			t.Fatalf("auth_file field = %q, want unknown when no filename/path is present", got)
+		}
+		if strings.Contains(entry.Message, secretID) {
+			t.Fatalf("refresh warn message leaked raw auth ID: %s", entry.Message)
+		}
+		for key, value := range entry.Data {
+			text, ok := value.(string)
+			if !ok {
+				continue
+			}
+			if strings.Contains(text, secretID) {
+				t.Fatalf("refresh warn field %s leaked raw auth ID: %q", key, text)
+			}
+		}
+	}
+	if !saw {
+		t.Fatalf("expected credential refresh failed warn, got %#v", hook.AllEntries())
+	}
+}
+
 func TestLogCredentialRefreshFailureEscapesProviderNewline(t *testing.T) {
 	hook := setupTestLoggerHook(t)
 	auth := &Auth{

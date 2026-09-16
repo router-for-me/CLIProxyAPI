@@ -17,8 +17,8 @@ func TestAuthFileBasenameUsesBasenameOnly(t *testing.T) {
 	if got := AuthFileBasename(auth); got != "account.json" {
 		t.Fatalf("AuthFileBasename() = %q, want %q", got, "account.json")
 	}
-	if got := AuthFileBasename(&Auth{ID: "plain-id"}); got != "plain-id" {
-		t.Fatalf("AuthFileBasename(id) = %q, want %q", got, "plain-id")
+	if got := AuthFileBasename(&Auth{ID: "plain-id"}); got != "" {
+		t.Fatalf("AuthFileBasename(id-only) = %q, want empty", got)
 	}
 	if got := AuthFileBasename(nil); got != "" {
 		t.Fatalf("AuthFileBasename(nil) = %q, want empty", got)
@@ -41,8 +41,8 @@ func TestAuthFileBasenamePrecedence(t *testing.T) {
 		t.Fatalf("Attributes[path] precedence: got %q, want from-path.json", got)
 	}
 	auth.Attributes = nil
-	if got := AuthFileBasename(auth); got != "from-id.json" {
-		t.Fatalf("ID fallback: got %q, want from-id.json", got)
+	if got := AuthFileBasename(auth); got != "" {
+		t.Fatalf("ID must not be used as auth_file: got %q, want empty", got)
 	}
 }
 
@@ -66,10 +66,20 @@ func TestAuthFileBasenameWindowsSeparators(t *testing.T) {
 func TestAuthFileBasenameRejectsControlCharacters(t *testing.T) {
 	got := AuthFileBasename(&Auth{
 		FileName: "evil\nname.json",
-		ID:       "safe-fallback.json",
+		ID:       "sk-secret-should-not-appear",
+		Attributes: map[string]string{
+			"path": "/hidden/safe-fallback.json",
+		},
 	})
 	if got != "safe-fallback.json" {
-		t.Fatalf("control-char FileName should fall through: got %q", got)
+		t.Fatalf("control-char FileName should fall through to path: got %q", got)
+	}
+	got = AuthFileBasename(&Auth{
+		FileName: "evil\nname.json",
+		ID:       "sk-secret-should-not-appear",
+	})
+	if got != "" {
+		t.Fatalf("rejected FileName must not fall back to raw ID: got %q", got)
 	}
 	got = AuthFileBasename(&Auth{FileName: "evil\x00name.json"})
 	if got != "" {
@@ -82,5 +92,23 @@ func TestAuthFileBasenameRejectsControlCharacters(t *testing.T) {
 	}
 	if got == "" {
 		t.Fatal("long but otherwise valid basename should truncate, not empty")
+	}
+}
+
+func TestAuthFileBasenameOmitsRawID(t *testing.T) {
+	secretID := "sk-live-plugin-api-key-should-not-log"
+	if got := AuthFileBasename(&Auth{ID: secretID}); got != "" {
+		t.Fatalf("AuthFileBasename(id-only) = %q, want empty", got)
+	}
+	if got := AuthFileBasename(&Auth{ID: secretID, FileName: "account.json"}); got != "account.json" {
+		t.Fatalf("AuthFileBasename(filename) = %q, want account.json", got)
+	}
+	if got := AuthFileBasename(&Auth{
+		ID: secretID,
+		Attributes: map[string]string{
+			"path": filepath.Join(string(filepath.Separator), "hidden", "from-path.json"),
+		},
+	}); got != "from-path.json" {
+		t.Fatalf("AuthFileBasename(path) = %q, want from-path.json", got)
 	}
 }
