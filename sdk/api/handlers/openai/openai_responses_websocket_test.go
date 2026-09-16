@@ -4854,7 +4854,7 @@ func TestResponsesWebsocketUsesObservedCompactionResponseForReplay(t *testing.T)
 	}
 }
 
-func TestResponsesWebsocketDoesNotPinObservedCompactionAuthWithoutReplayInput(t *testing.T) {
+func TestResponsesWebsocketPinsProxyMergedCompactionAuth(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	selector := &orderedWebsocketSelector{order: []string{"auth-first", "auth-second"}}
@@ -4867,7 +4867,7 @@ func TestResponsesWebsocketDoesNotPinObservedCompactionAuthWithoutReplayInput(t 
 	for _, authID := range []string{"auth-first", "auth-second"} {
 		auth := &coreauth.Auth{ID: authID, Provider: executor.Identifier(), Status: coreauth.StatusActive}
 		if _, err := manager.Register(context.Background(), auth); err != nil {
-			t.Fatalf("Register auth: %v", err)
+			t.Fatalf("Register auth %s: %v", authID, err)
 		}
 		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
@@ -4885,8 +4885,12 @@ func TestResponsesWebsocketDoesNotPinObservedCompactionAuthWithoutReplayInput(t 
 	}
 	defer conn.Close()
 
+	// The second request is intentionally incremental. The proxy merges the
+	// compaction from the first response before execution, so the merged payload
+	// must stay on auth-first rather than sending its opaque checkpoint to
+	// auth-second by round-robin.
 	for index, request := range []string{
-		`{"type":"response.create","model":"test-model","input":[{"type":"compaction_trigger"}]}`,
+		`{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","id":"old-user"}]}`,
 		`{"type":"response.create","input":[{"type":"message","role":"user","id":"new-user"}]}`,
 	} {
 		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
@@ -4897,12 +4901,18 @@ func TestResponsesWebsocketDoesNotPinObservedCompactionAuthWithoutReplayInput(t 
 		}
 	}
 
-	if len(executor.authIDs) != 2 || executor.authIDs[0] != "auth-first" || executor.authIDs[1] != "auth-second" {
-		t.Fatalf("ordinary follow-up pinned compaction auth: %v", executor.authIDs)
+	if len(executor.authIDs) != 2 || executor.authIDs[0] != "auth-first" || executor.authIDs[1] != "auth-first" {
+		t.Fatalf("proxy-merged compaction did not preserve producing auth: %v", executor.authIDs)
 	}
 	input := gjson.GetBytes(executor.payloads[1], "input").Array()
-	if len(input) != 2 || input[0].Get("id").String() != "cmp-1" || input[1].Get("id").String() != "new-user" {
-		t.Fatalf("ordinary follow-up should merge previous compaction output: %s", executor.payloads[1])
+	wantIDs := []string{"old-user", "cmp-1", "new-user"}
+	if len(input) != len(wantIDs) {
+		t.Fatalf("proxy-merged input len = %d, want %d: %s", len(input), len(wantIDs), executor.payloads[1])
+	}
+	for index, wantID := range wantIDs {
+		if gotID := input[index].Get("id").String(); gotID != wantID {
+			t.Fatalf("proxy-merged input[%d] id = %q, want %q: %s", index, gotID, wantID, executor.payloads[1])
+		}
 	}
 }
 
@@ -5680,6 +5690,9 @@ func TestResponsesWebsocketProviderRouteIgnoresResidualPinnedAuth(t *testing.T) 
 
 	if len(routedExecutor.payloads) < 2 {
 		t.Fatalf("expected at least 2 payloads on routed executor, got %d", len(routedExecutor.payloads))
+	}
+	if len(routedExecutor.authIDs) < 2 || routedExecutor.authIDs[1] != "auth-routed-override" {
+		t.Fatalf("routed replay must use observed compaction auth, got %v", routedExecutor.authIDs)
 	}
 	thirdPayload := routedExecutor.payloads[1]
 	input := gjson.GetBytes(thirdPayload, "input").Array()
