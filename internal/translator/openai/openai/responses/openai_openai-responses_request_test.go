@@ -1992,3 +1992,105 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_UnpairedExplicitCa
 		t.Fatalf("expected paired Bash tool message; output=%s", string(out))
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_QualifiedIdentityOutranksForeignLocalName(t *testing.T) {
+	// A replayed call or tool_choice carrying a fully-qualified uncapped name
+	// can match two things: the declaration whose qualified identity it is (A),
+	// and a different namespace's child that literally uses that whole
+	// qualified string as its own name (B). Local-name recovery runs on a bare
+	// name and is a guess about the namespace, so it must not outrank the
+	// identity match, or the call gets dispatched to B's tool.
+	longChild := "read_" + strings.Repeat("f", 60)
+	qualified := rawResponsesNamespaceQualifiedName("alpha_ns", longChild)
+	if len(qualified) <= responsesChatToolNameLimit {
+		t.Fatalf("fixture drift: qualified identity %q (len %d) must exceed the cap", qualified, len(qualified))
+	}
+	if capResponsesChatToolName(rawResponsesNamespaceQualifiedName("beta_ns", qualified)) != capResponsesChatToolName(qualified) {
+		t.Fatalf("fixture drift: the two declarations must cap onto the same alias; got %q and %q",
+			capResponsesChatToolName(rawResponsesNamespaceQualifiedName("beta_ns", qualified)),
+			capResponsesChatToolName(qualified))
+	}
+	toolsJSON := `[
+		{
+			"type":"namespace",
+			"name":"alpha_ns",
+			"tools":[{"type":"function","name":"` + longChild + `","parameters":{"type":"object"}}]
+		},
+		{
+			"type":"namespace",
+			"name":"beta_ns",
+			"tools":[{"type":"function","name":"` + qualified + `","parameters":{"type":"object"}}]
+		}
+	]`
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`
+	}`), false)
+	emitted := gjson.GetBytes(out, "tools").Array()
+	if len(emitted) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(emitted), out)
+	}
+	alphaAlias := emitted[0].Get("function.name").String()
+	betaAlias := emitted[1].Get("function.name").String()
+	if alphaAlias == betaAlias {
+		t.Fatalf("both declarations emitted %q; output=%s", alphaAlias, out)
+	}
+	for i, tool := range emitted {
+		if name := tool.Get("function.name").String(); len(name) > 64 {
+			t.Errorf("tools[%d].function.name %q (len %d) exceeds 64; output=%s", i, name, len(name), out)
+		}
+	}
+
+	// Bare qualified name: provenance points at the alpha declaration.
+	bareOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"`+qualified+`","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": `+toolsJSON+`
+	}`), false)
+	for _, m := range gjson.GetBytes(bareOut, "messages").Array() {
+		if m.Get("role").String() != "assistant" {
+			continue
+		}
+		if got := m.Get("tool_calls.0.function.name").String(); got != alphaAlias {
+			t.Fatalf("bare qualified name resolved to %q, want the identity owner's alias %q (beta's alias is %q); output=%s", got, alphaAlias, betaAlias, bareOut)
+		}
+	}
+	bareForced := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","function":{"name":"`+qualified+`"}}
+	}`), false)
+	if got := gjson.GetBytes(bareForced, "tool_choice.function.name").String(); got != alphaAlias {
+		t.Fatalf("tool_choice bare qualified name resolved to %q, want %q; output=%s", got, alphaAlias, bareForced)
+	}
+
+	// Both namespaces stay individually reachable when the namespace is present.
+	for _, tc := range []struct {
+		namespace string
+		name      string
+		want      string
+	}{
+		{"alpha_ns", longChild, alphaAlias},
+		{"beta_ns", qualified, betaAlias},
+	} {
+		namespacedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+			"input": [
+				{"type":"function_call","call_id":"call_1","namespace":"`+tc.namespace+`","name":"`+tc.name+`","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_1","output":"ok"}
+			],
+			"tools": `+toolsJSON+`
+		}`), false)
+		got := ""
+		for _, m := range gjson.GetBytes(namespacedOut, "messages").Array() {
+			if m.Get("role").String() == "assistant" {
+				got = m.Get("tool_calls.0.function.name").String()
+			}
+		}
+		if got != tc.want {
+			t.Fatalf("namespaced replay for %s/%s resolved to %q, want %q; output=%s", tc.namespace, tc.name, got, tc.want, namespacedOut)
+		}
+	}
+}

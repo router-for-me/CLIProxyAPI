@@ -458,13 +458,38 @@ func chatNameForResponsesNamespaceToolCall(requestRawJSON []byte, namespace, loc
 	return avoidResponsesDeclaredChatAliases(root, qualifyResponsesNamespaceToolName(namespace, localName))
 }
 
-// canonicalResponsesToolName restores an omitted namespace only when the current
-// request declares exactly one matching local name. Exact emitted names win;
-// ambiguous names remain unresolved rather than being dispatched to another tool.
+// canonicalResponsesToolName resolves a name carried by a replayed call or
+// tool_choice that omits the namespace. Exact emitted names win, then the
+// declarations' uncapped qualified names are checked, then an omitted namespace
+// is restored only when the current request declares exactly one matching local
+// name. Qualified-name equality is direct provenance — the name can only have
+// been generated from that declaration — so it outranks local-name recovery,
+// which merely guesses at a namespace and can otherwise hijack a name that is
+// also another namespace's declared child. Ambiguous names remain unresolved
+// rather than being dispatched to another tool.
 func canonicalResponsesToolName(requestRawJSON []byte, name string) string {
 	root := gjson.ParseBytes(requestRawJSON)
 	if _, _, found := resolveResponsesQualifiedToolIdentity(root, name); found {
 		return name
+	}
+	// A replayed call may carry the fully-qualified uncapped name of a long
+	// declaration (history recorded by an older build, or a foreign client
+	// that flattened the qualified name itself). Resolve it to that
+	// declaration's emitted chat name before the bare local-name lookup, which
+	// could otherwise hand the call to a different declaration that happens to
+	// use the whole qualified name as its own child name, and before the blind
+	// cap, which could collide with a declaration whose original name equals
+	// the long declaration's capped tail.
+	chatName := ""
+	walkResponsesToolDeclarations(root, func(declaration responsesToolDeclaration) bool {
+		if rawResponsesNamespaceQualifiedName(declaration.namespace, declaration.localName) == name {
+			chatName = declaration.chatName
+			return false
+		}
+		return true
+	})
+	if chatName != "" {
+		return chatName
 	}
 	seen := make(map[string]struct{})
 	candidate := ""
@@ -484,24 +509,6 @@ func canonicalResponsesToolName(requestRawJSON []byte, name string) string {
 	})
 	if candidate != "" && !ambiguous {
 		return candidate
-	}
-	// A replayed call may carry the fully-qualified uncapped name of a long
-	// declaration (history recorded by an older build, or a foreign client
-	// that flattened the qualified name itself). Resolve it to that
-	// declaration's emitted chat name before applying the blind cap, which
-	// could otherwise collide with a different declaration whose original
-	// name equals the long declaration's capped tail.
-	rawQualified := name
-	chatName := ""
-	walkResponsesToolDeclarations(root, func(declaration responsesToolDeclaration) bool {
-		if rawResponsesNamespaceQualifiedName(declaration.namespace, declaration.localName) == rawQualified {
-			chatName = declaration.chatName
-			return false
-		}
-		return true
-	})
-	if chatName != "" {
-		return chatName
 	}
 	// A name that no current declaration produced (unresolved or ambiguous
 	// local-name matches above, or history from an older build): still enforce
