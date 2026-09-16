@@ -59,6 +59,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	}
 
+	if errValidate := cfg.ValidateOpenAICompatibilityWireAPIs(); errValidate != nil {
+		return nil, errValidate
+	}
+
 	// Hash remote management key if plaintext is detected (nested), but do NOT persist.
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
 		hashed, errHash := bcrypt.GenerateFromPassword([]byte(cfg.RemoteManagement.SecretKey), bcrypt.DefaultCost)
