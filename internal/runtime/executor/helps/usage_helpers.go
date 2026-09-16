@@ -663,9 +663,13 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
 	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) {
 		preservedTier := b.detail.ResponseServiceTier
+		preservedCacheInputMode := b.detail.CacheInputMode
 		b.detail = detail
 		if b.detail.ResponseServiceTier == "" {
 			b.detail.ResponseServiceTier = preservedTier
+		}
+		if b.detail.CacheInputMode == "" {
+			b.detail.CacheInputMode = preservedCacheInputMode
 		}
 	} else {
 		b.detail.ResponseServiceTier = responseServiceTier
@@ -839,6 +843,7 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}
+	detail.CacheInputMode = extractCacheInputModeFromUsageNode(usageNode)
 	if hasOpenAIStyleUsageBucketFields(usageNode) {
 		if inputNode.Exists() && outputNode.Exists() {
 			detail.TokenBreakdown = usage.NewSubsetTokenBreakdown(
@@ -1079,6 +1084,29 @@ func extractResponseServiceTierFromValidJSON(payload []byte) string {
 	for _, path := range []string{"response.service_tier", "service_tier", "interaction.service_tier"} {
 		if tier := strings.TrimSpace(gjson.GetBytes(payload, path).String()); tier != "" {
 			return tier
+		}
+	}
+	return ""
+}
+
+// cacheInputModeValues enumerates the accepted cache accounting contracts.
+// Anything else is ignored so a malformed or unknown value cannot silently
+// flip how cache tokens are priced downstream.
+var cacheInputModeValues = map[string]struct{}{
+	"included_in_input": {},
+	"separate_from_input": {},
+}
+
+// extractCacheInputModeFromUsageNode reads the optional cache accounting
+// contract declared inside a usage object. Providers that report
+// prompt_tokens as the full input (including cache reads) can set
+// "cache_input_mode": "included_in_input" so downstream consumers do not add
+// the cache buckets on top of the input again.
+func extractCacheInputModeFromUsageNode(usageNode gjson.Result) string {
+	for _, path := range []string{"cache_input_mode", "cacheInputMode"} {
+		mode := strings.ToLower(strings.TrimSpace(usageNode.Get(path).String()))
+		if _, ok := cacheInputModeValues[mode]; ok {
+			return mode
 		}
 	}
 	return ""

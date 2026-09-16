@@ -194,6 +194,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			CacheReadTokens:     record.Detail.CacheReadTokens,
 			CacheCreationTokens: record.Detail.CacheCreationTokens,
 			TotalTokens:         record.Detail.TotalTokens,
+			CacheInputMode:      record.Detail.CacheInputMode,
 		},
 		ResponseHeaders: cloneHeader(record.ResponseHeaders),
 	})

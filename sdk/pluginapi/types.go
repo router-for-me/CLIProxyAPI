@@ -1469,6 +1469,11 @@ type UsageDetail struct {
 	CacheCreationTokens int64
 	// TotalTokens is the total token count.
 	TotalTokens int64
+	// CacheInputMode is the optional cache accounting contract reported by the
+	// upstream response. Providers that report input tokens as the full input
+	// (cache reads included) set "included_in_input" so downstream sinks do
+	// not add the cache buckets on top of the input again.
+	CacheInputMode string
 }
 
 // QuotaProvider surfaces credential quota, balance, and billing information for management clients.

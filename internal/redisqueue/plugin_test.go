@@ -202,6 +202,53 @@ func TestUsageQueuePluginPreservesLegacyCachedOnlyUsage(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginForwardsCacheInputMode(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "workbuddy",
+			Model:    "deepseek-v4.1-flash",
+			Detail: coreusage.Detail{
+				InputTokens:     64021,
+				OutputTokens:    144,
+				CacheReadTokens: 63872,
+				CachedTokens:    63872,
+				TotalTokens:     64165,
+				CacheInputMode:  "included_in_input",
+			},
+		})
+
+		payload := popSinglePayload(t)
+		tokens := requireTokensPayload(t, payload)
+		requireStringField(t, tokens, "cache_input_mode", "included_in_input")
+		requireIntField(t, tokens, "input_tokens", 64021)
+		requireIntField(t, tokens, "cache_read_tokens", 63872)
+	})
+}
+
+func TestUsageQueuePluginOmitsAbsentCacheInputMode(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithResponseStatusHolder(context.Background())
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{
+			Provider: "openai",
+			Model:    "gpt-5.4",
+			Detail: coreusage.Detail{
+				InputTokens:  10,
+				OutputTokens: 20,
+				TotalTokens:  30,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		tokens := requireTokensPayload(t, payload)
+		requireMissingField(t, tokens, "cache_input_mode")
+	})
+}
+
 func TestUsageQueuePluginEmitsSingleCanonicalAutoTier(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := coreusage.WithServiceTier(context.Background(), coreusage.AutoServiceTier)

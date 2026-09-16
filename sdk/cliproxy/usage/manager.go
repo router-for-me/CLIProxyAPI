@@ -78,6 +78,13 @@ type Detail struct {
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
+	// CacheInputMode is the optional cache accounting contract reported by the
+	// upstream response (for example "included_in_input" or
+	// "separate_from_input"). It lets a provider state explicitly whether the
+	// input token bucket already contains the cache read/creation tokens, so
+	// downstream usage sinks do not have to guess from the provider name.
+	// Empty means the provider did not declare a contract.
+	CacheInputMode string
 }
 
 type requestedModelAliasContextKey struct{}

@@ -47,6 +47,58 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageCacheInputModeContract(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "included",
+			data: `{"usage":{"prompt_tokens":64021,"completion_tokens":144,"total_tokens":64165,"prompt_tokens_details":{"cached_tokens":63872},"cache_input_mode":"included_in_input"}}`,
+			want: "included_in_input",
+		},
+		{
+			name: "separate camel case",
+			data: `{"usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"cacheInputMode":"separate_from_input"}}`,
+			want: "separate_from_input",
+		},
+		{
+			name: "unknown value ignored",
+			data: `{"usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"cache_input_mode":"legacy"}}`,
+			want: "",
+		},
+		{
+			name: "absent",
+			data: `{"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16}}`,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detail := ParseOpenAIUsage([]byte(tt.data))
+			if detail.CacheInputMode != tt.want {
+				t.Fatalf("cache input mode = %q, want %q", detail.CacheInputMode, tt.want)
+			}
+		})
+	}
+}
+
+func TestStreamUsageBufferPreservesCacheInputModeAcrossChunks(t *testing.T) {
+	t.Parallel()
+
+	var buffer StreamUsageBuffer
+	buffer.ObserveOpenAIStream([]byte(`data: {"usage":{"prompt_tokens":64021,"completion_tokens":144,"total_tokens":64165,"cache_input_mode":"included_in_input"}}`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"usage":{"prompt_tokens":64021,"completion_tokens":144,"total_tokens":64165}}`))
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("Detail() ok = false, want true")
+	}
+	if detail.CacheInputMode != "included_in_input" {
+		t.Fatalf("cache input mode = %q, want included_in_input", detail.CacheInputMode)
+	}
+}
+
 func TestParseOpenAIUsageResponses(t *testing.T) {
 	data := []byte(`{"service_tier":"default","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
 	detail := ParseOpenAIUsage(data)

@@ -90,6 +90,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheReadTokensPresent: true,
 		CacheCreationTokens:    usageDetail.CacheCreationTokens,
 		TotalTokens:            usageDetail.TotalTokens,
+		CacheInputMode:         usageDetail.CacheInputMode,
 	}
 
 	failed := record.Failed
@@ -183,14 +184,18 @@ type requestDetail struct {
 }
 
 type tokenStats struct {
-	InputTokens            int64 `json:"input_tokens"`
-	OutputTokens           int64 `json:"output_tokens"`
-	ReasoningTokens        int64 `json:"reasoning_tokens"`
-	CachedTokens           int64 `json:"cached_tokens"`
-	CacheReadTokens        int64 `json:"cache_read_tokens"`
-	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
-	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
-	TotalTokens            int64 `json:"total_tokens"`
+	InputTokens            int64  `json:"input_tokens"`
+	OutputTokens           int64  `json:"output_tokens"`
+	ReasoningTokens        int64  `json:"reasoning_tokens"`
+	CachedTokens           int64  `json:"cached_tokens"`
+	CacheReadTokens        int64  `json:"cache_read_tokens"`
+	CacheReadTokensPresent bool   `json:"cache_read_tokens_present"`
+	CacheCreationTokens    int64  `json:"cache_creation_tokens"`
+	TotalTokens            int64  `json:"total_tokens"`
+	// CacheInputMode forwards the cache accounting contract reported by the
+	// upstream response so downstream usage sinks can price cache tokens
+	// without guessing from the provider or model name.
+	CacheInputMode string `json:"cache_input_mode,omitempty"`
 }
 
 type failDetail struct {
