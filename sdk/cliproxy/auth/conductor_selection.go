@@ -112,6 +112,37 @@ func (m *Manager) syncScheduler() {
 	m.syncSchedulerFromSnapshot(m.snapshotAuths())
 }
 
+// reconcileScheduler re-synchronizes the scheduler with the manager after a failed pick. Unlike
+// syncScheduler it re-applies only auths whose scheduling inputs changed and drops auths the
+// manager no longer holds, so a pool whose credentials are all cooling down does not rebuild
+// every shard, and reset credential rotation, on each request.
+func (m *Manager) reconcileScheduler() {
+	if m == nil || m.scheduler == nil {
+		return
+	}
+	reg := registry.GetGlobalRegistry()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	auths := make([]*Auth, 0, len(m.auths))
+	states := make([]schedulerAuthState, 0, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		auths = append(auths, auth)
+		states = append(states, newSchedulerAuthState(auth, reg))
+	}
+	divergent := m.scheduler.divergentAuthStates(states)
+	if len(divergent) == 0 {
+		return
+	}
+	snapshots := make([]*Auth, 0, len(divergent))
+	for _, index := range divergent {
+		snapshots = append(snapshots, auths[index].Clone())
+	}
+	m.scheduler.upsertAuths(snapshots)
+}
+
 func (m *Manager) snapshotAuths() []*Auth {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -734,11 +765,10 @@ func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) 
 	return latestAuthErr
 }
 
-func schedulerAttributeSensitive(key string) bool {
-	key = strings.ToLower(strings.TrimSpace(key))
-	normalized := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(key)
-	compact := strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(key)
-	for _, fragment := range []string{
+var (
+	schedulerAttributeKeyNormalizer = strings.NewReplacer("-", "_", ".", "_", " ", "_")
+	schedulerAttributeKeyCompactor  = strings.NewReplacer("_", "", "-", "", ".", "", " ", "")
+	schedulerSensitiveAttributeKeys = []string{
 		"api_key",
 		"apikey",
 		"token",
@@ -750,7 +780,14 @@ func schedulerAttributeSensitive(key string) bool {
 		"authorization",
 		"auth_header",
 		"proxy_url",
-	} {
+	}
+)
+
+func schedulerAttributeSensitive(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	normalized := schedulerAttributeKeyNormalizer.Replace(key)
+	compact := schedulerAttributeKeyCompactor.Replace(key)
+	for _, fragment := range schedulerSensitiveAttributeKeys {
 		if strings.Contains(key, fragment) || strings.Contains(normalized, fragment) || strings.Contains(compact, fragment) {
 			return true
 		}
@@ -882,13 +919,13 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 	if providerKey == "mixed" {
 		selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-			m.syncScheduler()
+			m.reconcileScheduler()
 			selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
 		}
 	} else {
 		selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-			m.syncScheduler()
+			m.reconcileScheduler()
 			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 		}
 	}
@@ -1081,7 +1118,7 @@ func retryRoundAvailabilityForAuth(auth *Auth, model string, now time.Time) (boo
 	if modelKey != "" && len(auth.ModelStates) > 0 {
 		matchedBlocked := false
 		for stateModel, state := range auth.ModelStates {
-			if state == nil || canonicalModelKey(stateModel) != modelKey {
+			if state == nil || !modelStateKeyMatches(stateModel, modelKey) {
 				continue
 			}
 			if state.Status == StatusDisabled {
@@ -1557,11 +1594,31 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 	}
 }
 
-func (m *Manager) useSchedulerFastPath() bool {
-	if m == nil || m.scheduler == nil {
-		return false
+// schedulerSelection reports whether picks can be served from the scheduler. It also returns the
+// session-affinity selector when that selector must choose among the scheduler's ready auths.
+func (m *Manager) schedulerSelection() (*SessionAffinitySelector, bool) {
+	if m == nil || m.scheduler == nil || m.hasPluginScheduler() {
+		return nil, false
 	}
-	return isBuiltInSelector(m.Selector())
+	selector := m.Selector()
+	if affinity, ok := selector.(*SessionAffinitySelector); ok {
+		return affinity, true
+	}
+	return nil, isBuiltInSelector(selector)
+}
+
+// sessionAffinityCandidates returns the scheduler's ready auth snapshots for model, reconciling the
+// scheduler once when none is ready. ok is false when the scheduler still has no candidate; callers
+// then run the legacy path so unavailable errors and their logs stay unchanged. The candidates match
+// the across-priority list the legacy path hands the session-affinity selector, without scanning,
+// re-validating and cloning every credential under Manager.mu.
+func (m *Manager) sessionAffinityCandidates(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) ([]*Auth, bool) {
+	candidates := m.scheduler.readyAuths(ctx, providers, model, opts, tried)
+	if len(candidates) == 0 && strings.TrimSpace(model) != "" {
+		m.reconcileScheduler()
+		candidates = m.scheduler.readyAuths(ctx, providers, model, opts, tried)
+	}
+	return candidates, len(candidates) > 0
 }
 
 func shouldRetrySchedulerPick(err error) bool {
@@ -1579,11 +1636,14 @@ func shouldRetrySchedulerPick(err error) bool {
 	return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable"
 }
 
-func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) bool {
-	if auth == nil || strings.TrimSpace(routeModel) == "" {
+// routeAwareSelectionRequired reports whether auth resolves routeModel to a model key other than
+// routeKey, the canonical key of routeModel, which callers compute once per request.
+func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel, routeKey string) bool {
+	if auth == nil || routeKey == "" {
 		return false
 	}
-	return m.selectionModelKeyForAuth(auth, routeModel) != canonicalModelKey(routeModel)
+	selectionModel := m.selectionModelForAuth(auth, routeModel)
+	return selectionModel != routeModel && canonicalModelKey(selectionModel) != routeKey
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
@@ -1852,11 +1912,13 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	affinity, useScheduler := m.schedulerSelection()
+	if !useScheduler {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	if strings.TrimSpace(model) != "" {
+		routeKey := canonicalModelKey(model)
 		m.mu.RLock()
 		for _, candidate := range m.auths {
 			if candidate == nil || executorKeyFromAuth(candidate) != provider || candidate.Disabled {
@@ -1868,7 +1930,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			if _, used := tried[candidate.ID]; used {
 				continue
 			}
-			if m.routeAwareSelectionRequired(candidate, model) {
+			if m.routeAwareSelectionRequired(candidate, model, routeKey) {
 				m.mu.RUnlock()
 				return m.pickNextLegacy(ctx, provider, model, opts, tried)
 			}
@@ -1879,10 +1941,20 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if !okExecutor {
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
-	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-		m.syncScheduler()
+	var selected *Auth
+	var errPick error
+	if affinity != nil {
+		candidates, ok := m.sessionAffinityCandidates(ctx, []string{provider}, model, opts, tried)
+		if !ok {
+			return m.pickNextLegacy(ctx, provider, model, opts, tried)
+		}
+		selected, errPick = affinity.Pick(selectorContextForAvailableAuths(ctx, affinity, model), provider, model, opts, candidates)
+	} else {
 		selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+			m.reconcileScheduler()
+			selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+		}
 	}
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
@@ -2024,7 +2096,8 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 
-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+	affinity, useScheduler := m.schedulerSelection()
+	if !useScheduler {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
@@ -2053,6 +2126,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		for _, providerKey := range eligibleProviders {
 			providerSet[providerKey] = struct{}{}
 		}
+		routeKey := canonicalModelKey(model)
 		m.mu.RLock()
 		for _, candidate := range m.auths {
 			if candidate == nil || candidate.Disabled {
@@ -2067,7 +2141,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			if _, used := tried[candidate.ID]; used {
 				continue
 			}
-			if m.routeAwareSelectionRequired(candidate, model) {
+			if m.routeAwareSelectionRequired(candidate, model, routeKey) {
 				m.mu.RUnlock()
 				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 			}
@@ -2075,9 +2149,39 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		m.mu.RUnlock()
 	}
 
+	if affinity != nil {
+		candidates, ok := m.sessionAffinityCandidates(ctx, eligibleProviders, model, opts, tried)
+		if !ok {
+			return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+		}
+		selected, errPick := affinity.Pick(selectorContextForAvailableAuths(ctx, affinity, model), "mixed", model, opts, candidates)
+		if errPick != nil {
+			m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)
+			return nil, nil, "", errPick
+		}
+		if selected == nil {
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		providerKey := executorKeyFromAuth(selected)
+		executor, okExecutor := m.Executor(providerKey)
+		if !okExecutor {
+			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+		}
+		authCopy := selected.Clone()
+		if !selected.indexAssigned {
+			m.mu.Lock()
+			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+				current.EnsureIndex()
+				authCopy = current.Clone()
+			}
+			m.mu.Unlock()
+		}
+		return authCopy, executor, providerKey, nil
+	}
+
 	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
 	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-		m.syncScheduler()
+		m.reconcileScheduler()
 		selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
 	}
 	if errPick != nil {
@@ -2144,10 +2248,39 @@ func authCoolingSummary(auth *Auth, model string, next time.Time, now time.Time)
 	return fmt.Sprintf("[%s, reason=%s, remaining=%s]", ident, reason, remaining)
 }
 
+// maxLoggedCoolingAuths bounds how many cooling credentials one unavailable warning lists, so a
+// large pool in cooldown does not emit a line proportional to its size on every failed pick.
+const maxLoggedCoolingAuths = 20
+
 func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, err error) {
 	if m == nil || err == nil || !isAuthUnavailableError(err) {
 		return
 	}
+	coolingSummaries, totalCandidates := m.coolingAuthSummaries(ctx, providers, model, opts, tried)
+	if len(coolingSummaries) == 0 {
+		return
+	}
+	sort.Strings(coolingSummaries)
+	listed := coolingSummaries
+	if len(listed) > maxLoggedCoolingAuths {
+		listed = listed[:maxLoggedCoolingAuths]
+	}
+	details := strings.Join(listed, ", ")
+	if omitted := len(coolingSummaries) - len(listed); omitted > 0 {
+		details += fmt.Sprintf(", and %d more", omitted)
+	}
+	entry := logEntryWithRequestID(ctx)
+	providerText := strings.Join(providers, ",")
+	if len(providers) == 1 {
+		entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (provider=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, details)
+	} else {
+		entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (providers=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, details)
+	}
+}
+
+// coolingAuthSummaries describes the request candidates for model that are cooling down and counts
+// every candidate. Log formatting happens after it returns, outside Manager.mu.
+func (m *Manager) coolingAuthSummaries(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) ([]string, int) {
 	now := time.Now()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -2198,14 +2331,5 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 		}
 	}
 
-	if len(coolingSummaries) > 0 {
-		sort.Strings(coolingSummaries)
-		entry := logEntryWithRequestID(ctx)
-		providerText := strings.Join(providers, ",")
-		if len(providers) == 1 {
-			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (provider=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
-		} else {
-			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (providers=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
-		}
-	}
+	return coolingSummaries, totalCandidates
 }
