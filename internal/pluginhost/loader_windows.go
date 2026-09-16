@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -290,6 +291,8 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 		uintptr(len(request)),
 		responseMem,
 	)
+	runtime.KeepAlive(methodBytes)
+	runtime.KeepAlive(request)
 	var out []byte
 	if response.ptr != 0 && response.len > 0 {
 		out = unsafe.Slice((*byte)(unsafe.Pointer(response.ptr)), response.len)

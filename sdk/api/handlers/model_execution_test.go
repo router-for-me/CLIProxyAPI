@@ -786,3 +786,196 @@ func TestProvidersForExecutionForcedGeminiUsesGeminiProvider(t *testing.T) {
 		t.Fatalf("model = %q, want agents/test-agent", model)
 	}
 }
+
+func TestExecuteModelPropagatesForcedProviderAndAuthID(t *testing.T) {
+	model := "model-execution-pinned-model"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	executor := &modelExecutionCaptureExecutor{
+		provider: "custom-provider",
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{
+				Payload: []byte(`{"ok":true}`),
+			}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	authID := "model-execution-" + model
+
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "custom-provider",
+		AuthID:         authID,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	_, gotOpts := executor.captured()
+	if gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey] != authID {
+		t.Fatalf("pinned auth metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey], authID)
+	}
+}
+
+func TestExecuteModelStreamPropagatesForcedProviderAndAuthID(t *testing.T) {
+	model := "model-execution-stream-pinned-model"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	executor := &modelExecutionCaptureExecutor{
+		provider: "custom-provider",
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("chunk")}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	authID := "model-execution-" + model
+
+	stream, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Stream:         true,
+		Body:           requestBody,
+		ForcedProvider: "custom-provider",
+		AuthID:         authID,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModelStream() error = %+v", errMsg)
+	}
+	_, gotOpts := executor.captured()
+	if gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey] != authID {
+		t.Fatalf("pinned auth metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey], authID)
+	}
+	for range stream.Chunks {
+	}
+}
+
+func TestExecuteModelPinsExactAuthAcrossPrioritiesWithoutFallback(t *testing.T) {
+	model := "multi-tier-model"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+
+	var executedAuthID string
+	var mu sync.Mutex
+	executor := &modelExecutionCaptureExecutor{
+		provider: "pinned-provider",
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			mu.Lock()
+			executedAuthID = auth.ID
+			mu.Unlock()
+			return coreexecutor.Response{
+				Payload: []byte(`{"ok":true}`),
+			}, nil
+		},
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	highAuth := &coreauth.Auth{
+		ID:         "auth-high-priority",
+		Provider:   "pinned-provider",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"priority": "100"},
+	}
+	lowAuth := &coreauth.Auth{
+		ID:         "auth-low-priority",
+		Provider:   "pinned-provider",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"priority": "0"},
+	}
+	disabledAuth := &coreauth.Auth{
+		ID:         "auth-disabled",
+		Provider:   "pinned-provider",
+		Status:     coreauth.StatusActive,
+		Disabled:   true,
+		Attributes: map[string]string{"priority": "50"},
+	}
+
+	for _, a := range []*coreauth.Auth{highAuth, lowAuth, disabledAuth} {
+		if _, errRegister := manager.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("manager.Register(): %v", errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(a.ID)
+		})
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	// 1. Without AuthID pin, normal selection picks high priority auth
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "pinned-provider",
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() without pin error = %+v", errMsg)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	mu.Lock()
+	if executedAuthID != "auth-high-priority" {
+		t.Fatalf("default routing executed %q, want auth-high-priority", executedAuthID)
+	}
+	mu.Unlock()
+
+	// 2. With AuthID pin to low priority auth, exact low priority auth is executed
+	resp, errMsg = handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "pinned-provider",
+		AuthID:         "auth-low-priority",
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() with low pin error = %+v", errMsg)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	mu.Lock()
+	if executedAuthID != "auth-low-priority" {
+		t.Fatalf("pinned routing executed %q, want auth-low-priority", executedAuthID)
+	}
+	mu.Unlock()
+
+	// 3. Pinning to non-existent auth fails without falling back to high priority auth
+	_, errMsg = handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "pinned-provider",
+		AuthID:         "auth-non-existent",
+	})
+	if errMsg == nil {
+		t.Fatal("ExecuteModel() with non-existent AuthID error = nil, want auth_not_found")
+	}
+
+	// 4. Pinning to disabled auth fails without falling back
+	_, errMsg = handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "pinned-provider",
+		AuthID:         "auth-disabled",
+	})
+	if errMsg == nil {
+		t.Fatal("ExecuteModel() with disabled AuthID error = nil, want auth_not_found")
+	}
+}

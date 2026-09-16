@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"strings"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -27,16 +28,31 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Extract tools and forward map early so request contents and toolDeclarations use the exact same forward map
 	functionDeclarations, forwardMap, _ := util.BuildGeminiFunctionDeclarations(root)
+	var toolBlocks [][]byte
+	if HasResponsesWebSearchTool(root) && ModelSupportsWebSearch(modelName) && AllowsResponsesWebSearchToolChoice(root) {
+		googleSearchBlock := []byte(`{"googleSearch":{}}`)
+		if allowedDomains := ExtractResponsesWebSearchAllowedDomains(root); len(allowedDomains) > 0 {
+			if domainsJSON, errMarshal := json.Marshal(allowedDomains); errMarshal == nil {
+				googleSearchBlock, _ = sjson.SetRawBytes(googleSearchBlock, "googleSearch.includedDomains", domainsJSON)
+			}
+		}
+		toolBlocks = append(toolBlocks, googleSearchBlock)
+	}
 	if len(functionDeclarations) > 0 {
-		geminiTools := []byte(`[{"functionDeclarations":[]}]`)
-		geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
-		out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
+		fnBlock := []byte(`{"functionDeclarations":[]}`)
+		fnBlock, _ = sjson.SetRawBytes(fnBlock, "functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations))
+		toolBlocks = append(toolBlocks, fnBlock)
+	}
+	if len(toolBlocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolBlocks))
 	}
 
-	// Handle tool_choice if present
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		if toolConfig, ok := util.ConvertResponsesToolChoiceToGemini(toolChoice, forwardMap); ok {
-			out, _ = sjson.SetRawBytes(out, "toolConfig.functionCallingConfig", toolConfig)
+	// Handle tool_choice if present (only configure function calling when function declarations exist)
+	if len(functionDeclarations) > 0 {
+		if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+			if toolConfig, ok := util.ConvertResponsesToolChoiceToGemini(toolChoice, forwardMap); ok {
+				out, _ = sjson.SetRawBytes(out, "toolConfig.functionCallingConfig", toolConfig)
+			}
 		}
 	}
 
@@ -343,21 +359,31 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					}
 				}
 
+				var standaloneOutputContents [][]byte
+				appendStandaloneOutput := func(out gjson.Result) {
+					// Orphan outputs (no matching function_call, e.g. Codex
+					// send_message_to_thread cards) must not become unpaired
+					// functionResponse parts. Surface them as user text instead.
+					if parts := buildOpenAIResponsesStandaloneToolOutputTextParts(out); len(parts) > 0 {
+						standaloneOutputContents = append(standaloneOutputContents, geminiContent("user", parts))
+					}
+				}
 				for _, out := range orderedOutputs {
 					id := extractOpenAIResponsesCallID(out)
 					if _, remaining := outputByCallID[id]; remaining {
-						responseParts = append(responseParts, buildOpenAIResponsesFunctionResponseParts(out, functionNamesByCallID)...)
+						appendStandaloneOutput(out)
 						delete(outputByCallID, id)
 					}
 				}
 				for _, out := range extraOutputs {
-					responseParts = append(responseParts, buildOpenAIResponsesFunctionResponseParts(out, functionNamesByCallID)...)
+					appendStandaloneOutput(out)
 				}
 
 				pendingFunctionCallIDs = stillPending
 				if len(responseParts) > 0 {
 					contentItems = append(contentItems, geminiContent("user", responseParts))
 				}
+				contentItems = append(contentItems, standaloneOutputContents...)
 				if len(pendingFunctionCallIDs) == 0 && len(pendingDeveloperParts) > 0 {
 					contentItems = append(contentItems, geminiContent("user", pendingDeveloperParts))
 					pendingDeveloperParts = nil
@@ -1008,6 +1034,34 @@ func responsesHasSubsequentTurn(items []gjson.Result) bool {
 		}
 	}
 	return false
+}
+
+func buildOpenAIResponsesStandaloneToolOutputTextParts(item gjson.Result) [][]byte {
+	output := item.Get("output")
+	if !output.Exists() {
+		return nil
+	}
+	if output.IsArray() {
+		var parts [][]byte
+		output.ForEach(func(_, part gjson.Result) bool {
+			text := part.Get("text").String()
+			if strings.TrimSpace(text) == "" {
+				return true
+			}
+			textPart := []byte(`{"text":""}`)
+			textPart, _ = sjson.SetBytes(textPart, "text", text)
+			parts = append(parts, textPart)
+			return true
+		})
+		return parts
+	}
+	text := output.String()
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	textPart := []byte(`{"text":""}`)
+	textPart, _ = sjson.SetBytes(textPart, "text", text)
+	return [][]byte{textPart}
 }
 
 func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesByCallID map[string]string) [][]byte {

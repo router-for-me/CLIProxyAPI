@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -819,5 +820,292 @@ func TestConvertInteractionsResponseToOpenAIResponsesPreservesNonCollidingAndNon
 	outNonAnti := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.1-flash-lite", []byte(`{"model":"gemini-3.1-flash-lite"}`), nil, rawNonAnti, nil)
 	if got := gjson.GetBytes(outNonAnti, "output.0.name").String(); got != "external_read_file" {
 		t.Fatalf("output.0.name = %q, want external_read_file (preserved for non-antigravity). Output: %s", got, string(outNonAnti))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_PreservesHTMLCharactersInToolCallArguments(t *testing.T) {
+	command := `gh issue view 5802 --json number,title,body,url,state,labels,assignees 2>&1 | head -100`
+
+	// 1. Non-stream test: function_call with 2>&1
+	rawNonStream := []byte(fmt.Sprintf(`{
+		"id":"interaction_test",
+		"model":"devin/swe-2",
+		"steps":[
+			{"type":"function_call","id":"bash_1","name":"bash","arguments":{"command":%q,"timeout":60}}
+		]
+	}`, command))
+	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/swe-2", nil, nil, rawNonStream, nil)
+	outNonStreamStr := string(outNonStream)
+	if strings.Contains(outNonStreamStr, `\u003e`) || strings.Contains(outNonStreamStr, `\u0026`) {
+		t.Fatalf("non-stream output contains escaped HTML characters: %s", outNonStreamStr)
+	}
+	if !strings.Contains(outNonStreamStr, "2>&1") {
+		t.Fatalf("non-stream output should contain '2>&1': %s", outNonStreamStr)
+	}
+
+	// 2. Stream test: function_call delta and done with 2>&1
+	var param any
+	var outStream [][]byte
+	rawEvents := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_test\",\"model\":\"devin/swe-2\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":1,\"step\":{\"type\":\"function_call\",\"id\":\"bash_1\",\"name\":\"bash\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte(fmt.Sprintf("event: step.delta\ndata: {\"index\":1,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"command\\\":\\\"%s\\\",\\\"timeout\\\":60}\"},\"event_type\":\"step.delta\"}\n\n", command)),
+		[]byte("event: step.stop\ndata: {\"index\":1,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_test\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+	for _, raw := range rawEvents {
+		outStream = append(outStream, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", nil, nil, raw, &param)...)
+	}
+
+	for _, frame := range outStream {
+		frameStr := string(frame)
+		if strings.Contains(frameStr, `\u003e`) || strings.Contains(frameStr, `\u0026`) {
+			t.Fatalf("stream frame contains escaped HTML characters: %s", frameStr)
+		}
+	}
+
+	donePayload := findResponsesEventPayload(outStream, "response.function_call_arguments.done")
+	if donePayload == nil {
+		t.Fatalf("missing response.function_call_arguments.done event")
+	}
+	if !strings.Contains(string(donePayload), "2>&1") {
+		t.Fatalf("function_call_arguments.done should contain '2>&1': %s", string(donePayload))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_LogReplayTwoToolCalls(t *testing.T) {
+	// Replay the exact scenario from the log with separated tool calls:
+	// Step 0: thought
+	// Step 1: title_0 (title: Triage issue 5802)
+	// Step 2: bash_1 (gh issue view ... 2>&1 | head -100)
+	command := `gh issue view 5802 --json number,title,body,url,state,labels,assignees 2>&1 | head -100`
+
+	var param any
+	var outStream [][]byte
+	rawEvents := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"interaction_69c3126a-ab3\",\"model\":\"devin/swe-2\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"thought\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_summary\",\"text\":\"I need to triage GitHub issue 5802.\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"),
+		// Tool call 1: title
+		[]byte("event: step.start\ndata: {\"index\":1,\"step\":{\"type\":\"function_call\",\"id\":\"title_0\",\"call_id\":\"title_0\",\"name\":\"title\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":1,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"title\\\": \\\"Triage issue 5802\\\"}\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":1,\"event_type\":\"step.stop\"}\n\n"),
+		// Tool call 2: bash
+		[]byte("event: step.start\ndata: {\"index\":2,\"step\":{\"type\":\"function_call\",\"id\":\"bash_1\",\"call_id\":\"bash_1\",\"name\":\"bash\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte(fmt.Sprintf("event: step.delta\ndata: {\"index\":2,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"command\\\": \\\"%s\\\", \\\"timeout\\\": 60}\"},\"event_type\":\"step.delta\"}\n\n", command)),
+		[]byte("event: step.stop\ndata: {\"index\":2,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"interaction_69c3126a-ab3\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+
+	for _, raw := range rawEvents {
+		outStream = append(outStream, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", nil, nil, raw, &param)...)
+	}
+
+	for _, frame := range outStream {
+		frameStr := string(frame)
+		if strings.Contains(frameStr, `\u003e`) || strings.Contains(frameStr, `\u0026`) {
+			t.Fatalf("stream frame contains escaped HTML characters: %s", frameStr)
+		}
+	}
+
+	completedPayload := findResponsesEventPayload(outStream, "response.completed")
+	if completedPayload == nil {
+		t.Fatalf("missing response.completed event")
+	}
+
+	outputItems := gjson.GetBytes(completedPayload, "response.output").Array()
+	if len(outputItems) != 3 {
+		t.Fatalf("expected 3 output items (thought, title, bash), got %d: %s", len(outputItems), string(completedPayload))
+	}
+
+	titleItem := outputItems[1]
+	if titleItem.Get("name").String() != "title" || titleItem.Get("call_id").String() != "title_0" {
+		t.Errorf("title item mismatch: %s", titleItem.Raw)
+	}
+	if titleItem.Get("arguments").String() != `{"title": "Triage issue 5802"}` {
+		t.Errorf("title arguments = %s", titleItem.Get("arguments").String())
+	}
+
+	bashItem := outputItems[2]
+	if bashItem.Get("name").String() != "bash" || bashItem.Get("call_id").String() != "bash_1" {
+		t.Errorf("bash item mismatch: %s", bashItem.Raw)
+	}
+	if !strings.Contains(bashItem.Get("arguments").String(), "2>&1") {
+		t.Errorf("bash arguments should contain '2>&1': %s", bashItem.Get("arguments").String())
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_FunctionCallHasStatus(t *testing.T) {
+	// 1. Stream test: function_call added/done and response.completed items must carry status
+	var param any
+	rawEvents := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"i1\",\"model\":\"devin/swe-2\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"function_call\",\"id\":\"call_1\",\"call_id\":\"call_1\",\"name\":\"write_file\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/test\\\"}\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"i1\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+
+	var outStream [][]byte
+	for _, raw := range rawEvents {
+		outStream = append(outStream, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", nil, nil, raw, &param)...)
+	}
+
+	addedPayload := findResponsesEventPayload(outStream, "response.output_item.added")
+	if addedPayload == nil {
+		t.Fatalf("missing response.output_item.added")
+	}
+	if got := gjson.GetBytes(addedPayload, "item.status").String(); got != "in_progress" {
+		t.Fatalf("added item.status = %q, want in_progress. Payload: %s", got, string(addedPayload))
+	}
+
+	donePayload := findResponsesEventPayload(outStream, "response.output_item.done")
+	if donePayload == nil {
+		t.Fatalf("missing response.output_item.done")
+	}
+	if got := gjson.GetBytes(donePayload, "item.status").String(); got != "completed" {
+		t.Fatalf("done item.status = %q, want completed. Payload: %s", got, string(donePayload))
+	}
+
+	completedPayload := findResponsesEventPayload(outStream, "response.completed")
+	if completedPayload == nil {
+		t.Fatalf("missing response.completed")
+	}
+	if got := gjson.GetBytes(completedPayload, "response.output.0.status").String(); got != "completed" {
+		t.Fatalf("completed response.output.0.status = %q, want completed. Payload: %s", got, string(completedPayload))
+	}
+
+	// 2. Non-stream test: function_call output item must carry status: completed
+	rawNonStream := []byte(`{
+		"id":"i1",
+		"model":"devin/swe-2",
+		"steps":[
+			{"type":"function_call","id":"call_1","name":"write_file","arguments":{"path":"/tmp/test"}}
+		]
+	}`)
+	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/swe-2", nil, nil, rawNonStream, nil)
+	if got := gjson.GetBytes(outNonStream, "output.0.status").String(); got != "completed" {
+		t.Fatalf("non-stream output.0.status = %q, want completed. Output: %s", got, string(outNonStream))
+	}
+
+	// 3. Truncation test: stream with incomplete/length produces response.incomplete
+	var paramTrunc any
+	rawTruncEvents := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"i2\",\"model\":\"devin/swe-2\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"function_call\",\"id\":\"call_2\",\"name\":\"write_file\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/t\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"i2\",\"status\":\"incomplete\",\"finish_reason\":\"length\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+	var outTruncStream [][]byte
+	for _, raw := range rawTruncEvents {
+		outTruncStream = append(outTruncStream, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", nil, nil, raw, &paramTrunc)...)
+	}
+
+	incompletePayload := findResponsesEventPayload(outTruncStream, "response.incomplete")
+	if incompletePayload == nil {
+		t.Fatalf("expected response.incomplete event for truncated stream")
+	}
+	if got := gjson.GetBytes(incompletePayload, "response.status").String(); got != "incomplete" {
+		t.Fatalf("response.status = %q, want incomplete", got)
+	}
+	if got := gjson.GetBytes(incompletePayload, "response.incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("response.incomplete_details.reason = %q, want max_output_tokens", got)
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_ContentFilterIncomplete(t *testing.T) {
+	// 1. Stream
+	var param any
+	rawStream := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"i_cf\",\"model\":\"devin/swe-2\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"model_output\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text\",\"text\":\"blocked\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"i_cf\",\"status\":\"incomplete\",\"finish_reason\":\"content_filter\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+	var outStream [][]byte
+	for _, raw := range rawStream {
+		outStream = append(outStream, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", nil, nil, raw, &param)...)
+	}
+	incompletePayload := findResponsesEventPayload(outStream, "response.incomplete")
+	if incompletePayload == nil {
+		t.Fatalf("expected response.incomplete for content_filter")
+	}
+	if got := gjson.GetBytes(incompletePayload, "response.incomplete_details.reason").String(); got != "content_filter" {
+		t.Fatalf("incomplete_details.reason = %q, want content_filter. Payload: %s", got, string(incompletePayload))
+	}
+
+	// 2. Non-stream
+	rawNonStream := []byte(`{
+		"id":"i_cf",
+		"model":"devin/swe-2",
+		"status":"incomplete",
+		"finish_reason":"content_filter",
+		"steps":[{"type":"model_output","content":[{"type":"text","text":"blocked"}]}]
+	}`)
+	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/swe-2", nil, nil, rawNonStream, nil)
+	if got := gjson.GetBytes(outNonStream, "status").String(); got != "incomplete" {
+		t.Fatalf("non-stream status = %q, want incomplete", got)
+	}
+	if got := gjson.GetBytes(outNonStream, "incomplete_details.reason").String(); got != "content_filter" {
+		t.Fatalf("non-stream incomplete_details.reason = %q, want content_filter", got)
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_MissingUsageDefaultsToZeros(t *testing.T) {
+	// 1. Stream with no usage in interaction.completed
+	var param any
+	rawStream := [][]byte{
+		[]byte("event: interaction.created\ndata: {\"interaction\":{\"id\":\"i_nousage\",\"model\":\"devin/swe-2\"},\"event_type\":\"interaction.created\"}\n\n"),
+		[]byte("event: step.start\ndata: {\"index\":0,\"step\":{\"type\":\"model_output\"},\"event_type\":\"step.start\"}\n\n"),
+		[]byte("event: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text\",\"text\":\"hello\"},\"event_type\":\"step.delta\"}\n\n"),
+		[]byte("event: step.stop\ndata: {\"index\":0,\"event_type\":\"step.stop\"}\n\n"),
+		[]byte("event: interaction.completed\ndata: {\"interaction\":{\"id\":\"i_nousage\",\"status\":\"completed\"},\"event_type\":\"interaction.completed\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+	var outStream [][]byte
+	for _, raw := range rawStream {
+		outStream = append(outStream, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", nil, nil, raw, &param)...)
+	}
+	completedPayload := findResponsesEventPayload(outStream, "response.completed")
+	if completedPayload == nil {
+		t.Fatalf("missing response.completed")
+	}
+	if !gjson.GetBytes(completedPayload, "response.usage.input_tokens").Exists() {
+		t.Fatalf("expected usage.input_tokens to exist. Payload: %s", string(completedPayload))
+	}
+	if got := gjson.GetBytes(completedPayload, "response.usage.input_tokens").Int(); got != 0 {
+		t.Fatalf("usage.input_tokens = %d, want 0", got)
+	}
+	if !gjson.GetBytes(completedPayload, "response.usage.output_tokens").Exists() {
+		t.Fatalf("expected usage.output_tokens to exist")
+	}
+	if !gjson.GetBytes(completedPayload, "response.usage.total_tokens").Exists() {
+		t.Fatalf("expected usage.total_tokens to exist")
+	}
+
+	// 2. Non-stream with no usage
+	rawNonStream := []byte(`{
+		"id":"i_nousage",
+		"model":"devin/swe-2",
+		"status":"completed",
+		"steps":[{"type":"model_output","content":[{"type":"text","text":"hello"}]}]
+	}`)
+	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/swe-2", nil, nil, rawNonStream, nil)
+	if !gjson.GetBytes(outNonStream, "usage.input_tokens").Exists() {
+		t.Fatalf("expected non-stream usage.input_tokens to exist. Output: %s", string(outNonStream))
+	}
+	if !gjson.GetBytes(outNonStream, "usage.output_tokens").Exists() {
+		t.Fatalf("expected non-stream usage.output_tokens to exist")
+	}
+	if !gjson.GetBytes(outNonStream, "usage.total_tokens").Exists() {
+		t.Fatalf("expected non-stream usage.total_tokens to exist")
 	}
 }

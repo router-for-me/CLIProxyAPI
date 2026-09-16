@@ -262,6 +262,66 @@ func TestRequestLoggingMiddlewareCapturesLargeErrorRequestAndDeferredAPIRequest(
 	}
 }
 
+func TestRequestLoggingMiddleware_StreamingResponsesUpstreamSections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	logsDir := t.TempDir()
+	logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+
+	router := gin.New()
+	router.Use(RequestLoggingMiddleware(logger))
+	router.POST("/v1/responses", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		executorCtx := context.WithValue(context.Background(), "gin", c)
+		helps.RecordAPIRequest(executorCtx, cfg, helps.UpstreamRequestLog{
+			URL:     "https://api.example.com/v1/responses",
+			Method:  http.MethodPost,
+			Headers: http.Header{"Content-Type": []string{"application/json"}},
+			Body:    []byte(`{"model":"gpt-5-codex","input":[]}`),
+		})
+		helps.AppendAPIResponseChunk(executorCtx, cfg, []byte("data: {\"type\":\"response.output_item.added\"}\n\n"))
+		_, _ = c.Writer.Write([]byte("data: {\"type\":\"response.output_item.added\"}\n\n"))
+		if flusher, ok := c.Writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5-codex","input":[],"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("response status = %d, want %d", response.Code, http.StatusOK)
+	}
+
+	entries, errReadDir := os.ReadDir(logsDir)
+	if errReadDir != nil {
+		t.Fatalf("read logs dir: %v", errReadDir)
+	}
+	var logPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "v1-responses-") && strings.HasSuffix(entry.Name(), ".log") {
+			logPath = logsDir + string(os.PathSeparator) + entry.Name()
+			break
+		}
+	}
+	if logPath == "" {
+		t.Fatal("streaming request log was not created")
+	}
+	content, errReadLog := os.ReadFile(logPath)
+	if errReadLog != nil {
+		t.Fatalf("read log file: %v", errReadLog)
+	}
+	if !bytes.Contains(content, []byte("=== API REQUEST 1 ===")) {
+		t.Fatalf("streaming log missing API REQUEST: %s", string(content))
+	}
+	if !bytes.Contains(content, []byte("=== API RESPONSE 1 ===")) {
+		t.Fatalf("streaming log missing API RESPONSE: %s", string(content))
+	}
+}
+
 func TestAttachRequestLogSourcesUsesLoggerLogsDir(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

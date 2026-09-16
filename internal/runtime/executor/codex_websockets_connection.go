@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -123,7 +124,7 @@ func mapCodexWebsocketReadError(err error) error {
 }
 
 func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) []byte {
-	if !isCodexResponsesLiteRequest(body, headers) {
+	if !util.IsCodexResponsesLiteRequest(body, headers) {
 		return body
 	}
 	body = helps.SetBoolIfDifferent(body, "parallel_tool_calls", false)

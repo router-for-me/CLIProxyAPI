@@ -100,6 +100,10 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		Retryable:  authErr.Retryable,
 		HTTPStatus: status,
 	}
+	var carrier interface{ WithAuthError(*coreauth.Error) error }
+	if errors.As(err, &carrier) && carrier != nil {
+		return carrier.WithAuthError(enriched)
+	}
 	if coreauth.IsTerminalAuthError(err) {
 		return coreauth.NewTerminalAuthError(enriched, cause)
 	}

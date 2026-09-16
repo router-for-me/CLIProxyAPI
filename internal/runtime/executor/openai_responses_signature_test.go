@@ -11,6 +11,14 @@ import (
 
 var benchmarkSanitizeOpenAIResponsesReasoningOutput []byte
 
+func assertEmptyReasoningContent(t *testing.T, body []byte, path string) {
+	t.Helper()
+	content := gjson.GetBytes(body, path)
+	if !content.Exists() || !content.IsArray() || len(content.Array()) != 0 {
+		t.Fatalf("%s should be an empty array for Codex maxItems:0, got %s body=%s", path, content.Raw, body)
+	}
+}
+
 func validOpenAIResponsesReasoningEncryptedContentForTest() string {
 	payload := make([]byte, 1+8+16+16+32)
 	payload[0] = 0x80
@@ -67,6 +75,80 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContent_KeepsIDsWhenStoreEnabl
 	}
 	if gotID := gjson.GetBytes(got, "input.1.id").String(); gotID != "rs_orphan" {
 		t.Fatalf("store=true should keep orphan reasoning id, got %q body=%s", gotID, got)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContent_MovesCleartextContentToSummary(t *testing.T) {
+	// Codex Desktop replays third-party thinking as reasoning.content[reasoning_text].
+	// Official Codex upstream rejects that shape with array_above_max_length (maxItems: 0).
+	body := []byte(`{"store":false,"input":[` +
+		`{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"The model thinking process from a previous turn with a third-party provider..."}],"encrypted_content":null},` +
+		`{"id":"msg_1","type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}` +
+		`]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "test", body)
+
+	assertEmptyReasoningContent(t, got, "input.0.content")
+	if gotType := gjson.GetBytes(got, "input.0.summary.0.type").String(); gotType != "summary_text" {
+		t.Fatalf("summary.0.type = %q, want summary_text; body=%s", gotType, got)
+	}
+	if gotText := gjson.GetBytes(got, "input.0.summary.0.text").String(); gotText != "The model thinking process from a previous turn with a third-party provider..." {
+		t.Fatalf("summary.0.text = %q, want promoted reasoning_text; body=%s", gotText, got)
+	}
+	if gjson.GetBytes(got, "input.0.encrypted_content").Exists() {
+		t.Fatalf("null encrypted_content should still be stripped: %s", got)
+	}
+	if gotType := gjson.GetBytes(got, "input.1.content.0.type").String(); gotType != "input_text" {
+		t.Fatalf("non-reasoning content should stay: %s", got)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContent_DoesNotDuplicateExistingSummary(t *testing.T) {
+	body := []byte(`{"store":false,"input":[{"type":"reasoning","summary":[{"type":"summary_text","text":"already summarized"}],"content":[{"type":"reasoning_text","text":"duplicate thinking"}]}]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "test", body)
+
+	assertEmptyReasoningContent(t, got, "input.0.content")
+	if gotLen := len(gjson.GetBytes(got, "input.0.summary").Array()); gotLen != 1 {
+		t.Fatalf("summary length = %d, want 1 (no duplicate); body=%s", gotLen, got)
+	}
+	if gotText := gjson.GetBytes(got, "input.0.summary.0.text").String(); gotText != "already summarized" {
+		t.Fatalf("existing summary overwritten: %s", got)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContent_PromotesMultipleReasoningTextParts(t *testing.T) {
+	body := []byte(`{"store":false,"input":[{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"step one"},{"type":"reasoning_text","text":"step two"}]}]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "test", body)
+
+	assertEmptyReasoningContent(t, got, "input.0.content")
+	if gotLen := len(gjson.GetBytes(got, "input.0.summary").Array()); gotLen != 2 {
+		t.Fatalf("summary length = %d, want 2; body=%s", gotLen, got)
+	}
+	if gotText := gjson.GetBytes(got, "input.0.summary.0.text").String(); gotText != "step one" {
+		t.Fatalf("summary.0.text = %q, want step one; body=%s", gotText, got)
+	}
+	if gotText := gjson.GetBytes(got, "input.0.summary.1.text").String(); gotText != "step two" {
+		t.Fatalf("summary.1.text = %q, want step two; body=%s", gotText, got)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContent_KeepsValidEncryptedContentWhenStrippingContent(t *testing.T) {
+	valid := validOpenAIResponsesReasoningEncryptedContentForTest()
+	body := []byte(`{"store":false,"input":[{"id":"rs_good","type":"reasoning","encrypted_content":"` + valid + `","summary":[],"content":[{"type":"reasoning_text","text":"cleartext thinking"}]}]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "test", body)
+
+	assertEmptyReasoningContent(t, got, "input.0.content")
+	if gotID := gjson.GetBytes(got, "input.0.id").String(); gotID != "rs_good" {
+		t.Fatalf("valid reasoning id = %q, want rs_good; body=%s", gotID, got)
+	}
+	if gotEC := gjson.GetBytes(got, "input.0.encrypted_content").String(); gotEC != valid {
+		t.Fatalf("valid encrypted_content not preserved: %s", got)
+	}
+	if gotText := gjson.GetBytes(got, "input.0.summary.0.text").String(); gotText != "cleartext thinking" {
+		t.Fatalf("summary.0.text = %q, want promoted reasoning_text; body=%s", gotText, got)
 	}
 }
 

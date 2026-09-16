@@ -74,6 +74,19 @@ type geminiToResponsesState struct {
 	FuncDone         map[int]bool
 	SanitizedNameMap map[string]string
 	ToolIdentityMap  map[string]util.ResponsesToolIdentity
+
+	// web search aggregation
+	WebSearchStreamMode          bool
+	WebSearchDone                bool
+	WebSearchIndex               int
+	WebSearchItemID              string
+	WebSearchQuery               string
+	WebSearchQueries             []string
+	WebSearchSources             [][]byte
+	WebSearchAnnotations         [][]byte
+	WebSearchAnnotationsAttached bool
+	WebSearchBufferedDeltas      []string
+	RawGroundingMetadata         gjson.Result
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -117,6 +130,27 @@ func unwrapGeminiResponseRoot(root gjson.Result) gjson.Result {
 
 func emitEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
+}
+
+func hasEffectiveGoogleSearchTool(rawJSON []byte) bool {
+	if len(rawJSON) == 0 {
+		return false
+	}
+	if gjson.GetBytes(rawJSON, "requestType").String() == "web_search" {
+		return true
+	}
+	for _, path := range []string{"request.tools", "tools"} {
+		tools := gjson.GetBytes(rawJSON, path)
+		if !tools.IsArray() {
+			continue
+		}
+		for _, tool := range tools.Array() {
+			if tool.Get("googleSearch").Exists() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ConvertGeminiResponseToOpenAIResponses converts Gemini SSE chunks into OpenAI Responses SSE events.
@@ -291,14 +325,58 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		st.ReasoningPendingDeltas = nil
 	}
 
+	flushWebSearchBufferedText := func() {
+		if len(st.WebSearchBufferedDeltas) == 0 {
+			return
+		}
+		if st.MsgClosed {
+			st.MsgOpened = false
+			st.MsgClosed = false
+			st.ItemTextBuf.Reset()
+		}
+		if !st.MsgOpened {
+			st.MsgOpened = true
+			st.MsgIndex = st.NextIndex
+			st.NextIndex++
+			st.CurrentMsgID = fmt.Sprintf("msg_%s_%d", st.ResponseID, st.MsgIndex)
+			item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
+			item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+			item, _ = sjson.SetBytes(item, "output_index", st.MsgIndex)
+			item, _ = sjson.SetBytes(item, "item.id", st.CurrentMsgID)
+			out = append(out, emitEvent("response.output_item.added", item))
+			partAdded := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
+			partAdded, _ = sjson.SetBytes(partAdded, "sequence_number", nextSeq())
+			partAdded, _ = sjson.SetBytes(partAdded, "item_id", st.CurrentMsgID)
+			partAdded, _ = sjson.SetBytes(partAdded, "output_index", st.MsgIndex)
+			out = append(out, emitEvent("response.content_part.added", partAdded))
+			st.ItemTextBuf.Reset()
+		}
+		for _, delta := range st.WebSearchBufferedDeltas {
+			st.ItemTextBuf.WriteString(delta)
+			msg := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
+			msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
+			msg, _ = sjson.SetBytes(msg, "item_id", st.CurrentMsgID)
+			msg, _ = sjson.SetBytes(msg, "output_index", st.MsgIndex)
+			msg, _ = sjson.SetBytes(msg, "delta", delta)
+			out = append(out, emitEvent("response.output_text.delta", msg))
+		}
+		st.WebSearchBufferedDeltas = nil
+	}
+
 	// Helper to finalize the assistant message in correct order.
 	// It emits response.output_text.done, response.content_part.done,
 	// and response.output_item.done exactly once.
 	finalizeMessage := func() {
+		if !st.MsgOpened && len(st.WebSearchBufferedDeltas) > 0 {
+			flushWebSearchBufferedText()
+		}
 		if !st.MsgOpened || st.MsgClosed {
 			return
 		}
 		fullText := st.ItemTextBuf.String()
+		if st.RawGroundingMetadata.Exists() {
+			st.WebSearchAnnotations = BuildResponsesURLCitations(st.RawGroundingMetadata, fullText)
+		}
 		done := []byte(`{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`)
 		done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
 		done, _ = sjson.SetBytes(done, "item_id", st.CurrentMsgID)
@@ -310,12 +388,19 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		partDone, _ = sjson.SetBytes(partDone, "item_id", st.CurrentMsgID)
 		partDone, _ = sjson.SetBytes(partDone, "output_index", st.MsgIndex)
 		partDone, _ = sjson.SetBytes(partDone, "part.text", fullText)
+		if len(st.WebSearchAnnotations) > 0 && !st.WebSearchAnnotationsAttached {
+			partDone, _ = sjson.SetRawBytes(partDone, "part.annotations", translatorcommon.JoinRawArray(st.WebSearchAnnotations))
+		}
 		out = append(out, emitEvent("response.content_part.done", partDone))
 		final := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`)
 		final, _ = sjson.SetBytes(final, "sequence_number", nextSeq())
 		final, _ = sjson.SetBytes(final, "output_index", st.MsgIndex)
 		final, _ = sjson.SetBytes(final, "item.id", st.CurrentMsgID)
 		final, _ = sjson.SetBytes(final, "item.content.0.text", fullText)
+		if len(st.WebSearchAnnotations) > 0 && !st.WebSearchAnnotationsAttached {
+			final, _ = sjson.SetRawBytes(final, "item.content.0.annotations", translatorcommon.JoinRawArray(st.WebSearchAnnotations))
+			st.WebSearchAnnotationsAttached = true
+		}
 		out = append(out, emitEvent("response.output_item.done", final))
 
 		st.CompletedMessages[st.MsgIndex] = geminiCompletedMessageItem{ID: st.CurrentMsgID, Text: fullText}
@@ -432,6 +517,72 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 		st.Started = true
 		st.NextIndex = 0
+		if hasEffectiveGoogleSearchTool(requestRawJSON) {
+			st.WebSearchStreamMode = true
+		} else if len(reqJSON) > 0 {
+			reqRoot := unwrapRequestRoot(gjson.ParseBytes(reqJSON))
+			st.WebSearchStreamMode = HasResponsesWebSearchTool(reqRoot) && (ModelSupportsWebSearch(modelName) || ModelSupportsWebSearch(requestModelName))
+		}
+	}
+
+	// Handle groundingMetadata for web search
+	if gm := ExtractGroundingMetadata(root); HasValidWebGrounding(gm) {
+		st.RawGroundingMetadata = gm
+		queries := ExtractGroundingQueries(gm)
+		if len(queries) > 0 {
+			st.WebSearchQueries = queries
+			if st.WebSearchQuery == "" {
+				st.WebSearchQuery = queries[0]
+			}
+		}
+		if sources := ExtractGroundingSources(gm); len(sources) > 0 {
+			st.WebSearchSources = sources
+		}
+
+		if !st.WebSearchDone {
+			finalizeReasoning()
+			st.WebSearchIndex = st.NextIndex
+			st.NextIndex++
+			st.WebSearchItemID = fmt.Sprintf("ws_%s", strings.TrimPrefix(st.ResponseID, "resp_"))
+			if len(queries) > 0 && st.WebSearchQuery == "" {
+				st.WebSearchQuery = queries[0]
+			}
+			if st.WebSearchQuery == "" && len(reqJSON) > 0 {
+				reqRoot := unwrapRequestRoot(gjson.ParseBytes(reqJSON))
+				st.WebSearchQuery = ExtractResponsesWebSearchQuery(reqRoot)
+			}
+
+			added := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"web_search_call","status":"in_progress","action":{"type":"search","query":""}}}`)
+			added, _ = sjson.SetBytes(added, "sequence_number", nextSeq())
+			added, _ = sjson.SetBytes(added, "output_index", st.WebSearchIndex)
+			added, _ = sjson.SetBytes(added, "item.id", st.WebSearchItemID)
+			added, _ = sjson.SetBytes(added, "item.action.query", st.WebSearchQuery)
+			out = append(out, emitEvent("response.output_item.added", added))
+
+			searching := []byte(`{"type":"response.web_search_call.searching","sequence_number":0,"output_index":0,"item_id":""}`)
+			searching, _ = sjson.SetBytes(searching, "sequence_number", nextSeq())
+			searching, _ = sjson.SetBytes(searching, "output_index", st.WebSearchIndex)
+			searching, _ = sjson.SetBytes(searching, "item_id", st.WebSearchItemID)
+			out = append(out, emitEvent("response.web_search_call.searching", searching))
+
+			completed := []byte(`{"type":"response.web_search_call.completed","sequence_number":0,"output_index":0,"item_id":""}`)
+			completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
+			completed, _ = sjson.SetBytes(completed, "output_index", st.WebSearchIndex)
+			completed, _ = sjson.SetBytes(completed, "item_id", st.WebSearchItemID)
+			out = append(out, emitEvent("response.web_search_call.completed", completed))
+
+			doneItem := BuildResponsesWebSearchCallItem(st.WebSearchItemID, st.WebSearchQuery, st.WebSearchQueries, st.WebSearchSources)
+			doneEvent := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0}`)
+			doneEvent, _ = sjson.SetBytes(doneEvent, "sequence_number", nextSeq())
+			doneEvent, _ = sjson.SetBytes(doneEvent, "output_index", st.WebSearchIndex)
+			doneEvent, _ = sjson.SetRawBytes(doneEvent, "item", doneItem)
+			out = append(out, emitEvent("response.output_item.done", doneEvent))
+
+			st.WebSearchDone = true
+
+			// Flush any text deltas buffered while waiting for grounding metadata
+			flushWebSearchBufferedText()
+		}
 	}
 
 	// Handle parts (text/thought/functionCall)
@@ -577,6 +728,15 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				// opening the visible message. A signature that arrives later is
 				// cached with the message and recombined on replay.
 				finalizeReasoning()
+
+				// In web search stream mode, buffer deltas until grounding metadata arrives
+				// or the stream finishes, so web_search_call strictly precedes the message.
+				if st.WebSearchStreamMode && !st.WebSearchDone {
+					st.LastSemanticKind = geminiResponsesCarrierText
+					st.WebSearchBufferedDeltas = append(st.WebSearchBufferedDeltas, t.String())
+					return true
+				}
+
 				if st.MsgClosed {
 					st.MsgOpened = false
 					st.MsgClosed = false
@@ -615,6 +775,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				// Before emitting function-call outputs, finalize reasoning and the message (if open).
 				// Responses streaming requires message done events before the next output_item.added.
 				finalizeReasoning()
+				if len(st.WebSearchBufferedDeltas) > 0 {
+					flushWebSearchBufferedText()
+				}
 				finalizeMessage()
 				st.LastSemanticKind = geminiResponsesCarrierFunction
 
@@ -699,7 +862,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 						ad, _ = sjson.SetBytes(ad, "sequence_number", nextSeq())
 						ad, _ = sjson.SetBytes(ad, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
 						ad, _ = sjson.SetBytes(ad, "output_index", idx)
-						ad, _ = sjson.SetBytes(ad, "delta", argsJSON)
+						ad, _ = translatorcommon.SetStringWithoutHTMLEscape(ad, "delta", argsJSON)
 						out = append(out, emitEvent("response.function_call_arguments.delta", ad))
 					}
 
@@ -709,14 +872,14 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 						fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
 						fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
 						fcDone, _ = sjson.SetBytes(fcDone, "output_index", idx)
-						fcDone, _ = sjson.SetBytes(fcDone, "arguments", argsJSON)
+						fcDone, _ = translatorcommon.SetStringWithoutHTMLEscape(fcDone, "arguments", argsJSON)
 						out = append(out, emitEvent("response.function_call_arguments.done", fcDone))
 
 						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
 						itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 						itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
 						itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
-						itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", argsJSON)
+						itemDone, _ = translatorcommon.SetStringWithoutHTMLEscape(itemDone, "item.arguments", argsJSON)
 						itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
 						itemDone = translatorcommon.SetResponsesToolCallIdentity(itemDone, name, namespace, "item")
 						out = append(out, emitEvent("response.output_item.done", itemDone))
@@ -786,14 +949,14 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					fcDone, _ = sjson.SetBytes(fcDone, "sequence_number", nextSeq())
 					fcDone, _ = sjson.SetBytes(fcDone, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
 					fcDone, _ = sjson.SetBytes(fcDone, "output_index", idx)
-					fcDone, _ = sjson.SetBytes(fcDone, "arguments", args)
+					fcDone, _ = translatorcommon.SetStringWithoutHTMLEscape(fcDone, "arguments", args)
 					out = append(out, emitEvent("response.function_call_arguments.done", fcDone))
 
 					itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
 					itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 					itemDone, _ = sjson.SetBytes(itemDone, "output_index", idx)
 					itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
-					itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
+					itemDone, _ = translatorcommon.SetStringWithoutHTMLEscape(itemDone, "item.arguments", args)
 					itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
 					itemDone = translatorcommon.SetResponsesToolCallIdentity(itemDone, st.FuncNames[idx], st.FuncNamespaces[idx], "item")
 					out = append(out, emitEvent("response.output_item.done", itemDone))
@@ -876,7 +1039,13 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 		// Compose outputs in output_index order.
 		outputs := make([][]byte, 0, st.NextIndex)
+		attachedToMessage := false
 		for idx := 0; idx < st.NextIndex; idx++ {
+			if st.WebSearchDone && idx == st.WebSearchIndex {
+				item := BuildResponsesWebSearchCallItem(st.WebSearchItemID, st.WebSearchQuery, st.WebSearchQueries, st.WebSearchSources)
+				outputs = append(outputs, item)
+				continue
+			}
 			if completedReasoning, ok := st.CompletedReasoning[idx]; ok {
 				item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}`)
 				item, _ = sjson.SetBytes(item, "id", completedReasoning.ID)
@@ -889,6 +1058,10 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 				item, _ = sjson.SetBytes(item, "id", completedMessage.ID)
 				item, _ = sjson.SetBytes(item, "content.0.text", completedMessage.Text)
+				if len(st.WebSearchAnnotations) > 0 && !attachedToMessage {
+					item, _ = sjson.SetRawBytes(item, "content.0.annotations", translatorcommon.JoinRawArray(st.WebSearchAnnotations))
+					attachedToMessage = true
+				}
 				outputs = append(outputs, item)
 				continue
 			}
@@ -916,15 +1089,37 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					}
 					item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
-					item, _ = sjson.SetBytes(item, "arguments", args)
+					item, _ = translatorcommon.SetStringWithoutHTMLEscape(item, "arguments", args)
 					item, _ = sjson.SetBytes(item, "call_id", callID)
 					item = translatorcommon.SetResponsesToolCallIdentity(item, st.FuncNames[idx], st.FuncNamespaces[idx], "")
 					outputs = append(outputs, item)
 				}
 			}
 		}
+		if st.WebSearchDone {
+			// Ensure web_search_call is placed before the first message if not already
+			wsIdx := -1
+			firstMsgIdx := -1
+			for i, item := range outputs {
+				typ := gjson.GetBytes(item, "type").String()
+				if typ == "web_search_call" && wsIdx == -1 {
+					wsIdx = i
+				}
+				if typ == "message" && firstMsgIdx == -1 {
+					firstMsgIdx = i
+				}
+			}
+			if wsIdx != -1 && firstMsgIdx != -1 && wsIdx > firstMsgIdx {
+				wsItem := outputs[wsIdx]
+				outputs = append(outputs[:wsIdx], outputs[wsIdx+1:]...)
+				outputs = append(outputs[:firstMsgIdx], append([][]byte{wsItem}, outputs[firstMsgIdx:]...)...)
+			}
+		}
 		if len(outputs) > 0 {
 			completed, _ = sjson.SetRawBytes(completed, "response.output", translatorcommon.JoinRawArray(outputs))
+		}
+		if st.WebSearchDone {
+			completed, _ = sjson.SetBytes(completed, "response.tool_usage.web_search.num_requests", 1)
 		}
 
 		// usage mapping
@@ -1219,7 +1414,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 					itemJSON = []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 					itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
 					itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
-					itemJSON, _ = sjson.SetBytes(itemJSON, "arguments", argsStr)
+					itemJSON, _ = translatorcommon.SetStringWithoutHTMLEscape(itemJSON, "arguments", argsStr)
 					itemJSON = translatorcommon.SetResponsesToolCallIdentity(itemJSON, name, namespace, "")
 				}
 				functionIndex := len(functionOutputs)
@@ -1266,6 +1461,34 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	flushReasoningOutput()
 	flushMessageOutput()
 
+	// Web search handling from groundingMetadata
+	groundingMetadata := ExtractGroundingMetadata(root)
+	hasGrounding := HasValidWebGrounding(groundingMetadata)
+	var wsItem []byte
+	var citations [][]byte
+	if hasGrounding {
+		queries := ExtractGroundingQueries(groundingMetadata)
+		query := ""
+		if len(queries) > 0 {
+			query = queries[0]
+		}
+		if query == "" && len(reqJSON) > 0 {
+			query = ExtractResponsesWebSearchQuery(unwrapRequestRoot(gjson.ParseBytes(reqJSON)))
+		}
+		sources := ExtractGroundingSources(groundingMetadata)
+		wsID := fmt.Sprintf("ws_%s", strings.TrimPrefix(id, "resp_"))
+		wsItem = BuildResponsesWebSearchCallItem(wsID, query, queries, sources)
+	}
+
+	var allCandidateText strings.Builder
+	for _, mo := range messageOutputs {
+		allCandidateText.WriteString(mo.text)
+	}
+	if hasGrounding {
+		citations = BuildResponsesURLCitations(groundingMetadata, allCandidateText.String())
+	}
+
+	wsAppended := false
 	for _, outputItem := range outputOrder {
 		switch outputItem.kind {
 		case "detached":
@@ -1300,6 +1523,10 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			}
 			appendOutput(itemJSON)
 		case "message":
+			if hasGrounding && !wsAppended {
+				appendOutput(wsItem)
+				wsAppended = true
+			}
 			if outputItem.index < 0 || outputItem.index >= len(messageOutputs) {
 				continue
 			}
@@ -1312,6 +1539,9 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			itemJSON := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 			itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("msg_%s_%d", strings.TrimPrefix(id, "resp_"), outputItem.index))
 			itemJSON, _ = sjson.SetBytes(itemJSON, "content.0.text", messageOutput.text)
+			if len(citations) > 0 && outputItem.index == 0 {
+				itemJSON, _ = sjson.SetRawBytes(itemJSON, "content.0.annotations", translatorcommon.JoinRawArray(citations))
+			}
 			appendOutput(itemJSON)
 		case "function":
 			if outputItem.index < 0 || outputItem.index >= len(functionOutputs) {
@@ -1323,8 +1553,17 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		}
 	}
 
+	if hasGrounding && !wsAppended {
+		appendOutput(wsItem)
+		wsAppended = true
+	}
+
 	if len(outputs) > 0 {
 		resp, _ = sjson.SetRawBytes(resp, "output", translatorcommon.JoinRawArray(outputs))
+	}
+
+	if hasGrounding {
+		resp, _ = sjson.SetBytes(resp, "tool_usage.web_search.num_requests", 1)
 	}
 
 	// usage mapping

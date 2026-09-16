@@ -606,7 +606,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 			HTTPStatus: http.StatusServiceUnavailable,
 		}, terminalCause)
 	}
-	return WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
+	return newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 }
 
 // scheduledAuthPredicate filters request-ineligible auths before scheduler state advances.
@@ -1279,7 +1279,7 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 			HTTPStatus: http.StatusServiceUnavailable,
 		}, terminalCause)
 	}
-	return WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
+	return newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 }
 
 func (m *modelScheduler) latestCandidateErrorWithTimeLocked(model string, predicate func(*scheduledAuth) bool) (error, time.Time, string) {
@@ -1377,15 +1377,14 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if entry == nil || entry.auth == nil {
 			continue
 		}
-		if entry.state == scheduledStateCooldown {
-			cooldownCount++
-			if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
-				earliest = entry.nextRetryAt
-			}
-			continue
-		}
 		if hasUnauthorizedAuthFailure(entry.auth) {
 			unauthorizedCount++
+		}
+		if entry.state == scheduledStateCooldown {
+			cooldownCount++
+		}
+		if (entry.state == scheduledStateCooldown || entry.state == scheduledStateBlocked) && !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
+			earliest = entry.nextRetryAt
 		}
 	}
 	return total, cooldownCount, unauthorizedCount, earliest

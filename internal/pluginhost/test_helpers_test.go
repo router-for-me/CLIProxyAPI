@@ -48,6 +48,9 @@ func newTestSymbolLookup(plugin *testPlugin) *testSymbolLookup {
 }
 
 func (l *testSymbolLookup) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	switch method {
 	case pluginabi.MethodPluginRegister:
 		return l.callLifecycle(request, false)
@@ -173,6 +176,50 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 		}
 		l.active.Capabilities.UsagePlugin.HandleUsage(ctx, record)
 		return marshalRPCResult(rpcEmptyResponse{})
+	case pluginabi.MethodQuotaIdentifier:
+		if l.active.Capabilities.QuotaProvider == nil {
+			return nil, fmt.Errorf("missing quota provider")
+		}
+		return marshalRPCResult(rpcIdentifierResponse{Identifier: l.active.Capabilities.QuotaProvider.Identifier()})
+	case pluginabi.MethodQuotaDescribe:
+		if l.active.Capabilities.QuotaProvider == nil {
+			return nil, fmt.Errorf("missing quota provider")
+		}
+		var req pluginapi.QuotaDescribeRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errDescribe := l.active.Capabilities.QuotaProvider.DescribeQuota(ctx, req)
+		if errDescribe != nil {
+			return nil, errDescribe
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodQuotaFetch:
+		if l.active.Capabilities.QuotaProvider == nil {
+			return nil, fmt.Errorf("missing quota provider")
+		}
+		var req rpcQuotaFetchRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errFetch := l.active.Capabilities.QuotaProvider.FetchQuota(ctx, req.QuotaFetchRequest)
+		if errFetch != nil {
+			return nil, errFetch
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodQuotaReset:
+		if l.active.Capabilities.QuotaProvider == nil {
+			return nil, fmt.Errorf("missing quota provider")
+		}
+		var req rpcQuotaResetRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errReset := l.active.Capabilities.QuotaProvider.ResetQuota(ctx, req.QuotaResetRequest)
+		if errReset != nil {
+			return nil, errReset
+		}
+		return marshalRPCResult(resp)
 	default:
 		return nil, fmt.Errorf("missing test method %s", method)
 	}

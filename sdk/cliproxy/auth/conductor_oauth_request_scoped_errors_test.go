@@ -179,3 +179,89 @@ func TestOAuthRequestScopedErrors_DoesNotApplyToAPIKey(t *testing.T) {
 		t.Fatalf("expected execCount = 2 (rotated because OAuth rule skipped for API key), got %d", execCount)
 	}
 }
+
+func TestOAuthRequestScopedErrors_AppliesToMetaOAuth(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	cfg := &internalconfig.Config{
+		OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+			"meta": {
+				{
+					Status: 400,
+					Match:  []string{"context_length_exceeded"},
+					Action: "stop",
+				},
+			},
+		},
+	}
+
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+
+	auth1 := &Auth{
+		ID:       "auth-meta-oauth",
+		Provider: "meta",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"api_key":   "LLM|minted",
+			"priority":  "10",
+		},
+	}
+	auth2 := &Auth{
+		ID:       "auth-meta-oauth-2",
+		Provider: "meta",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+			"api_key":   "LLM|minted-2",
+			"priority":  "5",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth1.ID, "meta", []*registry.ModelInfo{{ID: "muse-spark-1.3"}})
+	reg.RegisterClient(auth2.ID, "meta", []*registry.ModelInfo{{ID: "muse-spark-1.3"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth1.ID)
+		reg.UnregisterClient(auth2.ID)
+	})
+
+	if _, err := m.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("register auth1: %v", err)
+	}
+	if _, err := m.Register(context.Background(), auth2); err != nil {
+		t.Fatalf("register auth2: %v", err)
+	}
+
+	execCount := 0
+	exec := &mockCustomErrorExecutor{
+		identifier: "meta",
+		executeFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			execCount++
+			return cliproxyexecutor.Response{}, customStatusError{
+				code: http.StatusBadRequest,
+				msg:  `{"error": "context_length_exceeded"}`,
+			}
+		},
+	}
+	m.RegisterExecutor(exec)
+
+	req := cliproxyexecutor.Request{Model: "muse-spark-1.3"}
+	opts := cliproxyexecutor.Options{}
+
+	_, errExec := m.Execute(context.Background(), []string{"meta"}, req, opts)
+	if errExec == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if execCount != 1 {
+		t.Fatalf("expected execCount = 1 (stopped), got %d", execCount)
+	}
+
+	auth1State, ok := m.GetByID("auth-meta-oauth")
+	if !ok || auth1State.Status != StatusActive || auth1State.Unavailable {
+		t.Fatalf("expected auth1 to remain active, got status=%v unavailable=%v", auth1State.Status, auth1State.Unavailable)
+	}
+}
