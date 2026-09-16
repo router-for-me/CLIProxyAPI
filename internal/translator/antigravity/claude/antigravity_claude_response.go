@@ -75,6 +75,8 @@ type Params struct {
 	CachedTokenCount     int64  // Cached content token count (indicates prompt caching)
 	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
 	HasToolUse           bool   // Indicates if tool use was observed in the stream
+	HasTextContent       bool   // Tracks whether visible text content has been output
+	HasThinking          bool   // Tracks whether a thinking block has been output
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
 	HasSemanticContent   bool
 	LastSemanticKind     string
@@ -138,6 +140,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 			output = translatorcommon.AppendSSEEventString(output, "content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex), 3)
 			params.ResponseType = 1
 			params.HasContent = true
+			params.HasTextContent = true
 		}
 		if params.HasContent {
 			appendFinalEvents(params, &output, true)
@@ -180,6 +183,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 		params.ResponseType = 2
 		params.CurrentThinkingSigned = false
 		params.HasContent = true
+		params.HasThinking = true
 	}
 	appendCarrierSignature := func(signature, direction, targetKind string) {
 		if signature == "" || params.ResponseType != 2 {
@@ -297,6 +301,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 							data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex)), "delta.thinking", partText)
 							appendEvent("content_block_delta", string(data))
 							params.HasContent = true
+							params.HasThinking = true
 						} else {
 							if params.ResponseType != 0 {
 								appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
@@ -308,6 +313,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 							appendEvent("content_block_delta", string(data))
 							params.ResponseType = 2
 							params.HasContent = true
+							params.HasThinking = true
 							params.CurrentThinkingText.Reset()
 							params.CurrentThinkingText.WriteString(partText)
 						}
@@ -324,6 +330,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", partText)
 						appendEvent("content_block_delta", string(data))
 						params.HasContent = true
+						params.HasTextContent = true
 					} else if partText != "" {
 						if params.ResponseType != 0 {
 							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
@@ -334,6 +341,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 						appendEvent("content_block_delta", string(data))
 						params.ResponseType = 1
 						params.HasContent = true
+						params.HasTextContent = true
 					}
 					if partText != "" {
 						params.HasSemanticContent = true
@@ -451,6 +459,7 @@ func appendBufferedWebSearchTextBlock(params *Params, appendEvent func(string, s
 	appendEvent("content_block_delta", string(data))
 	params.ResponseType = 1
 	params.HasContent = true
+	params.HasTextContent = true
 }
 
 func appendFinalEvents(params *Params, output *[]byte, force bool) {
@@ -467,12 +476,23 @@ func appendFinalEvents(params *Params, output *[]byte, force bool) {
 		return
 	}
 
-	if params.ResponseType != 0 {
+	closedOpenBlock := params.ResponseType != 0
+	wasThinking := params.HasThinking || params.ResponseType == 2
+	if closedOpenBlock {
 		*output = translatorcommon.AppendSSEEventString(*output, "content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex), 3)
 		params.ResponseType = 0
 	}
 
 	stopReason := resolveStopReason(params)
+	if translatorcommon.NeedsEmptyTextPad(params.CurrentThinkingText.String(), translatorcommon.ClaudeSSEPadState{
+		SawText:     params.HasTextContent,
+		SawToolUse:  params.HasToolUse,
+		SawThinking: wasThinking,
+	}, stopReason) {
+		idx := translatorcommon.EmptyTextBlockIndexAfterClose(params.ResponseIndex, closedOpenBlock)
+		*output = translatorcommon.AppendEmptyTextBlock(*output, idx, 3)
+		params.HasTextContent = true
+	}
 	usageOutputTokens := params.CandidatesTokenCount + params.ThoughtsTokenCount
 	if usageOutputTokens == 0 && params.TotalTokenCount > 0 {
 		usageOutputTokens = params.TotalTokenCount - params.PromptTokenCount
@@ -726,10 +746,6 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 	flushThinking()
 	flushText()
 
-	if len(blocks) > 0 {
-		responseJSON, _ = sjson.SetRawBytes(responseJSON, "content", translatorcommon.JoinRawArray(blocks))
-	}
-
 	stopReason := "end_turn"
 	if hasToolCall {
 		stopReason = "tool_use"
@@ -744,6 +760,10 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 				stopReason = "end_turn"
 			}
 		}
+	}
+	blocks = translatorcommon.AppendEmptyTextContentIfNeeded(blocks, stopReason)
+	if len(blocks) > 0 {
+		responseJSON, _ = sjson.SetRawBytes(responseJSON, "content", translatorcommon.JoinRawArray(blocks))
 	}
 	responseJSON, _ = sjson.SetBytes(responseJSON, "stop_reason", stopReason)
 

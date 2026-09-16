@@ -26,6 +26,8 @@ type Params struct {
 	ResponseType     int
 	ResponseIndex    int
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
+	HasTextContent   bool // Tracks whether visible text content has been output
+	HasThinking      bool // Tracks whether a thinking block has been output
 	ToolNameMap      map[string]string
 	SanitizedNameMap map[string]string
 	SawToolCall      bool
@@ -139,6 +141,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex)), "delta.thinking", partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).HasContent = true
+						(*param).(*Params).HasThinking = true
 					} else {
 						// Transition from another state to thinking
 						// First, close any existing content block
@@ -158,6 +161,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).ResponseType = 2 // Set state to thinking
 						(*param).(*Params).HasContent = true
+						(*param).(*Params).HasThinking = true
 					}
 					appendSignatureDelta(thoughtSignatureResult.String())
 				} else {
@@ -167,6 +171,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, (*param).(*Params).ResponseIndex)), "delta.text", partTextResult.String())
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).HasContent = true
+						(*param).(*Params).HasTextContent = true
 					} else {
 						// Transition from another state to text content
 						// First, close any existing content block
@@ -186,6 +191,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						appendEvent("content_block_delta", string(data))
 						(*param).(*Params).ResponseType = 1 // Set state to content
 						(*param).(*Params).HasContent = true
+						(*param).(*Params).HasTextContent = true
 					}
 				}
 			} else if functionCallResult.Exists() {
@@ -250,15 +256,34 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) && !(*param).(*Params).HasFinalEvents {
 		// Only send final events if we have actually output content
 		if (*param).(*Params).HasContent {
-			if (*param).(*Params).ResponseType != 0 {
-				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
-				(*param).(*Params).ResponseType = 0
+			params := (*param).(*Params)
+			closedOpenBlock := params.ResponseType != 0
+			wasThinking := params.HasThinking || params.ResponseType == 2
+			if closedOpenBlock {
+				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
+				params.ResponseType = 0
+			}
+
+			stopReason := "end_turn"
+			if params.SawToolCall {
+				stopReason = "tool_use"
+			} else if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
+				stopReason = "max_tokens"
+			}
+			if translatorcommon.NeedsEmptyTextPad("", translatorcommon.ClaudeSSEPadState{
+				SawText:     params.HasTextContent,
+				SawToolUse:  params.SawToolCall,
+				SawThinking: wasThinking,
+			}, stopReason) {
+				idx := translatorcommon.EmptyTextBlockIndexAfterClose(params.ResponseIndex, closedOpenBlock)
+				output = translatorcommon.AppendEmptyTextBlock(output, idx, 3)
+				params.HasTextContent = true
 			}
 
 			template := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-			if (*param).(*Params).SawToolCall {
+			if stopReason == "tool_use" {
 				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-			} else if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
+			} else if stopReason == "max_tokens" {
 				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 			}
 
@@ -403,10 +428,6 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	flushThinking()
 	flushText()
 
-	if len(blocks) > 0 {
-		out, _ = sjson.SetRawBytes(out, "content", translatorcommon.JoinRawArray(blocks))
-	}
-
 	stopReason := "end_turn"
 	if hasToolCall {
 		stopReason = "tool_use"
@@ -421,6 +442,10 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				stopReason = "end_turn"
 			}
 		}
+	}
+	blocks = translatorcommon.AppendEmptyTextContentIfNeeded(blocks, stopReason)
+	if len(blocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "content", translatorcommon.JoinRawArray(blocks))
 	}
 	out, _ = sjson.SetBytes(out, "stop_reason", stopReason)
 

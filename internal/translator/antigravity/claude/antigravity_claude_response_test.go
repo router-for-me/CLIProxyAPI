@@ -312,6 +312,24 @@ func TestBuildWebSearchCitedTextBlocks_TrimsOverlappingGroundingSupports(t *test
 	}
 }
 
+func assertClaudeEmptyTextPadBeforeMessageDelta(t *testing.T, output string) {
+	t.Helper()
+	emptyTextAt := strings.Index(output, `"content_block":{"type":"text","text":""}`)
+	deltaAt := strings.Index(output, `"type":"message_delta"`)
+	if emptyTextAt < 0 {
+		t.Fatalf("expected empty text content block:\n%s", output)
+	}
+	if deltaAt < 0 {
+		t.Fatalf("expected message_delta:\n%s", output)
+	}
+	if emptyTextAt > deltaAt {
+		t.Fatalf("empty text block must appear before message_delta:\n%s", output)
+	}
+	if strings.Contains(output, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("must not forge max_tokens:\n%s", output)
+	}
+}
+
 func sseDataForEvent(t *testing.T, output string, eventName string) string {
 	t.Helper()
 
@@ -759,11 +777,10 @@ func TestConvertAntigravityResponseToClaude_SignatureOnlyChunkWithoutThoughtFlag
 	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
 	outputText := string(output)
 
-	if strings.Contains(outputText, `"content_block":{"type":"text"`) {
-		t.Fatalf("signature-only part must not open an empty text block: %s", outputText)
-	}
-	if strings.Contains(outputText, `"type":"content_block_stop","index":1`) {
-		t.Fatalf("signature-only part must not produce a stop for unopened index 1: %s", outputText)
+	thinkingStop := strings.Index(outputText, `"type":"content_block_stop","index":0`)
+	textStart := strings.Index(outputText, `"content_block":{"type":"text"`)
+	if textStart >= 0 && (thinkingStop < 0 || textStart < thinkingStop) {
+		t.Fatalf("signature-only part must not open a text block before thinking is closed: %s", outputText)
 	}
 	if !strings.Contains(outputText, `"type":"signature_delta"`) {
 		t.Fatalf("signature-only part must be emitted as a thinking signature delta: %s", outputText)
@@ -771,6 +788,7 @@ func TestConvertAntigravityResponseToClaude_SignatureOnlyChunkWithoutThoughtFlag
 	if got := strings.Count(outputText, `"type":"content_block_stop","index":0`); got != 1 {
 		t.Fatalf("expected exactly one stop for thinking index 0, got %d: %s", got, outputText)
 	}
+	assertClaudeEmptyTextPadBeforeMessageDelta(t, outputText)
 	if !strings.Contains(outputText, `"type":"message_delta"`) || !strings.Contains(outputText, `"output_tokens":2`) {
 		t.Fatalf("finish chunk without candidatesTokenCount must still emit final message_delta: %s", outputText)
 	}
@@ -1200,13 +1218,22 @@ func TestConvertAntigravityResponseToClaude_LeadingCarrierTargetsFollowingThough
 	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + signature + `"},{"text":"reason","thought":true}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"leading-thought"}}`)
 	nonStream := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, responseJSON, nil)
 	content := gjson.GetBytes(nonStream, "content").Array()
-	if len(content) != 2 || content[0].Get("thinking").String() != "" || content[1].Get("thinking").String() != "reason" {
+	if len(content) != 3 || content[0].Get("thinking").String() != "" || content[1].Get("thinking").String() != "reason" {
 		t.Fatalf("leading thought carrier response malformed: %s", nonStream)
+	}
+	if content[2].Get("type").String() != "text" || content[2].Get("text").String() != "" {
+		t.Fatalf("expected trailing empty text pad: %s", nonStream)
 	}
 	replayRequest := []byte(`{"model":"gemini-3.6-flash-high","messages":[{"role":"assistant","content":[]}]}`)
 	replayRequest, _ = sjson.SetRawBytes(replayRequest, "messages.0.content", []byte(gjson.GetBytes(nonStream, "content").Raw))
 	replayRequest = StripInvalidGeminiSignatureThinkingBlocks(replayRequest)
-	if got := gjson.GetBytes(replayRequest, "messages.0.content.#").Int(); got != 2 {
+	thinkingKept := 0
+	for _, block := range gjson.GetBytes(replayRequest, "messages.0.content").Array() {
+		if block.Get("type").String() == "thinking" {
+			thinkingKept++
+		}
+	}
+	if thinkingKept != 2 {
 		t.Fatalf("prevalidation dropped unsigned target thought: %s", replayRequest)
 	}
 	translated := ConvertClaudeRequestToAntigravity("gemini-3.6-flash-high", replayRequest, false)
@@ -1246,8 +1273,8 @@ func TestConvertAntigravityResponseToClaudeNonStream_SignatureOnlyPartWithoutTho
 
 	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, nil)
 
-	if got := gjson.GetBytes(output, "content.#").Int(); got != 1 {
-		t.Fatalf("expected exactly one content block, got %d: %s", got, output)
+	if got := gjson.GetBytes(output, "content.#").Int(); got != 2 {
+		t.Fatalf("expected thinking + empty text content blocks, got %d: %s", got, output)
 	}
 	if got := gjson.GetBytes(output, "content.0.type").String(); got != "thinking" {
 		t.Fatalf("expected thinking content block, got %q: %s", got, output)
@@ -1257,6 +1284,12 @@ func TestConvertAntigravityResponseToClaudeNonStream_SignatureOnlyPartWithoutTho
 	}
 	if got := gjson.GetBytes(output, "content.0.signature").String(); got != validSignature {
 		t.Fatalf("expected signature %q, got %q: %s", validSignature, got, output)
+	}
+	if got := gjson.GetBytes(output, "content.1.type").String(); got != "text" || gjson.GetBytes(output, "content.1.text").String() != "" {
+		t.Fatalf("expected trailing empty text pad, got: %s", output)
+	}
+	if got := gjson.GetBytes(output, "stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, output)
 	}
 }
 
@@ -1499,12 +1532,13 @@ func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartKeepsThinkingBloc
 		}
 	}
 
-	if len(started) != 1 || !started[0] {
-		t.Fatalf("expected exactly 1 started block at index 0, got: %v", started)
+	if len(started) != 2 || !started[0] || !started[1] {
+		t.Fatalf("expected thinking at 0 and empty text pad at 1, got: %v", started)
 	}
-	if len(stopped) != 1 || !stopped[0] {
-		t.Fatalf("expected exactly 1 stopped block at index 0, got: %v", stopped)
+	if len(stopped) != 2 || !stopped[0] || !stopped[1] {
+		t.Fatalf("expected thinking and empty text pad to be stopped, got: %v", stopped)
 	}
+	assertClaudeEmptyTextPadBeforeMessageDelta(t, fullOutput)
 }
 
 func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartFollowedByThinkingAndText(t *testing.T) {
@@ -1563,5 +1597,124 @@ func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartFollowedByThinkin
 	}
 	if len(stopped) != 2 || !stopped[0] || !stopped[1] {
 		t.Fatalf("expected exactly 2 stopped blocks (0=thinking, 1=text), got: %v", stopped)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_ThinkingOnlyStopPadsEmptyText(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	thinkingChunk := []byte(`{
+		"response": {
+			"candidates": [{"content": {"parts": [{"text": "hidden reasoning", "thought": true}]}}],
+			"modelVersion": "gemini-3-flash-agent",
+			"responseId": "resp-thinking-only"
+		}
+	}`)
+	finishChunk := []byte(`{
+		"response": {
+			"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}],
+			"usageMetadata": {"promptTokenCount": 10, "thoughtsTokenCount": 4, "totalTokenCount": 14},
+			"modelVersion": "gemini-3-flash-agent",
+			"responseId": "resp-thinking-only"
+		}
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, thinkingChunk, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, finishChunk, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	assertClaudeEmptyTextPadBeforeMessageDelta(t, outputText)
+	if got := gjson.Get(sseDataForEvent(t, outputText, "message_delta"), "delta.stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, outputText)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_ThinkingOnlyMaxTokensDoesNotPad(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	thinkingChunk := []byte(`{
+		"response": {
+			"candidates": [{"content": {"parts": [{"text": "hidden reasoning", "thought": true}]}}],
+			"modelVersion": "gemini-3-flash-agent",
+			"responseId": "resp-thinking-max"
+		}
+	}`)
+	finishChunk := []byte(`{
+		"response": {
+			"candidates": [{"content": {"parts": []}, "finishReason": "MAX_TOKENS"}],
+			"usageMetadata": {"promptTokenCount": 10, "thoughtsTokenCount": 4, "totalTokenCount": 14},
+			"modelVersion": "gemini-3-flash-agent",
+			"responseId": "resp-thinking-max"
+		}
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, thinkingChunk, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, finishChunk, &param), nil)...)
+	outputText := string(output)
+
+	if strings.Contains(outputText, `"content_block":{"type":"text"`) {
+		t.Fatalf("MAX_TOKENS thinking-only stop must not pad empty text:\n%s", outputText)
+	}
+	if got := gjson.Get(sseDataForEvent(t, outputText, "message_delta"), "delta.stop_reason").String(); got != "max_tokens" {
+		t.Fatalf("stop_reason = %q, want max_tokens: %s", got, outputText)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_ThinkingOnlyStopPadsEmptyText(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {"parts": [{"text": "hidden reasoning", "thought": true}]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 10, "thoughtsTokenCount": 4, "totalTokenCount": 14},
+			"modelVersion": "gemini-3-flash-agent",
+			"responseId": "resp-thinking-only-ns"
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, responseJSON, nil)
+	blocks := gjson.GetBytes(output, "content").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("content blocks = %d, want thinking + empty text: %s", len(blocks), output)
+	}
+	if blocks[0].Get("type").String() != "thinking" || blocks[0].Get("thinking").String() != "hidden reasoning" {
+		t.Fatalf("unexpected thinking block: %s", output)
+	}
+	if blocks[1].Get("type").String() != "text" || blocks[1].Get("text").String() != "" {
+		t.Fatalf("expected empty text pad, got: %s", output)
+	}
+	if got := gjson.GetBytes(output, "stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, output)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_ThinkingOnlyMaxTokensDoesNotPad(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {"parts": [{"text": "hidden reasoning", "thought": true}]},
+				"finishReason": "MAX_TOKENS"
+			}],
+			"usageMetadata": {"promptTokenCount": 10, "thoughtsTokenCount": 4, "totalTokenCount": 14},
+			"modelVersion": "gemini-3-flash-agent",
+			"responseId": "resp-thinking-max-ns"
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, responseJSON, nil)
+	if got := gjson.GetBytes(output, "content.#").Int(); got != 1 {
+		t.Fatalf("MAX_TOKENS must not pad empty text, content.# = %d: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "content.0.type").String(); got != "thinking" {
+		t.Fatalf("content.0.type = %q, want thinking: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "stop_reason").String(); got != "max_tokens" {
+		t.Fatalf("stop_reason = %q, want max_tokens: %s", got, output)
 	}
 }
