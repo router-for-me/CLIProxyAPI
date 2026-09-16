@@ -46,79 +46,17 @@ const (
 	ecRelayBaseURL          = "nixllm.yaml.relay_base_url"
 )
 
-// NormalizedResourcePlan is the pure, non-database output of
-// BuildResourcePlan. It contains the upstream providers and client API keys
-// the import path should apply. Reports describe planning and apply outcomes.
-type NormalizedResourcePlan struct {
-	Providers []store.UpstreamProvider
-	APIKeys   []store.APIKey
-	Report    ImportReport
-}
-
-// ImportReport is mutable, so the planner writes outcomes incrementally and
-// the apply path updates Committed/RolledBack flags after a successful
-// commit or a transactional failure.
-type ImportReport struct {
-	Counts      map[string]map[string]int
-	Errors      map[string][]string
-	Unsupported map[string][]string
-	Planned     bool
-	Committed   bool
-	RolledBack  bool
-}
-
-// Created/Updated/Unchanged bump the per-kind action counter. The planner
-// records Created/Updated and the apply path records Unchanged when an
-// existing row already matches the canonical plan.
-func (r *ImportReport) Created(kind string) int   { return r.bump(kind, "created") }
-func (r *ImportReport) Updated(kind string) int   { return r.bump(kind, "updated") }
-func (r *ImportReport) Unchanged(kind string) int { return r.bump(kind, "unchanged") }
-
-func (r *ImportReport) bump(kind, action string) int {
-	if r == nil {
-		return 0
-	}
-	if r.Counts == nil {
-		r.Counts = map[string]map[string]int{}
-	}
-	m, ok := r.Counts[kind]
-	if !ok {
-		m = map[string]int{}
-		r.Counts[kind] = m
-	}
-	m[action]++
-	return m[action]
-}
-
-// AddError records a per-resource error with kind + identity context. The
-// apply path uses errors.As to inspect it. Plaintext secrets must never
-// appear here.
-func (r *ImportReport) AddError(kind, identity string, err error) {
-	if r == nil || err == nil {
-		return
-	}
-	if r.Errors == nil {
-		r.Errors = map[string][]string{}
-	}
-	key := kind
-	if identity != "" {
-		key = kind + ":" + identity
-	}
-	r.Errors[key] = append(r.Errors[key], err.Error())
-}
-
-// MarkUnsupported records a config field the importer preserves in
-// ExtraConfig because no normalized column exists. The apply path stores
-// the value in the row's ExtraConfig map without surfacing it as an error.
-func (r *ImportReport) MarkUnsupported(kind, field, reason string) {
-	if r == nil {
-		return
-	}
-	if r.Unsupported == nil {
-		r.Unsupported = map[string][]string{}
-	}
-	r.Unsupported[kind] = append(r.Unsupported[kind], fmt.Sprintf("%s=%s (%s)", field, reason, kind))
-}
+// NormalizedResourcePlan and ImportReport live in the store package (see
+// store/pg_normalized_import_types.go) so the transactional apply path can
+// consume the plan without an import cycle. The aliases below keep the
+// planner's call sites readable.
+type (
+	// NormalizedResourcePlan is the pure, non-database output of
+	// BuildResourcePlan.
+	NormalizedResourcePlan = store.NormalizedResourcePlan
+	// ImportReport describes planning and apply outcomes.
+	ImportReport = store.ImportReport
+)
 
 // BuildResourcePlan converts every supported section in cfg into a
 // NormalizedResourcePlan. It never mutates cfg or its nested slices/maps.
@@ -155,7 +93,7 @@ func BuildResourcePlan(cfg *config.Config) (*NormalizedResourcePlan, error) {
 		convertOpenCodeGo(cfg.OpenCodeGo)...,
 	)
 	convertClientAPIKeys(cfg.APIKeys, &plan.APIKeys, &plan.Report)
-	plan.Report.bump("internal_users", "not_applicable")
+	plan.Report.Bump("internal_users", "not_applicable")
 	if err := detectDuplicateProviderIdentities(&plan.Providers, &plan.Report); err != nil {
 		// err is currently nil; reserved for future identity policy.
 		_ = err
