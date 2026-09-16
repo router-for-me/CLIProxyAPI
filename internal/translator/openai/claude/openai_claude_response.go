@@ -147,12 +147,47 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 	}
 }
 
+func hasValidToolCallArguments(param *ConvertOpenAIResponseToAnthropicParams) bool {
+	if param == nil || len(param.ToolCallsAccumulator) == 0 {
+		return true
+	}
+	for _, acc := range param.ToolCallsAccumulator {
+		if acc == nil {
+			continue
+		}
+		if !acc.StartEmitted && acc.Name == "" && acc.ID == "" && acc.Arguments.Len() == 0 {
+			continue
+		}
+		if acc.Arguments.Len() == 0 {
+			continue
+		}
+		argsStr := strings.TrimSpace(acc.Arguments.String())
+		if argsStr == "" {
+			return false
+		}
+		if argsStr == "{}" {
+			continue
+		}
+		fixed := util.FixJSON(argsStr)
+		if !gjson.Valid(fixed) || !gjson.Parse(fixed).IsObject() {
+			return false
+		}
+	}
+	return true
+}
+
 func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) string {
 	if param == nil {
 		return ""
 	}
+	if param.FinishReason == "length" || param.FinishReason == "content_filter" {
+		return param.FinishReason
+	}
 	if param.SawToolCall {
-		return "tool_calls"
+		if hasValidToolCallArguments(param) {
+			return "tool_calls"
+		}
+		return "length"
 	}
 	return param.FinishReason
 }
@@ -341,8 +376,16 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	if finishReason := root.Get("choices.0.finish_reason"); finishReason.Exists() && finishReason.String() != "" {
 		reason := finishReason.String()
 		switch {
+		case reason == "length":
+			param.FinishReason = "length"
+		case reason == "content_filter":
+			param.FinishReason = "content_filter"
 		case param.SawToolCall:
-			param.FinishReason = "tool_calls"
+			if hasValidToolCallArguments(param) {
+				param.FinishReason = "tool_calls"
+			} else {
+				param.FinishReason = "length"
+			}
 		case reason == "tool_calls":
 			param.FinishReason = "stop"
 		default:

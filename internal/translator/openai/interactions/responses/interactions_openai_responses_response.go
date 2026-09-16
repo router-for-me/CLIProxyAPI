@@ -318,7 +318,7 @@ func responsesFunctionCallArgumentsDeltaToResponses(index int, itemID, arguments
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
 	payload, _ = sjson.SetBytes(payload, "output_index", index)
 	payload, _ = sjson.SetBytes(payload, "item_id", itemID)
-	payload, _ = sjson.SetBytes(payload, "delta", arguments)
+	payload, _ = translatorcommon.SetStringWithoutHTMLEscape(payload, "delta", arguments)
 	return emitResponsesEvent("response.function_call_arguments.delta", payload)
 }
 
@@ -327,7 +327,7 @@ func responsesFunctionCallArgumentsDoneToResponses(index int, itemID, arguments 
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
 	payload, _ = sjson.SetBytes(payload, "output_index", index)
 	payload, _ = sjson.SetBytes(payload, "item_id", itemID)
-	payload, _ = sjson.SetBytes(payload, "arguments", arguments)
+	payload, _ = translatorcommon.SetStringWithoutHTMLEscape(payload, "arguments", arguments)
 	return emitResponsesEvent("response.function_call_arguments.done", payload)
 }
 
@@ -379,7 +379,7 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 		done, _ = sjson.SetBytes(done, "item.id", itemID)
 		done, _ = sjson.SetBytes(done, "item.call_id", itemID)
 		done, _ = sjson.SetBytes(done, "item.name", call.Name)
-		done, _ = sjson.SetBytes(done, "item.arguments", arguments)
+		done, _ = translatorcommon.SetStringWithoutHTMLEscape(done, "item.arguments", arguments)
 		call.ItemDoneEmitted = true
 		return append(events, emitResponsesEvent("response.output_item.done", done))
 	default:
@@ -447,10 +447,10 @@ func interactionsReasoningEncryptedContent(rawSignature string) string {
 	if candidate == "" {
 		return ""
 	}
-	if _, err := signature.InspectGPTReasoningSignature(candidate); err != nil {
-		return ""
+	if signature.IsRecognizedReasoningSignature(candidate) {
+		return candidate
 	}
-	return candidate
+	return ""
 }
 
 func recordResponsesReasoningSummary(st *interactionsToResponsesStreamState, index int, text string) {
@@ -521,7 +521,7 @@ func responsesCompletedOutputItem(index int, itemType string, st *interactionsTo
 		item, _ = sjson.SetBytes(item, "call_id", itemID)
 		if call := st.FunctionCalls[index]; call != nil {
 			item, _ = sjson.SetBytes(item, "name", call.Name)
-			item, _ = sjson.SetBytes(item, "arguments", responsesFunctionCallArguments(call))
+			item, _ = translatorcommon.SetStringWithoutHTMLEscape(item, "arguments", responsesFunctionCallArguments(call))
 		}
 		return item, true
 	}
@@ -860,7 +860,7 @@ func appendInteractionsTextDeltaDirect(out [][]byte, st *responsesToInteractions
 func appendInteractionsArgumentsDeltaDirect(out [][]byte, st *responsesToInteractionsStreamState, arguments string) [][]byte {
 	payload := []byte(`{"index":0,"delta":{"arguments":"","type":"arguments_delta"},"event_type":"step.delta"}`)
 	payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
-	payload, _ = sjson.SetBytes(payload, "delta.arguments", arguments)
+	payload, _ = translatorcommon.SetStringWithoutHTMLEscape(payload, "delta.arguments", arguments)
 	return append(out, emitInteractionsEvent("step.delta", payload))
 }
 

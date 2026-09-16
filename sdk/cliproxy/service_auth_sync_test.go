@@ -11,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -224,6 +226,548 @@ func TestRuntimeAuthSyncHook_NilAndEmptyAuth(t *testing.T) {
 
 	if err := hook(context.Background(), &coreauth.Auth{}); err != nil {
 		t.Fatalf("expected nil error for empty auth, got: %v", err)
+	}
+}
+
+func TestRuntimeAuthSyncHook_DoesNotBlockOnUnrelatedAntigravityProbes(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "codex-probe-wait-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-probe-wait.json",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+		pluginHost:  pluginhost.New(),
+	}
+	service.antigravityProbeWg.Add(1)
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		service.antigravityProbeWg.Done()
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	hook := service.runtimeAuthSyncHook()
+	if hook == nil {
+		t.Fatal("runtimeAuthSyncHook() returned nil")
+	}
+
+	go func() {
+		defer close(finished)
+		done <- hook(context.Background(), auth)
+	}()
+
+	select {
+	case errHook := <-done:
+		if errHook != nil {
+			t.Fatalf("hook failed: %v", errHook)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtimeAuthSyncHook blocked waiting for unrelated antigravity probes")
+	}
+
+	models := reg.GetModelsForClient(authID)
+	if len(models) == 0 {
+		t.Fatal("expected models registered for enabled auth, got none")
+	}
+}
+
+func TestHandleAuthUpdates_DeleteDoesNotBlockOnUnrelatedAntigravityProbes(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "codex-probe-wait-delete-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-probe-wait-delete.json",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+		pluginHost:  pluginhost.New(),
+	}
+	service.registerModelsForAuth(context.Background(), auth)
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models registered before delete")
+	}
+
+	runAuthUpdateWithoutProbeWait(t, service, func() {
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionDelete,
+			ID:     authID,
+			Auth:   auth,
+		})
+	})
+
+	if _, ok := manager.GetByID(authID); ok {
+		t.Fatal("expected auth to be removed")
+	}
+	if len(reg.GetModelsForClient(authID)) != 0 {
+		t.Fatal("expected models unregistered after delete")
+	}
+}
+
+func TestHandleAuthUpdates_PluginVirtualModifyDoesNotBlockOnUnrelatedAntigravityProbes(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "plugin-virtual-probe-wait-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/plugin-virtual-probe-wait.json",
+		},
+	}
+	coreauth.MarkPluginVirtualAuth(auth, "/path/to/plugin-source.json", 0)
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+		pluginHost:  pluginhost.New(),
+	}
+
+	runAuthUpdateWithoutProbeWait(t, service, func() {
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     authID,
+			Auth:   auth,
+		})
+	})
+}
+
+func runAuthUpdateWithoutProbeWait(t *testing.T, service *Service, run func()) {
+	t.Helper()
+	if service == nil {
+		t.Fatal("service is nil")
+	}
+	service.antigravityProbeWg.Add(1)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		service.antigravityProbeWg.Done()
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	go func() {
+		defer close(finished)
+		run()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auth update blocked waiting for unrelated antigravity probes")
+	}
+}
+
+func TestHandleAuthUpdates_ModelRegistrationDoesNotHoldAuthUpdateLock(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authAID := "codex-lock-a-auth"
+	authBID := "codex-lock-b-auth"
+	reg.UnregisterClient(authAID)
+	reg.UnregisterClient(authBID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authAID)
+		reg.UnregisterClient(authBID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	authA := &coreauth.Auth{
+		ID:       authAID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-lock-a.json",
+		},
+	}
+	authB := &coreauth.Auth{
+		ID:       authBID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-lock-b.json",
+		},
+	}
+	for _, auth := range []*coreauth.Auth{authA, authB} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+	}
+
+	started := make(chan struct{})
+	block := make(chan struct{})
+	var first atomic.Bool
+	modelRegistrationTaskHook = func() {
+		if first.CompareAndSwap(false, true) {
+			close(started)
+			<-block
+		}
+	}
+	t.Cleanup(func() {
+		modelRegistrationTaskHook = nil
+		select {
+		case <-block:
+		default:
+			close(block)
+		}
+	})
+
+	finishedA := make(chan struct{})
+	go func() {
+		defer close(finishedA)
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     authAID,
+			Auth:   authA,
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first auth update did not reach model registration")
+	}
+
+	doneB := make(chan struct{})
+	go func() {
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     authBID,
+			Auth:   authB,
+		})
+		close(doneB)
+	}()
+
+	select {
+	case <-doneB:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second auth update blocked by first auth model registration")
+	}
+
+	close(block)
+	select {
+	case <-finishedA:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first auth update did not finish after registration was unblocked")
+	}
+}
+
+func TestHandleAuthUpdates_OlderGenerationDoesNotOverrideNewerPersist(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "codex-generation-stale-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-generation-stale.json",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+	}
+
+	disabledAuth := auth.Clone()
+	disabledAuth.Disabled = true
+	disabledAuth.Status = coreauth.StatusDisabled
+	disabledSnapshot, errDisable := manager.Update(context.Background(), disabledAuth)
+	if errDisable != nil {
+		t.Fatalf("disable update: %v", errDisable)
+	}
+
+	enabledAuth := disabledSnapshot.Clone()
+	enabledAuth.Disabled = false
+	enabledAuth.Status = coreauth.StatusActive
+	enabledSnapshot, errEnable := manager.Update(context.Background(), enabledAuth)
+	if errEnable != nil {
+		t.Fatalf("enable update: %v", errEnable)
+	}
+
+	service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionModify,
+		ID:     authID,
+		Auth:   enabledSnapshot,
+	})
+	manager.RegisterExecutor(&syncTestExecutor{})
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models after enable")
+	}
+
+	staleDisable := watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionModify,
+		ID:     authID,
+		Auth:   disabledSnapshot,
+	}
+	staleDisable.SetRevision(99)
+	service.handleAuthUpdate(context.Background(), staleDisable)
+	manager.RegisterExecutor(&syncTestExecutor{})
+
+	current, ok := manager.GetByID(authID)
+	if !ok || current == nil || current.Disabled {
+		t.Fatal("expected newer enabled persist to win over older disable snapshot")
+	}
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models to remain registered after stale disable update")
+	}
+}
+
+func TestHandleAuthUpdates_StaleDisableRegistrationDoesNotDropNewerEnable(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "codex-stale-disable-task-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-stale-disable-task.json",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+	}
+
+	disabledAuth := auth.Clone()
+	disabledAuth.Disabled = true
+	disabledAuth.Status = coreauth.StatusDisabled
+	disabledSnapshot, errDisable := manager.Update(context.Background(), disabledAuth)
+	if errDisable != nil {
+		t.Fatalf("disable update: %v", errDisable)
+	}
+
+	started := make(chan struct{})
+	block := make(chan struct{})
+	var first atomic.Bool
+	modelRegistrationTaskHook = func() {
+		if first.CompareAndSwap(false, true) {
+			close(started)
+			<-block
+		}
+	}
+	t.Cleanup(func() {
+		modelRegistrationTaskHook = nil
+		select {
+		case <-block:
+		default:
+			close(block)
+		}
+	})
+
+	finishedDisable := make(chan struct{})
+	go func() {
+		defer close(finishedDisable)
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     authID,
+			Auth:   disabledSnapshot,
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("disable registration did not start")
+	}
+
+	enabledAuth := disabledSnapshot.Clone()
+	enabledAuth.Disabled = false
+	enabledAuth.Status = coreauth.StatusActive
+	enabledSnapshot, errEnable := manager.Update(context.Background(), enabledAuth)
+	if errEnable != nil {
+		t.Fatalf("enable update: %v", errEnable)
+	}
+	service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionModify,
+		ID:     authID,
+		Auth:   enabledSnapshot,
+	})
+	manager.RegisterExecutor(&syncTestExecutor{})
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models after enable")
+	}
+
+	close(block)
+	select {
+	case <-finishedDisable:
+	case <-time.After(2 * time.Second):
+		t.Fatal("disable registration did not finish")
+	}
+
+	current, ok := manager.GetByID(authID)
+	if !ok || current == nil || current.Disabled {
+		t.Fatal("expected auth to remain enabled after stale disable registration")
+	}
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models to remain registered after stale disable registration")
+	}
+}
+
+func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authAID := "codex-batch-wait-a-auth"
+	authBID := "codex-batch-wait-b-auth"
+	reg.UnregisterClient(authAID)
+	reg.UnregisterClient(authBID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authAID)
+		reg.UnregisterClient(authBID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	authA := &coreauth.Auth{
+		ID:         authAID,
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"plan_type": "pro", "path": "/path/to/codex-batch-wait-a.json"},
+	}
+	authB := &coreauth.Auth{
+		ID:         authBID,
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"plan_type": "pro", "path": "/path/to/codex-batch-wait-b.json"},
+	}
+	for _, auth := range []*coreauth.Auth{authA, authB} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	bStarted := make(chan struct{})
+	bBlock := make(chan struct{})
+	var started atomic.Int32
+	modelRegistrationTaskHook = func() {
+		if started.Add(1) == 2 {
+			close(bStarted)
+			<-bBlock
+		}
+	}
+	t.Cleanup(func() {
+		modelRegistrationTaskHook = nil
+		select {
+		case <-bBlock:
+		default:
+			close(bBlock)
+		}
+	})
+
+	updateA := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authAID, Auth: authA}
+	updateA.SetRevision(1)
+	updateB := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authBID, Auth: authB}
+	updateB.SetRevision(1)
+
+	finishedBatch := make(chan struct{})
+	go func() {
+		defer close(finishedBatch)
+		service.handleAuthUpdates(context.Background(), []watcher.AuthUpdate{updateA, updateB})
+	}()
+
+	select {
+	case <-bStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second auth registration in batch did not start")
+	}
+
+	doneA := make(chan struct{})
+	go func() {
+		service.handleAuthUpdate(context.Background(), updateA)
+		close(doneA)
+	}()
+	select {
+	case <-doneA:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auth A hook wait blocked on unrelated auth B registration")
+	}
+
+	close(bBlock)
+	select {
+	case <-finishedBatch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch auth update did not finish")
 	}
 }
 
@@ -626,6 +1170,10 @@ func TestRuntimeAuthSync_FileSnapshotEnqueuedThenRequestExecutionThenConsume(t *
 	fileSnapshotAuth.Disabled = true
 	fileSnapshotAuth.Status = coreauth.StatusDisabled
 	fileSnapshotAuth.UpdatedAt = time.Now()
+	// File synthesizer snapshots are unversioned; keep this fixture aligned so an
+	// intermediate MarkResult generation bump cannot drop a newer watcher revision.
+	fileSnapshotAuth.RegistrationEpoch = 0
+	fileSnapshotAuth.Generation = 0
 
 	fileUpdate := watcher.AuthUpdate{
 		Action: watcher.AuthUpdateActionModify,
