@@ -54,6 +54,13 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// AllowOriginModelsEndpoint controls whether native CLIProxyAPI api-keys may
+	// access the global GET /v1/models and /v1beta/models endpoints. It defaults
+	// to false so native keys do not expose the complete model catalog unless the
+	// operator explicitly opts in. Plugin-owned keys keep their own per-key
+	// allow_models_endpoint policy.
+	AllowOriginModelsEndpoint bool `yaml:"allow-origin-models-endpoint" json:"allow-origin-models-endpoint"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

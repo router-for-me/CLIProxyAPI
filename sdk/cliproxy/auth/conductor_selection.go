@@ -948,7 +948,23 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 		return true
 	}
 	selectionKey := m.selectionModelKeyForAuth(auth, routeModel)
-	return selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey)
+	if selectionKey != "" && selectionKey != routeKey && registryRef.ClientSupportsModel(auth.ID, selectionKey) {
+		return true
+	}
+
+	// OpenAI-compatible auths may register only prefixed model IDs when
+	// force-model-prefix is enabled (for example, opencode/glm-5.3-flash),
+	// while a model router's target model is intentionally the upstream bare
+	// name (glm-5.3-flash). Treat the auth prefix as the registry namespace
+	// for this final capability check. Execution still receives the bare name
+	// through rewriteModelForAuth, so this does not alter the upstream model.
+	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" && !strings.Contains(routeKey, "/") {
+		prefixedKey := canonicalModelKey(prefix + "/" + routeKey)
+		if prefixedKey != routeKey && registryRef.ClientSupportsModel(auth.ID, prefixedKey) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) normalizeProviders(providers []string) []string {
