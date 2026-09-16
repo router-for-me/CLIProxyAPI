@@ -245,7 +245,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if name := item.Get("name"); name.Exists() {
 					functionName := name.String()
 					if namespace := strings.TrimSpace(item.Get("namespace").String()); namespace != "" {
-						functionName = qualifyResponsesNamespaceToolName(namespace, functionName)
+						functionName = chatNameForResponsesNamespaceToolCall(inputRawJSON, namespace, functionName)
 					} else {
 						functionName = canonicalResponsesToolName(inputRawJSON, functionName)
 					}
@@ -290,7 +290,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				toolCall, _ = sjson.SetBytes(toolCall, "id", translatorcommon.ExtractResponsesCallID(item))
 				functionName := item.Get("name").String()
 				if namespace := item.Get("namespace").String(); namespace != "" {
-					functionName = qualifyResponsesNamespaceToolName(namespace, functionName)
+					functionName = chatNameForResponsesNamespaceToolCall(inputRawJSON, namespace, functionName)
 				} else {
 					functionName = canonicalResponsesToolName(inputRawJSON, functionName)
 				}
@@ -396,7 +396,7 @@ func convertResponsesToolChoiceToChatCompletions(toolChoice gjson.Result, inputR
 		namespace = strings.TrimSpace(toolChoice.Get("custom.namespace").String())
 	}
 	if namespace != "" {
-		name = qualifyResponsesNamespaceToolName(namespace, name)
+		name = chatNameForResponsesNamespaceToolCall(inputRawJSON, namespace, name)
 	} else {
 		name = canonicalResponsesToolName(inputRawJSON, name)
 	}
