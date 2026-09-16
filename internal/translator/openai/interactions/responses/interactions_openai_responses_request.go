@@ -17,8 +17,27 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	if streamValue, ok := requestStreamValue(root, stream); ok {
 		out, _ = sjson.SetBytes(out, "stream", streamValue)
 	}
-	if instructions := root.Get("instructions"); instructions.Exists() {
-		out, _ = sjson.SetBytes(out, "system_instruction", responsesInstructionsText(instructions))
+	// The Responses API accepts the system prompt either as top-level
+	// `instructions` or as leading input items with role system/developer.
+	// The interactions format only has system_instruction, so both sources are
+	// merged there; otherwise the leading items would be sent as user turns
+	// and the upstream system prompt would be empty.
+	input := root.Get("input")
+	systemText := ""
+	instructions := root.Get("instructions")
+	if instructions.Exists() {
+		systemText = responsesInstructionsText(instructions)
+	}
+	leadingSystem, skipLeading := leadingResponsesSystemInstructions(input)
+	if leadingSystem != "" {
+		if strings.TrimSpace(systemText) != "" {
+			systemText += "\n\n" + leadingSystem
+		} else {
+			systemText = leadingSystem
+		}
+	}
+	if instructions.Exists() || leadingSystem != "" {
+		out, _ = sjson.SetBytes(out, "system_instruction", systemText)
 	}
 	if previousResponseID := firstNonEmpty(root.Get("previous_response_id").String(), root.Get("previous_interaction_id").String()); previousResponseID != "" {
 		out, _ = sjson.SetBytes(out, "previous_interaction_id", previousResponseID)
@@ -31,8 +50,8 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	}
 	forAntigravity := isAntigravityModel(model)
 	forDevin := isDevinModel(model) || !forAntigravity
-	if input := root.Get("input"); input.Exists() {
-		out = setResponsesInputOnInteractions(out, input, forAntigravity)
+	if input.Exists() {
+		out = setResponsesInputOnInteractions(out, input, forAntigravity, skipLeading)
 	}
 	out = appendResponsesToolsToInteractions(out, root, forAntigravity, forDevin)
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
@@ -229,19 +248,93 @@ func interactionsThinkingEffort(root gjson.Result) string {
 	return ""
 }
 
-func setResponsesInputOnInteractions(out []byte, input gjson.Result, forAntigravity bool) []byte {
+// leadingResponsesSystemInstructions returns the concatenated text of the
+// system/developer messages that open the input (before any conversation
+// turn) and how many items they span, so the caller can hoist them into
+// system_instruction and skip them when building input steps.
+// Mid-conversation developer messages are intentionally left in place as user
+// turns, matching the Gemini Responses translator (see #5490).
+func leadingResponsesSystemInstructions(input gjson.Result) (string, int) {
+	if input.IsObject() {
+		if isResponsesSystemMessage(input) {
+			return strings.TrimSpace(responsesMessageText(input)), 1
+		}
+		return "", 0
+	}
+	if !input.IsArray() {
+		return "", 0
+	}
+	var parts []string
+	count := 0
+	for _, item := range input.Array() {
+		if !isResponsesSystemMessage(item) {
+			break
+		}
+		if text := strings.TrimSpace(responsesMessageText(item)); text != "" {
+			parts = append(parts, text)
+		}
+		count++
+	}
+	return strings.Join(parts, "\n\n"), count
+}
+
+// isResponsesSystemMessage reports whether an input item is a system or
+// developer message, with or without an explicit "type":"message".
+func isResponsesSystemMessage(item gjson.Result) bool {
+	if itemType := item.Get("type").String(); itemType != "" && itemType != "message" {
+		return false
+	}
+	role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+	return role == "system" || role == "developer"
+}
+
+// responsesMessageText flattens a message's content (string or text parts) to
+// plain text. Non-text parts are ignored.
+func responsesMessageText(item gjson.Result) string {
+	content := item.Get("content")
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	var builder strings.Builder
+	appendPart := func(part gjson.Result) {
+		text := part.Get("text")
+		if !text.Exists() || text.String() == "" {
+			return
+		}
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		builder.WriteString(text.String())
+	}
+	if content.IsArray() {
+		content.ForEach(func(_, part gjson.Result) bool {
+			appendPart(part)
+			return true
+		})
+	} else if content.IsObject() {
+		appendPart(content)
+	}
+	return builder.String()
+}
+
+func setResponsesInputOnInteractions(out []byte, input gjson.Result, forAntigravity bool, skipLeading int) []byte {
 	functionNamesByCallID := make(map[string]string)
 	items := make([][]byte, 0)
 	if input.Type == gjson.String {
 		items = append(items, interactionsTextStep("user_input", input.String()))
 	} else if input.IsArray() {
+		index := 0
 		input.ForEach(func(_, item gjson.Result) bool {
+			index++
+			if index <= skipLeading {
+				return true
+			}
 			if converted := responsesInputItemToInteractions(item, functionNamesByCallID, forAntigravity); converted != nil {
 				items = append(items, converted)
 			}
 			return true
 		})
-	} else if input.IsObject() {
+	} else if input.IsObject() && skipLeading == 0 {
 		if converted := responsesInputItemToInteractions(input, functionNamesByCallID, forAntigravity); converted != nil {
 			items = append(items, converted)
 		}
@@ -253,10 +346,16 @@ func setResponsesInputOnInteractions(out []byte, input gjson.Result, forAntigrav
 }
 
 func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID map[string]string, forAntigravity bool) []byte {
-	switch item.Get("type").String() {
+	itemType := item.Get("type").String()
+	// The Responses API allows the shorthand {"role":...,"content":...} without
+	// an explicit type; treat it as a message so roles are honored.
+	if itemType == "" && item.Get("role").String() != "" {
+		itemType = "message"
+	}
+	switch itemType {
 	case "message":
 		stepType := "user_input"
-		if role := item.Get("role").String(); role == "assistant" || role == "model" {
+		if role := strings.ToLower(strings.TrimSpace(item.Get("role").String())); role == "assistant" || role == "model" {
 			stepType = "model_output"
 		}
 		step := []byte(`{"type":"","content":[]}`)
