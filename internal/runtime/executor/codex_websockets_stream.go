@@ -41,6 +41,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	preserveNativeOutput := helps.IsNativeCodexRequest(req.Payload, opts)
 	to := sdktranslator.FromString("codex")
+	// A capsule this instance can open is inlined as plain context. CPA ciphertext must
+	// never reach the upstream, which cannot decrypt it and rejects the whole request.
+	req.Payload = helps.NormalizeCPACompactionItems(ctx, req.Payload)
+	opts.OriginalRequest = helps.NormalizeCPACompactionItems(ctx, opts.OriginalRequest)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest

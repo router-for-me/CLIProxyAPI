@@ -44,6 +44,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	preserveNativeOutput := helps.IsNativeCodexRequest(req.Payload, opts)
 	isGrokClient := grokbuild.IsGrokClientContext(ctx, opts.Headers)
 	to := sdktranslator.FromString("codex")
+	// A capsule this instance can open is inlined as plain context. CPA ciphertext must
+	// never reach the upstream, which cannot decrypt it and rejects the whole request.
+	req.Payload = helps.NormalizeCPACompactionItems(ctx, req.Payload)
+	opts.OriginalRequest = helps.NormalizeCPACompactionItems(ctx, opts.OriginalRequest)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest

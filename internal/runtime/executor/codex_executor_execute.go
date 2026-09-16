@@ -39,6 +39,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("codex")
+	// A capsule this instance can open is inlined as plain context. CPA ciphertext must
+	// never reach the upstream, which cannot decrypt it and rejects the whole request.
+	req.Payload = helps.NormalizeCPACompactionItems(ctx, req.Payload)
+	opts.OriginalRequest = helps.NormalizeCPACompactionItems(ctx, opts.OriginalRequest)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -222,6 +226,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai-response")
+	// A capsule this instance can open is inlined as plain context. CPA ciphertext must
+	// never reach the upstream, which cannot decrypt it and rejects the whole request.
+	req.Payload = helps.NormalizeCPACompactionItems(ctx, req.Payload)
+	opts.OriginalRequest = helps.NormalizeCPACompactionItems(ctx, opts.OriginalRequest)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
