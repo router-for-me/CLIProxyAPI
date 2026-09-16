@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -401,19 +400,12 @@ func marshalRPCError(code, message string) []byte {
 }
 
 func marshalHostCallError(err error) []byte {
-	status := 0
-	var statusErr interface{ StatusCode() int }
-	if errors.As(err, &statusErr) {
-		if value := statusErr.StatusCode(); value >= 400 && value <= 599 {
-			status = value
-		}
-	}
 	raw, _ := json.Marshal(pluginabi.Envelope{
 		OK: false,
 		Error: &pluginabi.Error{
 			Code:       "host_call_failed",
 			Message:    err.Error(),
-			HTTPStatus: status,
+			HTTPStatus: hostErrorStatus(err),
 		},
 	})
 	return raw

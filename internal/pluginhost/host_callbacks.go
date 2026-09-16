@@ -3,7 +3,6 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -345,17 +344,40 @@ func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 			err = fmt.Errorf("model execution failed")
 		}
 	}
-	var statusErr interface{ StatusCode() int }
-	if errors.As(err, &statusErr) {
-		if status := statusErr.StatusCode(); status >= 400 && status <= 599 {
-			return err
-		}
+	status := hostErrorStatus(err)
+	if status == 0 {
+		status = errMsg.StatusCode
 	}
-	status := errMsg.StatusCode
 	if status < 400 || status > 599 {
 		status = http.StatusInternalServerError
 	}
 	return modelExecutionStatusError{err: err, status: status}
+}
+
+// hostErrorStatus returns the first valid HTTP error status in depth-first,
+// pre-order traversal. Invalid outer statuses do not hide their causes.
+func hostErrorStatus(err error) int {
+	for err != nil {
+		if statusErr, ok := err.(interface{ StatusCode() int }); ok {
+			if status := statusErr.StatusCode(); status >= 400 && status <= 599 {
+				return status
+			}
+		}
+		switch wrapped := err.(type) {
+		case interface{ Unwrap() error }:
+			err = wrapped.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, child := range wrapped.Unwrap() {
+				if status := hostErrorStatus(child); status != 0 {
+					return status
+				}
+			}
+			return 0
+		default:
+			return 0
+		}
+	}
+	return 0
 }
 
 type modelExecutionStatusError struct {
