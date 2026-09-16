@@ -1614,7 +1614,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongDeclarationDoe
 
 	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
 		"input": [{"role":"user","content":"hi"}],
-		"tools": ` + toolsJSON + `
+		"tools": `+toolsJSON+`
 	}`), false)
 	emitted := gjson.GetBytes(out, "tools").Array()
 	if len(emitted) != 2 {
@@ -1653,8 +1653,8 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongDeclarationDoe
 
 	forcedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
 		"input": [{"role":"user","content":"hi"}],
-		"tools": ` + toolsJSON + `,
-		"tool_choice": {"type":"function","function":{"name":"` + flatName + `"}}
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","function":{"name":"`+flatName+`"}}
 	}`), false)
 	if got := gjson.GetBytes(forcedOut, "tool_choice.function.name").String(); got != flatName {
 		t.Fatalf("tool_choice for the flat tool resolved to %q, want %q; output=%s", got, flatName, forcedOut)
@@ -1741,8 +1741,9 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongAliasDoesNotDi
 	if len(longFlatName) <= 64 || capResponsesChatToolName(longFlatName) != localName {
 		t.Fatalf("fixture drift: cap(%q) = %q, want %q", longFlatName, capResponsesChatToolName(longFlatName), localName)
 	}
-	// mcp__beta__localName is 75 chars, so the namespaced declaration is
-	// itself long and its capped alias is localName[11:], distinct from localName.
+	// mcp__beta__localName is 75 chars, so the namespaced declaration is long
+	// too, and its 11-char prefix is exactly what the cap drops: its alias is
+	// localName itself unless the reservation keeps the flat tool off it.
 	toolsJSON := `[
 		{"type":"function","name":"` + longFlatName + `","parameters":{"type":"object"}},
 		{
@@ -1754,7 +1755,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongAliasDoesNotDi
 
 	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
 		"input": [{"role":"user","content":"hi"}],
-		"tools": ` + toolsJSON + `
+		"tools": `+toolsJSON+`
 	}`), false)
 	emitted := gjson.GetBytes(out, "tools").Array()
 	if len(emitted) != 2 {
@@ -1791,10 +1792,128 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongAliasDoesNotDi
 	// tool_choice carrying the bare local name must resolve the same way.
 	forcedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
 		"input": [{"role":"user","content":"hi"}],
-		"tools": ` + toolsJSON + `,
-		"tool_choice": {"type":"function","function":{"name":"` + localName + `"}}
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","function":{"name":"`+localName+`"}}
 	}`), false)
 	if got := gjson.GetBytes(forcedOut, "tool_choice.function.name").String(); got != namespacedAlias {
 		t.Fatalf("tool_choice bare local name resolved to %q, want the namespaced alias %q; output=%s", got, namespacedAlias, forcedOut)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_SharedLocalNameIsNeverEmitted(t *testing.T) {
+	// Two namespaces declaring the same 64-byte local name: both qualified
+	// identities exceed the cap and their tails are exactly that bare local
+	// name, so the name is ambiguous for any namespace-less call yet also the
+	// natural capped alias of both declarations. Reserving it for the first
+	// declaration alone would make it emit the ambiguous name verbatim, where
+	// the exact-emitted-alias match attributes every namespace-less call and
+	// tool_choice to that namespace. The name must be burned instead, leaving
+	// both declarations on distinct aliases.
+	sharedLocal := "s" + strings.Repeat("t", 63) // exactly 64 chars
+	for _, namespace := range []string{"mcp__alpha", "mcp__beta"} {
+		if got := capResponsesChatToolName(rawResponsesNamespaceQualifiedName(namespace, sharedLocal)); got != sharedLocal {
+			t.Fatalf("fixture drift: %s alias = %q, want the ambiguous bare name %q", namespace, got, sharedLocal)
+		}
+	}
+	toolsJSON := `[
+		{
+			"type":"namespace",
+			"name":"mcp__alpha",
+			"tools":[{"type":"function","name":"` + sharedLocal + `","parameters":{"type":"object"}}]
+		},
+		{
+			"type":"namespace",
+			"name":"mcp__beta",
+			"tools":[{"type":"function","name":"` + sharedLocal + `","parameters":{"type":"object"}}]
+		}
+	]`
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`
+	}`), false)
+	emitted := gjson.GetBytes(out, "tools").Array()
+	if len(emitted) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(emitted), out)
+	}
+	aliases := make(map[string]bool, len(emitted))
+	for i, tool := range emitted {
+		name := tool.Get("function.name").String()
+		if len(name) > 64 {
+			t.Errorf("tools[%d].function.name %q (len %d) exceeds 64; output=%s", i, name, len(name), out)
+		}
+		if name == sharedLocal {
+			t.Errorf("tools[%d] emits the ambiguous local name %q; output=%s", i, name, out)
+		}
+		if aliases[name] {
+			t.Errorf("tools[%d] duplicates alias %q; output=%s", i, name, out)
+		}
+		aliases[name] = true
+	}
+	alphaAlias := emitted[0].Get("function.name").String()
+	betaAlias := emitted[1].Get("function.name").String()
+
+	// Each namespace still reaches its own declaration.
+	for _, tc := range []struct {
+		namespace string
+		want      string
+	}{
+		{"mcp__alpha", alphaAlias},
+		{"mcp__beta", betaAlias},
+	} {
+		namespacedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+			"input": [
+				{"type":"function_call","call_id":"call_1","namespace":"`+tc.namespace+`","name":"`+sharedLocal+`","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_1","output":"ok"}
+			],
+			"tools": `+toolsJSON+`
+		}`), false)
+		got := ""
+		for _, m := range gjson.GetBytes(namespacedOut, "messages").Array() {
+			if m.Get("role").String() == "assistant" {
+				got = m.Get("tool_calls.0.function.name").String()
+			}
+		}
+		if got != tc.want {
+			t.Fatalf("namespaced replay for %s resolved to %q, want %q; output=%s", tc.namespace, got, tc.want, namespacedOut)
+		}
+	}
+
+	// A namespace-less replayed call or tool_choice carrying the ambiguous
+	// bare name must stay unresolved rather than pick a winner.
+	bareOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"`+sharedLocal+`","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": `+toolsJSON+`
+	}`), false)
+	for _, m := range gjson.GetBytes(bareOut, "messages").Array() {
+		if m.Get("role").String() != "assistant" {
+			continue
+		}
+		got := m.Get("tool_calls.0.function.name").String()
+		if len(got) > 64 {
+			t.Fatalf("ambiguous replayed name %q (len %d) exceeds 64; output=%s", got, len(got), bareOut)
+		}
+		if aliases[got] {
+			t.Fatalf("ambiguous replayed call resolved to declared alias %q, silently invoking one namespace's tool; output=%s", got, bareOut)
+		}
+	}
+	bareForced := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","function":{"name":"`+sharedLocal+`"}}
+	}`), false)
+	if got := gjson.GetBytes(bareForced, "tool_choice.function.name").String(); aliases[got] {
+		t.Fatalf("ambiguous tool_choice resolved to declared alias %q, silently invoking one namespace's tool; output=%s", got, bareForced)
+	}
+	forcedAlpha := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","namespace":"mcp__beta","function":{"name":"`+sharedLocal+`"}}
+	}`), false)
+	if got := gjson.GetBytes(forcedAlpha, "tool_choice.function.name").String(); got != betaAlias {
+		t.Fatalf("namespaced tool_choice resolved to %q, want %q; output=%s", got, betaAlias, forcedAlpha)
 	}
 }

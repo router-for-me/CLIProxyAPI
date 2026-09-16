@@ -113,10 +113,16 @@ func walkResponsesToolDeclarations(root gjson.Result, visit func(responsesToolDe
 // so a capped alias occupying that name would win the earlier
 // exact-emitted-alias match and attribute those calls to the wrong tool. A
 // long declaration whose capped tail lands on any reserved name therefore
-// takes the suffix itself. Shared local names reserve first-wins (claim
-// ignores conflicting identities), which only strengthens the reservation.
-// Suffixed variants stay within the name cap, and every variant is claimed
-// in the same pass so a later declaration cannot resurrect a collision.
+// takes the suffix itself. Suffixed variants stay within the name cap, and
+// every variant is claimed in the same pass so a later declaration cannot
+// resurrect a collision.
+//
+// A local name carried by more than one distinct identity is ambiguous: no
+// namespace-less call naming it can be resolved, so the name is burned
+// instead of being awarded to whichever declaration came first. Burning
+// matters even when the name is also a declaration's capped alias — that
+// alias would be emitted verbatim, win the exact-emitted-alias match, and
+// silently route the other namespace's calls to the first declaration.
 func disambiguateResponsesChatToolNames(declarations []responsesToolDeclaration) {
 	claimed := make(map[string]string, len(declarations))
 	claim := func(candidate, identity string) bool {
@@ -128,25 +134,52 @@ func disambiguateResponsesChatToolNames(declarations []responsesToolDeclaration)
 		}
 	}
 	longDeclarations := make([]int, 0)
+	identities := make([]string, len(declarations))
+	// localName → the single identity that declares it, or "" once a second,
+	// distinct identity shows the name is ambiguous.
+	localOwners := make(map[string]string)
+	ambiguousLocalNames := make(map[string]struct{})
 	for i := range declarations {
 		identity := rawResponsesNamespaceQualifiedName(declarations[i].namespace, declarations[i].localName)
+		identities[i] = identity
 		if len(identity) > responsesChatToolNameLimit {
 			longDeclarations = append(longDeclarations, i)
 		} else {
 			claim(identity, identity)
 		}
-		if local := declarations[i].localName; local != identity && len(local) <= responsesChatToolNameLimit {
-			claim(local, identity)
+		local := declarations[i].localName
+		if local == "" || local == identity || len(local) > responsesChatToolNameLimit {
+			continue
+		}
+		if owner, seen := localOwners[local]; !seen {
+			localOwners[local] = identity
+		} else if owner != "" && owner != identity {
+			localOwners[local] = ""
 		}
 	}
+	for local, owner := range localOwners {
+		// Reserving under any identity keeps the name out of every later
+		// truncation alias; ambiguous names additionally never get emitted.
+		claim(local, owner)
+		if owner == "" {
+			ambiguousLocalNames[local] = struct{}{}
+		}
+	}
+	isAmbiguous := func(name string) bool {
+		_, ambiguous := ambiguousLocalNames[name]
+		return ambiguous
+	}
 	for _, i := range longDeclarations {
-		identity := rawResponsesNamespaceQualifiedName(declarations[i].namespace, declarations[i].localName)
+		identity := identities[i]
 		name := declarations[i].chatName
-		if claim(name, identity) {
+		if !isAmbiguous(name) && claim(name, identity) {
 			continue
 		}
 		for suffix := 1; ; suffix++ {
 			candidate := capResponsesChatToolName(name + "_" + strconv.Itoa(suffix))
+			if isAmbiguous(candidate) {
+				continue
+			}
 			if claim(candidate, identity) {
 				declarations[i].chatName = candidate
 				break
