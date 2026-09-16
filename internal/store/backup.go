@@ -57,6 +57,15 @@ const (
 	ResourceSyncLog BackupResource = "sync_log"
 	// ResourceConfigStore covers the PG mirror of config.yaml (config_store).
 	ResourceConfigStore BackupResource = "config_store"
+	// ResourceRuntimeConfig covers the PG-first runtime_config singleton
+	// (one row: settings/extra JSONB + revision counter + update metadata).
+	ResourceRuntimeConfig BackupResource = "runtime_config"
+	// ResourceConfigRevisions covers the append-only config_revisions
+	// history backing rollback and audit.
+	ResourceConfigRevisions BackupResource = "config_revisions"
+	// ResourceConfigImports covers the config_imports audit table (one row
+	// per import attempt).
+	ResourceConfigImports BackupResource = "config_imports"
 	// ResourceCooldownStore covers runtime auth/model cooldown state
 	// (cooldown_store).
 	ResourceCooldownStore BackupResource = "cooldown_store"
@@ -118,6 +127,9 @@ var AllBackupResources = []BackupResource{
 	ResourceModelHealth,
 	ResourceSyncLog,
 	ResourceConfigStore,
+	ResourceRuntimeConfig,
+	ResourceConfigRevisions,
+	ResourceConfigImports,
 	ResourceCooldownStore,
 	ResourceUsageStatDay,
 	ResourceModelRouting,
@@ -217,6 +229,12 @@ func (s *PostgresStore) resourceTables(res BackupResource) []backupTable {
 		return []backupTable{{s.UpstreamSyncLogTable(), "id"}}
 	case ResourceConfigStore:
 		return []backupTable{{s.ConfigTable(), "id"}}
+	case ResourceRuntimeConfig:
+		return []backupTable{{s.RuntimeConfigTable(), "id"}}
+	case ResourceConfigRevisions:
+		return []backupTable{{s.ConfigRevisionsTable(), "revision"}}
+	case ResourceConfigImports:
+		return []backupTable{{s.ConfigImportsTable(), "id"}}
 	case ResourceCooldownStore:
 		return []backupTable{{s.CooldownTable(), ""}}
 	case ResourceUsageStatDay:

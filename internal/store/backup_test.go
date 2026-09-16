@@ -838,6 +838,9 @@ func TestAllBackupResourcesIncludesMissingTables(t *testing.T) {
 	st := &PostgresStore{cfg: PostgresStoreConfig{
 		Schema:                  "backup_missing",
 		ConfigTable:             "config_store",
+		RuntimeConfigTable:      "runtime_config",
+		ConfigRevisionsTable:    "config_revisions",
+		ConfigImportsTable:      "config_imports",
 		CooldownTable:           "cooldown_store",
 		UsageStatDayTable:       "usage_stat_day",
 		ModelRoutingTable:       "model_routing",
@@ -846,6 +849,9 @@ func TestAllBackupResourcesIncludesMissingTables(t *testing.T) {
 
 	newResources := []BackupResource{
 		ResourceConfigStore,
+		ResourceRuntimeConfig,
+		ResourceConfigRevisions,
+		ResourceConfigImports,
 		ResourceCooldownStore,
 		ResourceUsageStatDay,
 		ResourceModelRouting,
@@ -866,6 +872,9 @@ func TestAllBackupResourcesIncludesMissingTables(t *testing.T) {
 		orderColumn string
 	}{
 		ResourceConfigStore:        {`"backup_missing"."config_store"`, "id"},
+		ResourceRuntimeConfig:      {`"backup_missing"."runtime_config"`, "id"},
+		ResourceConfigRevisions:    {`"backup_missing"."config_revisions"`, "revision"},
+		ResourceConfigImports:      {`"backup_missing"."config_imports"`, "id"},
 		ResourceCooldownStore:      {`"backup_missing"."cooldown_store"`, ""},
 		ResourceUsageStatDay:       {`"backup_missing"."usage_stat_day"`, "stat_day"},
 		ResourceModelRouting:       {`"backup_missing"."model_routing"`, "id"},
