@@ -152,6 +152,29 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	return accessAuthMiddleware(manager, false)
 }
 
+// originModelsEndpointMiddleware applies the explicit host-level policy for
+// native CLIProxyAPI api-keys. It is attached after AuthMiddleware on model
+// list routes, so plugin-owned providers and other auth providers retain their
+// own policies and native keys are denied before model generation by default.
+func (s *Server) originModelsEndpointMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s == nil || s.cfg == nil || s.cfg.AllowOriginModelsEndpoint || c == nil || c.Request == nil {
+			c.Next()
+			return
+		}
+
+		provider, _ := c.Get("accessProvider")
+		if providerName, ok := provider.(string); !ok || !strings.EqualFold(strings.TrimSpace(providerName), sdkaccess.DefaultAccessProviderName) {
+			c.Next()
+			return
+		}
+
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"error": "model listing is disabled for native api-keys",
+		})
+	}
+}
+
 func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 	return accessAuthMiddleware(manager, true)
 }

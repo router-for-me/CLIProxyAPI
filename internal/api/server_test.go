@@ -618,7 +618,8 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 
 	cfg := &proxyconfig.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
+			APIKeys:                   []string{"test-key"},
+			AllowOriginModelsEndpoint: true,
 		},
 		Port:                   0,
 		AuthDir:                authDir,

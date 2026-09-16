@@ -41,6 +41,10 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Native CLIProxyAPI api-keys cannot access the global model list by default.
+# Set this explicitly to true only when those origin keys should see it.
+allow-origin-models-endpoint: false
+
 # Enable debug logging
 debug: false
 
