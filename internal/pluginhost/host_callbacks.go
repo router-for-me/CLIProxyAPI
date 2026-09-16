@@ -3,7 +3,9 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -335,14 +337,35 @@ func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}
-	if errMsg.Error != nil {
-		return errMsg.Error
+	err := errMsg.Error
+	if err == nil {
+		if errMsg.StatusCode > 0 {
+			err = fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
+		} else {
+			err = fmt.Errorf("model execution failed")
+		}
 	}
-	if errMsg.StatusCode > 0 {
-		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) {
+		if status := statusErr.StatusCode(); status >= 400 && status <= 599 {
+			return err
+		}
 	}
-	return fmt.Errorf("model execution failed")
+	status := errMsg.StatusCode
+	if status < 400 || status > 599 {
+		status = http.StatusInternalServerError
+	}
+	return modelExecutionStatusError{err: err, status: status}
 }
+
+type modelExecutionStatusError struct {
+	err    error
+	status int
+}
+
+func (e modelExecutionStatusError) Error() string   { return e.err.Error() }
+func (e modelExecutionStatusError) Unwrap() error   { return e.err }
+func (e modelExecutionStatusError) StatusCode() int { return e.status }
 
 func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) {
 	var req rpcHostLogRequest
