@@ -4,20 +4,91 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
+const antigravityWebSearchSystemInstruction = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar."
+
+func antigravitySupportsNativeResponsesWebSearch(model string) bool {
+	infoAG := registry.LookupModelInfo(model, "antigravity")
+	if infoAG != nil && infoAG.NativeCapabilities != nil && infoAG.NativeCapabilities.WebSearch != nil && !*infoAG.NativeCapabilities.WebSearch {
+		return false
+	}
+	return registry.AntigravityWebSearchModelFor(model) != ""
+}
+
+func shouldBuildAntigravityResponsesWebSearchRequest(model string, payload []byte) bool {
+	root := gjson.ParseBytes(payload)
+	return HasOnlyResponsesWebSearchTools(root) &&
+		antigravitySupportsNativeResponsesWebSearch(model) &&
+		AllowsResponsesWebSearchToolChoice(root)
+}
+
+func buildAntigravityResponsesWebSearchRequest(model string, payload []byte) []byte {
+	root := gjson.ParseBytes(payload)
+	query := ExtractResponsesWebSearchQuery(root)
+	includedDomains := ExtractResponsesWebSearchAllowedDomains(root)
+	out := []byte(`{"model":"","requestType":"web_search","request":{"contents":[{"role":"user","parts":[{"text":""}]}],"systemInstruction":{"role":"user","parts":[{"text":""}]},"tools":[{"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}}],"generationConfig":{"candidateCount":1}}}`)
+	out, _ = sjson.SetBytes(out, "model", model)
+	out, _ = sjson.SetBytes(out, "request.contents.0.parts.0.text", query)
+	out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.0.text", antigravityWebSearchSystemInstruction)
+	if len(includedDomains) > 0 {
+		if domainsJSON, err := json.Marshal(includedDomains); err == nil {
+			out, _ = sjson.SetRawBytes(out, "request.tools.0.googleSearch.includedDomains", domainsJSON)
+		}
+	}
+	return out
+}
+
 func ConvertOpenAIResponsesRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
+	if shouldBuildAntigravityResponsesWebSearchRequest(modelName, inputRawJSON) {
+		return buildAntigravityResponsesWebSearchRequest(modelName, inputRawJSON)
+	}
 	rawJSON := inputRawJSON
 	rawJSON = ConvertOpenAIResponsesRequestToGemini(modelName, rawJSON, stream)
+	rawJSON = stripAntigravityResponsesGoogleSearch(rawJSON)
 	rawJSON = rewriteOpenAIResponsesReasoningForAntigravityClaude(modelName, inputRawJSON, rawJSON)
 	rawJSON = ConvertGeminiRequestToAntigravity(modelName, rawJSON, stream)
+	rawJSON = stripAntigravityResponsesGoogleSearch(rawJSON)
 	return enableAntigravityResponsesThinkingSummary(inputRawJSON, rawJSON)
+}
+
+// stripAntigravityResponsesGoogleSearch removes any native googleSearch tool block
+// from the request payload when falling back to a normal chat request, because
+// Antigravity only supports native search in dedicated web_search request envelopes
+// and rejects requests with mixed googleSearch and function declarations.
+func stripAntigravityResponsesGoogleSearch(payload []byte) []byte {
+	for _, path := range []string{"tools", "request.tools"} {
+		tools := gjson.GetBytes(payload, path)
+		if !tools.IsArray() {
+			continue
+		}
+		var filtered [][]byte
+		hasGoogleSearch := false
+		for _, tool := range tools.Array() {
+			if tool.Get("googleSearch").Exists() {
+				hasGoogleSearch = true
+				continue
+			}
+			filtered = append(filtered, []byte(tool.Raw))
+		}
+		if hasGoogleSearch {
+			if len(filtered) == 0 {
+				payload, _ = sjson.DeleteBytes(payload, path)
+			} else {
+				payload, _ = sjson.SetRawBytes(payload, path, translatorcommon.JoinRawArray(filtered))
+			}
+		}
+	}
+	return payload
 }
 
 // OpenAI Responses separates reasoning effort from reasoning summary visibility.

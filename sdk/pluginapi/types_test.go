@@ -33,6 +33,7 @@ var _ UsagePlugin = (*compileTimePlugin)(nil)
 var _ CommandLinePlugin = (*compileTimePlugin)(nil)
 var _ ManagementAPI = (*compileTimePlugin)(nil)
 var _ ManagementHandler = (*compileTimePlugin)(nil)
+var _ QuotaProvider = (*compileTimePlugin)(nil)
 
 func TestMetadataConfigFieldsExposePluginSchema(t *testing.T) {
 	meta := Metadata{
@@ -175,21 +176,23 @@ func TestHostInjectedHTTPClientIsNotEncodedInPluginJSON(t *testing.T) {
 
 func TestHostModelTypesPreserveFields(t *testing.T) {
 	request := HostModelExecutionRequest{
-		EntryProtocol: "openai",
-		ExitProtocol:  "claude",
-		Model:         "gpt-test",
-		Stream:        true,
-		Body:          []byte(`{"input":"hello"}`),
-		Headers:       http.Header{"X-Test": []string{"one", "two"}},
-		Query:         url.Values{"alt": []string{"beta"}},
-		Alt:           "chat",
+		EntryProtocol:  "openai",
+		ExitProtocol:   "claude",
+		Model:          "gpt-test",
+		Stream:         true,
+		Body:           []byte(`{"input":"hello"}`),
+		Headers:        http.Header{"X-Test": []string{"one", "two"}},
+		Query:          url.Values{"alt": []string{"beta"}},
+		Alt:            "chat",
+		ForcedProvider: "gemini",
+		AuthID:         "exact-auth-123",
 	}
 	rawRequest, errMarshalRequest := json.Marshal(request)
 	if errMarshalRequest != nil {
 		t.Fatalf("marshal HostModelExecutionRequest: %v", errMarshalRequest)
 	}
 	requestJSON := string(rawRequest)
-	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt"} {
+	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt", "forced_provider", "auth_id"} {
 		if !strings.Contains(requestJSON, `"`+field+`"`) {
 			t.Fatalf("HostModelExecutionRequest JSON missing field %q: %s", field, requestJSON)
 		}
@@ -205,7 +208,9 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		string(decodedRequest.Body) != string(request.Body) ||
 		decodedRequest.Headers.Get("X-Test") != "one" ||
 		decodedRequest.Query.Get("alt") != "beta" ||
-		decodedRequest.Alt != request.Alt {
+		decodedRequest.Alt != request.Alt ||
+		decodedRequest.ForcedProvider != request.ForcedProvider ||
+		decodedRequest.AuthID != request.AuthID {
 		t.Fatalf("HostModelExecutionRequest round trip = %#v", decodedRequest)
 	}
 	if got := decodedRequest.Headers.Values("X-Test"); len(got) != 2 || got[1] != "two" {
@@ -556,6 +561,18 @@ func (compileTimePlugin) HandleManagement(context.Context, ManagementRequest) (M
 	return ManagementResponse{}, nil
 }
 
+func (compileTimePlugin) DescribeQuota(context.Context, QuotaDescribeRequest) (QuotaDescribeResponse, error) {
+	return QuotaDescribeResponse{}, nil
+}
+
+func (compileTimePlugin) FetchQuota(context.Context, QuotaFetchRequest) (QuotaFetchResponse, error) {
+	return QuotaFetchResponse{}, nil
+}
+
+func (compileTimePlugin) ResetQuota(context.Context, QuotaResetRequest) (QuotaResetResponse, error) {
+	return QuotaResetResponse{}, nil
+}
+
 func TestHostAffinityLookupTypes(t *testing.T) {
 	if HostAffinityStatusBound != "bound" {
 		t.Fatalf("HostAffinityStatusBound = %q", HostAffinityStatusBound)
@@ -642,5 +659,88 @@ func TestBaseURLInUsageRecordAndHostAuthFileEntry(t *testing.T) {
 	}
 	if strings.Contains(string(emptyData), "base_url") {
 		t.Fatalf("empty base_url should be omitted, got: %s", string(emptyData))
+	}
+}
+
+func TestQuotaPayloadJSON(t *testing.T) {
+	// Test camelCase input
+	camelJSON := []byte(`{
+		"subscription": {"plan":"Pro","tierName":"Tier 1","tierId":"t-1"},
+		"summary": [
+			{"key":"credits_used","label":"Credits used","value":1740.28,"unit":"credits","format":"number"},
+			{"key":"charged","label":"Charged","value":29.61,"format":"currency","currency":"USD"}
+		],
+		"serverTimeOffsetMs": 100,
+		"groups": [
+			{
+				"displayName": "Daily Quota",
+				"buckets": [
+					{"window":"daily","remainingFraction":0.8,"resetTime":"2026-09-13T00:00:00Z","description":"80% left"}
+				]
+			}
+		]
+	}`)
+
+	var respCamel QuotaFetchResponse
+	if err := json.Unmarshal(camelJSON, &respCamel); err != nil {
+		t.Fatalf("unmarshal camelCase JSON failed: %v", err)
+	}
+	if respCamel.Subscription == nil || respCamel.Subscription.TierName != "Tier 1" || respCamel.Subscription.TierID != "t-1" {
+		t.Fatalf("unexpected camel subscription: %+v", respCamel.Subscription)
+	}
+	if len(respCamel.Summary) != 2 || respCamel.Summary[0].Key != "credits_used" || respCamel.Summary[0].Value != 1740.28 || respCamel.Summary[1].Currency != "USD" {
+		t.Fatalf("unexpected camel summary: %+v", respCamel.Summary)
+	}
+	if respCamel.ServerTimeOffsetMs != 100 {
+		t.Fatalf("unexpected server time offset: %d", respCamel.ServerTimeOffsetMs)
+	}
+	if len(respCamel.Groups) != 1 || respCamel.Groups[0].DisplayName != "Daily Quota" {
+		t.Fatalf("unexpected camel groups: %+v", respCamel.Groups)
+	}
+	if len(respCamel.Groups[0].Buckets) != 1 || respCamel.Groups[0].Buckets[0].RemainingFraction != 0.8 || respCamel.Groups[0].Buckets[0].ResetTime != "2026-09-13T00:00:00Z" {
+		t.Fatalf("unexpected camel bucket: %+v", respCamel.Groups[0].Buckets)
+	}
+
+	// Test snake_case input
+	snakeJSON := []byte(`{
+		"subscription": {"plan":"Free","tier_name":"Tier Free","tier_id":"t-free"},
+		"server_time_offset_ms": 200,
+		"groups": [
+			{
+				"display_name": "Monthly Quota",
+				"buckets": [
+					{"window":"monthly","remaining_fraction":0.5,"reset_time":"2026-10-01T00:00:00Z","description":"50% left"}
+				]
+			}
+		]
+	}`)
+
+	var respSnake QuotaFetchResponse
+	if err := json.Unmarshal(snakeJSON, &respSnake); err != nil {
+		t.Fatalf("unmarshal snake_case JSON failed: %v", err)
+	}
+	if respSnake.Subscription == nil || respSnake.Subscription.TierName != "Tier Free" || respSnake.Subscription.TierID != "t-free" {
+		t.Fatalf("unexpected snake subscription: %+v", respSnake.Subscription)
+	}
+	if respSnake.ServerTimeOffsetMs != 200 {
+		t.Fatalf("unexpected server time offset: %d", respSnake.ServerTimeOffsetMs)
+	}
+	if len(respSnake.Groups) != 1 || respSnake.Groups[0].DisplayName != "Monthly Quota" {
+		t.Fatalf("unexpected snake groups: %+v", respSnake.Groups)
+	}
+	if len(respSnake.Groups[0].Buckets) != 1 || respSnake.Groups[0].Buckets[0].RemainingFraction != 0.5 || respSnake.Groups[0].Buckets[0].ResetTime != "2026-10-01T00:00:00Z" {
+		t.Fatalf("unexpected snake bucket: %+v", respSnake.Groups[0].Buckets)
+	}
+}
+
+func TestQuotaBucketZeroRemainingFractionPreserved(t *testing.T) {
+	// remainingFraction is 0 (exhausted), while remaining_fraction has a fallback value
+	rawJSON := []byte(`{"remainingFraction":0,"remaining_fraction":0.8}`)
+	var bucket QuotaBucket
+	if err := json.Unmarshal(rawJSON, &bucket); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if bucket.RemainingFraction != 0 {
+		t.Fatalf("expected remainingFraction 0 to be preserved, got %f", bucket.RemainingFraction)
 	}
 }

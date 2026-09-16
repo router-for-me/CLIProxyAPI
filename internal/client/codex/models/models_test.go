@@ -1391,3 +1391,61 @@ func TestCodexClientModelsResponse_OAuthAliasesInheritCompleteReasoningLevelsWit
 		}
 	}
 }
+
+func TestCodexClientModelsResponse_CPAWebSearchCapabilities(t *testing.T) {
+	trueValue, falseValue := true, false
+	capabilities := map[string]*bool{
+		"supported-model":   &trueValue,
+		"unsupported-model": &falseValue,
+	}
+	availableModels := []map[string]any{
+		{"id": "supported-model"},
+		{"id": "unsupported-model"},
+		{"id": "unknown-model"},
+	}
+
+	resp := BuildResponseForClientWithCPACapabilities(availableModels, nil, func(id string) *bool {
+		return capabilities[id]
+	}, false, "cpa")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != len(availableModels) {
+		t.Fatalf("models = %#v, want %d models", resp["models"], len(availableModels))
+	}
+	entries := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		entries[stringModelValue(model, "slug")] = model
+	}
+	assertCPAWebSearchCapability(t, entries["supported-model"], true, true)
+	assertCPAWebSearchCapability(t, entries["unsupported-model"], false, true)
+	assertCPAWebSearchCapability(t, entries["unknown-model"], false, false)
+}
+
+func TestCodexClientModelsResponse_CPAWebSearchCapabilitiesOnlyForCPAClient(t *testing.T) {
+	capabilityLookup := func(string) *bool { value := true; return &value }
+	for _, clientVersion := range []string{"", "0.153.4", "CPA", "cpa-preview"} {
+		resp := BuildResponseForClientWithCPACapabilities([]map[string]any{{"id": "gpt-5.5"}}, nil, capabilityLookup, false, clientVersion)
+		models, ok := resp["models"].([]map[string]any)
+		if !ok || len(models) != 1 {
+			t.Fatalf("client version %q models = %#v, want one model", clientVersion, resp["models"])
+		}
+		assertCPAWebSearchCapability(t, models[0], false, false)
+	}
+}
+
+func assertCPAWebSearchCapability(t *testing.T, model map[string]any, want bool, wantPresent bool) {
+	t.Helper()
+	raw, present := model["cpa_capabilities"]
+	if present != wantPresent {
+		t.Fatalf("model %q cpa_capabilities presence = %v, want %v", stringModelValue(model, "slug"), present, wantPresent)
+	}
+	if !wantPresent {
+		return
+	}
+	capabilities, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("model %q cpa_capabilities = %#v, want object", stringModelValue(model, "slug"), raw)
+	}
+	if got, ok := capabilities["web_search"].(bool); !ok || got != want {
+		t.Fatalf("model %q web_search = %#v, want %v", stringModelValue(model, "slug"), capabilities["web_search"], want)
+	}
+}

@@ -80,3 +80,24 @@ func TestIsPluginErrorEnvelopeAcceptsNonzeroReturnEnvelope(t *testing.T) {
 		t.Fatal("isPluginErrorEnvelope accepted invalid JSON")
 	}
 }
+
+func TestCallPluginPreservesStatusFromNewErrorEnvelope(t *testing.T) {
+	raw, errMarshal := pluginabi.NewErrorEnvelope("insufficient_quota", "plan limit reached", http.StatusForbidden)
+	if errMarshal != nil {
+		t.Fatalf("NewErrorEnvelope() error = %v", errMarshal)
+	}
+	_, errCall := callPlugin[rpcEmptyResponse](context.Background(), staticEnvelopePluginClient{raw: raw}, pluginabi.MethodExecutorExecute, rpcEmptyResponse{})
+	if errCall == nil {
+		t.Fatal("callPlugin returned nil error")
+	}
+	if got := errCall.Error(); got != "plan limit reached" {
+		t.Fatalf("error = %q, want plan limit reached", got)
+	}
+	statusProvider, ok := errCall.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error %T does not expose StatusCode", errCall)
+	}
+	if got := statusProvider.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+	}
+}
