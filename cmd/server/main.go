@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/events"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -861,6 +862,24 @@ func main() {
 			}
 		}
 	}
+
+	// Initialize the in-memory events ring recorder that backs the
+	// /v0/management/events and /events/stats endpoints (and the future
+	// /events/stream SSE feed). The same ring backs both the management
+	// handler (via api.WithEventsRing) and the global recorder that
+	// emission sites (round-2 Task 12 — routing decisions, breaker trips,
+	// cooldown waits) read from via events.Global(). Capacity falls back
+	// to events.DefaultRingCapacity (5000) when the config knob is unset,
+	// matching the round-2 design doc. This must happen after serverOptions
+	// is fully assembled so both the foreground and TUI-embedded server
+	// paths pick it up.
+	ringCapacity := events.DefaultRingCapacity
+	if cfg != nil && cfg.Routing.Events.RingCapacity > 0 {
+		ringCapacity = cfg.Routing.Events.RingCapacity
+	}
+	eventsRing := events.NewRing(ringCapacity)
+	events.SetGlobal(eventsRing)
+	serverOptions = append(serverOptions, api.WithEventsRing(eventsRing))
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)

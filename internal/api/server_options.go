@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/backup"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/events"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
@@ -53,6 +54,15 @@ type serverOptionConfig struct {
 	backupSubsystem *backup.Runner
 	backupInterval  time.Duration
 	backupRetention int
+
+	// eventsRing is the in-memory events ring recorder that backs the
+	// /v0/management/events and /events/stats endpoints (and the future
+	// /events/stream SSE feed). Set via WithEventsRing from cmd/server
+	// after events.SetGlobal so a single ring backs both the management
+	// handlers and the global recorder emission sites read from. nil
+	// disables both endpoints (they return 503 — same gate as the rest of
+	// the management-route surface).
+	eventsRing *events.Ring
 }
 
 // PgStoreHandles bundles the optional PG-backed stores and adapters that the
@@ -277,5 +287,19 @@ func WithBackupS3(runner *backup.Runner, interval time.Duration, retention int) 
 		cfg.backupSubsystem = runner
 		cfg.backupInterval = interval
 		cfg.backupRetention = retention
+	}
+}
+
+// WithEventsRing attaches the in-memory events ring recorder to the management
+// handler so the /v0/management/events, /events/stats, and (future)
+// /events/stream endpoints can serve the live buffer. Pass the same *events.Ring
+// that was set via events.SetGlobal so emission sites (router decisions,
+// breaker trips, cooldown waits) and the management handlers share a single
+// ring — the SetEventsRing setter flips the events gate on (eventsEnabled) so
+// the routes stop returning 503. Pass nil to disable the endpoints (tests that
+// want a 503 contract).
+func WithEventsRing(ring *events.Ring) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.eventsRing = ring
 	}
 }

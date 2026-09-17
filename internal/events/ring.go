@@ -12,6 +12,12 @@ const (
 	defaultRingCapacity = 5000
 )
 
+// DefaultRingCapacity is the capacity the ring picks when callers pass
+// 0 (and the value cmd/server falls back to when config.routing.events.
+// ring-capacity is unset). It matches the value the round-2 design doc
+// pins as the in-process default.
+const DefaultRingCapacity = defaultRingCapacity
+
 // Ring is a bounded, lock-protected event buffer. Capacity is enforced
 // by count (not bytes). Records that exceed the contention threshold
 // are dropped and counted, never blocking the caller for long.

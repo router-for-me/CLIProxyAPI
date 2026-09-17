@@ -8,15 +8,15 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/events"
+	log "github.com/sirupsen/logrus"
 )
 
 // EventsResponse is the JSON shape returned by GET /v0/management/events.
 // Events is always non-nil so clients can iterate without nil-checks;
-// empty result sets surface as []. Count mirrors len(Events) so the
-// dashboard does not have to reach into the slice to size its render.
+// empty result sets surface as []. Clients compute the length from the
+// slice — no separate Count field is needed.
 type EventsResponse struct {
 	Events []events.Event `json:"events"`
-	Count  int            `json:"count"`
 }
 
 // EventsStatsResponse is the JSON shape returned by
@@ -55,7 +55,13 @@ func (h *Handler) GetEvents(c *gin.Context) {
 	}
 	ring := h.eventsRing()
 	if ring == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "PG storage not enabled"})
+		// Unreachable in production — cmd/server/main.go calls
+		// mgmt.SetEventsRing before the server binds, so the nil-ring
+		// path only fires if a future wiring change forgets the ring.
+		// 500 (not 503) signals "this is a deployment bug, not a
+		// missing-feature condition" so the dashboard can surface a
+		// remediation hint instead of a misleading "PG not enabled" .
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "events ring not wired"})
 		return
 	}
 
@@ -74,14 +80,18 @@ func (h *Handler) GetEvents(c *gin.Context) {
 			continue
 		}
 		if !since.IsZero() && e.Ts.Before(since) {
-			continue
+			// Newer events first; once we cross an event older than since,
+			// every remaining entry is also older so we can stop scanning.
+			// This collapses the per-request work from O(ring-capacity) to
+			// O(matching-events) when a since= filter is supplied.
+			break
 		}
 		out = append(out, e)
 		if len(out) >= limit {
 			break
 		}
 	}
-	c.JSON(http.StatusOK, EventsResponse{Events: out, Count: len(out)})
+	c.JSON(http.StatusOK, EventsResponse{Events: out})
 }
 
 // GetEventsStats handles GET /v0/management/events/stats. Exposes the
@@ -96,7 +106,11 @@ func (h *Handler) GetEventsStats(c *gin.Context) {
 	}
 	ring := h.eventsRing()
 	if ring == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "PG storage not enabled"})
+		// See the comment on GetEvents's nil-ring branch — same rationale
+		// applies here. Logged separately so an operator inspecting
+		// /events/stats sees the warning.
+		log.Warn("events stats handler called but events ring is not wired; check cmd/server/main.go initialization")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "events ring not wired"})
 		return
 	}
 	c.JSON(http.StatusOK, EventsStatsResponse{
@@ -110,13 +124,16 @@ func (h *Handler) GetEventsStats(c *gin.Context) {
 // which the handler treats as "no since filter" — the same shape as
 // omitting the parameter. We deliberately do NOT 400 on a malformed since:
 // the rest of the filters still apply, so a typo doesn't black out the
-// whole page for the operator.
+// whole page for the operator. The parse failure is logged at WARN so
+// operators can spot a recurring client bug or copy/paste mistake
+// without the operator's dashboard silently dropping events.
 func parseEventsSince(s string) time.Time {
 	if s == "" {
 		return time.Time{}
 	}
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
+		log.Warnf("events endpoint: invalid since=%q (RFC3339 required): %v", s, err)
 		return time.Time{}
 	}
 	return t
@@ -125,6 +142,12 @@ func parseEventsSince(s string) time.Time {
 // parseEventsLimit parses the limit= query parameter. Empty / non-numeric
 // / non-positive values fall back to defaultLimit; values above maxLimit
 // clamp down to maxLimit. The 500-page cap matches the round-2 design.
+//
+// We treat zero/negative as missing because limit=0 is rarely an
+// intentional request and we'd rather give a default page than an empty
+// response — callers who genuinely want to test the empty-result path
+// can pass an impossibly-narrow since= or use a filter that matches no
+// rows.
 func parseEventsLimit(s string, defaultLimit, maxLimit int) int {
 	if s == "" {
 		return defaultLimit

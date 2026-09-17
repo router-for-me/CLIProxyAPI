@@ -44,7 +44,7 @@ func runEvents(t *testing.T, h *Handler, method, path string) *httptest.Response
 }
 
 // TestEventsEndpointFiltersByType pins the type=... query-param filter:
-// only events whose Type matches are returned, with Count matching len.
+// only events whose Type matches are returned.
 func TestEventsEndpointFiltersByType(t *testing.T) {
 	ring := events.NewRing(100)
 	now := time.Now()
@@ -60,9 +60,6 @@ func TestEventsEndpointFiltersByType(t *testing.T) {
 	var resp EventsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
-	}
-	if resp.Count != 1 {
-		t.Errorf("count = %d, want 1", resp.Count)
 	}
 	if len(resp.Events) != 1 || resp.Events[0].Type != "routing.decision" {
 		t.Errorf("events = %+v, want one routing.decision row", resp.Events)
@@ -87,8 +84,8 @@ func TestEventsEndpointFiltersByAuth(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Count != 1 || resp.Events[0].AuthID != "auth-1" {
-		t.Errorf("count = %d, events = %+v, want one auth-1 row", resp.Count, resp.Events)
+	if len(resp.Events) != 1 || resp.Events[0].AuthID != "auth-1" {
+		t.Errorf("events = %+v, want one auth-1 row", resp.Events)
 	}
 }
 
@@ -111,8 +108,8 @@ func TestEventsEndpointFiltersBySince(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Count != 1 {
-		t.Errorf("count = %d, want 1 (only the fresh event passes the since filter)", resp.Count)
+	if len(resp.Events) != 1 {
+		t.Errorf("len(events) = %d, want 1 (only the fresh event passes the since filter)", len(resp.Events))
 	}
 }
 
@@ -135,8 +132,8 @@ func TestEventsEndpointRespectsLimit(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Count != 10 {
-		t.Errorf("count = %d, want 10 (limit=10)", resp.Count)
+	if len(resp.Events) != 10 {
+		t.Errorf("len(events) = %d, want 10 (limit=10)", len(resp.Events))
 	}
 }
 

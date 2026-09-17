@@ -309,6 +309,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// BACKUP_S3_ENDPOINT is not set — the routes return 503. This wiring is
 	// independent of the PG backend.
 	s.mgmt.SetBackupS3(optionState.backupSubsystem, optionState.backupSubsystem, optionState.backupInterval, optionState.backupRetention)
+	// Wire the in-memory events ring recorder so the /v0/management/events
+	// and /events/stats endpoints can serve the live buffer. The same ring
+	// is installed as events.SetGlobal in cmd/server so emission sites
+	// (round-2 Task 12 — router decisions, breaker trips, cooldown waits)
+	// and the management handlers share a single buffer. nil disables both
+	// endpoints (gate flips off; routes return 503).
+	s.mgmt.SetEventsRing(optionState.eventsRing)
 	// Wire the /v1/models invoker so the management endpoint
 	// POST /v0/management/models-catalog/sync-from-v1 can probe the live
 	// caller-facing model list in-process (no network loopback). The

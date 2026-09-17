@@ -308,6 +308,25 @@ type RoutingConfig struct {
 	// CooldownWait bounds server-side cooldown waiting and 403
 	// reclassification. See CooldownWaitConfig for defaults.
 	CooldownWait CooldownWaitConfig `yaml:"cooldown-wait,omitempty" json:"cooldown-wait,omitempty"`
+
+	// Events configures the in-process events ring recorder that backs
+	// the /v0/management/events and /events/stats endpoints (and the
+	// future /events/stream SSE feed). RingCapacity sets the post-clamp
+	// upper bound on the number of events the ring retains; 0 falls back
+	// to internal/events.DefaultRingCapacity (5000). The ring itself
+	// clamps to [100, 50000].
+	Events EventsRingConfig `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// EventsRingConfig configures the in-memory events ring. See
+// RoutingConfig.Events for context.
+type EventsRingConfig struct {
+	// RingCapacity is the ring's post-clamp upper bound. 0 means use the
+	// internal default (5000). The ring itself clamps to [100, 50000] in
+	// internal/events.NewRing so operators can over-shoot here without
+	// crashing; the value the handlers see via ring.Capacity() reflects
+	// the post-clamp size.
+	RingCapacity int `yaml:"ring-capacity,omitempty" json:"ring-capacity,omitempty"`
 }
 
 // CooldownWaitConfig bounds server-side cooldown waits and controls
