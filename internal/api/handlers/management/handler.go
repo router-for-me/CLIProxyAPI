@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/configstore"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/events"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
@@ -224,6 +225,18 @@ type Handler struct {
 	// management-route contract.
 	quotaRepoIface   quotaRepo
 	quotaRepoEnabled bool
+
+	// eventsRingRecorder / eventsEnabled gate the round-2 live-events
+	// endpoints (/v0/management/events, /v0/management/events/stats).
+	// eventsRingRecorder is the same *events.Ring that events.SetGlobal
+	// exposes to runtime emission sites (one ring backs both — see
+	// SetEventsRing). eventsEnabled flips to true when SetEventsRing is
+	// called with a non-nil ring (production path) or via the test-only
+	// setEventsEnabledForTest seam. nil/disabled returns 503 from the
+	// handlers, mirroring the rest of the management-route gate so the
+	// dashboard can rely on "no PG → no /v0/management/* data routes".
+	eventsRingRecorder *events.Ring
+	eventsEnabled      bool
 }
 
 type configReloadSnapshot struct {
