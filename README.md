@@ -187,6 +187,28 @@ HOME_JWT=... docker compose -f docker-compose.cluster.yml up -d
 
 All tunables are documented in [`.env.production.example`](.env.production.example).
 
+## Configuration persistence (PG-first)
+
+When `PGSTORE_DSN` is set, NixLLM can own its configuration in PostgreSQL. The `config_revisions` / `config_imports` / `runtime_config` tables track every accepted change so the dashboard can roll back to any prior revision without leaving the control plane.
+
+One-shot migration from YAML:
+
+```bash
+nixllm -import-config config.yaml                       # YAML → PostgreSQL
+nixllm -import-config config.yaml -import-config-dry-run # preview only; no DB writes
+```
+
+The import is transactional: provider, API-key, and client-key resources commit together or not at all. Duplicate provider identities, invalid fields, and unsupported values are surfaced in the dry-run report before anything touches the database.
+
+Management API routes for the control plane (require `PGSTORE_DSN`):
+
+- `GET /v0/management/runtime-config` — active snapshot.
+- `POST /v0/management/runtime-config` — apply with `expected_revision` (optimistic concurrency; 409 on conflict).
+- `POST /v0/management/runtime-config/rollback` — restore a prior revision in one transaction.
+- `GET /v0/management/config-revisions` and `GET /v0/management/config-imports` — history views.
+
+`config.yaml` is still read at runtime today; the Phase 2 startup bridge is the cutover that stops reading it.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

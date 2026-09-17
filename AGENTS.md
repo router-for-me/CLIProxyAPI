@@ -13,6 +13,9 @@ go run ./cmd/server # Run dev server
 go test ./... # Run all tests
 go test -v -run TestName ./path/to/pkg # Run single test
 go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
+# PG-first import-config (requires PGSTORE_DSN):
+nixllm -import-config config.yaml # One-shot YAML → PostgreSQL control-plane import
+nixllm -import-config config.yaml -import-config-dry-run # Plan and validate only; no DB writes
 # NixLLM dashboard (React + Vite SPA under web/dashboard/):
 cd web/dashboard && npm install && npm run dev  # Dev SPA on :9173 (proxies /v0 to the Go API)
 cd web/dashboard && npm run build                # Build dist/ (embedded via internal/dashboardasset)
@@ -36,6 +39,12 @@ make dash-embed                                  # Build SPA + rebuild Go binary
 - `internal/translator/` — Provider protocol translators (and shared `common`)
 - `internal/registry/` — Model registry + remote updater (`StartModelsUpdater`); `--local-model` disables remote updates
 - `internal/store/` — Storage implementations and secret resolution
+- `internal/configsnapshot/` — PG-first control plane planner. `BuildResourcePlan` converts all supported config sections into a `NormalizedResourcePlan` (pure, no DB, no mutation of the caller's config); `MarshalYAML`/`UnmarshalYAML` give deterministic snapshot projection; `Checksum` gives the canonical SHA-256 identity. See `docs/plans/2026-09-14-nixllm-pg-first-design.md`.
+- `internal/configvalidation/` — Shared validation pipeline; `Validate(snapshot)` round-trips a snapshot through `config.ParseConfigBytes` so dashboard saves and CLI imports share the same defaults and sanitization.
+- `internal/configstore/` — `Repository` interface + `RevisionConflictError`; the PG-backed implementation (`configstore/pg`) gates every write on expected revision inside one tx and appends a `config_revisions` row.
+- `internal/store/runtimeconfig/` — Transaction-aware SQL for `LoadRuntimeConfig`, `RollbackRuntimeConfig`, `ListRevisions`, `ListImports`, `ActiveRevision` over the `runtime_config` / `config_revisions` / `config_imports` tables. Depends on both `store` and `configsnapshot`, so those two must never depend on each other.
+- `internal/store/pg_normalized_import.go` — `ApplyNormalizedResourcePlan` applies the planner output in ONE transaction: provider parent upsert + child collections (models/headers/excluded/entries with stable child identity matching), then client API keys. Any error rolls back everything.
+- `internal/api/handlers/management/runtime_config.go` — Management routes `/v0/management/runtime-config` (GET/POST with expected_revision), `/runtime-config/rollback`, `/config-revisions`, `/config-imports`. Return 503 without `PGSTORE_DSN`.
 - `internal/policy/` — Per-API-key + per-Internal-User policy enforcement (RPM, TPM, hourly rate, max_parallel_requests, budget caps, model access). Per-user caps act as fallback when per-key caps are unset, mirroring the LiteLLM user→key hierarchy.
 - `internal/api/handlers/management/internal_users.go` — LiteLLM `/user/*` equivalence class under `/v0/management/internal-users/*` (path kept for backward compatibility; see the file-level comment for the route-by-route mapping). Implements auto-create-key on user creation, per-user TPM/parallel caps, per-model spend via on-the-fly SELECT, and spend reconciliation.
 - `internal/api/handlers/management/alerts.go` + `alerts_runner.go` — Alert/notification feed (Analysis → Alerts) and the background detection sweep (max-spend for internal users + API keys via `usage_windows`/`policy.WindowFor`, error-rate from `usage_errors`, provider cooldowns via `authManager.CooldownStateSnapshot()`). Deduplicated by fingerprint + suppression window; settings live in `alert_settings`.
