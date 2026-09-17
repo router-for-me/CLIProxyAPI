@@ -410,6 +410,7 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
 	body = normalizeKimiTools(body)
 	body = normalizeKimiTemperature(body)
+	body = normalizeKimiAgentMessages(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiResponsesURL(auth)
@@ -519,6 +520,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
 	body = normalizeKimiTools(body)
 	body = normalizeKimiTemperature(body)
+	body = normalizeKimiAgentMessages(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiResponsesURL(auth)
@@ -1228,4 +1230,61 @@ func normalizeKimiTemperature(body []byte) []byte {
 		body, _ = sjson.DeleteBytes(body, "temperature")
 	}
 	return body
+}
+
+// normalizeKimiAgentMessages rewrites Codex multi-agent v2 "agent_message"
+// input items into plain user "message" items before the payload is forwarded
+// to the upstream Kimi Responses endpoint. The upstream rejects agent_message
+// items outright (HTTP 400 invalid_request_error), which broke every Codex
+// session that injected subagent handoff items into the Responses input.
+// Encrypted content parts are surfaced as input_text, mirroring
+// normalizeCodexAgentMessages in the Claude translator so delegated task text
+// is preserved instead of dropped.
+func normalizeKimiAgentMessages(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	updated := body
+	changed := false
+	for itemIndex, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
+			continue
+		}
+		itemPath := fmt.Sprintf("input.%d", itemIndex)
+		if content := item.Get("content"); content.IsArray() {
+			for partIndex, part := range content.Array() {
+				if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
+					continue
+				}
+				enc := part.Get("encrypted_content")
+				if enc.Type != gjson.String {
+					continue
+				}
+				partPath := fmt.Sprintf("%s.content.%d", itemPath, partIndex)
+				var errSet error
+				if updated, errSet = sjson.SetBytes(updated, partPath+".type", "input_text"); errSet != nil {
+					return body
+				}
+				if updated, errSet = sjson.SetBytes(updated, partPath+".text", enc.String()); errSet != nil {
+					return body
+				}
+				if updated, errSet = sjson.DeleteBytes(updated, partPath+".encrypted_content"); errSet != nil {
+					return body
+				}
+			}
+		}
+		var errSet error
+		if updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user"); errSet != nil {
+			return body
+		}
+		if updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message"); errSet != nil {
+			return body
+		}
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	return updated
 }
