@@ -116,6 +116,6 @@ This repo (`arrrrny/CLIProxyAPIPlus`) is a **fork** of `router-for-me/CLIProxyAP
 - **Never auto-resolve conflicts in favor of upstream.** `git checkout --theirs`, `git merge -X theirs`, and `git merge -s ours` are forbidden against upstream. On any conflict, abort, open a `sync`-labeled issue, and resolve by hand on a `sync/fork-sync-resolution` branch.
 - **After a clean merge, verify `.github/FORK_OWNED_FILES`.** A clean merge can overwrite fork code without conflicting. When you add or change a fork-owned file, append it with a fork-unique survival marker.
 - **Never push a merged tree that fails `go build ./...`.**
-- `.github/workflows/sync-and-release.yml` is deprecated and must stay commented out; `sync-upstream.yml` is the source of truth.
+- The `-X theirs` sync is banned outright. `.github/workflows/sync-and-release.yml` implemented it and has been deleted — do not reintroduce it. `sync-upstream.yml` is the source of truth.
 
 **Note:** `AGENTS.md` cannot be changed by a pull request — `agents-md-guard.yml` auto-closes any PR that touches it. Edit it via a direct push to `sync`, as done here.

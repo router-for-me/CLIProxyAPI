@@ -47,7 +47,7 @@ the conflicted files, and fails the job. Nothing is pushed.
 forbidden against upstream — in scripts, in CI, and by hand. They do not
 "resolve" a conflict, they delete fork code and report success. An earlier
 version of this repo's `sync-and-release.yml` did exactly that with a hardcoded
-owned-file list; it silently dropped fork work and is now commented out.
+owned-file list; it silently dropped fork work. The file has been deleted.
 
 Resolve conflicts on a `sync/fork-sync-resolution` branch, then merge manually.
 
@@ -84,7 +84,6 @@ would be published as a release by `sync-release.yml`.
 | --- | --- |
 | `sync-upstream.yml` | **Source of truth.** Daily upstream merge with the three rules above. |
 | `sync-release.yml` | Unrelated to upstream syncing — builds and publishes release artifacts on every push to `sync`. |
-| `sync-and-release.yml` | **Deprecated, must stay commented out.** The `-X theirs` version described above. |
 
 Note that `sync-upstream.yml` pushes with the `CLIPROXY_SYNC` PAT rather than
 `GITHUB_TOKEN`: pushes authenticated with `GITHUB_TOKEN` do not trigger other
@@ -105,7 +104,7 @@ This repo (`arrrrny/CLIProxyAPIPlus`) is a **fork** of `router-for-me/CLIProxyAP
 - **Never auto-resolve conflicts in favor of upstream.** `git checkout --theirs`, `git merge -X theirs`, and `git merge -s ours` are forbidden against upstream. On any conflict, abort, open a `sync`-labeled issue, and resolve by hand on a `sync/fork-sync-resolution` branch.
 - **After a clean merge, verify `.github/FORK_OWNED_FILES`.** A clean merge can overwrite fork code without conflicting. When you add or change a fork-owned file, append it with a fork-unique survival marker.
 - **Never push a merged tree that fails `go build ./...`.**
-- `.github/workflows/sync-and-release.yml` is deprecated and must stay commented out; `sync-upstream.yml` is the source of truth.
+- The `-X theirs` sync is banned outright. `.github/workflows/sync-and-release.yml` implemented it and has been deleted — do not reintroduce it. `sync-upstream.yml` is the source of truth.
 
 **Note:** `AGENTS.md` cannot be changed by a pull request — `agents-md-guard.yml` auto-closes any PR that touches it. Edit it via a direct push to `sync`, as done here.
 ```

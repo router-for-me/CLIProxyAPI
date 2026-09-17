@@ -1,6 +1,6 @@
 name: sync-release
 
-# Replaces the disabled sync-and-release.yml. Builds release binaries for
+# Replaces the removed sync-and-release.yml. Builds release binaries for
 # linux/amd64 and darwin/amd64 (Intel Mac) on every push to the `sync` branch
 # and publishes them as a GitHub release.
 
