@@ -96,7 +96,7 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 	}
 	// Store the combined excluded models list so that routing can read it at runtime
 	if len(combined) > 0 {
-		auth.Attributes["excluded_models"] = strings.Join(combined, ",")
+		auth.Attributes[coreauth.AttributeExcludedModels] = strings.Join(combined, ",")
 	}
 	if authKind != "" {
 		auth.Attributes["auth_kind"] = authKind

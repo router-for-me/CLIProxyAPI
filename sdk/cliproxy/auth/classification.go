@@ -13,12 +13,13 @@ const (
 	AuthSourceObjectStore = "objectstore"
 	AuthSourcePostgres    = "postgres"
 
-	AttributeAPIKey        = "api_key"
-	AttributeAuthKind      = "auth_kind"
-	AttributePath          = "path"
-	AttributeRuntimeOnly   = "runtime_only"
-	AttributeSource        = "source"
-	AttributeSourceBackend = "source_backend"
+	AttributeAPIKey         = "api_key"
+	AttributeAuthKind       = "auth_kind"
+	AttributeExcludedModels = "excluded_models"
+	AttributePath           = "path"
+	AttributeRuntimeOnly    = "runtime_only"
+	AttributeSource         = "source"
+	AttributeSourceBackend  = "source_backend"
 )
 
 // AuthKind returns the credential kind using explicit metadata first and legacy

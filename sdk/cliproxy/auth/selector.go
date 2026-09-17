@@ -140,6 +140,34 @@ func canonicalModelKey(model string) string {
 	return modelName
 }
 
+// authExcludedForModel reports whether the credential is excluded for the requested
+// model. The management API writes the "*" sentinel when a config-declared API key is
+// disabled; any other pattern matches the requested model exactly. Only the "*" sentinel
+// blocks when the requested model is empty.
+func authExcludedForModel(auth *Auth, model string) bool {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return false
+	}
+	raw := strings.TrimSpace(auth.Attributes[AttributeExcludedModels])
+	if raw == "" {
+		return false
+	}
+	modelKey := canonicalModelKey(model)
+	for _, pattern := range strings.Split(raw, ",") {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if pattern == "*" {
+			return true
+		}
+		if modelKey != "" && pattern == modelKey {
+			return true
+		}
+	}
+	return false
+}
+
 func authWebsocketsEnabled(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -307,6 +335,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, time.Time{}
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
+		return true, blockReasonDisabled, time.Time{}
+	}
+	if authExcludedForModel(auth, model) {
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if model != "" {
