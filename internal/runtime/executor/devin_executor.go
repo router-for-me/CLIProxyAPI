@@ -539,6 +539,144 @@ func (e *DevinExecutor) streamDevinFrames(
 	var lastStopReason uint64
 	sawEOS := false
 
+	// Buffer subsequent content/tools while thinking is active so late-arriving or split
+	// thought signatures can be emitted before closing the thinking content block.
+	var pendingActions []func() bool
+
+	flushPendingActions := func() bool {
+		if thoughtStarted {
+			stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", thoughtStepIndex)
+			if !emitInteractionsEvent(stopEvent) {
+				return false
+			}
+			thoughtStarted = false
+			stepIndex++
+		}
+		for _, action := range pendingActions {
+			if !action() {
+				return false
+			}
+		}
+		pendingActions = nil
+		return true
+	}
+
+	emitContentChunk := func(chunk string) bool {
+		if thoughtStarted {
+			stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
+			if !emitInteractionsEvent(stopEvent) {
+				return false
+			}
+			thoughtStarted = false
+			stepIndex++
+		}
+		if !contentStarted {
+			startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"model_output"}}`), "index", stepIndex)
+			if !emitInteractionsEvent(startEvent) {
+				return false
+			}
+			contentStarted = true
+		}
+		deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"text","text":""}}`), "index", stepIndex)
+		deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.text", chunk)
+		return emitInteractionsEvent(deltaEvent)
+	}
+
+	emitToolCall := func(tc helps.DevinToolCallDelta) bool {
+		if tc.Index < 0 || tc.Index >= maxDevinToolCalls {
+			log.Warnf("devin executor: tool call index %d out of bounds (max %d), dropping", tc.Index, maxDevinToolCalls)
+			return true
+		}
+		if thoughtStarted {
+			stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
+			_ = emitInteractionsEvent(stopEvent)
+			thoughtStarted = false
+			stepIndex++
+		}
+		if contentStarted {
+			stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
+			_ = emitInteractionsEvent(stopEvent)
+			contentStarted = false
+			stepIndex++
+		}
+
+		slot, exists := activeToolSlots[tc.Index]
+		if exists && slot.id != "" && tc.ID != "" && tc.ID != slot.id {
+			stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", slot.stepIndex)
+			if !emitInteractionsEvent(stopEvent) {
+				return false
+			}
+			exists = false
+		}
+
+		if !exists {
+			sIdx := stepIndex
+			stepIndex++
+			slot = &devinActiveToolSlot{
+				stepIndex: sIdx,
+				id:        tc.ID,
+				name:      tc.Name,
+			}
+			activeToolSlots[tc.Index] = slot
+			startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","name":"","id":"","call_id":"","arguments":{}}}`), "index", sIdx)
+			startEvent, _ = sjson.SetBytes(startEvent, "step.name", tc.Name)
+			startEvent, _ = sjson.SetBytes(startEvent, "step.id", tc.ID)
+			startEvent, _ = sjson.SetBytes(startEvent, "step.call_id", tc.ID)
+			if !emitInteractionsEvent(startEvent) {
+				return false
+			}
+		} else {
+			updated := false
+			if slot.id == "" && tc.ID != "" {
+				slot.id = tc.ID
+				updated = true
+			}
+			if slot.name == "" && tc.Name != "" {
+				slot.name = tc.Name
+				updated = true
+			}
+			if updated {
+				updateEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","name":"","id":"","call_id":"","arguments":{}}}`), "index", slot.stepIndex)
+				updateEvent, _ = sjson.SetBytes(updateEvent, "step.name", slot.name)
+				updateEvent, _ = sjson.SetBytes(updateEvent, "step.id", slot.id)
+				updateEvent, _ = sjson.SetBytes(updateEvent, "step.call_id", slot.id)
+				_ = emitInteractionsEvent(updateEvent)
+			}
+		}
+
+		if tc.Arguments != "" {
+			deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":""}}`), "index", slot.stepIndex)
+			deltaEvent, _ = translatorcommon.SetStringWithoutHTMLEscape(deltaEvent, "delta.arguments", tc.Arguments)
+			if !emitInteractionsEvent(deltaEvent) {
+				return false
+			}
+		}
+		return true
+	}
+
+	closeOpenSteps := func() {
+		if len(pendingActions) > 0 || thoughtStarted {
+			_ = flushPendingActions()
+		}
+		if contentStarted {
+			stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
+			_ = emitInteractionsEvent(stopEvent)
+			contentStarted = false
+		}
+		if len(activeToolSlots) > 0 {
+			sortedIndices := make([]int, 0, len(activeToolSlots))
+			for _, slot := range activeToolSlots {
+				sortedIndices = append(sortedIndices, slot.stepIndex)
+			}
+			sort.Ints(sortedIndices)
+			for _, sIdx := range sortedIndices {
+				stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", sIdx)
+				_ = emitInteractionsEvent(stopEvent)
+			}
+			clear(activeToolSlots)
+		}
+	}
+
 	// 2. Consume streaming Connect-proto frames
 	for {
 		flag, payload, errRead := helps.ReadConnectFrame(body)
@@ -556,6 +694,7 @@ func (e *DevinExecutor) streamDevinFrames(
 		if flag&helps.ConnectFlagEndStream != 0 {
 			code, errTrailer := helps.ParseDevinTrailerError(payload)
 			if errTrailer != nil {
+				closeOpenSteps()
 				log.Warnf("devin executor: trailer error (%d): %v", code, errTrailer)
 				helps.RecordAPIResponseError(ctx, e.cfg, errTrailer)
 				failedEvent, _ := sjson.SetBytes([]byte(`{"event_type":"response.failed","error":{"message":"","code":""}}`), "error.message", errTrailer.Error())
@@ -631,6 +770,11 @@ func (e *DevinExecutor) streamDevinFrames(
 
 		// Emit thinking delta
 		if frameRes.ThinkingText != "" {
+			if len(pendingActions) > 0 {
+				if !flushPendingActions() {
+					return
+				}
+			}
 			accumulatedThinking.WriteString(frameRes.ThinkingText)
 			chunk := thinkingBuf.Feed([]byte(frameRes.ThinkingText))
 			if chunk != "" {
@@ -691,95 +835,27 @@ func (e *DevinExecutor) streamDevinFrames(
 			chunk := contentBuf.Feed([]byte(frameRes.ContentText))
 			if chunk != "" {
 				if thoughtStarted {
-					stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
-					if !emitInteractionsEvent(stopEvent) {
+					capturedChunk := chunk
+					pendingActions = append(pendingActions, func() bool {
+						return emitContentChunk(capturedChunk)
+					})
+				} else {
+					if !emitContentChunk(chunk) {
 						return
 					}
-					thoughtStarted = false
-					stepIndex++
-				}
-				if !contentStarted {
-					startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"model_output"}}`), "index", stepIndex)
-					if !emitInteractionsEvent(startEvent) {
-						return
-					}
-					contentStarted = true
-				}
-				deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"text","text":""}}`), "index", stepIndex)
-				deltaEvent, _ = sjson.SetBytes(deltaEvent, "delta.text", chunk)
-				if !emitInteractionsEvent(deltaEvent) {
-					return
 				}
 			}
 		}
 
 		// Emit tool call deltas
 		for _, tc := range frameRes.ToolCallDeltas {
-			if tc.Index < 0 || tc.Index >= maxDevinToolCalls {
-				log.Warnf("devin executor: tool call index %d out of bounds (max %d), dropping", tc.Index, maxDevinToolCalls)
-				continue
-			}
 			if thoughtStarted {
-				stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
-				_ = emitInteractionsEvent(stopEvent)
-				thoughtStarted = false
-				stepIndex++
-			}
-			if contentStarted {
-				stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
-				_ = emitInteractionsEvent(stopEvent)
-				contentStarted = false
-				stepIndex++
-			}
-
-			slot, exists := activeToolSlots[tc.Index]
-			if exists && slot.id != "" && tc.ID != "" && tc.ID != slot.id {
-				stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", slot.stepIndex)
-				if !emitInteractionsEvent(stopEvent) {
-					return
-				}
-				exists = false
-			}
-
-			if !exists {
-				sIdx := stepIndex
-				stepIndex++
-				slot = &devinActiveToolSlot{
-					stepIndex: sIdx,
-					id:        tc.ID,
-					name:      tc.Name,
-				}
-				activeToolSlots[tc.Index] = slot
-				startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","name":"","id":"","call_id":"","arguments":{}}}`), "index", sIdx)
-				startEvent, _ = sjson.SetBytes(startEvent, "step.name", tc.Name)
-				startEvent, _ = sjson.SetBytes(startEvent, "step.id", tc.ID)
-				startEvent, _ = sjson.SetBytes(startEvent, "step.call_id", tc.ID)
-				if !emitInteractionsEvent(startEvent) {
-					return
-				}
+				capturedTC := tc
+				pendingActions = append(pendingActions, func() bool {
+					return emitToolCall(capturedTC)
+				})
 			} else {
-				updated := false
-				if slot.id == "" && tc.ID != "" {
-					slot.id = tc.ID
-					updated = true
-				}
-				if slot.name == "" && tc.Name != "" {
-					slot.name = tc.Name
-					updated = true
-				}
-				if updated {
-					updateEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","name":"","id":"","call_id":"","arguments":{}}}`), "index", slot.stepIndex)
-					updateEvent, _ = sjson.SetBytes(updateEvent, "step.name", slot.name)
-					updateEvent, _ = sjson.SetBytes(updateEvent, "step.id", slot.id)
-					updateEvent, _ = sjson.SetBytes(updateEvent, "step.call_id", slot.id)
-					_ = emitInteractionsEvent(updateEvent)
-				}
-			}
-
-			if tc.Arguments != "" {
-				deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":""}}`), "index", slot.stepIndex)
-				deltaEvent, _ = translatorcommon.SetStringWithoutHTMLEscape(deltaEvent, "delta.arguments", tc.Arguments)
-				if !emitInteractionsEvent(deltaEvent) {
+				if !emitToolCall(tc) {
 					return
 				}
 			}
@@ -787,21 +863,7 @@ func (e *DevinExecutor) streamDevinFrames(
 	}
 
 	// 3. Close open steps
-	if thoughtStarted || contentStarted {
-		stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
-		_ = emitInteractionsEvent(stopEvent)
-	}
-	if len(activeToolSlots) > 0 {
-		sortedIndices := make([]int, 0, len(activeToolSlots))
-		for _, slot := range activeToolSlots {
-			sortedIndices = append(sortedIndices, slot.stepIndex)
-		}
-		sort.Ints(sortedIndices)
-		for _, sIdx := range sortedIndices {
-			stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", sIdx)
-			_ = emitInteractionsEvent(stopEvent)
-		}
-	}
+	closeOpenSteps()
 
 	// If stream encountered an abnormal read error mid-flight, record failure and emit response.failed
 	if streamErr != nil && ctx.Err() == nil {
@@ -1429,15 +1491,53 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 	// 6. Tools
 	toolsRes := root.Get("tools")
 	if toolsRes.IsArray() {
-		for _, t := range toolsRes.Array() {
+		appendDevinTool := func(t gjson.Result) {
 			name := t.Get("name").String()
+			if name == "" || translatorcommon.IsDevinCodexAppAutomationUpdate("", name) {
+				return
+			}
 			desc := t.Get("description").String()
+			desc = translatorcommon.SanitizeDevinToolDescription(name, desc)
 			params := t.Get("parameters").Raw
+			if len(params) == 0 {
+				params = t.Get("parametersJsonSchema").Raw
+			}
 			tools = append(tools, helps.DevinTool{
 				Name:        name,
 				Description: desc,
 				Parameters:  []byte(params),
 			})
+		}
+		for _, t := range toolsRes.Array() {
+			if t.Get("type").String() == "namespace" && strings.EqualFold(strings.TrimSpace(t.Get("name").String()), "mcp__codex_app") {
+				children := t.Get("tools")
+				if !children.Exists() || !children.IsArray() {
+					children = t.Get("children")
+				}
+				if children.Exists() && children.IsArray() {
+					for _, c := range children.Array() {
+						childName := c.Get("name").String()
+						if strings.EqualFold(strings.TrimSpace(childName), "automation_update") {
+							continue
+						}
+						appendDevinTool(c)
+					}
+				}
+				continue
+			}
+			if decls := t.Get("function_declarations"); decls.Exists() && decls.IsArray() {
+				for _, d := range decls.Array() {
+					appendDevinTool(d)
+				}
+				continue
+			}
+			if decls := t.Get("functionDeclarations"); decls.Exists() && decls.IsArray() {
+				for _, d := range decls.Array() {
+					appendDevinTool(d)
+				}
+				continue
+			}
+			appendDevinTool(t)
 		}
 	}
 

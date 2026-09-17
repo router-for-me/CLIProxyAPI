@@ -761,7 +761,7 @@ nonstream-keepalive-interval: 0
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
-#         thinking:                      # optional: omit to default to levels ["low","medium","high"]
+#         thinking:                      # optional: omit to default to levels ["low","medium","high"]. Exceeding levels (e.g. "max", "xhigh") are clamped to "high"; explicitly declare levels here if the upstream supports them
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
 #       # The client still sees only one alias in the model list.

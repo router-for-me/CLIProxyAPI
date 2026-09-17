@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -23,11 +24,14 @@ type interactionsToResponsesStreamState struct {
 	TextOutputs        map[int]*strings.Builder
 	Seq                int
 	Done               bool
+	ToolIdentityMap    map[string]util.ResponsesToolIdentity
 }
 
 type interactionsFunctionCallState struct {
 	ID                      string
 	Name                    string
+	Namespace               string
+	IsCustom                bool
 	Arguments               strings.Builder
 	InitialArgumentsEmitted bool
 	ArgumentsDoneEmitted    bool
@@ -78,6 +82,15 @@ func ConvertInteractionsResponseToOpenAIResponses(ctx context.Context, modelName
 	if st.TextOutputs == nil {
 		st.TextOutputs = make(map[int]*strings.Builder)
 	}
+	if st.ToolIdentityMap == nil {
+		reqJSON := originalRequestRawJSON
+		if len(reqJSON) == 0 {
+			reqJSON = requestRawJSON
+		}
+		if len(reqJSON) > 0 {
+			st.ToolIdentityMap = util.ResponsesToolReverseIdentityMap(reqJSON)
+		}
+	}
 	return convertInteractionsEventToResponses(modelName, originalRequestRawJSON, requestRawJSON, rawJSON, st)
 }
 
@@ -94,9 +107,17 @@ func ConvertInteractionsResponseToOpenAIResponsesNonStream(ctx context.Context, 
 		steps = root.Get("interaction.steps")
 	}
 	forAntigravity := isAntigravityModel(responseModel(modelName, root))
+	reqJSON := originalRequestRawJSON
+	if len(reqJSON) == 0 {
+		reqJSON = requestRawJSON
+	}
+	var toolIdentityMap map[string]util.ResponsesToolIdentity
+	if len(reqJSON) > 0 {
+		toolIdentityMap = util.ResponsesToolReverseIdentityMap(reqJSON)
+	}
 	var outputs [][]byte
 	steps.ForEach(func(_, step gjson.Result) bool {
-		if item, ok := interactionsStepToResponsesOutput(step, forAntigravity); ok {
+		if item, ok := interactionsStepToResponsesOutput(step, forAntigravity, toolIdentityMap); ok {
 			outputs = append(outputs, item)
 		}
 		return true
@@ -157,7 +178,7 @@ func convertInteractionsEventToResponses(modelName string, originalRequestRawJSO
 	return nil
 }
 
-func interactionsStepToResponsesOutput(step gjson.Result, forAntigravity bool) ([]byte, bool) {
+func interactionsStepToResponsesOutput(step gjson.Result, forAntigravity bool, toolIdentityMap map[string]util.ResponsesToolIdentity) ([]byte, bool) {
 	switch step.Get("type").String() {
 	case "model_output":
 		item := []byte(`{"type":"message","role":"assistant","content":[]}`)
@@ -199,7 +220,7 @@ func interactionsStepToResponsesOutput(step gjson.Result, forAntigravity bool) (
 		}
 		return item, true
 	case "function_call":
-		item := interactionsFunctionCallToResponses(step, forAntigravity)
+		item := interactionsFunctionCallToResponsesWithIdentity(step, forAntigravity, toolIdentityMap)
 		item, _ = sjson.SetBytes(item, "status", "completed")
 		return item, true
 	}
@@ -258,26 +279,51 @@ func interactionsStepStartToResponses(modelName string, root gjson.Result, st *i
 		if st.FunctionCalls[index] != nil {
 			return nil
 		}
-		name := step.Get("name").String()
+		rawName := step.Get("name").String()
+		name := rawName
+		var namespace string
+		var isCustom bool
 		if isAntigravityModel(modelName) {
 			name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
 		}
+		if st.ToolIdentityMap != nil {
+			if identity, ok := st.ToolIdentityMap[rawName]; ok {
+				name = identity.Name
+				namespace = identity.Namespace
+				isCustom = identity.Custom
+			} else if identity, ok := st.ToolIdentityMap[name]; ok {
+				name = identity.Name
+				namespace = identity.Namespace
+				isCustom = identity.Custom
+			}
+		}
 		call := &interactionsFunctionCallState{
-			ID:   itemID,
-			Name: name,
+			ID:        itemID,
+			Name:      name,
+			Namespace: namespace,
+			IsCustom:  isCustom,
 		}
 		if args := step.Get("arguments"); args.Exists() && strings.TrimSpace(args.Raw) != "{}" {
 			call.Arguments.WriteString(jsonStringValue(args, "{}"))
 		}
 		st.FunctionCalls[index] = call
-		added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"function_call","call_id":"","name":"","arguments":"","status":"in_progress"}}`)
+
+		var added []byte
+		if call.IsCustom {
+			added = []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"custom_tool_call","call_id":"","name":"","input":"","status":"in_progress"}}`)
+		} else {
+			added = []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"function_call","call_id":"","name":"","arguments":"","status":"in_progress"}}`)
+		}
 		added, _ = sjson.SetBytes(added, "sequence_number", nextResponsesSeq(st))
 		added, _ = sjson.SetBytes(added, "output_index", index)
 		added, _ = sjson.SetBytes(added, "item.id", itemID)
 		added, _ = sjson.SetBytes(added, "item.call_id", itemID)
+		if call.Namespace != "" {
+			added, _ = sjson.SetBytes(added, "item.namespace", call.Namespace)
+		}
 		added, _ = sjson.SetBytes(added, "item.name", call.Name)
 		events := [][]byte{emitResponsesEvent("response.output_item.added", added)}
-		if call.Arguments.Len() > 0 && !call.InitialArgumentsEmitted {
+		if !call.IsCustom && call.Arguments.Len() > 0 && !call.InitialArgumentsEmitted {
 			events = append(events, responsesFunctionCallArgumentsDeltaToResponses(index, itemID, call.Arguments.String(), st))
 			call.InitialArgumentsEmitted = true
 		}
@@ -310,6 +356,9 @@ func interactionsStepDeltaToResponses(root gjson.Result, st *interactionsToRespo
 				return nil
 			}
 			call.Arguments.WriteString(arguments)
+			if call.IsCustom {
+				return nil
+			}
 		}
 		return [][]byte{responsesFunctionCallArgumentsDeltaToResponses(index, st.ItemIDs[index], arguments, st)}
 	default:
@@ -340,6 +389,15 @@ func responsesFunctionCallArgumentsDoneToResponses(index int, itemID, arguments 
 	payload, _ = sjson.SetBytes(payload, "item_id", itemID)
 	payload, _ = translatorcommon.SetStringWithoutHTMLEscape(payload, "arguments", arguments)
 	return emitResponsesEvent("response.function_call_arguments.done", payload)
+}
+
+func responsesCustomToolCallInputDoneToResponses(index int, itemID, input string, st *interactionsToResponsesStreamState) []byte {
+	payload := []byte(`{"type":"response.custom_tool_call_input.done","output_index":0,"item_id":"","input":""}`)
+	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
+	payload, _ = sjson.SetBytes(payload, "output_index", index)
+	payload, _ = sjson.SetBytes(payload, "item_id", itemID)
+	payload, _ = sjson.SetBytes(payload, "input", input)
+	return emitResponsesEvent("response.custom_tool_call_input.done", payload)
 }
 
 func interactionsStepStopToResponses(root gjson.Result, st *interactionsToResponsesStreamState) [][]byte {
@@ -379,6 +437,26 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 			return nil
 		}
 		events := make([][]byte, 0, 2)
+		if call.IsCustom {
+			input := util.UnwrapResponsesCustomToolInput(call.Arguments.String())
+			if !call.ArgumentsDoneEmitted {
+				events = append(events, responsesCustomToolCallInputDoneToResponses(index, itemID, input, st))
+				call.ArgumentsDoneEmitted = true
+			}
+			done := []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"","type":"custom_tool_call","call_id":"","name":"","input":"","status":"completed"}}`)
+			done, _ = sjson.SetBytes(done, "sequence_number", nextResponsesSeq(st))
+			done, _ = sjson.SetBytes(done, "output_index", index)
+			done, _ = sjson.SetBytes(done, "item.id", itemID)
+			done, _ = sjson.SetBytes(done, "item.call_id", itemID)
+			if call.Namespace != "" {
+				done, _ = sjson.SetBytes(done, "item.namespace", call.Namespace)
+			}
+			done, _ = sjson.SetBytes(done, "item.name", call.Name)
+			done, _ = sjson.SetBytes(done, "item.input", input)
+			call.ItemDoneEmitted = true
+			return append(events, emitResponsesEvent("response.output_item.done", done))
+		}
+
 		arguments := responsesFunctionCallArguments(call)
 		if !call.ArgumentsDoneEmitted {
 			events = append(events, responsesFunctionCallArgumentsDoneToResponses(index, itemID, arguments, st))
@@ -389,6 +467,9 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 		done, _ = sjson.SetBytes(done, "output_index", index)
 		done, _ = sjson.SetBytes(done, "item.id", itemID)
 		done, _ = sjson.SetBytes(done, "item.call_id", itemID)
+		if call.Namespace != "" {
+			done, _ = sjson.SetBytes(done, "item.namespace", call.Namespace)
+		}
 		done, _ = sjson.SetBytes(done, "item.name", call.Name)
 		done, _ = translatorcommon.SetStringWithoutHTMLEscape(done, "item.arguments", arguments)
 		call.ItemDoneEmitted = true
@@ -545,11 +626,27 @@ func responsesCompletedOutputItem(index int, itemType string, st *interactionsTo
 	case "thought":
 		return responsesReasoningItem(index, st), true
 	case "function_call":
+		if call := st.FunctionCalls[index]; call != nil && call.IsCustom {
+			item := []byte(`{"id":"","type":"custom_tool_call","call_id":"","name":"","input":"","status":"completed"}`)
+			itemID := st.ItemIDs[index]
+			item, _ = sjson.SetBytes(item, "id", itemID)
+			item, _ = sjson.SetBytes(item, "call_id", itemID)
+			if call.Namespace != "" {
+				item, _ = sjson.SetBytes(item, "namespace", call.Namespace)
+			}
+			item, _ = sjson.SetBytes(item, "name", call.Name)
+			input := util.UnwrapResponsesCustomToolInput(responsesFunctionCallArguments(call))
+			item, _ = sjson.SetBytes(item, "input", input)
+			return item, true
+		}
 		item := []byte(`{"id":"","type":"function_call","call_id":"","name":"","arguments":"{}","status":"completed"}`)
 		itemID := st.ItemIDs[index]
 		item, _ = sjson.SetBytes(item, "id", itemID)
 		item, _ = sjson.SetBytes(item, "call_id", itemID)
 		if call := st.FunctionCalls[index]; call != nil {
+			if call.Namespace != "" {
+				item, _ = sjson.SetBytes(item, "namespace", call.Namespace)
+			}
 			item, _ = sjson.SetBytes(item, "name", call.Name)
 			item, _ = translatorcommon.SetStringWithoutHTMLEscape(item, "arguments", responsesFunctionCallArguments(call))
 		}

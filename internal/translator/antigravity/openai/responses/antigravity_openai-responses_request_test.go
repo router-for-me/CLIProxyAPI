@@ -1,12 +1,14 @@
 package responses
 
 import (
+	"context"
 	"encoding/base64"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -462,11 +464,52 @@ func TestConvertOpenAIResponsesRequestToAntigravity_MidSessionDeveloperMessageDo
 	if len(turn2Parts) != 2 {
 		t.Fatalf("turn 2 parts count = %d, want 2; output=%s", len(turn2Parts), out)
 	}
-	if got := turn2Parts[0].Get("text").String(); got != "<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>" {
-		t.Fatalf("turn 2 part 0 = %q, want image_resize_notice; output=%s", got, out)
+	expectedDevText := "<system-reminder>\n<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>\n</system-reminder>"
+	if got := turn2Parts[0].Get("text").String(); got != expectedDevText {
+		t.Fatalf("turn 2 part 0 = %q, want %q; output=%s", got, expectedDevText, out)
 	}
 	if got := turn2Parts[1].Get("text").String(); got != "Turn 2 user" {
 		t.Fatalf("turn 2 part 1 = %q, want Turn 2 user; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_MidSessionSystemReminderEnvelope(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"instructions": "Be a helpful assistant",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Turn 1 user"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [
+					{"type": "output_text", "text": "Turn 1 assistant"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "system",
+				"content": "Please decide which tool to call next."
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	result := gjson.ParseBytes(out)
+
+	contents := result.Get("request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want 3; output=%s", len(contents), out)
+	}
+	expectedReminder := "<system-reminder>\nPlease decide which tool to call next.\n</system-reminder>"
+	if got := contents[2].Get("parts.0.text").String(); got != expectedReminder {
+		t.Fatalf("mid-session system reminder mismatch:\ngot:  %q\nwant: %q", got, expectedReminder)
 	}
 }
 
@@ -969,12 +1012,304 @@ func TestConvertOpenAIResponsesRequestToAntigravity_CrossProviderCapabilityIsola
 
 	// Antigravity dedicated request builder must not build web_search envelope
 	// by borrowing AI Studio's capability
-	if shouldBuildAntigravityResponsesWebSearchRequest(modelID, input) {
+	if shouldBuildAntigravityResponsesWebSearchRequest(modelID, input, nil) {
 		t.Fatalf("shouldBuildAntigravityResponsesWebSearchRequest should be false for Antigravity route when Antigravity model lacks search capability")
 	}
 
 	out := ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false)
 	if gjson.GetBytes(out, "requestType").String() == "web_search" {
 		t.Fatalf("ConvertOpenAIResponsesRequestToAntigravity should not build web_search requestType envelope when Antigravity route lacks capability: %s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_DoesNotBorrowNativeCapabilityFromGemini(t *testing.T) {
+	const modelID = "gemini-provider-native-capability-only"
+	webSearch := true
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("gemini-native-search-only", "gemini", []*registry.ModelInfo{{
+		ID:                 modelID,
+		NativeCapabilities: &registry.NativeCapabilities{WebSearch: &webSearch},
+	}})
+	t.Cleanup(func() { reg.UnregisterClient("gemini-native-search-only") })
+
+	input := []byte(`{
+		"model": "` + modelID + `",
+		"input": "Search web",
+		"tools": [{"type": "web_search"}]
+	}`)
+	out := ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false)
+	if gjson.GetBytes(out, "requestType").String() == "web_search" {
+		t.Fatalf("borrowed Gemini capability for Antigravity route: %s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_LocalWebSearchCapability(t *testing.T) {
+	trueVal, falseVal := true, false
+	for _, tc := range []struct {
+		name       string
+		capability *bool
+		probe      bool
+		wantSearch bool
+	}{
+		{name: "unknown without probe"},
+		{name: "unknown with probe", probe: true, wantSearch: true},
+		{name: "false without probe", capability: &falseVal},
+		{name: "false vetoes probe", capability: &falseVal, probe: true},
+		{name: "true still requires probe", capability: &trueVal},
+		{name: "true with probe", capability: &trueVal, probe: true, wantSearch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const modelID = "gemini-responses-local-search"
+			const clientID = "ag-responses-local-search"
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{{
+				ID:                 modelID,
+				NativeCapabilities: &registry.NativeCapabilities{WebSearch: tc.capability},
+			}})
+			t.Cleanup(func() { reg.UnregisterClient(clientID) })
+			if tc.probe && !reg.ApplyClientModelCapabilities(clientID, reg.ClientRegistrationEpoch(clientID), func(_ string, info *registry.ModelInfo) {
+				info.SupportsWebSearch = true
+			}) {
+				t.Fatal("capability probe update was not applied")
+			}
+
+			input := []byte(`{"model":"` + modelID + `","input":"Search weather","tools":[{"type":"web_search"}]}`)
+			unknownInfo := &registry.ModelInfo{ID: modelID, NativeCapabilities: &registry.NativeCapabilities{}}
+			for name, out := range map[string][]byte{
+				"legacy": ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false),
+				"unknown envelope with suffix": ConvertOpenAIResponsesRequestEnvelopeToAntigravity(context.Background(), sdktranslator.RequestEnvelope{
+					Model: modelID + "(high)", Body: input, Stream: true, ModelInfo: unknownInfo,
+				}).Body,
+			} {
+				if got := gjson.GetBytes(out, "requestType").String() == "web_search"; got != tc.wantSearch {
+					t.Fatalf("%s: web_search = %v, want %v; output=%s", name, got, tc.wantSearch, out)
+				}
+				if got := gjson.GetBytes(out, "request.tools.0.googleSearch").Exists(); got != tc.wantSearch {
+					t.Fatalf("%s: googleSearch present = %v, want %v; output=%s", name, got, tc.wantSearch, out)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_IgnoresOtherProviderSearchVeto(t *testing.T) {
+	const modelID = "gemini-responses-provider-search-veto"
+	webSearch := false
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("ag-responses-provider-search-veto", "antigravity", []*registry.ModelInfo{{
+		ID: modelID, SupportsWebSearch: true,
+	}})
+	reg.RegisterClient("gemini-responses-provider-search-veto", "gemini", []*registry.ModelInfo{{
+		ID: modelID, NativeCapabilities: &registry.NativeCapabilities{WebSearch: &webSearch},
+	}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("ag-responses-provider-search-veto")
+		reg.UnregisterClient("gemini-responses-provider-search-veto")
+	})
+
+	input := []byte(`{"model":"` + modelID + `","input":"Search weather","tools":[{"type":"web_search"}]}`)
+	out := ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false)
+	if gjson.GetBytes(out, "requestType").String() != "web_search" {
+		t.Fatalf("another provider disabled Antigravity search: %s", out)
+	}
+	if !gjson.GetBytes(out, "request.tools.0.googleSearch").Exists() {
+		t.Fatalf("missing Antigravity googleSearch tool: %s", out)
+	}
+}
+
+func registerAntigravityResponsesWebSearchModel(t *testing.T, clientID, modelID string) {
+	t.Helper()
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(clientID, "antigravity", []*registry.ModelInfo{
+		{ID: modelID, SupportsWebSearch: true},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(clientID)
+	})
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchPreservesMultiTurnContents(t *testing.T) {
+	modelID := "ag-websearch-multiturn-model"
+	registerAntigravityResponsesWebSearchModel(t, "ag-search-multiturn-client", modelID)
+
+	input := []byte(`{
+		"model": "` + modelID + `",
+		"reasoning": {"effort": "high"},
+		"input": [
+			{
+				"role": "user",
+				"content": [{"type": "input_text", "text": "We are discussing Paris."}]
+			},
+			{
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "Paris is the capital of France."}]
+			},
+			{
+				"role": "user",
+				"content": [{"type": "input_text", "text": "How is the weather there tomorrow?"}]
+			}
+		],
+		"tools": [{"type": "web_search"}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false)
+	parsed := gjson.ParseBytes(out)
+	if parsed.Get("requestType").String() != "web_search" {
+		t.Fatalf("expected requestType web_search, got %q. Output: %s", parsed.Get("requestType").String(), out)
+	}
+
+	contents := parsed.Get("request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("request.contents count = %d, want 3. Output: %s", len(contents), out)
+	}
+	if contents[0].Get("role").String() != "user" || contents[0].Get("parts.0.text").String() != "We are discussing Paris." {
+		t.Fatalf("first turn not preserved. Output: %s", out)
+	}
+	if contents[1].Get("role").String() != "model" || contents[1].Get("parts.0.text").String() != "Paris is the capital of France." {
+		t.Fatalf("assistant turn not preserved as model. Output: %s", out)
+	}
+	if contents[2].Get("role").String() != "user" || contents[2].Get("parts.0.text").String() != "How is the weather there tomorrow?" {
+		t.Fatalf("current user turn not preserved. Output: %s", out)
+	}
+
+	if parsed.Get("request.generationConfig.thinkingConfig.thinkingLevel").String() != "high" {
+		t.Fatalf("thinkingLevel not preserved. Output: %s", out)
+	}
+	if !parsed.Get("request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("includeThoughts should be enabled from reasoning.effort. Output: %s", out)
+	}
+	if parsed.Get("request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount").Int() != 5 {
+		t.Fatalf("expected maxResultCount 5, got %d. Output: %s", parsed.Get("request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount").Int(), out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchPreservesInstructions(t *testing.T) {
+	modelID := "ag-websearch-instructions-model"
+	registerAntigravityResponsesWebSearchModel(t, "ag-search-instructions-client", modelID)
+
+	const userInstructions = "Answer as a travel concierge. Use metric units."
+	input := []byte(`{
+		"model": "` + modelID + `",
+		"instructions": "` + userInstructions + `",
+		"input": "How is the weather in Paris tomorrow?",
+		"tools": [{"type": "web_search"}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false)
+	parsed := gjson.ParseBytes(out)
+	if parsed.Get("requestType").String() != "web_search" {
+		t.Fatalf("expected requestType web_search, got %q. Output: %s", parsed.Get("requestType").String(), out)
+	}
+
+	foundUserInstructions := false
+	for _, part := range parsed.Get("request.systemInstruction.parts").Array() {
+		if part.Get("text").String() == userInstructions {
+			foundUserInstructions = true
+			break
+		}
+	}
+	if !foundUserInstructions {
+		t.Fatalf("user instructions missing from request.systemInstruction. Output: %s", out)
+	}
+	if parsed.Get("request.contents.0.parts.0.text").String() != "How is the weather in Paris tomorrow?" {
+		t.Fatalf("user query not preserved. Output: %s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_WebSearchToolChoiceAutoPreservesContext(t *testing.T) {
+	modelID := "ag-websearch-toolchoice-auto-model"
+	registerAntigravityResponsesWebSearchModel(t, "ag-search-toolchoice-auto-client", modelID)
+
+	input := []byte(`{
+		"model": "` + modelID + `",
+		"instructions": "Keep answers concise.",
+		"tool_choice": "auto",
+		"input": [
+			{
+				"role": "user",
+				"content": [{"type": "input_text", "text": "We are discussing Paris."}]
+			},
+			{
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "Understood."}]
+			},
+			{
+				"role": "user",
+				"content": [{"type": "input_text", "text": "How is the weather there tomorrow?"}]
+			}
+		],
+		"tools": [{"type": "web_search"}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToAntigravity(modelID, input, false)
+	parsed := gjson.ParseBytes(out)
+	if parsed.Get("requestType").String() != "web_search" {
+		t.Fatalf("expected requestType web_search with tool_choice auto, got %q. Output: %s", parsed.Get("requestType").String(), out)
+	}
+
+	contents := parsed.Get("request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("request.contents count = %d, want 3. Output: %s", len(contents), out)
+	}
+	if contents[0].Get("parts.0.text").String() != "We are discussing Paris." {
+		t.Fatalf("conversation context dropped with tool_choice auto. Output: %s", out)
+	}
+	if contents[2].Get("parts.0.text").String() != "How is the weather there tomorrow?" {
+		t.Fatalf("current query dropped with tool_choice auto. Output: %s", out)
+	}
+
+	foundUserInstructions := false
+	for _, part := range parsed.Get("request.systemInstruction.parts").Array() {
+		if part.Get("text").String() == "Keep answers concise." {
+			foundUserInstructions = true
+			break
+		}
+	}
+	if !foundUserInstructions {
+		t.Fatalf("user instructions missing with tool_choice auto. Output: %s", out)
+	}
+	if parsed.Get("request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount").Int() != 5 {
+		t.Fatalf("expected maxResultCount 5, got %d. Output: %s", parsed.Get("request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount").Int(), out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestEnvelopeToAntigravity(t *testing.T) {
+	const modelID = "gemini-3.8-flash-high"
+	trueVal, falseVal := true, false
+	for _, tc := range []struct {
+		name            string
+		enabled         bool
+		localCapability *bool
+	}{
+		{name: "request true without local model", enabled: true},
+		{name: "request false without local model"},
+		{name: "request true overrides local false", enabled: true, localCapability: &falseVal},
+		{name: "request false overrides local true", localCapability: &trueVal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.localCapability != nil {
+				reg := registry.GetGlobalRegistry()
+				reg.RegisterClient("ag-responses-envelope-local", "antigravity", []*registry.ModelInfo{{
+					ID:                 modelID,
+					SupportsWebSearch:  true,
+					NativeCapabilities: &registry.NativeCapabilities{WebSearch: tc.localCapability},
+				}})
+				t.Cleanup(func() { reg.UnregisterClient("ag-responses-envelope-local") })
+			}
+			input := []byte(`{"model":"` + modelID + `","input":"Search weather","tools":[{"type":"web_search"}]}`)
+			info := &registry.ModelInfo{
+				ID:                 modelID,
+				NativeCapabilities: &registry.NativeCapabilities{WebSearch: &tc.enabled},
+			}
+			out := ConvertOpenAIResponsesRequestEnvelopeToAntigravity(context.Background(), sdktranslator.RequestEnvelope{
+				Model: modelID, Body: input, ModelInfo: info,
+			})
+			if got := gjson.GetBytes(out.Body, "requestType").String() == "web_search"; got != tc.enabled {
+				t.Fatalf("web_search = %v, want %v; output=%s", got, tc.enabled, out.Body)
+			}
+			if got := gjson.GetBytes(out.Body, "request.tools.0.googleSearch").Exists(); got != tc.enabled {
+				t.Fatalf("googleSearch present = %v, want %v; output=%s", got, tc.enabled, out.Body)
+			}
+		})
 	}
 }
