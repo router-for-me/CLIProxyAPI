@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtimebridge"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -98,6 +99,99 @@ func StartServiceBackgroundWithPluginHost(cfg *config.Config, configPath string,
 
 	go func() {
 		defer close(doneCh)
+		if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Errorf("proxy service exited with error: %v", err)
+		}
+	}()
+
+	return cancelFn, doneCh
+}
+
+// StartServiceWithBridge builds and runs the proxy service when the
+// configuration file is a generated artifact rather than a real file
+// on disk (Phase 2: ephemeral PG-first bridge). After service Run
+// returns the bridge is closed; errors during close are logged but
+// never mask the primary run error.
+func StartServiceWithBridge(cfg *config.Config, host *pluginhost.Host, localPassword string, bridge runtimebridge.BridgeOp, serverOptions ...api.ServerOption) {
+	if bridge == nil {
+		StartServiceWithPluginHost(cfg, bridge.ConfigPath(), localPassword, host, serverOptions...)
+		return
+	}
+	defer func() {
+		if err := bridge.Close(); err != nil {
+			log.WithError(err).Warn("runtimebridge: close after run failed")
+		}
+	}()
+
+	builder := cliproxy.NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(bridge.ConfigPath()).
+		WithLocalManagementPassword(localPassword)
+	if host != nil {
+		builder = builder.WithPluginHost(host)
+	}
+	if len(serverOptions) > 0 {
+		builder = builder.WithServerOptions(serverOptions...)
+	}
+
+	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	runCtx := ctxSignal
+	if localPassword != "" {
+		var keepAliveCancel context.CancelFunc
+		runCtx, keepAliveCancel = context.WithCancel(ctxSignal)
+		builder = builder.WithServerOptions(api.WithKeepAliveEndpoint(10*time.Second, func() {
+			log.Warn("keep-alive endpoint idle for 10s, shutting down")
+			keepAliveCancel()
+		}))
+	}
+
+	service, err := builder.Build()
+	if err != nil {
+		log.Errorf("failed to build proxy service: %v", err)
+		return
+	}
+
+	err = service.Run(runCtx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Errorf("proxy service exited with error: %v", err)
+	}
+}
+
+// StartServiceBackgroundWithBridge starts the proxy service in a background
+// goroutine with an ephemeral PG-first bridge. After Run returns the
+// goroutine closes the bridge.
+func StartServiceBackgroundWithBridge(cfg *config.Config, host *pluginhost.Host, localPassword string, bridge runtimebridge.BridgeOp, serverOptions ...api.ServerOption) (cancel func(), done <-chan struct{}) {
+	if bridge == nil {
+		return StartServiceBackgroundWithPluginHost(cfg, bridge.ConfigPath(), localPassword, host, serverOptions...)
+	}
+
+	ctx, cancelFn := context.WithCancel(context.Background())
+	doneCh := make(chan struct{})
+
+	go func() {
+		defer close(doneCh)
+		defer func() {
+			if err := bridge.Close(); err != nil {
+				log.WithError(err).Warn("runtimebridge: close after run failed")
+			}
+		}()
+		builder := cliproxy.NewBuilder().
+			WithConfig(cfg).
+			WithConfigPath(bridge.ConfigPath()).
+			WithLocalManagementPassword(localPassword)
+		if host != nil {
+			builder = builder.WithPluginHost(host)
+		}
+		if len(serverOptions) > 0 {
+			builder = builder.WithServerOptions(serverOptions...)
+		}
+		service, err := builder.Build()
+		if err != nil {
+			log.Errorf("failed to build proxy service: %v", err)
+			return
+		}
 		if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Errorf("proxy service exited with error: %v", err)
 		}
