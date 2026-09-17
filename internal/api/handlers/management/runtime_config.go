@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/configsnapshot"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store/runtimeconfig"
+	log "github.com/sirupsen/logrus"
 )
 
 // SetPGControl attaches the PG store handle to the handler. The runtime-
@@ -23,6 +24,21 @@ func (h *Handler) SetPGControl(pg *store.PostgresStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pgControl = pg
+}
+
+// ReloadLatestFn re-renders the ephemeral bridge from the latest committed
+// runtime_config snapshot. Implemented by runtimebridge.Coordinator.ReloadLatest.
+type ReloadLatestFn func(ctx context.Context) error
+
+// SetReloadCoordinator attaches the bridge reload hook. Called from
+// cmd/server/main.go when the server boots with an active bridge.
+func (h *Handler) SetReloadCoordinator(fn ReloadLatestFn) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.reloadCoordinator = fn
 }
 
 // runtimeConfigHandle is the concrete type the runtime-config routes use
@@ -72,6 +88,22 @@ func (h *Handler) GetRuntimeConfig(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"snapshot": snap})
+}
+
+// triggerReload invokes the bridge reload hook when one is bound. Phase 2
+// keeps this best-effort: a reload failure is logged but does not undo the
+// committed DB revision (matching the design's "committed but pending
+// reload" state).
+func (h *Handler) triggerReload(ctx context.Context) {
+	h.mu.Lock()
+	fn := h.reloadCoordinator
+	h.mu.Unlock()
+	if fn == nil {
+		return
+	}
+	if err := fn(ctx); err != nil {
+		log.WithError(err).Error("runtime-config bridge reload failed; committed revision is pending reload")
+	}
 }
 
 // updateRuntimeConfigRequest is the JSON body for POST /runtime-config.
@@ -142,6 +174,7 @@ func (h *Handler) PostRuntimeConfigRollback(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("rollback failed: %v", err)})
 		return
 	}
+	h.triggerReload(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "rolled_back_to": req.TargetRevision})
 }
 

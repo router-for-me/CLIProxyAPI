@@ -73,10 +73,48 @@ func baseDir() (string, error) {
 	return os.TempDir(), nil
 }
 
+// Build creates a new ephemeral bridge directory and renders the initial
+// config.yaml from snap (the snapshotRenderer contract). Production callers
+// that already hold a *config.Config should prefer BuildFromConfig.
+func Build(ctx context.Context, snap snapshotRenderer, authDirHint string) (*Bridge, error) {
+	if snap == nil {
+		return nil, errors.New("runtimebridge: snapshot is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	base, err := baseDir()
+	if err != nil {
+		return nil, fmt.Errorf("runtimebridge: resolve base dir: %w", err)
+	}
+	if base == "" {
+		return nil, errors.New("runtimebridge: base dir is empty")
+	}
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return nil, fmt.Errorf("runtimebridge: mkdir %s: %w", base, err)
+	}
+	root, err := os.MkdirTemp(base, "nixllm-bridge-*")
+	if err != nil {
+		return nil, fmt.Errorf("runtimebridge: mkdir temp: %w", err)
+	}
+	authDir := filepath.Join(root, authsSubdir)
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		_ = os.RemoveAll(root)
+		return nil, fmt.Errorf("runtimebridge: mkdir auths: %w", err)
+	}
+	cfgPath := filepath.Join(root, "config.yaml")
+	if err := renderTo(snap, cfgPath, 0o600); err != nil {
+		_ = os.RemoveAll(root)
+		return nil, fmt.Errorf("runtimebridge: render: %w", err)
+	}
+	_ = authDirHint // Phase 2 currently ignores the hint; the legacy store AuthDir keeps serving auths.
+	return &Bridge{root: root, configPath: cfgPath, authDir: authDir}, nil
+}
+
 // BuildFromConfig creates a new ephemeral bridge directory and renders the
 // initial config.yaml from cfg (a parsed *config.Config). The file is
-// written only after yaml.Marshal + configvalidation.Validate succeed so a
-// malformed configuration never lands on disk.
+// written only after yaml.Marshal + configvalidation.ValidateParsed succeed
+// so a malformed configuration never lands on disk.
 func BuildFromConfig(ctx context.Context, cfg *config.Config, authDirHint string) (*Bridge, error) {
 	if cfg == nil {
 		return nil, errors.New("runtimebridge: cfg is nil")

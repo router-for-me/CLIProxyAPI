@@ -202,6 +202,11 @@ type Handler struct {
 	// /config-imports). nil when PG is not configured — those routes return
 	// 503 in that case.
 	pgControl *store.PostgresStore
+
+	// reloadCoordinator, when non-nil, re-renders the ephemeral bridge file
+	// after a successful runtime-config commit. nil when the server booted
+	// in legacy file mode (no bridge is active, so nothing to reload).
+	reloadCoordinator ReloadLatestFn
 }
 
 type configReloadSnapshot struct {
