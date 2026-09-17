@@ -2,7 +2,7 @@
 // PG-first runtime_config snapshot into a real on-disk config.yaml the
 // file-bound CLIProxyAPI core can consume. PostgreSQL remains the only
 // source of truth; the bridge file is a generated artifact the existing
-// fsnotify watcher reads.
+// fsnotify watcher reads. See docs/plans/2026-09-14-nixllm-pg-first-design.md.
 package runtimebridge
 
 import (
@@ -14,22 +14,13 @@ import (
 	"sync"
 )
 
-// snapshotRenderer is the contract Build relies on. The production
-// implementation embeds *configsnapshot.Snapshot; tests provide a fake
-// without depending on the real snapshot package to keep this package
-// dependency-light.
-type snapshotRenderer interface {
-	// MarshalYAML returns deterministic YAML bytes suitable for the
-	// file-watcher to consume. A non-nil error aborts the render.
-	MarshalYAML() ([]byte, error)
-	// Validate parses its own YAML output and returns an error when the
-	// content is malformed. Build calls Validate after MarshalYAML so a
-	// broken snapshot never lands on disk.
-	Validate() error
-	// AtomicWrite writes data to path atomically with the given mode.
-	// Phase 2 reuses the central util/atomicfile helper, so this method
-	// is a thin wrapper around the cross-package primitive.
-	AtomicWrite(path string, data []byte, mode os.FileMode) error
+// BridgeOp is the minimal contract the cmd package consumes. Production
+// code constructs a Bridge and passes it via BridgeOp; the test package
+// can supply a fake without depending on the snapshot package.
+type BridgeOp interface {
+	ConfigPath() string
+	AuthDir() string
+	Close() error
 }
 
 const authsSubdir = "auths"
@@ -84,6 +75,24 @@ func baseDir() (string, error) {
 		return v, nil
 	}
 	return os.TempDir(), nil
+}
+
+// snapshotRenderer is the contract Build relies on. The production
+// implementation embeds *configsnapshot.Snapshot; tests provide a fake
+// without depending on the real snapshot package to keep this package
+// dependency-light.
+type snapshotRenderer interface {
+	// MarshalYAML returns deterministic YAML bytes suitable for the
+	// file-watcher to consume. A non-nil error aborts the render.
+	MarshalYAML() ([]byte, error)
+	// Validate parses its own YAML output and returns an error when the
+	// content is malformed. Build calls Validate after MarshalYAML so a
+	// broken snapshot never lands on disk.
+	Validate() error
+	// AtomicWrite writes data to path atomically with the given mode.
+	// Phase 2 reuses the central util/atomicfile helper, so this method
+	// is a thin wrapper around the cross-package primitive.
+	AtomicWrite(path string, data []byte, mode os.FileMode) error
 }
 
 // Build creates a new ephemeral bridge directory and renders the initial
