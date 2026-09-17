@@ -380,7 +380,7 @@ if strategy == schedulerStrategyWeighted {
 }
 ```
 
-Implement `pickWeighted` with prefix-sum + binary search:
+Implement `pickWeighted` with prefix-sum + linear scan (O(n); n is small per priority tier, matches fill-first's pattern — binary-search variant deferred unless profiling shows it matters):
 
 ```go
 func pickWeighted(entries []*scheduledAuth) *scheduledAuth {
@@ -394,7 +394,7 @@ func pickWeighted(entries []*scheduledAuth) *scheduledAuth {
     if total <= 0 {
         return entries[0] // defensive: round-robin fallback
     }
-    target := rand.Intn(total)
+    target := rand.IntN(total)
     cum := 0
     for _, e := range entries {
         if e == nil || e.auth == nil || e.meta == nil {

@@ -49,7 +49,7 @@ Data flow stays canonical: PG row → render → auth attribute → conductor �
 
 - **Semantics**: existing `priority` is a strict total order. `weighted` instead treats each entry's `weight` field as a sampling weight (default 1) within the same priority bucket.
 - **New config**: per-entry `weight` field on `UpstreamProviderEntry` (PG column add, renderer read, default 1). Pure additive schema change.
-- **Implementation**: precompute weight-sum per priority bucket at render time; pick via weighted reservoir using prefix sums — O(log n).
+- **Implementation**: precompute weight-sum per priority bucket at render time; pick via weighted reservoir using prefix sums — O(n) linear scan; n is small per priority tier (typically 2-10 entries), matches the fill-first selector's pattern. Binary-search variant deferred unless profiling shows it matters.
 
 ### `headroom`
 
@@ -214,7 +214,7 @@ In-memory only, deliberate. Survives only as long as the process. Round-3 candid
 ## Error handling
 
 - **`X-NixLLM-Decision`** header: if header write fails (headers already sent, oversized value), log a warning with the proposed value truncated to 200 chars, continue. Never break the response.
-- **`fill-first` / `weighted` / `headroom`**: each must terminate. `fill-first` and `headroom` are O(n) scans; empty bucket returns the existing "no candidates" error. `weighted`'s prefix-sum draw is constant time once built; rebuild only on render.
+- **`fill-first` / `weighted` / `headroom`**: each must terminate. All three are O(n) scans over their candidate slice; n is small per priority tier (fill-first and weighted are filtered down to one priority tier's entries, headroom scans the highest-priority ready set). Empty bucket returns the existing "no candidates" error. The weighted draw's prefix-sum walk is constant-time relative to the rand draw itself — the scan is the linear bound, not a binary search.
 - **Quota endpoints**: return 503 without `PGSTORE_DSN`. Cap query latency at 2 s; on timeout return 200 with `partial: true` and whatever windows came back.
 - **Event recorder**: 1 ms contention threshold is per-write, not per-buffer. Mutex never held across a network call. Drops increment `events.dropped`.
 - **SSE stream**: client disconnect drops the server goroutine within 5 s of the disconnect (existing `internal/wsrelay` pattern adapted for SSE). No goroutine leaks on dashboard tab close.

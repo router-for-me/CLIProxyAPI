@@ -55,6 +55,13 @@ type WeightedByEntrySelector struct{}
 
 // Pick returns the first available auth deterministically; the scheduler
 // fast path owns the real weighted sampling — see WeightedByEntrySelector.
+//
+// This Pick is defensive-only: conductor_selection.isBuiltInSelector treats
+// *WeightedByEntrySelector as built-in, so the scheduler fast path handles
+// every production pick. Reaching this method in production would mean the
+// fast path has been bypassed (e.g. a plugin scheduler in front of the
+// built-in scheduler), in which case returning the first available auth is
+// still correct because every planner-normalized entry has weight >= 1.
 func (s *WeightedByEntrySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()

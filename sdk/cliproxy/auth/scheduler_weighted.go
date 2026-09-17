@@ -1,6 +1,6 @@
 package auth
 
-import "math/rand"
+import "math/rand/v2"
 
 // pickWeighted samples one ready auth proportionally to its per-entry weight
 // column (scheduler keeps the weight on scheduledAuthMeta.weight, populated
@@ -8,10 +8,14 @@ import "math/rand"
 // sync pipeline normalizes the UpstreamProviderAPIKey.Weight *int from the
 // PG-backed control plane onto that attribute at the planner boundary).
 //
+// O(n) linear scan; n is small per priority tier (typically 2-10 entries),
+// matching the fill-first selector's pattern. Binary-search variant deferred
+// unless profiling shows it matters.
+//
 // Semantics (round-2, docs/plans/2026-09-17-omniroute-round-2-design.md):
 //   - Each candidate contributes its meta.weight (>=1 post-planner) to the
 //     total sum.
-//   - One rand.Intn(total) draw selects a slot; the cumulative scan returns
+//   - One rand.Int64N(total) draw selects a slot; the cumulative scan returns
 //     the entry whose [low, high) range contains the slot.
 //   - Empty input returns nil.
 //   - Defensive fallback: if every candidate's effective weight is <= 0
@@ -23,7 +27,7 @@ import "math/rand"
 // Distinct from the round-1 smooth-WRR weighted selector
 // (schedulerStrategyWeightedRoundRobin → readyView.pickWeighted → pickSmooth-
 // WeightedScheduled): the round-1 selector uses smoothed current-value state
-// across cycles, the round-2 selector draws one rand.Intn per pick over the
+// across cycles, the round-2 selector draws one rand.Int64N per pick over the
 // prefix sum.
 func pickWeighted(entries []*scheduledAuth) *scheduledAuth {
 	if len(entries) == 0 {
@@ -51,7 +55,7 @@ func pickWeighted(entries []*scheduledAuth) *scheduledAuth {
 		}
 		return nil
 	}
-	target := rand.Int63n(total)
+	target := rand.Int64N(total)
 	cum := int64(0)
 	for _, entry := range entries {
 		if entry == nil || entry.auth == nil || entry.meta == nil {
