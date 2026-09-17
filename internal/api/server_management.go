@@ -302,11 +302,14 @@ func (s *Server) registerManagementRoutes() {
 		// Round-2 live events feed (docs/plans/2026-09-17-...). Newest-first
 		// snapshot of the bounded in-memory ring buffer, filterable by
 		// type/auth/since. /stats exposes capacity + dropped counter so
-		// operators can detect backpressure. 503 without PG (matches the
-		// rest of the management-route gate contract even though no PG
-		// queries are involved).
+		// operators can detect backpressure. /stream is the SSE append-
+		// only feed; one per-subscriber channel per client (32-event cap,
+		// drops on overflow). 503 without PG (matches the rest of the
+		// management-route gate contract even though no PG queries are
+		// involved).
 		mgmt.GET("/events", s.mgmt.GetEvents)
 		mgmt.GET("/events/stats", s.mgmt.GetEventsStats)
+		mgmt.GET("/events/stream", s.mgmt.StreamEvents)
 
 		// Live snapshot of upstream auth/model pairs currently in cooldown.
 		// Read-only; the dashboard's per-row "Reset" button calls the

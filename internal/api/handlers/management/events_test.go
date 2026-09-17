@@ -1,9 +1,11 @@
 package management
 
 import (
+	"bufio"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,5 +179,61 @@ func TestEventsStatsEndpoint(t *testing.T) {
 	}
 	if resp.Dropped < 0 {
 		t.Errorf("dropped = %d, want >= 0", resp.Dropped)
+	}
+}
+
+// TestEventsStreamDeliversNewEvents pins the SSE fan-out contract:
+// events recorded into the ring after the client subscribes are
+// delivered to the client as text/event-stream frames within 1s. Uses
+// httptest.NewServer so the full Gin → net/http → client stack runs,
+// including the c.Writer.Flush path that an in-process Recorder would
+// silently bypass.
+func TestEventsStreamDeliversNewEvents(t *testing.T) {
+	ring := events.NewRing(100)
+	h := eventsHandlersTest(t, ring)
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/v0/management/events/stream", h.StreamEvents)
+
+	server := httptest.NewServer(r)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/v0/management/events/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Errorf("want text/event-stream, got %q", got)
+	}
+
+	// Read first frame
+	scanner := bufio.NewScanner(resp.Body)
+	frameCh := make(chan string, 1)
+	go func() {
+		for scanner.Scan() {
+			frameCh <- scanner.Text()
+		}
+		close(frameCh)
+	}()
+
+	// Record an event; expect an SSE frame within 2s
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		ring.Record(events.Event{Type: "routing.decision", Ts: time.Now(), AuthID: "test"})
+	}()
+
+	select {
+	case frame := <-frameCh:
+		if !strings.HasPrefix(frame, "event: routing.decision") {
+			t.Errorf("unexpected first frame: %q", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no SSE frame received within 2s")
 	}
 }

@@ -1,6 +1,8 @@
 package management
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -117,6 +119,91 @@ func (h *Handler) GetEventsStats(c *gin.Context) {
 		Capacity: ring.Capacity(),
 		Dropped:  ring.Dropped(),
 	})
+}
+
+// eventsStreamKeepAlive is the SSE comment-ping interval. SSE clients
+// (EventSource browsers, the dashboard live tab) treat the connection
+// as dead when no frames arrive within ~30-60s, so we emit a ":keep-alive"
+// comment every 15s to keep proxies and the browser happy without
+// burning bandwidth.
+const eventsStreamKeepAlive = 15 * time.Second
+
+// StreamEvents handles GET /v0/management/events/stream — the Server-Sent
+// Events live feed. Each subscribed client gets its own per-subscriber
+// channel (see events.Ring.Subscribe); the handler pumps frames until
+// the client disconnects (c.Request.Context() Done) or the subscriber
+// is closed. Returns 503 without PG (matches the rest of the
+// management-route gate contract, even though no PG queries are
+// involved), so the dashboard can detect the absence cleanly.
+//
+// SSE framing: one event per frame as `event: <type>\ndata: <json>\n\n`
+// plus a 15s `:keep-alive\n\n` comment to defeat proxy/browser idle
+// timeouts. The X-Accel-Buffering=no header disables nginx buffering so
+// frames are flushed immediately; Cache-Control: no-cache prevents
+// intermediate caches from holding frames. Connection: keep-alive
+// keeps the underlying TCP socket warm.
+//
+// Client disconnect drops the goroutine within 5s of context
+// cancellation — the request context cancels the moment the underlying
+// TCP read on the request body fails, and the select on ctx.Done()
+// returns immediately. No goroutine leaks on dashboard tab close.
+func (h *Handler) StreamEvents(c *gin.Context) {
+	if !h.pgEnabledForEvents() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "PG storage not enabled"})
+		return
+	}
+	ring := h.eventsRing()
+	if ring == nil {
+		log.Warn("events stream handler called but events ring is not wired; check cmd/server/main.go initialization")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "events ring not wired"})
+		return
+	}
+
+	hdr := c.Writer.Header()
+	hdr.Set("Content-Type", "text/event-stream")
+	hdr.Set("Cache-Control", "no-cache")
+	hdr.Set("Connection", "keep-alive")
+	hdr.Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeader(http.StatusOK)
+	c.Writer.Flush()
+
+	sub := ring.Subscribe()
+	defer ring.Unsubscribe(sub)
+
+	ctx := c.Request.Context()
+	pingTicker := time.NewTicker(eventsStreamKeepAlive)
+	defer pingTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case e, ok := <-sub.C:
+			if !ok {
+				return
+			}
+			payload, err := json.Marshal(e)
+			if err != nil {
+				// Should never happen — the only error json.Marshal can
+				// return on Event is for unsupported types, and Event
+				// is all primitives + RawMessage. Log and skip rather
+				// than close the stream on a single bad event.
+				log.WithError(err).WithField("event_type", e.Type).Warn("events stream: marshal event failed; skipping frame")
+				continue
+			}
+			if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", e.Type, payload); err != nil {
+				// Write failure usually means the client disconnected;
+				// let ctx.Done() close the loop on the next iteration.
+				return
+			}
+			c.Writer.Flush()
+		case <-pingTicker.C:
+			if _, err := fmt.Fprint(c.Writer, ": keep-alive\n\n"); err != nil {
+				return
+			}
+			c.Writer.Flush()
+		}
+	}
 }
 
 // parseEventsSince parses an RFC3339 timestamp from the since= query

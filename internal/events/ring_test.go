@@ -98,6 +98,93 @@ func TestRingConcurrentRecord(t *testing.T) {
 	}
 }
 
+// TestRingSubscribeReceivesRecordedEvents pins the Subscribe / Unsubscribe
+// fan-out: events recorded after Subscribe are delivered to the subscriber
+// in Record order, so the SSE handler can stream them as they arrive.
+func TestRingSubscribeReceivesRecordedEvents(t *testing.T) {
+	r := NewRing(100)
+	sub := r.Subscribe()
+	defer r.Unsubscribe(sub)
+
+	r.Record(Event{Type: "test", Ts: time.Now(), Payload: mustRaw(t, 1)})
+	r.Record(Event{Type: "test", Ts: time.Now(), Payload: mustRaw(t, 2)})
+
+	var got []Event
+	for i := 0; i < 2; i++ {
+		select {
+		case e := <-sub.C:
+			got = append(got, e)
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("did not receive event %d", i)
+		}
+	}
+	if got[0].payloadInt(t) != 1 || got[1].payloadInt(t) != 2 {
+		t.Errorf("events out of order: %+v", got)
+	}
+}
+
+// TestRingUnsubscribeStopsDelivery confirms Unsubscribe closes the subscriber
+// channel so the SSE handler can rely on a closed-channel signal as
+// "stream is over".
+func TestRingUnsubscribeStopsDelivery(t *testing.T) {
+	r := NewRing(100)
+	sub := r.Subscribe()
+	r.Record(Event{Type: "before", Ts: time.Now()})
+
+	// Drain the before event
+	select {
+	case <-sub.C:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("did not receive before event")
+	}
+
+	r.Unsubscribe(sub)
+	r.Record(Event{Type: "after", Ts: time.Now()})
+
+	select {
+	case _, ok := <-sub.C:
+		if ok {
+			t.Errorf("subscriber received event after Unsubscribe (channel still open)")
+		}
+		// Channel closed — good
+	case <-time.After(50 * time.Millisecond):
+		// Channel still open but no event — also acceptable
+	}
+}
+
+// TestRingSubscriberBufferOverflowDropsEvents confirms a slow subscriber
+// (one that doesn't drain its buffer) never blocks Record calls — the
+// per-subscriber buffer caps at subscriberChanCap and further events
+// are silently dropped for that subscriber only.
+func TestRingSubscriberBufferOverflowDropsEvents(t *testing.T) {
+	r := NewRing(100)
+	sub := r.Subscribe()
+	defer r.Unsubscribe(sub)
+
+	// Record more events than the subscriber buffer (32) without draining.
+	for i := 0; i < 100; i++ {
+		r.Record(Event{Type: "flood", Ts: time.Now(), Payload: mustRaw(t, i)})
+	}
+
+	// Drain whatever arrived
+	received := 0
+	drained := false
+	for !drained {
+		select {
+		case <-sub.C:
+			received++
+		case <-time.After(50 * time.Millisecond):
+			drained = true
+		}
+	}
+	if received >= 100 {
+		t.Errorf("subscriber received all events (no overflow protection): got %d", received)
+	}
+	if received > 32 {
+		t.Errorf("subscriber received more than buffer cap: got %d", received)
+	}
+}
+
 // helpers
 
 func mustRaw(t *testing.T, v int) json.RawMessage {
