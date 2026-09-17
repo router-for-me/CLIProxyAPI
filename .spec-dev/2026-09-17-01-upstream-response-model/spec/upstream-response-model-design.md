@@ -91,7 +91,7 @@ CLIProxyAPI 的用量记录只有发往上游的 `model` 和客户端 `alias`。
 
 ## 取代与共存
 
-无相交 active spec。`.spec-dev/` 此前不存在。
+无相交 active spec。`.spec-dev/` 此前不存在。独立审查曾建议拆成 CPA / Keeper 两份 roadmap 子项目；不采纳——成功标准是端到端第三行，队列键名必须由同一份行为规范锁死。实施计划用两个仓库的顺序任务，不是两个特性。
 
 ## 行为规范（Requirements）
 
@@ -133,7 +133,19 @@ CLIProxyAPI 的用量记录只有发往上游的 `model` 和客户端 `alias`。
 
 ### Requirement: Extract models with protocol-specific rules
 
-系统 SHALL 按协议从原文抽取模型：OpenAI 路径 `response.model` 然后 `model`，事件 `response.completed`、`response.done`、`response.failed`、`response.incomplete`、`response.cancelled`、`response.canceled` 为 terminal；Claude 路径 `message.model` 然后 `model`，声明为非 terminal；Gemini/Antigravity 路径 `modelVersion`、`response.modelVersion`、`response.response.modelVersion`，每条声明视为 terminal。terminal 覆盖已有选中值；非 terminal 只在尚无 first 时写入。空白丢弃。名称 trim 后按 rune 截到 200。发现候选后若整段 JSON 非法，该次声明作废。观测以入口收到的一段字节为单位，不跨 chunk 拼接。
+系统 SHALL 按**一次尝试一个抽取族**从原文抽取模型，不得对同一段 payload 同时套用两套 terminal 规则。
+
+抽取族在该尝试的 `UsageReporter` 创建时绑定，映射为：provider/executor 标识属于 Claude 族则用 Claude 规则；属于 Gemini、Antigravity、AI Studio、Vertex 则用 Gemini 规则；其余（含 OpenAI 兼容、Codex、Kimi、xAI、Devin、Interactions）用 OpenAI 规则。绑定前若已有原文到达，按字段嗅探一次：存在 `modelVersion` / `response.modelVersion` / `response.response.modelVersion` 用 Gemini；存在 `message.model` 用 Claude；否则用 OpenAI。嗅探只选一族。
+
+各族规则：
+
+- OpenAI：路径 `response.model` 然后 `model`。terminal 事件名为 `response.completed`、`response.done`、`response.failed`、`response.incomplete`、`response.cancelled`、`response.canceled`。
+- Claude：路径 `message.model` 然后 `model`。声明一律非 terminal（只保留 first）。
+- Gemini：路径 `modelVersion`、`response.modelVersion`、`response.response.modelVersion`。每条声明视为 terminal（后写覆盖）。
+
+terminal 覆盖已有选中值；非 terminal 只在尚无 first 时写入。空白丢弃。名称 trim 后按 rune 截到 200。发现候选后若整段 JSON 非法，该次声明作废。
+
+观测以入口收到的**一段字节**为单位，不把相邻 chunk 拼成完整帧。生产入口常把 SSE `event:` 与 `data:` 分成两次调用。观察器 SHALL 记住本次尝试最近一次 `event:` 行的事件名；随后的 `data:` 行用该事件名判定 OpenAI terminal。同一段字节里的 JSON `type` 也当作事件名。仅 `event:`、没有 data 的行不抽模型。
 
 #### Scenario: OpenAI 流式终态覆盖
 
@@ -152,6 +164,24 @@ CLIProxyAPI 的用量记录只有发往上游的 `model` 和客户端 `alias`。
 - **GIVEN** 上游声明的模型名 trim 后超过 200 个 rune
 - **WHEN** 发布用量记录
 - **THEN** 上游响应模型等于截断到 200 rune 后的值
+
+#### Scenario: Claude 只保留 first
+
+- **GIVEN** 抽取族为 Claude，先声明 `message.model` 为 `claude-first`，再声明 `claude-later`
+- **WHEN** 发布用量记录
+- **THEN** 上游响应模型是 `claude-first`
+
+#### Scenario: Gemini 后写覆盖
+
+- **GIVEN** 抽取族为 Gemini，先声明 `modelVersion` 为 `gemini-a`，再声明 `gemini-b`
+- **WHEN** 发布用量记录
+- **THEN** 上游响应模型是 `gemini-b`
+
+#### Scenario: 分行 SSE 终态
+
+- **GIVEN** 抽取族为 OpenAI，同一尝试先观测到字节 `event: response.completed`，再观测到 `data: {"response":{"model":"final-model"}}`
+- **WHEN** 发布用量记录
+- **THEN** 上游响应模型是 `final-model`
 
 ### Requirement: Publish the observed model on usage records
 
@@ -181,11 +211,11 @@ Redis 用量入队 JSON SHALL 在观测值非空时包含 `upstream_response_mod
 
 ### Requirement: Observe independently of request logging
 
-只要原文到达观测入口，系统 SHALL 进行观测，即使 request-log 关闭或 CommercialMode 开启。
+只要原文到达观测入口，系统 SHALL 进行观测，即使 request-log 关闭或 CommercialMode 开启（二者都会关掉 request-log 捕获，不得一并关掉观测）。
 
 #### Scenario: 关闭 request-log 仍观测
 
-- **GIVEN** request-log 未启用
+- **GIVEN** request-log 未启用，或 CommercialMode 开启
 - **WHEN** 上游原文到达 `AppendAPIResponseChunk` 或 WebSocket 原文入口
 - **THEN** 随后发布的用量记录仍带上能解析出的上游响应模型
 
@@ -201,7 +231,7 @@ cpa-usage-keeper SHALL 把队列中的 `upstream_response_model` 写入请求事
 
 ### Requirement: Show the upstream response model only on mismatch
 
-Usage「请求事件」模型列与凭证详情请求表的模型列 SHALL 仅在 mismatch 时增加一行「上游响应: {name}」；一致或空值时不出现该行，也不出现「上游响应: -」。比较基准是发往上游模型，不是客户端别名。不加徽章。
+Usage「请求事件」模型列与凭证详情请求表的模型列 SHALL 仅在 mismatch 时增加一行 `{t('usage_stats.upstream_response_model')}: {name}`。文案键为 `usage_stats.upstream_response_model`，英文 `Upstream response`，简体「上游响应」，繁体「上游響應」。一致或空值时不出现该行，也不出现「Upstream response: -」或「上游响应: -」。比较基准是发往上游模型，不是客户端别名。不加徽章。
 
 #### Scenario: 不一致才显示第三行
 
@@ -217,13 +247,13 @@ Usage「请求事件」模型列与凭证详情请求表的模型列 SHALL 仅�
 
 ### Requirement: Include the observed model in event exports
 
-事件 CSV/JSON 导出 SHALL 始终包含 `upstream_response_model` 列或字段；无值时为空。
+事件 CSV 与 JSON 导出 SHALL 始终包含 `upstream_response_model` 列或字段；无值时为空。
 
 #### Scenario: 导出始终带列
 
 - **GIVEN** 两条事件，一条有上游响应模型，一条没有
-- **WHEN** 导出 CSV
-- **THEN** 表头含 `upstream_response_model`，两条记录分别写出该值与空
+- **WHEN** 导出 CSV 或 JSON
+- **THEN** CSV 表头与 JSON 对象均含 `upstream_response_model`，两条记录分别写出该值与空
 
 ### Requirement: Degrade when the observed model is absent
 
@@ -240,11 +270,13 @@ Usage「请求事件」模型列与凭证详情请求表的模型列 SHALL 仅�
 ### 架构与组件
 
 - **Observer**（`sdk/cliproxy/usage`）：一次尝试一个实例。`Observe(model, terminal)`、`Model()`。不解析协议。
-- **字节解析**（`internal/runtime/executor/helps`）：`ObserveUpstreamResponseBytes(ctx, payload)` 按协议抽模型并写入 ctx 上的 observer。SSE 按 `event`/`data` 拆帧，否则当裸 JSON。
-- **尝试生命周期**：`newUpstreamAttemptContext` 调用 `BeginUpstreamResponseModelObservation`。发布时 `UsageReporter` 从 ctx 抄到 `Record.UpstreamResponseModel`。
+- **字节解析**（`internal/runtime/executor/helps`）：`ObserveUpstreamResponseBytes(ctx, payload)` 按已绑定抽取族抽模型。`event:` 行只更新本次尝试记住的事件名；`data:` 行用该事件名（或 JSON `type`）判定 OpenAI terminal。
+- **尝试生命周期**：`newUpstreamAttemptContext` 调用 `BeginUpstreamResponseModelObservation`。`NewUsageReporter` 按 provider/executor 绑定抽取族。发布时从 ctx 抄到 `Record.UpstreamResponseModel`。
 - **观测入口**：`AppendAPIResponseChunk`、`AppendAPIWebsocketResponse`、`EmitWebSocketResponseEvent` 在 RequestLog/CommercialMode 门控之前调用解析。
 - **Redis 插件**：入队字段 `upstream_response_model`。
 - **Keeper**：解码 → 实体/迁移 → 投影/DTO/API → 两处表格与导出。
+
+本特性是**一份实施计划、两个仓库的顺序任务**：先合 CLIProxyAPI 入队字段，再合 cpa-usage-keeper 展示。不拆成两份 spec / roadmap 子项目——成功标准是端到端第三行，契约键名必须由同一份行为规范锁死。
 
 ### 数据流
 
@@ -266,7 +298,7 @@ usage.Record.UpstreamResponseModel string
 queuedUsageDetail.UpstreamResponseModel string `json:"upstream_response_model,omitempty"`
 ```
 
-Keeper 存储列 `upstream_response_model TEXT NOT NULL DEFAULT ''`。列表/导出 JSON 键 `upstream_response_model`。前端 `UsageEvent.upstream_response_model?: string`。无新 HTTP 路由。
+Keeper 存储列 `upstream_response_model TEXT NOT NULL DEFAULT ''`。列表/导出 JSON 键 `upstream_response_model`。前端 `UsageEvent.upstream_response_model?: string`。i18n 键 `usage_stats.upstream_response_model`。无新 HTTP 路由。
 
 ### 错误处理
 
@@ -284,7 +316,7 @@ Keeper 存储列 `upstream_response_model TEXT NOT NULL DEFAULT ''`。列表/导
 | 公共落点 | 覆盖 Scenario | 允许替换的依赖 |
 |----------|---------------|----------------|
 | `sdk/cliproxy/usage` observer 公共方法 | 无声明则保持空、超长名称截断、重试不串味（配合 Begin） | 无 |
-| `helps.ObserveUpstreamResponseBytes` | OpenAI 流式终态覆盖、非法 JSON 丢弃声明 | 无 |
+| `helps.ObserveUpstreamResponseBytes` | OpenAI 流式终态覆盖、非法 JSON 丢弃声明、Claude 只保留 first、Gemini 后写覆盖、分行 SSE 终态 | 无 |
 | `AppendAPIResponseChunk` / WebSocket 原文入口 | 关闭 request-log 仍观测、观测不改写出站字节（入口不改 chunk） | 无 |
 | `UsageReporter` Publish / PublishFailure | 非流式原文含 model、失败体仍观测、无响应体保持空 | 无 |
 | `internal/redisqueue` 入队 JSON | 队列写出观测值 | 无 |
@@ -303,6 +335,9 @@ Keeper 存储列 `upstream_response_model TEXT NOT NULL DEFAULT ''`。列表/导
 | OpenAI 流式终态覆盖 | unit | 任务内 TDD | 测试通过 |
 | 非法 JSON 丢弃声明 | unit | 任务内 TDD | 测试通过 |
 | 超长名称截断 | unit | 任务内 TDD | 测试通过 |
+| Claude 只保留 first | unit | 任务内 TDD | 测试通过 |
+| Gemini 后写覆盖 | unit | 任务内 TDD | 测试通过 |
+| 分行 SSE 终态 | unit | 任务内 TDD | 测试通过 |
 | 失败体仍观测 | unit | 任务内 TDD | 测试通过 |
 | 无响应体保持空 | unit | 任务内 TDD | 测试通过 |
 | 队列写出观测值 | unit | 任务内 TDD | 测试通过 |
