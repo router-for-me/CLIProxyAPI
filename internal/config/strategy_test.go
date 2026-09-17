@@ -108,6 +108,14 @@ func TestValidateGlobalRoutingStrategy(t *testing.T) {
 	if err := ValidateGlobalRoutingStrategy(""); err != nil {
 		t.Errorf("empty should validate (unset is allowed): %v", err)
 	}
+	// The error message lists every canonical value so operators see the
+	// full accepted set without opening the source.
+	err := ValidateGlobalRoutingStrategy("bogus")
+	for _, want := range []string{"invalid global routing strategy", "round-robin", "fill-first", "weighted", "headroom"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("ValidateGlobalRoutingStrategy(bogus) error = %v, want it to contain %q", err, want)
+		}
+	}
 }
 
 func TestPoolStrategyFillFirstUnchanged(t *testing.T) {
