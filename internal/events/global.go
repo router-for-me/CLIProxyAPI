@@ -8,7 +8,10 @@ import (
 // read by Global() at emission sites.
 var global atomic.Pointer[Ring]
 
-// SetGlobal installs the ring as the global recorder. Idempotent.
+// SetGlobal installs the ring as the global recorder. Thread-safe.
+// Subsequent calls REPLACE the previous ring; events buffered in the
+// previous ring remain accessible via the old *Ring handle but are no
+// longer visible to events.Global().
 func SetGlobal(r *Ring) { global.Store(r) }
 
 // Global returns the installed ring, or a no-op stub if SetGlobal hasn't

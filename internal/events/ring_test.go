@@ -29,17 +29,36 @@ func TestRingWrapsAtCapacity(t *testing.T) {
 
 func TestRingDropsUnderContention(t *testing.T) {
 	r := NewRing(100)
-	// Force the contention threshold to be exceeded by setting it to 0;
-	// any non-zero time-since-start will trip the drop branch.
-	r.contentionThreshold = 0
-	for i := 0; i < 10; i++ {
+	// Hold the lock from this goroutine so the Record goroutine's
+	// TryLock fails immediately — this genuinely exercises the
+	// contention drop path.
+	r.mu.Lock()
+	done := make(chan struct{})
+	go func() {
 		r.Record(Event{Type: "test", Ts: time.Now()})
-	}
-	if r.Dropped() != 10 {
-		t.Errorf("want 10 drops, got %d", r.Dropped())
+		close(done)
+	}()
+	<-done
+	r.mu.Unlock()
+	if r.Dropped() != 1 {
+		t.Errorf("want 1 drop, got %d", r.Dropped())
 	}
 	if len(r.Snapshot()) != 0 {
 		t.Errorf("want empty snapshot, got %d events", len(r.Snapshot()))
+	}
+}
+
+func TestRingZeroValueRecordIsNoOp(t *testing.T) {
+	// Critical regression test: events.Global() returns &Ring{} before
+	// SetGlobal has been called. Record on that zero-value ring must
+	// not panic — it must be a no-op.
+	r := &Ring{}
+	r.Record(Event{Type: "test", Ts: time.Now()}) // must not panic
+	if r.Dropped() != 0 {
+		t.Errorf("zero-value ring should not increment dropped counter, got %d", r.Dropped())
+	}
+	if len(r.Snapshot()) != 0 {
+		t.Errorf("zero-value ring snapshot should be empty, got %d", len(r.Snapshot()))
 	}
 }
 

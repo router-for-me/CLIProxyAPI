@@ -6,28 +6,37 @@ import (
 	"time"
 )
 
+const (
+	minRingCapacity     = 100
+	maxRingCapacity     = 50000
+	defaultRingCapacity = 5000
+)
+
 // Ring is a bounded, lock-protected event buffer. Capacity is enforced
 // by count (not bytes). Records that exceed the contention threshold
 // are dropped and counted, never blocking the caller for long.
 type Ring struct {
-	mu                  sync.Mutex
-	buf                 []Event
-	cap                 int
-	cursor              int
-	full                bool
-	dropped             atomic.Int64
-	now                 func() time.Time
+	mu      sync.Mutex
+	buf     []Event
+	cap     int
+	cursor  int
+	full    bool
+	dropped atomic.Int64
+	now     func() time.Time
+	// contentionThreshold is reserved for future use. The current
+	// Record implementation only drops on TryLock failure; the field
+	// is kept for callers that want to introspect or extend.
 	contentionThreshold time.Duration
 }
 
 // NewRing returns a Ring with the given capacity. Capacity is clamped
 // to [100, 50000]. The default contention threshold is 1ms.
 func NewRing(capacity int) *Ring {
-	if capacity < 100 {
-		capacity = 100
+	if capacity < minRingCapacity {
+		capacity = minRingCapacity
 	}
-	if capacity > 50000 {
-		capacity = 50000
+	if capacity > maxRingCapacity {
+		capacity = maxRingCapacity
 	}
 	return &Ring{
 		buf:                 make([]Event, capacity),
@@ -40,23 +49,24 @@ func NewRing(capacity int) *Ring {
 // Capacity returns the ring's actual capacity (post-clamp).
 func (r *Ring) Capacity() int { return r.cap }
 
-// Record adds an event to the ring. If the event has no timestamp, the
-// ring's clock is used. Drops increment the dropped counter if the
-// mutex is held longer than contentionThreshold.
+// Record adds an event to the ring. If e.Ts is the zero time.Time,
+// the ring stamps it with its clock; otherwise the caller's Ts is
+// preserved. Zero-value Ring (cap==0) is a no-op.
 func (r *Ring) Record(e Event) {
+	// Short-circuit on zero-value Ring (returned by events.Global()
+	// before SetGlobal has been called). Without this, the zero-value
+	// ring has cap=0 and panics on the modulo below.
+	if r.cap == 0 {
+		return
+	}
 	if e.Ts.IsZero() {
 		e.Ts = r.now()
 	}
-	start := time.Now()
 	if !r.mu.TryLock() {
 		r.dropped.Add(1)
 		return
 	}
 	defer r.mu.Unlock()
-	if time.Since(start) > r.contentionThreshold {
-		r.dropped.Add(1)
-		return
-	}
 	r.buf[r.cursor] = e
 	r.cursor = (r.cursor + 1) % r.cap
 	if r.cursor == 0 {
