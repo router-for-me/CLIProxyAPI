@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,12 @@ import (
 
 // zcodeLoginTimeout bounds how long we wait for the user to authorize.
 const zcodeLoginTimeout = 5 * time.Minute
+
+// ZCode OAuth provider variants.
+const (
+	zcodeProviderZai      = "zai"
+	zcodeProviderBigmodel = "bigmodel"
+)
 
 // zCodeVersion is the ZCode desktop client version whose user-agent and identity
 // headers we mirror for upstream fidelity. Bump with the ZCode release cadence.
@@ -48,13 +55,34 @@ func (a ZCodeAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	return runZCodeLogin(ctx, cfg, opts)
 }
 
+// zcodeProviderFromOptions reads the ZCode OAuth provider variant ("zai"
+// global, default; "bigmodel" China) from LoginOptions.Metadata.
+func zcodeProviderFromOptions(opts *LoginOptions) string {
+	if opts == nil || opts.Metadata == nil {
+		return zcodeProviderZai
+	}
+	return normalizeZCodeProvider(opts.Metadata["provider"])
+}
+
+func normalizeZCodeProvider(provider string) string {
+	if strings.EqualFold(strings.TrimSpace(provider), zcodeProviderBigmodel) {
+		return zcodeProviderBigmodel
+	}
+	return zcodeProviderZai
+}
+
 // runZCodeLogin builds the OAuth flow, resolver and token storage, then returns
 // a *coreauth.Auth with the Metadata and Attributes needed by executors.
 func runZCodeLogin(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
-	login := &zcode.ZaiCliLogin{}
+	provider := zcodeProviderFromOptions(opts)
+
+	// The ZCode server owns the OAuth callback for both providers
+	// (zcode.z.ai/api/v1/oauth/cli/callback/<provider>), so cross-device login
+	// needs no localhost redirect: the same cli/init + poll flow serves both.
+	login := &zcode.CliLogin{Provider: provider}
 	flow, err := login.Start(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("zcode: %w", err)
@@ -73,14 +101,29 @@ func runZCodeLogin(ctx context.Context, cfg *config.Config, opts *LoginOptions) 
 		return nil, fmt.Errorf("zcode: %w", err)
 	}
 
-	cred, err := (&zcode.Resolver{}).ResolveZaiCredential(ctx, tokens.AccessToken)
+	cred, err := (&zcode.Resolver{}).ResolveCredential(ctx, tokens.AccessToken, provider)
 	if err != nil {
 		return nil, fmt.Errorf("zcode: %w", err)
 	}
 	cred.JWT = tokens.JWT
 	cred.UserID = tokens.UserID
 
-	return BuildZCodeAuth(cred, cred.JWT, cred.UserID), nil
+	return BuildZCodeAuth(cred, cred.JWT, cred.UserID, provider), nil
+}
+
+// ZCode coding-plan Anthropic endpoints per provider variant.
+const (
+	zcodeZaiAnthropicBase      = "https://api.z.ai/api/anthropic"
+	zcodeBigmodelAnthropicBase = "https://open.bigmodel.cn/api/anthropic"
+)
+
+// anthropicBaseForProvider returns the coding-plan Anthropic endpoint for a
+// provider variant ("bigmodel" China, anything else Z.ai global).
+func anthropicBaseForProvider(provider string) string {
+	if provider == zcodeProviderBigmodel {
+		return zcodeBigmodelAnthropicBase
+	}
+	return zcodeZaiAnthropicBase
 }
 
 // BuildZCodeAuth builds the *coreauth.Auth credential record for ZCode from the
@@ -88,10 +131,12 @@ func runZCodeLogin(ctx context.Context, cfg *config.Config, opts *LoginOptions) 
 // runner (runZCodeLogin) and the management web/TUI login handler so both
 // produce identical credential shapes: Attributes (api_key, base_url, header:*)
 // consumed by the ZCode executor and Metadata (type, api_key, secret, jwt,
-// user_id, device_mid) persisted to the auth file.
-func BuildZCodeAuth(cred *zcode.Credential, jwt, userID string) *coreauth.Auth {
+// user_id, device_mid) persisted to the auth file. provider selects the
+// coding-plan endpoint (Z.ai global vs Bigmodel China).
+func BuildZCodeAuth(cred *zcode.Credential, jwt, userID, provider string) *coreauth.Auth {
 	deviceMid := uuid.NewString()
 	fileName := fmt.Sprintf("zcode-%d.json", time.Now().UnixMilli())
+	baseURL := anthropicBaseForProvider(provider)
 
 	// Identity headers carried on every upstream request (native ZCode client
 	// fidelity). Stored as header:* attributes consumed by ApplyCustomHeadersFromAttrs
@@ -100,20 +145,21 @@ func BuildZCodeAuth(cred *zcode.Credential, jwt, userID string) *coreauth.Auth {
 	identity := identityHeaders(deviceMid)
 	attrs := map[string]string{
 		"api_key":  cred.FullKey(),
-		"base_url": "https://api.z.ai/api/anthropic",
+		"base_url": baseURL,
 	}
 	for name, value := range identity {
 		attrs["header:"+name] = value
 	}
 	metadata := map[string]any{
 		"type":       "zcode",
+		"provider":   provider,
 		"api_key":    cred.APIKey,
 		"secret":     cred.Secret,
 		"jwt":        jwt,
 		"user_id":    userID,
 		"device_mid": deviceMid,
-		"base_url":   "https://api.z.ai/api/anthropic",
-		"headers":    identityHeaders(deviceMid),
+		"base_url":   baseURL,
+		"headers":    identity,
 		"timestamp":  time.Now().UnixMilli(),
 	}
 
@@ -122,7 +168,7 @@ func BuildZCodeAuth(cred *zcode.Credential, jwt, userID string) *coreauth.Auth {
 		Provider:   "zcode",
 		FileName:   fileName,
 		Label:      "ZCode User",
-		Storage:    &zcode.TokenStorage{APIKey: cred.APIKey, Secret: cred.Secret, JWT: jwt, UserID: userID, DeviceMid: deviceMid, Provider: "zcode", BaseURL: "https://api.z.ai/api/anthropic", Headers: identityHeaders(deviceMid)},
+		Storage:    &zcode.TokenStorage{APIKey: cred.APIKey, Secret: cred.Secret, JWT: jwt, UserID: userID, DeviceMid: deviceMid, Provider: "zcode", BaseURL: baseURL, Headers: identity},
 		Metadata:   metadata,
 		Attributes: attrs,
 	}

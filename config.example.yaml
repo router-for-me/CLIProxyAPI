@@ -593,7 +593,9 @@ nonstream-keepalive-interval: 0
 # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai.
 # zcode: ZCode (Z.ai GLM) is an OAuth-only provider. No config keys are required here;
 # run `--zcode-login` to authenticate and a `auths/zcode-*.json` credential is written
-# automatically, just like the kimi OAuth provider.
+# automatically, just like the kimi OAuth provider. Use `--zcode-provider bigmodel` for a
+# BigModel/China (智谱) account; the default `zai` targets the global Z.ai account.
+# Both variants use the same server-mediated OAuth flow, so cross-device login works.
 # NOTE: Aliases do not apply to gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, or vertex-api-key.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. For strict backend pinning, use

@@ -34,16 +34,32 @@ type Resolver struct {
 	TestHost string
 }
 
-const defaultResolverHost = "https://api.z.ai"
+const (
+	zaiResolverHost      = "https://api.z.ai"
+	bigmodelResolverHost = "https://bigmodel.cn"
+)
 
 func (r *Resolver) host() string {
 	if r.TestHost != "" {
 		return r.TestHost
 	}
-	return defaultResolverHost
+	return zaiResolverHost
 }
 
-func (r *Resolver) doJSON(ctx context.Context, method, url string, bearer string, body any, out any) error {
+// bigmodelHost returns the Bigmodel (China) business-API origin. It shares the
+// TestHost override so tests can point both providers at one mock server.
+func (r *Resolver) bigmodelHost() string {
+	if r.TestHost != "" {
+		return r.TestHost
+	}
+	return bigmodelResolverHost
+}
+
+// doJSON sends a JSON request. authorization is the COMPLETE Authorization
+// header value (e.g. "Bearer xyz" or a bare token) and is applied verbatim;
+// callers own the scheme, since Z.ai uses "Bearer <biz>" while Bigmodel passes
+// the OAuth access token unchanged.
+func (r *Resolver) doJSON(ctx context.Context, method, url string, authorization string, body any, out any) error {
 	httpClient := r.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -58,8 +74,8 @@ func (r *Resolver) doJSON(ctx context.Context, method, url string, bearer string
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -101,7 +117,7 @@ func (r *Resolver) doJSON(ctx context.Context, method, url string, bearer string
 	return nil
 }
 
-func (r *Resolver) resolveCustomerInfo(ctx context.Context, auth string) (orgID, projectID string, err error) {
+func (r *Resolver) resolveCustomerInfo(ctx context.Context, host, auth string) (orgID, projectID string, err error) {
 	var info struct {
 		Organizations []struct {
 			OrganizationID   string `json:"organizationId"`
@@ -120,7 +136,7 @@ func (r *Resolver) resolveCustomerInfo(ctx context.Context, auth string) (orgID,
 			} `json:"projects"`
 		} `json:"orgs"`
 	}
-	if err := r.doJSON(ctx, http.MethodGet, r.host()+"/api/biz/customer/getCustomerInfo", auth, nil, &info); err != nil {
+	if err := r.doJSON(ctx, http.MethodGet, host+"/api/biz/customer/getCustomerInfo", auth, nil, &info); err != nil {
 		return "", "", err
 	}
 	orgs := info.Organizations
@@ -221,12 +237,8 @@ func (r *Resolver) ResolveZaiCredential(ctx context.Context, accessToken string)
 	if login.AccessToken == "" {
 		return nil, fmt.Errorf("zcode: z/login returned no biz token")
 	}
-	auth := login.AccessToken
-
-	// resolveCustomerInfo/findOrCreateAPIKey/copySecret already prepend the
-	// "Bearer " scheme inside doJSON; pass the raw token only (a pre-suffixed
-	// "Bearer Bearer ..." prefix is rejected upstream with 401).
-	orgID, projectID, err := r.resolveCustomerInfo(ctx, auth)
+	auth := "Bearer " + login.AccessToken
+	orgID, projectID, err := r.resolveCustomerInfo(ctx, r.host(), auth)
 	if err != nil {
 		return nil, err
 	}
@@ -235,5 +247,37 @@ func (r *Resolver) ResolveZaiCredential(ctx context.Context, accessToken string)
 		return nil, err
 	}
 	secret := r.copySecret(ctx, r.host(), auth, orgID, projectID, apiKey)
+	return &Credential{APIKey: apiKey, Secret: secret}, nil
+}
+
+// ResolveCredential exchanges an OAuth access token for a static coding-plan
+// credential, selecting the resolution path by provider: "zai" (global) or
+// "bigmodel" (China). Any other value falls back to the Z.ai path.
+func (r *Resolver) ResolveCredential(ctx context.Context, accessToken, provider string) (*Credential, error) {
+	if strings.EqualFold(strings.TrimSpace(provider), "bigmodel") {
+		return r.resolveBigmodelCredential(ctx, accessToken)
+	}
+	return r.ResolveZaiCredential(ctx, accessToken)
+}
+
+// resolveBigmodelCredential resolves a Bigmodel (China) credential. Unlike Z.ai
+// there is no z/login biz-token exchange: the OAuth access token is sent to the
+// Bigmodel business API as the Authorization value directly, then the default
+// org/project API key (and its secret, when available) are read out.
+func (r *Resolver) resolveBigmodelCredential(ctx context.Context, accessToken string) (*Credential, error) {
+	host := r.bigmodelHost()
+	auth := strings.TrimSpace(accessToken)
+	if auth == "" {
+		return nil, fmt.Errorf("zcode: empty bigmodel access token")
+	}
+	orgID, projectID, err := r.resolveCustomerInfo(ctx, host, auth)
+	if err != nil {
+		return nil, err
+	}
+	apiKey, err := r.findOrCreateAPIKey(ctx, host, auth, orgID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	secret := r.copySecret(ctx, host, auth, orgID, projectID, apiKey)
 	return &Credential{APIKey: apiKey, Secret: secret}, nil
 }

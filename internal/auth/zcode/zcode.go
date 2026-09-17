@@ -22,12 +22,15 @@ type ZCodeEnvelope struct {
 	Msg  string          `json:"msg"`
 }
 
-// CliFlow is the response of the Z.ai OAuth cli/init endpoint.
+// CliFlow describes an in-progress server-mediated OAuth flow.
 type CliFlow struct {
 	FlowID          string `json:"flow_id"`
 	AuthorizeURL    string `json:"authorize_url"`
 	PollIntervalSec int    `json:"poll_interval_sec"`
 	ExpiresAt       int64  `json:"expires_at"`
+
+	// Provider is the account platform this flow targets ("zai" or "bigmodel").
+	Provider string `json:"-"`
 }
 
 // CliTokens carries the credentials returned when the flow reaches "ready".
@@ -37,13 +40,31 @@ type CliTokens struct {
 	UserID      string
 }
 
-// ZaiCliLogin implements the server-mediated Z.ai CLI OAuth flow.
-type ZaiCliLogin struct {
+// CliLogin implements the server-mediated ZCode CLI OAuth flow, shared by both
+// provider variants. The ZCode server owns the callback
+// (zcode.z.ai/api/v1/oauth/cli/callback/<provider>), so no localhost redirect is
+// needed and cross-device login works. Provider "zai" (global, default) returns
+// data.zai.access_token; "bigmodel" (China) returns data.bigmodel.access_token.
+type CliLogin struct {
 	HTTP      *http.Client
 	PollToken string
-	baseURL   string              // injectable; empty = ZCodeAPIBase (used by tests)
-	Sleep     func(time.Duration) // injectable; nil = time.Sleep
-	Now       func() time.Time    // injectable; nil = time.Now
+	// Provider selects the upstream account platform: "zai" (default) or
+	// "bigmodel".
+	Provider string
+	baseURL  string              // injectable; empty = ZCodeAPIBase (used by tests)
+	Sleep    func(time.Duration) // injectable; nil = time.Sleep
+	Now      func() time.Time    // injectable; nil = time.Now
+}
+
+// ZaiCliLogin is the Z.ai (global) variant of the CLI flow, kept as the
+// historical type name for callers that only need the Z.ai provider.
+type ZaiCliLogin = CliLogin
+
+func (c *CliLogin) provider() string {
+	if strings.EqualFold(strings.TrimSpace(c.Provider), "bigmodel") {
+		return "bigmodel"
+	}
+	return "zai"
 }
 
 func (c *ZaiCliLogin) base() string {
@@ -114,12 +135,13 @@ func (c *ZaiCliLogin) doEnvelope(ctx context.Context, method, url string, body i
 }
 
 // Start calls oauth/cli/init and returns the flow to authorize.
-func (c *ZaiCliLogin) Start(ctx context.Context) (*CliFlow, error) {
+func (c *CliLogin) Start(ctx context.Context) (*CliFlow, error) {
 	c.PollToken = randomHex(32)
 	var flow CliFlow
+	body := fmt.Sprintf(`{"provider":%q}`, c.provider())
 	err := c.doEnvelope(ctx, http.MethodPost,
 		c.base()+"/oauth/cli/init",
-		strings.NewReader(`{"provider":"zai"}`),
+		strings.NewReader(body),
 		c.PollToken, &flow)
 	if err != nil {
 		return nil, err
@@ -127,11 +149,12 @@ func (c *ZaiCliLogin) Start(ctx context.Context) (*CliFlow, error) {
 	if flow.FlowID == "" || flow.AuthorizeURL == "" {
 		return nil, fmt.Errorf("zcode: cli/init returned empty flow")
 	}
+	flow.Provider = c.provider()
 	return &flow, nil
 }
 
 // Complete polls oauth/cli/poll/{flowID} until ready, failed or deadline.
-func (c *ZaiCliLogin) Complete(ctx context.Context, flow *CliFlow, timeout time.Duration) (*CliTokens, error) {
+func (c *CliLogin) Complete(ctx context.Context, flow *CliFlow, timeout time.Duration) (*CliTokens, error) {
 	if flow == nil || flow.FlowID == "" {
 		return nil, fmt.Errorf("zcode: flow not started")
 	}
@@ -156,6 +179,9 @@ func (c *ZaiCliLogin) Complete(ctx context.Context, flow *CliFlow, timeout time.
 			Zai struct {
 				AccessToken string `json:"access_token"`
 			} `json:"zai"`
+			Bigmodel struct {
+				AccessToken string `json:"access_token"`
+			} `json:"bigmodel"`
 		}
 		url := fmt.Sprintf("%s/oauth/cli/poll/%s", c.base(), flow.FlowID)
 		if err := c.doEnvelope(ctx, http.MethodGet, url, nil, c.PollToken, &data); err != nil {
@@ -166,11 +192,17 @@ func (c *ZaiCliLogin) Complete(ctx context.Context, flow *CliFlow, timeout time.
 		}
 		switch data.Status {
 		case "ready":
-			if data.Zai.AccessToken == "" {
+			// The ready payload carries the provider-scoped token; accept either
+			// field so a provider mismatch or a future rename still resolves.
+			accessToken := strings.TrimSpace(data.Zai.AccessToken)
+			if accessToken == "" {
+				accessToken = strings.TrimSpace(data.Bigmodel.AccessToken)
+			}
+			if accessToken == "" {
 				return nil, fmt.Errorf("zcode: ready response missing access_token")
 			}
 			return &CliTokens{
-				AccessToken: strings.TrimSpace(data.Zai.AccessToken),
+				AccessToken: accessToken,
 				JWT:         strings.TrimSpace(data.Token),
 				UserID:      data.User.UserID,
 			}, nil

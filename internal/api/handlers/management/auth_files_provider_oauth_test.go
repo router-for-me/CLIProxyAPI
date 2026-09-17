@@ -103,7 +103,7 @@ func TestRequestZCodeToken_ReturnsAuthURLAndSavesAuthFile(t *testing.T) {
 
 	origLogin := newZCodeLogin
 	origResolver := newZCodeResolver
-	newZCodeLogin = func() *zcode.ZaiCliLogin { return newZCodeLoginForTest(fakeHost) }
+	newZCodeLogin = func(string) *zcode.CliLogin { return newZCodeLoginForTest(fakeHost) }
 	newZCodeResolver = func() *zcode.Resolver { return &zcode.Resolver{TestHost: fake.URL} }
 	defer func() {
 		newZCodeLogin = origLogin

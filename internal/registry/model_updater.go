@@ -124,6 +124,12 @@ func tryRefreshModels(ctx context.Context, label string) {
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
 
+	// The remote catalog does not publish every provider: zcode ships only in the
+	// embedded catalog, so a wholesale replace would silently drop its models and
+	// leave "unknown provider for model glm-5.3" until restart. Preserve local-only
+	// sections the remote omits.
+	carryOverLocalOnlySections(oldData, parsed)
+
 	// Update store with new data regardless.
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = parsed
@@ -192,6 +198,19 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 // detectChangedProviders compares two model catalogs and returns provider names
 // whose model definitions differ. Codex tiers (free/team/plus/pro) are grouped
 // under a single "codex" provider.
+// carryOverLocalOnlySections retains sections that exist in the local catalog
+// but are absent from the fetched one. Currently only zcode is local-only; keep
+// this explicit rather than a generic merge so that a genuine upstream removal
+// of a managed provider (claude/gemini/...) is still reflected.
+func carryOverLocalOnlySections(local, remote *staticModelsJSON) {
+	if local == nil || remote == nil {
+		return
+	}
+	if len(remote.ZCode) == 0 && len(local.ZCode) > 0 {
+		remote.ZCode = local.ZCode
+	}
+}
+
 func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 	if oldData == nil || newData == nil {
 		return nil

@@ -82,6 +82,7 @@ func main() {
 	var kimiLogin bool
 	var xaiLogin bool
 	var zcodeLogin bool
+	var zcodeProvider string
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
@@ -102,6 +103,7 @@ func main() {
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&zcodeLogin, "zcode-login", false, "Login to ZCode using OAuth")
+	flag.StringVar(&zcodeProvider, "zcode-provider", "zai", "ZCode OAuth provider: \"zai\" (global) or \"bigmodel\" (China)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
@@ -665,7 +667,7 @@ func main() {
 	} else if xaiLogin {
 		cmd.DoXAILogin(cfg, options)
 	} else if zcodeLogin {
-		cmd.DoZCodeLogin(cfg, options)
+		cmd.DoZCodeLogin(cfg, options, zcodeProvider)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

@@ -725,23 +725,38 @@ const zcodeLoginTimeout = 5 * time.Minute
 
 var (
 	// newZCodeLogin and newZCodeResolver build the ZCode login and credential
-	// resolver. They are package-level so tests can point them at a fake server.
-	newZCodeLogin    = func() *zcode.ZaiCliLogin { return &zcode.ZaiCliLogin{} }
+	// resolver for a provider variant ("zai" global, "bigmodel" China). Both
+	// providers use the same server-mediated cli/init + poll flow. They are
+	// package-level so tests can point them at a fake server.
+	newZCodeLogin    = func(provider string) *zcode.CliLogin { return &zcode.CliLogin{Provider: provider} }
 	newZCodeResolver = func() *zcode.Resolver { return &zcode.Resolver{} }
 )
 
-// RequestZCodeToken starts the ZCode server-mediated OAuth login and returns the
-// authorize URL. A background goroutine polls the flow, resolves the static
-// coding-plan credential and saves the auth file (mirroring RequestKimiToken).
+// zcodeProviderFromQuery reads the optional ?provider= variant (default "zai").
+func zcodeProviderFromQuery(c *gin.Context) string {
+	if c == nil {
+		return "zai"
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Query("provider")), "bigmodel") {
+		return "bigmodel"
+	}
+	return "zai"
+}
+
+// RequestZCodeToken starts the ZCode OAuth login and returns the authorize URL.
+// A background goroutine completes the flow, resolves the static coding-plan
+// credential and saves the auth file (mirroring RequestKimiToken). The optional
+// ?provider=bigmodel query selects the China (Bigmodel) auth-code flow.
 func (h *Handler) RequestZCodeToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
-	fmt.Println("Initializing ZCode authentication...")
+	provider := zcodeProviderFromQuery(c)
+	fmt.Printf("Initializing ZCode authentication (%s)...\n", provider)
 
 	state := fmt.Sprintf("zcd-%d", time.Now().UnixNano())
 
-	login := newZCodeLogin()
+	login := newZCodeLogin(provider)
 	flow, errStart := login.Start(ctx)
 	if errStart != nil {
 		log.WithError(errStart).Error("failed to generate ZCode authorization URL")
@@ -774,7 +789,7 @@ func (h *Handler) RequestZCodeToken(c *gin.Context) {
 			return
 		}
 
-		cred, errResolve := newZCodeResolver().ResolveZaiCredential(pollCtx, tokens.AccessToken)
+		cred, errResolve := newZCodeResolver().ResolveCredential(pollCtx, tokens.AccessToken, provider)
 		if errResolve != nil {
 			if !IsOAuthSessionPending(state, "zcode") {
 				return
@@ -789,7 +804,7 @@ func (h *Handler) RequestZCodeToken(c *gin.Context) {
 		// Reuse the shared credential builder so the auth file matches the CLI
 		// login runner exactly (Attributes api_key/base_url/header:* and Metadata
 		// type/api_key/secret/jwt/user_id/device_mid).
-		record := sdkAuth.BuildZCodeAuth(cred, cred.JWT, cred.UserID)
+		record := sdkAuth.BuildZCodeAuth(cred, cred.JWT, cred.UserID, provider)
 		if errGuard := guardOAuthSessionPendingForSave(state, "zcode"); errGuard != nil {
 			return
 		}

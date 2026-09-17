@@ -16,16 +16,18 @@ type oauthProvider struct {
 	name       string
 	apiPath    string // management API path
 	emoji      string
-	deviceFlow bool // true for RFC 8628 device-code providers
+	deviceFlow bool   // true for RFC 8628 device-code providers
+	query      string // optional extra query for the auth-url request
 }
 
 var oauthProviders = []oauthProvider{
-	{"Claude (Anthropic)", "anthropic-auth-url", "🟧", false},
-	{"Codex (OpenAI)", "codex-auth-url", "🟩", false},
-	{"Antigravity", "antigravity-auth-url", "🟪", false},
-	{"Kimi", "kimi-auth-url", "🟫", true},
-	{"xAI", "xai-auth-url", "⬛", true},
-	{"ZCode", "zcode-auth-url", "🟩", true},
+	{"Claude (Anthropic)", "anthropic-auth-url", "🟧", false, ""},
+	{"Codex (OpenAI)", "codex-auth-url", "🟩", false, ""},
+	{"Antigravity", "antigravity-auth-url", "🟪", false, ""},
+	{"Kimi", "kimi-auth-url", "🟫", true, ""},
+	{"xAI", "xai-auth-url", "⬛", true, ""},
+	{"ZCode (Z.ai)", "zcode-auth-url", "🟩", true, ""},
+	{"ZCode (BigModel/智谱)", "zcode-auth-url", "🟩", true, "provider=bigmodel"},
 }
 
 // oauthTabModel handles OAuth login flows.
@@ -281,7 +283,11 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 func (m oauthTabModel) startOAuth(provider oauthProvider, generation int) tea.Cmd {
 	return func() tea.Msg {
 		// Call the auth URL endpoint with is_webui=true
-		data, err := m.client.getJSON("/v0/management/" + provider.apiPath + "?is_webui=true")
+		authURLPath := "/v0/management/" + provider.apiPath + "?is_webui=true"
+		if provider.query != "" {
+			authURLPath += "&" + provider.query
+		}
+		data, err := m.client.getJSON(authURLPath)
 		if err != nil {
 			return oauthStartMsg{generation: generation, err: fmt.Errorf("failed to start %s login: %w", provider.name, err)}
 		}

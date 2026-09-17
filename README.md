@@ -143,7 +143,16 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 ## ZCode login
 
-ZCode (Z.ai GLM) is supported via OAuth, like Kimi. Run the server with `--zcode-login`
+ZCode (Z.ai GLM) is supported via OAuth, like Kimi. Two account platforms are
+supported and share the same server-mediated login flow (the callback is hosted by
+`zcode.z.ai`, so the authorization URL works from any device):
+
+- `--zcode-provider zai` (default) — global Z.ai account, models served from
+  `https://api.z.ai/api/anthropic`.
+- `--zcode-provider bigmodel` — BigModel/智谱 (China) account, models served from
+  `https://open.bigmodel.cn/api/anthropic`.
+
+Run the server with `--zcode-login`
 to authenticate with your Z.ai account; the credentials are saved automatically to
 `auths/zcode-*.json`. No API key or extra config is required.
 
