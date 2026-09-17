@@ -321,6 +321,35 @@ func (s *authScheduler) pickReadyLookup(snapshot map[string]int) func(string) in
 	return func(authID string) int { return snapshot[authID] }
 }
 
+// maxParallelLookup returns a function that resolves a per-auth
+// max_parallel_requests cap by auth.ID, defaulting to 0 (unbounded). The
+// scheduler holds a snapshot of auth providers at call time so the lookup is
+// allocation-free for the common case (no caps set). Used by the round-2
+// global fill-first selector to keep filling one auth until it hits its cap.
+func (s *authScheduler) maxParallelLookup() func(string) int {
+	if s == nil || len(s.providers) == 0 {
+		return func(string) int { return 0 }
+	}
+	caps := make(map[string]int, len(s.providers))
+	for _, providerState := range s.providers {
+		if providerState == nil || len(providerState.auths) == 0 {
+			continue
+		}
+		for authID, meta := range providerState.auths {
+			if meta == nil || meta.auth == nil {
+				continue
+			}
+			if v := maxParallelForAuth(meta.auth); v > 0 {
+				caps[authID] = v
+			}
+		}
+	}
+	if len(caps) == 0 {
+		return func(string) int { return 0 }
+	}
+	return func(authID string) int { return caps[authID] }
+}
+
 func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, error) {
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -345,7 +374,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot())); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup()); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -406,7 +435,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-		if picked := shard.pickReadyLocked(false, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot())); picked != nil {
+		if picked := shard.pickReadyLocked(false, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup()); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -441,15 +470,42 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	}
 
 	if strategy == schedulerStrategyFillFirst {
-		for providerIndex, providerKey := range normalized {
-			shard := candidateShards[providerIndex]
+		// Round-2 fill-first: scan every candidate shard at the best
+		// priority, then pick the auth with the highest in-flight count
+		// below its per-auth max_parallel_requests cap. Distinct from the
+		// round-1 deterministic per-shard pick (which used
+		// pickReadyAtPriorityLocked directly).
+		entries := make([]*scheduledAuth, 0)
+		for _, shard := range candidateShards {
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot()))
-			if picked != nil {
-				return picked, providerKey, nil
+			bucket := shard.readyByPriority[bestPriority]
+			if bucket == nil {
+				continue
 			}
+			for _, entry := range bucket.all.flat {
+				if entry == nil || entry.auth == nil {
+					continue
+				}
+				if predicate != nil && !predicate(entry) {
+					continue
+				}
+				entries = append(entries, entry)
+			}
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i] == nil || entries[i].auth == nil {
+				return false
+			}
+			if entries[j] == nil || entries[j].auth == nil {
+				return true
+			}
+			return entries[i].auth.ID < entries[j].auth.ID
+		})
+		picked := pickFillFirst(entries, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup())
+		if picked != nil && picked.meta != nil {
+			return picked.auth, picked.meta.providerKey, nil
 		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
@@ -571,7 +627,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate, s.pickReadyLookup(s.inFlightSnapshot()))
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup())
 		if picked == nil {
 			continue
 		}
@@ -938,7 +994,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, inFlightCount func(string) int) *Auth {
+func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, inFlightCount func(string) int, maxParallel func(string) int) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -947,7 +1003,7 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 	if !okPriority {
 		return nil
 	}
-	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate, inFlightCount)
+	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate, inFlightCount, maxParallel)
 }
 
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
@@ -984,7 +1040,7 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, inFlightCount func(string) int) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, inFlightCount func(string) int, maxParallel func(string) int) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -999,7 +1055,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	var picked *scheduledAuth
 	switch strategy {
 	case schedulerStrategyFillFirst:
-		picked = view.pickFirst(predicate)
+		picked = view.pickFillFirst(predicate, inFlightCount, maxParallel)
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
 	case schedulerStrategyP2C:
