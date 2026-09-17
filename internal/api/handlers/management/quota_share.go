@@ -8,7 +8,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
-	log "github.com/sirupsen/logrus"
 )
 
 // quotaQueryTimeout caps the read-side quota aggregation queries so a slow
@@ -221,11 +220,11 @@ func computeHeadroom(used, limit int64) (float64, bool) {
 	return math.Round(pct*10) / 10, used > limit
 }
 
-// pgEnabledForQuota gates the quota-share endpoints on the PG backend. The
-// existing pgControl/pgUsage fields drive this check; we read them under
-// h.mu so the gate stays consistent with requirePG. The dedicated helper
-// exists (instead of reusing requirePG) because the management store wiring
-// for the quota repo is plumbed separately — see SetQuotaRepo.
+// pgEnabledForQuota gates the quota-share endpoints on the PG backend.
+// The quota-share endpoints are gated on quotaRepoEnabled (set by
+// SetPGControl when a real PostgresStore is wired, or by setQuotaRepo
+// from tests). We read it under h.mu so the gate stays consistent with
+// the rest of the PG-only routes.
 func (h *Handler) pgEnabledForQuota() bool {
 	if h == nil {
 		return false
@@ -246,11 +245,12 @@ func (h *Handler) quotaRepo() quotaRepo {
 	return h.quotaRepoIface
 }
 
-// SetQuotaRepo wires the production quota-share repo onto the handler. The
-// store.PostgresStore satisfies quotaRepo via its (ctx, authID) and
-// (ctx, key) aggregate helpers (see pg_quota_share.go). Pass nil to disable
-// the endpoints; they will return 503.
-func (h *Handler) SetQuotaRepo(repo quotaRepo) {
+// setQuotaRepo is the test-only seam for injecting a fake quota-share
+// repo. Production wires the real store.PostgresStore adapter via
+// SetPGControl (which sets quotaRepoIface + quotaRepoEnabled atomically
+// under the handler's mutex); tests do not need to stand up a real PG
+// instance, so they poke the field directly.
+func (h *Handler) setQuotaRepo(repo quotaRepo) {
 	if h == nil {
 		return
 	}
@@ -258,13 +258,6 @@ func (h *Handler) SetQuotaRepo(repo quotaRepo) {
 	defer h.mu.Unlock()
 	h.quotaRepoIface = repo
 	h.quotaRepoEnabled = repo != nil
-}
-
-// setQuotaRepo is the test-only counterpart of SetQuotaRepo. It keeps the
-// production wiring path stable while letting tests inject a fake without
-// standing up a real PG instance.
-func (h *Handler) setQuotaRepo(repo quotaRepo) {
-	h.SetQuotaRepo(repo)
 }
 
 // setPGEnabledForTest toggles the quota-share gate without standing up the
@@ -365,6 +358,3 @@ func (a *storeQuotaRepoAdapter) GetPoolQuota(ctx context.Context, key string) (Q
 	}
 	return out, partial, nil
 }
-
-// Avoid pulling in logrus solely for the unused-import tripwire.
-var _ = log.WithError

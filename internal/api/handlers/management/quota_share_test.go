@@ -22,10 +22,12 @@ type fakeQuotaRepo struct {
 	authSnapshot QuotaAuthSnapshot
 	authErr      error
 	authDelay    time.Duration // sleep before returning; > 2s exercises timeout
+	authPartial  bool          // force partial=true on the auth path
 
 	poolSnapshot QuotaPoolSnapshot
 	poolErr      error
 	poolDelay    time.Duration
+	poolPartial  bool
 }
 
 func (f *fakeQuotaRepo) GetAuthQuota(ctx context.Context, authID string) (QuotaAuthSnapshot, bool, error) {
@@ -45,7 +47,7 @@ func (f *fakeQuotaRepo) GetAuthQuota(ctx context.Context, authID string) (QuotaA
 	if out.AuthID == "" {
 		out.AuthID = authID
 	}
-	return out, false, nil
+	return out, f.authPartial, nil
 }
 
 func (f *fakeQuotaRepo) GetPoolQuota(ctx context.Context, key string) (QuotaPoolSnapshot, bool, error) {
@@ -63,7 +65,7 @@ func (f *fakeQuotaRepo) GetPoolQuota(ctx context.Context, key string) (QuotaPool
 	if out.PoolKey == "" {
 		out.PoolKey = key
 	}
-	return out, false, nil
+	return out, f.poolPartial, nil
 }
 
 // quotaShareHandlersTest wires a handler with the fake repo. The handler
@@ -285,5 +287,57 @@ func TestQuotaShareRepoErrorReturns500(t *testing.T) {
 	w := runQuotaShare(h, "GET", "/v0/management/auths/auth-1/quota")
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestQuotaSharePartialUnderPGSlowness pins the round-2 review-finding
+// fix end-to-end at the handler: when the store reports partial=true
+// (because at least one per-window sub-query hit the store's 500ms
+// per-window timeout), the handler MUST surface 200 + partial=true and
+// preserve the windows that did come back, with zero placeholders for
+// the timed-out ones. The fake repo is the test seam — production
+// wires the store, which under real PG slowness fires the same path.
+//
+// This is the spec example: hourly + monthly come back, weekly timed out
+// and is recorded as a zero placeholder (Limit=0 → headroom_pct=100.0).
+func TestQuotaSharePartialUnderPGSlowness(t *testing.T) {
+	repo := &fakeQuotaRepo{
+		authPartial: true,
+		authSnapshot: QuotaAuthSnapshot{
+			AuthID:       "auth-partial",
+			Channel:      "openai",
+			PoolStrategy: "fallback",
+			Windows: []WindowQuota{
+				{Size: "hourly", Used: 100, Limit: 1000, HeadroomPct: 90.0, OverLimit: false},
+				// weekly timed out — placeholder zero (Limit=0 → headroom=100.0).
+				{Size: "weekly", Used: 0, Limit: 0, HeadroomPct: 100.0, OverLimit: false},
+				{Size: "monthly", Used: 300, Limit: 5000, HeadroomPct: 94.0, OverLimit: false},
+			},
+		},
+	}
+	h := quotaShareHandlersTest(t, repo)
+	w := runQuotaShare(h, "GET", "/v0/management/auths/auth-1/quota")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 on partial; body=%s", w.Code, w.Body.String())
+	}
+	var resp quotaAuthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Partial {
+		t.Errorf("partial = false, want true when store reports partial")
+	}
+	if len(resp.Windows) != 3 {
+		t.Fatalf("windows = %d, want 3 (timed-out window preserved as zero placeholder)", len(resp.Windows))
+	}
+	// hourly and monthly came back; weekly was zeroed by the store.
+	if resp.Windows[0].Used != 100 || resp.Windows[0].HeadroomPct != 90.0 {
+		t.Errorf("hourly window = %+v, want used=100 headroom=90.0", resp.Windows[0])
+	}
+	if resp.Windows[1].Used != 0 || resp.Windows[1].HeadroomPct != 100.0 {
+		t.Errorf("weekly window = %+v, want used=0 headroom=100.0 (zero placeholder for timed-out window)", resp.Windows[1])
+	}
+	if resp.Windows[2].Used != 300 || resp.Windows[2].HeadroomPct != 94.0 {
+		t.Errorf("monthly window = %+v, want used=300 headroom=94.0", resp.Windows[2])
 	}
 }
