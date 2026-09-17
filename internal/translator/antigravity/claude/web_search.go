@@ -30,6 +30,14 @@ func antigravitySupportsNativeGoogleSearch(model string) bool {
 	return registry.AntigravityWebSearchModelFor(model) != ""
 }
 
+func antigravityWebSearchTargetModel(model string) string {
+	target := registry.AntigravityWebSearchModelFor(model)
+	if target == "" {
+		return model
+	}
+	return target
+}
+
 func isClaudeTypedWebSearchToolType(toolType string) bool {
 	return toolType == "web_search_20250305" || toolType == "web_search_20260209"
 }
@@ -172,7 +180,12 @@ func extractClaudeWebSearchQuery(payload []byte) string {
 			continue
 		}
 		if query := extractClaudeTextContent(message.Get("content")); query != "" {
-			return query
+			const prefix = "perform a web search for the query:"
+			trimmed := strings.TrimSpace(query)
+			if strings.HasPrefix(strings.ToLower(trimmed), prefix) {
+				return strings.TrimSpace(trimmed[len(prefix):])
+			}
+			return trimmed
 		}
 	}
 	return ""
