@@ -62,7 +62,8 @@ type apiCallResponse struct {
 // Request JSON:
 //   - auth_index / authIndex / AuthIndex (optional):
 //     The credential "auth_index" from GET /v0/management/auth-files (or other endpoints returning it).
-//     If omitted or not found, credential-specific proxy/token substitution is skipped.
+//     If omitted or not found, credential-specific proxy selection is skipped.
+//     Requests containing "$TOKEN$" are rejected when no matching credential is available.
 //   - method (required): HTTP method, e.g. GET, POST, PUT, PATCH, DELETE.
 //   - url (required): Absolute URL including scheme and host, e.g. "https://api.example.com/v1/ping".
 //   - proxy_url (optional): Proxy used for this request. Supports HTTP, HTTPS, SOCKS5, SOCKS5H,
@@ -148,7 +149,7 @@ func (h *Handler) APICall(c *gin.Context) {
 			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth, requestProxyURL)
 			tokenResolved = true
 		}
-		if auth != nil && token == "" {
+		if token == "" {
 			if tokenErr != nil {
 				return errors.New("auth token refresh failed")
 			}

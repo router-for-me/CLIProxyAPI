@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -330,6 +333,151 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestAPICallReplacesXAIFileTokenUsingListedAuthIndex(t *testing.T) {
+	t.Parallel()
+
+	receivedAuthorization := make(chan string, 1)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuthorization <- r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstreamServer.Close()
+
+	authDir := t.TempDir()
+	authPath := filepath.Join(authDir, "xai-test.json")
+	authData := []byte(`{"type":"xai","auth_kind":"oauth","access_token":"xai-oauth-token","refresh_token":"refresh-token"}`)
+	if errWrite := os.WriteFile(authPath, authData, 0o600); errWrite != nil {
+		t.Fatalf("write xAI auth file: %v", errWrite)
+	}
+	auths, errSynthesize := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: authDir,
+	}, authPath, authData)
+	if errSynthesize != nil {
+		t.Fatalf("synthesize xAI auth file: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("synthesized auth count = %d, want 1", len(auths))
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, errRegister := manager.Register(context.Background(), auths[0]); errRegister != nil {
+		t.Fatalf("register xAI auth: %v", errRegister)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	router := gin.New()
+	router.GET("/auth-files", h.ListAuthFiles)
+	router.POST("/api-call", h.APICall)
+
+	listRecorder := httptest.NewRecorder()
+	listRequest := httptest.NewRequest(http.MethodGet, "/auth-files", nil)
+	router.ServeHTTP(listRecorder, listRequest)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("list status code = %d, want %d; body = %s", listRecorder.Code, http.StatusOK, listRecorder.Body.String())
+	}
+	var listResponse struct {
+		Files []struct {
+			AuthIndex string `json:"auth_index"`
+		} `json:"files"`
+	}
+	if errDecode := json.NewDecoder(listRecorder.Body).Decode(&listResponse); errDecode != nil {
+		t.Fatalf("decode auth files response: %v", errDecode)
+	}
+	if len(listResponse.Files) != 1 || listResponse.Files[0].AuthIndex == "" {
+		t.Fatalf("listed auth files = %#v, want one non-empty auth_index", listResponse.Files)
+	}
+
+	callPayload := map[string]any{
+		"authIndex": listResponse.Files[0].AuthIndex,
+		"method":    http.MethodGet,
+		"url":       upstreamServer.URL,
+		"header": map[string]string{
+			"Authorization": "Bearer $TOKEN$",
+		},
+	}
+	callData, errMarshal := json.Marshal(callPayload)
+	if errMarshal != nil {
+		t.Fatalf("marshal api-call request: %v", errMarshal)
+	}
+	callRecorder := httptest.NewRecorder()
+	callRequest := httptest.NewRequest(http.MethodPost, "/api-call", strings.NewReader(string(callData)))
+	callRequest.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(callRecorder, callRequest)
+	if callRecorder.Code != http.StatusOK {
+		t.Fatalf("api-call status code = %d, want %d; body = %s", callRecorder.Code, http.StatusOK, callRecorder.Body.String())
+	}
+	if authorization := <-receivedAuthorization; authorization != "Bearer xai-oauth-token" {
+		t.Fatalf("upstream Authorization = %q, want %q", authorization, "Bearer xai-oauth-token")
+	}
+}
+
+func TestAPICallRejectsUnresolvedTokenPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	var upstreamCalls atomic.Int64
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstreamServer.Close()
+
+	h := &Handler{
+		cfg:         &config.Config{},
+		authManager: coreauth.NewManager(nil, nil, nil),
+	}
+	router := gin.New()
+	router.POST("/", h.APICall)
+
+	for _, testCase := range []struct {
+		name        string
+		authIndex   string
+		placeholder string
+	}{
+		{name: "missing auth index in header", placeholder: "header"},
+		{name: "unknown auth index in header", authIndex: "missing-auth", placeholder: "header"},
+		{name: "unknown auth index in body", authIndex: "missing-auth", placeholder: "body"},
+	} {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			requestPayload := map[string]any{
+				"method": http.MethodGet,
+				"url":    upstreamServer.URL,
+			}
+			if testCase.placeholder == "header" {
+				requestPayload["header"] = map[string]string{"Authorization": "Bearer $TOKEN$"}
+			} else {
+				requestPayload["data"] = `{"token":"$TOKEN$"}`
+			}
+			if testCase.authIndex != "" {
+				requestPayload["authIndex"] = testCase.authIndex
+			}
+			requestData, errMarshal := json.Marshal(requestPayload)
+			if errMarshal != nil {
+				t.Fatalf("marshal api-call request: %v", errMarshal)
+			}
+
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(requestData)))
+			request.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status code = %d, want %d; body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+			}
+			var response map[string]string
+			if errDecode := json.NewDecoder(recorder.Body).Decode(&response); errDecode != nil {
+				t.Fatalf("decode response: %v", errDecode)
+			}
+			if response["error"] != "auth token not found" {
+				t.Fatalf("error = %q, want %q", response["error"], "auth token not found")
+			}
+		})
+	}
+	if calls := upstreamCalls.Load(); calls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls)
 	}
 }
 
