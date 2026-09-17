@@ -184,17 +184,18 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				}
 			} else if role == "user" || role == "system" || role == "developer" {
 				hasEncounteredConversation = true
+				isDemotedSystem := role == "system" || role == "developer"
 				partItems := make([][]byte, 0, 4)
 				if content.Type == gjson.String {
-					partItems = append(partItems, antigravityOpenAITextPart(content.String()))
+					partItems = append(partItems, antigravityOpenAITextPart(antigravityDemotedSystemText(content.String(), isDemotedSystem)))
 				} else if content.IsObject() && content.Get("type").String() == "text" {
-					partItems = append(partItems, antigravityOpenAITextPart(content.Get("text").String()))
+					partItems = append(partItems, antigravityOpenAITextPart(antigravityDemotedSystemText(content.Get("text").String(), isDemotedSystem)))
 				} else if content.IsArray() {
 					for _, item := range content.Array() {
 						switch item.Get("type").String() {
 						case "text":
 							if text := item.Get("text").String(); text != "" {
-								partItems = append(partItems, antigravityOpenAITextPart(text))
+								partItems = append(partItems, antigravityOpenAITextPart(antigravityDemotedSystemText(text, isDemotedSystem)))
 							}
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()
@@ -628,4 +629,14 @@ func setAntigravityOpenAIRawIfDifferent(out []byte, path string, value gjson.Res
 		return out
 	}
 	return updated
+}
+
+// antigravityDemotedSystemText wraps a demoted mid-session system or developer
+// message in the <system-reminder> envelope so non-Claude upstream models treat it
+// as a directive rather than user speech.
+func antigravityDemotedSystemText(text string, isDemoted bool) string {
+	if !isDemoted || strings.TrimSpace(text) == "" {
+		return text
+	}
+	return translatorcommon.SystemReminderText(text)
 }
