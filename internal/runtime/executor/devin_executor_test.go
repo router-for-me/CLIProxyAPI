@@ -1282,6 +1282,194 @@ func TestDevinExecutorOpenAIToolCallAndResultViaInteractions(t *testing.T) {
 	}
 }
 
+func TestParseInteractionsPayload_FunctionResultStructuredContent(t *testing.T) {
+	interactionsPayload := []byte(`{
+		"input": [
+			{"type":"function_call","name":"read_file","id":"call_1","arguments":{"path":"a.go"}},
+			{"type":"function_result","call_id":"call_1","result":[{"type":"text","text":"first line"},{"type":"text","text":"second line"},{"type":"image","data":"aGk="}]},
+			{"type":"function_call","name":"read_file","id":"call_2","arguments":{"path":"b.go"}},
+			{"type":"function_result","call_id":"call_2","result":{"text":"object text"}},
+			{"type":"function_call","name":"read_file","id":"call_3","arguments":{"path":"c.go"}},
+			{"type":"function_result","call_id":"call_3","output":{"output":"output field"}}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsPayload, nil)
+	if len(prompts) != 6 {
+		t.Fatalf("prompts len = %d, want 6 (alternating assistant call / tool result)", len(prompts))
+	}
+	for _, want := range []struct {
+		idx        int
+		toolCallID string
+		content    string
+	}{
+		{1, "call_1", "[Image 1: pasted_image_1.png]\n\nfirst line\nsecond line"},
+		// Object payloads are business data and pass through untouched.
+		{3, "call_2", `{"text":"object text"}`},
+		{5, "call_3", `{"output":"output field"}`},
+	} {
+		if prompts[want.idx].Source != 4 {
+			t.Fatalf("prompts[%d].Source = %d, want 4", want.idx, prompts[want.idx].Source)
+		}
+		if prompts[want.idx].ToolCallID != want.toolCallID {
+			t.Fatalf("prompts[%d].ToolCallID = %q, want %q", want.idx, prompts[want.idx].ToolCallID, want.toolCallID)
+		}
+		if prompts[want.idx].Content != want.content {
+			t.Fatalf("prompts[%d].Content = %q, want %q", want.idx, prompts[want.idx].Content, want.content)
+		}
+	}
+	if len(prompts[1].Images) != 1 {
+		t.Fatalf("prompts[1].Images len = %d, want 1 (image part extracted)", len(prompts[1].Images))
+	}
+}
+
+func TestParseInteractionsPayload_FunctionResultEmptyPlaceholder(t *testing.T) {
+	interactionsPayload := []byte(`{
+		"input": [
+			{"type":"function_call","name":"touch","id":"call_1","arguments":{}},
+			{"type":"function_result","call_id":"call_1"},
+			{"type":"function_call","name":"touch","id":"call_2","arguments":{}},
+			{"type":"function_result","call_id":"call_2","result":"","output":""},
+			{"type":"function_call","name":"touch","id":"call_3","arguments":{}},
+			{"type":"function_result","call_id":"call_3","result":[{"type":"image","data":"aGk="}]}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsPayload, nil)
+	if len(prompts) != 6 {
+		t.Fatalf("prompts len = %d, want 6", len(prompts))
+	}
+	for i, idx := range []int{1, 3} {
+		p := prompts[idx]
+		if p.Source != 4 {
+			t.Fatalf("prompts[%d].Source = %d, want 4", idx, p.Source)
+		}
+		if p.Content != "[tool result]" {
+			t.Fatalf("prompts[%d].Content = %q, want [tool result] placeholder", idx, p.Content)
+		}
+		if p.ToolCallID != fmt.Sprintf("call_%d", i+1) {
+			t.Fatalf("prompts[%d].ToolCallID = %q", idx, p.ToolCallID)
+		}
+	}
+	// An image-only result carries its extracted image and header, not the placeholder.
+	if prompts[5].Source != 4 || len(prompts[5].Images) != 1 {
+		t.Fatalf("prompts[5] = %+v, want source=4 with one image", prompts[5])
+	}
+	if prompts[5].Content != "[Image 1: pasted_image_1.png]" {
+		t.Fatalf("prompts[5].Content = %q, want image header", prompts[5].Content)
+	}
+}
+
+func TestParseInteractionsPayload_OrphanFunctionResultDemoted(t *testing.T) {
+	interactionsPayload := []byte(`{
+		"input": [
+			{"type":"function_result","call_id":"call_lost","result":"orphan payload"},
+			{"type":"function_result","result":"no id payload"},
+			{"type":"function_call","name":"lookup","id":"call_1","arguments":{"q":"x"}},
+			{"type":"function_result","call_id":"call_1","result":"matched"},
+			{"type":"function_result","call_id":"call_1","result":"second result same call"}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsPayload, nil)
+	if len(prompts) != 5 {
+		t.Fatalf("prompts len = %d, want 5", len(prompts))
+	}
+
+	// An unmatched id and a missing id both fold the result into user text.
+	for i, want := range []string{"orphan payload", "no id payload"} {
+		if prompts[i].Source != 1 {
+			t.Fatalf("prompts[%d].Source = %d, want 1 (folded)", i, prompts[i].Source)
+		}
+		if prompts[i].Content != "[tool result without matching call]\n"+want {
+			t.Fatalf("prompts[%d].Content = %q, want folded payload %q", i, prompts[i].Content, want)
+		}
+	}
+
+	if prompts[2].Source != 2 || len(prompts[2].ToolCalls) != 1 || prompts[2].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("prompts[2] assistant tool call mismatch: %+v", prompts[2])
+	}
+	if prompts[3].Source != 4 || prompts[3].ToolCallID != "call_1" || prompts[3].Content != "matched" {
+		t.Fatalf("prompts[3] tool result mismatch: %+v", prompts[3])
+	}
+	// The pending call was already consumed, so a second result folds too.
+	if prompts[4].Source != 1 || prompts[4].Content != "[tool result without matching call]\nsecond result same call" {
+		t.Fatalf("prompts[4] folded result mismatch: %+v", prompts[4])
+	}
+}
+
+func TestParseInteractionsPayload_MessagesFallbackToolResult(t *testing.T) {
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":"calling now","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.go\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"tool output"}]}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(payload, nil)
+	if len(prompts) != 2 {
+		t.Fatalf("prompts len = %d, want 2", len(prompts))
+	}
+	if prompts[0].Source != 2 || len(prompts[0].ToolCalls) != 1 {
+		t.Fatalf("prompts[0] assistant mismatch: %+v", prompts[0])
+	}
+	if got := prompts[0].ToolCalls[0].ID; got != "call_1" {
+		t.Fatalf("tool call id = %q, want call_1", got)
+	}
+	if got := prompts[0].ToolCalls[0].Name; got != "read_file" {
+		t.Fatalf("tool call name = %q, want read_file", got)
+	}
+	if prompts[1].Source != 4 || prompts[1].ToolCallID != "call_1" || prompts[1].Content != "tool output" {
+		t.Fatalf("prompts[1] tool result mismatch: %+v", prompts[1])
+	}
+}
+
+func TestParseInteractionsPayload_MessagesFallbackOrphanTool(t *testing.T) {
+	payload := []byte(`{
+		"messages": [
+			{"role":"assistant","content":"no calls here"},
+			{"role":"tool","tool_call_id":"call_x","content":"orphan"}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(payload, nil)
+	if len(prompts) != 2 {
+		t.Fatalf("prompts len = %d, want 2", len(prompts))
+	}
+	if prompts[1].Source != 1 || prompts[1].Content != "[tool result without matching call]\norphan" {
+		t.Fatalf("prompts[1] folded result mismatch: %+v", prompts[1])
+	}
+}
+
+func TestParseInteractionsPayload_OrphanResultDoesNotShiftUserImages(t *testing.T) {
+	// The folded orphan is a source=1 prompt but must not consume a user image
+	// slot in supplementImagesFromOriginal, or the following user prompt loses
+	// its image.
+	payload := []byte(`{
+		"input": [
+			{"type":"function_result","call_id":"call_orphan","result":"stale result"},
+			{"type":"user_input","content":[{"type":"text","text":"hello"}]}
+		]
+	}`)
+	original := []byte(`{
+		"messages": [
+			{"role":"tool","tool_call_id":"call_orphan","content":"stale result"},
+			{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,aGk="}}]}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(payload, original)
+	if len(prompts) != 2 {
+		t.Fatalf("prompts len = %d, want 2", len(prompts))
+	}
+	if len(prompts[0].Images) != 0 {
+		t.Fatalf("demoted orphan picked up user images: %+v", prompts[0].Images)
+	}
+	if len(prompts[1].Images) != 1 {
+		t.Fatalf("user prompt lost its image to the demoted orphan: %+v", prompts[1])
+	}
+}
+
 func TestStreamDevinFrames_StopReasonMaxTokens(t *testing.T) {
 	// Frame with StopReason = 3 (MAX_TOKENS) and partial content
 	var f1 []byte

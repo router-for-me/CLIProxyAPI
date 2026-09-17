@@ -1334,6 +1334,11 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 	cascadeID = sessionID
 
 	// 4. Repeated History Prompts
+	// pendingToolCalls counts emitted tool calls not yet consumed by a kept
+	// result: upstream binds each result to an earlier unconsumed call in
+	// order, so appendToolResultPrompt folds results with nothing left to
+	// consume into a user prompt.
+	pendingToolCalls := 0
 	inputRes := root.Get("input")
 	if inputRes.IsArray() {
 		for _, step := range inputRes.Array() {
@@ -1402,6 +1407,7 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 				id := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String())
 				args := step.Get("arguments").Raw
 				tc := helps.DevinToolCall{ID: id, Name: name, Arguments: args}
+				pendingToolCalls++
 				if len(prompts) > 0 && prompts[len(prompts)-1].Source == 2 {
 					prompts[len(prompts)-1].ToolCalls = append(prompts[len(prompts)-1].ToolCalls, tc)
 				} else {
@@ -1415,13 +1421,7 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 			case "function_result":
 				id := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String())
 				resText, resImages := extractFunctionResultContent(step)
-				prompts = append(prompts, helps.DevinPrompt{
-					MessageID:  uuid.New().String(),
-					Source:     4,
-					ToolCallID: id,
-					Content:    resText,
-					Images:     resImages,
-				})
+				prompts, pendingToolCalls = appendToolResultPrompt(prompts, pendingToolCalls, id, resText, resImages)
 			}
 		}
 	} else if messagesRes := root.Get("messages"); messagesRes.IsArray() {
@@ -1442,22 +1442,24 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 					Images:    images,
 				})
 			case "assistant":
-				text := extractInteractionsStepText(m)
-				prompts = append(prompts, helps.DevinPrompt{
+				prompt := helps.DevinPrompt{
 					MessageID: uuid.New().String(),
 					Source:    2,
-					Content:   text,
-				})
+					Content:   extractInteractionsStepText(m),
+				}
+				for _, tc := range m.Get("tool_calls").Array() {
+					prompt.ToolCalls = append(prompt.ToolCalls, helps.DevinToolCall{
+						ID:        tc.Get("id").String(),
+						Name:      firstNonEmpty(tc.Get("function.name").String(), tc.Get("name").String()),
+						Arguments: firstNonEmpty(tc.Get("function.arguments").String(), tc.Get("arguments").String()),
+					})
+					pendingToolCalls++
+				}
+				prompts = append(prompts, prompt)
 			case "tool":
 				id := firstNonEmpty(m.Get("tool_call_id").String(), m.Get("id").String())
 				resText, resImages := extractFunctionResultContent(m)
-				prompts = append(prompts, helps.DevinPrompt{
-					MessageID:  uuid.New().String(),
-					Source:     4,
-					ToolCallID: id,
-					Content:    resText,
-					Images:     resImages,
-				})
+				prompts, pendingToolCalls = appendToolResultPrompt(prompts, pendingToolCalls, id, resText, resImages)
 			}
 		}
 	}
@@ -1744,6 +1746,43 @@ func extractInteractionsStepText(step gjson.Result) string {
 	return step.Get("text").String()
 }
 
+// orphanToolResultMarker prefixes a tool result that had no pending emitted
+// call to pair with and was folded into a user prompt.
+const orphanToolResultMarker = "[tool result without matching call]"
+
+// appendToolResultPrompt emits a tool result as a source=4 prompt when a still
+// unconsumed emitted call is pending (upstream binds each result to an earlier
+// unconsumed call in order and rejects a result with nothing left to
+// consume), decrementing the pending count. Otherwise the orphan is folded
+// into a user prompt that still carries the payload so it is not silently
+// dropped. Returns the updated prompt slice and remaining pending count.
+func appendToolResultPrompt(prompts []helps.DevinPrompt, pending int, id, resText string, resImages []helps.DevinImage) ([]helps.DevinPrompt, int) {
+	if id != "" && pending > 0 {
+		if resText == "" && len(resImages) == 0 {
+			// Upstream rejects empty tool result text; substitute a placeholder.
+			resText = "[tool result]"
+		}
+		return append(prompts, helps.DevinPrompt{
+			MessageID:  uuid.New().String(),
+			Source:     4,
+			ToolCallID: id,
+			Content:    resText,
+			Images:     resImages,
+		}), pending - 1
+	}
+	content := orphanToolResultMarker
+	if resText != "" {
+		content += "\n" + resText
+	}
+	log.Warnf("devin executor: orphan tool result folded into user prompt, call_id=%q", id)
+	return append(prompts, helps.DevinPrompt{
+		MessageID: uuid.New().String(),
+		Source:    1,
+		Content:   content,
+		Images:    resImages,
+	}), pending
+}
+
 func supplementImagesFromOriginal(original []byte, prompts []helps.DevinPrompt) {
 	origRoot := gjson.ParseBytes(original)
 	messages := origRoot.Get("messages")
@@ -1808,6 +1847,12 @@ func supplementImagesFromOriginal(original []byte, prompts []helps.DevinPrompt) 
 	userPromptIdx := 0
 	for i := range prompts {
 		if prompts[i].Source == 1 {
+			// Folded orphan tool results share source=1 but do not correspond to
+			// a user message; skip them so they neither absorb a user image slot
+			// nor shift the positional mapping for later prompts.
+			if strings.HasPrefix(prompts[i].Content, orphanToolResultMarker) {
+				continue
+			}
 			if len(prompts[i].Images) == 0 && userPromptIdx < len(userImages) && len(userImages[userPromptIdx]) > 0 {
 				prompts[i].Images = userImages[userPromptIdx]
 				if !strings.Contains(prompts[i].Content, "[Image ") {
