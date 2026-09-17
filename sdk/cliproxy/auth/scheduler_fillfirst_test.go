@@ -7,13 +7,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
-// alwaysZeroMaxParallel returns a max-parallel lookup that treats every auth as
-// uncapped. Tests that need a per-auth cap build their own lookup and pass it
-// into pickFillFirst directly; this helper covers the "no cap" production path
-// in which fill-first keeps filling whichever auth has the highest in-flight
-// count, only ever backing off because of the cap (which never trips here).
-func alwaysZeroMaxParallel(string) int { return 0 }
-
 // newFillFirstSchedulerForTest builds a scheduler over gemini auths with the
 // given in-flight counts seeded per auth. Mirrors newStrategySchedulerForTest
 // but keeps the API minimal (no model registration needed for fill-first
