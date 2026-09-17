@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -542,4 +543,104 @@ func TestConvertInteractionsResponseToClaude_PreservesCacheReadUsage(t *testing.
 			t.Fatalf("usage.cache_read_input_tokens = %d, want 30. Output: %s", got, string(out))
 		}
 	})
+}
+
+func TestConvertClaudeRequestToInteractionsPreservesImagesInToolResult(t *testing.T) {
+	raw := []byte(`{
+		"model": "devin/swe-2",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "tool_image_1", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_image_1",
+						"content": [
+							{
+								"type": "text",
+								"text": "Captured desktop"
+							},
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertClaudeRequestToInteractions("devin/swe-2", raw, false)
+	res := gjson.GetBytes(out, "input.1.result")
+	if !res.IsArray() {
+		t.Fatalf("expected input.1.result to be array, got: %s", res.Raw)
+	}
+
+	foundText := false
+	foundImage := false
+	for _, item := range res.Array() {
+		switch item.Get("type").String() {
+		case "text":
+			if item.Get("text").String() == "Captured desktop" {
+				foundText = true
+			}
+		case "image":
+			if item.Get("mime_type").String() == "image/png" && item.Get("data").String() != "" {
+				foundImage = true
+			}
+		}
+	}
+
+	if !foundText {
+		t.Fatalf("expected text part 'Captured desktop' in result, got: %s", res.Raw)
+	}
+	if !foundImage {
+		t.Fatalf("expected image part in result, got: %s", res.Raw)
+	}
+}
+
+func TestConvertClaudeRequestToInteractionsPreservesBusinessObjectsInToolResultArray(t *testing.T) {
+	raw := []byte(`{
+		"model": "devin/swe-2",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_call_1",
+						"content": [
+							{"text": "failed", "exit_code": 1, "retryable": true},
+							{"type": "text", "text": "failed with code", "exit_code": 2}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertClaudeRequestToInteractions("devin/swe-2", raw, false)
+	res := gjson.GetBytes(out, "input.0.result")
+	if !res.IsArray() {
+		t.Fatalf("expected input.0.result to be array, got: %s", res.Raw)
+	}
+
+	resStr := res.Raw
+	if !strings.Contains(resStr, `"exit_code": 1`) || !strings.Contains(resStr, `"retryable": true`) {
+		t.Errorf("expected exit_code 1 and retryable to be preserved in result: %s", resStr)
+	}
+	if !strings.Contains(resStr, `"exit_code": 2`) {
+		t.Errorf("expected exit_code 2 to be preserved in result: %s", resStr)
+	}
 }

@@ -1414,25 +1414,13 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 
 			case "function_result":
 				id := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String())
-				resText := firstNonEmpty(
-					step.Get("result").String(),
-					step.Get("output").String(),
-					step.Get("content").String(),
-				)
-				if resText == "" {
-					if r := step.Get("result"); r.Exists() {
-						resText = r.Raw
-					} else if o := step.Get("output"); o.Exists() {
-						resText = o.Raw
-					} else if c := step.Get("content"); c.Exists() {
-						resText = c.Raw
-					}
-				}
+				resText, resImages := extractFunctionResultContent(step)
 				prompts = append(prompts, helps.DevinPrompt{
 					MessageID:  uuid.New().String(),
 					Source:     4,
 					ToolCallID: id,
 					Content:    resText,
+					Images:     resImages,
 				})
 			}
 		}
@@ -1462,21 +1450,13 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 				})
 			case "tool":
 				id := firstNonEmpty(m.Get("tool_call_id").String(), m.Get("id").String())
-				resText := firstNonEmpty(
-					m.Get("content").String(),
-					m.Get("output").String(),
-					m.Get("result").String(),
-				)
-				if resText == "" {
-					if c := m.Get("content"); c.Exists() {
-						resText = c.Raw
-					}
-				}
+				resText, resImages := extractFunctionResultContent(m)
 				prompts = append(prompts, helps.DevinPrompt{
 					MessageID:  uuid.New().String(),
 					Source:     4,
 					ToolCallID: id,
 					Content:    resText,
+					Images:     resImages,
 				})
 			}
 		}
@@ -1576,59 +1556,145 @@ func mimeExtension(mime string) string {
 	}
 }
 
+func extractDevinImage(part gjson.Result) (helps.DevinImage, bool) {
+	partType := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
+	if partType != "image" && partType != "input_image" && partType != "image_url" {
+		return helps.DevinImage{}, false
+	}
+	base64Data := strings.TrimSpace(part.Get("data").String())
+	mimeType := strings.TrimSpace(part.Get("mime_type").String())
+
+	if base64Data == "" {
+		base64Data = strings.TrimSpace(part.Get("source.data").String())
+		if mimeType == "" {
+			mimeType = strings.TrimSpace(part.Get("source.media_type").String())
+		}
+	}
+
+	if base64Data == "" {
+		url := firstNonEmpty(part.Get("image_url.url").String(), part.Get("image_url").String(), part.Get("url").String())
+		if m, d, ok := parseDataURL(url); ok {
+			base64Data = d
+			if mimeType == "" {
+				mimeType = m
+			}
+		}
+	}
+
+	if base64Data == "" {
+		base64Data = strings.TrimSpace(part.Get("inline_data.data").String())
+		if mimeType == "" {
+			mimeType = strings.TrimSpace(part.Get("inline_data.mime_type").String())
+		}
+	}
+
+	if base64Data == "" {
+		return helps.DevinImage{}, false
+	}
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+	return helps.DevinImage{
+		Base64Data: base64Data,
+		MimeType:   mimeType,
+	}, true
+}
+
+func extractFunctionResultContent(step gjson.Result) (string, []helps.DevinImage) {
+	target := step.Get("result")
+	if !target.Exists() {
+		target = step.Get("output")
+	}
+	if !target.Exists() {
+		target = step.Get("content")
+	}
+
+	if !target.Exists() {
+		return "", nil
+	}
+
+	if target.Type == gjson.String {
+		return target.String(), nil
+	}
+
+	if target.IsArray() {
+		var textParts []string
+		var images []helps.DevinImage
+		hasStructuredParts := false
+
+		for _, item := range target.Array() {
+			if img, ok := extractDevinImage(item); ok {
+				images = append(images, img)
+				hasStructuredParts = true
+				continue
+			}
+			itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+			if itemType == "text" {
+				isPureTextPart := true
+				if item.IsObject() {
+					item.ForEach(func(k, _ gjson.Result) bool {
+						key := k.String()
+						if key != "type" && key != "text" && key != "cache_control" {
+							isPureTextPart = false
+							return false
+						}
+						return true
+					})
+				}
+				if isPureTextPart {
+					if t := item.Get("text").String(); t != "" {
+						textParts = append(textParts, t)
+					}
+					hasStructuredParts = true
+				} else {
+					if raw := strings.TrimSpace(item.Raw); raw != "" {
+						textParts = append(textParts, raw)
+					}
+				}
+			} else {
+				// Preserve unconsumed array items (e.g. arbitrary business JSON or string parts)
+				if raw := strings.TrimSpace(item.Raw); raw != "" {
+					textParts = append(textParts, raw)
+				}
+			}
+		}
+
+		if hasStructuredParts || len(images) > 0 {
+			resText := strings.Join(textParts, "\n")
+			if len(images) > 0 && !strings.Contains(resText, "[Image ") {
+				var imgHeaders []string
+				for i, img := range images {
+					ext := mimeExtension(img.MimeType)
+					imgHeaders = append(imgHeaders, fmt.Sprintf("[Image %d: pasted_image_%d.%s]", i+1, i+1, ext))
+				}
+				header := strings.Join(imgHeaders, "\n")
+				if resText != "" {
+					resText = header + "\n\n" + resText
+				} else {
+					resText = header
+				}
+			}
+			return resText, images
+		}
+
+		return target.Raw, nil
+	}
+
+	return target.Raw, nil
+}
+
 func extractInteractionsStepContent(step gjson.Result) (string, []helps.DevinImage) {
 	content := step.Get("content")
 	var textParts []string
 	var images []helps.DevinImage
 
 	extractFromPart := func(p gjson.Result) {
-		partType := strings.ToLower(strings.TrimSpace(p.Get("type").String()))
-		switch partType {
-		case "text":
-			if t := p.Get("text").String(); t != "" {
-				textParts = append(textParts, t)
-			}
-		case "image", "input_image", "image_url":
-			base64Data := strings.TrimSpace(p.Get("data").String())
-			mimeType := strings.TrimSpace(p.Get("mime_type").String())
-
-			if base64Data == "" {
-				base64Data = strings.TrimSpace(p.Get("source.data").String())
-				if mimeType == "" {
-					mimeType = strings.TrimSpace(p.Get("source.media_type").String())
-				}
-			}
-
-			if base64Data == "" {
-				url := firstNonEmpty(p.Get("image_url.url").String(), p.Get("image_url").String(), p.Get("url").String())
-				if m, d, ok := parseDataURL(url); ok {
-					base64Data = d
-					if mimeType == "" {
-						mimeType = m
-					}
-				}
-			}
-
-			if base64Data == "" {
-				base64Data = strings.TrimSpace(p.Get("inline_data.data").String())
-				if mimeType == "" {
-					mimeType = strings.TrimSpace(p.Get("inline_data.mime_type").String())
-				}
-			}
-
-			if base64Data != "" {
-				if mimeType == "" {
-					mimeType = "image/png"
-				}
-				images = append(images, helps.DevinImage{
-					Base64Data: base64Data,
-					MimeType:   mimeType,
-				})
-			}
-		default:
-			if t := p.Get("text").String(); t != "" {
-				textParts = append(textParts, t)
-			}
+		if img, ok := extractDevinImage(p); ok {
+			images = append(images, img)
+			return
+		}
+		if t := p.Get("text").String(); t != "" {
+			textParts = append(textParts, t)
 		}
 	}
 
@@ -1686,33 +1752,56 @@ func supplementImagesFromOriginal(original []byte, prompts []helps.DevinPrompt) 
 	}
 
 	var userImages [][]helps.DevinImage
+	toolImagesByID := make(map[string][]helps.DevinImage)
+
 	for _, m := range messages.Array() {
-		if strings.EqualFold(m.Get("role").String(), "user") {
+		role := strings.ToLower(strings.TrimSpace(m.Get("role").String()))
+		switch role {
+		case "user":
 			var imgs []helps.DevinImage
 			content := m.Get("content")
 			if content.IsArray() {
 				for _, part := range content.Array() {
-					partType := strings.ToLower(part.Get("type").String())
-					if partType == "image" || partType == "image_url" || partType == "input_image" {
-						data := strings.TrimSpace(part.Get("source.data").String())
-						mime := strings.TrimSpace(part.Get("source.media_type").String())
-						if data == "" {
-							url := firstNonEmpty(part.Get("image_url.url").String(), part.Get("image_url").String(), part.Get("url").String())
-							if m, d, ok := parseDataURL(url); ok {
-								data = d
-								mime = m
+					partType := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
+					if partType == "tool_result" {
+						toolCallID := firstNonEmpty(part.Get("tool_use_id").String(), part.Get("id").String())
+						var toolImgs []helps.DevinImage
+						toolContent := part.Get("content")
+						if toolContent.IsArray() {
+							for _, subPart := range toolContent.Array() {
+								if img, ok := extractDevinImage(subPart); ok {
+									toolImgs = append(toolImgs, img)
+								}
 							}
+						} else if img, ok := extractDevinImage(part); ok {
+							toolImgs = append(toolImgs, img)
 						}
-						if data != "" {
-							if mime == "" {
-								mime = "image/png"
-							}
-							imgs = append(imgs, helps.DevinImage{Base64Data: data, MimeType: mime})
+						if len(toolImgs) > 0 && toolCallID != "" {
+							toolImagesByID[toolCallID] = append(toolImagesByID[toolCallID], toolImgs...)
 						}
+					} else if img, ok := extractDevinImage(part); ok {
+						imgs = append(imgs, img)
 					}
 				}
 			}
 			userImages = append(userImages, imgs)
+
+		case "tool":
+			toolCallID := firstNonEmpty(m.Get("tool_call_id").String(), m.Get("id").String())
+			var toolImgs []helps.DevinImage
+			content := m.Get("content")
+			if content.IsArray() {
+				for _, subPart := range content.Array() {
+					if img, ok := extractDevinImage(subPart); ok {
+						toolImgs = append(toolImgs, img)
+					}
+				}
+			} else if img, ok := extractDevinImage(m); ok {
+				toolImgs = append(toolImgs, img)
+			}
+			if len(toolImgs) > 0 && toolCallID != "" {
+				toolImagesByID[toolCallID] = append(toolImagesByID[toolCallID], toolImgs...)
+			}
 		}
 	}
 
@@ -1735,6 +1824,25 @@ func supplementImagesFromOriginal(original []byte, prompts []helps.DevinPrompt) 
 				}
 			}
 			userPromptIdx++
+		} else if prompts[i].Source == 4 {
+			// Strictly match by tool call ID; never cross-associate images from different tools
+			if len(prompts[i].Images) == 0 && prompts[i].ToolCallID != "" {
+				if matchedImgs, ok := toolImagesByID[prompts[i].ToolCallID]; ok && len(matchedImgs) > 0 {
+					prompts[i].Images = matchedImgs
+					if !strings.Contains(prompts[i].Content, "[Image ") {
+						var imgHeaders []string
+						for imgIdx, img := range prompts[i].Images {
+							imgHeaders = append(imgHeaders, fmt.Sprintf("[Image %d: pasted_image_%d.%s]", imgIdx+1, imgIdx+1, mimeExtension(img.MimeType)))
+						}
+						header := strings.Join(imgHeaders, "\n")
+						if prompts[i].Content != "" {
+							prompts[i].Content = header + "\n\n" + prompts[i].Content
+						} else {
+							prompts[i].Content = header
+						}
+					}
+				}
+			}
 		}
 	}
 }
