@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	interactionsclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/interactions/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -2167,4 +2168,671 @@ func TestDevinExecutor_ResponsesToolsFilterAndObfuscate(t *testing.T) {
 	if !strings.Contains(logBodyStr, "to a existing") {
 		t.Fatalf("upstream log body should contain 'to a existing': %s", logBodyStr)
 	}
+}
+
+func TestDevinExecutor_ToolResultImagesInInteractionsPayload(t *testing.T) {
+	interactionsJSON := []byte(`{
+		"model": "devin/swe-2",
+		"input": [
+			{
+				"type": "function_call",
+				"id": "tool_img_1",
+				"name": "screenshot"
+			},
+			{
+				"type": "function_result",
+				"call_id": "tool_img_1",
+				"result": [
+					{
+						"type": "text",
+						"text": "Screenshot captured"
+					},
+					{
+						"type": "image",
+						"mime_type": "image/png",
+						"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+					}
+				]
+			}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, nil)
+	var toolPrompt *helps.DevinPrompt
+	for i := range prompts {
+		if prompts[i].Source == 4 && prompts[i].ToolCallID == "tool_img_1" {
+			toolPrompt = &prompts[i]
+			break
+		}
+	}
+
+	if toolPrompt == nil {
+		t.Fatalf("expected tool_result prompt with ToolCallID tool_img_1")
+	}
+	if len(toolPrompt.Images) != 1 {
+		t.Fatalf("expected 1 image in toolPrompt.Images, got %d", len(toolPrompt.Images))
+	}
+	if toolPrompt.Images[0].MimeType != "image/png" {
+		t.Errorf("expected mime_type image/png, got %s", toolPrompt.Images[0].MimeType)
+	}
+	if toolPrompt.Images[0].Base64Data != "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" {
+		t.Errorf("unexpected base64 data: %s", toolPrompt.Images[0].Base64Data)
+	}
+	if !strings.Contains(toolPrompt.Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("expected content to contain image header, got: %s", toolPrompt.Content)
+	}
+}
+
+func TestDevinExecutor_SupplementImagesFromOriginalToolResult(t *testing.T) {
+	origRequest := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "tool_img_1", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_img_1",
+						"content": [
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "original-tool-result-base64"
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	prompts := []helps.DevinPrompt{
+		{
+			Source:     4,
+			ToolCallID: "tool_img_1",
+			Content:    "",
+		},
+	}
+
+	supplementImagesFromOriginal(origRequest, prompts)
+
+	if len(prompts[0].Images) != 1 {
+		t.Fatalf("expected 1 image supplemented to tool_result prompt, got %d", len(prompts[0].Images))
+	}
+	if prompts[0].Images[0].Base64Data != "original-tool-result-base64" {
+		t.Errorf("expected base64 'original-tool-result-base64', got %s", prompts[0].Images[0].Base64Data)
+	}
+	if prompts[0].Images[0].MimeType != "image/png" {
+		t.Errorf("expected mime_type 'image/png', got %s", prompts[0].Images[0].MimeType)
+	}
+	if !strings.Contains(prompts[0].Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("expected content to contain image header, got: %s", prompts[0].Content)
+	}
+}
+
+func TestDevinExecutor_SupplementImagesFromOriginalMultipleToolsNoCrossPollution(t *testing.T) {
+	origRequest := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_text_only", "name": "bash", "input": {"cmd": "ls"}},
+					{"type": "tool_use", "id": "call_with_image", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_text_only",
+						"content": "file1.txt\nfile2.txt"
+					},
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_with_image",
+						"content": [
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "screenshot-base64-data"
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	prompts := []helps.DevinPrompt{
+		{
+			Source:     4,
+			ToolCallID: "call_text_only",
+			Content:    "file1.txt\nfile2.txt",
+		},
+		{
+			Source:     4,
+			ToolCallID: "call_with_image",
+			Content:    "",
+		},
+	}
+
+	supplementImagesFromOriginal(origRequest, prompts)
+
+	// Tool A (text-only) must NOT receive any images
+	if len(prompts[0].Images) != 0 {
+		t.Fatalf("expected 0 images on text-only tool prompt, got %d", len(prompts[0].Images))
+	}
+	if strings.Contains(prompts[0].Content, "[Image ") {
+		t.Errorf("text-only tool prompt should not have image header: %s", prompts[0].Content)
+	}
+
+	// Tool B (screenshot) MUST receive its image
+	if len(prompts[1].Images) != 1 {
+		t.Fatalf("expected 1 image on screenshot tool prompt, got %d", len(prompts[1].Images))
+	}
+	if prompts[1].Images[0].Base64Data != "screenshot-base64-data" {
+		t.Errorf("screenshot tool image data mismatch: %s", prompts[1].Images[0].Base64Data)
+	}
+	if !strings.Contains(prompts[1].Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("screenshot tool prompt should contain image header: %s", prompts[1].Content)
+	}
+}
+
+func TestDevinExecutor_ClaudeToolResultEndToEnd(t *testing.T) {
+	claudeReq := []byte(`{
+		"model": "devin/swe-2",
+		"messages": [
+			{
+				"role": "user",
+				"content": "Inspect the screenshot returned by the tool."
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "tool_text_1", "name": "bash", "input": {"cmd": "pwd"}},
+					{"type": "tool_use", "id": "tool_image_1", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_text_1",
+						"content": "/workspace"
+					},
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_image_1",
+						"content": [
+							{
+								"type": "text",
+								"text": "Captured window"
+							},
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	// Real conversion from Claude request to Interactions format
+	interactionsJSON := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, true)
+
+	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, _, _ := parseInteractionsPayload(interactionsJSON, claudeReq)
+
+	var textToolPrompt *helps.DevinPrompt
+	var imageToolPrompt *helps.DevinPrompt
+	for i := range prompts {
+		if prompts[i].Source == 4 {
+			if prompts[i].ToolCallID == "tool_text_1" {
+				textToolPrompt = &prompts[i]
+			} else if prompts[i].ToolCallID == "tool_image_1" {
+				imageToolPrompt = &prompts[i]
+			}
+		}
+	}
+
+	if textToolPrompt == nil {
+		t.Fatalf("missing text tool prompt for tool_text_1")
+	}
+	if len(textToolPrompt.Images) != 0 {
+		t.Fatalf("text tool prompt should have 0 images, got %d", len(textToolPrompt.Images))
+	}
+
+	if imageToolPrompt == nil {
+		t.Fatalf("missing image tool prompt for tool_image_1")
+	}
+	if len(imageToolPrompt.Images) != 1 {
+		t.Fatalf("expected 1 image in imageToolPrompt, got %d", len(imageToolPrompt.Images))
+	}
+	if imageToolPrompt.Images[0].Base64Data != "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" {
+		t.Errorf("image data mismatch: %s", imageToolPrompt.Images[0].Base64Data)
+	}
+	if !strings.Contains(imageToolPrompt.Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("expected content to contain image header, got: %s", imageToolPrompt.Content)
+	}
+
+	// Verify upstream wire encoding
+	wireReq := helps.BuildDevinGetChatMessageRequest(
+		"test-token",
+		"test-seed",
+		"swe-2-medium",
+		systemPrompt,
+		prompts,
+		tools,
+		temp,
+		maxTokens,
+		sessionID,
+		cascadeID,
+		nil,
+	)
+	if len(wireReq) == 0 {
+		t.Fatalf("expected non-empty wire request")
+	}
+
+	// Verify wire-level decoded prompts and per-tool image associations
+	decoded := decodeWirePrompts(t, wireReq)
+	var wireTextToolPrompt *decodedWirePrompt
+	var wireImageToolPrompt *decodedWirePrompt
+	for i := range decoded {
+		if decoded[i].source == 4 {
+			if decoded[i].toolCallID == "tool_text_1" {
+				wireTextToolPrompt = &decoded[i]
+			} else if decoded[i].toolCallID == "tool_image_1" {
+				wireImageToolPrompt = &decoded[i]
+			}
+		}
+	}
+	if wireTextToolPrompt == nil {
+		t.Fatalf("missing tool_text_1 prompt in decoded wire request")
+	}
+	if len(wireTextToolPrompt.images) != 0 {
+		t.Fatalf("wire tool_text_1 prompt should have 0 images, got %d", len(wireTextToolPrompt.images))
+	}
+	if wireImageToolPrompt == nil {
+		t.Fatalf("missing tool_image_1 prompt in decoded wire request")
+	}
+	if len(wireImageToolPrompt.images) != 1 {
+		t.Fatalf("wire tool_image_1 prompt should have 1 image, got %d", len(wireImageToolPrompt.images))
+	}
+	if wireImageToolPrompt.images[0].Base64Data != "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" {
+		t.Errorf("wire image data mismatch: %s", wireImageToolPrompt.images[0].Base64Data)
+	}
+	if wireImageToolPrompt.images[0].MimeType != "image/png" {
+		t.Errorf("wire image mime mismatch: %s", wireImageToolPrompt.images[0].MimeType)
+	}
+
+	// Verify upstream log body
+	logBody := helps.BuildDevinUpstreamLogBody(
+		interactionsJSON,
+		true,
+		"swe-2-medium",
+		systemPrompt,
+		prompts,
+		tools,
+		temp,
+		maxTokens,
+		sessionID,
+		cascadeID,
+	)
+	logBodyStr := string(logBody)
+	if !strings.Contains(logBodyStr, `"mime_type": "image/png"`) || !strings.Contains(logBodyStr, `"data_len": 96`) {
+		t.Fatalf("expected log body to contain image log entry with data_len, got: %s", logBodyStr)
+	}
+}
+
+type decodedWirePrompt struct {
+	source     int
+	content    string
+	toolCallID string
+	images     []helps.DevinImage
+}
+
+func decodeWirePrompts(t *testing.T, reqBytes []byte) []decodedWirePrompt {
+	t.Helper()
+	var decoded []decodedWirePrompt
+	b := reqBytes
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			break
+		}
+		b = b[n:]
+		if num == 3 && typ == protowire.BytesType {
+			promptBytes, m := protowire.ConsumeBytes(b)
+			if m < 0 {
+				t.Fatalf("failed to consume prompt bytes")
+			}
+			b = b[m:]
+
+			var p decodedWirePrompt
+			pb := promptBytes
+			for len(pb) > 0 {
+				pnum, ptyp, pn := protowire.ConsumeTag(pb)
+				if pn < 0 {
+					break
+				}
+				pb = pb[pn:]
+				switch {
+				case pnum == 2 && ptyp == protowire.VarintType:
+					val, vm := protowire.ConsumeVarint(pb)
+					if vm < 0 {
+						break
+					}
+					p.source = int(val)
+					pb = pb[vm:]
+				case pnum == 3 && ptyp == protowire.BytesType:
+					val, vm := protowire.ConsumeString(pb)
+					if vm < 0 {
+						break
+					}
+					p.content = val
+					pb = pb[vm:]
+				case pnum == 7 && ptyp == protowire.BytesType:
+					val, vm := protowire.ConsumeString(pb)
+					if vm < 0 {
+						break
+					}
+					p.toolCallID = val
+					pb = pb[vm:]
+				case pnum == 10 && ptyp == protowire.BytesType:
+					imgBytes, vm := protowire.ConsumeBytes(pb)
+					if vm < 0 {
+						break
+					}
+					pb = pb[vm:]
+					var img helps.DevinImage
+					ib := imgBytes
+					for len(ib) > 0 {
+						inum, ityp, in := protowire.ConsumeTag(ib)
+						if in < 0 {
+							break
+						}
+						ib = ib[in:]
+						if inum == 1 && ityp == protowire.BytesType {
+							s, im := protowire.ConsumeString(ib)
+							if im < 0 {
+								break
+							}
+							img.Base64Data = s
+							ib = ib[im:]
+						} else if inum == 2 && ityp == protowire.BytesType {
+							s, im := protowire.ConsumeString(ib)
+							if im < 0 {
+								break
+							}
+							img.MimeType = s
+							ib = ib[im:]
+						} else {
+							im := protowire.ConsumeFieldValue(inum, ityp, ib)
+							if im < 0 {
+								break
+							}
+							ib = ib[im:]
+						}
+					}
+					p.images = append(p.images, img)
+				default:
+					vm := protowire.ConsumeFieldValue(pnum, ptyp, pb)
+					if vm < 0 {
+						break
+					}
+					pb = pb[vm:]
+				}
+			}
+			decoded = append(decoded, p)
+		} else {
+			m := protowire.ConsumeFieldValue(num, typ, b)
+			if m < 0 {
+				break
+			}
+			b = b[m:]
+		}
+	}
+	return decoded
+}
+
+func TestDevinExecutor_FunctionResultMixedStructuredAndBusinessJSON(t *testing.T) {
+	interactionsJSON := []byte(`{
+		"model": "devin/swe-2",
+		"input": [
+			{
+				"type": "function_result",
+				"call_id": "call_mixed",
+				"result": [
+					{"type": "text", "text": "log output"},
+					{"exit_code": 0, "status": "ok"}
+				]
+			}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, nil)
+	if len(prompts) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(prompts))
+	}
+	if !strings.Contains(prompts[0].Content, "log output") {
+		t.Errorf("content missing text part: %s", prompts[0].Content)
+	}
+	if !strings.Contains(prompts[0].Content, `{"exit_code": 0, "status": "ok"}`) {
+		t.Errorf("content missing business JSON part: %s", prompts[0].Content)
+	}
+}
+
+func TestDevinExecutor_FunctionResultBusinessObjectWithTextFieldPreserved(t *testing.T) {
+	// Case 1: Array contains only a business object with a "text" field, should preserve full JSON
+	payloadOnlyBusiness := []byte(`{
+		"model": "devin/swe-2",
+		"input": [
+			{
+				"type": "function_result",
+				"call_id": "call_err",
+				"result": [
+					{"text": "failed", "exit_code": 1, "retryable": true}
+				]
+			}
+		]
+	}`)
+
+	_, prompts1, _, _, _, _, _, _, _ := parseInteractionsPayload(payloadOnlyBusiness, nil)
+	if len(prompts1) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(prompts1))
+	}
+	if !strings.Contains(prompts1[0].Content, `"exit_code": 1`) || !strings.Contains(prompts1[0].Content, `"retryable": true`) {
+		t.Errorf("expected business object fields to be preserved, got: %s", prompts1[0].Content)
+	}
+
+	// Case 2: Array contains image and business object with a "text" field
+	payloadWithImage := []byte(`{
+		"model": "devin/swe-2",
+		"input": [
+			{
+				"type": "function_result",
+				"call_id": "call_img_err",
+				"result": [
+					{
+						"type": "image",
+						"mime_type": "image/png",
+						"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+					},
+					{"text": "failed", "exit_code": 1, "retryable": true}
+				]
+			}
+		]
+	}`)
+
+	_, prompts2, _, _, _, _, _, _, _ := parseInteractionsPayload(payloadWithImage, nil)
+	if len(prompts2) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(prompts2))
+	}
+	if len(prompts2[0].Images) != 1 {
+		t.Fatalf("expected 1 image in prompt, got %d", len(prompts2[0].Images))
+	}
+	if !strings.Contains(prompts2[0].Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("expected image header, got: %s", prompts2[0].Content)
+	}
+	if !strings.Contains(prompts2[0].Content, `"exit_code": 1`) || !strings.Contains(prompts2[0].Content, `"retryable": true`) {
+		t.Errorf("expected business object fields to be preserved in mixed array, got: %s", prompts2[0].Content)
+	}
+}
+
+func TestDevinExecutor_ClaudeToolResultMixedBusinessJSONEndToEnd(t *testing.T) {
+	claudeReq := []byte(`{
+		"model": "devin/swe-2",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "tool_mixed_1", "name": "run_test", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_mixed_1",
+						"content": [
+							{"type": "text", "text": "Test suite finished"},
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+								}
+							},
+							{"text": "failed", "exit_code": 1, "retryable": true}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	interactionsJSON := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, false)
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, claudeReq)
+
+	if len(prompts) != 2 {
+		t.Fatalf("expected 2 prompts (assistant call + tool result), got %d", len(prompts))
+	}
+	toolPrompt := prompts[1]
+	if toolPrompt.Source != 4 || toolPrompt.ToolCallID != "tool_mixed_1" {
+		t.Fatalf("expected tool prompt with ToolCallID tool_mixed_1, got source %d, id %s", toolPrompt.Source, toolPrompt.ToolCallID)
+	}
+	if len(toolPrompt.Images) != 1 {
+		t.Fatalf("expected 1 image in toolPrompt, got %d", len(toolPrompt.Images))
+	}
+	if !strings.Contains(toolPrompt.Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("content missing image header: %s", toolPrompt.Content)
+	}
+	if !strings.Contains(toolPrompt.Content, "Test suite finished") {
+		t.Errorf("content missing text part: %s", toolPrompt.Content)
+	}
+	if !strings.Contains(toolPrompt.Content, `"exit_code": 1`) || !strings.Contains(toolPrompt.Content, `"retryable": true`) {
+		t.Errorf("content missing business object fields: %s", toolPrompt.Content)
+	}
+}
+
+func TestDevinExecutor_SupplementImagesEdgeCases(t *testing.T) {
+	t.Run("mismatched_tool_id_no_images_attached", func(t *testing.T) {
+		origRequest := []byte(`{
+			"messages": [
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "tool_result",
+							"tool_use_id": "call_expected_1",
+							"content": [
+								{
+									"type": "image",
+									"source": {"type": "base64", "media_type": "image/png", "data": "img-data"}
+								}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		prompts := []helps.DevinPrompt{
+			{
+				Source:     4,
+				ToolCallID: "call_different_2",
+				Content:    "some result",
+			},
+		}
+
+		supplementImagesFromOriginal(origRequest, prompts)
+		if len(prompts[0].Images) != 0 {
+			t.Fatalf("expected 0 images for mismatched tool id, got %d", len(prompts[0].Images))
+		}
+	})
+
+	t.Run("multiple_images_in_single_tool_result", func(t *testing.T) {
+		origRequest := []byte(`{
+			"messages": [
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "tool_result",
+							"tool_use_id": "call_multi_img",
+							"content": [
+								{
+									"type": "image",
+									"source": {"type": "base64", "media_type": "image/png", "data": "img-1"}
+								},
+								{
+									"type": "image",
+									"source": {"type": "base64", "media_type": "image/jpeg", "data": "img-2"}
+								}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		prompts := []helps.DevinPrompt{
+			{
+				Source:     4,
+				ToolCallID: "call_multi_img",
+				Content:    "",
+			},
+		}
+
+		supplementImagesFromOriginal(origRequest, prompts)
+		if len(prompts[0].Images) != 2 {
+			t.Fatalf("expected 2 images, got %d", len(prompts[0].Images))
+		}
+		if !strings.Contains(prompts[0].Content, "[Image 1: pasted_image_1.png]") {
+			t.Errorf("missing header for image 1: %s", prompts[0].Content)
+		}
+		if !strings.Contains(prompts[0].Content, "[Image 2: pasted_image_2.jpg]") {
+			t.Errorf("missing header for image 2: %s", prompts[0].Content)
+		}
+	})
 }
