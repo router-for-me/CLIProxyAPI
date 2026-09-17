@@ -447,6 +447,20 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 			clone["items"] = repairedItems
 			modified = true
 		}
+		// After recursion, if inner items is itself an array type but still lacks its own
+		// items field, inject a string fallback. This fixes Gemini rejecting nested
+		// array-of-array schemas with "items.items: missing field" (e.g. from MCP tools).
+		if addMissingArrayItems {
+			if innerItems, ok2 := clone["items"].(map[string]any); ok2 {
+				if isArrayDeclaredType(innerItems["type"]) {
+					if _, hasInner := innerItems["items"]; !hasInner {
+						innerItems["items"] = map[string]any{"type": "string"}
+						clone["items"] = innerItems
+						modified = true
+					}
+				}
+			}
+		}
 	} else if itemsList, ok := clone["items"].([]any); ok {
 		repairedList, listMod := repairSchemaList(itemsList, addMissingArrayItems)
 		if listMod {

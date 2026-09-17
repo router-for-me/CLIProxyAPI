@@ -2446,3 +2446,35 @@ func TestCleanJSONSchema_RemovesDraft04IdAndSchemaIdentifierKeywords(t *testing.
 		}
 	}
 }
+
+func TestCleanJSONSchemaNestedArrayItems(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"where": {
+				"type": "array",
+				"items": {
+					"type": "array"
+				}
+			}
+		}
+	}`
+
+	cleaners := map[string]func(string) string{
+		"antigravity":     CleanJSONSchemaForAntigravity,
+		"gemini":          CleanJSONSchemaForGemini,
+		"antigravityTool": func(s string) string { return CleanJSONSchemaForAntigravityTool(s, true) },
+	}
+
+	for name, cleaner := range cleaners {
+		got := cleaner(input)
+		parsed := gjson.Parse(got)
+		itemsItems := parsed.Get("properties.where.items.items")
+		if !itemsItems.Exists() {
+			t.Errorf("%s: properties.where.items.items is missing: %s", name, got)
+		}
+		if itemsItems.Get("type").String() != "string" {
+			t.Errorf("%s: properties.where.items.items.type expected string, got: %s", name, itemsItems.Get("type").String())
+		}
+	}
+}
