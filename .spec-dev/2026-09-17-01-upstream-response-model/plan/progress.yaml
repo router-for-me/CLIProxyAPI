@@ -1,8 +1,8 @@
 format_version: 1
-current: T01
+current: T02
 tasks:
   T00: { status: completed, commit: 3ad8a0dc3ee3ca925839b9656f19519bfb0dcfce, tests: pass }
-  T01: { status: pending }
+  T01: { status: completed, commit: 9cee4a6abf674fe108664422a1ef7847ccd7f485, tests: pass }
   T02: { status: pending }
   T03: { status: pending }
   T04: { status: pending }
@@ -19,3 +19,4 @@ notes:
   - "CPA source: /Users/maverick/CLIProxyAPI branch=main HEAD=3ad8a0dc3ee3ca925839b9656f19519bfb0dcfce; impl: /Users/maverick/CLIProxyAPI/.worktrees/plan/2026-09-17-01-upstream-response-model branch=plan/2026-09-17-01-upstream-response-model created"
   - "Keeper source: /Users/maverick/cpa-usage-keeper branch=main HEAD=68a9d99596f8d797d0a513a5baa58bfdf855fdf9; impl: /Users/maverick/cpa-usage-keeper/.worktrees/plan/2026-09-17-01-upstream-response-model branch=plan/2026-09-17-01-upstream-response-model created"
   - "T00 baseline: CPA go test 749 passed; Keeper go test 489 passed; vitest RequestEventsDetailsCardModelAlias 5 passed. worktree web/node_modules installed after ignored-build warning."
+  - "T01 added UpstreamResponseModelFamilyFromContext so helps can read the bound family."
