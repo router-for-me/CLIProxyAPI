@@ -253,6 +253,12 @@ func claudeMediaPartToInteractions(part gjson.Result, partType string) ([]byte, 
 	source := part.Get("source")
 	mimeType := source.Get("media_type").String()
 	data := source.Get("data").String()
+	if data == "" {
+		data = part.Get("data").String()
+	}
+	if mimeType == "" {
+		mimeType = part.Get("mime_type").String()
+	}
 	if mimeType == "" || data == "" {
 		return nil, false
 	}
@@ -300,10 +306,37 @@ func claudeToolResultToInteractions(part gjson.Result, toolNamesByID map[string]
 		case result.IsArray():
 			contentItems := make([][]byte, 0, 4)
 			result.ForEach(func(_, item gjson.Result) bool {
-				if item.Get("type").String() == "text" {
-					contentPart := []byte(`{"type":"text","text":""}`)
-					contentPart, _ = sjson.SetBytes(contentPart, "text", item.Get("text").String())
-					contentItems = append(contentItems, contentPart)
+				itemType := item.Get("type").String()
+				switch itemType {
+				case "text":
+					isPureText := true
+					if item.IsObject() {
+						item.ForEach(func(k, _ gjson.Result) bool {
+							key := k.String()
+							if key != "type" && key != "text" && key != "cache_control" {
+								isPureText = false
+								return false
+							}
+							return true
+						})
+					}
+					if isPureText {
+						contentPart := []byte(`{"type":"text","text":""}`)
+						contentPart, _ = sjson.SetBytes(contentPart, "text", item.Get("text").String())
+						contentItems = append(contentItems, contentPart)
+					} else if raw := strings.TrimSpace(item.Raw); raw != "" {
+						contentItems = append(contentItems, []byte(raw))
+					}
+				case "image", "document":
+					if mediaPart, ok := claudeMediaPartToInteractions(item, itemType); ok {
+						contentItems = append(contentItems, mediaPart)
+					} else if raw := strings.TrimSpace(item.Raw); raw != "" {
+						contentItems = append(contentItems, []byte(raw))
+					}
+				default:
+					if raw := strings.TrimSpace(item.Raw); raw != "" {
+						contentItems = append(contentItems, []byte(raw))
+					}
 				}
 				return true
 			})
