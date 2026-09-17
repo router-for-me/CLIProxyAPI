@@ -82,6 +82,10 @@ type Capabilities struct {
 	FrontendAuthProviderExclusive bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
+	// SchedulerAcrossPriorities opts into receiving available candidates across all priority tiers
+	// in SchedulerPickRequest.Candidates. When false (default), Candidates only contains
+	// credentials from the highest available priority tier.
+	SchedulerAcrossPriorities bool
 	// ModelRouter routes matching requests to a plugin executor, the router's own executor,
 	// or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouter ModelRouter
