@@ -66,12 +66,16 @@ type DevinToolCall struct {
 	Arguments string
 }
 
-// DevinToolCallDelta represents a streaming tool call chunk from response Field 6.
+// DevinToolCallDelta represents a streaming tool call chunk from response Field 6
+// (ExaCodeiumCommonPb_ChatToolCall). The wire message has no slot index: the first
+// delta of a call carries id/name and later deltas carry only argument fragments.
 type DevinToolCallDelta struct {
-	ID        string
-	Name      string
-	Arguments string
-	Index     int
+	ID               string
+	Name             string
+	Arguments        string
+	InvalidJSONStr   string
+	InvalidJSONErr   string
+	IsCustomToolCall bool
 }
 
 // DevinImage represents an image attachment in a DevinPrompt (Prompt #10).
@@ -98,6 +102,7 @@ type DevinUsage struct {
 	PromptTokens     int64             `json:"prompt_tokens"`
 	CompletionTokens int64             `json:"completion_tokens"`
 	CachedTokens     int64             `json:"cached_tokens"`
+	CacheWriteTokens int64             `json:"cache_write_tokens,omitempty"`
 	StatusCode       uint64            `json:"status_code,omitempty"`
 	RequestID        string            `json:"request_id,omitempty"`
 	ModelName        string            `json:"model_name,omitempty"`
@@ -253,7 +258,7 @@ func BuildDevinClientMetadataBytes(sessionToken, deviceSeed, osName string) []by
 
 	var f1Bytes []byte
 	f1Bytes = protowire.AppendTag(f1Bytes, 1, protowire.BytesType)
-	f1Bytes = protowire.AppendString(f1Bytes, "devin-cli")
+	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientName)
 
 	f1Bytes = protowire.AppendTag(f1Bytes, 2, protowire.BytesType)
 	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientVersion)
@@ -271,9 +276,6 @@ func BuildDevinClientMetadataBytes(sessionToken, deviceSeed, osName string) []by
 	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientVersion)
 
 	f1Bytes = protowire.AppendTag(f1Bytes, 12, protowire.BytesType)
-	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientName)
-
-	f1Bytes = protowire.AppendTag(f1Bytes, 28, protowire.BytesType)
 	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientName)
 
 	f1Bytes = protowire.AppendTag(f1Bytes, 31, protowire.BytesType)
@@ -657,6 +659,9 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 	return res
 }
 
+// parseDevinToolCallDelta decodes one ExaCodeiumCommonPb_ChatToolCall:
+// 1=id, 2=name, 3=arguments_json, 4=invalid_json_str, 5=invalid_json_err,
+// 6=is_custom_tool_call.
 func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
 	var tc DevinToolCallDelta
 	pos := 0
@@ -674,8 +679,8 @@ func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
 				return tc, protowire.ParseError(vn)
 			}
 			pos += vn
-			if num == 4 {
-				tc.Index = int(v)
+			if num == 6 {
+				tc.IsCustomToolCall = v != 0
 			}
 		case protowire.BytesType:
 			val, bn := protowire.ConsumeBytes(data[pos:])
@@ -690,6 +695,10 @@ func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
 				tc.Name = string(val)
 			case 3:
 				tc.Arguments = string(val)
+			case 4:
+				tc.InvalidJSONStr = string(val)
+			case 5:
+				tc.InvalidJSONErr = string(val)
 			}
 		default:
 			nSkip := protowire.ConsumeFieldValue(num, typ, data[pos:])
@@ -785,8 +794,8 @@ func parseDevinUsageField(data []byte) *DevinUsage {
 				u.PromptTokens += int64(v)
 			case 3: // Output tokens
 				u.CompletionTokens = int64(v)
-			case 4: // Additional context/system prompt tokens in OpenAI-family models (total prompt = 2 + 4)
-				u.PromptTokens += int64(v)
+			case 4: // Cache write tokens
+				u.CacheWriteTokens = int64(v)
 			case 5: // Cache read tokens
 				u.CachedTokens = int64(v)
 			case 6: // Status code
@@ -1217,15 +1226,23 @@ func BuildDevinUpstreamLogBody(
 
 // DevinUpstreamResponseLog represents the decoded response frames from Devin Connect-RPC.
 type DevinUpstreamResponseLog struct {
-	Status        string          `json:"status,omitempty"`
-	FramesCount   int             `json:"frames_count"`
-	Content       string          `json:"content,omitempty"`
-	Thinking      string          `json:"thinking,omitempty"`
-	Signature     string          `json:"signature,omitempty"`
-	SignatureType string          `json:"signature_type,omitempty"`
-	ToolCalls     []DevinToolCall `json:"tool_calls,omitempty"`
-	Usage         *DevinUsage     `json:"usage,omitempty"`
-	UnknownFields []int           `json:"unknown_fields,omitempty"`
+	Status        string                 `json:"status,omitempty"`
+	FramesCount   int                    `json:"frames_count"`
+	Content       string                 `json:"content,omitempty"`
+	Thinking      string                 `json:"thinking,omitempty"`
+	Signature     string                 `json:"signature,omitempty"`
+	SignatureType string                 `json:"signature_type,omitempty"`
+	ToolCalls     []DevinToolCallLogItem `json:"tool_calls,omitempty"`
+	Usage         *DevinUsage            `json:"usage,omitempty"`
+	UnknownFields []int                  `json:"unknown_fields,omitempty"`
+}
+
+// DevinToolCallLogItem represents a completed tool call in the response log.
+type DevinToolCallLogItem struct {
+	ID               string `json:"id,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Arguments        string `json:"arguments,omitempty"`
+	IsCustomToolCall bool   `json:"is_custom_tool_call,omitempty"`
 }
 
 // BuildDevinUpstreamResponseLogBody formats the decoded Devin response and the intermediate

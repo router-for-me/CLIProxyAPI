@@ -679,12 +679,14 @@ func TestParseDevinUsageField_HeadersAndField4(t *testing.T) {
 		t.Fatal("expected non-nil usage")
 	}
 
-	// 3 + 58 = 61
-	if usage.PromptTokens != 61 {
-		t.Errorf("PromptTokens = %d, want 61 (3 turn + 58 context)", usage.PromptTokens)
+	if usage.PromptTokens != 3 {
+		t.Errorf("PromptTokens = %d, want 3 (uncached input only)", usage.PromptTokens)
 	}
 	if usage.CompletionTokens != 39 {
 		t.Errorf("CompletionTokens = %d, want 39", usage.CompletionTokens)
+	}
+	if usage.CacheWriteTokens != 58 {
+		t.Errorf("CacheWriteTokens = %d, want 58", usage.CacheWriteTokens)
 	}
 	if usage.CachedTokens != 19179 {
 		t.Errorf("CachedTokens = %d, want 19179", usage.CachedTokens)
@@ -873,5 +875,90 @@ func TestBuildDevinGetChatMessageRequest_FiltersAutomationUpdateAndObfuscatesDes
 	}
 	if !strings.Contains(reqStr, "to a existing unified") {
 		t.Fatalf("wire bytes should contain 'to a existing unified'")
+	}
+}
+
+func TestBuildDevinClientMetadataBytes_ClientIdentity(t *testing.T) {
+	meta := BuildDevinClientMetadataBytes("tok-123", "seed-1", "linux")
+
+	fields := make(map[int]string)
+	b := meta
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n <= 0 {
+			t.Fatalf("consume tag failed at offset %d", len(meta)-len(b))
+		}
+		b = b[n:]
+		if typ != protowire.BytesType {
+			t.Fatalf("unexpected wire type %d for metadata field %d", typ, num)
+		}
+		val, m := protowire.ConsumeBytes(b)
+		if m <= 0 {
+			t.Fatalf("consume bytes failed for metadata field %d", num)
+		}
+		b = b[m:]
+		fields[int(num)] = string(val)
+	}
+
+	if got := fields[1]; got != DevinDefaultClientName {
+		t.Errorf("ide_name (field 1) = %q, want %q", got, DevinDefaultClientName)
+	}
+	if got := fields[12]; got != DevinDefaultClientName {
+		t.Errorf("extension_name (field 12) = %q, want %q", got, DevinDefaultClientName)
+	}
+	if _, ok := fields[28]; ok {
+		t.Errorf("field 28 (ide_type) must not be emitted: upstream clients do not send it")
+	}
+	if got := fields[31]; len(got) != DevinFingerprintHexLen {
+		t.Errorf("device fingerprint (field 31) len = %d, want %d", len(got), DevinFingerprintHexLen)
+	}
+}
+
+func TestParseDevinToolCallDelta_WireFields(t *testing.T) {
+	// ExaCodeiumCommonPb_ChatToolCall: 1=id, 2=name, 3=arguments_json,
+	// 4=invalid_json_str, 5=invalid_json_err, 6=is_custom_tool_call.
+	var data []byte
+	data = appendFieldBytes(data, 1, []byte("call_1"))
+	data = appendFieldBytes(data, 2, []byte("apply_patch"))
+	data = appendFieldBytes(data, 4, []byte("*** Begin Patch\n+hello"))
+	data = appendFieldBytes(data, 5, []byte("invalid character"))
+	data = protowire.AppendTag(data, 6, protowire.VarintType)
+	data = protowire.AppendVarint(data, 1)
+
+	tc, err := parseDevinToolCallDelta(data)
+	if err != nil {
+		t.Fatalf("parseDevinToolCallDelta failed: %v", err)
+	}
+	if tc.ID != "call_1" || tc.Name != "apply_patch" {
+		t.Errorf("id/name = %q/%q, want call_1/apply_patch", tc.ID, tc.Name)
+	}
+	if tc.Arguments != "" {
+		t.Errorf("Arguments = %q, want empty (field 3 absent)", tc.Arguments)
+	}
+	if tc.InvalidJSONStr != "*** Begin Patch\n+hello" {
+		t.Errorf("InvalidJSONStr = %q, want raw patch text", tc.InvalidJSONStr)
+	}
+	if tc.InvalidJSONErr != "invalid character" {
+		t.Errorf("InvalidJSONErr = %q, want 'invalid character'", tc.InvalidJSONErr)
+	}
+	if !tc.IsCustomToolCall {
+		t.Error("IsCustomToolCall = false, want true (field 6 varint)")
+	}
+}
+
+func TestParseDevinToolCallDelta_ArgumentsJSON(t *testing.T) {
+	var data []byte
+	data = appendFieldBytes(data, 1, []byte("call_9"))
+	data = appendFieldBytes(data, 3, []byte(`{"command":"ls"}`))
+
+	tc, err := parseDevinToolCallDelta(data)
+	if err != nil {
+		t.Fatalf("parseDevinToolCallDelta failed: %v", err)
+	}
+	if tc.Arguments != `{"command":"ls"}` {
+		t.Errorf("Arguments = %q, want %q", tc.Arguments, `{"command":"ls"}`)
+	}
+	if tc.IsCustomToolCall {
+		t.Error("IsCustomToolCall = true, want false (field 6 absent)")
 	}
 }
