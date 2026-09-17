@@ -62,3 +62,64 @@ func TestObserveChatTokenEventUsesAssembledFrameNotFragments(t *testing.T) {
 		t.Fatalf("token TTFT %v should be later than first-packet fallback %v", tokenTTFT, fallback)
 	}
 }
+
+func TestIsChatTokenEventRecognizesAudioOutput(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{
+			name:    "delta audio data",
+			payload: `{"choices":[{"delta":{"audio":{"data":"UklGRi..."}}}]}`,
+			want:    true,
+		},
+		{
+			name:    "delta audio transcript",
+			payload: `{"choices":[{"delta":{"audio":{"transcript":"Hello"}}}]}`,
+			want:    true,
+		},
+		{
+			name:    "delta audio id",
+			payload: `{"choices":[{"delta":{"audio":{"id":"audio_1"}}}]}`,
+			want:    true,
+		},
+		{
+			name:    "delta output_audio string",
+			payload: `{"choices":[{"delta":{"output_audio":"UklGRi..."}}]}`,
+			want:    true,
+		},
+		{
+			name:    "empty audio object is not a token",
+			payload: `{"choices":[{"delta":{"audio":{}}}]}`,
+			want:    false,
+		},
+		{
+			name:    "role-only delta is not a token",
+			payload: `{"choices":[{"delta":{"role":"assistant"}}]}`,
+			want:    false,
+		},
+		{
+			name:    "message audio data",
+			payload: `{"choices":[{"message":{"audio":{"data":"UklGRi...","transcript":"Hi"}}}]}`,
+			want:    true,
+		},
+		{
+			name:    "content part output_audio",
+			payload: `{"choices":[{"delta":{"content":[{"type":"output_audio","audio":"AAAA"}]}}]}`,
+			want:    true,
+		},
+		{
+			name:    "content part audio",
+			payload: `{"choices":[{"delta":{"content":[{"type":"audio","data":"AAAA"}]}}]}`,
+			want:    true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsChatTokenEvent([]byte(tc.payload)); got != tc.want {
+				t.Fatalf("IsChatTokenEvent(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}

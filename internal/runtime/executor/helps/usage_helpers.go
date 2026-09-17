@@ -523,7 +523,7 @@ func (r *UsageReporter) latency() time.Duration {
 	if start.IsZero() {
 		return 0
 	}
-	latency := time.Since(start)
+	latency := r.now().Sub(start)
 	if latency < 0 {
 		return 0
 	}

@@ -6,8 +6,50 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// isSubstantiveAudio reports whether a Chat Completions audio node carries output
+// (base64 data, transcript, id, or a non-empty string payload).
+func isSubstantiveAudio(node gjson.Result) bool {
+	if !node.Exists() || node.Type == gjson.Null {
+		return false
+	}
+	if node.Type == gjson.String {
+		return len(node.String()) > 0
+	}
+	if !node.IsObject() {
+		return false
+	}
+	for _, path := range []string{"data", "transcript", "id", "audio"} {
+		if len(node.Get(path).String()) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSubstantiveAudioContentParts(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	for _, part := range content.Array() {
+		switch part.Get("type").String() {
+		case "audio", "output_audio":
+			if isSubstantiveAudio(part) || isSubstantiveAudio(part.Get("audio")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasSubstantiveAudioOutput(node gjson.Result) bool {
+	if isSubstantiveAudio(node.Get("audio")) || isSubstantiveAudio(node.Get("output_audio")) {
+		return true
+	}
+	return hasSubstantiveAudioContentParts(node.Get("content"))
+}
+
 // IsChatTokenEvent reports whether the given OpenAI-compatible Chat Completions SSE or JSON chunk
-// carries substantive output token content (such as text delta, reasoning content, or tool call arguments).
+// carries substantive output token content (text, audio, reasoning, refusal, or tool-call arguments).
 // It filters out container metadata, role announcements, and empty delta frames.
 func IsChatTokenEvent(payload []byte) bool {
 	payload = bytes.TrimSpace(payload)
@@ -52,6 +94,9 @@ func IsChatTokenEvent(payload []byte) bool {
 			if len(delta.Get("content").String()) > 0 {
 				return true
 			}
+			if hasSubstantiveAudioOutput(delta) {
+				return true
+			}
 			if len(delta.Get("reasoning_content").String()) > 0 {
 				return true
 			}
@@ -75,6 +120,9 @@ func IsChatTokenEvent(payload []byte) bool {
 		message := choice.Get("message")
 		if message.Exists() {
 			if len(message.Get("content").String()) > 0 {
+				return true
+			}
+			if hasSubstantiveAudioOutput(message) {
 				return true
 			}
 			if len(message.Get("reasoning_content").String()) > 0 {

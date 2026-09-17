@@ -67,7 +67,7 @@ var usageObjectPaths = []string{
 }
 
 func reporterTokensPerSecond(reporter *UsageReporter, outputTokens int64) float64 {
-	if reporter == nil {
+	if reporter == nil || !reporter.IsTTFTSet() {
 		return 0
 	}
 	return usage.TokensPerSecond(outputTokens, reporter.latency(), reporter.ttftDuration())

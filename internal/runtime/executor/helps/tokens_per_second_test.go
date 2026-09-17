@@ -157,8 +157,11 @@ func TestAttachTokensPerSecondHeaderStripsUpstreamForgedMarker(t *testing.T) {
 }
 
 func TestMeasuredTokensPerSecondFrozenAcrossPostGenerationDelay(t *testing.T) {
+	// Controllable clock: no wall-clock Sleep for ordering (AGENTS.md).
+	now := time.Unix(1_700_000_000, 0)
 	reporter := &UsageReporter{
-		upstreamStartedAt: time.Now().Add(-5 * time.Second),
+		nowFunc:           func() time.Time { return now },
+		upstreamStartedAt: now.Add(-5 * time.Second),
 		ttft:              3 * time.Second,
 		ttftSet:           true,
 	}
@@ -167,7 +170,7 @@ func TestMeasuredTokensPerSecondFrozenAcrossPostGenerationDelay(t *testing.T) {
 	if tps < 99 || tps > 101 {
 		t.Fatalf("snapshot tokens_per_second = %v, want ~100", tps)
 	}
-	time.Sleep(200 * time.Millisecond)
+	now = now.Add(200 * time.Millisecond)
 	later := MeasuredTokensPerSecond(raw, reporter)
 	if later >= tps {
 		t.Fatalf("live remeasure should drop after post-generation delay: early=%v later=%v", tps, later)
@@ -186,5 +189,44 @@ func TestMeasuredTokensPerSecondFrozenAcrossPostGenerationDelay(t *testing.T) {
 	}
 	if headers.Get(tokensPerSecondGatewayMarker) != GatewayMeasuredTPSMarkerValue() {
 		t.Fatalf("missing gateway marker")
+	}
+}
+
+func TestMeasuredTokensPerSecondOmitsWithoutEffectiveTTFT(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	reporter := &UsageReporter{
+		nowFunc:             func() time.Time { return now },
+		upstreamStartedAt:   now.Add(-5 * time.Second),
+		firstPacketDuration: 10 * time.Millisecond,
+		firstPacketSet:      true,
+	}
+	raw := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":200,"total_tokens":210}}`)
+	if tps := MeasuredTokensPerSecond(raw, reporter); tps != 0 {
+		t.Fatalf("TPS = %v, want 0 when only first-packet fallback is set", tps)
+	}
+	line := []byte(`data: {"usage":{"completion_tokens":200}}`)
+	got := AttachStreamTokensPerSecond(line, reporter)
+	if gjson.GetBytes(jsonPayloadFromSSE(got), "usage.tokens_per_second").Exists() {
+		t.Fatalf("stream TPS must wait for a substantive token, got %s", got)
+	}
+}
+
+func TestAttachStreamTokensPerSecondAfterAudioToken(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	reporter := &UsageReporter{
+		nowFunc: func() time.Time { return now },
+	}
+	reporter.StartResponseTTFT()
+	now = now.Add(1 * time.Second)
+	ObserveChatTokenEvent(reporter, []byte(`{"choices":[{"delta":{"audio":{"data":"UklGRi..."}}}]}`))
+	if !reporter.IsTTFTSet() {
+		t.Fatal("audio output delta must set effective TTFT")
+	}
+	now = now.Add(2 * time.Second)
+	line := []byte(`data: {"usage":{"completion_tokens":200}}`)
+	got := AttachStreamTokensPerSecond(line, reporter)
+	tps := gjson.GetBytes(jsonPayloadFromSSE(got), "usage.tokens_per_second").Float()
+	if tps < 99 || tps > 101 {
+		t.Fatalf("stream tokens_per_second after audio TTFT = %v, want ~100; body=%s", tps, got)
 	}
 }
