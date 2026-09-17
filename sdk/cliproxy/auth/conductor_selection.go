@@ -266,6 +266,21 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 }
 
+// SetHeadroomLookup swaps the headroom resolver on the active scheduler.
+// Production wiring in cmd/server/main.go calls this once at startup with
+// a usage_windows-backed implementation (Task 7 closes the loop on Task
+// 5's stub); nil restores the unlimited-default behavior. Safe to call
+// concurrently with dispatch — the scheduler guards its lookup field
+// with its own mutex.
+func (m *Manager) SetHeadroomLookup(lookup HeadroomLookup) {
+	if m == nil {
+		return
+	}
+	if m.scheduler != nil {
+		m.scheduler.SetHeadroomLookup(lookup)
+	}
+}
+
 // Selector returns the current credential selector.
 func (m *Manager) Selector() Selector {
 	if m == nil {

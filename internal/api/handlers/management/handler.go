@@ -215,6 +215,15 @@ type Handler struct {
 	// after a successful runtime-config commit. nil when the server booted
 	// in legacy file mode (no bridge is active, so nothing to reload).
 	reloadCoordinator ReloadLatestFn
+
+	// quotaRepoIface / quotaRepoEnabled gate the round-2 quota-share endpoints
+	// (/v0/management/auths/:id/quota, /v0/management/pools/:key/quota). The
+	// repo interface is satisfied by the production *store.PostgresStore in
+	// cmd/server wiring and by an in-process fake in tests. nil/disabled
+	// returns 503 from those handlers, mirroring the rest of the PG-first
+	// management-route contract.
+	quotaRepoIface   quotaRepo
+	quotaRepoEnabled bool
 }
 
 type configReloadSnapshot struct {

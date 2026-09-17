@@ -311,6 +311,25 @@ func (s *authScheduler) setSelector(selector Selector) {
 	clear(s.mixedWeightedStates)
 }
 
+// SetHeadroomLookup replaces the scheduler's headroom resolver. Production
+// wires a usage_windows-backed implementation here at startup (Task 7
+// closes the loop on Task 5's stub); tests inject scripted lookups via
+// scheduler.headroomLookup directly. Pass nil to fall back to the
+// unlimited-100% behavior of StaticHeadroomLookup{} so a misconfigured
+// deployment can never crash the dispatcher.
+func (s *authScheduler) SetHeadroomLookup(lookup HeadroomLookup) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lookup == nil {
+		s.headroomLookup = defaultHeadroomLookup()
+		return
+	}
+	s.headroomLookup = lookup
+}
+
 // StrategyName returns the canonical name of the configured selector.
 // Used by the X-NixLLM-Decision header (Task 6) to surface which selector
 // served the request. Unknown/custom selectors return "n/a" so the header

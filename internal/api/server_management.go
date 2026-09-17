@@ -292,6 +292,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-stats/filters", s.mgmt.GetUsageFilters)
 		mgmt.GET("/usage-windows/:api_key_id", s.mgmt.GetUsageWindows)
 
+		// Round-2 quota-share endpoints (docs/plans/2026-09-17-...). Read-only
+		// aggregation over usage_windows: 503 without PGSTORE_DSN, 2s query
+		// timeout with partial=true on slowness. Pool key follows the
+		// (channel:rowID) convention the round-1 PoolBreaker uses.
+		mgmt.GET("/auths/:id/quota", s.mgmt.GetAuthQuota)
+		mgmt.GET("/pools/:key/quota", s.mgmt.GetPoolQuota)
+
 		// Live snapshot of upstream auth/model pairs currently in cooldown.
 		// Read-only; the dashboard's per-row "Reset" button calls the
 		// existing POST /v0/management/reset-quota route with auth_index.

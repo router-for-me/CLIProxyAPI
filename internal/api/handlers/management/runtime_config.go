@@ -29,8 +29,29 @@ func (h *Handler) SetPGControl(pg *store.PostgresStore) {
 	h.pgControl = pg
 	if pg != nil {
 		h.configRepo = pgconfigstore.Open(pg)
+		// Round-2 quota-share endpoints (Task 7) share the same PostgresStore
+		// handle. Wire the adapter so /v0/management/auths/:id/quota and
+		// /v0/management/pools/:key/quota flip from 503 to data-bearing
+		// whenever PG is configured.
+		h.quotaRepoIface = NewStoreQuotaRepoAdapter(pg)
+		h.quotaRepoEnabled = true
 	} else {
 		h.configRepo = nil
+		h.quotaRepoIface = nil
+		h.quotaRepoEnabled = false
+	}
+	// Round-2 headroom production wiring (Task 7 closes the loop on Task 5's
+	// stub). When the auth manager is already attached, replace its default
+	// unlimited-100% headroom lookup with the usage_windows-backed
+	// implementation so the headroom selector becomes functional in
+	// production. nil PG keeps the static stub in place (preserves the
+	// pre-Task-7 behavior on file-only deployments).
+	if h.authManager != nil {
+		if pg != nil {
+			h.authManager.SetHeadroomLookup(newUsageWindowsHeadroomLookupFromStore(pg))
+		} else {
+			h.authManager.SetHeadroomLookup(nil)
+		}
 	}
 }
 
