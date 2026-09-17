@@ -954,6 +954,9 @@ func TestOpenAICompatExecutorResponsesStreamFailsOnEOFWithoutDone(t *testing.T) 
 	if !strings.Contains(streamErr.Error(), "closed before [DONE]") {
 		t.Fatalf("stream error does not explain the missing terminal marker: %v", streamErr)
 	}
+	if scoped, ok := streamErr.(cliproxyexecutor.RequestScopedError); !ok || !scoped.IsRequestScoped() {
+		t.Fatalf("missing [DONE] must be request-scoped, got %T: %v", streamErr, streamErr)
+	}
 }
 
 func TestOpenAICompatExecutorResponsesStreamPreservesUpstreamDataError(t *testing.T) {
@@ -1001,6 +1004,9 @@ func TestOpenAICompatExecutorResponsesStreamPreservesUpstreamDataError(t *testin
 			}
 			if streamErr == nil || !strings.Contains(streamErr.Error(), "upstream failed") {
 				t.Fatalf("terminal stream error = %v, want original upstream failure", streamErr)
+			}
+			if scoped, ok := streamErr.(cliproxyexecutor.RequestScopedError); ok && scoped.IsRequestScoped() {
+				t.Fatalf("explicit upstream error must retain its credential classification: %v", streamErr)
 			}
 		})
 	}
