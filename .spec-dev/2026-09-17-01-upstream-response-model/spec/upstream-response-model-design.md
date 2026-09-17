@@ -3,7 +3,7 @@
 spec_dev:
   version: 1
   feature: upstream-response-model
-  status: draft
+  status: active
   covers:
     - "sdk/cliproxy/usage/**"
     - "internal/runtime/executor/helps/**"
