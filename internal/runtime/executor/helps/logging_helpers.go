@@ -243,6 +243,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+	ObserveUpstreamResponseBytes(ctx, chunk)
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -378,6 +379,7 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
+	ObserveUpstreamResponseBytes(ctx, payload)
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}

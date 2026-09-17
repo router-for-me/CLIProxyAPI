@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func TestRequestLoggingDoesNotMarkUpstreamAttempt(t *testing.T) {
@@ -153,5 +154,58 @@ func TestAPIResponseAttemptsAreSeparated(t *testing.T) {
 				t.Fatalf("API response attempts are not separated by one blank line:\n%q\nwant boundary %q", response, wantBoundary)
 			}
 		})
+	}
+}
+
+func TestAppendAPIResponseChunkObservesWhenRequestLogDisabled(t *testing.T) {
+	ctx := usage.BeginUpstreamResponseModelObservation(context.Background())
+	usage.BindUpstreamResponseModelFamily(ctx, usage.FamilyOpenAI)
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: false}}
+	chunk := []byte(`{"model":"gpt-5.4"}`)
+	before := string(chunk)
+	AppendAPIResponseChunk(ctx, cfg, chunk)
+	if string(chunk) != before {
+		t.Fatalf("chunk mutated")
+	}
+	if got := usage.UpstreamResponseModelFromContext(ctx); got != "gpt-5.4" {
+		t.Fatalf("got %q, want gpt-5.4", got)
+	}
+}
+
+func TestAppendAPIResponseChunkObservesInCommercialMode(t *testing.T) {
+	ctx := usage.BeginUpstreamResponseModelObservation(context.Background())
+	usage.BindUpstreamResponseModelFamily(ctx, usage.FamilyOpenAI)
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}, CommercialMode: true}
+	AppendAPIResponseChunk(ctx, cfg, []byte(`{"response":{"model":"kept"}}`))
+	if got := usage.UpstreamResponseModelFromContext(ctx); got != "kept" {
+		t.Fatalf("got %q, want kept", got)
+	}
+}
+
+func TestAppendAPIWebsocketResponseObservesWhenRequestLogDisabled(t *testing.T) {
+	ctx := usage.BeginUpstreamResponseModelObservation(context.Background())
+	usage.BindUpstreamResponseModelFamily(ctx, usage.FamilyOpenAI)
+	payload := []byte(`{"model":"ws-model"}`)
+	before := string(payload)
+	AppendAPIWebsocketResponse(ctx, &config.Config{SDKConfig: config.SDKConfig{RequestLog: false}}, payload)
+	if string(payload) != before {
+		t.Fatalf("payload mutated")
+	}
+	if got := usage.UpstreamResponseModelFromContext(ctx); got != "ws-model" {
+		t.Fatalf("got %q, want ws-model", got)
+	}
+}
+
+func TestEmitWebSocketResponseEventObservesWhenRequestLogDisabled(t *testing.T) {
+	ctx := usage.BeginUpstreamResponseModelObservation(context.Background())
+	usage.BindUpstreamResponseModelFamily(ctx, usage.FamilyOpenAI)
+	payload := []byte(`{"model":"ws-model"}`)
+	before := string(payload)
+	EmitWebSocketResponseEvent(ctx, cliproxyexecutor.Options{}, nil, "openai", "mapped-model", payload)
+	if string(payload) != before {
+		t.Fatalf("payload mutated")
+	}
+	if got := usage.UpstreamResponseModelFromContext(ctx); got != "ws-model" {
+		t.Fatalf("got %q, want ws-model", got)
 	}
 }
