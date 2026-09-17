@@ -407,6 +407,52 @@ func TestIsAuthBlockedForModel_ExcludedModels(t *testing.T) {
 	}
 }
 
+// Characterization test: exclusion patterns other than the "*" sentinel are matched exactly
+// (and case-sensitively), so wildcards are a listing-only concern. Both behaviours are part of
+// the documented contract in config.example.yaml under "excluded-models".
+func TestIsAuthBlockedForModel_ExcludedModelsMatchingIsExact(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	tests := []struct {
+		name        string
+		attributes  map[string]string
+		model       string
+		wantBlocked bool
+	}{
+		{
+			name:        "glob_pattern_does_not_block_routing",
+			attributes:  map[string]string{AttributeExcludedModels: "gemini-*"},
+			model:       "gemini-2.5-pro",
+			wantBlocked: false,
+		},
+		{
+			name:        "trailing_glob_does_not_block_its_exact_model",
+			attributes:  map[string]string{AttributeExcludedModels: "gpt-5*"},
+			model:       "gpt-5",
+			wantBlocked: false,
+		},
+		{
+			name:        "match_is_case_sensitive",
+			attributes:  map[string]string{AttributeExcludedModels: "gpt-5"},
+			model:       "GPT-5",
+			wantBlocked: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := &Auth{ID: "candidate", Attributes: tt.attributes}
+
+			blocked, _, _ := isAuthBlockedForModel(candidate, tt.model, now)
+
+			if blocked != tt.wantBlocked {
+				t.Fatalf("blocked = %v, want %v", blocked, tt.wantBlocked)
+			}
+		})
+	}
+}
+
 func TestFillFirstSelectorPick_SkipsExcludedAllCredential(t *testing.T) {
 	t.Parallel()
 
@@ -453,6 +499,28 @@ func TestFillFirstSelectorPick_PerModelExclusionBlocksOnlyThatModel(t *testing.T
 	}
 	if routed.ID != "a" {
 		t.Fatalf("Pick() for other model auth.ID = %q, want %q", routed.ID, "a")
+	}
+}
+
+// Characterization test for the routing side of the listing/routing asymmetry: a glob exclusion
+// is not matched by the routing check, so the lowest-ID credential is still selected. The
+// documented contract lives under "excluded-models" in config.example.yaml.
+func TestFillFirstSelectorPick_GlobExclusionDoesNotSkipCredential(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	globExcluded := &Auth{ID: "a-wildcard", Attributes: map[string]string{AttributeExcludedModels: "gemini-*"}}
+	eligible := &Auth{ID: "b-eligible"}
+
+	got, err := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", cliproxyexecutor.Options{}, []*Auth{globExcluded, eligible})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "a-wildcard" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "a-wildcard")
 	}
 }
 
