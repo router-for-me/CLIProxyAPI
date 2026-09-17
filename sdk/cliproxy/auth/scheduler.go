@@ -38,6 +38,10 @@ const (
 	// lastHeadroomExhausted so the X-NixLLM-Decision header (Task 6) can
 	// carry a marker. See scheduler_headroom.go for the helper and
 	// docs/plans/2026-09-17-omniroute-round-2-design.md for the design.
+	// headroom differs from fill-first/weighted (Tasks 3/4) because it needs
+	// lastHeadroomExhausted co-set under the scheduler lock; the fast-path
+	// helpers (pickReadyAtPriorityLocked) return only *Auth, so headroom
+	// dispatches inline in pickSingleWithStrategy / pickMixedWithStrategy.
 	schedulerStrategyHeadroom schedulerStrategy = 7
 )
 
@@ -69,6 +73,9 @@ type authScheduler struct {
 	// this lookup. Tests inject a scripted StaticHeadroomLookup; production
 	// wires a stub that returns 100.0 until the usage_windows-backed reader
 	// lands in the events/quota workstream (Task 7).
+	// Setter (used by Task 7 to swap in a real usage_windows-backed
+	// implementation) must take s.mu. Reads inside pickSingleWithStrategy
+	// and pickMixedWithStrategy are already under the lock.
 	headroomLookup HeadroomLookup
 	// lastHeadroomExhausted is set when the most recent headroom pick had to
 	// fall back to least-used ordering because every candidate was at or
@@ -76,6 +83,10 @@ type authScheduler struct {
 	// flag to emit the headroom=exhausted,fallback=least-used marker.
 	// Cleared at the start of every pick cycle (see pickSingleWithStrategy
 	// and pickMixedWithStrategy).
+	// Cleared at the top of pickSingleWithStrategy (line 425) and
+	// pickMixedWithStrategy (line 536). In the multi-provider
+	// single-eligible case (line 511), pickMixedWithStrategy delegates
+	// to pickSingleWithStrategy which owns the clear — no double-clear.
 	lastHeadroomExhausted bool
 }
 
@@ -448,6 +459,20 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 			}
 			entries = append(entries, entry)
 		}
+		// Pre-sort by auth.ID so the smaller-ID tie-break in pickHeadroom is
+		// honored regardless of bucket iteration order. Mirrors the
+		// mixed-provider headroom branch below (line 665-673) and the
+		// fill-first/weighted branches: tie-break semantics depend on a
+		// stable candidate order, which the flat view does not provide.
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i] == nil || entries[i].auth == nil {
+				return false
+			}
+			if entries[j] == nil || entries[j].auth == nil {
+				return true
+			}
+			return entries[i].auth.ID < entries[j].auth.ID
+		})
 		picked, exhausted := pickHeadroom(entries, s.headroomLookup, s.pickReadyLookup(s.inFlightSnapshot()))
 		s.lastHeadroomExhausted = exhausted
 		if picked != nil {

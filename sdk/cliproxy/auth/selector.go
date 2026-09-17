@@ -160,6 +160,10 @@ type HeadroomByUsageSelector struct{}
 // every production pick. Reaching this method in production would mean the
 // fast path has been bypassed, in which case returning the first available
 // auth is still correct because every auth defaults to 100.0 headroom.
+// With the production stub returning 100.0 for every auth (the highest
+// headroom possible), the first-available-by-ID behaviour here is
+// observationally equivalent to what the scheduler fast path produces, so
+// the defensive fallback matches the production path in practice.
 func (s *HeadroomByUsageSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()

@@ -137,9 +137,10 @@ func TestSchedulerHeadroom_TieBreaksByPriority(t *testing.T) {
 		auth, exhausted := pickHeadroomWithStrategy(t, scheduler, model, nil)
 		// Same headroom (42.0) on both — the pure helper tie-breaks by the
 		// smaller auth.ID. Both share the same priority bucket so the
-		// scheduler's priority gate does not pre-select.
-		if auth.ID != "hr-t-high" && auth.ID != "hr-t-low" {
-			t.Fatalf("headroom tie pick #%d = %q, want one of hr-t-high/hr-t-low", i, auth.ID)
+		// scheduler's priority gate does not pre-select. Alphabetically
+		// "hr-t-high" < "hr-t-low", so the smaller-ID rule picks hr-t-high.
+		if auth.ID != "hr-t-high" {
+			t.Fatalf("headroom tie pick #%d = %q, want hr-t-high (smaller auth.ID)", i, auth.ID)
 		}
 		if exhausted {
 			t.Fatalf("headroom tie pick #%d exhausted = true, want false (positive headroom present)", i)
