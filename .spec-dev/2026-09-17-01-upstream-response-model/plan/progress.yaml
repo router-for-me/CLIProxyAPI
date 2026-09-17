@@ -1,0 +1,18 @@
+format_version: 1
+current: null
+tasks:
+  T00: { status: pending }
+  T01: { status: pending }
+  T02: { status: pending }
+  T03: { status: pending }
+  T04: { status: pending }
+  T05: { status: pending }
+  T06: { status: pending }
+  T07: { status: pending }
+  T08: { status: pending }
+  T09: { status: pending }
+  T10: { status: pending }
+resources:
+  - "worktree: /Users/maverick/CLIProxyAPI/.worktrees/plan/2026-09-17-01-upstream-response-model —— git -C /Users/maverick/CLIProxyAPI worktree remove .worktrees/plan/2026-09-17-01-upstream-response-model"
+  - "worktree: /Users/maverick/cpa-usage-keeper/.worktrees/plan/2026-09-17-01-upstream-response-model —— git -C /Users/maverick/cpa-usage-keeper worktree remove .worktrees/plan/2026-09-17-01-upstream-response-model"
+notes: []
