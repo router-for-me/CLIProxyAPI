@@ -122,6 +122,10 @@ func main() {
 	var importConfigDryRun bool
 	flag.StringVar(&importConfig, "import-config", "", "One-shot import of a YAML config into the PostgreSQL control plane (requires PGSTORE_DSN)")
 	flag.BoolVar(&importConfigDryRun, "import-config-dry-run", false, "With -import-config, plan and validate only; no DB writes")
+	var exportConfigPath string
+	flag.StringVar(&exportConfigPath, "export-config", "", "One-shot export of the active PostgreSQL snapshot to a YAML file")
+	var verifyConfig bool
+	flag.BoolVar(&verifyConfig, "verify-config", false, "One-shot verify of the active PostgreSQL snapshot integrity")
 	flag.StringVar(&password, "password", "", "")
 	flag.StringVar(&homeJWT, "home-jwt", "", "Home control plane JWT for mTLS certificate bootstrap and connection")
 	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address")
@@ -485,10 +489,12 @@ func main() {
 		usePostgresStore = false
 		useObjectStore = false
 		useGitStore = false
-	} else if usePostgresStore && importConfig == "" {
-		// The -import-config command mode skips the boot path entirely:
-		// it opens its own store connection and must not race with (or be
-		// pre-empted by) the boot auto-import below.
+	} else if usePostgresStore && importConfig == "" && !verifyConfig && exportConfigPath == "" {
+		// The -import-config / -verify-config / -export-config command modes
+		// skip the boot path entirely: they open their own store connection
+		// and must not race with (or be pre-empted by) the boot auto-import
+		// below. Skipping here keeps the verify path read-only against the
+		// current snapshot rather than accidentally seeding an empty one.
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
 		}
@@ -1028,7 +1034,14 @@ func main() {
 
 	// Handle different command modes based on the provided flags.
 
-	if importConfig != "" {
+	if verifyConfig {
+		// Handle one-shot verify-config command. Failures are loud and
+		// non-zero so a CI gate can wire this in directly.
+		if errVerify := cmd.DoVerifyConfig(context.Background(), cmd.VerifyConfigOptions{}); errVerify != nil {
+			log.Errorf("verify-config failed: %v", errVerify)
+			os.Exit(1)
+		}
+	} else if importConfig != "" {
 		// Handle one-shot PG-first import-config command. Failures must be
 		// loud and non-zero: a silent import failure leaves the PG control
 		// plane unseeded and the next boot fails closed with no hint why.
@@ -1037,6 +1050,15 @@ func main() {
 			DryRun:     importConfigDryRun,
 		}); errImport != nil {
 			log.Errorf("import-config failed: %v", errImport)
+			os.Exit(1)
+		}
+	} else if exportConfigPath != "" {
+		// Handle one-shot export-config command. Failures are loud and
+		// non-zero; the operator can re-run after fixing the snapshot.
+		if errExport := cmd.DoExportConfig(context.Background(), cmd.ExportConfigOptions{
+			OutputPath: exportConfigPath,
+		}); errExport != nil {
+			log.Errorf("export-config failed: %v", errExport)
 			os.Exit(1)
 		}
 	} else if vertexImport != "" {
