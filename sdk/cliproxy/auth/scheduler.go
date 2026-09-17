@@ -23,6 +23,14 @@ const (
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
 	schedulerStrategyP2C                schedulerStrategy = 4
 	schedulerStrategyLeastUsed          schedulerStrategy = 5
+	// schedulerStrategyWeighted samples one ready auth proportionally to its
+	// per-entry weight column (normalized to >=1 at the planner boundary in
+	// internal/configsnapshot.normalizeEntryWeight). Distinct from
+	// schedulerStrategyWeightedRoundRobin (smooth-WRR state above): this
+	// selector uses a single rand.Intn draw over the prefix-sum of weights.
+	// See scheduler_weighted.go for the helper and docs/plans/2026-09-17-
+	// omniroute-round-2-design.md for the design.
+	schedulerStrategyWeighted schedulerStrategy = 6
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -233,6 +241,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 		return schedulerStrategyFillFirst
 	case *WeightedRoundRobinSelector:
 		return schedulerStrategyWeightedRoundRobin
+	case *WeightedByEntrySelector:
+		return schedulerStrategyWeighted
 	case *P2CSelector:
 		return schedulerStrategyP2C
 	case *LeastUsedSelector:
@@ -504,6 +514,47 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
 		picked := pickFillFirst(entries, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup())
+		if picked != nil && picked.meta != nil {
+			return picked.auth, picked.meta.providerKey, nil
+		}
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
+
+	if strategy == schedulerStrategyWeighted {
+		// Round-2 weighted: scan every candidate shard at the best priority,
+		// then sample one ready auth proportionally to its per-entry weight
+		// column (normalized to >=1 at the planner boundary). Distinct from
+		// the round-1 schedulerStrategyWeightedRoundRobin branch below, which
+		// uses smoothed weighted state across cycles.
+		entries := make([]*scheduledAuth, 0)
+		for _, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			bucket := shard.readyByPriority[bestPriority]
+			if bucket == nil {
+				continue
+			}
+			for _, entry := range bucket.all.flat {
+				if entry == nil || entry.auth == nil {
+					continue
+				}
+				if predicate != nil && !predicate(entry) {
+					continue
+				}
+				entries = append(entries, entry)
+			}
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i] == nil || entries[i].auth == nil {
+				return false
+			}
+			if entries[j] == nil || entries[j].auth == nil {
+				return true
+			}
+			return entries[i].auth.ID < entries[j].auth.ID
+		})
+		picked := pickWeighted(entries)
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
@@ -1058,6 +1109,8 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		picked = view.pickFillFirst(predicate, inFlightCount, maxParallel)
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
+	case schedulerStrategyWeighted:
+		picked = view.pickWeightedFromView(predicate)
 	case schedulerStrategyP2C:
 		picked = view.pickPowerOfTwo(predicate, inFlightCount)
 	case schedulerStrategyLeastUsed:

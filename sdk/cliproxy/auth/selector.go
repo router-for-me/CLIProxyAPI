@@ -41,6 +41,31 @@ type WeightedRoundRobinSelector struct {
 	keyOrder boundedKeyTracker
 }
 
+// WeightedByEntrySelector samples one available auth proportionally to its
+// per-entry weight column. Distinct from WeightedRoundRobinSelector (which
+// uses smoothed weighted round-robin state): this selector runs a single
+// rand.Intn draw over the prefix-sum of weights, which gives an unbiased
+// proportional sample without per-cycle smoothing. The real in-scheduler
+// pick lives in the active scheduler's pickReadyAtPriorityLocked switch
+// (schedulerStrategyWeighted); Pick here is a defensive fallback used only
+// when a plugin scheduler or other slow path bypasses the fast path. In
+// that case it returns the first available auth, which is correct under
+// the planner's guarantee that every entry has weight >= 1.
+type WeightedByEntrySelector struct{}
+
+// Pick returns the first available auth deterministically; the scheduler
+// fast path owns the real weighted sampling — see WeightedByEntrySelector.
+func (s *WeightedByEntrySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	return available[0], nil
+}
+
 // boundedKeyTracker records the insertion order of a bounded map's keys so a
 // full map can evict its oldest keys in FIFO batches instead of being cleared
 // wholesale. It is not safe for concurrent use; callers hold the selector's
