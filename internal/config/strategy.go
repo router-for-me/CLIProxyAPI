@@ -60,3 +60,45 @@ func ValidatePoolRoutingStrategy(s string) error {
 		return fmt.Errorf("invalid routing strategy %q: want one of round-robin, weighted-round-robin, fill-first, power-of-two-choices, least-used", s)
 	}
 }
+
+// Canonical global routing strategy values for the top-level selector that
+// decides which auth to route an incoming request to when no per-pool rule
+// applies. Distinct namespace from PoolStrategy*: the pool-row "fill-first"
+// keeps deterministic-by-priority semantics on pool rows, while the global
+// "fill-first" extends it with an in-flight-highest-below-cap rule.
+const (
+	GlobalStrategyRoundRobin = "round-robin"
+	GlobalStrategyFillFirst  = "fill-first"
+	GlobalStrategyWeighted   = "weighted"
+	GlobalStrategyHeadroom   = "headroom"
+)
+
+// NormalizeGlobalRoutingStrategy canonicalizes an operator-supplied global
+// routing strategy. Unknown or blank values return "" (unset).
+func NormalizeGlobalRoutingStrategy(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "round-robin", "roundrobin", "rr":
+		return GlobalStrategyRoundRobin
+	case "fill-first", "fillfirst", "ff":
+		return GlobalStrategyFillFirst
+	case "weighted", "w":
+		return GlobalStrategyWeighted
+	case "headroom", "hr":
+		return GlobalStrategyHeadroom
+	default:
+		return ""
+	}
+}
+
+// ValidateGlobalRoutingStrategy accepts only canonical values (plus empty).
+// Raw aliases must be rejected at strict input boundaries so operators see
+// their typo; call NormalizeGlobalRoutingStrategy first when aliases are
+// intended.
+func ValidateGlobalRoutingStrategy(s string) error {
+	switch s {
+	case "", GlobalStrategyRoundRobin, GlobalStrategyFillFirst, GlobalStrategyWeighted, GlobalStrategyHeadroom:
+		return nil
+	default:
+		return fmt.Errorf("invalid global routing strategy %q: want one of round-robin, fill-first, weighted, headroom", s)
+	}
+}

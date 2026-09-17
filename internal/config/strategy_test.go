@@ -64,3 +64,55 @@ func TestValidatePoolRoutingStrategy(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeGlobalRoutingStrategy(t *testing.T) {
+	cases := map[string]string{
+		"round-robin": GlobalStrategyRoundRobin,
+		"rr":          GlobalStrategyRoundRobin,
+		"fill-first":  GlobalStrategyFillFirst,
+		"ff":          GlobalStrategyFillFirst,
+		"weighted":    GlobalStrategyWeighted,
+		"w":           GlobalStrategyWeighted,
+		"headroom":    GlobalStrategyHeadroom,
+		"hr":          GlobalStrategyHeadroom,
+		"  weighted ": GlobalStrategyWeighted,
+		"unknown":     "",
+		"":            "",
+		"   ":         "",
+		"Round-Robin": GlobalStrategyRoundRobin,
+		"FILL-FIRST":  GlobalStrategyFillFirst,
+	}
+	for in, want := range cases {
+		if got := NormalizeGlobalRoutingStrategy(in); got != want {
+			t.Errorf("NormalizeGlobalRoutingStrategy(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestValidateGlobalRoutingStrategy(t *testing.T) {
+	if err := ValidateGlobalRoutingStrategy(GlobalStrategyHeadroom); err != nil {
+		t.Errorf("headroom should validate: %v", err)
+	}
+	if err := ValidateGlobalRoutingStrategy(GlobalStrategyFillFirst); err != nil {
+		t.Errorf("fill-first should validate: %v", err)
+	}
+	if err := ValidateGlobalRoutingStrategy(GlobalStrategyWeighted); err != nil {
+		t.Errorf("weighted should validate: %v", err)
+	}
+	if err := ValidateGlobalRoutingStrategy(GlobalStrategyRoundRobin); err != nil {
+		t.Errorf("round-robin should validate: %v", err)
+	}
+	if err := ValidateGlobalRoutingStrategy("bogus"); err == nil {
+		t.Errorf("bogus should fail validation")
+	}
+	if err := ValidateGlobalRoutingStrategy(""); err != nil {
+		t.Errorf("empty should validate (unset is allowed): %v", err)
+	}
+}
+
+func TestPoolStrategyFillFirstUnchanged(t *testing.T) {
+	// Ensure we did not break the existing pool-row canonical value.
+	if NormalizePoolRoutingStrategy("ff") != PoolStrategyFillFirst {
+		t.Errorf("pool fill-first alias regressed")
+	}
+}
