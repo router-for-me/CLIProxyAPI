@@ -77,6 +77,12 @@ type PluginScheduler interface {
 	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
 }
 
+// PluginSchedulerAcrossPriorities is an optional interface implemented by schedulers
+// that opt into receiving candidates across all priority tiers.
+type PluginSchedulerAcrossPriorities interface {
+	SchedulerWantsAcrossPriorities() bool
+}
+
 type pluginSchedulerState interface {
 	HasScheduler() bool
 }
