@@ -10,7 +10,7 @@ tasks:
   T06: { status: completed, commit: ff1d1fc6b41f975f33ce0ed230d8d3d42b324ac3, tests: pass }
   T07: { status: completed, commit: 206607264a0ad52aa43689d11800c762099d3108, tests: pass }
   T08: { status: completed, commit: 47c6a6c832cf6bd47fc72c9101eafd69fe0057e5, tests: pass }
-  T09: { status: completed, tests: pass }
+  T09: { status: completed, commit: 928d8987b7bfa5daddebd93f1ca927048b159030, tests: pass }
   T10: { status: pending }
 resources:
   - "worktree: /Users/maverick/CLIProxyAPI/.worktrees/plan/2026-09-17-01-upstream-response-model —— git -C /Users/maverick/CLIProxyAPI worktree remove .worktrees/plan/2026-09-17-01-upstream-response-model"
