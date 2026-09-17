@@ -98,6 +98,12 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")
 	}
+	if oldEntry.AutoDiscoverModels != newEntry.AutoDiscoverModels {
+		details = append(details, fmt.Sprintf("auto-discover-models %t -> %t", oldEntry.AutoDiscoverModels, newEntry.AutoDiscoverModels))
+	}
+	if ComputeExcludedModelsHash(oldEntry.ExcludedModels) != ComputeExcludedModelsHash(newEntry.ExcludedModels) {
+		details = append(details, fmt.Sprintf("excluded-models %d -> %d", len(oldEntry.ExcludedModels), len(newEntry.ExcludedModels)))
+	}
 	if len(details) == 0 {
 		return ""
 	}
