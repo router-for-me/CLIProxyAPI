@@ -367,6 +367,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			remaining = closedCh
 		}
 		attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
+		// Set the X-NixLLM-Decision header on the stream headers BEFORE
+		// wrapping so streaming clients see the decision metadata before the
+		// first chunk is forwarded. The api layer reads streamResult.Headers
+		// and propagates them into the downstream response.
+		setStreamDecisionHeader(streamResult.Headers, m.decisionFor(auth, provider, routeModel, 1))
 		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult), nil
 	}
 	if lastErr == nil {

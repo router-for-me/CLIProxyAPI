@@ -474,6 +474,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
+			setResponseDecisionHeader(&resp, m.decisionFor(auth, provider, routeModel, len(attempted)))
 			return resp, nil
 		}
 		if authErr != nil {
@@ -633,6 +634,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
+			setResponseDecisionHeader(&resp, m.decisionFor(auth, provider, routeModel, len(attempted)))
 			return resp, nil
 		}
 		if authErr != nil {

@@ -171,6 +171,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 				releaseAttempt()
 				attemptAliasResult := resolveAttemptAliasResult(routing, preparedAuth, routeModel, upstreamModel, aliasResult)
 				rewriteForceMappedResponse(&response, attemptAliasResult)
+				setResponseDecisionHeader(&response, m.decisionFor(preparedAuth, selection.Provider, routeModel, len(tried)))
 				if !m.retainHomeWebsocketSelection(ctx, opts, routeModel, selection) {
 					selection.End("completed")
 				}

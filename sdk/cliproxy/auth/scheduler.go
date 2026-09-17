@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"sort"
 	"strings"
@@ -308,6 +309,69 @@ func (s *authScheduler) setSelector(selector Selector) {
 	s.strategy = selectorStrategy(selector)
 	clear(s.mixedCursors)
 	clear(s.mixedWeightedStates)
+}
+
+// StrategyName returns the canonical name of the configured selector.
+// Used by the X-NixLLM-Decision header (Task 6) to surface which selector
+// served the request. Unknown/custom selectors return "n/a" so the header
+// still carries a stable value rather than an empty field.
+func (s *authScheduler) StrategyName() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch s.strategy {
+	case schedulerStrategyRoundRobin:
+		return "round-robin"
+	case schedulerStrategyFillFirst:
+		return "fill-first"
+	case schedulerStrategyWeightedRoundRobin:
+		return "weighted-round-robin"
+	case schedulerStrategyWeighted:
+		return "weighted"
+	case schedulerStrategyP2C:
+		return "power-of-two-choices"
+	case schedulerStrategyLeastUsed:
+		return "least-used"
+	case schedulerStrategyHeadroom:
+		return "headroom"
+	default:
+		return ""
+	}
+}
+
+// HeadroomExhausted returns the most recent headroom pick's fallback flag.
+// True means the headroom selector fell back to least-used ordering for
+// the dispatch the caller is about to surface. The flag is cleared at the
+// top of every pick cycle (see pickSingleWithStrategy / pickMixedWithStrategy),
+// so a read here captures only the current pick's verdict.
+func (s *authScheduler) HeadroomExhausted() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastHeadroomExhausted
+}
+
+// HeadroomPercent returns the auth's remaining-quota percent from the wired
+// HeadroomLookup, formatted as "%.1f". Returns "" when the lookup is unset
+// (production today, until Task 7 wires the usage_windows-backed reader).
+func (s *authScheduler) HeadroomPercent(authID string) string {
+	if s == nil || s.headroomLookup == nil {
+		return ""
+	}
+	pct := s.headroomLookup.Headroom(authID)
+	if pct <= 0 {
+		return ""
+	}
+	// Trim the trailing ".0" so an exact 100% does not render as "100.0".
+	formatted := fmt.Sprintf("%.1f", pct)
+	if formatted == "100.0" {
+		return "100"
+	}
+	return formatted
 }
 
 // rebuild recreates the complete scheduler state from an auth snapshot.
