@@ -237,10 +237,10 @@ nonstream-keepalive-interval: 0
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
 #         display-name: "Gemini Flash" # optional catalog display name
 #     excluded-models:
-#       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
-#       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
-#       - "*-preview"          # wildcard matching suffix (e.g. gemini-3-pro-preview)
-#       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
+#       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match; also blocks routing)
+#       - "gemini-2.5-*"       # wildcard matching prefix, listing only (e.g. gemini-2.5-flash, gemini-2.5-pro)
+#       - "*-preview"          # wildcard matching suffix, listing only (e.g. gemini-3-pro-preview)
+#       - "*flash*"            # wildcard matching substring, listing only (e.g. gemini-2.5-flash-lite)
 #   - api-key: "AIzaSy...02"
 
 # Native Interactions API keys
@@ -277,10 +277,10 @@ nonstream-keepalive-interval: 0
 #         display-name: "Codex Latest" # optional catalog display name
 #         force-mapping: true    # optional: rewrite response model fields back to the alias
 #     excluded-models:
-#       - "gpt-5.1"         # exclude specific models (exact match)
-#       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
-#       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
-#       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
+#       - "gpt-5.1"         # exclude specific models (exact match; also blocks routing)
+#       - "gpt-5-*"         # wildcard matching prefix, listing only (e.g. gpt-5-medium, gpt-5-codex)
+#       - "*-mini"          # wildcard matching suffix, listing only (e.g. gpt-5-codex-mini)
+#       - "*codex*"         # wildcard matching substring, listing only (e.g. gpt-5-codex-low)
 
 # xAI API keys
 # Uses the native xAI executor, including its Responses namespace-tool handling.
@@ -300,8 +300,8 @@ nonstream-keepalive-interval: 0
 #         display-name: "Grok Latest" # optional catalog display name
 #         force-mapping: true     # optional: rewrite response model fields back to the alias
 #     excluded-models:
-#       - "grok-4.1"             # exclude specific models (exact match)
-#       - "grok-3-*"             # wildcard matching prefix
+#       - "grok-4.1"             # exclude specific models (exact match; also blocks routing)
+#       - "grok-3-*"             # wildcard matching prefix, listing only
 
 # Claude API keys
 # claude-api-key:
@@ -320,10 +320,10 @@ nonstream-keepalive-interval: 0
 #         display-name: "Claude Sonnet"      # optional catalog display name
 #         force-mapping: true                 # optional: rewrite response model fields back to the alias
 #     excluded-models:
-#       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
-#       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
-#       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
-#       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
+#       - "claude-opus-4-5-20251101" # exclude specific models (exact match; also blocks routing)
+#       - "claude-3-*"               # wildcard matching prefix, listing only (e.g. claude-3-7-sonnet-20250219)
+#       - "*-thinking"               # wildcard matching suffix, listing only (e.g. claude-opus-4-5-thinking)
+#       - "*haiku*"                  # wildcard matching substring, listing only (e.g. claude-3-5-haiku-20241022)
 #     rebuild-mid-system-message: false # optional: default is false; when true, move messages with role "system" into the top-level Claude system field
 #     cloak:                         # optional: request cloaking for non-Claude-Code clients
 #       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
@@ -389,8 +389,8 @@ nonstream-keepalive-interval: 0
 #       alias: "glm-5"
 # oauth-excluded-models:
 #   kilo:
-#     - "kilo-claude-opus-4-6"  # exclude specific models (exact match)
-#     - "*:free"                # wildcard matching suffix (e.g. all free models)
+#     - "kilo-claude-opus-4-6"  # exclude specific models (exact match; also blocks routing)
+#     - "*:free"                # wildcard matching suffix, listing only (e.g. all free models)
 
 # OpenAI compatibility providers
 # openai-compatibility:
@@ -467,7 +467,11 @@ nonstream-keepalive-interval: 0
 #         display-name: "Vertex Flash"            # optional catalog display name
 #       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
-#     excluded-models:                            # optional: models to exclude from listing
+#     # excluded-models hides these models from the listing and removes this credential as a
+#     # routing candidate for them (an excluded model returns auth_unavailable when no other
+#     # credential can serve it). Routing matches exact model names, case-sensitively, plus the
+#     # "*" sentinel; other wildcards, such as "imagen-*", affect the listing only.
+#     excluded-models:
 #       - "imagen-3.0-generate-002"
 #       - "imagen-*"
 

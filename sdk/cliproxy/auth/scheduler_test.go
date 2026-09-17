@@ -167,6 +167,80 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_SkipsExcludedAllCredential(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&FillFirstSelector{},
+		&Auth{ID: "a-excluded", Provider: "gemini", Attributes: map[string]string{AttributeExcludedModels: "*"}},
+		&Auth{ID: "b-eligible", Provider: "gemini"},
+	)
+
+	for index := 0; index < 3; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != "b-eligible" {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "b-eligible")
+		}
+	}
+}
+
+func TestSchedulerPick_ExcludedCredentialReevaluatedAfterExclusionChange(t *testing.T) {
+	t.Parallel()
+
+	excluded := &Auth{ID: "a-excluded", Provider: "gemini", Attributes: map[string]string{AttributeExcludedModels: "*"}}
+	scheduler := newSchedulerForTest(
+		&FillFirstSelector{},
+		excluded,
+		&Auth{ID: "b-eligible", Provider: "gemini"},
+	)
+
+	ctx := context.Background()
+	picked, errPick := scheduler.pickSingle(ctx, "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() while excluded error = %v", errPick)
+	}
+	if picked == nil {
+		t.Fatalf("pickSingle() while excluded auth = nil")
+	}
+	if picked.ID != "b-eligible" {
+		t.Fatalf("pickSingle() while excluded auth.ID = %q, want %q", picked.ID, "b-eligible")
+	}
+
+	excluded.Attributes[AttributeExcludedModels] = ""
+	scheduler.upsertAuth(excluded)
+
+	restored, errPick := scheduler.pickSingle(ctx, "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after removal error = %v", errPick)
+	}
+	if restored == nil {
+		t.Fatalf("pickSingle() after removal auth = nil")
+	}
+	if restored.ID != "a-excluded" {
+		t.Fatalf("pickSingle() after removal auth.ID = %q, want %q", restored.ID, "a-excluded")
+	}
+
+	excluded.Attributes[AttributeExcludedModels] = "*"
+	scheduler.upsertAuth(excluded)
+
+	reExcluded, errPick := scheduler.pickSingle(ctx, "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after re-exclusion error = %v", errPick)
+	}
+	if reExcluded == nil {
+		t.Fatalf("pickSingle() after re-exclusion auth = nil")
+	}
+	if reExcluded.ID != "b-eligible" {
+		t.Fatalf("pickSingle() after re-exclusion auth.ID = %q, want %q", reExcluded.ID, "b-eligible")
+	}
+}
+
 func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	t.Parallel()
 

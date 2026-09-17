@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 func TestNewStableIDGenerator(t *testing.T) {
@@ -222,6 +224,25 @@ func TestApplyAuthExcludedModelsMeta_OAuthMergeWritesCombinedModels(t *testing.T
 	expectedHash := diff.ComputeExcludedModelsHash([]string{"global-a", "per", "shared"})
 	if gotHash := auth.Attributes["excluded_models_hash"]; gotHash != expectedHash {
 		t.Fatalf("expected excluded_models_hash=%q, got %q", expectedHash, gotHash)
+	}
+}
+
+func TestApplyAuthExcludedModelsMeta_DisableSentinelBlocksSelection(t *testing.T) {
+	disabled := &coreauth.Auth{ID: "config-key-a", Provider: "gemini"}
+	ApplyAuthExcludedModelsMeta(disabled, &config.Config{}, []string{"*"}, "apikey")
+
+	eligible := &coreauth.Auth{ID: "config-key-b", Provider: "gemini"}
+
+	selector := &coreauth.FillFirstSelector{}
+	got, err := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", cliproxyexecutor.Options{}, []*coreauth.Auth{disabled, eligible})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "config-key-b" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "config-key-b")
 	}
 }
 
