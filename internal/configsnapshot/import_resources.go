@@ -720,6 +720,12 @@ func thinkingToMap(in any) map[string]any {
 // convertOpenAIEntries maps config.OpenAICompatibilityAPIKey into normalized
 // API-key entries. IDs stay zero: the apply path matches existing children
 // by identity and assigns persisted IDs inside the import transaction.
+//
+// Weights are normalized here at the planner boundary so downstream code
+// (signature hashing, apply path, renderer) sees a non-nil Weight that is
+// always at least 1. The round-2 weighted selector (docs/plans/2026-09-17-
+// omniroute-round-2-design.md) samples by Weight directly and would divide
+// by zero on an unmodified nil/0/negative input.
 func convertOpenAIEntries(in []config.OpenAICompatibilityAPIKey) []store.UpstreamProviderAPIKey {
 	if len(in) == 0 {
 		return nil
@@ -731,7 +737,7 @@ func convertOpenAIEntries(in []config.OpenAICompatibilityAPIKey) []store.Upstrea
 			Name:        e.Name,
 			ProxyURL:    e.ProxyURL,
 			ProxyPoolID: e.ProxyPoolID,
-			Weight:      e.Weight,
+			Weight:      normalizeEntryWeight(e.Weight),
 			Priority:    e.Priority,
 			Disabled:    e.Disabled,
 			SortOrder:   i,
@@ -741,6 +747,8 @@ func convertOpenAIEntries(in []config.OpenAICompatibilityAPIKey) []store.Upstrea
 }
 
 // convertOpenCodeEntries maps config.OpenCodeGoKey into normalized entries.
+// Same Weight normalization contract as convertOpenAIEntries; see that
+// function for the rationale.
 func convertOpenCodeEntries(in []config.OpenCodeGoKey) []store.UpstreamProviderAPIKey {
 	if len(in) == 0 {
 		return nil
@@ -752,11 +760,23 @@ func convertOpenCodeEntries(in []config.OpenCodeGoKey) []store.UpstreamProviderA
 			Name:        e.Name,
 			ProxyURL:    e.ProxyURL,
 			ProxyPoolID: e.ProxyPoolID,
-			Weight:      e.Weight,
+			Weight:      normalizeEntryWeight(e.Weight),
 			Priority:    e.Priority,
 			Disabled:    e.Disabled,
 			SortOrder:   i,
 		})
 	}
 	return out
+}
+
+// normalizeEntryWeight returns a non-nil pointer to a value of at least 1.
+// Nil, zero, and negative inputs are clamped to 1 so the round-2 weighted
+// selector (docs/plans/2026-09-17-omniroute-round-2-design.md) and the
+// canonical identity hash always see a positive weight.
+func normalizeEntryWeight(w *int) *int {
+	if w == nil || *w < 1 {
+		one := 1
+		return &one
+	}
+	return w
 }

@@ -263,6 +263,104 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
+// TestPlanEntriesNormalizeWeight pins the planner's contract: every entry
+// produced by BuildResourcePlan carries a non-nil Weight that is at least
+// 1, regardless of whether the source config left it nil, zero, or
+// negative. This is the planner-boundary normalization the round-2
+// weighted selector (docs/plans/2026-09-17-omniroute-round-2-design.md)
+// relies on so downstream code can dereference Weight unconditionally.
+func TestPlanEntriesNormalizeWeight(t *testing.T) {
+	zero := 0
+	neg := -2
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "oai-pool",
+			BaseURL: "https://oai.example",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "sk-a", Name: "a", Weight: &zero},
+				{APIKey: "sk-b", Name: "b", Weight: &neg},
+				{APIKey: "sk-c", Name: "c", Weight: nil},
+			},
+		}},
+		OpenCodeGo: []config.OpenCodeGo{{
+			Name:    "ocg-pool",
+			BaseURL: "https://ocg.example",
+			APIKeyEntries: []config.OpenCodeGoKey{
+				{APIKey: "sk-x", Name: "x", Weight: &zero},
+				{APIKey: "sk-y", Name: "y", Weight: &neg},
+				{APIKey: "sk-z", Name: "z", Weight: nil},
+			},
+		}},
+	}
+	plan, err := BuildResourcePlan(cfg)
+	if err != nil {
+		t.Fatalf("BuildResourcePlan: %v", err)
+	}
+	for _, p := range plan.Providers {
+		for _, e := range p.APIKeyEntries {
+			if e.Weight == nil {
+				t.Errorf("%s entry %q: Weight = nil; want non-nil >= 1", p.ProviderType, e.Name)
+				continue
+			}
+			if *e.Weight < 1 {
+				t.Errorf("%s entry %q: Weight = %d; want >= 1", p.ProviderType, e.Name, *e.Weight)
+			}
+		}
+	}
+}
+
+// TestPlanEntriesPreserveValidWeight pins that explicit positive weights
+// flow through the planner untouched.
+func TestPlanEntriesPreserveValidWeight(t *testing.T) {
+	three := 3
+	seven := 7
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "oai-pool",
+			BaseURL: "https://oai.example",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "sk-a", Name: "a", Weight: &three},
+				{APIKey: "sk-b", Name: "b", Weight: &seven},
+			},
+		}},
+		OpenCodeGo: []config.OpenCodeGo{{
+			Name:    "ocg-pool",
+			BaseURL: "https://ocg.example",
+			APIKeyEntries: []config.OpenCodeGoKey{
+				{APIKey: "sk-x", Name: "x", Weight: &seven},
+				{APIKey: "sk-y", Name: "y", Weight: &three},
+			},
+		}},
+	}
+	plan, err := BuildResourcePlan(cfg)
+	if err != nil {
+		t.Fatalf("BuildResourcePlan: %v", err)
+	}
+	bySection := map[string]map[string]int{}
+	for _, p := range plan.Providers {
+		bySection[p.ProviderType] = map[string]int{}
+		for _, e := range p.APIKeyEntries {
+			if e.Weight == nil {
+				t.Errorf("%s entry %q: Weight = nil; want non-nil", p.ProviderType, e.Name)
+				continue
+			}
+			bySection[p.ProviderType][e.Name] = *e.Weight
+		}
+	}
+	if got := bySection["openai-compatibility"]["a"]; got != 3 {
+		t.Errorf("openai a weight = %d; want 3", got)
+	}
+	if got := bySection["openai-compatibility"]["b"]; got != 7 {
+		t.Errorf("openai b weight = %d; want 7", got)
+	}
+	if got := bySection["opencode-go"]["x"]; got != 7 {
+		t.Errorf("opencode x weight = %d; want 7", got)
+	}
+	if got := bySection["opencode-go"]["y"]; got != 3 {
+		t.Errorf("opencode y weight = %d; want 3", got)
+	}
+}
+
 // TestBuildResourcePlanDoesNotMutateConfig pins input immutability: a deep
 // snapshot of the config before the call must equal the config after.
 func TestBuildResourcePlanDoesNotMutateConfig(t *testing.T) {
