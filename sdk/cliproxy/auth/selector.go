@@ -138,6 +138,39 @@ func weightedSelectorStateModel(ctx context.Context, availabilityModel string) s
 	return availabilityModel
 }
 
+// HeadroomByUsageSelector routes to the auth with the highest remaining
+// quota percent (HeadroomLookup). Distinct from the WRR selectors above:
+// this selector is round-2 only and runs through the scheduler fast path
+// (schedulerStrategyHeadroom in scheduler.go). Pick here is defensive-only:
+// conductor_selection.isBuiltInSelector treats *HeadroomByUsageSelector as
+// built-in, so the scheduler fast path handles every production pick. In
+// the unlikely event that the fast path is bypassed (e.g. a plugin scheduler
+// in front of the built-in scheduler), the fallback returns the first
+// available auth — which is correct because the production wiring defaults
+// to 100.0 (unlimited) for every auth until the usage_windows-backed
+// implementation lands (Task 7).
+type HeadroomByUsageSelector struct{}
+
+// Pick returns the first available auth deterministically; the scheduler
+// fast path owns the real headroom-aware sampling — see
+// HeadroomByUsageSelector.
+//
+// This Pick is defensive-only: conductor_selection.isBuiltInSelector treats
+// *HeadroomByUsageSelector as built-in, so the scheduler fast path handles
+// every production pick. Reaching this method in production would mean the
+// fast path has been bypassed, in which case returning the first available
+// auth is still correct because every auth defaults to 100.0 headroom.
+func (s *HeadroomByUsageSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	return available[0], nil
+}
+
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).

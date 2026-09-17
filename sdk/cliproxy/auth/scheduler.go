@@ -31,6 +31,14 @@ const (
 	// See scheduler_weighted.go for the helper and docs/plans/2026-09-17-
 	// omniroute-round-2-design.md for the design.
 	schedulerStrategyWeighted schedulerStrategy = 6
+	// schedulerStrategyHeadroom samples the ready auth whose remaining-quota
+	// percent is highest (HeadroomLookup interface). Distinct from the WRR
+	// strategies above: this selector falls back to least-used ordering when
+	// every candidate is at or below 0% headroom and sets
+	// lastHeadroomExhausted so the X-NixLLM-Decision header (Task 6) can
+	// carry a marker. See scheduler_headroom.go for the helper and
+	// docs/plans/2026-09-17-omniroute-round-2-design.md for the design.
+	schedulerStrategyHeadroom schedulerStrategy = 7
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -56,6 +64,19 @@ type authScheduler struct {
 	// and rebuild (MarkResult re-upserts per result), which would zero a
 	// meta-resident counter mid-flight.
 	inFlight map[string]int
+	// headroomLookup resolves the remaining-quota percent for an auth. The
+	// round-2 headroom selector (schedulerStrategyHeadroom) routes through
+	// this lookup. Tests inject a scripted StaticHeadroomLookup; production
+	// wires a stub that returns 100.0 until the usage_windows-backed reader
+	// lands in the events/quota workstream (Task 7).
+	headroomLookup HeadroomLookup
+	// lastHeadroomExhausted is set when the most recent headroom pick had to
+	// fall back to least-used ordering because every candidate was at or
+	// below 0% headroom. The X-NixLLM-Decision header (Task 6) reads this
+	// flag to emit the headroom=exhausted,fallback=least-used marker.
+	// Cleared at the start of every pick cycle (see pickSingleWithStrategy
+	// and pickMixedWithStrategy).
+	lastHeadroomExhausted bool
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -170,7 +191,17 @@ func newAuthScheduler(selector Selector) *authScheduler {
 		mixedCursors:        make(map[string]int),
 		mixedWeightedStates: make(map[string]*smoothWeightedState),
 		inFlight:            make(map[string]int),
+		headroomLookup:      defaultHeadroomLookup(),
 	}
+}
+
+// defaultHeadroomLookup returns the production headroom resolver. Today this
+// is a StaticHeadroomLookup{} which answers 100.0 (unlimited) for every
+// auth — effectively a no-op for the round-2 headroom selector until the
+// events/quota workstream (Task 7) replaces it with a usage_windows-backed
+// reader. Tests inject scripted lookups directly via scheduler.headroomLookup.
+func defaultHeadroomLookup() HeadroomLookup {
+	return StaticHeadroomLookup{}
 }
 
 // adjustInFlight applies a delta to an auth's in-flight counter. No-op for
@@ -243,6 +274,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 		return schedulerStrategyWeightedRoundRobin
 	case *WeightedByEntrySelector:
 		return schedulerStrategyWeighted
+	case *HeadroomByUsageSelector:
+		return schedulerStrategyHeadroom
 	case *P2CSelector:
 		return schedulerStrategyP2C
 	case *LeastUsedSelector:
@@ -375,6 +408,10 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	if strategy == schedulerStrategyCurrent {
 		strategy = s.strategy
 	}
+	// Clear the headroom-exhausted marker at the start of every pick cycle
+	// so the X-NixLLM-Decision header (Task 6) only carries the marker when
+	// the current pick actually fell back to least-used ordering.
+	s.lastHeadroomExhausted = false
 	providerState := s.providers[providerKey]
 	if providerState == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -384,6 +421,40 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
+	if strategy == schedulerStrategyHeadroom {
+		// Round-2 headroom picks live at the authScheduler level so the
+		// lastHeadroomExhausted flag can be set here (the per-shard pick path
+		// is modelScheduler-owned and cannot write back to the authScheduler's
+		// flag without invasive return-value plumbing). The scan below mirrors
+		// the headroom branch in pickMixedWithStrategy: collect every
+		// predicate-passing entry in the highest priority bucket, hand them
+		// to pickHeadroom, and translate the exhausted boolean into the flag.
+		shard.promoteExpiredLocked(time.Now())
+		priorityReady, okPriority := shard.highestReadyPriorityLocked(preferWebsocket, predicate)
+		if !okPriority {
+			return nil, shard.unavailableErrorLocked(provider, model, predicate)
+		}
+		bucket := shard.readyByPriority[priorityReady]
+		if bucket == nil {
+			return nil, shard.unavailableErrorLocked(provider, model, predicate)
+		}
+		entries := make([]*scheduledAuth, 0, len(bucket.all.flat))
+		for _, entry := range bucket.all.flat {
+			if entry == nil || entry.auth == nil {
+				continue
+			}
+			if predicate != nil && !predicate(entry) {
+				continue
+			}
+			entries = append(entries, entry)
+		}
+		picked, exhausted := pickHeadroom(entries, s.headroomLookup, s.pickReadyLookup(s.inFlightSnapshot()))
+		s.lastHeadroomExhausted = exhausted
+		if picked != nil {
+			return picked.auth, nil
+		}
+		return nil, shard.unavailableErrorLocked(provider, model, predicate)
+	}
 	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup()); picked != nil {
 		return picked, nil
 	}
@@ -434,6 +505,10 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	if strategy == schedulerStrategyCurrent {
 		strategy = s.strategy
 	}
+	// Clear the headroom-exhausted marker at the start of every pick cycle
+	// so the X-NixLLM-Decision header (Task 6) only carries the marker when
+	// the current pick actually fell back to least-used ordering.
+	s.lastHeadroomExhausted = false
 	if pinnedAuthID != "" {
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
@@ -555,6 +630,49 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
 		picked := pickWeighted(entries)
+		if picked != nil && picked.meta != nil {
+			return picked.auth, picked.meta.providerKey, nil
+		}
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
+
+	if strategy == schedulerStrategyHeadroom {
+		// Round-2 headroom: scan every candidate shard at the best priority,
+		// then pick the auth whose HeadroomLookup value is highest. When every
+		// candidate is at or below 0% headroom the helper falls back to
+		// least-used ordering and sets s.lastHeadroomExhausted so the
+		// X-NixLLM-Decision header (Task 6) can carry the marker. The
+		// flag is cleared at the top of pickMixedWithStrategy.
+		entries := make([]*scheduledAuth, 0)
+		for _, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			bucket := shard.readyByPriority[bestPriority]
+			if bucket == nil {
+				continue
+			}
+			for _, entry := range bucket.all.flat {
+				if entry == nil || entry.auth == nil {
+					continue
+				}
+				if predicate != nil && !predicate(entry) {
+					continue
+				}
+				entries = append(entries, entry)
+			}
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i] == nil || entries[i].auth == nil {
+				return false
+			}
+			if entries[j] == nil || entries[j].auth == nil {
+				return true
+			}
+			return entries[i].auth.ID < entries[j].auth.ID
+		})
+		picked, exhausted := pickHeadroom(entries, s.headroomLookup, s.pickReadyLookup(s.inFlightSnapshot()))
+		s.lastHeadroomExhausted = exhausted
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
