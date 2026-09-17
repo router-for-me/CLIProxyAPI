@@ -63,7 +63,10 @@ func ApplyArtifacts(ctx context.Context, st store.UpstreamProviderStore, cfg *co
 	merged.OpenCodeGo = rendered.OpenCodeGo
 	merged.VertexCompatAPIKey = rendered.VertexCompatAPIKey
 
-	// Preserve comments when writing the merged config back to the spool.
+	// Phase 5: this SaveConfigPreserveComments write to the legacy spool
+	// becomes a no-op. Phase 3 keeps it so the on-disk config.yaml stays
+	// in sync as a debugging artifact; the bridge reads the runtime_config
+	// singleton on every boot and writes its own ephemeral config.yaml.
 	if configPath != "" {
 		if err := config.SaveConfigPreserveComments(configPath, merged); err != nil {
 			return nil, fmt.Errorf("upstreamsync: write config: %w", err)

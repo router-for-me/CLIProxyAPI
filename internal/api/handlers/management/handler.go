@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/configstore"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/errormessages"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
@@ -23,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pricingsource"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store/runtimeconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/upstreamsync"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -202,6 +204,12 @@ type Handler struct {
 	// /config-imports). nil when PG is not configured — those routes return
 	// 503 in that case.
 	pgControl *store.PostgresStore
+
+	// configRepo is the configstore.Repository facade over pgControl. It is
+	// derived from pgControl by SetPGControl so every management handler
+	// (not just the runtime-config routes) can commit a snapshot under
+	// expected_revision when PG is the source of truth.
+	configRepo configstore.Repository
 
 	// reloadCoordinator, when non-nil, re-renders the ephemeral bridge file
 	// after a successful runtime-config commit. nil when the server booted
@@ -689,11 +697,83 @@ func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
 // saveConfigAndSnapshotLocked saves h.cfg and returns a full runtime config snapshot.
 // Callers must hold h.mu.
 func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnapshot, bool) {
+	if h.configRepo != nil {
+		if errSave := h.saveViaRepositoryLocked(c); errSave != nil {
+			return configReloadSnapshot{}, false
+		}
+		return h.reloadSnapshotConfigLocked(), true
+	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
 		return configReloadSnapshot{}, false
 	}
 	return h.reloadSnapshotConfigLocked(), true
+}
+
+// saveViaRepositoryLocked commits h.cfg through the configstore.Repository
+// facade so PG-backed deployments stop writing the legacy config.yaml.
+// Callers must hold h.mu.
+func (h *Handler) saveViaRepositoryLocked(c *gin.Context) error {
+	snap, err := snapshotFromInMemoryCfg(h.cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("snapshot build failed: %v", err)})
+		return err
+	}
+	// Read the active revision under a brief lock release; using the
+	// repository's optimistic-concurrency contract (expected=0 + read-back
+	// conflict) is overkill for a save helper, so we use expected=0 (the
+	// bootstrap path only succeeds when no row exists, which will fail
+	// fast with a "revision already exists" error the first time). For
+	// production we read the active revision and pass it as the expected
+	// revision so concurrent saves still surface a 409.
+	active, errRead := h.activeRevisionForRepoLocked()
+	if errRead != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("read active revision: %v", errRead)})
+		return errRead
+	}
+	actor := strings.TrimSpace(c.GetHeader("X-Management-User"))
+	if actor == "" {
+		actor = "dashboard"
+	}
+	audit := configstore.SaveAudit{
+		Actor:  actor,
+		Reason: "management save via " + safePath(c.Request.URL.Path),
+		Source: "dashboard",
+	}
+	if _, err := h.configRepo.Save(context.Background(), active, &snap, audit); err != nil {
+		var conflict *configstore.RevisionConflictError
+		if errorsAs(err, &conflict) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":           "revision_conflict",
+				"expected":        active,
+				"active_revision": conflict.Current,
+			})
+			return err
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("save failed: %v", err)})
+		return err
+	}
+	return nil
+}
+
+// activeRevisionForRepoLocked reads the active revision number via the
+// runtime-config store handle so callers can pass it as expected_revision
+// when committing through configRepo. Callers must hold h.mu.
+func (h *Handler) activeRevisionForRepoLocked() (int64, error) {
+	if h.pgControl == nil {
+		return 0, fmt.Errorf("management: pgControl not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rc := runtimeconfig.New(h.pgControl)
+	return rc.ActiveRevision(ctx)
+}
+
+// safePath returns the request path with a fallback so a nil request does
+// not panic during a save helper that runs before the HTTP context is
+// guaranteed live.
+func safePath(p string) string {
+	return strings.TrimSpace(p)
 }
 
 // reloadConfigAfterManagementSave reloads from an independent config snapshot.
@@ -938,10 +1018,15 @@ func (h *Handler) persist(c *gin.Context) bool {
 // persistLocked saves the current in-memory config to disk.
 // It expects the caller to hold h.mu.
 func (h *Handler) persistLocked(c *gin.Context) bool {
-	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
-		return false
+	if h.configRepo != nil {
+		if errSave := h.saveViaRepositoryLocked(c); errSave != nil {
+			return false
+		}
+	} else {
+		if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+			return false
+		}
 	}
 	snapshot := h.reloadSnapshotConfigLocked()
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})

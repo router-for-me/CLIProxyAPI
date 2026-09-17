@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util/atomicfile"
 )
@@ -75,9 +76,21 @@ func renderTo(snap SnapshotRenderer, path string, mode os.FileMode) error {
 // enough to refresh the bridge file. Multi-instance fan-out via
 // LISTEN/NOTIFY is explicitly deferred.
 type Coordinator struct {
-	mu     sync.Mutex
+	mu sync.Mutex
+	// bridge is the live ephemeral bridge. ReloadLatest swaps the active
+	// file in place when set; nil disables re-renders.
 	bridge *Bridge
-	src    func(context.Context) (SnapshotRenderer, error)
+	// src produces a renderer per call. Invoked lazily so a re-import
+	// stays transparent.
+	src func(context.Context) (SnapshotRenderer, error)
+
+	// Reload outcome state, recorded by ReloadLatest. The management API
+	// surfaces this in the response so the dashboard can distinguish
+	// "applied", "pending" (reload errored but revision committed), and
+	// "skipped" (no bridge bound).
+	lastReloadRevision int64
+	lastReloadErr      error
+	lastReloadAt       time.Time
 }
 
 // NewCoordinator returns a coordinator that re-renders using src. The
@@ -97,23 +110,61 @@ func (c *Coordinator) Bind(b *Bridge) {
 
 // ReloadLatest re-renders the latest snapshot and atomically replaces the
 // active bridge file. When no bridge is bound, ReloadLatest is a no-op.
+//
+// On success or failure the outcome (revision + err + time) is recorded
+// for the management response shape; callers should read it via
+// LastReloadStatus.
 func (c *Coordinator) ReloadLatest(ctx context.Context) error {
 	c.mu.Lock()
 	b := c.bridge
 	src := c.src
 	c.mu.Unlock()
 	if b == nil {
+		// Mark as "skipped": no bridge, no error, no time recorded.
+		c.recordReload(0, nil)
 		return nil
 	}
 	if src == nil {
-		return errors.New("runtimebridge: ReloadLatest: no snapshot source")
+		err := errors.New("runtimebridge: ReloadLatest: no snapshot source")
+		c.recordReload(0, err)
+		return err
 	}
 	renderer, err := src(ctx)
 	if err != nil {
-		return fmt.Errorf("runtimebridge: load snapshot: %w", err)
+		wrapped := fmt.Errorf("runtimebridge: load snapshot: %w", err)
+		c.recordReload(0, wrapped)
+		return wrapped
 	}
 	if renderer == nil {
-		return errors.New("runtimebridge: nil snapshot")
+		err := errors.New("runtimebridge: nil snapshot")
+		c.recordReload(0, err)
+		return err
 	}
-	return renderTo(renderer, b.configPath, 0o600)
+	renderErr := renderTo(renderer, b.configPath, 0o600)
+	c.recordReload(0, renderErr)
+	return renderErr
+}
+
+// recordReload stores the outcome of the most recent ReloadLatest call.
+// revision is reserved for a future caller that knows which revision the
+// reload was meant to apply; today the bridge re-renders from the latest
+// snapshot, so callers should treat the timestamp as the source of truth
+// for "did the reload fire?".
+func (c *Coordinator) recordReload(revision int64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastReloadRevision = revision
+	c.lastReloadErr = err
+	c.lastReloadAt = time.Now()
+}
+
+// LastReloadStatus returns the outcome of the most recent ReloadLatest
+// call. revision is 0 when no reload has fired yet; err is non-nil when
+// the most recent reload failed (the committed revision is still in
+// effect — the dashboard surfaces this as "pending"). at is the zero
+// time when no reload has fired.
+func (c *Coordinator) LastReloadStatus() (revision int64, err error, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastReloadRevision, c.lastReloadErr, c.lastReloadAt
 }

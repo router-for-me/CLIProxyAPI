@@ -162,6 +162,17 @@ func WriteConfig(path string, data []byte) error {
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {
+	// Phase 3 deprecation gate. When the runtime_config control plane is
+	// active, the legacy raw-YAML PUT is replaced by the structured
+	// POST /v0/management/runtime-config route.
+	if h.pgControl != nil {
+		c.JSON(http.StatusGone, gin.H{
+			"error":     "deprecated",
+			"message":   "use POST /v0/management/runtime-config with the scalar projection",
+			"migration": "POST /v0/management/runtime-config",
+		})
+		return
+	}
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": "cannot read request body"})
@@ -217,7 +228,19 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 
 // GetConfigYAML returns the raw config.yaml file bytes without re-encoding.
 // It preserves comments and original formatting/styles.
+//
+// Phase 3: when the PG-first control plane is active, this route returns
+// 410 Gone with a migration pointer. Use GET /v0/management/runtime-config
+// for the structured view.
 func (h *Handler) GetConfigYAML(c *gin.Context) {
+	if h.pgControl != nil {
+		c.JSON(http.StatusGone, gin.H{
+			"error":     "deprecated",
+			"message":   "use GET /v0/management/runtime-config for the structured view",
+			"migration": "GET /v0/management/runtime-config",
+		})
+		return
+	}
 	data, err := os.ReadFile(h.configFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
