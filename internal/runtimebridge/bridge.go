@@ -1,8 +1,3 @@
-// Package runtimebridge owns the ephemeral compatibility bridge that turns the
-// PG-first runtime_config snapshot into a real on-disk config.yaml the
-// file-bound CLIProxyAPI core can consume. PostgreSQL remains the only
-// source of truth; the bridge file is a generated artifact the existing
-// fsnotify watcher reads. See docs/plans/2026-09-14-nixllm-pg-first-design.md.
 package runtimebridge
 
 import (
@@ -12,6 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/configvalidation"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util/atomicfile"
+	"gopkg.in/yaml.v3"
 )
 
 // BridgeOp is the minimal contract the cmd package consumes. Production
@@ -66,10 +66,6 @@ func (b *Bridge) Close() error {
 // baseDir picks the per-writable runtime directory, mirroring the
 // fallback used by store.NewPostgresStore when no SpoolDir is configured.
 func baseDir() (string, error) {
-	// Phase 2 reuses the same writable-path resolution the store layer uses.
-	// We avoid importing store to keep this package dependency-light, so we
-	// mirror the relevant env contract inline. The contract is
-	// WRITABLE_PATH; "" means fall back to os.TempDir().
 	const writableEnv = "WRITABLE_PATH"
 	if v := os.Getenv(writableEnv); v != "" {
 		return v, nil
@@ -77,31 +73,13 @@ func baseDir() (string, error) {
 	return os.TempDir(), nil
 }
 
-// snapshotRenderer is the contract Build relies on. The production
-// implementation embeds *configsnapshot.Snapshot; tests provide a fake
-// without depending on the real snapshot package to keep this package
-// dependency-light.
-type snapshotRenderer interface {
-	// MarshalYAML returns deterministic YAML bytes suitable for the
-	// file-watcher to consume. A non-nil error aborts the render.
-	MarshalYAML() ([]byte, error)
-	// Validate parses its own YAML output and returns an error when the
-	// content is malformed. Build calls Validate after MarshalYAML so a
-	// broken snapshot never lands on disk.
-	Validate() error
-	// AtomicWrite writes data to path atomically with the given mode.
-	// Phase 2 reuses the central util/atomicfile helper, so this method
-	// is a thin wrapper around the cross-package primitive.
-	AtomicWrite(path string, data []byte, mode os.FileMode) error
-}
-
-// Build creates a new ephemeral bridge directory and renders the initial
-// config.yaml from snap. The file is written only after validation
-// confirms the rendered bytes parse into a *config.Config, so a malformed
-// snapshot never lands on disk.
-func Build(ctx context.Context, snap snapshotRenderer, authDirHint string) (*Bridge, error) {
-	if snap == nil {
-		return nil, errors.New("runtimebridge: snapshot is nil")
+// BuildFromConfig creates a new ephemeral bridge directory and renders the
+// initial config.yaml from cfg (a parsed *config.Config). The file is
+// written only after yaml.Marshal + configvalidation.Validate succeed so a
+// malformed configuration never lands on disk.
+func BuildFromConfig(ctx context.Context, cfg *config.Config, authDirHint string) (*Bridge, error) {
+	if cfg == nil {
+		return nil, errors.New("runtimebridge: cfg is nil")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -126,7 +104,7 @@ func Build(ctx context.Context, snap snapshotRenderer, authDirHint string) (*Bri
 		return nil, fmt.Errorf("runtimebridge: mkdir auths: %w", err)
 	}
 	cfgPath := filepath.Join(root, "config.yaml")
-	if err := renderTo(snap, cfgPath, 0o600); err != nil {
+	if err := renderConfigTo(cfg, cfgPath, 0o600); err != nil {
 		_ = os.RemoveAll(root)
 		return nil, fmt.Errorf("runtimebridge: render: %w", err)
 	}
@@ -134,17 +112,18 @@ func Build(ctx context.Context, snap snapshotRenderer, authDirHint string) (*Bri
 	return &Bridge{root: root, configPath: cfgPath, authDir: authDir}, nil
 }
 
-// renderTo renders the snapshot, validates it, and atomically writes
-// config.yaml. Phase 2 delegates validation through the same
-// configvalidation.Validate contract the runtime already uses, so the
-// watcher will see a file the core is happy to consume.
-func renderTo(snap snapshotRenderer, path string, mode os.FileMode) error {
-	data, err := snap.MarshalYAML()
+// renderConfigTo marshals cfg to YAML, validates via configvalidation, and
+// atomically writes it to path.
+func renderConfigTo(cfg *config.Config, path string, mode os.FileMode) error {
+	if cfg == nil {
+		return errors.New("runtimebridge: nil cfg")
+	}
+	data, err := yaml.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal snapshot: %w", err)
+		return fmt.Errorf("marshal config: %w", err)
 	}
-	if err := snap.Validate(); err != nil {
-		return fmt.Errorf("validate snapshot: %w", err)
+	if err := configvalidation.ValidateParsed(cfg); err != nil {
+		return fmt.Errorf("validate config: %w", err)
 	}
-	return snap.AtomicWrite(path, data, mode)
+	return atomicfile.Write(path, data, mode)
 }

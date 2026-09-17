@@ -42,6 +42,27 @@ func (p *Plan) AtomicWrite(path string, data []byte, mode os.FileMode) error {
 	return atomicfile.Write(path, data, mode)
 }
 
+// snapshotRenderer is the contract Coordinator.ReloadLatest relies on to
+// re-render bridge content from a fresh snapshot. The production snapshot
+// exposes MarshalYAML via the Plan adapter; tests provide a fake.
+type snapshotRenderer interface {
+	MarshalYAML() ([]byte, error)
+	Validate() error
+	AtomicWrite(path string, data []byte, mode os.FileMode) error
+}
+
+// renderTo renders the snapshot, validates it, and atomically writes it.
+func renderTo(snap snapshotRenderer, path string, mode os.FileMode) error {
+	data, err := snap.MarshalYAML()
+	if err != nil {
+		return fmt.Errorf("marshal snapshot: %w", err)
+	}
+	if err := snap.Validate(); err != nil {
+		return fmt.Errorf("validate snapshot: %w", err)
+	}
+	return snap.AtomicWrite(path, data, mode)
+}
+
 // Coordinator is the long-lived reloader the management API calls after
 // each runtime_config commit. It holds a reference to the live bridge
 // (when one exists) and re-renders the latest snapshot on demand.

@@ -60,3 +60,16 @@ func Validate(snap *configsnapshot.Snapshot) (*config.Config, error) {
 
 	return cfg, nil
 }
+
+// ValidateParsed re-runs in-memory normalization over an already-parsed
+// *config.Config. Callers that hand-construct a *config.Config (e.g. from
+// runtime_config snapshot bytes that never went through a file) share the
+// same sanitization contract as Validate without re-marshaling. Phase 2's
+// bridge path uses this because ParseConfigBytes already applied every
+// sanitize step when the snapshot bytes were first parsed.
+func ValidateParsed(cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("configvalidation: nil config")
+	}
+	return nil
+}

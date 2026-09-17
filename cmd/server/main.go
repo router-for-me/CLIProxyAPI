@@ -36,8 +36,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtimebridge"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	runtimeconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/store/runtimeconfig"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/upstreamsync"
@@ -503,11 +505,35 @@ func main() {
 			return
 		}
 		cancel()
-		configFilePath = pgStoreInst.ConfigPath()
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
-		if err == nil {
+
+		// Phase 2 PG-first boot path. When runtime_config has an active
+		// revision, render an ephemeral bridge so the file-bound core can
+		// consume it. Otherwise fall through to the legacy spool flow or
+		// fail closed when no legacy file is present.
+		runtimeCfg := runtimeconfig.New(pgStoreInst)
+		snapshotCfg, snapErr := runtimebridge.LoadConfigFromSnapshot(context.Background(), runtimeCfg)
+		if snapErr == nil {
+			// The bridge requires a snapshotRenderer; we render straight
+			// from the loaded *config.Config so the file is generated from
+			// the same bytes the in-memory cfg was parsed from.
+			bridge, buildErr := runtimebridge.BuildFromConfig(context.Background(), snapshotCfg, pgStoreInst.AuthDir())
+			if buildErr != nil {
+				log.Errorf("postgres-backed bridge build failed: %v", buildErr)
+				return
+			}
+			configFilePath = bridge.ConfigPath()
+			cfg = snapshotCfg
 			cfg.AuthDir = pgStoreInst.AuthDir()
-			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
+			log.Infof("postgres-backed runtime_config bridge online, workspace path: %s", pgStoreInst.WorkDir())
+		} else {
+			configFilePath = pgStoreInst.ConfigPath()
+			cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+			if err == nil {
+				cfg.AuthDir = pgStoreInst.AuthDir()
+				log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
+			} else {
+				log.Warnf("postgres-backed snapshot not ready and legacy config.yaml missing; use 'nixllm -import-config config.yaml' to bootstrap: %v", snapErr)
+			}
 		}
 	} else if useObjectStore {
 		if objectStoreLocalPath == "" {
