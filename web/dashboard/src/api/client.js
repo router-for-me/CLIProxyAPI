@@ -1274,6 +1274,52 @@ export async function getCpaLatestVersion() {
   return cpaFetch('/latest-version');
 }
 
+// --- Runtime config (PG-first control plane) -----------------------------
+
+// getRuntimeConfig fetches the active runtime_config singleton as a JSON
+// snapshot. Returns 503 when PGSTORE_DSN is not configured.
+export function getRuntimeConfig() {
+  return cpaFetch('/runtime-config');
+}
+
+// updateRuntimeConfig applies a settings/extra update under optimistic
+// concurrency. The expectedRevision must match the current active revision
+// or the server returns 409. `expected_revision: 0` lets the dashboard
+// skip the check for low-stakes edits.
+export function updateRuntimeConfig({ expectedRevision, settings, extra }) {
+  return cpaFetch('/runtime-config', {
+    method: 'POST',
+    body: JSON.stringify({
+      expected_revision: expectedRevision,
+      settings: settings || {},
+      extra: extra || {},
+    }),
+  });
+}
+
+// rollbackRuntimeConfig rebuilds the active runtime_config from a prior
+// config_revisions row. `reason` is recorded in the audit trail.
+export function rollbackRuntimeConfig({ targetRevision, reason }) {
+  return cpaFetch('/runtime-config/rollback', {
+    method: 'POST',
+    body: JSON.stringify({
+      target_revision: targetRevision,
+      reason: reason || '',
+    }),
+  });
+}
+
+// listConfigRevisions returns the most recent config_revisions rows.
+// `limit` defaults to 50 and is capped server-side at 500.
+export function listConfigRevisions({ limit = 50 } = {}) {
+  return cpaFetch(`/config-revisions?limit=${encodeURIComponent(limit)}`);
+}
+
+// listConfigImports returns the most recent config_imports rows.
+export function listConfigImports({ limit = 50 } = {}) {
+  return cpaFetch(`/config-imports?limit=${encodeURIComponent(limit)}`);
+}
+
 // --- Branding (root GET / HTML page) ----------------------------------------
 //
 // Branding customizes the HTML page served at GET /. When all four fields are
