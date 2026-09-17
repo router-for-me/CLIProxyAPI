@@ -5,12 +5,49 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+type readinessTestExecutor struct {
+	id string
+}
+
+func (e readinessTestExecutor) Identifier() string { return e.id }
+
+func (readinessTestExecutor) Execute(context.Context, *auth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (readinessTestExecutor) ExecuteStream(context.Context, *auth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (readinessTestExecutor) Refresh(_ context.Context, a *auth.Auth) (*auth.Auth, error) {
+	return a, nil
+}
+
+func (readinessTestExecutor) CountTokens(context.Context, *auth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (readinessTestExecutor) HttpRequest(context.Context, *auth.Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func registerReadyAuth(t *testing.T, manager *auth.Manager, entry *auth.Auth) {
+	t.Helper()
+	if _, err := manager.Register(context.Background(), entry); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	manager.RegisterExecutor(readinessTestExecutor{id: entry.Provider})
+}
 
 func TestEvaluateReadiness_EmptyConfigIsReady(t *testing.T) {
 	ready, reason, usable, total := evaluateReadiness(&config.Config{}, auth.NewManager(nil, nil, nil))
@@ -59,13 +96,11 @@ func TestEvaluateReadiness_AllAuthsUnusableIsNotReady(t *testing.T) {
 
 func TestEvaluateReadiness_ActiveAuthIsReady(t *testing.T) {
 	manager := auth.NewManager(nil, nil, nil)
-	if _, err := manager.Register(context.Background(), &auth.Auth{
+	registerReadyAuth(t, manager, &auth.Auth{
 		ID:       "ok.json",
 		Provider: "codex",
 		Status:   auth.StatusActive,
-	}); err != nil {
-		t.Fatalf("register: %v", err)
-	}
+	})
 	ready, reason, usable, total := evaluateReadiness(&config.Config{}, manager)
 	if !ready || reason != "ok" || usable != 1 || total != 1 {
 		t.Fatalf("evaluateReadiness() = ready=%t reason=%q usable=%d total=%d", ready, reason, usable, total)
@@ -74,14 +109,12 @@ func TestEvaluateReadiness_ActiveAuthIsReady(t *testing.T) {
 
 func TestEvaluateReadiness_StatusErrorStillSelectableWhenAvailable(t *testing.T) {
 	manager := auth.NewManager(nil, nil, nil)
-	if _, err := manager.Register(context.Background(), &auth.Auth{
+	registerReadyAuth(t, manager, &auth.Auth{
 		ID:       "partial.json",
 		Provider: "codex",
 		Status:   auth.StatusError, // parent lifecycle error after model-scoped failure
 		// Unavailable left false because another model remains selectable.
-	}); err != nil {
-		t.Fatalf("register: %v", err)
-	}
+	})
 	ready, reason, usable, total := evaluateReadiness(&config.Config{}, manager)
 	if !ready || reason != "ok" || usable != 1 || total != 1 {
 		t.Fatalf("evaluateReadiness() = ready=%t reason=%q usable=%d total=%d", ready, reason, usable, total)
@@ -90,14 +123,12 @@ func TestEvaluateReadiness_StatusErrorStillSelectableWhenAvailable(t *testing.T)
 
 func TestEvaluateReadiness_ZeroWeightExcludedUnderWeightedStrategy(t *testing.T) {
 	manager := auth.NewManager(nil, nil, nil)
-	if _, err := manager.Register(context.Background(), &auth.Auth{
+	registerReadyAuth(t, manager, &auth.Auth{
 		ID:         "zero.json",
 		Provider:   "codex",
 		Status:     auth.StatusActive,
 		Attributes: map[string]string{auth.AttributeWeight: "0"},
-	}); err != nil {
-		t.Fatalf("register: %v", err)
-	}
+	})
 	for _, strategy := range []string{"weighted-round-robin", "weightedroundrobin", "wrr", "WRR", "WeightedRoundRobin"} {
 		cfg := &config.Config{Routing: config.RoutingConfig{Strategy: strategy}}
 		ready, reason, usable, total := evaluateReadiness(cfg, manager)
@@ -109,6 +140,46 @@ func TestEvaluateReadiness_ZeroWeightExcludedUnderWeightedStrategy(t *testing.T)
 	ready, reason, usable, total := evaluateReadiness(&config.Config{Routing: config.RoutingConfig{Strategy: "round-robin"}}, manager)
 	if !ready || reason != "ok" || usable != 1 || total != 1 {
 		t.Fatalf("round-robin evaluateReadiness() = ready=%t reason=%q usable=%d total=%d", ready, reason, usable, total)
+	}
+}
+
+func TestEvaluateReadiness_MalformedAuthFilesAreNotReady(t *testing.T) {
+	authDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(authDir, "broken.json"), []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	cfg := &config.Config{AuthDir: authDir}
+	ready, reason, usable, total := evaluateReadiness(cfg, auth.NewManager(nil, nil, nil))
+	if ready || reason != "no_usable_auth" || usable != 0 || total != 0 {
+		t.Fatalf("evaluateReadiness() = ready=%t reason=%q usable=%d total=%d, want not ready when OAuth files failed to load", ready, reason, usable, total)
+	}
+}
+
+func TestEvaluateReadiness_EmptyAuthDirWithoutFilesIsReady(t *testing.T) {
+	cfg := &config.Config{AuthDir: t.TempDir()}
+	ready, reason, usable, total := evaluateReadiness(cfg, auth.NewManager(nil, nil, nil))
+	if !ready || reason != "ok" || usable != 0 || total != 0 {
+		t.Fatalf("evaluateReadiness() = ready=%t reason=%q usable=%d total=%d, want ready for empty auth dir", ready, reason, usable, total)
+	}
+}
+
+func TestEvaluateReadiness_MissingExecutorIsNotUsable(t *testing.T) {
+	manager := auth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &auth.Auth{
+		ID:       "plugin.json",
+		Provider: "unloaded-plugin",
+		Status:   auth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	ready, reason, usable, total := evaluateReadiness(&config.Config{}, manager)
+	if ready || reason != "no_usable_auth" || usable != 0 || total != 1 {
+		t.Fatalf("evaluateReadiness() = ready=%t reason=%q usable=%d total=%d, want not ready without executor", ready, reason, usable, total)
+	}
+	manager.RegisterExecutor(readinessTestExecutor{id: "unloaded-plugin"})
+	ready, reason, usable, total = evaluateReadiness(&config.Config{}, manager)
+	if !ready || reason != "ok" || usable != 1 || total != 1 {
+		t.Fatalf("evaluateReadiness() after executor = ready=%t reason=%q usable=%d total=%d", ready, reason, usable, total)
 	}
 }
 

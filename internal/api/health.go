@@ -2,7 +2,10 @@ package api
 
 import (
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -19,7 +22,7 @@ func evaluateReadiness(cfg *config.Config, manager *auth.Manager) (ready bool, r
 	if manager != nil {
 		for _, entry := range manager.List() {
 			total++
-			if authIsUsable(entry, requireWeight) {
+			if authIsUsable(manager, entry, requireWeight) {
 				usable++
 			}
 		}
@@ -30,7 +33,7 @@ func evaluateReadiness(cfg *config.Config, manager *auth.Manager) (ready bool, r
 	if cfg != nil && cfg.Home.Enabled {
 		return true, "ok", usable, total
 	}
-	if total == 0 && !hasConfiguredProviderCredentials(cfg) {
+	if total == 0 && !hasConfiguredProviderCredentials(cfg) && !hasAuthDirectoryCredentialSources(cfg) {
 		return true, "ok", usable, total
 	}
 	return false, "no_usable_auth", usable, total
@@ -51,9 +54,12 @@ func readinessRequiresPositiveWeight(cfg *config.Config) bool {
 }
 
 // authIsUsable mirrors scheduler admission: availability/selection predicates,
-// plus positive weight when routing.strategy is weighted-round-robin.
-func authIsUsable(entry *auth.Auth, requirePositiveWeight bool) bool {
+// a registered executor, plus positive weight when routing.strategy is WRR.
+func authIsUsable(manager *auth.Manager, entry *auth.Auth, requirePositiveWeight bool) bool {
 	if !auth.IsSelectableCredential(entry) {
+		return false
+	}
+	if !auth.HasRegisteredExecutor(manager, entry) {
 		return false
 	}
 	if requirePositiveWeight && !auth.HasPositiveCredentialWeight(entry) {
@@ -72,6 +78,43 @@ func hasConfiguredProviderCredentials(cfg *config.Config) bool {
 		return true
 	}
 	return false
+}
+
+// hasAuthDirectoryCredentialSources reports whether the configured auth
+// directory contains non-empty JSON files. FileTokenStore.List skips files
+// that fail to load, so an empty manager must not be treated as ready when
+// those sources exist.
+func hasAuthDirectoryCredentialSources(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	dir := strings.TrimSpace(cfg.AuthDir)
+	if dir == "" {
+		return false
+	}
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d == nil || d.IsDir() {
+			return walkErr
+		}
+		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+			return nil
+		}
+		info, errStat := d.Info()
+		if errStat != nil {
+			if os.IsNotExist(errStat) {
+				return nil
+			}
+			found = true
+			return fs.SkipAll
+		}
+		if info.Size() <= 0 {
+			return nil
+		}
+		found = true
+		return fs.SkipAll
+	})
+	return found
 }
 
 func (s *Server) handleReadyz(c *gin.Context) {

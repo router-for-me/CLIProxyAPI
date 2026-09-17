@@ -20,3 +20,14 @@ func IsSelectableCredential(a *Auth) bool {
 func HasPositiveCredentialWeight(a *Auth) bool {
 	return authWeight(a) > 0
 }
+
+// HasRegisteredExecutor reports whether the manager has an executor for the
+// same provider key used during selection. Entries without one are skipped
+// (mixed) or fail with executor_not_found (legacy pick).
+func HasRegisteredExecutor(m *Manager, a *Auth) bool {
+	if m == nil || a == nil {
+		return false
+	}
+	_, ok := m.Executor(executorKeyFromAuth(a))
+	return ok
+}
