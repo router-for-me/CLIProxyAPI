@@ -444,6 +444,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
+	out = helps.PadClaudeMessagePayload(responseFormat, out)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -567,6 +568,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
+	out = helps.PadClaudeMessagePayload(responseFormat, out)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -684,6 +686,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+		claudeSSEPad := helps.NewClaudeSSEStreamPad(responseFormat)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -692,6 +695,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 				reporter.Publish(ctx, detail)
 			}
 			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param, claudeInputTokens)
+			lines = helps.ProcessClaudeSSEPadChunks(claudeSSEPad, lines)
 			for i := range lines {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
@@ -701,6 +705,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			}
 		}
 		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param, claudeInputTokens)
+		lines = helps.ProcessClaudeSSEPadChunks(claudeSSEPad, lines)
 		for i := range lines {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
@@ -833,6 +838,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+		claudeSSEPad := helps.NewClaudeSSEStreamPad(responseFormat)
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -841,6 +847,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 				reporter.Publish(ctx, detail)
 			}
 			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param, claudeInputTokens)
+			lines = helps.ProcessClaudeSSEPadChunks(claudeSSEPad, lines)
 			for i := range lines {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
@@ -850,6 +857,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			}
 		}
 		lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param, claudeInputTokens)
+		lines = helps.ProcessClaudeSSEPadChunks(claudeSSEPad, lines)
 		for i := range lines {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
