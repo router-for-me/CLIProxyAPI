@@ -8,10 +8,11 @@ This document is the authoritative description of that contract. The workflow
 that enforces it is `.github/workflows/sync-upstream.yml`; the inventory it
 checks is `.github/FORK_OWNED_FILES`.
 
-> **Why this file is not in `AGENTS.md`:** `agents-md-guard.yml` auto-closes any
-> pull request that modifies `AGENTS.md`, so the policy cannot ride a PR. A
-> repository admin must push the "Agent instructions" block at the bottom of
-> this file into `AGENTS.md` on `sync` directly.
+> **Why this policy lives in two places:** `agents-md-guard.yml` auto-closes any
+> pull request that modifies `AGENTS.md`, so the policy cannot ride a PR. The
+> `AGENTS.md` section is applied by a direct push to `sync`. The block in
+> "Agent instructions" below is kept in sync with it by hand — if you change one,
+> change the other via direct push.
 
 ## What the fork owns
 
@@ -91,8 +92,10 @@ workflows, and the push to `sync` must trigger `sync-release.yml`.
 
 ## Agent instructions
 
-Paste the block below into `AGENTS.md` on `sync` via a direct push (an admin
-action — a PR cannot carry it):
+This is the mirror of the "Fork Upstream Sync Policy (MANDATORY)" section in
+`AGENTS.md`, which was applied by a direct push to `sync`. A PR cannot carry it,
+and `agents-md-guard.yml` will close one that tries. If you amend the policy,
+update both copies the same way:
 
 ```markdown
 ## Fork Upstream Sync Policy (MANDATORY)
@@ -103,6 +106,8 @@ This repo (`arrrrny/CLIProxyAPIPlus`) is a **fork** of `router-for-me/CLIProxyAP
 - **After a clean merge, verify `.github/FORK_OWNED_FILES`.** A clean merge can overwrite fork code without conflicting. When you add or change a fork-owned file, append it with a fork-unique survival marker.
 - **Never push a merged tree that fails `go build ./...`.**
 - `.github/workflows/sync-and-release.yml` is deprecated and must stay commented out; `sync-upstream.yml` is the source of truth.
+
+**Note:** `AGENTS.md` cannot be changed by a pull request — `agents-md-guard.yml` auto-closes any PR that touches it. Edit it via a direct push to `sync`, as done here.
 ```
 
 ## Reference implementation

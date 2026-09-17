@@ -108,3 +108,14 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Use logrus structured logging; avoid leaking secrets/tokens in logs
 - Avoid panics in HTTP handlers; prefer logged errors and meaningful HTTP status codes
 - Timeouts are allowed only during credential acquisition; after an upstream connection is established, do not set timeouts for any subsequent network behavior. Intentional exceptions that must remain allowed are the Codex websocket liveness deadlines in `internal/runtime/executor/codex_websockets_executor.go`, the wsrelay session deadlines in `internal/wsrelay/session.go`, the management APICall timeout in `internal/api/handlers/management/api_tools.go`, and the `cmd/fetch_antigravity_models` utility timeouts
+
+## Fork Upstream Sync Policy (MANDATORY)
+
+This repo (`arrrrny/CLIProxyAPIPlus`) is a **fork** of `router-for-me/CLIProxyAPI`. The `sync` branch carries fork-owned providers upstream will never accept — kiro, cursor, codebuddy, github-copilot, gitlab, kilo, gemini-cli, the dedicated model providers, the AMP module registry, the fork's OAuth model alias defaults, and the selection-time model-exclusion guard. The upstream sync MUST preserve them. See `.github/UPSTREAM-SYNC-POLICY.md`.
+
+- **Never auto-resolve conflicts in favor of upstream.** `git checkout --theirs`, `git merge -X theirs`, and `git merge -s ours` are forbidden against upstream. On any conflict, abort, open a `sync`-labeled issue, and resolve by hand on a `sync/fork-sync-resolution` branch.
+- **After a clean merge, verify `.github/FORK_OWNED_FILES`.** A clean merge can overwrite fork code without conflicting. When you add or change a fork-owned file, append it with a fork-unique survival marker.
+- **Never push a merged tree that fails `go build ./...`.**
+- `.github/workflows/sync-and-release.yml` is deprecated and must stay commented out; `sync-upstream.yml` is the source of truth.
+
+**Note:** `AGENTS.md` cannot be changed by a pull request — `agents-md-guard.yml` auto-closes any PR that touches it. Edit it via a direct push to `sync`, as done here.
