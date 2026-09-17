@@ -14,6 +14,12 @@ const DecisionHeader = "X-NixLLM-Decision"
 // limits while leaving room for upstream pass-through headers.
 const decisionHeaderCapBytes = 1024
 
+// decisionVersionPrefix is the canonical wire prefix emitted at byte 0 of
+// every Decision.Header() output. Truncation logic must always preserve
+// this prefix so downstream parsers can rely on its presence — an
+// oversized field value must never leave the prefix half-stripped.
+const decisionVersionPrefix = "v=1"
+
 // Decision captures the routing decision for a single successful dispatch.
 // The header surfaces metadata about which auth handled a request, which
 // selector chose it, and any gating state (breaker, headroom, cooldown waits)
@@ -35,7 +41,7 @@ type Decision struct {
 	// "headroom=exhausted,fallback=least-used".
 	Strategy string
 	// Breaker is the auth's pool breaker state at dispatch time:
-	// "closed", "open", "half-open", or "n/a" when the auth did not opt
+	// "closed", "open", "half_open", or "n/a" when the auth did not opt
 	// into pool-level circuit breaking.
 	Breaker string
 	// CooldownWaitMs is the total millisecond sum of cooldown waits
@@ -103,14 +109,28 @@ func (d Decision) Header() string {
 	out := b.String()
 	if len(out) > decisionHeaderCapBytes {
 		// Truncate at the last complete field boundary so we never emit a
-		// partial key=value pair. LastIndex finds the trailing "; " before
-		// the cut point; -1 means nothing fits the cap cleanly and we
-		// fall back to dropping the final field entirely.
+		// partial key=value pair, and ALWAYS preserve the "v=1" version
+		// prefix so downstream parsers can rely on it. Without the
+		// minIdx guard an oversized Model/AuthID field could truncate
+		// the header to literally "v=1" (3 bytes, no payload), silently
+		// breaking downstream parsers — see
+		// TestDecisionHeaderOversizedModelPreservesVersionPrefix.
 		out = out[:decisionHeaderCapBytes]
-		if idx := strings.LastIndex(out, "; "); idx > 0 {
+		minIdx := len(decisionVersionPrefix)
+		if idx := strings.LastIndex(out, "; "); idx > minIdx {
 			out = out[:idx]
+		} else if idx >= 0 {
+			// Cap fits "v=1" but not a full second field. Drop the partial
+			// second field but keep the trailing "; " so the version prefix
+			// still parses as "v=1;" (a known marker that no payload
+			// fields fit). Clients that expect the prefix can rely on it
+			// being emitted verbatim.
+			out = out[:minIdx+2]
 		} else {
-			out = ""
+			// No "; " at all — the cap is so tight even "v=1" doesn't fit;
+			// fall back to the bare prefix so we never emit an empty
+			// string in violation of the contract.
+			out = decisionVersionPrefix
 		}
 	}
 	return out
@@ -118,7 +138,9 @@ func (d Decision) Header() string {
 
 // naOrValue returns s when non-empty, otherwise the literal "n/a". Used by
 // Decision.Header to keep all fields present in the serialized output even
-// when the conductor has no value to emit for them.
+// when the conductor has no value to emit for them. Whitespace-only inputs
+// are treated as empty so callers can pass raw user/executor output without
+// pre-trimming and still see a clean "n/a" marker in the wire payload.
 func naOrValue(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "n/a"

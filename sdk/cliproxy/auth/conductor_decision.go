@@ -104,17 +104,24 @@ func setResponseDecisionHeader(resp *cliproxyexecutor.Response, d Decision) {
 
 // setStreamDecisionHeader writes the decision header onto a streaming
 // response's Headers map before the first chunk is forwarded. Same
-// defensive semantics as setResponseDecisionHeader. The API layer
+// defensive semantics as setResponseDecisionHeader (lazy-allocates the
+// map when nil, logs on oversized value, never breaks the response).
+// The pointer-to-map signature matches setResponseDecisionHeader's
+// pointer-to-struct access pattern so callers can transparently reuse
+// StreamResult.Headers without pre-checking nil. The API layer
 // (handlers_stream.go) reads StreamResult.Headers and propagates them
 // into the downstream response, so writing here surfaces the header to
 // streaming clients as soon as the first byte is ready.
-func setStreamDecisionHeader(headers http.Header, d Decision) {
+func setStreamDecisionHeader(headers *http.Header, d Decision) {
 	if headers == nil {
 		return
 	}
+	if *headers == nil {
+		*headers = make(http.Header)
+	}
 	value := d.Header()
-	headers.Set(DecisionHeader, value)
-	if len(headers.Get(DecisionHeader)) != len(value) {
+	(*headers).Set(DecisionHeader, value)
+	if len((*headers).Get(DecisionHeader)) != len(value) {
 		log.Warnf("failed to set %s header: oversized value (truncated to 200): %.200s", DecisionHeader, value)
 	}
 }
