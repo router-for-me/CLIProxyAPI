@@ -74,9 +74,9 @@ func baseDir() (string, error) {
 }
 
 // Build creates a new ephemeral bridge directory and renders the initial
-// config.yaml from snap (the snapshotRenderer contract). Production callers
+// config.yaml from snap (the SnapshotRenderer contract). Production callers
 // that already hold a *config.Config should prefer BuildFromConfig.
-func Build(ctx context.Context, snap snapshotRenderer, authDirHint string) (*Bridge, error) {
+func Build(ctx context.Context, snap SnapshotRenderer, authDirHint string) (*Bridge, error) {
 	if snap == nil {
 		return nil, errors.New("runtimebridge: snapshot is nil")
 	}

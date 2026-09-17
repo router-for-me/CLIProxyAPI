@@ -42,17 +42,20 @@ func (p *Plan) AtomicWrite(path string, data []byte, mode os.FileMode) error {
 	return atomicfile.Write(path, data, mode)
 }
 
-// snapshotRenderer is the contract Coordinator.ReloadLatest relies on to
+// SnapshotRenderer is the contract Coordinator.ReloadLatest relies on to
 // re-render bridge content from a fresh snapshot. The production snapshot
 // exposes MarshalYAML via the Plan adapter; tests provide a fake.
-type snapshotRenderer interface {
+//
+// Exported because cmd/server/main.go wires the snapshot source callback at
+// registration time and needs the named type.
+type SnapshotRenderer interface {
 	MarshalYAML() ([]byte, error)
 	Validate() error
 	AtomicWrite(path string, data []byte, mode os.FileMode) error
 }
 
 // renderTo renders the snapshot, validates it, and atomically writes it.
-func renderTo(snap snapshotRenderer, path string, mode os.FileMode) error {
+func renderTo(snap SnapshotRenderer, path string, mode os.FileMode) error {
 	data, err := snap.MarshalYAML()
 	if err != nil {
 		return fmt.Errorf("marshal snapshot: %w", err)
@@ -74,13 +77,13 @@ func renderTo(snap snapshotRenderer, path string, mode os.FileMode) error {
 type Coordinator struct {
 	mu     sync.Mutex
 	bridge *Bridge
-	src    func(context.Context) (snapshotRenderer, error)
+	src    func(context.Context) (SnapshotRenderer, error)
 }
 
 // NewCoordinator returns a coordinator that re-renders using src. The
 // src callback is the only thing the coordinator depends on at runtime:
 // it is invoked per-call so a re-import or a re-resolve stays transparent.
-func NewCoordinator(src func(context.Context) (snapshotRenderer, error)) *Coordinator {
+func NewCoordinator(src func(context.Context) (SnapshotRenderer, error)) *Coordinator {
 	return &Coordinator{src: src}
 }
 

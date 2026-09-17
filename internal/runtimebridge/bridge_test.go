@@ -13,7 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util/atomicfile"
 )
 
-// fakeRenderer implements snapshotRenderer for unit tests without
+// fakeRenderer implements SnapshotRenderer for unit tests without
 // depending on the configsnapshot package.
 type fakeRenderer struct {
 	yaml         []byte
@@ -131,7 +131,7 @@ func TestCoordinatorReloadReplacesConfigAtomically(t *testing.T) {
 	defer b.Close()
 
 	var renderCalls atomic.Int32
-	src := func(_ context.Context) (snapshotRenderer, error) {
+	src := func(_ context.Context) (SnapshotRenderer, error) {
 		renderCalls.Add(1)
 		return &fakeRenderer{yaml: []byte("v2\n")}, nil
 	}
@@ -153,7 +153,7 @@ func TestCoordinatorReloadReplacesConfigAtomically(t *testing.T) {
 }
 
 func TestCoordinatorReloadWithoutBindingIsNoOp(t *testing.T) {
-	coord := NewCoordinator(func(_ context.Context) (snapshotRenderer, error) {
+	coord := NewCoordinator(func(_ context.Context) (SnapshotRenderer, error) {
 		t.Fatal("src must not be called when bridge is not bound")
 		return nil, nil
 	})
@@ -163,7 +163,7 @@ func TestCoordinatorReloadWithoutBindingIsNoOp(t *testing.T) {
 }
 
 func TestCoordinatorReloadReturnsSourceError(t *testing.T) {
-	coord := NewCoordinator(func(_ context.Context) (snapshotRenderer, error) {
+	coord := NewCoordinator(func(_ context.Context) (SnapshotRenderer, error) {
 		return nil, errValidate
 	})
 	b, err := BuildFromConfig(context.Background(), &config.Config{}, "")
@@ -186,7 +186,7 @@ func TestCoordinatorReloadValidationErrorLeavesFileIntact(t *testing.T) {
 	defer b.Close()
 	r := &fakeRenderer{yaml: []byte("replacement\n")}
 	r.failValidate.Store(true)
-	src := func(_ context.Context) (snapshotRenderer, error) {
+	src := func(_ context.Context) (SnapshotRenderer, error) {
 		return r, nil
 	}
 	coord := NewCoordinator(src)

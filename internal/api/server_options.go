@@ -19,18 +19,22 @@ import (
 )
 
 type serverOptionConfig struct {
-	extraMiddleware       []gin.HandlerFunc
-	engineConfigurator    func(*gin.Engine)
-	routerConfigurator    func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
-	requestLoggerFactory  func(*config.Config, string) logging.RequestLogger
-	localPassword         string
-	keepAliveEnabled      bool
-	keepAliveTimeout      time.Duration
-	keepAliveOnTimeout    func()
-	postAuthHook          auth.PostAuthHook
-	postAuthPersistHook   auth.PostAuthHook
-	pluginHost            *pluginhost.Host
-	configReloadHook      func(context.Context, *config.Config)
+	extraMiddleware      []gin.HandlerFunc
+	engineConfigurator   func(*gin.Engine)
+	routerConfigurator   func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
+	requestLoggerFactory func(*config.Config, string) logging.RequestLogger
+	localPassword        string
+	keepAliveEnabled     bool
+	keepAliveTimeout     time.Duration
+	keepAliveOnTimeout   func()
+	postAuthHook         auth.PostAuthHook
+	postAuthPersistHook  auth.PostAuthHook
+	pluginHost           *pluginhost.Host
+	configReloadHook     func(context.Context, *config.Config)
+	// reloadCoordinator re-renders the ephemeral PG-first bridge after a
+	// successful runtime-config commit. nil when the server boots in legacy
+	// file mode (no bridge active).
+	reloadCoordinator     func(context.Context) error
 	exampleAPIKeySafeMode bool
 
 	// policyService enforces per-API-key limits (RPM, budget, model access)
@@ -228,9 +232,20 @@ func WithPluginHost(host *pluginhost.Host) ServerOption {
 }
 
 // WithConfigReloadHook registers a callback used after management saves config changes.
+// WithConfigReloadHook registers a callback fired after the in-memory config
+// changes. Use WithReloadCoordinator for the PG-first bridge reload instead.
 func WithConfigReloadHook(hook func(context.Context, *config.Config)) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.configReloadHook = hook
+	}
+}
+
+// WithReloadCoordinator registers the bridge reload hook fired after a
+// successful runtime-config commit or rollback. nil (the zero value) keeps
+// the legacy file-watcher flow.
+func WithReloadCoordinator(fn func(context.Context) error) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.reloadCoordinator = fn
 	}
 }
 

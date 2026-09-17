@@ -206,6 +206,13 @@ func main() {
 		return
 	}
 
+	// Phase 2: track the ephemeral PG-first bridge across the storage-backend
+	// if/else chain. Only the PG-first boot path (snapshot populated) sets it;
+	// the file/object/git branches leave it nil so the reload coordinator is
+	// skipped. Hoisted to function scope so the serverOptions assembly below
+	// can reference it.
+	var activeBridge *runtimebridge.Bridge
+
 	// Load environment variables from .env if present.
 	if errLoad := godotenv.Load(filepath.Join(wd, ".env")); errLoad != nil {
 		if !errors.Is(errLoad, os.ErrNotExist) {
@@ -513,7 +520,7 @@ func main() {
 		runtimeCfg := runtimeconfig.New(pgStoreInst)
 		snapshotCfg, snapErr := runtimebridge.LoadConfigFromSnapshot(context.Background(), runtimeCfg)
 		if snapErr == nil {
-			// The bridge requires a snapshotRenderer; we render straight
+			// The bridge requires a SnapshotRenderer; we render straight
 			// from the loaded *config.Config so the file is generated from
 			// the same bytes the in-memory cfg was parsed from.
 			bridge, buildErr := runtimebridge.BuildFromConfig(context.Background(), snapshotCfg, pgStoreInst.AuthDir())
@@ -521,6 +528,7 @@ func main() {
 				log.Errorf("postgres-backed bridge build failed: %v", buildErr)
 				return
 			}
+			activeBridge = bridge
 			configFilePath = bridge.ConfigPath()
 			cfg = snapshotCfg
 			cfg.AuthDir = pgStoreInst.AuthDir()
@@ -898,7 +906,19 @@ func main() {
 			LiteLLMKeys:        pgLiteLLMKeys,
 			LiteLLMSync:        pgLiteLLMSync,
 			Flusher:            usageFlusher,
+			PG:                 pgStoreInst,
 		}))
+		// When the ephemeral bridge is active (Phase 2 PG-first boot), wire
+		// the reload coordinator so a successful runtime-config commit or
+		// rollback re-renders the bridge file and the fsnotify watcher picks
+		// up the change.
+		if activeBridge != nil {
+			coord := runtimebridge.NewCoordinator(func(ctx context.Context) (runtimebridge.SnapshotRenderer, error) {
+				return runtimebridge.PlanFromConfig(ctx, pgStoreInst)
+			})
+			coord.Bind(activeBridge)
+			serverOptions = append(serverOptions, api.WithReloadCoordinator(coord.ReloadLatest))
+		}
 	}
 
 	// Construct the full-backup-to-S3 subsystem. Activates only when
