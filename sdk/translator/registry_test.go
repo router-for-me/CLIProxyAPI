@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/tidwall/gjson"
 )
 
@@ -363,6 +364,55 @@ func TestTranslateStream_PluginTranslatorUsedWhenNativeStreamMissing(t *testing.
 	}
 	if !hasCall(hooks.calls, "translate-response") {
 		t.Fatal("plugin response translator was not called when native stream transformer was missing")
+	}
+}
+
+func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
+	r := NewRegistry()
+	from := FormatOpenAIResponse
+	to := FormatAntigravity
+	modelInfo := &registry.ModelInfo{ID: "home-model"}
+
+	r.RegisterRequestEnvelope(from, to, func(_ context.Context, req RequestEnvelope) RequestEnvelope {
+		if req.ModelInfo == nil {
+			req.Body = []byte(`{"source":"native"}`)
+		} else {
+			req.Body = []byte(`{"source":"model-info"}`)
+		}
+		return req
+	})
+
+	withoutMetadata := r.TranslateRequest(from, to, "home-model", []byte(`{"input":"hello"}`), false)
+	if gjson.GetBytes(withoutMetadata, "source").String() != "native" {
+		t.Fatalf("without metadata used unexpected transform: %s", withoutMetadata)
+	}
+	withMetadata, err := NewPipeline(r).TranslateRequest(context.Background(), from, to, RequestEnvelope{
+		Format: from, Model: "home-model", Body: []byte(`{"input":"hello"}`), ModelInfo: modelInfo,
+	})
+	if err != nil {
+		t.Fatalf("pipeline translation failed: %v", err)
+	}
+	if gjson.GetBytes(withMetadata.Body, "source").String() != "model-info" {
+		t.Fatalf("envelope metadata was not used: %s", withMetadata.Body)
+	}
+	if withMetadata.ModelInfo != modelInfo {
+		t.Fatal("pipeline did not preserve request-scoped model info")
+	}
+
+	// A custom registration replaces the envelope-aware native route.
+	r.Register(from, to, func(string, []byte, bool) []byte {
+		return []byte(`{"source":"custom"}`)
+	}, ResponseTransform{})
+	for _, payload := range [][]byte{
+		[]byte(`{"input":"hello"}`),
+		[]byte(`{"input":"weather","tools":[{"type":"web_search"}]}`),
+	} {
+		customWithMetadata := r.TranslateRequestEnvelope(context.Background(), from, to, RequestEnvelope{
+			Format: from, Model: "home-model", Body: payload, ModelInfo: modelInfo,
+		})
+		if gjson.GetBytes(customWithMetadata.Body, "source").String() != "custom" {
+			t.Fatalf("request metadata bypassed custom transform for %s: %s", payload, customWithMetadata.Body)
+		}
 	}
 }
 

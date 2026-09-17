@@ -1109,3 +1109,266 @@ func TestConvertInteractionsResponseToOpenAIResponses_MissingUsageDefaultsToZero
 		t.Fatalf("expected non-stream usage.total_tokens to exist")
 	}
 }
+
+func TestConvertInteractionsResponseToOpenAIResponses_RestoresNamespaceAndCustomTool(t *testing.T) {
+	origRequest := []byte(`{
+		"model": "devin/gemini-3-7-flash",
+		"tools": [
+			{
+				"type": "namespace",
+				"name": "multi_agent_v1",
+				"tools": [
+					{"type": "function", "name": "close_agent", "description": "Close an agent"}
+				]
+			},
+			{
+				"type": "namespace",
+				"name": "functions",
+				"tools": [
+					{"type": "custom", "name": "exec", "description": "Run custom command"}
+				]
+			}
+		]
+	}`)
+
+	// Test NonStream
+	rawNonStream := []byte(`{
+		"id": "resp_1",
+		"steps": [
+			{
+				"type": "function_call",
+				"id": "call_1",
+				"name": "multi_agent_v1__close_agent",
+				"arguments": {"target": "agent_1"}
+			},
+			{
+				"type": "function_call",
+				"id": "call_2",
+				"name": "functions__exec",
+				"arguments": {"input": "echo hi"}
+			}
+		]
+	}`)
+
+	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/gemini-3-7-flash", origRequest, nil, rawNonStream, nil)
+
+	// Item 0: multi_agent_v1__close_agent -> name: "close_agent", namespace: "multi_agent_v1", type: "function_call"
+	if got := gjson.GetBytes(outNonStream, "output.0.name").String(); got != "close_agent" {
+		t.Errorf("output.0.name = %q, want close_agent", got)
+	}
+	if got := gjson.GetBytes(outNonStream, "output.0.namespace").String(); got != "multi_agent_v1" {
+		t.Errorf("output.0.namespace = %q, want multi_agent_v1", got)
+	}
+	if got := gjson.GetBytes(outNonStream, "output.0.type").String(); got != "function_call" {
+		t.Errorf("output.0.type = %q, want function_call", got)
+	}
+
+	// Item 1: functions__exec -> name: "exec", namespace: "functions", type: "custom_tool_call"
+	if got := gjson.GetBytes(outNonStream, "output.1.name").String(); got != "exec" {
+		t.Errorf("output.1.name = %q, want exec", got)
+	}
+	if got := gjson.GetBytes(outNonStream, "output.1.namespace").String(); got != "functions" {
+		t.Errorf("output.1.namespace = %q, want functions", got)
+	}
+	if got := gjson.GetBytes(outNonStream, "output.1.type").String(); got != "custom_tool_call" {
+		t.Errorf("output.1.type = %q, want custom_tool_call", got)
+	}
+	if got := gjson.GetBytes(outNonStream, "output.1.input").String(); got != "echo hi" {
+		t.Errorf("output.1.input = %q, want echo hi", got)
+	}
+	if gjson.GetBytes(outNonStream, "output.1.arguments").Exists() {
+		t.Errorf("output.1.arguments should not exist for custom_tool_call")
+	}
+
+	// Test Stream
+	var param any
+	streamChunk := []byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","call_id":"call_1","name":"multi_agent_v1__close_agent","arguments":"{\"target\":\"agent_1\"}"}}`)
+	events := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/gemini-3-7-flash", origRequest, nil, streamChunk, &param)
+	foundAdded := false
+	for _, ev := range events {
+		evStr := string(ev)
+		if strings.Contains(evStr, "response.output_item.added") {
+			foundAdded = true
+			data := strings.TrimPrefix(evStr, "data: ")
+			if got := gjson.Get(data, "item.name").String(); got != "close_agent" {
+				t.Errorf("stream item.name = %q, want close_agent", got)
+			}
+			if got := gjson.Get(data, "item.namespace").String(); got != "multi_agent_v1" {
+				t.Errorf("stream item.namespace = %q, want multi_agent_v1", got)
+			}
+			if got := gjson.Get(data, "item.type").String(); got != "function_call" {
+				t.Errorf("stream item.type = %q, want function_call", got)
+			}
+		}
+	}
+	if !foundAdded {
+		t.Fatalf("expected response.output_item.added event in stream")
+	}
+
+	// Test Stream done
+	doneChunk := []byte(`{"event_type":"step.stop","index":0}`)
+	eventsDone := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/gemini-3-7-flash", origRequest, nil, doneChunk, &param)
+	foundDone := false
+	for _, ev := range eventsDone {
+		evStr := string(ev)
+		if strings.Contains(evStr, "response.output_item.done") {
+			foundDone = true
+			data := strings.TrimPrefix(evStr, "data: ")
+			if got := gjson.Get(data, "item.name").String(); got != "close_agent" {
+				t.Errorf("stream done item.name = %q, want close_agent", got)
+			}
+			if got := gjson.Get(data, "item.namespace").String(); got != "multi_agent_v1" {
+				t.Errorf("stream done item.namespace = %q, want multi_agent_v1", got)
+			}
+		}
+	}
+	if !foundDone {
+		t.Fatalf("expected response.output_item.done event in stream")
+	}
+
+	// Test Stream Custom Tool (start -> delta -> stop sequence)
+	var paramCustom any
+	streamCustomStart := []byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","call_id":"call_2","name":"functions__exec"}}`)
+	eventsStart := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/gemini-3-7-flash", origRequest, nil, streamCustomStart, &paramCustom)
+	foundCustomAdded := false
+	for _, ev := range eventsStart {
+		evStr := string(ev)
+		if strings.Contains(evStr, "response.output_item.added") {
+			foundCustomAdded = true
+			data := strings.TrimPrefix(evStr, "data: ")
+			if got := gjson.Get(data, "item.type").String(); got != "custom_tool_call" {
+				t.Errorf("custom stream item.type = %q, want custom_tool_call", got)
+			}
+			if got := gjson.Get(data, "item.name").String(); got != "exec" {
+				t.Errorf("custom stream item.name = %q, want exec", got)
+			}
+			if got := gjson.Get(data, "item.namespace").String(); got != "functions" {
+				t.Errorf("custom stream item.namespace = %q, want functions", got)
+			}
+		}
+		if strings.Contains(evStr, "response.custom_tool_call_input.done") {
+			t.Fatalf("custom_tool_call_input.done should not be emitted on step.start")
+		}
+	}
+	if !foundCustomAdded {
+		t.Fatalf("expected response.output_item.added for custom tool")
+	}
+
+	streamCustomDelta := []byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"input\":\"pwd\"}"}}`)
+	eventsDelta := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/gemini-3-7-flash", origRequest, nil, streamCustomDelta, &paramCustom)
+	for _, ev := range eventsDelta {
+		if strings.Contains(string(ev), "response.function_call_arguments") {
+			t.Fatalf("function_call_arguments events should not be emitted for custom tool")
+		}
+	}
+
+	streamCustomStop := []byte(`{"event_type":"step.stop","index":0}`)
+	eventsStop := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/gemini-3-7-flash", origRequest, nil, streamCustomStop, &paramCustom)
+	customInputDoneCount := 0
+	customItemDoneCount := 0
+	for _, ev := range eventsStop {
+		evStr := string(ev)
+		if strings.Contains(evStr, "response.custom_tool_call_input.done") {
+			customInputDoneCount++
+			data := strings.TrimPrefix(evStr, "data: ")
+			if got := gjson.Get(data, "input").String(); got != "pwd" {
+				t.Errorf("custom stream input = %q, want pwd", got)
+			}
+		}
+		if strings.Contains(evStr, "response.output_item.done") {
+			customItemDoneCount++
+			data := strings.TrimPrefix(evStr, "data: ")
+			if got := gjson.Get(data, "item.input").String(); got != "pwd" {
+				t.Errorf("custom stream done item.input = %q, want pwd", got)
+			}
+			if got := gjson.Get(data, "item.type").String(); got != "custom_tool_call" {
+				t.Errorf("custom stream done item.type = %q, want custom_tool_call", got)
+			}
+		}
+	}
+	if customInputDoneCount != 1 {
+		t.Fatalf("expected exactly 1 response.custom_tool_call_input.done, got %d", customInputDoneCount)
+	}
+	if customItemDoneCount != 1 {
+		t.Fatalf("expected exactly 1 response.output_item.done, got %d", customItemDoneCount)
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIResponses_AntigravityCustomToolRestoresNameAndType(t *testing.T) {
+	origRequest := []byte(`{
+		"model": "antigravity-preview-05-2026",
+		"tools": [
+			{"type": "custom", "name": "read_file", "description": "Read a file"}
+		]
+	}`)
+	rawNonStream := []byte(`{
+		"id": "resp_anti_custom",
+		"steps": [
+			{
+				"type": "function_call",
+				"id": "call_1",
+				"name": "external_read_file",
+				"arguments": {"input": "/path/to/file"}
+			}
+		]
+	}`)
+
+	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", origRequest, nil, rawNonStream, nil)
+	if got := gjson.GetBytes(outNonStream, "output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("output.0.type = %q, want custom_tool_call", got)
+	}
+	if got := gjson.GetBytes(outNonStream, "output.0.name").String(); got != "read_file" {
+		t.Fatalf("output.0.name = %q, want read_file", got)
+	}
+	if got := gjson.GetBytes(outNonStream, "output.0.input").String(); got != "/path/to/file" {
+		t.Fatalf("output.0.input = %q, want /path/to/file", got)
+	}
+	if gjson.GetBytes(outNonStream, "output.0.arguments").Exists() {
+		t.Fatalf("output.0.arguments unexpectedly exists for custom_tool_call")
+	}
+
+	// Test Stream (start -> delta -> stop)
+	var param any
+	streamChunk := []byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","call_id":"call_1","name":"external_read_file"}}`)
+	eventsStart := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "antigravity-preview-05-2026", origRequest, nil, streamChunk, &param)
+	foundAdded := false
+	for _, ev := range eventsStart {
+		evStr := string(ev)
+		if strings.Contains(evStr, "response.output_item.added") {
+			foundAdded = true
+			data := strings.TrimPrefix(evStr, "data: ")
+			if got := gjson.Get(data, "item.type").String(); got != "custom_tool_call" {
+				t.Fatalf("stream item.type = %q, want custom_tool_call", got)
+			}
+			if got := gjson.Get(data, "item.name").String(); got != "read_file" {
+				t.Fatalf("stream item.name = %q, want read_file", got)
+			}
+		}
+		if strings.Contains(evStr, "response.custom_tool_call_input.done") {
+			t.Fatalf("custom_tool_call_input.done should not be emitted on step.start")
+		}
+	}
+	if !foundAdded {
+		t.Fatalf("expected response.output_item.added event")
+	}
+
+	streamDelta := []byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"input\":\"/path/to/file\"}"}}`)
+	_ = ConvertInteractionsResponseToOpenAIResponses(context.Background(), "antigravity-preview-05-2026", origRequest, nil, streamDelta, &param)
+
+	streamStop := []byte(`{"event_type":"step.stop","index":0}`)
+	eventsStop := ConvertInteractionsResponseToOpenAIResponses(context.Background(), "antigravity-preview-05-2026", origRequest, nil, streamStop, &param)
+	customDoneCount := 0
+	for _, ev := range eventsStop {
+		evStr := string(ev)
+		if strings.Contains(evStr, "response.custom_tool_call_input.done") {
+			customDoneCount++
+			data := strings.TrimPrefix(evStr, "data: ")
+			if got := gjson.Get(data, "input").String(); got != "/path/to/file" {
+				t.Fatalf("stream custom_tool_call_input.done = %q, want /path/to/file", got)
+			}
+		}
+	}
+	if customDoneCount != 1 {
+		t.Fatalf("expected exactly 1 response.custom_tool_call_input.done event on step.stop, got %d", customDoneCount)
+	}
+}

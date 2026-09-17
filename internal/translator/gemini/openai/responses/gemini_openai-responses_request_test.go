@@ -1079,11 +1079,91 @@ func TestConvertOpenAIResponsesRequestToGemini_MidSessionDeveloperMessageDoesNot
 	if len(turn2Parts) != 2 {
 		t.Fatalf("turn 2 parts count = %d, want 2; output=%s", len(turn2Parts), output)
 	}
-	if got := turn2Parts[0].Get("text").String(); got != "<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>" {
-		t.Fatalf("turn 2 part 0 = %q, want image_resize_notice; output=%s", got, output)
+	expectedDevText := "<system-reminder>\n<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>\n</system-reminder>"
+	if got := turn2Parts[0].Get("text").String(); got != expectedDevText {
+		t.Fatalf("turn 2 part 0 = %q, want %q; output=%s", got, expectedDevText, output)
 	}
 	if got := turn2Parts[1].Get("text").String(); got != "Turn 2 user" {
 		t.Fatalf("turn 2 part 1 = %q, want Turn 2 user; output=%s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_MidSessionSystemReminderEnvelope(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"instructions": "Be a helpful assistant",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Turn 1 user"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [
+					{"type": "output_text", "text": "Turn 1 assistant"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "developer",
+				"content": "Please decide which tool to call next."
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	contents := result.Get("contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want 3; output=%s", len(contents), output)
+	}
+	expectedReminder := "<system-reminder>\nPlease decide which tool to call next.\n</system-reminder>"
+	if got := contents[2].Get("parts.0.text").String(); got != expectedReminder {
+		t.Fatalf("mid-session system reminder mismatch:\ngot:  %q\nwant: %q", got, expectedReminder)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_MidSessionDeveloperMultiPartContentWrappedOnce(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"instructions": "Be a helpful assistant",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": "Turn 1"
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": "Reply 1"
+			},
+			{
+				"type": "message",
+				"role": "developer",
+				"content": [
+					{"type": "input_text", "text": "Rule line 1"},
+					{"type": "input_text", "text": "Rule line 2"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	contents := result.Get("contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want 3; output=%s", len(contents), output)
+	}
+	expected := "<system-reminder>\nRule line 1\nRule line 2\n</system-reminder>"
+	if got := contents[2].Get("parts.0.text").String(); got != expected {
+		t.Fatalf("multi-part developer reminder mismatch:\ngot:  %q\nwant: %q", got, expected)
 	}
 }
 

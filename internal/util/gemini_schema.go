@@ -1191,7 +1191,8 @@ func flattenTypeArrays(jsonStr string, preserveNativeNullable bool) string {
 
 func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) string {
 	keywords := append(constraintKeywords(options),
-		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
+		"$schema", "$defs", "definitions", "const", "$ref", "$id", "id", "additionalProperties",
+		"$anchor", "$vocabulary", "$dynamicRef", "$dynamicAnchor",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
 		"if", "then", "else",
 		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", "encrypted", // Schema metadata fields unsupported by Gemini

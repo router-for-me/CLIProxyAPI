@@ -132,19 +132,32 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					var devParts [][]byte
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						if contentArray.IsArray() {
+							var texts []string
 							contentArray.ForEach(func(_, contentItem gjson.Result) bool {
 								text := contentItem.Get("text").String()
+								if text == "" && contentItem.Type == gjson.String {
+									text = contentItem.String()
+								}
 								if text != "" {
-									part := []byte(`{"text":""}`)
-									part, _ = sjson.SetBytes(part, "text", text)
-									devParts = append(devParts, part)
+									texts = append(texts, text)
 								}
 								return true
 							})
+							if len(texts) > 0 {
+								joined := strings.Join(texts, "\n")
+								if strings.TrimSpace(joined) != "" {
+									part := []byte(`{"text":""}`)
+									part, _ = sjson.SetBytes(part, "text", translatorcommon.SystemReminderText(joined))
+									devParts = append(devParts, part)
+								}
+							}
 						} else if contentArray.Type == gjson.String && contentArray.String() != "" {
-							part := []byte(`{"text":""}`)
-							part, _ = sjson.SetBytes(part, "text", contentArray.String())
-							devParts = append(devParts, part)
+							text := contentArray.String()
+							if strings.TrimSpace(text) != "" {
+								part := []byte(`{"text":""}`)
+								part, _ = sjson.SetBytes(part, "text", translatorcommon.SystemReminderText(text))
+								devParts = append(devParts, part)
+							}
 						}
 					}
 					if len(devParts) > 0 {
