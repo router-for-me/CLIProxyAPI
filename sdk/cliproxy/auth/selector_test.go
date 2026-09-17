@@ -313,6 +313,243 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 }
 
+func TestIsAuthBlockedForModel_ExcludedModels(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	tests := []struct {
+		name        string
+		attributes  map[string]string
+		model       string
+		wantBlocked bool
+	}{
+		{
+			name:        "excluded_all_blocks_named_model",
+			attributes:  map[string]string{AttributeExcludedModels: "*"},
+			model:       "gpt-5",
+			wantBlocked: true,
+		},
+		{
+			name:        "excluded_all_blocks_empty_model",
+			attributes:  map[string]string{AttributeExcludedModels: "*"},
+			model:       "",
+			wantBlocked: true,
+		},
+		{
+			name:        "excluded_model_blocks_only_that_model",
+			attributes:  map[string]string{AttributeExcludedModels: "gpt-5"},
+			model:       "gpt-5",
+			wantBlocked: true,
+		},
+		{
+			name:        "excluded_model_does_not_block_another_model",
+			attributes:  map[string]string{AttributeExcludedModels: "gpt-5"},
+			model:       "gpt-4o",
+			wantBlocked: false,
+		},
+		{
+			name:        "excluded_model_matches_thinking_suffix_base_model",
+			attributes:  map[string]string{AttributeExcludedModels: "gpt-5"},
+			model:       "gpt-5(high)",
+			wantBlocked: true,
+		},
+		{
+			name:        "excluded_model_does_not_block_empty_model",
+			attributes:  map[string]string{AttributeExcludedModels: "gpt-5"},
+			model:       "",
+			wantBlocked: false,
+		},
+		{
+			name:        "excluded_model_matches_within_comma_separated_list",
+			attributes:  map[string]string{AttributeExcludedModels: "gpt-5, gemini-2.5-pro"},
+			model:       "gemini-2.5-pro",
+			wantBlocked: true,
+		},
+		{
+			name:        "no_exclusion_attribute_is_not_blocked",
+			attributes:  nil,
+			model:       "gpt-5",
+			wantBlocked: false,
+		},
+		{
+			name:        "empty_exclusion_list_is_not_blocked",
+			attributes:  map[string]string{AttributeExcludedModels: ""},
+			model:       "gpt-5",
+			wantBlocked: false,
+		},
+		{
+			name:        "whitespace_only_exclusion_list_is_not_blocked",
+			attributes:  map[string]string{AttributeExcludedModels: " , ,"},
+			model:       "gpt-5",
+			wantBlocked: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := &Auth{ID: "candidate", Attributes: tt.attributes}
+
+			blocked, reason, next := isAuthBlockedForModel(candidate, tt.model, now)
+
+			if blocked != tt.wantBlocked {
+				t.Fatalf("blocked = %v, want %v", blocked, tt.wantBlocked)
+			}
+			if !tt.wantBlocked {
+				return
+			}
+			if reason != blockReasonDisabled {
+				t.Fatalf("reason = %v, want %v", reason, blockReasonDisabled)
+			}
+			if !next.IsZero() {
+				t.Fatalf("next = %v, want zero time", next)
+			}
+		})
+	}
+}
+
+func TestFillFirstSelectorPick_SkipsExcludedAllCredential(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	excluded := &Auth{ID: "a", Attributes: map[string]string{AttributeExcludedModels: "*"}}
+	eligible := &Auth{ID: "b"}
+
+	got, err := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", cliproxyexecutor.Options{}, []*Auth{excluded, eligible})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "b" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "b")
+	}
+}
+
+func TestFillFirstSelectorPick_PerModelExclusionBlocksOnlyThatModel(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	excluded := &Auth{ID: "a", Attributes: map[string]string{AttributeExcludedModels: "gpt-5"}}
+	eligible := &Auth{ID: "b"}
+
+	blocked, err := selector.Pick(context.Background(), "openai", "gpt-5", cliproxyexecutor.Options{}, []*Auth{excluded, eligible})
+	if err != nil {
+		t.Fatalf("Pick() for excluded model error = %v", err)
+	}
+	if blocked == nil {
+		t.Fatalf("Pick() for excluded model auth = nil")
+	}
+	if blocked.ID != "b" {
+		t.Fatalf("Pick() for excluded model auth.ID = %q, want %q", blocked.ID, "b")
+	}
+
+	routed, err := selector.Pick(context.Background(), "openai", "gpt-4o", cliproxyexecutor.Options{}, []*Auth{excluded, eligible})
+	if err != nil {
+		t.Fatalf("Pick() for other model error = %v", err)
+	}
+	if routed == nil {
+		t.Fatalf("Pick() for other model auth = nil")
+	}
+	if routed.ID != "a" {
+		t.Fatalf("Pick() for other model auth.ID = %q, want %q", routed.ID, "a")
+	}
+}
+
+func TestFillFirstSelectorPick_CredentialWithoutExclusionsUnaffected(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	// Config keys carry an attributes map (auth_kind, source, ...) but no excluded_models
+	// key unless an exclusion was configured; the lowest-ID eligible credential must
+	// still be returned.
+	configKey := &Auth{ID: "a", Attributes: map[string]string{"auth_kind": "apikey"}}
+	oauthCredential := &Auth{ID: "b"}
+
+	got, err := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", cliproxyexecutor.Options{}, []*Auth{configKey, oauthCredential})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "a" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "a")
+	}
+}
+
+func TestFillFirstSelectorPick_ExcludedCredentialEligibleAfterExclusionRemoved(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	credential := &Auth{ID: "a", Attributes: map[string]string{AttributeExcludedModels: "*"}}
+	auths := []*Auth{credential, {ID: "b"}}
+
+	excluded, err := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() while excluded error = %v", err)
+	}
+	if excluded == nil {
+		t.Fatalf("Pick() while excluded auth = nil")
+	}
+	if excluded.ID != "b" {
+		t.Fatalf("Pick() while excluded auth.ID = %q, want %q", excluded.ID, "b")
+	}
+
+	credential.Attributes[AttributeExcludedModels] = ""
+
+	restored, err := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() after removal error = %v", err)
+	}
+	if restored == nil {
+		t.Fatalf("Pick() after removal auth = nil")
+	}
+	if restored.ID != "a" {
+		t.Fatalf("Pick() after removal auth.ID = %q, want %q", restored.ID, "a")
+	}
+}
+
+func TestFillFirstSelectorPick_ThinkingSuffixMatchesBaseModelExclusion(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	excluded := &Auth{ID: "a", Attributes: map[string]string{AttributeExcludedModels: "gpt-5"}}
+	eligible := &Auth{ID: "b"}
+
+	got, err := selector.Pick(context.Background(), "openai", "gpt-5(high)", cliproxyexecutor.Options{}, []*Auth{excluded, eligible})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "b" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "b")
+	}
+}
+
+func TestRoundRobinSelectorPick_SkipsExcludedAllCredential(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	excluded := &Auth{ID: "a", Attributes: map[string]string{AttributeExcludedModels: "*"}}
+	eligible := &Auth{ID: "b"}
+
+	for i := 0; i < 3; i++ {
+		got, err := selector.Pick(context.Background(), "gemini", "gemini-2.5-pro", cliproxyexecutor.Options{}, []*Auth{excluded, eligible})
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != "b" {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, "b")
+		}
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 
