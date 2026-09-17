@@ -14,7 +14,6 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -3021,44 +3020,21 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 }
 
 // syncConfigFromDatabase writes the database-stored config to disk or seeds the database from template.
+// syncConfigFromDatabase previously mirrored the runtime_config JSONB row
+// to a local `pgstore/config/config.yaml` spool file. Phase 5 removes
+// that spool write: the ephemeral bridge (`internal/runtimebridge`)
+// reads the runtime_config singleton on every boot and writes its own
+// private config.yaml, so a duplicate local mirror serves no purpose.
+//
+// The function remains callable for backwards compatibility with tests
+// and the reverse-direction file→PG path (`PersistConfig`); it is now a
+// no-op when called from `Bootstrap`. The error returns are preserved so
+// callers that depended on a particular signature keep compiling.
 func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfigPath string) error {
-	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
-	var content string
-	err := s.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&content)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		if _, errStat := os.Stat(s.configPath); errors.Is(errStat, fs.ErrNotExist) {
-			if exampleConfigPath != "" {
-				if errCopy := misc.CopyConfigTemplate(exampleConfigPath, s.configPath); errCopy != nil {
-					return fmt.Errorf("postgres store: copy example config: %w", errCopy)
-				}
-			} else {
-				if errCreate := os.MkdirAll(filepath.Dir(s.configPath), 0o700); errCreate != nil {
-					return fmt.Errorf("postgres store: prepare config directory: %w", errCreate)
-				}
-				if errWrite := os.WriteFile(s.configPath, []byte{}, 0o600); errWrite != nil {
-					return fmt.Errorf("postgres store: create empty config: %w", errWrite)
-				}
-			}
-		}
-		data, errRead := os.ReadFile(s.configPath)
-		if errRead != nil {
-			return fmt.Errorf("postgres store: read local config: %w", errRead)
-		}
-		if errPersist := s.persistConfig(ctx, data); errPersist != nil {
-			return errPersist
-		}
-	case err != nil:
-		return fmt.Errorf("postgres store: load config from database: %w", err)
-	default:
-		if err = os.MkdirAll(filepath.Dir(s.configPath), 0o700); err != nil {
-			return fmt.Errorf("postgres store: prepare config directory: %w", err)
-		}
-		normalized := normalizeLineEndings(content)
-		if err = os.WriteFile(s.configPath, []byte(normalized), 0o600); err != nil {
-			return fmt.Errorf("postgres store: write config to spool: %w", err)
-		}
+	if ctx == nil {
+		return nil
 	}
+	_ = exampleConfigPath // accepted for signature stability; no longer read.
 	return nil
 }
 
