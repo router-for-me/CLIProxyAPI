@@ -356,14 +356,15 @@ type homeAuthDispatchResponse struct {
 }
 
 type homeDispatchModelInfo struct {
-	ID                  string                    `json:"id"`
-	Type                string                    `json:"type,omitempty"`
-	InputTokenLimit     int                       `json:"inputTokenLimit,omitempty"`
-	OutputTokenLimit    int                       `json:"outputTokenLimit,omitempty"`
-	ContextLength       int                       `json:"context_length,omitempty"`
-	MaxCompletionTokens int                       `json:"max_completion_tokens,omitempty"`
-	Thinking            *registry.ThinkingSupport `json:"thinking,omitempty"`
-	UserDefined         bool                      `json:"user_defined"`
+	ID                  string                       `json:"id"`
+	Type                string                       `json:"type,omitempty"`
+	InputTokenLimit     int                          `json:"inputTokenLimit,omitempty"`
+	OutputTokenLimit    int                          `json:"outputTokenLimit,omitempty"`
+	ContextLength       int                          `json:"context_length,omitempty"`
+	MaxCompletionTokens int                          `json:"max_completion_tokens,omitempty"`
+	Thinking            *registry.ThinkingSupport    `json:"thinking,omitempty"`
+	NativeCapabilities  *registry.NativeCapabilities `json:"native_capabilities,omitempty"`
+	UserDefined         bool                         `json:"user_defined"`
 }
 
 func (m *homeDispatchModelInfo) registryModelInfo() *registry.ModelInfo {
@@ -378,6 +379,7 @@ func (m *homeDispatchModelInfo) registryModelInfo() *registry.ModelInfo {
 		ContextLength:       m.ContextLength,
 		MaxCompletionTokens: m.MaxCompletionTokens,
 		Thinking:            m.Thinking,
+		NativeCapabilities:  m.NativeCapabilities,
 		UserDefined:         m.UserDefined,
 	}
 }

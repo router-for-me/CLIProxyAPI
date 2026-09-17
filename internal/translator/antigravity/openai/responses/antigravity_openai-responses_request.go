@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -17,48 +19,137 @@ import (
 
 const antigravityWebSearchSystemInstruction = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar."
 
-func antigravitySupportsNativeResponsesWebSearch(model string) bool {
-	infoAG := registry.LookupModelInfo(model, "antigravity")
-	if infoAG != nil && infoAG.NativeCapabilities != nil && infoAG.NativeCapabilities.WebSearch != nil && !*infoAG.NativeCapabilities.WebSearch {
+func antigravitySupportsNativeResponsesWebSearch(model string, modelInfo *registry.ModelInfo) bool {
+	if modelInfo != nil && modelInfo.NativeCapabilities != nil && modelInfo.NativeCapabilities.WebSearch != nil {
+		return *modelInfo.NativeCapabilities.WebSearch
+	}
+	model = strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
+	if model == "" {
 		return false
 	}
-	return registry.AntigravityWebSearchModelFor(model) != ""
+	// Read the catalog veto and probe result from the same Antigravity record.
+	for _, localInfo := range registry.GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+		if localInfo == nil {
+			continue
+		}
+		localModel := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(localInfo.ID)).ModelName)
+		if !strings.EqualFold(localModel, model) {
+			continue
+		}
+		if capabilities := localInfo.NativeCapabilities; capabilities != nil && capabilities.WebSearch != nil && !*capabilities.WebSearch {
+			return false
+		}
+		return localInfo.SupportsWebSearch
+	}
+	return false
 }
 
-func shouldBuildAntigravityResponsesWebSearchRequest(model string, payload []byte) bool {
+func shouldBuildAntigravityResponsesWebSearchRequest(model string, payload []byte, modelInfo *registry.ModelInfo) bool {
 	root := gjson.ParseBytes(payload)
 	return HasOnlyResponsesWebSearchTools(root) &&
-		antigravitySupportsNativeResponsesWebSearch(model) &&
+		antigravitySupportsNativeResponsesWebSearch(model, modelInfo) &&
 		AllowsResponsesWebSearchToolChoice(root)
 }
 
-func buildAntigravityResponsesWebSearchRequest(model string, payload []byte) []byte {
-	root := gjson.ParseBytes(payload)
-	query := ExtractResponsesWebSearchQuery(root)
-	includedDomains := ExtractResponsesWebSearchAllowedDomains(root)
-	out := []byte(`{"model":"","requestType":"web_search","request":{"contents":[{"role":"user","parts":[{"text":""}]}],"systemInstruction":{"role":"user","parts":[{"text":""}]},"tools":[{"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}}],"generationConfig":{"candidateCount":1}}}`)
-	out, _ = sjson.SetBytes(out, "model", model)
-	out, _ = sjson.SetBytes(out, "request.contents.0.parts.0.text", query)
-	out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.0.text", antigravityWebSearchSystemInstruction)
-	if len(includedDomains) > 0 {
-		if domainsJSON, err := json.Marshal(includedDomains); err == nil {
-			out, _ = sjson.SetRawBytes(out, "request.tools.0.googleSearch.includedDomains", domainsJSON)
-		}
-	}
-	return out
+func buildAntigravityResponsesWebSearchRequest(model string, payload []byte, stream bool) []byte {
+	includedDomains := ExtractResponsesWebSearchAllowedDomains(gjson.ParseBytes(payload))
+	rawJSON := ConvertOpenAIResponsesRequestToGemini(model, payload, stream)
+	rawJSON = rewriteOpenAIResponsesReasoningForAntigravityClaude(model, payload, rawJSON)
+	out := ConvertGeminiRequestToAntigravity(model, rawJSON, stream)
+	out, _ = sjson.SetBytes(out, "requestType", "web_search")
+	out = ensureAntigravityResponsesWebSearchTool(out, includedDomains)
+	out = ensureAntigravityResponsesWebSearchSystemInstruction(out)
+	return enableAntigravityResponsesThinkingSummary(payload, out)
 }
 
-func ConvertOpenAIResponsesRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
-	if shouldBuildAntigravityResponsesWebSearchRequest(modelName, inputRawJSON) {
-		return buildAntigravityResponsesWebSearchRequest(modelName, inputRawJSON)
+func ensureAntigravityResponsesWebSearchTool(payload []byte, includedDomains []string) []byte {
+	googleSearchTool := []byte(`{"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}}`)
+	if len(includedDomains) > 0 {
+		if domainsJSON, errMarshal := json.Marshal(includedDomains); errMarshal == nil {
+			googleSearchTool, _ = sjson.SetRawBytes(googleSearchTool, "googleSearch.includedDomains", domainsJSON)
+		}
 	}
-	rawJSON := inputRawJSON
-	rawJSON = ConvertOpenAIResponsesRequestToGemini(modelName, rawJSON, stream)
-	rawJSON = stripAntigravityResponsesGoogleSearch(rawJSON)
-	rawJSON = rewriteOpenAIResponsesReasoningForAntigravityClaude(modelName, inputRawJSON, rawJSON)
-	rawJSON = ConvertGeminiRequestToAntigravity(modelName, rawJSON, stream)
-	rawJSON = stripAntigravityResponsesGoogleSearch(rawJSON)
-	return enableAntigravityResponsesThinkingSummary(inputRawJSON, rawJSON)
+
+	tools := gjson.GetBytes(payload, "request.tools")
+	if !tools.IsArray() {
+		payload, _ = sjson.SetRawBytes(payload, "request.tools", translatorcommon.JoinRawArray([][]byte{googleSearchTool}))
+		return payload
+	}
+
+	replaced := false
+	filtered := make([][]byte, 0, len(tools.Array()))
+	for _, tool := range tools.Array() {
+		if tool.Get("googleSearch").Exists() {
+			if !replaced {
+				filtered = append(filtered, googleSearchTool)
+				replaced = true
+			}
+			continue
+		}
+		filtered = append(filtered, []byte(tool.Raw))
+	}
+	if !replaced {
+		filtered = append([][]byte{googleSearchTool}, filtered...)
+	}
+	payload, _ = sjson.SetRawBytes(payload, "request.tools", translatorcommon.JoinRawArray(filtered))
+	return payload
+}
+
+func ensureAntigravityResponsesWebSearchSystemInstruction(payload []byte) []byte {
+	searchPart := []byte(`{"text":""}`)
+	searchPart, _ = sjson.SetBytes(searchPart, "text", antigravityWebSearchSystemInstruction)
+
+	sys := gjson.GetBytes(payload, "request.systemInstruction")
+	if !sys.Exists() {
+		instr := []byte(`{"role":"user","parts":[]}`)
+		instr, _ = sjson.SetRawBytes(instr, "parts", translatorcommon.JoinRawArray([][]byte{searchPart}))
+		payload, _ = sjson.SetRawBytes(payload, "request.systemInstruction", instr)
+		return payload
+	}
+
+	var parts [][]byte
+	alreadyPresent := false
+	if sys.Get("parts").IsArray() {
+		for _, part := range sys.Get("parts").Array() {
+			if part.Get("text").String() == antigravityWebSearchSystemInstruction {
+				alreadyPresent = true
+			}
+			parts = append(parts, []byte(part.Raw))
+		}
+	}
+	if !alreadyPresent {
+		parts = append(parts, searchPart)
+	}
+	payload, _ = sjson.SetRawBytes(payload, "request.systemInstruction.parts", translatorcommon.JoinRawArray(parts))
+	return payload
+}
+
+// ConvertOpenAIResponsesRequestToAntigravity translates an OpenAI Responses request
+// to the Antigravity schema using locally registered Antigravity capabilities.
+func ConvertOpenAIResponsesRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
+	req := ConvertOpenAIResponsesRequestEnvelopeToAntigravity(context.Background(), sdktranslator.RequestEnvelope{
+		Model:  modelName,
+		Body:   inputRawJSON,
+		Stream: stream,
+	})
+	return req.Body
+}
+
+// ConvertOpenAIResponsesRequestEnvelopeToAntigravity translates an OpenAI Responses
+// request and consumes request-scoped model capabilities from the envelope.
+func ConvertOpenAIResponsesRequestEnvelopeToAntigravity(_ context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
+	if shouldBuildAntigravityResponsesWebSearchRequest(req.Model, req.Body, req.ModelInfo) {
+		req.Body = buildAntigravityResponsesWebSearchRequest(req.Model, req.Body, req.Stream)
+		return req
+	}
+	inputRawJSON := req.Body
+	req.Body = ConvertOpenAIResponsesRequestToGemini(req.Model, req.Body, req.Stream)
+	req.Body = stripAntigravityResponsesGoogleSearch(req.Body)
+	req.Body = rewriteOpenAIResponsesReasoningForAntigravityClaude(req.Model, inputRawJSON, req.Body)
+	req.Body = ConvertGeminiRequestToAntigravity(req.Model, req.Body, req.Stream)
+	req.Body = stripAntigravityResponsesGoogleSearch(req.Body)
+	req.Body = enableAntigravityResponsesThinkingSummary(inputRawJSON, req.Body)
+	return req
 }
 
 // stripAntigravityResponsesGoogleSearch removes any native googleSearch tool block

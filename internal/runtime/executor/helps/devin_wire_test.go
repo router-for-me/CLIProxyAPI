@@ -291,6 +291,43 @@ func TestParseDevinTrailerError(t *testing.T) {
 	if code != 504 {
 		t.Errorf("status code = %d, want 504 for deadline_exceeded", code)
 	}
+
+	// Case: transient high-demand capacity error encoded as permission_denied → 429
+	highDemandJSON := []byte(`{"error":{"code":"permission_denied","message":"The model is currently in high demand, please try again later (trace ID: 00000000000000000000000000000000)"}}`)
+	code, err = ParseDevinTrailerError(highDemandJSON)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if code != 429 {
+		t.Errorf("status code = %d, want 429 for transient high-demand permission_denied", code)
+	}
+
+	// Case: genuine permission error remains 403
+	genuinePermJSON := []byte(`{"error":{"code":"permission_denied","message":"model access is not allowed for this account"}}`)
+	code, err = ParseDevinTrailerError(genuinePermJSON)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if code != 403 {
+		t.Errorf("status code = %d, want 403 for genuine permission_denied", code)
+	}
+
+	// Case: resource_exhausted remains 429 (unchanged behavior)
+	resourceExhaustedJSON := []byte(`{"error":{"code":"resource_exhausted","message":"rate limit exceeded"}}`)
+	code, err = ParseDevinTrailerError(resourceExhaustedJSON)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if code != 429 {
+		t.Errorf("status code = %d, want 429 for resource_exhausted", code)
+	}
+
+	// Case: high-demand matching is case-insensitive
+	highDemandLowerJSON := []byte(`{"error":{"code":"permission_denied","message":"HIGH DEMAND: please retry"}}`)
+	code, err = ParseDevinTrailerError(highDemandLowerJSON)
+	if code != 429 {
+		t.Errorf("status code = %d, want 429 for case-insensitive high demand match", code)
+	}
 }
 
 func TestUTF8SplitBuffer(t *testing.T) {
@@ -785,5 +822,56 @@ func TestParseDevinResponseDimensionGroups_UnrelatedGroup(t *testing.T) {
 	promptTokens, completionTokens, cachedTokens, found := ParseDevinResponseDimensionGroups(root)
 	if found {
 		t.Errorf("expected found = false for unrelated group, got true with prompt=%d, comp=%d, cached=%d", promptTokens, completionTokens, cachedTokens)
+	}
+}
+
+func TestBuildDevinGetChatMessageRequest_FiltersAutomationUpdateAndObfuscatesDescriptions(t *testing.T) {
+	tools := []DevinTool{
+		{
+			Name:        "mcp__codex_app__automation_update",
+			Description: "Recurring automations",
+			Parameters:  []byte(`{"type":"object"}`),
+		},
+		{
+			Name:        "exec_command",
+			Description: "Runs a command in a bash shell, returning output or a session ID for ongoing interaction.",
+			Parameters:  []byte(`{"type":"object"}`),
+		},
+		{
+			Name:        "write_stdin",
+			Description: "Writes characters to an existing unified exec session and returns recent output.",
+			Parameters:  []byte(`{"type":"object"}`),
+		},
+	}
+
+	req := BuildDevinGetChatMessageRequest(
+		"token-123",
+		"device-seed-1",
+		"swe-2",
+		"system prompt",
+		nil,
+		tools,
+		nil,
+		1000,
+		"session-1",
+		"cascade-1",
+		nil,
+	)
+
+	reqStr := string(req)
+	if strings.Contains(reqStr, "automation_update") {
+		t.Fatalf("wire bytes should not contain automation_update")
+	}
+	if strings.Contains(reqStr, "a session ID") {
+		t.Fatalf("wire bytes should not contain 'a session ID'")
+	}
+	if !strings.Contains(reqStr, "an session ID") {
+		t.Fatalf("wire bytes should contain 'an session ID'")
+	}
+	if strings.Contains(reqStr, "to an existing unified") {
+		t.Fatalf("wire bytes should not contain 'to an existing unified'")
+	}
+	if !strings.Contains(reqStr, "to a existing unified") {
+		t.Fatalf("wire bytes should contain 'to a existing unified'")
 	}
 }

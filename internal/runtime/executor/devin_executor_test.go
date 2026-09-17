@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	interactionsclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/interactions/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -1449,4 +1450,1389 @@ func TestConsumeDevinFramesToInteractions_StopReasonContentFilter(t *testing.T) 
 	if got := parsed.Get("finish_reason").String(); got != "content_filter" {
 		t.Fatalf("finish_reason = %q, want content_filter. Output: %s", got, string(out))
 	}
+}
+
+func TestStreamDevinFrames_LateThinkingSignaturesToClaudeStreaming(t *testing.T) {
+	tests := []struct {
+		name          string
+		buildFrames   func() [][]byte
+		wantSignature string
+		wantText      string
+		wantToolID    string
+		wantToolName  string
+		wantToolArgs  string
+	}{
+		{
+			name: "Summary_Signature_Text",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "thought text")
+
+				// Frame 2: signature
+				var f2 []byte
+				f2 = protowire.AppendTag(f2, 10, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "CAQS-early-sig-19B")
+				f2 = protowire.AppendTag(f2, 21, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "anthropic")
+
+				// Frame 3: text content
+				var f3 []byte
+				f3 = protowire.AppendTag(f3, 3, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "answer text")
+
+				return [][]byte{f1, f2, f3}
+			},
+			wantSignature: "CAQS-early-sig-19B",
+			wantText:      "answer text",
+		},
+		{
+			name: "Summary_Text_Signature_Same_Frame",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "thought text")
+
+				// Frame 2: text content + signature in same frame
+				var f2 []byte
+				f2 = protowire.AppendTag(f2, 3, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "answer text")
+				f2 = protowire.AppendTag(f2, 10, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "CAQS-sameframe-sig-")
+				f2 = protowire.AppendTag(f2, 21, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "anthropic")
+
+				return [][]byte{f1, f2}
+			},
+			wantSignature: "CAQS-sameframe-sig-",
+			wantText:      "answer text",
+		},
+		{
+			name: "Summary_Text_Signature",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "thought text")
+
+				// Frame 2: text content
+				var f2 []byte
+				f2 = protowire.AppendTag(f2, 3, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "answer text")
+
+				// Frame 3: late signature
+				var f3 []byte
+				f3 = protowire.AppendTag(f3, 10, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "CAQS-late-signature-19B")
+				f3 = protowire.AppendTag(f3, 21, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "anthropic")
+
+				return [][]byte{f1, f2, f3}
+			},
+			wantSignature: "CAQS-late-signature-19B",
+			wantText:      "answer text",
+		},
+		{
+			name: "Summary_ToolCall_Signature",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "thinking about tools")
+
+				// Frame 2: tool call delta
+				var tc0 []byte
+				tc0 = protowire.AppendTag(tc0, 1, protowire.BytesType)
+				tc0 = protowire.AppendString(tc0, "call_1")
+				tc0 = protowire.AppendTag(tc0, 2, protowire.BytesType)
+				tc0 = protowire.AppendString(tc0, "bash")
+				tc0 = protowire.AppendTag(tc0, 3, protowire.BytesType)
+				tc0 = protowire.AppendString(tc0, `{"cmd":"ls"}`)
+				tc0 = protowire.AppendTag(tc0, 4, protowire.VarintType)
+				tc0 = protowire.AppendVarint(tc0, 0)
+
+				var f2 []byte
+				f2 = protowire.AppendTag(f2, 6, protowire.BytesType)
+				f2 = protowire.AppendBytes(f2, tc0)
+
+				// Frame 3: late signature
+				var f3 []byte
+				f3 = protowire.AppendTag(f3, 10, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "CAQS-tool-signature-19B")
+				f3 = protowire.AppendTag(f3, 21, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "anthropic")
+
+				return [][]byte{f1, f2, f3}
+			},
+			wantSignature: "CAQS-tool-signature-19B",
+			wantToolID:    "call_1",
+			wantToolName:  "bash",
+			wantToolArgs:  `{"cmd":"ls"}`,
+		},
+		{
+			name: "Summary_SplitSignature_Across_Text",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "thought text")
+
+				// Frame 2: signature fragment 1 + text content
+				var f2 []byte
+				f2 = protowire.AppendTag(f2, 10, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "CAQS-part1-")
+				f2 = protowire.AppendTag(f2, 3, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "answer text")
+
+				// Frame 3: signature fragment 2
+				var f3 []byte
+				f3 = protowire.AppendTag(f3, 10, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "part2-done")
+				f3 = protowire.AppendTag(f3, 21, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "anthropic")
+
+				return [][]byte{f1, f2, f3}
+			},
+			wantSignature: "CAQS-part1-part2-done",
+			wantText:      "answer text",
+		},
+		{
+			name: "Summary_SignatureFragment1_Text_SignatureFragment2_IndependentFrames",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "thought text")
+
+				// Frame 2: signature fragment 1
+				var f2 []byte
+				f2 = protowire.AppendTag(f2, 10, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "CAQS-seg1-")
+
+				// Frame 3: independent text frame without signature
+				var f3 []byte
+				f3 = protowire.AppendTag(f3, 3, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "interleaving text")
+
+				// Frame 4: signature fragment 2
+				var f4 []byte
+				f4 = protowire.AppendTag(f4, 10, protowire.BytesType)
+				f4 = protowire.AppendString(f4, "seg2-done")
+				f4 = protowire.AppendTag(f4, 21, protowire.BytesType)
+				f4 = protowire.AppendString(f4, "anthropic")
+
+				// Frame 5: subsequent text
+				var f5 []byte
+				f5 = protowire.AppendTag(f5, 3, protowire.BytesType)
+				f5 = protowire.AppendString(f5, " final text")
+
+				return [][]byte{f1, f2, f3, f4, f5}
+			},
+			wantSignature: "CAQS-seg1-seg2-done",
+			wantText:      "interleaving text final text",
+		},
+		{
+			name: "Summary_ManyTextFrames_LateSignature",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "thought text")
+
+				// 6 consecutive text frames with no signature
+				var frames [][]byte
+				frames = append(frames, f1)
+				for i := 1; i <= 6; i++ {
+					var ft []byte
+					ft = protowire.AppendTag(ft, 3, protowire.BytesType)
+					ft = protowire.AppendString(ft, fmt.Sprintf("text-%d ", i))
+					frames = append(frames, ft)
+				}
+
+				// Late signature arriving on frame 8
+				var fsig []byte
+				fsig = protowire.AppendTag(fsig, 10, protowire.BytesType)
+				fsig = protowire.AppendString(fsig, "CAQS-late-after-6-frames")
+				fsig = protowire.AppendTag(fsig, 21, protowire.BytesType)
+				fsig = protowire.AppendString(fsig, "anthropic")
+				frames = append(frames, fsig)
+
+				return frames
+			},
+			wantSignature: "CAQS-late-after-6-frames",
+			wantText:      "text-1 text-2 text-3 text-4 text-5 text-6 ",
+		},
+		{
+			name: "Summary_ToolCall_Signature_ToolCallContinuation",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "planning tool call")
+
+				// Frame 2: tool call 0 partial args
+				var tc0 []byte
+				tc0 = protowire.AppendTag(tc0, 1, protowire.BytesType)
+				tc0 = protowire.AppendString(tc0, "call_1")
+				tc0 = protowire.AppendTag(tc0, 2, protowire.BytesType)
+				tc0 = protowire.AppendString(tc0, "bash")
+				tc0 = protowire.AppendTag(tc0, 3, protowire.BytesType)
+				tc0 = protowire.AppendString(tc0, `{"command": "git`)
+				tc0 = protowire.AppendTag(tc0, 4, protowire.VarintType)
+				tc0 = protowire.AppendVarint(tc0, 0)
+				var f2 []byte
+				f2 = protowire.AppendTag(f2, 6, protowire.BytesType)
+				f2 = protowire.AppendBytes(f2, tc0)
+
+				// Frame 3: signature arriving between tool deltas
+				var f3 []byte
+				f3 = protowire.AppendTag(f3, 10, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "CAQS-interleaved-tool-sig")
+				f3 = protowire.AppendTag(f3, 21, protowire.BytesType)
+				f3 = protowire.AppendString(f3, "anthropic")
+
+				// Frame 4: tool call 0 continuation
+				var tc0Cont []byte
+				tc0Cont = protowire.AppendTag(tc0Cont, 3, protowire.BytesType)
+				tc0Cont = protowire.AppendString(tc0Cont, ` status"}`)
+				tc0Cont = protowire.AppendTag(tc0Cont, 4, protowire.VarintType)
+				tc0Cont = protowire.AppendVarint(tc0Cont, 0)
+				var f4 []byte
+				f4 = protowire.AppendTag(f4, 6, protowire.BytesType)
+				f4 = protowire.AppendBytes(f4, tc0Cont)
+
+				return [][]byte{f1, f2, f3, f4}
+			},
+			wantSignature: "CAQS-interleaved-tool-sig",
+			wantToolID:    "call_1",
+			wantToolName:  "bash",
+			wantToolArgs:  `{"command": "git status"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frames := tt.buildFrames()
+			var buf bytes.Buffer
+			for _, f := range frames {
+				buf.Write(helps.WrapConnectEnvelope(f))
+			}
+			buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+			e := &DevinExecutor{}
+			out := make(chan cliproxyexecutor.StreamChunk, 50)
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatClaude,
+				OriginalRequest: []byte(`{"model":"devin/swe-2","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+			}
+
+			go func() {
+				defer close(out)
+				e.streamDevinFrames(
+					context.Background(),
+					&buf,
+					cliproxyexecutor.Request{Model: "devin/swe-2", Payload: opts.OriginalRequest},
+					opts,
+					"swe-2-high",
+					sdktranslator.FormatClaude,
+					nil,
+					out,
+				)
+			}()
+
+			var accumulatedSig strings.Builder
+			var accumulatedThinking strings.Builder
+			var accumulatedText strings.Builder
+			var gotToolID string
+			var gotToolName string
+			var gotToolArgs strings.Builder
+
+			startedBlocks := make(map[int]string)
+			stoppedBlocks := make(map[int]bool)
+			activeBlock := -1
+
+			for chunk := range out {
+				if chunk.Err != nil {
+					t.Fatalf("unexpected chunk error: %v", chunk.Err)
+				}
+				lines := strings.Split(string(chunk.Payload), "\n")
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if strings.HasPrefix(line, "data: ") {
+						data := strings.TrimPrefix(line, "data: ")
+						data = strings.TrimSpace(data)
+						if data == "" || data == "[DONE]" {
+							continue
+						}
+						parsed := gjson.Parse(data)
+						eventType := parsed.Get("type").String()
+						switch eventType {
+						case "content_block_start":
+							idx := int(parsed.Get("index").Int())
+							bType := parsed.Get("content_block.type").String()
+							if _, exists := startedBlocks[idx]; exists {
+								t.Errorf("content_block_start for index %d duplicated", idx)
+							}
+							startedBlocks[idx] = bType
+							activeBlock = idx
+							if bType == "tool_use" {
+								gotToolID = parsed.Get("content_block.id").String()
+								gotToolName = parsed.Get("content_block.name").String()
+							}
+						case "content_block_delta":
+							idx := int(parsed.Get("index").Int())
+							if idx != activeBlock {
+								t.Errorf("delta index %d received while active block is %d", idx, activeBlock)
+							}
+							if stoppedBlocks[idx] {
+								t.Errorf("delta index %d received after block was stopped", idx)
+							}
+							deltaType := parsed.Get("delta.type").String()
+							switch deltaType {
+							case "thinking_delta":
+								accumulatedThinking.WriteString(parsed.Get("delta.thinking").String())
+							case "signature_delta":
+								sig := parsed.Get("delta.signature").String()
+								accumulatedSig.WriteString(sig)
+							case "text_delta":
+								accumulatedText.WriteString(parsed.Get("delta.text").String())
+							case "input_json_delta":
+								gotToolArgs.WriteString(parsed.Get("delta.partial_json").String())
+							}
+						case "content_block_stop":
+							idx := int(parsed.Get("index").Int())
+							if idx != activeBlock {
+								t.Errorf("content_block_stop index %d does not match active block %d", idx, activeBlock)
+							}
+							if stoppedBlocks[idx] {
+								t.Errorf("content_block_stop index %d duplicated", idx)
+							}
+							stoppedBlocks[idx] = true
+							activeBlock = -1
+						}
+					}
+				}
+			}
+
+			// Verify thinking
+			if accumulatedThinking.Len() == 0 {
+				t.Errorf("accumulated thinking is empty")
+			}
+
+			// Verify signature
+			if got := accumulatedSig.String(); got != tt.wantSignature {
+				t.Errorf("accumulated signature = %q, want %q", got, tt.wantSignature)
+			}
+
+			// Verify text if expected
+			if tt.wantText != "" {
+				if got := accumulatedText.String(); got != tt.wantText {
+					t.Errorf("accumulated text = %q, want %q", got, tt.wantText)
+				}
+			}
+
+			// Verify tool call if expected
+			if tt.wantToolID != "" {
+				if gotToolID != tt.wantToolID {
+					t.Errorf("tool ID = %q, want %q", gotToolID, tt.wantToolID)
+				}
+				if gotToolName != tt.wantToolName {
+					t.Errorf("tool name = %q, want %q", gotToolName, tt.wantToolName)
+				}
+				if got := gotToolArgs.String(); got != tt.wantToolArgs {
+					t.Errorf("tool args = %q, want %q", got, tt.wantToolArgs)
+				}
+			}
+
+			// Verify block closure integrity: every started block must be stopped
+			for idx, bType := range startedBlocks {
+				if !stoppedBlocks[idx] {
+					t.Errorf("block %d (type: %s) was started but never stopped", idx, bType)
+				}
+			}
+		})
+	}
+}
+
+func TestStreamDevinFrames_LateThinkingSignatures_TrailerErrorClosesBlocks(t *testing.T) {
+	tests := []struct {
+		name        string
+		buildFrames func() [][]byte
+		wantBlocks  map[int]string // expected started block types
+	}{
+		{
+			name: "TrailerError_WithBufferedText",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "thought text")
+
+				// Frame 2: text content
+				var f2 []byte
+				f2 = protowire.AppendTag(f2, 3, protowire.BytesType)
+				f2 = protowire.AppendString(f2, "answer text")
+
+				return [][]byte{f1, f2}
+			},
+			wantBlocks: map[int]string{
+				0: "thinking",
+				1: "text",
+			},
+		},
+		{
+			name: "TrailerError_WithBufferedToolCall",
+			buildFrames: func() [][]byte {
+				// Frame 1: thinking summary
+				var f1 []byte
+				f1 = protowire.AppendTag(f1, 9, protowire.BytesType)
+				f1 = protowire.AppendString(f1, "planning tool call")
+
+				// Frame 2: tool call delta
+				var tc0 []byte
+				tc0 = protowire.AppendTag(tc0, 1, protowire.BytesType)
+				tc0 = protowire.AppendString(tc0, "call_err")
+				tc0 = protowire.AppendTag(tc0, 2, protowire.BytesType)
+				tc0 = protowire.AppendString(tc0, "bash")
+				tc0 = protowire.AppendTag(tc0, 3, protowire.BytesType)
+				tc0 = protowire.AppendString(tc0, `{"cmd":"err"}`)
+				tc0 = protowire.AppendTag(tc0, 4, protowire.VarintType)
+				tc0 = protowire.AppendVarint(tc0, 0)
+
+				var f2 []byte
+				f2 = protowire.AppendTag(f2, 6, protowire.BytesType)
+				f2 = protowire.AppendBytes(f2, tc0)
+
+				return [][]byte{f1, f2}
+			},
+			wantBlocks: map[int]string{
+				0: "thinking",
+				1: "tool_use",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frames := tt.buildFrames()
+			var buf bytes.Buffer
+			for _, f := range frames {
+				buf.Write(helps.WrapConnectEnvelope(f))
+			}
+			// Connect trailer with error code 14 (UNAVAILABLE)
+			buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{"error":{"code":"unavailable","message":"server overload"}}`)))
+
+			e := &DevinExecutor{}
+			out := make(chan cliproxyexecutor.StreamChunk, 50)
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatClaude,
+				OriginalRequest: []byte(`{"model":"devin/swe-2","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+			}
+
+			go func() {
+				defer close(out)
+				e.streamDevinFrames(
+					context.Background(),
+					&buf,
+					cliproxyexecutor.Request{Model: "devin/swe-2", Payload: opts.OriginalRequest},
+					opts,
+					"swe-2-high",
+					sdktranslator.FormatClaude,
+					nil,
+					out,
+				)
+			}()
+
+			var sawChunkErr bool
+			startedBlocks := make(map[int]string)
+			stoppedBlocks := make(map[int]bool)
+
+			for chunk := range out {
+				if chunk.Err != nil {
+					// Verify that all started blocks were already stopped before the error chunk
+					for idx, bType := range startedBlocks {
+						if !stoppedBlocks[idx] {
+							t.Errorf("block %d (%s) was not stopped before stream error", idx, bType)
+						}
+					}
+					sawChunkErr = true
+					continue
+				}
+				lines := strings.Split(string(chunk.Payload), "\n")
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if strings.HasPrefix(line, "data: ") {
+						data := strings.TrimPrefix(line, "data: ")
+						data = strings.TrimSpace(data)
+						if data == "" || data == "[DONE]" {
+							continue
+						}
+						parsed := gjson.Parse(data)
+						eventType := parsed.Get("type").String()
+						if eventType == "content_block_start" {
+							idx := int(parsed.Get("index").Int())
+							startedBlocks[idx] = parsed.Get("content_block.type").String()
+						} else if eventType == "content_block_stop" {
+							idx := int(parsed.Get("index").Int())
+							stoppedBlocks[idx] = true
+						}
+					}
+				}
+			}
+
+			if !sawChunkErr {
+				t.Errorf("expected chunk error from trailer error, got none")
+			}
+
+			// Verify all expected blocks were started
+			for idx, wantType := range tt.wantBlocks {
+				if gotType := startedBlocks[idx]; gotType != wantType {
+					t.Errorf("block %d type = %q, want %q", idx, gotType, wantType)
+				}
+			}
+
+			// Verify that every block that was started was properly stopped
+			for idx, bType := range startedBlocks {
+				if !stoppedBlocks[idx] {
+					t.Errorf("block %d (type: %s) was started but NOT closed with content_block_stop before error exit", idx, bType)
+				}
+			}
+		})
+	}
+}
+
+func TestDevinExecutor_ResponsesNamespaceToolsFlattenedInUpstreamRequest(t *testing.T) {
+	responsesPayload := []byte(`{
+		"model": "devin/gemini-3-7-flash",
+		"tools": [
+			{
+				"type": "function",
+				"name": "exec_command",
+				"description": "Execute a command",
+				"parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+			},
+			{
+				"type": "namespace",
+				"name": "multi_agent_v1",
+				"description": "Multi agent tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "close_agent",
+						"description": "Close an agent",
+						"parameters": {"type": "object", "properties": {"target": {"type": "string"}}}
+					},
+					{
+						"type": "function",
+						"name": "resume_agent",
+						"description": "Resume an agent",
+						"parameters": {"type": "object", "properties": {"id": {"type": "string"}}}
+					}
+				]
+			}
+		],
+		"input": [
+			{"type": "message", "role": "user", "content": "hello"}
+		]
+	}`)
+
+	interactionsJSON := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatInteractions, "devin/gemini-3-7-flash", responsesPayload, false)
+	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, _, _ := parseInteractionsPayload(interactionsJSON, responsesPayload)
+
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools, got %d", len(tools))
+	}
+
+	for i, tool := range tools {
+		if tool.Name == "" {
+			t.Fatalf("tool %d has empty Name", i)
+		}
+	}
+
+	logBody := helps.BuildDevinUpstreamLogBody(
+		interactionsJSON,
+		false,
+		"gemini-3-7-flash",
+		systemPrompt,
+		prompts,
+		tools,
+		temp,
+		maxTokens,
+		sessionID,
+		cascadeID,
+	)
+
+	logBodyStr := string(logBody)
+	if strings.Contains(logBodyStr, `"name": ""`) {
+		t.Fatalf("devin upstream log body contains empty tool name: %s", logBodyStr)
+	}
+}
+
+func TestDevinExecutor_ResponsesToolsFilterAndObfuscate(t *testing.T) {
+	responsesPayload := []byte(`{
+		"model": "devin/swe-2",
+		"tools": [
+			{
+				"type": "namespace",
+				"name": "mcp__codex_app",
+				"description": "Codex App tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "automation_update",
+						"description": "Recurring automations",
+						"parameters": {"type": "object", "properties": {"id": {"type": "string"}}}
+					},
+					{
+						"type": "function",
+						"name": "read_resource",
+						"description": "Read a resource",
+						"parameters": {"type": "object", "properties": {"uri": {"type": "string"}}}
+					}
+				]
+			},
+			{
+				"type": "function",
+				"name": "exec_command",
+				"description": "Runs a command in a bash shell, returning output or a session ID for ongoing interaction.",
+				"parameters": {
+					"type": "object",
+					"properties": {"cmd": {"type": "string"}},
+					"required": ["cmd"]
+				}
+			},
+			{
+				"type": "function",
+				"name": "write_stdin",
+				"description": "Writes characters to an existing unified exec session and returns recent output.",
+				"parameters": {
+					"type": "object",
+					"properties": {"session_id": {"type": "string"}},
+					"required": ["session_id"]
+				}
+			}
+		],
+		"input": [
+			{"type": "message", "role": "user", "content": "hello"}
+		]
+	}`)
+
+	interactionsJSON := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatInteractions, "devin/swe-2", responsesPayload, false)
+	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, _, _ := parseInteractionsPayload(interactionsJSON, responsesPayload)
+
+	// 1. automation_update must be filtered out, leaving read_resource, exec_command, write_stdin
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools, got %d", len(tools))
+	}
+
+	for _, tool := range tools {
+		if strings.Contains(tool.Name, "automation_update") {
+			t.Fatalf("unexpected automation_update tool in Devin tools: %s", tool.Name)
+		}
+		if tool.Name == "exec_command" {
+			want := "Runs a command in a bash shell, returning output or an session ID for ongoing interaction."
+			if tool.Description != want {
+				t.Fatalf("exec_command description = %q, want %q", tool.Description, want)
+			}
+		}
+		if tool.Name == "write_stdin" {
+			want := "Writes characters to a existing unified exec session and returns recent output."
+			if tool.Description != want {
+				t.Fatalf("write_stdin description = %q, want %q", tool.Description, want)
+			}
+		}
+	}
+
+	logBody := helps.BuildDevinUpstreamLogBody(
+		interactionsJSON,
+		false,
+		"swe-2",
+		systemPrompt,
+		prompts,
+		tools,
+		temp,
+		maxTokens,
+		sessionID,
+		cascadeID,
+	)
+
+	logBodyStr := string(logBody)
+	if strings.Contains(logBodyStr, "automation_update") {
+		t.Fatalf("upstream log body should not contain automation_update: %s", logBodyStr)
+	}
+	if !strings.Contains(logBodyStr, "an session ID") {
+		t.Fatalf("upstream log body should contain 'an session ID': %s", logBodyStr)
+	}
+	if !strings.Contains(logBodyStr, "to a existing") {
+		t.Fatalf("upstream log body should contain 'to a existing': %s", logBodyStr)
+	}
+}
+
+func TestDevinExecutor_ToolResultImagesInInteractionsPayload(t *testing.T) {
+	interactionsJSON := []byte(`{
+		"model": "devin/swe-2",
+		"input": [
+			{
+				"type": "function_call",
+				"id": "tool_img_1",
+				"name": "screenshot"
+			},
+			{
+				"type": "function_result",
+				"call_id": "tool_img_1",
+				"result": [
+					{
+						"type": "text",
+						"text": "Screenshot captured"
+					},
+					{
+						"type": "image",
+						"mime_type": "image/png",
+						"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+					}
+				]
+			}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, nil)
+	var toolPrompt *helps.DevinPrompt
+	for i := range prompts {
+		if prompts[i].Source == 4 && prompts[i].ToolCallID == "tool_img_1" {
+			toolPrompt = &prompts[i]
+			break
+		}
+	}
+
+	if toolPrompt == nil {
+		t.Fatalf("expected tool_result prompt with ToolCallID tool_img_1")
+	}
+	if len(toolPrompt.Images) != 1 {
+		t.Fatalf("expected 1 image in toolPrompt.Images, got %d", len(toolPrompt.Images))
+	}
+	if toolPrompt.Images[0].MimeType != "image/png" {
+		t.Errorf("expected mime_type image/png, got %s", toolPrompt.Images[0].MimeType)
+	}
+	if toolPrompt.Images[0].Base64Data != "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" {
+		t.Errorf("unexpected base64 data: %s", toolPrompt.Images[0].Base64Data)
+	}
+	if !strings.Contains(toolPrompt.Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("expected content to contain image header, got: %s", toolPrompt.Content)
+	}
+}
+
+func TestDevinExecutor_SupplementImagesFromOriginalToolResult(t *testing.T) {
+	origRequest := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "tool_img_1", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_img_1",
+						"content": [
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "original-tool-result-base64"
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	prompts := []helps.DevinPrompt{
+		{
+			Source:     4,
+			ToolCallID: "tool_img_1",
+			Content:    "",
+		},
+	}
+
+	supplementImagesFromOriginal(origRequest, prompts)
+
+	if len(prompts[0].Images) != 1 {
+		t.Fatalf("expected 1 image supplemented to tool_result prompt, got %d", len(prompts[0].Images))
+	}
+	if prompts[0].Images[0].Base64Data != "original-tool-result-base64" {
+		t.Errorf("expected base64 'original-tool-result-base64', got %s", prompts[0].Images[0].Base64Data)
+	}
+	if prompts[0].Images[0].MimeType != "image/png" {
+		t.Errorf("expected mime_type 'image/png', got %s", prompts[0].Images[0].MimeType)
+	}
+	if !strings.Contains(prompts[0].Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("expected content to contain image header, got: %s", prompts[0].Content)
+	}
+}
+
+func TestDevinExecutor_SupplementImagesFromOriginalMultipleToolsNoCrossPollution(t *testing.T) {
+	origRequest := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_text_only", "name": "bash", "input": {"cmd": "ls"}},
+					{"type": "tool_use", "id": "call_with_image", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_text_only",
+						"content": "file1.txt\nfile2.txt"
+					},
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_with_image",
+						"content": [
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "screenshot-base64-data"
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	prompts := []helps.DevinPrompt{
+		{
+			Source:     4,
+			ToolCallID: "call_text_only",
+			Content:    "file1.txt\nfile2.txt",
+		},
+		{
+			Source:     4,
+			ToolCallID: "call_with_image",
+			Content:    "",
+		},
+	}
+
+	supplementImagesFromOriginal(origRequest, prompts)
+
+	// Tool A (text-only) must NOT receive any images
+	if len(prompts[0].Images) != 0 {
+		t.Fatalf("expected 0 images on text-only tool prompt, got %d", len(prompts[0].Images))
+	}
+	if strings.Contains(prompts[0].Content, "[Image ") {
+		t.Errorf("text-only tool prompt should not have image header: %s", prompts[0].Content)
+	}
+
+	// Tool B (screenshot) MUST receive its image
+	if len(prompts[1].Images) != 1 {
+		t.Fatalf("expected 1 image on screenshot tool prompt, got %d", len(prompts[1].Images))
+	}
+	if prompts[1].Images[0].Base64Data != "screenshot-base64-data" {
+		t.Errorf("screenshot tool image data mismatch: %s", prompts[1].Images[0].Base64Data)
+	}
+	if !strings.Contains(prompts[1].Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("screenshot tool prompt should contain image header: %s", prompts[1].Content)
+	}
+}
+
+func TestDevinExecutor_ClaudeToolResultEndToEnd(t *testing.T) {
+	claudeReq := []byte(`{
+		"model": "devin/swe-2",
+		"messages": [
+			{
+				"role": "user",
+				"content": "Inspect the screenshot returned by the tool."
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "tool_text_1", "name": "bash", "input": {"cmd": "pwd"}},
+					{"type": "tool_use", "id": "tool_image_1", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_text_1",
+						"content": "/workspace"
+					},
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_image_1",
+						"content": [
+							{
+								"type": "text",
+								"text": "Captured window"
+							},
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	// Real conversion from Claude request to Interactions format
+	interactionsJSON := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, true)
+
+	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, _, _ := parseInteractionsPayload(interactionsJSON, claudeReq)
+
+	var textToolPrompt *helps.DevinPrompt
+	var imageToolPrompt *helps.DevinPrompt
+	for i := range prompts {
+		if prompts[i].Source == 4 {
+			if prompts[i].ToolCallID == "tool_text_1" {
+				textToolPrompt = &prompts[i]
+			} else if prompts[i].ToolCallID == "tool_image_1" {
+				imageToolPrompt = &prompts[i]
+			}
+		}
+	}
+
+	if textToolPrompt == nil {
+		t.Fatalf("missing text tool prompt for tool_text_1")
+	}
+	if len(textToolPrompt.Images) != 0 {
+		t.Fatalf("text tool prompt should have 0 images, got %d", len(textToolPrompt.Images))
+	}
+
+	if imageToolPrompt == nil {
+		t.Fatalf("missing image tool prompt for tool_image_1")
+	}
+	if len(imageToolPrompt.Images) != 1 {
+		t.Fatalf("expected 1 image in imageToolPrompt, got %d", len(imageToolPrompt.Images))
+	}
+	if imageToolPrompt.Images[0].Base64Data != "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" {
+		t.Errorf("image data mismatch: %s", imageToolPrompt.Images[0].Base64Data)
+	}
+	if !strings.Contains(imageToolPrompt.Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("expected content to contain image header, got: %s", imageToolPrompt.Content)
+	}
+
+	// Verify upstream wire encoding
+	wireReq := helps.BuildDevinGetChatMessageRequest(
+		"test-token",
+		"test-seed",
+		"swe-2-medium",
+		systemPrompt,
+		prompts,
+		tools,
+		temp,
+		maxTokens,
+		sessionID,
+		cascadeID,
+		nil,
+	)
+	if len(wireReq) == 0 {
+		t.Fatalf("expected non-empty wire request")
+	}
+
+	// Verify wire-level decoded prompts and per-tool image associations
+	decoded := decodeWirePrompts(t, wireReq)
+	var wireTextToolPrompt *decodedWirePrompt
+	var wireImageToolPrompt *decodedWirePrompt
+	for i := range decoded {
+		if decoded[i].source == 4 {
+			if decoded[i].toolCallID == "tool_text_1" {
+				wireTextToolPrompt = &decoded[i]
+			} else if decoded[i].toolCallID == "tool_image_1" {
+				wireImageToolPrompt = &decoded[i]
+			}
+		}
+	}
+	if wireTextToolPrompt == nil {
+		t.Fatalf("missing tool_text_1 prompt in decoded wire request")
+	}
+	if len(wireTextToolPrompt.images) != 0 {
+		t.Fatalf("wire tool_text_1 prompt should have 0 images, got %d", len(wireTextToolPrompt.images))
+	}
+	if wireImageToolPrompt == nil {
+		t.Fatalf("missing tool_image_1 prompt in decoded wire request")
+	}
+	if len(wireImageToolPrompt.images) != 1 {
+		t.Fatalf("wire tool_image_1 prompt should have 1 image, got %d", len(wireImageToolPrompt.images))
+	}
+	if wireImageToolPrompt.images[0].Base64Data != "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" {
+		t.Errorf("wire image data mismatch: %s", wireImageToolPrompt.images[0].Base64Data)
+	}
+	if wireImageToolPrompt.images[0].MimeType != "image/png" {
+		t.Errorf("wire image mime mismatch: %s", wireImageToolPrompt.images[0].MimeType)
+	}
+
+	// Verify upstream log body
+	logBody := helps.BuildDevinUpstreamLogBody(
+		interactionsJSON,
+		true,
+		"swe-2-medium",
+		systemPrompt,
+		prompts,
+		tools,
+		temp,
+		maxTokens,
+		sessionID,
+		cascadeID,
+	)
+	logBodyStr := string(logBody)
+	if !strings.Contains(logBodyStr, `"mime_type": "image/png"`) || !strings.Contains(logBodyStr, `"data_len": 96`) {
+		t.Fatalf("expected log body to contain image log entry with data_len, got: %s", logBodyStr)
+	}
+}
+
+type decodedWirePrompt struct {
+	source     int
+	content    string
+	toolCallID string
+	images     []helps.DevinImage
+}
+
+func decodeWirePrompts(t *testing.T, reqBytes []byte) []decodedWirePrompt {
+	t.Helper()
+	var decoded []decodedWirePrompt
+	b := reqBytes
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			break
+		}
+		b = b[n:]
+		if num == 3 && typ == protowire.BytesType {
+			promptBytes, m := protowire.ConsumeBytes(b)
+			if m < 0 {
+				t.Fatalf("failed to consume prompt bytes")
+			}
+			b = b[m:]
+
+			var p decodedWirePrompt
+			pb := promptBytes
+			for len(pb) > 0 {
+				pnum, ptyp, pn := protowire.ConsumeTag(pb)
+				if pn < 0 {
+					break
+				}
+				pb = pb[pn:]
+				switch {
+				case pnum == 2 && ptyp == protowire.VarintType:
+					val, vm := protowire.ConsumeVarint(pb)
+					if vm < 0 {
+						break
+					}
+					p.source = int(val)
+					pb = pb[vm:]
+				case pnum == 3 && ptyp == protowire.BytesType:
+					val, vm := protowire.ConsumeString(pb)
+					if vm < 0 {
+						break
+					}
+					p.content = val
+					pb = pb[vm:]
+				case pnum == 7 && ptyp == protowire.BytesType:
+					val, vm := protowire.ConsumeString(pb)
+					if vm < 0 {
+						break
+					}
+					p.toolCallID = val
+					pb = pb[vm:]
+				case pnum == 10 && ptyp == protowire.BytesType:
+					imgBytes, vm := protowire.ConsumeBytes(pb)
+					if vm < 0 {
+						break
+					}
+					pb = pb[vm:]
+					var img helps.DevinImage
+					ib := imgBytes
+					for len(ib) > 0 {
+						inum, ityp, in := protowire.ConsumeTag(ib)
+						if in < 0 {
+							break
+						}
+						ib = ib[in:]
+						if inum == 1 && ityp == protowire.BytesType {
+							s, im := protowire.ConsumeString(ib)
+							if im < 0 {
+								break
+							}
+							img.Base64Data = s
+							ib = ib[im:]
+						} else if inum == 2 && ityp == protowire.BytesType {
+							s, im := protowire.ConsumeString(ib)
+							if im < 0 {
+								break
+							}
+							img.MimeType = s
+							ib = ib[im:]
+						} else {
+							im := protowire.ConsumeFieldValue(inum, ityp, ib)
+							if im < 0 {
+								break
+							}
+							ib = ib[im:]
+						}
+					}
+					p.images = append(p.images, img)
+				default:
+					vm := protowire.ConsumeFieldValue(pnum, ptyp, pb)
+					if vm < 0 {
+						break
+					}
+					pb = pb[vm:]
+				}
+			}
+			decoded = append(decoded, p)
+		} else {
+			m := protowire.ConsumeFieldValue(num, typ, b)
+			if m < 0 {
+				break
+			}
+			b = b[m:]
+		}
+	}
+	return decoded
+}
+
+func TestDevinExecutor_FunctionResultMixedStructuredAndBusinessJSON(t *testing.T) {
+	interactionsJSON := []byte(`{
+		"model": "devin/swe-2",
+		"input": [
+			{
+				"type": "function_result",
+				"call_id": "call_mixed",
+				"result": [
+					{"type": "text", "text": "log output"},
+					{"exit_code": 0, "status": "ok"}
+				]
+			}
+		]
+	}`)
+
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, nil)
+	if len(prompts) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(prompts))
+	}
+	if !strings.Contains(prompts[0].Content, "log output") {
+		t.Errorf("content missing text part: %s", prompts[0].Content)
+	}
+	if !strings.Contains(prompts[0].Content, `{"exit_code": 0, "status": "ok"}`) {
+		t.Errorf("content missing business JSON part: %s", prompts[0].Content)
+	}
+}
+
+func TestDevinExecutor_FunctionResultBusinessObjectWithTextFieldPreserved(t *testing.T) {
+	// Case 1: Array contains only a business object with a "text" field, should preserve full JSON
+	payloadOnlyBusiness := []byte(`{
+		"model": "devin/swe-2",
+		"input": [
+			{
+				"type": "function_result",
+				"call_id": "call_err",
+				"result": [
+					{"text": "failed", "exit_code": 1, "retryable": true}
+				]
+			}
+		]
+	}`)
+
+	_, prompts1, _, _, _, _, _, _, _ := parseInteractionsPayload(payloadOnlyBusiness, nil)
+	if len(prompts1) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(prompts1))
+	}
+	if !strings.Contains(prompts1[0].Content, `"exit_code": 1`) || !strings.Contains(prompts1[0].Content, `"retryable": true`) {
+		t.Errorf("expected business object fields to be preserved, got: %s", prompts1[0].Content)
+	}
+
+	// Case 2: Array contains image and business object with a "text" field
+	payloadWithImage := []byte(`{
+		"model": "devin/swe-2",
+		"input": [
+			{
+				"type": "function_result",
+				"call_id": "call_img_err",
+				"result": [
+					{
+						"type": "image",
+						"mime_type": "image/png",
+						"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+					},
+					{"text": "failed", "exit_code": 1, "retryable": true}
+				]
+			}
+		]
+	}`)
+
+	_, prompts2, _, _, _, _, _, _, _ := parseInteractionsPayload(payloadWithImage, nil)
+	if len(prompts2) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(prompts2))
+	}
+	if len(prompts2[0].Images) != 1 {
+		t.Fatalf("expected 1 image in prompt, got %d", len(prompts2[0].Images))
+	}
+	if !strings.Contains(prompts2[0].Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("expected image header, got: %s", prompts2[0].Content)
+	}
+	if !strings.Contains(prompts2[0].Content, `"exit_code": 1`) || !strings.Contains(prompts2[0].Content, `"retryable": true`) {
+		t.Errorf("expected business object fields to be preserved in mixed array, got: %s", prompts2[0].Content)
+	}
+}
+
+func TestDevinExecutor_ClaudeToolResultMixedBusinessJSONEndToEnd(t *testing.T) {
+	claudeReq := []byte(`{
+		"model": "devin/swe-2",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "tool_mixed_1", "name": "run_test", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "tool_mixed_1",
+						"content": [
+							{"type": "text", "text": "Test suite finished"},
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+								}
+							},
+							{"text": "failed", "exit_code": 1, "retryable": true}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	interactionsJSON := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, false)
+	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, claudeReq)
+
+	if len(prompts) != 2 {
+		t.Fatalf("expected 2 prompts (assistant call + tool result), got %d", len(prompts))
+	}
+	toolPrompt := prompts[1]
+	if toolPrompt.Source != 4 || toolPrompt.ToolCallID != "tool_mixed_1" {
+		t.Fatalf("expected tool prompt with ToolCallID tool_mixed_1, got source %d, id %s", toolPrompt.Source, toolPrompt.ToolCallID)
+	}
+	if len(toolPrompt.Images) != 1 {
+		t.Fatalf("expected 1 image in toolPrompt, got %d", len(toolPrompt.Images))
+	}
+	if !strings.Contains(toolPrompt.Content, "[Image 1: pasted_image_1.png]") {
+		t.Errorf("content missing image header: %s", toolPrompt.Content)
+	}
+	if !strings.Contains(toolPrompt.Content, "Test suite finished") {
+		t.Errorf("content missing text part: %s", toolPrompt.Content)
+	}
+	if !strings.Contains(toolPrompt.Content, `"exit_code": 1`) || !strings.Contains(toolPrompt.Content, `"retryable": true`) {
+		t.Errorf("content missing business object fields: %s", toolPrompt.Content)
+	}
+}
+
+func TestDevinExecutor_SupplementImagesEdgeCases(t *testing.T) {
+	t.Run("mismatched_tool_id_no_images_attached", func(t *testing.T) {
+		origRequest := []byte(`{
+			"messages": [
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "tool_result",
+							"tool_use_id": "call_expected_1",
+							"content": [
+								{
+									"type": "image",
+									"source": {"type": "base64", "media_type": "image/png", "data": "img-data"}
+								}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		prompts := []helps.DevinPrompt{
+			{
+				Source:     4,
+				ToolCallID: "call_different_2",
+				Content:    "some result",
+			},
+		}
+
+		supplementImagesFromOriginal(origRequest, prompts)
+		if len(prompts[0].Images) != 0 {
+			t.Fatalf("expected 0 images for mismatched tool id, got %d", len(prompts[0].Images))
+		}
+	})
+
+	t.Run("multiple_images_in_single_tool_result", func(t *testing.T) {
+		origRequest := []byte(`{
+			"messages": [
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "tool_result",
+							"tool_use_id": "call_multi_img",
+							"content": [
+								{
+									"type": "image",
+									"source": {"type": "base64", "media_type": "image/png", "data": "img-1"}
+								},
+								{
+									"type": "image",
+									"source": {"type": "base64", "media_type": "image/jpeg", "data": "img-2"}
+								}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		prompts := []helps.DevinPrompt{
+			{
+				Source:     4,
+				ToolCallID: "call_multi_img",
+				Content:    "",
+			},
+		}
+
+		supplementImagesFromOriginal(origRequest, prompts)
+		if len(prompts[0].Images) != 2 {
+			t.Fatalf("expected 2 images, got %d", len(prompts[0].Images))
+		}
+		if !strings.Contains(prompts[0].Content, "[Image 1: pasted_image_1.png]") {
+			t.Errorf("missing header for image 1: %s", prompts[0].Content)
+		}
+		if !strings.Contains(prompts[0].Content, "[Image 2: pasted_image_2.jpg]") {
+			t.Errorf("missing header for image 2: %s", prompts[0].Content)
+		}
+	})
 }

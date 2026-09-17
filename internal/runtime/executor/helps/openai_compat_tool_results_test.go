@@ -1,11 +1,151 @@
 package helps
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/tidwall/gjson"
 )
+
+func TestNormalizeOpenAIToolResultsTextOnlyRelayedImages(t *testing.T) {
+	t.Run("synthetic relay message is dropped and tool is marked", func(t *testing.T) {
+		input := []byte(`{"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"inspect_image","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"image inspected"},
+			{"role":"user","content":[
+				{"type":"text","text":"Images returned by the preceding tool call(s):"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}
+			]}
+		]}`)
+
+		got := NormalizeOpenAIToolResultsTextOnly(input)
+		if strings.Contains(string(got), "image_url") {
+			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
+		}
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("expected 2 messages after dropping synthetic relay user message, got %d: %s", len(messages), string(got))
+		}
+		if gotContent := messages[1].Get("content").String(); gotContent != "image inspected\n\n"+openAIToolResultImageOmittedText {
+			t.Fatalf("tool content = %q, want %q", gotContent, "image inspected\n\n"+openAIToolResultImageOmittedText)
+		}
+	})
+
+	t.Run("placeholder tool content is replaced with omitted marker", func(t *testing.T) {
+		input := []byte(`{"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"inspect_image","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"[Tool returned image content; the images follow in the next user message.]"},
+			{"role":"user","content":[
+				{"type":"text","text":"Images returned by the preceding tool call(s):"},
+				{"type":"image_url","image_url":{"url":"https://example.com/img.png"}}
+			]}
+		]}`)
+
+		got := NormalizeOpenAIToolResultsTextOnly(input)
+		if strings.Contains(string(got), "image_url") {
+			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
+		}
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("expected 2 messages, got %d: %s", len(messages), string(got))
+		}
+		if gotContent := messages[1].Get("content").String(); gotContent != openAIToolResultImageOmittedText {
+			t.Fatalf("tool content = %q, want %q", gotContent, openAIToolResultImageOmittedText)
+		}
+	})
+
+	t.Run("merged user message retains user prompt while stripping relay images", func(t *testing.T) {
+		input := []byte(`{"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"inspect_image","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"image inspected"},
+			{"role":"user","content":[
+				{"type":"text","text":"Images returned by the preceding tool call(s):"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}},
+				{"type":"text","text":"What color is the car?"}
+			]}
+		]}`)
+
+		got := NormalizeOpenAIToolResultsTextOnly(input)
+		if strings.Contains(string(got), "image_url") {
+			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
+		}
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages when user text is present, got %d: %s", len(messages), string(got))
+		}
+		if gotContent := messages[1].Get("content").String(); gotContent != "image inspected\n\n"+openAIToolResultImageOmittedText {
+			t.Fatalf("tool content = %q, want %q", gotContent, "image inspected\n\n"+openAIToolResultImageOmittedText)
+		}
+		userContent := messages[2].Get("content").Raw
+		if strings.Contains(userContent, claudeToolResultImageRelayNotice) {
+			t.Fatalf("user content still has relay notice: %s", userContent)
+		}
+		if !strings.Contains(userContent, "What color is the car?") {
+			t.Fatalf("user text was lost: %s", userContent)
+		}
+	})
+
+	t.Run("multiple preceding tools where one is placeholder", func(t *testing.T) {
+		input := []byte(`{"messages":[
+			{"role":"assistant","content":"","tool_calls":[
+				{"id":"call_1","type":"function","function":{"name":"tool1","arguments":"{}"}},
+				{"id":"call_2","type":"function","function":{"name":"tool2","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_1","content":"text result only"},
+			{"role":"tool","tool_call_id":"call_2","content":"[Tool returned image content; the images follow in the next user message.]"},
+			{"role":"user","content":[
+				{"type":"text","text":"Images returned by the preceding tool call(s):"},
+				{"type":"image_url","image_url":{"url":"https://example.com/tool2.png"}}
+			]}
+		]}`)
+
+		got := NormalizeOpenAIToolResultsTextOnly(input)
+		if strings.Contains(string(got), "image_url") {
+			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
+		}
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %d: %s", len(messages), string(got))
+		}
+		if got1 := messages[1].Get("content").String(); got1 != "text result only" {
+			t.Fatalf("tool 1 content = %q, want 'text result only'", got1)
+		}
+		if got2 := messages[2].Get("content").String(); got2 != openAIToolResultImageOmittedText {
+			t.Fatalf("tool 2 content = %q, want %q", got2, openAIToolResultImageOmittedText)
+		}
+	})
+
+	t.Run("multiple preceding tools where image tool precedes text tool", func(t *testing.T) {
+		input := []byte(`{"messages":[
+			{"role":"assistant","content":"","tool_calls":[
+				{"id":"call_1","type":"function","function":{"name":"tool1","arguments":"{}"}},
+				{"id":"call_2","type":"function","function":{"name":"tool2","arguments":"{}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_1","content":"[Tool returned image content; the images follow in the next user message.]"},
+			{"role":"tool","tool_call_id":"call_2","content":"text result only"},
+			{"role":"user","content":[
+				{"type":"text","text":"Images returned by the preceding tool call(s):"},
+				{"type":"image_url","image_url":{"url":"https://example.com/tool1.png"}}
+			]}
+		]}`)
+
+		got := NormalizeOpenAIToolResultsTextOnly(input)
+		if strings.Contains(string(got), "image_url") {
+			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
+		}
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %d: %s", len(messages), string(got))
+		}
+		if got1 := messages[1].Get("content").String(); got1 != openAIToolResultImageOmittedText {
+			t.Fatalf("tool 1 content = %q, want %q", got1, openAIToolResultImageOmittedText)
+		}
+		if got2 := messages[2].Get("content").String(); got2 != "text result only" {
+			t.Fatalf("tool 2 content = %q, want 'text result only'", got2)
+		}
+	})
+}
 
 func TestNormalizeOpenAIToolResultsTextOnly(t *testing.T) {
 	input := []byte(`{"messages":[

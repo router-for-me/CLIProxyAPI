@@ -239,7 +239,7 @@ Quotio のクロスプラットフォーム（Tauri）移植版（Windows / macO
 
 Claude、ChatGPT/Codex、Antigravity、Grok、Kimi のサブスクリプションを GitHub Copilot Chat のネイティブ言語モデルとして利用できる VS Code 拡張機能です。Git のコミットメッセージ、チャットタイトル、要約の生成にも使えます。CLIProxyAPI を完全管理されたバックグラウンドライフサイクル（ダウンロード、検証、監視）で実行し、すべてのウィンドウで共有するため、セットアップは不要です。API キーは不要で、OAuth だけで利用できます。
 
-### [CPA-Tray-Powershell](https://github.com/IQ-Director/CPA-Tray-Powershell)
+### [CPA-Tray-Powershell](https://github.com/ztzpro/CPA-Tray-Powershell.git)
 
 PowerShellベースのWindows向けCLIProxyAPIシステムトレイランチャー。コンソールウィンドウを表示せずにバックグラウンドで実行し、管理ページを開き、管理ウィンドウを閉じた後もバックエンドを維持してトレイからページを再表示できます。起動時のCLIProxyAPI更新確認、SHA-256検証と失敗時のロールバック、ワンクリックでのCLIProxyAPI再起動と更新、PID検証に基づくプロセス管理、安全なサービス停止にも対応しています。
 
@@ -262,6 +262,14 @@ CLIProxyAPI のローカル OpenAI 互換エンドポイントをモデルプロ
 ### [Infinitus](https://github.com/deathemperor/infinitus)
 
 CLIProxyAPI の Management API 経由で複数の Claude アカウントを管理するネイティブ macOS メニューバーアプリ（claude-swap と 9Router にも対応）。5 時間 / 7 日 / モデル別のクォータゲージ、ポップアップからの切り替え / 保留 / スター、現在のペースから各ウィンドウが尽きる時刻を予測する機能に加え、iPhone からも同じ状態を確認できます。
+
+### [PiCloud](https://github.com/cookerpapa/pi-cloud)
+
+Pi SDK をベースにしたセルフホスト型コーディングエージェント基盤。Web UI、並列サブエージェント、CubeSandbox KVM ワークスペースを備えています。CLIProxyAPI をモデルプロバイダーへのゲートウェイとして利用し、プロバイダーの認証情報をゲストのワークスペースから分離します。
+
+### [cc-status-line](https://github.com/kinka/cc-status-line)
+
+Claude Code のステータスライン。現在の CPA インスタンスに対応する Codex / Grok / Antigravity / Claude のアカウント別クォータ（5h / 7d / 週）とリセットまでの時間を表示します。`ANTHROPIC_BASE_URL` でインスタンスを選び、Management API 経由でクォータを取得します。
 
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
