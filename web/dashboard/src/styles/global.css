@@ -5034,3 +5034,57 @@ button.ghost:hover:not(:disabled) {
   color: var(--text-dim);
   font-size: 12px;
 }
+
+/* Quota panel (/dashboard/quota) ----------------------------------------- */
+.quota-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.quota-card {
+  padding: 14px 16px;
+  border-left: 3px solid var(--border);
+  transition: border-color 120ms ease;
+}
+
+.quota-card--over {
+  border-left-color: var(--accent-red, #ef4444);
+}
+
+.quota-card__head {
+  align-items: flex-start;
+}
+
+.quota-card__subtitle {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.quota-bar {
+  position: relative;
+  height: 8px;
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.quota-bar__fill {
+  height: 100%;
+  background: var(--accent, #5eead4);
+  border-radius: 4px;
+  transition: width 200ms ease;
+}
+
+.quota-bar--warn .quota-bar__fill {
+  background: #f59e0b;
+}
+
+.quota-bar--over .quota-bar__fill {
+  background: #ef4444;
+}

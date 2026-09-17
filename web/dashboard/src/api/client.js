@@ -2312,3 +2312,20 @@ export async function getLogs({ cursor, limit = 1000, after } = {}) {
 export async function clearLogs() {
   return fetchJSON('/logs', { method: 'DELETE' });
 }
+
+// --- Quota share (round-2 /docs/plans/2026-09-17-omniroute-round-2-...) ---
+//
+// getAuthQuota returns the per-window + per-model quota snapshot for one
+// auth. Used by the per-auth drill-down card on the Quota dashboard.
+// Returns { auth_id, channel, pool_strategy, windows[], models[], partial }.
+export async function getAuthQuota(authID) {
+  return fetchJSON(`/auths/${encodeURIComponent(authID)}/quota`);
+}
+
+// getPoolQuota returns the per-window + per-model quota snapshot summed
+// across one pool (identified by the round-1 (channel:rowID) compound key,
+// matching PoolBreaker / PoolStrategyForProviderKeys). Returns { pool_key,
+// windows[], models[], auths[], partial }.
+export async function getPoolQuota(poolKey) {
+  return fetchJSON(`/pools/${encodeURIComponent(poolKey)}/quota`);
+}

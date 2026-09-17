@@ -45,6 +45,7 @@ import RuntimeConfigPage from './pages/RuntimeConfigPage.jsx';
 import ConfigRevisionsPage from './pages/ConfigRevisionsPage.jsx';
 import ConfigImportsPage from './pages/ConfigImportsPage.jsx';
 import LiteLLMPage from './pages/litellm/LiteLLMPage.jsx';
+import QuotaPage from './pages/Quota.jsx';
 import { ToastProvider } from './components/Toast.jsx';
 import AlertsDropdown from './components/AlertsDropdown.jsx';
 
@@ -312,6 +313,7 @@ export default function App() {
               <Route path="imports" element={<ConfigImportsPage />} />
             </Route>
             <Route path="/litellm" element={<LiteLLMPage />} />
+            <Route path="/quota" element={<QuotaPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

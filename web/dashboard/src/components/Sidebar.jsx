@@ -446,6 +446,7 @@ const NAV_GROUPS = [
       { to: '/session-affinity', label: 'Session Affinity', icon: 'link' },
       { to: '/upstream-sync-log', label: 'Sync Log', icon: 'sync' },
       { to: '/model-health', label: 'Model Health', icon: 'pulse' },
+      { to: '/quota', label: 'Quota', icon: 'meter' },
       { to: '/analysis/auto-routers', label: 'Auto Router', icon: 'route' },
     ],
   },
@@ -564,4 +565,5 @@ const ICON_MAP = {
   archive: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="12" height="3" rx="0.5" /><path d="M3 6v6.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6" /><path d="M6.5 9h3" /></svg>,
   chat: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2.5 4.5A1.5 1.5 0 0 1 4 3h8a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 11H6.5L4 13.5V11H4a1.5 1.5 0 0 1-1.5-1.5v-5z" /><path d="M5.5 6.5h5M5.5 8.5h3" /></svg>,
   terminal: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2" /><path d="M4 6l2.5 2.5L4 11M8.5 11h3.5" /></svg>,
+  meter: <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2.5 13A5.5 5.5 0 0 1 13.5 13" /><path d="M8 13L10.5 7" strokeLinejoin="round" /><circle cx="8" cy="13" r="0.8" fill="currentColor" stroke="none" /></svg>,
 };

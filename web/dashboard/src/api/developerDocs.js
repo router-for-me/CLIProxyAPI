@@ -823,6 +823,43 @@ export const sections = [
       },
     ],
   },
+
+  // =========================================================================
+  // 5. Quota Share
+  // =========================================================================
+  {
+    id: 'quota-share',
+    title: 'Quota Share',
+    description:
+      'Live per-window headroom for upstream provider pools, aggregated from the PG usage_windows table. ' +
+      'Pools are identified by the round-1 (channel:rowID) compound key (mirrors PoolBreaker / ' +
+      'PoolStrategyForProviderKeys). All routes return 503 when the PG store is not configured. ' +
+      'A 2s query timeout returns 200 + partial=true so a single slow PG row never blacks out the ' +
+      'panel.',
+    endpoints: [
+      {
+        method: 'GET', path: '/auths/:id/quota', summary: 'Live per-window quota for one auth.',
+        params: [{ name: 'id', in: 'path', type: 'string', required: true, default: '', description: 'Auth id.' }],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/auths/auth-1/quota" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{\n  "auth_id": "auth-1",\n  "channel": "openai",\n  "pool_strategy": "fallback",\n  "windows": [\n    { "size": "1m", "used": 12345, "limit": 1000000, "headroom_pct": 98.8, "over_limit": false },\n    { "size": "1h", "used": 200000, "limit": 5000000, "headroom_pct": 96.0, "over_limit": false },\n    { "size": "1d", "used": 1500000, "limit": 50000000, "headroom_pct": 97.0, "over_limit": false }\n  ],\n  "models": [\n    { "model": "gpt-5", "used_1h": 80000, "limit_1h": 1000000 }\n  ],\n  "partial": false\n}` },
+          { status: 503, label: 'PG store not configured', body: `{"error":"PG storage not enabled"}` },
+        ],
+      },
+      {
+        method: 'GET', path: '/pools/:key/quota', summary: 'Live per-window quota summed across one pool.',
+        params: [{ name: 'key', in: 'path', type: 'string', required: true, default: '', description: 'Pool key in (channel:rowID) compound form (e.g. "oauth:openai:5"). The auths[] brief lists every contributing auth id; empty when the pool has no live auths.' }],
+        examplePayload: null,
+        exampleCurl: `curl -s "${'{API_BASE}'}/pools/oauth%3Aopenai%3A5/quota" \\\n  -H "Authorization: Bearer $MGMT_SECRET"`,
+        responses: [
+          { status: 200, label: 'OK', body: `{\n  "pool_key": "oauth:openai:5",\n  "windows": [\n    { "size": "1m", "used": 60000, "limit": 1000000, "headroom_pct": 94.0, "over_limit": false },\n    { "size": "1h", "used": 800000, "limit": 5000000, "headroom_pct": 84.0, "over_limit": false }\n  ],\n  "models": [\n    { "model": "gpt-4o", "used_1h": 500000, "limit_1h": 4000000 }\n  ],\n  "auths": [\n    { "auth_id": "auth-1", "channel": "openai", "pool_strategy": "fallback" },\n    { "auth_id": "auth-2", "channel": "openai", "pool_strategy": "fallback" }\n  ],\n  "partial": false\n}` },
+          { status: 200, label: 'Partial (timeout)', body: `{"pool_key":"oauth:openai:5","windows":[...],"models":[],"auths":[...],"partial":true}` },
+          { status: 503, label: 'PG store not configured', body: `{"error":"PG storage not enabled"}` },
+        ],
+      },
+    ],
+  },
   // NOTE: Management API Token endpoints (/api-tokens, /api-tokens/audit-log,
   // etc.) are intentionally omitted from the public Developer docs. Token
   // lifecycle is managed via the dashboard's "API Management" page, which
