@@ -14,6 +14,8 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/configsnapshot"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/configstore"
+	pgconfigstore "github.com/router-for-me/CLIProxyAPI/v7/internal/configstore/pg"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	log "github.com/sirupsen/logrus"
 )
@@ -37,6 +39,89 @@ type ImportConfigOptions struct {
 	Replace bool
 	// Timeout bounds the whole command; zero uses the 60s default.
 	Timeout time.Duration
+}
+
+// ApplyConfigFile is the shared import core used by both the `-import-config`
+// CLI and the boot-time auto-import path. It loads the YAML config at
+// sourcePath, converts it to a normalized resource plan, applies the plan to
+// pg in one transaction, and then seeds the runtime_config singleton with the
+// bootstrap snapshot (revision 1) plus the matching config_imports audit row.
+//
+// pg must already be connected and have EnsureSchema applied; the caller
+// retains ownership. The audit trail records mode ("import-config" or
+// "boot-auto-import") and the source path so the dashboard can distinguish
+// manual imports from boot-time seeding.
+//
+// Failure semantics: resource rows and the snapshot are committed in
+// separate transactions (the repository owns the singleton write), so a
+// snapshot failure leaves resources committed without an active revision.
+// Re-running the import re-applies resources idempotently (stable child
+// identity matching) and can still seed the snapshot.
+func ApplyConfigFile(ctx context.Context, sourcePath string, pg *store.PostgresStore, mode string) error {
+	sourcePath = strings.TrimSpace(sourcePath)
+	if sourcePath == "" {
+		return fmt.Errorf("import-config: missing source path")
+	}
+	if strings.TrimSpace(mode) == "" {
+		mode = "import-config"
+	}
+
+	// Load and parse the YAML config using the same parser the runtime uses
+	// so defaults/normalization apply identically.
+	cfg, err := config.LoadConfig(sourcePath)
+	if err != nil {
+		return fmt.Errorf("import-config: parse %s: %w", sourcePath, err)
+	}
+	if cfg == nil {
+		return fmt.Errorf("import-config: nil cfg from %s", sourcePath)
+	}
+
+	plan, errPlan := configsnapshot.BuildResourcePlan(cfg)
+	if errPlan != nil {
+		return fmt.Errorf("import-config: build plan: %w", errPlan)
+	}
+	if len(plan.Report.Errors) > 0 {
+		for key, msgs := range plan.Report.Errors {
+			for _, msg := range msgs {
+				log.Errorf("import-config: plan error %s: %s", key, msg)
+			}
+		}
+		return fmt.Errorf("import-config: plan has %d error(s); refusing to apply", len(plan.Report.Errors))
+	}
+
+	if err := pg.ApplyNormalizedResourcePlan(ctx, plan); err != nil {
+		return fmt.Errorf("import-config: apply plan: %w", err)
+	}
+
+	// Seed the runtime_config singleton so the PG-first boot path
+	// (runtimebridge.LoadConfigFromSnapshot) sees an active revision. The
+	// snapshot carries the scalar runtime projection only; resources live in
+	// the normalized tables applied above.
+	snap, errSnap := configsnapshot.SnapshotFromConfig(cfg)
+	if errSnap != nil {
+		return fmt.Errorf("import-config: build snapshot: %w", errSnap)
+	}
+	repo := pgconfigstore.Open(pg)
+	saved, errSave := repo.Save(ctx, 0, &snap, configstore.SaveAudit{
+		Actor:        mode,
+		Reason:       fmt.Sprintf("%s from %s", mode, sourcePath),
+		Source:       mode,
+		ImportSource: sourcePath,
+		Mode:         mode,
+	})
+	if errSave != nil {
+		return fmt.Errorf("import-config: seed runtime_config: %w", errSave)
+	}
+
+	total := len(plan.Providers) + len(plan.APIKeys)
+	log.Infof("import-config: committed %d resource(s) and seeded runtime_config revision %d (mode=%s, source=%s)",
+		total, saved.Revision, mode, sourcePath)
+	for kind, actions := range plan.Report.Counts {
+		for action, n := range actions {
+			log.Infof("import-config: %s/%s = %d", kind, action, n)
+		}
+	}
+	return nil
 }
 
 // DoImportConfig executes the import-config command. It returns the number
@@ -63,10 +148,14 @@ func DoImportConfig(ctx context.Context, opts ImportConfigOptions) (int, error) 
 	}
 
 	// Load and parse the YAML config using the same parser the runtime uses
-	// so defaults/normalization apply identically.
+	// so defaults/normalization apply identically. The dry-run path needs
+	// only the plan, so parse + plan first and return before connecting.
 	cfg, err := config.LoadConfig(sourcePath)
 	if err != nil {
 		return 0, fmt.Errorf("import-config: parse %s: %w", sourcePath, err)
+	}
+	if cfg == nil {
+		return 0, fmt.Errorf("import-config: nil cfg from %s", sourcePath)
 	}
 
 	plan, errPlan := configsnapshot.BuildResourcePlan(cfg)
@@ -122,16 +211,8 @@ func DoImportConfig(ctx context.Context, opts ImportConfigOptions) (int, error) 
 		return 0, fmt.Errorf("import-config: ensure schema: %w", errSchema)
 	}
 
-	if err := pg.ApplyNormalizedResourcePlan(ctx, plan); err != nil {
-		return 0, fmt.Errorf("import-config: apply plan: %w", err)
+	if err := ApplyConfigFile(ctx, sourcePath, pg, "import-config"); err != nil {
+		return 0, err
 	}
-
-	total := len(plan.Providers) + len(plan.APIKeys)
-	log.Infof("import-config: committed %d resource(s) to schema %q", total, schema)
-	for kind, actions := range plan.Report.Counts {
-		for action, n := range actions {
-			log.Infof("import-config: %s/%s = %d", kind, action, n)
-		}
-	}
-	return total, nil
+	return len(plan.Providers) + len(plan.APIKeys), nil
 }

@@ -11,7 +11,16 @@
 // capitalized keys.
 package configsnapshot
 
-import "time"
+import (
+	"bytes"
+	"errors"
+	"fmt"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"time"
+)
 
 // Snapshot is the canonical, immutable view of a NixLLM configuration
 // revision. It is the value the repository returns to the runtime, the
@@ -112,4 +121,55 @@ func NewEmpty() Snapshot {
 		ResourceRefs:  []ResourceRef{},
 		UpdatedSource: "system",
 	}
+}
+
+// SnapshotFromConfig projects a parsed *config.Config into a bootstrap
+// Snapshot for the initial import / boot auto-import paths.
+//
+// Settings receives the scalar runtime projection: the YAML top-level keys
+// that appear in the scalarKeys allowlist. Every other top-level key lands
+// in Extra, except the reserved "__extra" envelope which cannot occur in a
+// fresh yaml.Marshal of *config.Config and is rejected defensively.
+// ResourceRefs stays empty: normalized tables (upstream providers, client
+// API keys, ...) are the source of truth for resources, mirroring the
+// resource_snapshot='{}' convention the pg repository persists.
+//
+// Revision is 0 (the repository's bootstrap Save assigns revision 1) and
+// UpdatedSource is "cli-import" so the audit trail reflects where this
+// snapshot originated.
+func SnapshotFromConfig(cfg *config.Config) (Snapshot, error) {
+	if cfg == nil {
+		return Snapshot{}, errors.New("configsnapshot: SnapshotFromConfig: cfg is nil")
+	}
+	empty := NewEmpty()
+	empty.UpdatedSource = "cli-import"
+	raw, err := yaml.Marshal(cfg)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("configsnapshot: marshal config for projection: %w", err)
+	}
+	var root map[string]any
+	if err := yaml.NewDecoder(bytes.NewReader(raw)).Decode(&root); err != nil {
+		if errors.Is(err, ErrEmptyYAML) {
+			return empty, nil
+		}
+		return Snapshot{}, fmt.Errorf("configsnapshot: decode projected yaml: %w", err)
+	}
+	if root == nil {
+		return empty, nil
+	}
+	for k, v := range root {
+		nv, errNorm := normalizeYAMLValue(v)
+		if errNorm != nil {
+			return Snapshot{}, fmt.Errorf("configsnapshot: normalize %s: %w", k, errNorm)
+		}
+		if k == extraEnvelope {
+			return Snapshot{}, fmt.Errorf("configsnapshot: %s cannot occur in a projected config; refusing to guess", extraEnvelope)
+		}
+		if _, known := scalarKeySet[k]; known {
+			empty.Settings[k] = nv
+		} else {
+			empty.Extra[k] = nv
+		}
+	}
+	return empty, nil
 }

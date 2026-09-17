@@ -32,6 +32,7 @@ func Open(pg *store.PostgresStore) configstore.Repository {
 		schema:    pg.Schema(),
 		table:     pg.RuntimeConfigTable(),
 		revisions: pg.ConfigRevisionsTable(),
+		imports:   pg.ConfigImportsTable(),
 	}
 }
 
@@ -40,6 +41,7 @@ type pgRepo struct {
 	schema    string
 	table     string
 	revisions string
+	imports   string
 }
 
 // Load reads the active runtime_config singleton. When the singleton is
@@ -193,6 +195,28 @@ func (r *pgRepo) Save(ctx context.Context, expected int64, candidate *configsnap
 		VALUES ($1, $2::jsonb, $3::jsonb, $4, NOW(), $5, $6)
 	`, r.revisions), newRevision, settingsJSON, resourceSnapshot, checksum, actorArg, reason); err != nil {
 		return nil, fmt.Errorf("configstore.pg: insert config_revisions: %w", err)
+	}
+
+	// The bootstrap path (expected==0) also records one config_imports audit
+	// row in the same transaction, so the dashboard's import history shows
+	// how the singleton was first populated. Non-bootstrap saves (dashboard
+	// edits, rollbacks) do not touch the import audit trail.
+	if expected == 0 {
+		importMode := audit.Mode
+		if strings.TrimSpace(importMode) == "" {
+			importMode = "dashboard"
+		}
+		var sourceLabel any
+		if strings.TrimSpace(audit.ImportSource) != "" {
+			sourceLabel = audit.ImportSource
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			INSERT INTO %s (source_label, source_checksum, canonical_checksum, status, revision,
+			                resource_counts, error_summary, actor, mode)
+			VALUES ($1, '', $2, 'committed', $3, '{}'::jsonb, NULL, $4, $5)
+		`, r.imports), sourceLabel, checksum, newRevision, actorArg, importMode); err != nil {
+			return nil, fmt.Errorf("configstore.pg: insert config_imports audit: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

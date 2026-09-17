@@ -183,6 +183,13 @@ func normalizeYAMLValue(v any) (any, error) {
 // loss-lossy that flattens Settings vs Extra semantics.
 const extraEnvelope = "__extra"
 
+// ErrEmptyYAML is returned by SnapshotFromConfig when the projected config
+// marshals to empty/whitespace-only YAML. The bootstrap projector treats the
+// empty case as a benign no-op and returns a NewEmpty snapshot without
+// erroring the import; explicit UnmarshalYAML callers continue to fail
+// loudly via the same wrapped error.
+var ErrEmptyYAML = errors.New("configsnapshot: empty yaml payload")
+
 // buildRoot composes the ordered root map that MarshalYAML hands to the
 // yaml.v3 encoder. Known Settings come first, in scalarKeys order; unknown
 // Extra keys follow in sorted order under the reserved __extra envelope so

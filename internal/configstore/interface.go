@@ -22,10 +22,22 @@ import (
 // implementation defaults to "dashboard" (matching the existing CLI
 // conventions). Callers that want the rollback path to record its own
 // channel pass Source: "rollback" explicitly.
+//
+// The bootstrap path of the pg implementation (expected==0) additionally
+// records one config_imports audit row; ImportSource and Mode populate
+// that row's source_label and mode columns respectively. Both are optional
+// and only meaningful on the bootstrap path.
 type SaveAudit struct {
 	Actor  string
 	Reason string
 	Source string
+	// ImportSource is the on-disk YAML path (or other human label) the
+	// bootstrap import originated from. Empty leaves source_label NULL.
+	ImportSource string
+	// Mode names the calling CLI surface (e.g. "import-config",
+	// "boot-auto-import"). Empty defaults to "dashboard" so non-import
+	// saves do not mislabel the audit trail.
+	Mode string
 }
 
 // Repository is the control-plane interface for reading and writing the

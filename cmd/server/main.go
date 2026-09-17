@@ -485,7 +485,10 @@ func main() {
 		usePostgresStore = false
 		useObjectStore = false
 		useGitStore = false
-	} else if usePostgresStore {
+	} else if usePostgresStore && importConfig == "" {
+		// The -import-config command mode skips the boot path entirely:
+		// it opens its own store connection and must not race with (or be
+		// pre-empted by) the boot auto-import below.
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
 		}
@@ -515,10 +518,31 @@ func main() {
 
 		// Phase 2 PG-first boot path. When runtime_config has an active
 		// revision, render an ephemeral bridge so the file-bound core can
-		// consume it. Otherwise fall through to the legacy spool flow or
-		// fail closed when no legacy file is present.
+		// consume it. Otherwise auto-import a legacy config.yaml when one
+		// exists (boot decision matrix: DSN set + PG empty + legacy file),
+		// or fall back to the legacy spool flow / fail closed when no
+		// legacy file is present.
 		runtimeCfg := runtimeconfig.New(pgStoreInst)
 		snapshotCfg, snapErr := runtimebridge.LoadConfigFromSnapshot(context.Background(), runtimeCfg)
+		if snapErr != nil {
+			// runtime_config has no active revision. Auto-import the legacy
+			// config when one exists at the resolved path so a first boot
+			// with PGSTORE_DSN set seeds the control plane transparently.
+			legacyPath := configPath
+			if strings.TrimSpace(legacyPath) == "" {
+				legacyPath = filepath.Join(wd, "config.yaml")
+			}
+			if _, statErr := os.Stat(legacyPath); statErr == nil {
+				log.Infof("postgres-backed runtime_config empty; auto-importing legacy config from %s", legacyPath)
+				if errImport := cmd.ApplyConfigFile(context.Background(), legacyPath, pgStoreInst, "boot-auto-import"); errImport != nil {
+					log.Errorf("postgres-backed auto-import failed: %v", errImport)
+				} else {
+					// Re-attempt the snapshot load; on success fall through
+					// to the bridge path below.
+					snapshotCfg, snapErr = runtimebridge.LoadConfigFromSnapshot(context.Background(), runtimeCfg)
+				}
+			}
+		}
 		if snapErr == nil {
 			// The bridge requires a SnapshotRenderer; we render straight
 			// from the loaded *config.Config so the file is generated from
@@ -540,7 +564,7 @@ func main() {
 				cfg.AuthDir = pgStoreInst.AuthDir()
 				log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
 			} else {
-				log.Warnf("postgres-backed snapshot not ready and legacy config.yaml missing; use 'nixllm -import-config config.yaml' to bootstrap: %v", snapErr)
+				log.Warnf("postgres-backed snapshot not ready and no legacy config.yaml at %s; run 'nixllm -import-config config.yaml' or place a config.yaml at the -config path to bootstrap: %v", configPath, snapErr)
 			}
 		}
 	} else if useObjectStore {
@@ -739,7 +763,10 @@ func main() {
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
-	if usePostgresStore {
+	// The -import-config command mode skips the PG boot path (pgStoreInst
+	// stays nil), so it registers the plain file token store; the command
+	// exits before any auth flow can run.
+	if usePostgresStore && pgStoreInst != nil {
 		sdkAuth.RegisterTokenStore(pgStoreInst)
 	} else if useObjectStore {
 		sdkAuth.RegisterTokenStore(objectStoreInst)
@@ -767,7 +794,7 @@ func main() {
 		policySvc            policy.PolicyService
 		usageFlusher         *store.UsageFlusher
 	)
-	if usePostgresStore {
+	if usePostgresStore && pgStoreInst != nil {
 		pgAPIKeyStore = store.NewAPIKeyStore(pgStoreInst)
 		pgUsageStore = store.NewUsageStore(pgStoreInst)
 		pgModelsStore = store.NewModelsStore(pgStoreInst)
@@ -1002,11 +1029,16 @@ func main() {
 	// Handle different command modes based on the provided flags.
 
 	if importConfig != "" {
-		// Handle one-shot PG-first import-config command
-		cmd.DoImportConfig(context.Background(), cmd.ImportConfigOptions{
+		// Handle one-shot PG-first import-config command. Failures must be
+		// loud and non-zero: a silent import failure leaves the PG control
+		// plane unseeded and the next boot fails closed with no hint why.
+		if _, errImport := cmd.DoImportConfig(context.Background(), cmd.ImportConfigOptions{
 			SourcePath: importConfig,
 			DryRun:     importConfigDryRun,
-		})
+		}); errImport != nil {
+			log.Errorf("import-config failed: %v", errImport)
+			os.Exit(1)
+		}
 	} else if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport, vertexImportPrefix)

@@ -738,3 +738,79 @@ func TestPackageTypesReachableFromInternalConfigstore(t *testing.T) {
 		_ *configstore.RevisionConflictError = &configstore.RevisionConflictError{}
 	)
 }
+
+// TestSaveBootstrapRecordsImportAudit verifies the bootstrap Save path
+// (expected==0) records exactly one config_imports row with the audit
+// metadata, and that non-bootstrap saves do not append to the import
+// audit trail.
+func TestSaveBootstrapRecordsImportAudit(t *testing.T) {
+	repo, pg := newTestRepo(t, "test_repo_save_import_audit")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	candidate := configsnapshot.NewEmpty()
+	candidate.Settings["port"] = 8317
+
+	saved, err := repo.Save(ctx, 0, &candidate, configstore.SaveAudit{
+		Actor:        "tester",
+		Reason:       "bootstrap",
+		Source:       "import-config",
+		ImportSource: "bootstrap.yaml",
+		Mode:         "import-config",
+	})
+	if err != nil {
+		t.Fatalf("bootstrap Save: %v", err)
+	}
+	if saved.Revision != 1 {
+		t.Fatalf("saved.Revision = %d, want 1", saved.Revision)
+	}
+
+	var (
+		status       string
+		revision     int64
+		sourceLabel  *string
+		mode         string
+		importsCount int
+	)
+	if err := pg.DB().QueryRowContext(ctx,
+		"SELECT status, revision, source_label, mode FROM "+pg.ConfigImportsTable(),
+	).Scan(&status, &revision, &sourceLabel, &mode); err != nil {
+		t.Fatalf("scan config_imports row: %v", err)
+	}
+	if status != "committed" {
+		t.Fatalf("status = %q, want committed", status)
+	}
+	if revision != 1 {
+		t.Fatalf("import revision = %d, want 1", revision)
+	}
+	if sourceLabel == nil || *sourceLabel != "bootstrap.yaml" {
+		t.Fatalf("source_label = %v, want bootstrap.yaml", sourceLabel)
+	}
+	if mode != "import-config" {
+		t.Fatalf("mode = %q, want import-config", mode)
+	}
+	if err := pg.DB().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+pg.ConfigImportsTable(),
+	).Scan(&importsCount); err != nil {
+		t.Fatalf("count config_imports: %v", err)
+	}
+	if importsCount != 1 {
+		t.Fatalf("config_imports rows = %d, want 1", importsCount)
+	}
+
+	// A non-bootstrap save must not add another import audit row.
+	next := configsnapshot.NewEmpty()
+	next.Settings["port"] = 9090
+	if _, err := repo.Save(ctx, 1, &next, configstore.SaveAudit{Actor: "tester", Reason: "second"}); err != nil {
+		t.Fatalf("second Save: %v", err)
+	}
+	if err := pg.DB().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM "+pg.ConfigImportsTable(),
+	).Scan(&importsCount); err != nil {
+		t.Fatalf("count config_imports after second save: %v", err)
+	}
+	if importsCount != 1 {
+		t.Fatalf("config_imports rows after non-bootstrap save = %d, want 1", importsCount)
+	}
+}
