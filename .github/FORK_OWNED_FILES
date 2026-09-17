@@ -1,0 +1,88 @@
+# Fork-owned files and fork edits inside upstream files.
+#
+# This list is the secondary guardrail behind the conflict abort in
+# sync-upstream.yml. On any merge conflict the sync aborts and opens a
+# `sync`-labeled issue. But a *clean* merge can still silently overwrite fork
+# code when upstream is not touching the same lines — the merge succeeds, the
+# fork's change vanishes, and nobody notices until a provider stops working.
+#
+# So: after every clean merge, sync-upstream.yml verifies that each file below
+# still exists on `sync` and still contains its survival marker. If a marker is
+# gone, the sync fails, opens an issue, and refuses to push.
+#
+# Each entry: <path>  ::  <survival-marker-string>
+#
+# When you add or change a fork-owned file:
+#   1. Add the file here with a marker UNIQUE TO THE FORK — an exported
+#      identifier, config field, or literal that upstream does not contain.
+#      Verify it with:
+#          grep -c -F '<marker>' <path>                      # must be > 0
+#          git show upstream/main:<path> | grep -c -F '<marker>'   # must be 0
+#   2. Re-run the sync workflow (`workflow_dispatch`) to confirm it still passes.
+#
+# Do not remove entries unless the fork feature was intentionally retired AND
+# the upstream merge removed the source code.
+
+# --- kiro provider (auth + executor + translators) ---
+internal/auth/kiro/oauth.go                                :: KiroTokenResponse
+internal/auth/kiro/codewhisperer_client.go                 :: CodeWhispererClient
+internal/auth/kiro/rate_limiter.go                         :: TokenState
+internal/runtime/executor/kiro_executor.go                 :: retryableHTTPStatusCodes
+internal/translator/kiro/claude/kiro_claude.go             :: ConvertKiroStreamToClaude
+internal/translator/kiro/openai/kiro_openai.go             :: ConvertKiroStreamToOpenAI
+internal/cmd/kiro_login.go                                 :: DoKiroLogin
+sdk/auth/kiro.go                                           :: extractKiroIdentifier
+
+# --- cursor provider ---
+internal/auth/cursor/oauth.go                              :: AuthParams
+internal/runtime/executor/cursor_executor.go               :: CursorExecutor
+
+# --- codebuddy provider ---
+internal/auth/codebuddy/codebuddy_auth.go                  :: CodeBuddyAuth
+internal/runtime/executor/codebuddy_executor.go            :: CodeBuddyExecutor
+
+# --- github copilot provider ---
+internal/auth/copilot/copilot_auth.go                      :: CopilotAPIToken
+internal/runtime/executor/github_copilot_executor.go       :: GitHubCopilotExecutor
+
+# --- gitlab duo provider ---
+internal/auth/gitlab/gitlab.go                             :: PKCECodes
+internal/runtime/executor/gitlab_executor.go               :: GitLabExecutor
+
+# --- kilo provider ---
+internal/auth/kilo/kilo_auth.go                            :: DeviceAuthResponse
+internal/runtime/executor/kilo_executor.go                 :: KiloExecutor
+internal/registry/kilo_models.go                           :: KiloModel
+
+# --- gemini-cli provider ---
+internal/runtime/executor/gemini_cli_executor.go           :: geminiOAuthScopes
+
+# --- dedicated model providers (spec 002) + provider parse styles ---
+internal/registry/dedicated_provider_models.go             :: openCodeCuratedWindows
+internal/registry/provider_models.go                       :: ProviderParseStyle
+sdk/api/handlers/openai/endpoint_compat.go                 :: resolveEndpointOverride
+
+# --- fork OAuth model alias defaults ---
+internal/config/oauth_model_alias_defaults.go              :: defaultKiroAliases
+
+# --- AMP module registry (V2 route modules) ---
+internal/api/modules/modules.go                            :: RouteModuleV2
+
+# --- management API: API key creation ---
+internal/api/handlers/management/api_keys_post.go          :: PostAPIKey
+
+# --- Fork edits INSIDE files that also exist upstream.
+#     These are the dangerous ones: nothing conflicts, upstream just wins the
+#     hunk and the fork's provider plumbing disappears.
+internal/config/config.go                                  :: KiroPreferredEndpoint
+internal/api/handlers/management/auth_files.go             :: RequestKiroToken
+internal/registry/model_registry.go                        :: SupportedEndpoints
+sdk/cliproxy/service.go                                    :: KiroAuth
+config.example.yaml                                        :: kiro
+
+# --- Model-exclusion selection guard (bug fallback-disabled-accounts, PR #18).
+#     Upstream solves the same defect at model-registration time instead of at
+#     selection time, so a naive upstream merge would drop this guard.
+sdk/cliproxy/auth/selector.go                              :: authExcludedForModel
+sdk/cliproxy/auth/classification.go                        :: AttributeExcludedModels
+internal/watcher/synthesizer/helpers.go                    :: AttributeExcludedModels
