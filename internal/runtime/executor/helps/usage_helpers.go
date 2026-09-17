@@ -24,6 +24,7 @@ import (
 )
 
 type UsageReporter struct {
+	ctx                 context.Context
 	provider            string
 	baseURL             string
 	executorType        string
@@ -63,6 +64,7 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 	}
 	reporter := NewUsageReporter(ctx, provider, model, auth)
 	reporter.executorType = ExecutorTypeName(executor)
+	reporter.bindUpstreamResponseModelFamily()
 	return reporter
 }
 
@@ -94,6 +96,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		}
 	}
 	reporter := &UsageReporter{
+		ctx:             ctx,
 		provider:        provider,
 		baseURL:         baseURL,
 		model:           model,
@@ -114,7 +117,15 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.authIndex = auth.EnsureIndex()
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
 	}
+	reporter.bindUpstreamResponseModelFamily()
 	return reporter
+}
+
+func (r *UsageReporter) bindUpstreamResponseModelFamily() {
+	if r == nil {
+		return
+	}
+	usage.BindUpstreamResponseModelFamily(r.ctx, usage.MapExecutorToExtractionFamily(r.provider, r.executorType))
 }
 
 // SetStream records whether the request was executed in streaming mode.
@@ -445,30 +456,31 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
 	return usage.Record{
-		Provider:            r.provider,
-		BaseURL:             r.baseURL,
-		ExecutorType:        r.executorType,
-		Model:               model,
-		Alias:               r.alias,
-		Source:              r.source,
-		APIKey:              r.apiKey,
-		SessionID:           r.sessionID,
-		ParentSessionID:     r.parentSessionID,
-		AuthID:              r.authID,
-		AuthIndex:           r.authIndex,
-		AccessTokenSHA256:   r.accessTokenFingerprint(),
-		AuthType:            r.authType,
-		ReasoningEffort:     r.reasoning,
-		ServiceTier:         r.serviceTier,
-		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
-		Generate:            usage.GenerateFlag(r.generate),
-		Stream:              r.stream,
-		RequestedAt:         r.requestedAt,
-		Latency:             r.latency(),
-		TTFT:                r.ttftDuration(),
-		Failed:              failed,
-		Fail:                fail,
-		Detail:              detail,
+		Provider:              r.provider,
+		BaseURL:               r.baseURL,
+		ExecutorType:          r.executorType,
+		Model:                 model,
+		Alias:                 r.alias,
+		UpstreamResponseModel: usage.UpstreamResponseModelFromContext(r.ctx),
+		Source:                r.source,
+		APIKey:                r.apiKey,
+		SessionID:             r.sessionID,
+		ParentSessionID:       r.parentSessionID,
+		AuthID:                r.authID,
+		AuthIndex:             r.authIndex,
+		AccessTokenSHA256:     r.accessTokenFingerprint(),
+		AuthType:              r.authType,
+		ReasoningEffort:       r.reasoning,
+		ServiceTier:           r.serviceTier,
+		ResponseServiceTier:   strings.TrimSpace(detail.ResponseServiceTier),
+		Generate:              usage.GenerateFlag(r.generate),
+		Stream:                r.stream,
+		RequestedAt:           r.requestedAt,
+		Latency:               r.latency(),
+		TTFT:                  r.ttftDuration(),
+		Failed:                failed,
+		Fail:                  fail,
+		Detail:                detail,
 	}
 }
 

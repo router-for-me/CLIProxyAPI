@@ -1179,3 +1179,42 @@ func TestUsageReporterPropagatesBaseURL(t *testing.T) {
 		t.Fatalf("recordNilAuth.BaseURL = %q, want empty", recordNilAuth.BaseURL)
 	}
 }
+
+func TestUsageReporterBuildRecordCopiesObservedModel(t *testing.T) {
+	ctx := usage.BeginUpstreamResponseModelObservation(context.Background())
+	usage.ObserveUpstreamResponseModel(ctx, "gpt-5.4", true)
+	reporter := NewUsageReporter(ctx, "openai", "mapped-model", nil)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+	if record.UpstreamResponseModel != "gpt-5.4" {
+		t.Fatalf("got %q, want gpt-5.4", record.UpstreamResponseModel)
+	}
+}
+
+func TestUsageReporterPublishFailureKeepsObservedModel(t *testing.T) {
+	ctx := usage.BeginUpstreamResponseModelObservation(context.Background())
+	usage.ObserveUpstreamResponseModel(ctx, "err-model", true)
+	reporter := NewUsageReporter(ctx, "openai", "mapped-model", nil)
+	record := reporter.buildRecord(usage.Detail{}, true, usage.Failure{StatusCode: 500})
+	if record.UpstreamResponseModel != "err-model" {
+		t.Fatalf("got %q, want err-model", record.UpstreamResponseModel)
+	}
+}
+
+func TestNewUsageReporterBindsClaudeFamily(t *testing.T) {
+	ctx := usage.BeginUpstreamResponseModelObservation(context.Background())
+	_ = NewUsageReporter(ctx, "claude", "claude-sonnet-4-6", nil)
+	ObserveUpstreamResponseBytes(ctx, []byte(`{"model":"claude-first"}`))
+	ObserveUpstreamResponseBytes(ctx, []byte(`{"type":"response.completed","response":{"model":"claude-later"}}`))
+	if got := usage.UpstreamResponseModelFromContext(ctx); got != "claude-first" {
+		t.Fatalf("got %q, want claude-first", got)
+	}
+}
+
+func TestUsageReporterBuildRecordEmptyWithoutObservation(t *testing.T) {
+	ctx := usage.BeginUpstreamResponseModelObservation(context.Background())
+	reporter := NewUsageReporter(ctx, "openai", "mapped-model", nil)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+	if record.UpstreamResponseModel != "" {
+		t.Fatalf("got %q, want empty", record.UpstreamResponseModel)
+	}
+}

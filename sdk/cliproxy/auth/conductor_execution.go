@@ -25,6 +25,7 @@ import (
 
 func newUpstreamAttemptContext(ctx context.Context) context.Context {
 	ctx = logging.WithFreshResponseHeadersHolder(ctx)
+	ctx = coreusage.BeginUpstreamResponseModelObservation(ctx)
 	return cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
 }
 
