@@ -18,16 +18,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// ApplyNormalizedResourcePlan applies a plan transactionally. It is the
-// single owner of Phase 1 Task 8 Step 2 import writes: it begins one
-// *sql.Tx, matches existing parent rows by stable identity, persists parent
-// rows, then mirrors child collections (models, headers, excluded models,
-// API-key entries) without churning stable child IDs, and finally upserts
-// global client API keys. Any error rolls back every resource and the
-// plan's Report records the outcome.
-//
-// The plan is the input contract from the planner; this function does not
-// mutate it. It only consumes its Provider and APIKey slices.
 func (s *PostgresStore) ApplyNormalizedResourcePlan(
 	ctx context.Context,
 	plan *NormalizedResourcePlan,

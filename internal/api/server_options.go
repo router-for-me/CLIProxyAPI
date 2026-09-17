@@ -86,6 +86,11 @@ type PgStoreHandles struct {
 	// failure) for the Analysis → Upstream Providers page. nil when PG is not
 	// configured — the /upstream-sync-log routes return 503 in that case.
 	SyncLog *store.SyncLogStore
+	// PG is the raw PostgresStore handle. The runtime-config management
+	// routes use it for expected_revision optimistic concurrency and
+	// config_revisions/config_imports history. nil when PG is not configured
+	// — the runtime-config routes return 503 in that case.
+	PG *store.PostgresStore
 	// ModelGroups is the PG-backed store for reusable Model Group templates
 	// (allowed-models grant lists + per-model upstream routing). nil when PG
 	// is not configured — the /model-groups routes return 503 in that case.

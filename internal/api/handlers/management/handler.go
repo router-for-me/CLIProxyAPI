@@ -196,6 +196,12 @@ type Handler struct {
 	// sealed master API key + last-sync outcome). nil when PG is not configured
 	// — the /litellm/settings and /litellm/sync/run routes return 503.
 	litellmSync *store.LiteLLMSyncStore
+
+	// pgControl is the raw PostgresStore handle used by the runtime-config
+	// management routes (GET/POST /runtime-config, /config-revisions,
+	// /config-imports). nil when PG is not configured — those routes return
+	// 503 in that case.
+	pgControl *store.PostgresStore
 }
 
 type configReloadSnapshot struct {

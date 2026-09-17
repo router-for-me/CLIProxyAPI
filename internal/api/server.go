@@ -236,6 +236,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// when the PG backend is inactive.
 	if handles := optionState.pgStores; handles != nil {
 		s.mgmt.SetPostgresStores(handles.APIKeys, handles.Usage, handles.Models, handles.PGSync, handles.Policy)
+		s.mgmt.SetPGControl(handles.PG)
 		s.mgmt.SetErrorMessagesStore(handles.ErrorMessages)
 		s.mgmt.SetPricingSourcesStore(handles.PricingSources, handles.PricingSourcesDir)
 		s.mgmt.SetUserStore(handles.Users)
