@@ -1320,6 +1320,42 @@ export function listConfigImports({ limit = 50 } = {}) {
   return cpaFetch(`/config-imports?limit=${encodeURIComponent(limit)}`);
 }
 
+// --- Revision-conflict helper (PG-first control plane) ----------------------
+//
+// `extractRevisionConflict(err)` parses a 409 Conflict response from the
+// runtime-config management routes into a structured object the dashboard
+// can render in the RevisionConflictModal. Returns `null` when the error
+// is not a revision conflict (so callers can fall through to a generic
+// error toast).
+export function extractRevisionConflict(err) {
+  if (!(err instanceof ApiError) || err.status !== 409) return null;
+  const payload = err.payload || {};
+  if (payload.error !== 'revision_conflict') return null;
+  return {
+    activeRevision: Number(payload.active_revision) || 0,
+    expected: Number(payload.expected) || 0,
+  };
+}
+
+// `redactConfigSnapshot(yaml)` strips the value of any top-level scalar
+// whose key is `secret-key` or `api-key`, mirroring the server-side
+// redactor in `internal/cmd/export_config.go:redactSecrets`. Used by the
+// dashboard diff viewer and the snapshot export button so secrets never
+// reach the browser console.
+export function redactConfigSnapshot(yaml) {
+  if (!yaml || typeof yaml !== 'string') return yaml;
+  const out = [];
+  for (const raw of yaml.split('\n')) {
+    const m = /^(?<indent>\s*)(?<key>secret-key|api-key)\s*:\s*(?<rest>.*)$/.exec(raw);
+    if (!m) {
+      out.push(raw);
+      continue;
+    }
+    out.push(`${m.groups.indent}${m.groups.key}: <redacted>`);
+  }
+  return out.join('\n');
+}
+
 // --- Branding (root GET / HTML page) ----------------------------------------
 //
 // Branding customizes the HTML page served at GET /. When all four fields are

@@ -16,7 +16,9 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 const TABS = [
   { to: '/manage-cpa', label: 'Overview', end: true },
   { to: '/manage-cpa/providers', label: 'AI Providers' },
-  { to: '/manage-cpa/raw-config', label: 'Raw Config' },
+  { to: '/manage-cpa/runtime-config', label: 'Runtime Config' },
+  { to: '/manage-cpa/revisions', label: 'Revisions' },
+  { to: '/manage-cpa/imports', label: 'Imports' },
 ];
 
 export default function ManageCpaLayout() {
@@ -28,7 +30,8 @@ export default function ManageCpaLayout() {
           <h1 className="main__title">Manage CPA</h1>
           <div className="main__subtitle">
             Operate the running NixLLM server: inspect config, manage
-            every AI provider account, and edit <code>config.yaml</code> in place.
+            every AI provider account, and edit the runtime settings
+            backed by the PG-first control plane.
           </div>
         </div>
         <div className="row gap-sm">

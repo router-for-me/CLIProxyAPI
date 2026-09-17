@@ -41,7 +41,9 @@ import PlaygroundPage from './pages/PlaygroundPage.jsx';
 import ManageCpaLayout from './pages/manage-cpa/ManageCpaLayout.jsx';
 import OverviewTab from './pages/manage-cpa/OverviewTab.jsx';
 import ProvidersTab from './pages/manage-cpa/ProvidersTab.jsx';
-import RawConfigTab from './pages/manage-cpa/RawConfigTab.jsx';
+import RuntimeConfigPage from './pages/RuntimeConfigPage.jsx';
+import ConfigRevisionsPage from './pages/ConfigRevisionsPage.jsx';
+import ConfigImportsPage from './pages/ConfigImportsPage.jsx';
 import LiteLLMPage from './pages/litellm/LiteLLMPage.jsx';
 import { ToastProvider } from './components/Toast.jsx';
 import AlertsDropdown from './components/AlertsDropdown.jsx';
@@ -305,7 +307,9 @@ export default function App() {
             <Route path="/manage-cpa" element={<ManageCpaLayout />}>
               <Route index element={<OverviewTab />} />
               <Route path="providers" element={<ProvidersTab />} />
-              <Route path="raw-config" element={<RawConfigTab />} />
+              <Route path="runtime-config" element={<RuntimeConfigPage />} />
+              <Route path="revisions" element={<ConfigRevisionsPage />} />
+              <Route path="imports" element={<ConfigImportsPage />} />
             </Route>
             <Route path="/litellm" element={<LiteLLMPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
