@@ -70,13 +70,27 @@ func BuildResponseForClientWithCPACapabilities(availableModels []map[string]any,
 	}
 }
 
-func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
+// codexClientModelDefaults holds the entry the server assembles for every model it can
+// serve, before the local override layer is applied. Those entries are the default
+// configuration a management UI shows and edits against.
+type codexClientModelDefaults struct {
+	order           []string
+	bySlug          map[string]map[string]any
+	templates       map[string]map[string]any
+	defaultTemplate map[string]any
+}
+
+// assembleCodexClientModelDefaults builds one entry per servable model from the catalog
+// templates and the runtime model metadata. The templates come from the base catalog:
+// the local override layer no longer shapes them, it shapes the assembled entries.
+func assembleCodexClientModelDefaults(models []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) codexClientModelDefaults {
 	templates, defaultTemplate, err := loadCodexClientModelTemplates()
 	if err != nil || defaultTemplate == nil {
-		return nil
+		return codexClientModelDefaults{}
 	}
 
 	result := make([]map[string]any, 0, len(models))
+	order := make([]string, 0, len(models))
 	for _, model := range models {
 		id := strings.TrimSpace(stringModelValue(model, "id"))
 		if id == "" {
@@ -105,6 +119,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			if optimizeMultiAgentV2 {
 				entry["multi_agent_version"] = "v2"
 			}
+			order = append(order, stringModelValue(entry, "slug"))
 			result = append(result, entry)
 			continue
 		}
@@ -116,10 +131,39 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 		applyCodexClientVisibilityOverride(entry, id)
+		order = append(order, stringModelValue(entry, "slug"))
 		result = append(result, entry)
 	}
 
+	// Sorting happens once the override layer has had its say, but the position a model
+	// without a catalog entry gets is part of its default entry.
 	applyCodexClientNonTemplatePriorities(result, templates)
+
+	bySlug := make(map[string]map[string]any, len(result))
+	for index, entry := range result {
+		bySlug[order[index]] = entry
+	}
+	return codexClientModelDefaults{order: order, bySlug: bySlug, templates: templates, defaultTemplate: defaultTemplate}
+}
+
+func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
+	assembled := assembleCodexClientModelDefaults(models, providersForModel, webSearchCapabilityForModel, optimizeMultiAgentV2, clientVersion)
+	if len(assembled.bySlug) == 0 {
+		return nil
+	}
+
+	// The assembled entries are the default configuration: the override layer is applied
+	// on top of them, so an override reaches the client whatever the metadata says.
+	served, _ := registry.ResolveCodexClientModelOverrides(codexClientModelResolveBase(assembled), registry.GetCodexClientModelsOverride())
+
+	result := make([]map[string]any, 0, len(assembled.order))
+	for _, slug := range assembled.order {
+		entry, ok := served[slug]
+		if !ok {
+			continue
+		}
+		result = append(result, entry)
+	}
 
 	sort.SliceStable(result, func(i, j int) bool {
 		return codexClientModelPriority(result[i]) < codexClientModelPriority(result[j])

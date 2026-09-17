@@ -51,7 +51,7 @@ func tryRefreshCodexClientModels(ctx context.Context, label string) {
 		return
 	}
 
-	changed, err := loadCodexClientModelsFromBytes(data, sourceURL)
+	changed, err := setCodexClientModelsBase(data, sourceURL)
 	if err != nil {
 		log.Warnf("%s: fetched catalog rejected, keeping current data: %v", label, err)
 		return
