@@ -433,7 +433,6 @@ const NAV_GROUPS = [
       { to: '/proxy-pools', label: 'Proxy Pools', icon: 'lan' },
       { to: '/playground', label: 'Playground', icon: 'chat' },
       { to: '/developer', label: 'Developer', icon: 'code' },
-      { to: '/manage-cpa', label: 'Manage CPA', icon: 'cpa' },
     ],
   },
   {

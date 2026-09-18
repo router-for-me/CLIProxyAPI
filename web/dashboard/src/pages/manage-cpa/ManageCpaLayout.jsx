@@ -9,6 +9,10 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 // through <Outlet />, so each tab is a standalone page that owns its own
 // data loading and state.
 //
+// Runtime config used to live here as a separate tab; it is now folded into
+// the global /settings page so every scalar setting is editable from one
+// place (see DynamicSettingsCard).
+//
 // This is the first place in the dashboard that uses nested <Routes>, so
 // <Outlet /> is imported from react-router-dom. The App.jsx sidebar still
 // highlights "Manage CPA" for every sub-route — the existing isActive()
@@ -16,7 +20,6 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 const TABS = [
   { to: '/manage-cpa', label: 'Overview', end: true },
   { to: '/manage-cpa/providers', label: 'AI Providers' },
-  { to: '/manage-cpa/runtime-config', label: 'Runtime Config' },
   { to: '/manage-cpa/revisions', label: 'Revisions' },
   { to: '/manage-cpa/imports', label: 'Imports' },
 ];

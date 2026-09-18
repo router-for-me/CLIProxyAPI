@@ -5,13 +5,16 @@ import {
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, Stat } from '../components/Primitives.jsx';
+import DynamicSettingsCard from '../components/DynamicSettingsCard.jsx';
 import { useToast } from '../components/Toast.jsx';
 
-// SettingsPage — dashboard session / connection info plus the operator
-// configuration that fits under "Settings": the alert/notification sweep.
-// Server file config is intentionally not exposed here (callers should use
-// /v0/management/config directly); the dashboard scope limits itself to the
-// PG-backed features it manages.
+// SettingsPage — dashboard session / connection info plus every operator
+// configuration that fits under "Settings": the alert/notification sweep
+// (separate form because its shape is unique) and the entire runtime_config
+// snapshot rendered dynamically from its scalar keys. Branding lives on its
+// own page. Server file config is intentionally not exposed here (callers
+// should use /v0/management/config directly); the dashboard scope limits
+// itself to the PG-backed features it manages.
 export default function SettingsPage() {
   const toast = useToast();
   const { data: alive, error, loading, reload } = useAsync(() => getHealth(), []);
@@ -21,7 +24,7 @@ export default function SettingsPage() {
       <div className="main__header">
         <div>
           <h1 className="main__title">Settings</h1>
-          <div className="main__subtitle">Alert notifications and dashboard session info.</div>
+          <div className="main__subtitle">Alert notifications, runtime configuration, and dashboard session info.</div>
         </div>
         <button onClick={reload}>Refresh</button>
       </div>
@@ -34,6 +37,10 @@ export default function SettingsPage() {
       </div>
 
       <AlertSettingsCard toast={toast} />
+
+      <div className="card">
+        <DynamicSettingsCard />
+      </div>
 
       <div className="card">
         <h3 className="card__title">Session</h3>
