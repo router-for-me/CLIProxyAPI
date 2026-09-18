@@ -905,3 +905,51 @@ func TestPatchClaudeKeyPriority(t *testing.T) {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestPatchClaudeKeyRelaxedSystemPrompt(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		initial *bool
+		patch   string
+		want    *bool
+	}{
+		{name: "enable", patch: `{"relaxed-system-prompt":true}`, want: new(true)},
+		{name: "explicit false", patch: `{"relaxed-system-prompt":false}`, want: new(false)},
+		{name: "disable", initial: new(true), patch: `{"relaxed-system-prompt":false}`, want: new(false)},
+		{name: "preserve omitted", initial: new(true), patch: `{"strict-mode":true}`, want: new(true)},
+		{name: "omit unset", patch: `{"strict-mode":true}`},
+		{name: "clear cloak", initial: new(true), patch: `null`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+				APIKey: "test-key", Cloak: &config.CloakConfig{RelaxedSystemPrompt: test.initial},
+			}}}
+			h := &Handler{cfg: cfg, configFilePath: writeTestConfigFile(t)}
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			ctx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/claude-api-key",
+				strings.NewReader(`{"index":0,"value":{"cloak":`+test.patch+`}}`))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			h.PatchClaudeKey(ctx)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			loaded, errLoad := config.LoadConfigOptional(h.configFilePath, false)
+			if errLoad != nil {
+				t.Fatal(errLoad)
+			}
+			for _, entry := range []config.ClaudeKey{cfg.ClaudeKey[0], loaded.ClaudeKey[0]} {
+				var got *bool
+				if entry.Cloak != nil {
+					got = entry.Cloak.RelaxedSystemPrompt
+				}
+				if (got == nil) != (test.want == nil) {
+					t.Fatalf("relaxed-system-prompt presence = %t, want %t", got != nil, test.want != nil)
+				}
+				if got != nil && *got != *test.want {
+					t.Fatalf("relaxed-system-prompt = %t, want %t", *got, *test.want)
+				}
+			}
+		})
+	}
+}
