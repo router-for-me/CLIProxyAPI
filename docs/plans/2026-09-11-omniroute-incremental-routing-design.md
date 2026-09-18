@@ -203,4 +203,27 @@ and is a possible follow-up.
 
 - OmniRoute `docs/routing/AUTO-COMBO.md`, `docs/architecture/RESILIENCE_GUIDE.md`
 - `docs/plans/2026-09-03-upstream-entry-routing-strategy-design.md`
+- `docs/plans/2026-09-18-zero-downtime-routing-design.md` (supersedes G5
+  retry portion — see notes below)
 - `docs/plans/2026-08-31-routing-remediation-plan.md`
+
+## Superseding notes (2026-09-18)
+
+G5 (bounded cooldown wait) is implemented as designed; the per-attempt
+retry portion is **superseded** by
+`docs/plans/2026-09-18-zero-downtime-routing-design.md`. The new design:
+
+- Adds `routing.retry.{max-attempts, max-time-ms, backoff-ms, retry-on}`
+  to `internal/config.RoutingConfig` with sane defaults (3 / 5000ms / 200ms
+  / [408, 429, 500, 502, 503, 504]).
+- Adds per-entry overrides
+  `upstream_provider_api_key_entries.{retry_max_attempts, retry_max_time_ms,
+  retry_backoff_ms}` (all nullable SMALLINT/INTEGER, no DEFAULT — legacy
+  rows survive the migration).
+- Ships `RunInnerLoop` in `sdk/cliproxy/auth/` as a pure helper with
+  13 unit tests. **Conductor integration is deferred** to a follow-up PR
+  with code review (default `MaxAttempts == 0` = today's behavior, so
+  zero production risk until the integration PR lands).
+
+G2 (success-decay), G3 (pool breaker), G4 (p2c + least-used), and G6
+(narrow 403→429 reclassification) remain in their original design state.

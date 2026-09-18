@@ -735,6 +735,65 @@ export const sections = [
   // 4. Usage Stats
   // =========================================================================
   {
+    id: 'model-routing-picker',
+    title: 'Model Routing Picker',
+    description:
+      'Zero-downtime routing design (2026-09-18). The picker lists every configured upstream as a candidate ' +
+      'for a model, partitioned into LIVE and STALE based on the runtime registry. Pinning assigns a priority ' +
+      'atomically as MAX(existing pinned priorities) + 1, with a default floor of 10 when no pins exist. ' +
+      'Returns 503 when PG is not configured.',
+    endpoints: [
+      {
+        method: 'GET',
+        path: '/model-routing/picker',
+        summary: 'List picker candidates for a model.',
+        params: [
+          { name: 'model', in: 'query', required: true, type: 'string', description: 'Model id to pick upstreams for.' },
+        ],
+        exampleCurl: `curl -H "Authorization: Bearer $TOKEN" "$API_BASE/model-routing/picker?model=gpt-4o"`,
+        responses: [
+          {
+            status: 200,
+            label: 'OK',
+            body: `{
+  "model": "gpt-4o",
+  "live":  [{"provider_key":"openai:42","name":"OpenAI prod","level":"provider","count":2,"live":true,"suggested_priority":11}],
+  "stale": [{"provider_key":"claude:7","name":"Claude A","level":"provider","count":1,"live":false,"suggested_priority":11}],
+  "pinned":[{"provider_key":"openai:42","name":"OpenAI prod","priority":10,"is_live":true}]
+}`,
+          },
+          { status: 400, label: 'Missing model', body: `{"error":{"type":"invalid_request","message":"model query parameter is required"}}` },
+          { status: 503, label: 'PG not configured', body: `{"error":{"type":"pg_not_configured","message":"PG store is not configured"}}` },
+        ],
+      },
+      {
+        method: 'POST',
+        path: '/model-routing/pin',
+        summary: 'Pin a single provider to a model with atomic MAX(priority)+1.',
+        examplePayload: `{"model":"gpt-4o","provider_key":"openai:42","force":false}`,
+        exampleCurl: `curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"model":"gpt-4o","provider_key":"openai:42"}' "$API_BASE/model-routing/pin"`,
+        responses: [
+          {
+            status: 200,
+            label: 'OK',
+            body: `{"model":"gpt-4o","provider_key":"openai:42","priority":11,"was_existing":false}`,
+          },
+          {
+            status: 200,
+            label: 'Already pinned (idempotent)',
+            body: `{"model":"gpt-4o","provider_key":"openai:42","priority":10,"was_existing":true}`,
+          },
+          { status: 400, label: 'Missing field', body: `{"error":{"type":"invalid_request","message":"model and provider_key are required"}}` },
+          { status: 409, label: 'Not live', body: `{"error":{"type":"not_live","message":"provider is not LIVE for this model; pass force=true to pin anyway"}}` },
+          { status: 503, label: 'PG not configured', body: `{"error":{"type":"pg_not_configured","message":"PG store is not configured"}}` },
+        ],
+      },
+    ],
+  },
+  // =========================================================================
+  // 4. Usage Stats
+  // =========================================================================
+  {
     id: 'usage-stats',
     title: 'Usage Stats',
     description:
