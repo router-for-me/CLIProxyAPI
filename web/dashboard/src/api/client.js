@@ -1868,15 +1868,9 @@ export async function listUpstreamProviders({ providerType = '' } = {}) {
 
 // GET /v0/management/upstream-providers/live-status
 // Returns { rows: { [id]: { is_live, cooldown_until, breaker_open, last_check_at, last_error } }, as_of: ISO }
-// Throws on non-2xx; callers (liveStatus.js) catch and degrade to {}.
+// fetchJSON throws ApiError on non-2xx; callers (liveStatus.js) catch and degrade to {}.
 export async function listUpstreamProviderLiveStatus() {
-  const r = await fetch('/v0/management/upstream-providers/live-status', {
-    credentials: 'include',
-  });
-  if (!r.ok) {
-    throw new Error(`live-status failed: ${r.status}`);
-  }
-  return r.json();
+  return fetchJSON('/upstream-providers/live-status');
 }
 
 export async function getUpstreamProvider(id) {
