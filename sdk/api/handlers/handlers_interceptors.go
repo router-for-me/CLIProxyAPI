@@ -117,6 +117,13 @@ type requestLifecycleTracker struct {
 func (h *BaseAPIHandler) newRequestLifecycleTracker(ctx context.Context, sourceFormat, model, requestedModel string, stream bool, metadata map[string]any, skipPluginID string) *requestLifecycleTracker {
 	requestID := uuid.NewString()
 	traceID := logging.GetRequestID(ctx)
+	// Publish the id on the execution metadata. This map is the same one the
+	// caller assigns to Options.Metadata, and the conductor copies that into
+	// SchedulerOptions.Metadata, so a scheduler plugin sees the id with no new
+	// plumbing. A nil map means the caller kept no metadata: nothing to do.
+	if metadata != nil {
+		metadata[coreexecutor.PluginRequestIDMetadataKey] = requestID
+	}
 	return &requestLifecycleTracker{
 		ctx:          ctx,
 		host:         h.interceptorHost(),

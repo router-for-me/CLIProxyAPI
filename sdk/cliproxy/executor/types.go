@@ -11,6 +11,16 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// PluginRequestIDMetadataKey carries the plugin-facing request id, the same
+// value plugins receive on request.intercept_before and request.complete.
+//
+// It lets a scheduler plugin tie its own decision back to the request it
+// belongs to. Without it a plugin that refuses a candidate in scheduler.pick
+// cannot record why against that request: the refusal reaches the client, but
+// the completion hook only reports the host outcome, so every plugin refusal
+// is indistinguishable from an upstream rejection.
+const PluginRequestIDMetadataKey = "plugin_request_id"
+
 // RequestPathMetadataKey stores the inbound HTTP request path (e.g. "/v1/images/generations") in Options.Metadata.
 // It is optional and may be absent for non-HTTP executions.
 const RequestPathMetadataKey = "request_path"
