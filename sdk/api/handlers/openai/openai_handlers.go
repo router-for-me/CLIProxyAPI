@@ -55,6 +55,10 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 	return modelRegistry.GetAvailableModels("openai")
 }
 
+// openAIModelPassthroughFields lists the optional registry fields forwarded
+// verbatim by the /v1/models listing.
+var openAIModelPassthroughFields = []string{"created", "owned_by", "context_length", "max_completion_tokens"}
+
 // OpenAIModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
@@ -68,7 +72,9 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
 
-	// Filter to only include the 4 required fields: id, object, created, owned_by
+	// Filter to the OpenAI-compatible identity fields plus the per-model token
+	// limits from the registry, so clients can discover the real limits instead
+	// of guessing them.
 	filteredModels := make([]map[string]any, len(allModels))
 	for i, model := range allModels {
 		filteredModel := map[string]any{
@@ -76,14 +82,11 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			"object": model["object"],
 		}
 
-		// Add created field if it exists
-		if created, exists := model["created"]; exists {
-			filteredModel["created"] = created
-		}
-
-		// Add owned_by field if it exists
-		if ownedBy, exists := model["owned_by"]; exists {
-			filteredModel["owned_by"] = ownedBy
+		// Add the optional fields only when the registry entry provides them.
+		for _, field := range openAIModelPassthroughFields {
+			if value, exists := model[field]; exists {
+				filteredModel[field] = value
+			}
 		}
 
 		filteredModels[i] = filteredModel
