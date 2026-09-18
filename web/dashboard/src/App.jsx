@@ -35,6 +35,7 @@ import UpstreamProviderModelsTab from './pages/upstream-provider-editor/ModelsTa
 import UpstreamProviderEntriesTab from './pages/upstream-provider-editor/EntriesTab.jsx';
 import UpstreamProviderQuotaTab from './pages/upstream-provider-editor/QuotaTab.jsx';
 import UpstreamProviderTestTab from './pages/upstream-provider-editor/TestTab.jsx';
+import UpstreamProviderLogsTab from './pages/upstream-provider-editor/LogsTab.jsx';
 import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import ModelHealthPage from './pages/ModelHealthPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
@@ -317,6 +318,11 @@ export default function App() {
               <Route path="entries" element={<UpstreamProviderEntriesTab />} />
               <Route path="quota" element={<UpstreamProviderQuotaTab />} />
               <Route path="test" element={<UpstreamProviderTestTab />} />
+              <Route path="logs" element={<UpstreamProviderLogsTab />} />
+              {/* Catch-all for unknown :tab segments: fall back to the
+                  Overview tab. Keeps a stale bookmark from blowing up into
+                  a 404, and matches the design doc's behaviour. */}
+              <Route path="*" element={<Navigate to="overview" replace />} />
             </Route>
             <Route path="/proxy-pools" element={<ProxyPoolsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
