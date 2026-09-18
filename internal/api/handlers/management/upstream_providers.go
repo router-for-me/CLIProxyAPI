@@ -431,12 +431,21 @@ func (h *Handler) GetUpstreamProvidersLiveStatus(c *gin.Context) {
 	cooldown := h.authManager.CooldownStateSnapshot()
 	breakers := coreauth.PoolBreakerSnapshot()
 	// Build the union of "live" provider keys across every model the auth
-	// manager has reported recently. We avoid per-model iteration by
-	// collecting models from the cooldown snapshot (the only signal we
-	// have without forcing a list-models fetch). When the snapshot is
-	// empty, is_live is false for everyone — that's the desired
-	// "no-evidence" state.
+	// manager could serve. We seed the model set from the configured
+	// upstream providers (so a healthy provider that has never cooldowned
+	// still shows is_live=true when its auth is registered for any of its
+	// declared models), then union with models seen in the cooldown
+	// snapshot. Iterating every model in the registry would force a
+	// list-models fetch; the configured + cooldown set is sufficient
+	// evidence for the dashboard's per-row dot.
 	models := map[string]struct{}{}
+	for _, p := range providers {
+		for _, m := range p.Models {
+			if name := strings.TrimSpace(m.Name); name != "" {
+				models[name] = struct{}{}
+			}
+		}
+	}
 	for _, r := range cooldown {
 		if r.Model != "" {
 			models[r.Model] = struct{}{}
@@ -492,8 +501,16 @@ func (h *Handler) GetUpstreamProvidersLiveStatus(c *gin.Context) {
 			if breakerOpen[key] {
 				row.BreakerOpen = true
 			}
-			// OpenAI-compat compound-row fallback: a breaker record on
-			// "openai-compatible-foo" also covers "openai-compatible-foo:bar".
+			// Compound-row fallback: a breaker record on a compound child key
+			// (e.g. "openai-compatible-foo:bar") also surfaces as breaker_open
+			// on the parent provider row (e.g. "openai-compatible-foo").
+			//
+			// Asymmetric with the IsLive fallback above on purpose: breaker
+			// keys come from operator-defined pool identifiers and may have
+			// any shape; restricting to openai-compat would hide breaker
+			// trips on legacy/custom channels. Live evidence keys, by
+			// contrast, are auth-manager-issued and known to be one of the
+			// narrow shapes that IsProviderRowLive already restricts.
 			if !row.BreakerOpen {
 				prefix := key + ":"
 				for bp, open := range breakerOpen {
@@ -516,18 +533,18 @@ func (h *Handler) GetUpstreamProvidersLiveStatus(c *gin.Context) {
 					}
 				}
 			}
-		}
-		// last_check_at = the most recent signal we have, regardless of
-		// whether the row is currently healthy.
-		var last time.Time
-		if cd, ok := cooldownUntil[key]; ok && (last.IsZero() || cd.After(last)) {
-			last = cd
-		}
-		if bu, ok := breakerUntil[key]; ok && (last.IsZero() || bu.After(last)) {
-			last = bu
-		}
-		if !last.IsZero() {
-			row.LastCheckAt = &last
+			// last_check_at = the most recent signal we have, regardless of
+			// whether the row is currently healthy.
+			var last time.Time
+			if cd, ok := cooldownUntil[key]; ok && (last.IsZero() || cd.After(last)) {
+				last = cd
+			}
+			if bu, ok := breakerUntil[key]; ok && (last.IsZero() || bu.After(last)) {
+				last = bu
+			}
+			if !last.IsZero() {
+				row.LastCheckAt = &last
+			}
 		}
 		rows[strconv.FormatInt(p.ID, 10)] = row
 	}
