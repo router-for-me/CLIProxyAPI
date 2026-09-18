@@ -2342,6 +2342,10 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	// request, so a request-retry round cannot select a credential that was
 	// already attempted. A round that can no longer select a new credential
 	// reports the error accumulated so far instead of lapping the whole pool.
+	// With a single credential that means no retry at all: a 429 carrying
+	// RetryAfter reaches the client on the first hit, under the default cooling
+	// configuration as well as with disable_cooling. Home mode is the exception
+	// (see executeMixedOnce).
 	triedAuths := make(map[string]struct{})
 	for attempt := 0; ; attempt++ {
 		triedBefore := len(triedAuths)
@@ -2557,7 +2561,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	homeAuthCount := 1
 	// triedAuths accumulates the credentials selected in earlier rounds of the
 	// same client request, so a later round cannot select one of them again.
-	// Home mode keeps a per-round set because its dispatcher owns repeat detection.
+	// Home mode keeps a per-round set because its dispatcher owns repeat
+	// detection, so it may hand the same credential to the executor in
+	// successive rounds: the one-selection-per-credential guarantee holds
+	// outside home mode only.
 	tried := triedAuths
 	if homeMode || tried == nil {
 		tried = make(map[string]struct{})

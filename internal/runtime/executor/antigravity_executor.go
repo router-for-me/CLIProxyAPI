@@ -466,9 +466,12 @@ func injectEnabledCreditTypes(payload []byte) []byte {
 	return updated
 }
 
-// classifyAntigravity429 maps an upstream 429 body onto the cooldown category the
-// conductor acts on. The decision kinds below are classification only: the executor
-// issues exactly one upstream request per credential, so a kind named for a retry
+// classifyAntigravity429 maps an upstream 429 body onto a cooldown category.
+// It has no production caller since the executor stopped re-requesting inside a
+// single invocation; the table is kept as a test-visible pin on the classification
+// performed by decideAntigravity429, which is what the conductor consumes.
+// The decision kinds are classification only: the executor issues exactly one
+// upstream request per credential, so a kind named for a retry
 // (e.g. antigravity429DecisionInstantRetrySameAuth) no longer triggers one. Re-requesting
 // the same credential here is what made one client request hammer every account twice;
 // credential failover belongs to the conductor.

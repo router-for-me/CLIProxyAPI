@@ -1161,6 +1161,55 @@ func TestManager_Execute_DisableCoolingDoesNotRepeatTriedCredential(t *testing.T
 	}
 }
 
+// TestManager_Execute_SingleCredentialDoesNotRetryAfter429RetryAfter pins the
+// broader form of the behaviour change: with cooling enabled (no disable_cooling
+// metadata) a lone credential answering 429 with RetryAfter is not re-selected,
+// so the 429 reaches the caller on the first hit.
+func TestManager_Execute_SingleCredentialDoesNotRetryAfter429RetryAfter(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 100*time.Millisecond, 0)
+
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"auth-429-cooling-exec": &retryAfterStatusError{
+				status:     http.StatusTooManyRequests,
+				message:    "quota exhausted",
+				retryAfter: 5 * time.Millisecond,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "auth-429-cooling-exec", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-429-cooling-exec"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	req := cliproxyexecutor.Request{Model: model}
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected execute error")
+	}
+	if statusCodeFromError(errExecute) != http.StatusTooManyRequests {
+		t.Fatalf("execute status = %d, want %d", statusCodeFromError(errExecute), http.StatusTooManyRequests)
+	}
+
+	calls := executor.ExecuteCalls()
+	if len(calls) != 1 {
+		t.Fatalf("execute calls = %d, want 1 (a tried credential is not selected again)", len(calls))
+	}
+}
+
 // TestManager_DoesNotSelectTriedCredentialTwice covers a pool in which every
 // credential answers 429: one client request may select each credential once,
 // and the request-retry rounds must not lap the whole pool again.
@@ -1216,6 +1265,9 @@ func TestManager_DoesNotSelectTriedCredentialTwice(t *testing.T) {
 				if result == nil {
 					t.Fatal("ExecuteStream() result = nil")
 				}
+				// Unlike the execute subtest, the streaming path reports the upstream
+				// 429 as a chunk error on a non-nil stream result, so the 429 itself
+				// is asserted there and the chunks are only drained here.
 				for range result.Chunks {
 				}
 				calls = executor.StreamCalls()
@@ -1230,8 +1282,8 @@ func TestManager_DoesNotSelectTriedCredentialTwice(t *testing.T) {
 				calls = executor.ExecuteCalls()
 			}
 
-			if len(calls) > len(authIDs) {
-				t.Fatalf("credential calls = %v, want at most %d", calls, len(authIDs))
+			if len(calls) != len(authIDs) {
+				t.Fatalf("credential calls = %v, want exactly %d (each credential once)", calls, len(authIDs))
 			}
 			seen := make(map[string]int, len(calls))
 			for _, authID := range calls {
