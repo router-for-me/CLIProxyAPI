@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
@@ -371,7 +372,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		// wrapping so streaming clients see the decision metadata before the
 		// first chunk is forwarded. The api layer reads streamResult.Headers
 		// and propagates them into the downstream response.
-		setStreamDecisionHeader(&streamResult.Headers, m.decisionFor(auth, provider, routeModel, 1))
+		decision := m.decisionFor(auth, provider, routeModel, 1)
+		setStreamDecisionHeader(&streamResult.Headers, decision)
+		emitRoutingDecision(logging.GetRequestID(ctx), routeModel, auth, decision)
 		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult), nil
 	}
 	if lastErr == nil {

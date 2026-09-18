@@ -83,24 +83,36 @@ func (b *poolBreaker) entry(key string) *poolBreakerEntry {
 // counting: failures inside one 60s window accumulate; hitting the threshold
 // opens the breaker. A failure while HALF_OPEN re-opens with the reset period
 // doubled (capped); failures while OPEN are ignored (the pool is already
-// blocked).
+// blocked). The CLOSED → OPEN transition emits a breaker.tripped event
+// (round-2 Task 12) so the dashboard live-events tab surfaces the trip
+// without polling.
 func (b *poolBreaker) recordFailure(key string, now time.Time) {
 	if key == "" {
 		return
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	tripped := false
+	wasHalfOpenProbe := false
 	entry := b.entry(key)
 	if entry.state == breakerHalfOpen {
+		wasHalfOpenProbe = entry.probeUsed
 		entry.state = breakerOpen
 		entry.openedAt = now
 		entry.resetPeriod *= 2
 		if entry.resetPeriod > poolBreakerResetMax {
 			entry.resetPeriod = poolBreakerResetMax
 		}
+		b.mu.Unlock()
+		if wasHalfOpenProbe {
+			// A HALF_OPEN probe drove the breaker back to OPEN — surface it
+			// as a probe_fail verdict before the generic tripped event.
+			emitBreakerProbeVerdict(key, false)
+		}
+		emitBreakerTripped(key, entry.failures)
 		return
 	}
 	if entry.state == breakerOpen {
+		b.mu.Unlock()
 		return
 	}
 	if entry.windowStart.IsZero() || now.Sub(entry.windowStart) > poolBreakerWindow {
@@ -111,22 +123,45 @@ func (b *poolBreaker) recordFailure(key string, now time.Time) {
 	if entry.failures >= poolBreakerFailureThreshold {
 		entry.state = breakerOpen
 		entry.openedAt = now
+		tripped = true
+	}
+	failureCount := entry.failures
+	b.mu.Unlock()
+	if tripped {
+		emitBreakerTripped(key, failureCount)
 	}
 }
 
 // recordSuccess closes an open/half-open breaker and clears the window. The
 // now parameter is unused today (deletion needs no time) but kept for a
-// uniform signature with the other methods.
+// uniform signature with the other methods. A success that lands while a
+// HALF_OPEN probe was in flight emits breaker.probe_ok (round-2 Task 12).
 func (b *poolBreaker) recordSuccess(key string, now time.Time) {
 	if key == "" {
 		return
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.pools[key]; !ok {
+	wasHalfOpenProbe := false
+	if entry, ok := b.pools[key]; ok && entry != nil {
+		wasHalfOpenProbe = entry.state == breakerHalfOpen && entry.probeUsed
+	}
+	b.mu.Unlock()
+	if !wasHalfOpenProbe {
+		// No probe verdict to emit; just drop the entry (the original
+		// behaviour for a normal success).
+		b.mu.Lock()
+		if _, ok := b.pools[key]; ok {
+			delete(b.pools, key)
+		}
+		b.mu.Unlock()
 		return
 	}
-	delete(b.pools, key)
+	emitBreakerProbeVerdict(key, true)
+	b.mu.Lock()
+	if _, ok := b.pools[key]; ok {
+		delete(b.pools, key)
+	}
+	b.mu.Unlock()
 }
 
 // blockDeadline reports whether the pool currently blocks selection reads and

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/tidwall/sjson"
 )
@@ -171,7 +172,9 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 				releaseAttempt()
 				attemptAliasResult := resolveAttemptAliasResult(routing, preparedAuth, routeModel, upstreamModel, aliasResult)
 				rewriteForceMappedResponse(&response, attemptAliasResult)
-				setResponseDecisionHeader(&response, m.decisionFor(preparedAuth, selection.Provider, routeModel, len(tried)))
+				decision := m.decisionFor(preparedAuth, selection.Provider, routeModel, len(tried))
+				setResponseDecisionHeader(&response, decision)
+				emitRoutingDecision(logging.GetRequestID(execCtx), routeModel, preparedAuth, decision)
 				if !m.retainHomeWebsocketSelection(ctx, opts, routeModel, selection) {
 					selection.End("completed")
 				}

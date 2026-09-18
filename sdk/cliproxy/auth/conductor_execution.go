@@ -48,7 +48,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	var lastAuthID string
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	attempts := 0
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
@@ -58,6 +60,8 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			return cliproxyexecutor.Response{}, errExec
 		}
 		lastErr = errExec
+		lastAuthID = ""
+		attempts = attempt + 1
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
@@ -67,6 +71,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 	}
 	if lastErr != nil {
+		emitAttemptsExhausted(retryModel, lastAuthID, attempts)
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok, errCredits := m.tryAntigravityCreditsExecute(ctx, req, opts); errCredits != nil {
 				return cliproxyexecutor.Response{}, errCredits
@@ -93,7 +98,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	var lastAuthID string
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	attempts := 0
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
@@ -103,6 +110,8 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			return cliproxyexecutor.Response{}, errExec
 		}
 		lastErr = errExec
+		lastAuthID = ""
+		attempts = attempt + 1
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
@@ -112,6 +121,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		}
 	}
 	if lastErr != nil {
+		emitAttemptsExhausted(retryModel, lastAuthID, attempts)
 		return cliproxyexecutor.Response{}, lastErr
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -134,7 +144,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
+	var lastAuthID string
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	attempts := 0
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
@@ -144,6 +156,8 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return nil, errStream
 		}
 		lastErr = errStream
+		lastAuthID = ""
+		attempts = attempt + 1
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
 		if !shouldRetry {
 			break
@@ -153,6 +167,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if lastErr != nil {
+		emitAttemptsExhausted(retryModel, lastAuthID, attempts)
 		if hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
 				return nil, errCredits
@@ -474,7 +489,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
-			setResponseDecisionHeader(&resp, m.decisionFor(auth, provider, routeModel, len(attempted)))
+			decision := m.decisionFor(auth, provider, routeModel, len(attempted))
+			setResponseDecisionHeader(&resp, decision)
+			emitRoutingDecision(logging.GetRequestID(execCtx), routeModel, auth, decision)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -634,7 +651,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			m.MarkResult(execCtx, result)
 			attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, upstreamModel, aliasResult)
 			rewriteForceMappedResponse(&resp, attemptAliasResult)
-			setResponseDecisionHeader(&resp, m.decisionFor(auth, provider, routeModel, len(attempted)))
+			decision := m.decisionFor(auth, provider, routeModel, len(attempted))
+			setResponseDecisionHeader(&resp, decision)
+			emitRoutingDecision(logging.GetRequestID(execCtx), routeModel, auth, decision)
 			return resp, nil
 		}
 		if authErr != nil {

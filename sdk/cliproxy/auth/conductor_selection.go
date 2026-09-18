@@ -9,12 +9,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
+
+// requestIDFromContext reads the request_id stamped onto the context by the
+// logging middleware. Returns "" if absent; emit* helpers tolerate the empty
+// value so the caller never has to guard.
+func requestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	return logging.GetRequestID(ctx)
+}
 
 func (m *Manager) SetPluginScheduler(scheduler PluginScheduler) {
 	if m == nil {
@@ -1078,23 +1089,27 @@ func jitteredCooldownWait(wait, maxWait time.Duration) time.Duration {
 // waitForCooldown blocks until the closest upstream cooldown expires (bounded
 // by maxWait) or ctx is canceled. A request held here produces no output, so
 // every nonzero wait is logged: "stopped without reason" reports were usually
-// requests silently waiting in cooldown with no trace.
+// requests silently waiting in cooldown with no trace. The wait is also
+// emitted as a routing.cooldown_wait event (round-2 Task 12) so the dashboard
+// live-events tab can surface every blocked retry.
 func waitForCooldown(ctx context.Context, wait, maxWait time.Duration, providers []string, model string) error {
 	if wait <= 0 {
 		return nil
 	}
+	jittered := jitteredCooldownWait(wait, maxWait)
 	log.WithFields(log.Fields{
 		"providers":   strings.Join(providers, ","),
 		"model":       model,
 		"wait_ms":     wait.Milliseconds(),
 		"max_wait_ms": maxWait.Milliseconds(),
 	}).Info("all upstreams cooling down; delaying retry")
-	timer := time.NewTimer(jitteredCooldownWait(wait, maxWait))
+	timer := time.NewTimer(jittered)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
+		emitCooldownWait(requestIDFromContext(ctx), model, "", jittered.Milliseconds())
 		return nil
 	}
 }

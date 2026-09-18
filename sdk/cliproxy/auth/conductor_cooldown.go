@@ -818,6 +818,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						// Deliberate: a provider-supplied Retry-After on a
 						// reclassified 403 still wins over the 1s ladder base.
 						statusCode = http.StatusTooManyRequests
+						emitCooldownReclassified(result.AuthID)
 					}
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
