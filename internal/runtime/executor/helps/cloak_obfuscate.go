@@ -81,6 +81,19 @@ func (m *SensitiveWordMatcher) obfuscateText(text string) string {
 	return m.regex.ReplaceAllStringFunc(text, obfuscateWord)
 }
 
+// Matches reports whether the text contains any of the configured sensitive words.
+func (m *SensitiveWordMatcher) Matches(text string) bool {
+	if m == nil || m.regex == nil {
+		return false
+	}
+	return m.regex.MatchString(text)
+}
+
+// ObfuscateText replaces all sensitive words in the text.
+func (m *SensitiveWordMatcher) ObfuscateText(text string) string {
+	return m.obfuscateText(text)
+}
+
 // ObfuscateSensitiveWords processes the payload and obfuscates sensitive words
 // in system blocks and message content.
 func ObfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []byte {
@@ -147,6 +160,9 @@ func obfuscateSystemBlocks(payload []byte, matcher *SensitiveWordMatcher) []byte
 		system.ForEach(func(key, value gjson.Result) bool {
 			if value.Get("type").String() == "text" {
 				text := value.Get("text").String()
+				if strings.HasPrefix(text, "x-anthropic-billing-header:") {
+					return true
+				}
 				obfuscated := matcher.obfuscateText(text)
 				if obfuscated != text {
 					path := "system." + key.String() + ".text"
@@ -161,9 +177,11 @@ func obfuscateSystemBlocks(payload []byte, matcher *SensitiveWordMatcher) []byte
 		}
 	} else if system.Type == gjson.String {
 		text := system.String()
-		obfuscated := matcher.obfuscateText(text)
-		if obfuscated != text {
-			payload, _ = sjson.SetBytes(payload, "system", obfuscated)
+		if !strings.HasPrefix(text, "x-anthropic-billing-header:") {
+			obfuscated := matcher.obfuscateText(text)
+			if obfuscated != text {
+				payload, _ = sjson.SetBytes(payload, "system", obfuscated)
+			}
 		}
 	}
 

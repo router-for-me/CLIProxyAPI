@@ -89,7 +89,7 @@ func httptest_NewRequest() *http.Request {
 
 func midSystemAuth() *cliproxyauth.Auth {
 	// No base_url, so the executor keeps Anthropic's first-party origin.
-	return &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	return &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "cloak_mode": "always"}}
 }
 
 func midSystemConfig() *config.Config {
@@ -282,7 +282,7 @@ func TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt(t *testin
 func TestClaudeExecutor_ConfirmedNativeLegacyMidSystemMessageForwarded(t *testing.T) {
 	upstream := &midSystemUpstream{}
 	ex := NewClaudeExecutor(midSystemConfig())
-	headers := claudeNativeHelperHeaders("claude-code-20250219,"+claudeNativeHelperCoreBetas, "gzip", false)
+	headers := claudeNativeHelperHeaders("claude-code-20250219,"+claudeNativeHelperCoreBetas, "gzip, deflate, br, zstd")
 
 	if _, err := ex.Execute(upstream.context(t, headers), midSystemAuth(), cliproxyexecutor.Request{
 		Model:   "claude-haiku-4-5-20251001",

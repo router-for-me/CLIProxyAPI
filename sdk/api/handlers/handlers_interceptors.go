@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -51,6 +53,25 @@ func streamChunkPayloadIncludesRequestBody(host PluginInterceptorHost) bool {
 	return true
 }
 
+// streamChunkHistoryPolicy reports whether payload stream-chunk interceptors
+// still require HistoryChunks (legacy schema_version < 5).
+type streamChunkHistoryPolicy interface {
+	StreamChunkPayloadIncludesHistory() bool
+}
+
+// streamChunkPayloadIncludesHistory returns true when at least one active
+// stream interceptor needs per-chunk history chunks. Evaluated per call so
+// mid-stream plugin reloads stay correct. Unknown hosts default to true.
+func streamChunkPayloadIncludesHistory(host PluginInterceptorHost) bool {
+	if host == nil {
+		return false
+	}
+	if policy, ok := host.(streamChunkHistoryPolicy); ok {
+		return policy.StreamChunkPayloadIncludesHistory()
+	}
+	return true
+}
+
 type requestInterceptorDetector interface {
 	HasRequestInterceptors() bool
 }
@@ -61,6 +82,28 @@ type requestLifecycleHost interface {
 
 type requestLifecycleSkipHost interface {
 	CompleteRequestExcept(context.Context, pluginapi.RequestCompletion, string)
+}
+
+type webSocketResponseObserverHost interface {
+	ObserveWebSocketResponseEvent(context.Context, pluginapi.WebSocketResponseEvent)
+}
+
+type webSocketResponseObserverSkipHost interface {
+	ObserveWebSocketResponseEventExcept(context.Context, pluginapi.WebSocketResponseEvent, string)
+}
+
+type webSocketResponseObserverDetector interface {
+	HasWebSocketResponseObservers() bool
+}
+
+func webSocketResponseObserversEnabled(host PluginInterceptorHost) bool {
+	if host == nil {
+		return false
+	}
+	if detector, ok := host.(webSocketResponseObserverDetector); ok {
+		return detector.HasWebSocketResponseObservers()
+	}
+	return true
 }
 
 type requestLifecycleTracker struct {
@@ -463,6 +506,47 @@ func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCa
 	}
 }
 
+func (h *BaseAPIHandler) webSocketResponseObserver(requestID, skipPluginID string) coreexecutor.WebSocketResponseObserver {
+	host := h.interceptorHost()
+	if !webSocketResponseObserversEnabled(host) {
+		return nil
+	}
+	observerHost, ok := host.(webSocketResponseObserverHost)
+	if !ok {
+		return nil
+	}
+	skipHost, _ := host.(webSocketResponseObserverSkipHost)
+	return func(ctx context.Context, ev coreexecutor.WebSocketResponseEvent) {
+		traceID := ev.TraceID
+		if traceID == "" {
+			traceID = logging.GetRequestID(ctx)
+		}
+		reqID := ev.RequestID
+		if reqID == "" {
+			reqID = requestID
+		}
+		pluginEvent := pluginapi.WebSocketResponseEvent{
+			RequestID:      reqID,
+			TraceID:        traceID,
+			SourceFormat:   ev.SourceFormat,
+			Model:          ev.Model,
+			RequestedModel: ev.RequestedModel,
+			Provider:       ev.Provider,
+			AuthID:         ev.AuthID,
+			AuthLabel:      ev.AuthLabel,
+			AuthType:       ev.AuthType,
+			EventType:      ev.EventType,
+			Payload:        ev.Payload,
+			Metadata:       ev.Metadata,
+		}
+		if skipPluginID != "" && skipHost != nil {
+			skipHost.ObserveWebSocketResponseEventExcept(ctx, pluginEvent, skipPluginID)
+			return
+		}
+		observerHost.ObserveWebSocketResponseEvent(ctx, pluginEvent)
+	}
+}
+
 func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest, requestID, skipPluginID string) coreexecutor.RequestAfterAuthInterceptResponse {
 	host := h.interceptorHost()
 	if !requestInterceptorsEnabled(host) {
@@ -515,4 +599,71 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 		body = cloneBytes(resp.Body)
 	}
 	return body, responseHeaders
+}
+
+// WriteModelListResponse serializes the model-list payload, applies plugin response interceptors
+// if a plugin host is configured, and writes the resulting headers and body to the Gin context.
+func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat string, payload any) {
+	if c == nil {
+		return
+	}
+	var body []byte
+	switch v := payload.(type) {
+	case []byte:
+		body = cloneBytes(v)
+	default:
+		var errMarshal error
+		body, errMarshal = json.Marshal(payload)
+		if errMarshal != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
+			return
+		}
+	}
+
+	rawResponseHeaders := http.Header{
+		"Content-Type": []string{"application/json; charset=utf-8"},
+	}
+
+	host := h.interceptorHost()
+	if host != nil {
+		ctx := context.Background()
+		var reqHeaders http.Header
+		if c.Request != nil {
+			reqHeaders = cloneHeader(c.Request.Header)
+			if reqCtx := c.Request.Context(); reqCtx != nil {
+				ctx = reqCtx
+			}
+		}
+		lifecycle := h.newRequestLifecycleTracker(ctx, sourceFormat, "", "", false, nil, "")
+		resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
+			RequestID:       lifecycle.requestID(),
+			SourceFormat:    sourceFormat,
+			Model:           "",
+			RequestedModel:  "",
+			Stream:          false,
+			RequestHeaders:  reqHeaders,
+			ResponseHeaders: cloneHeader(rawResponseHeaders),
+			OriginalRequest: nil,
+			RequestBody:     nil,
+			Body:            cloneBytes(body),
+			StatusCode:      http.StatusOK,
+			Metadata:        nil,
+		}, "")
+		if len(resp.Body) > 0 {
+			body = cloneBytes(resp.Body)
+		}
+		if resp.Headers != nil {
+			for key, values := range resp.Headers {
+				c.Writer.Header()[key] = append([]string(nil), values...)
+			}
+		}
+		lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
+	}
+
+	if c.Writer.Header().Get("Content-Type") == "" {
+		c.Header("Content-Type", "application/json; charset=utf-8")
+	}
+	c.Set("API_RESPONSE", cloneBytes(body))
+	c.Status(http.StatusOK)
+	_, _ = c.Writer.Write(body)
 }

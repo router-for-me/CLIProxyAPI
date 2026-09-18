@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -56,6 +57,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	selectionOpts := coreexecutor.Options{Headers: liveSelectionHeaders(c)}
+	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionOpts.Headers, nil, nil)
 	selection, selected, errSelect := h.selectOAuth(ctx, selectionModel, selectionOpts)
 	if errSelect != nil {
 		writeSelectionError(c, errSelect)
@@ -67,6 +69,19 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth unavailable", "server_error", "codex_auth_unavailable")
 		return
+	}
+	if selection != nil && selection.CanonicalSessionID != "" {
+		meta := logging.GetClientRequestMetadata(ctx)
+		meta.SessionID = selection.CanonicalSessionID
+		if selection.ParentSessionID != "" {
+			meta.ParentSessionID = selection.ParentSessionID
+		} else {
+			meta.ParentSessionID = ""
+		}
+		if meta.SessionID == meta.ParentSessionID {
+			meta.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, meta)
 	}
 	if selection != nil {
 		attemptCtx, releaseAttempt, errAttempt := selection.AttemptContext(ctx)
@@ -111,28 +126,45 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	}
 
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
-	if errDial != nil && selection != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
-		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
-		closeHandshakeBody(handshakeResponse, "direct websocket unauthorized")
-		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
-		if errRefresh != nil {
-			writeSelectionError(c, errRefresh)
-			return
-		}
-		if didRefresh && refreshed != nil {
-			selected = refreshed
-			logging.SetGinCPATraceID(c, selected.EnsureIndex())
-			upstream, handshakeResponse, errDial = dialUpstream(selected)
-		}
-	}
 	if errDial != nil {
 		status := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
+		helpConfig := h.currentConfig()
+		var responseBody []byte
 		if handshakeResponse != nil && handshakeResponse.StatusCode > 0 {
 			status = handshakeResponse.StatusCode
 			copyRealtimeHandshakeHeaders(c.Writer.Header(), handshakeResponse.Header)
+			helps.RecordAPIWebsocketHandshake(ctx, helpConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
+			if handshakeResponse.Body != nil {
+				var errRead error
+				responseBody, errRead = readLimitedBody(handshakeResponse.Body)
+				if errRead != nil {
+					log.Errorf("codex realtime: read rejected handshake body error: %v", errRead)
+				}
+				helps.AppendAPIWebsocketResponse(ctx, helpConfig, responseBody)
+			}
 		}
 		closeHandshakeBody(handshakeResponse, "direct websocket rejected")
-		helpConfig := h.currentConfig()
+		if selection != nil && status == http.StatusUnauthorized {
+			diagnosticBody := responseBody
+			if len(diagnosticBody) == 0 {
+				diagnosticBody = []byte(errDial.Error())
+			}
+			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, diagnosticBody)
+			log.WithField("status", status).Warnf("codex realtime websocket upstream handshake failed: %s", logging.SafeDiagnosticForLog(string(diagnosticBody)))
+		}
+		helps.RecordAPIWebsocketError(ctx, helpConfig, "dial", errDial)
+		if handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
+			if contentType := handshakeResponse.Header.Get("Content-Type"); contentType != "" {
+				c.Header("Content-Type", contentType)
+			}
+			c.Status(handshakeResponse.StatusCode)
+			if len(responseBody) > 0 {
+				if _, errWrite := c.Writer.Write(responseBody); errWrite != nil {
+					log.WithError(errWrite).Warn("codex realtime: write rejected handshake body failed")
+				}
+			}
+			return
+		}
 		helpDetails := "Codex Realtime WebSocket upstream unavailable"
 		helpType := "api_error"
 		if status == http.StatusNotFound || status == http.StatusNotImplemented {
@@ -147,7 +179,6 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 			helpType = "authentication_error"
 			helpCode = "realtime_upstream_unauthorized"
 		}
-		helps.RecordAPIWebsocketError(ctx, helpConfig, "dial", errDial)
 		writeRealtimeError(c, status, helpDetails, helpType, helpCode)
 		return
 	}

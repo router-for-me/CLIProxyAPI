@@ -6,8 +6,10 @@
 package claude
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -30,6 +32,7 @@ import (
 // 4. Converts tools declarations to the expected format
 // 5. Adds additional configuration parameters for the Codex API
 // 6. Maps Claude thinking configuration to Codex reasoning settings
+// 7. Maps Claude output_config format to Codex text format
 //
 // Parameters:
 //   - modelName: The name of the model to use for the request
@@ -43,7 +46,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream b
 }
 
 // ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
-// empty signatures for configured compatibility endpoints.
+// empty or unknown-format signatures for configured compatibility endpoints.
 func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
 	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true)
 }
@@ -96,6 +99,8 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	messagesResult := rootResult.Get("messages")
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
+		var pendingToolUseIDs []string
+		var pendingSystemReminders [][]byte
 
 		for i := 0; i < len(messageResults); i++ {
 			messageResult := messageResults[i]
@@ -104,12 +109,20 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(messageResult.Get("content")); ok {
 					message := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
 					message, _ = sjson.SetBytes(message, "content.0.text", reminderText)
-					inputItems = append(inputItems, message)
+					if len(pendingToolUseIDs) > 0 {
+						pendingSystemReminders = append(pendingSystemReminders, message)
+					} else {
+						inputItems = append(inputItems, message)
+					}
 				}
 				continue
 			}
 
 			messageContentsResult := messageResult.Get("content")
+			if messageRole == "user" && len(pendingToolUseIDs) > 0 && messageContentsResult.IsArray() {
+				messageContentsResult = translatorcommon.AlignClaudeToolResults(messageContentsResult, pendingToolUseIDs)
+			}
+			pendingToolUseIDs = nil
 			contentItems := make([][]byte, 0, 4)
 
 			flushMessage := func() {
@@ -152,6 +165,11 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 
 				rawSignature := part.Get("signature").String()
 				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
+				if !ok && preserveEmptyThinkingBlocks && part.Get("signature").Type == gjson.String && strings.TrimSpace(rawSignature) != "" &&
+					sigcompat.DetectSignatureProviderForBlock(rawSignature, sigcompat.SignatureBlockKindClaudeThinking) == sigcompat.SignatureProviderUnknown {
+					signature = rawSignature
+					ok = true
+				}
 				if !ok {
 					if preserveEmptyThinkingBlocks && strings.TrimSpace(rawSignature) == "" {
 						signature = rawSignature
@@ -180,10 +198,18 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 
 					switch contentType {
 					case "text":
+						if len(pendingSystemReminders) > 0 {
+							inputItems = append(inputItems, pendingSystemReminders...)
+							pendingSystemReminders = nil
+						}
 						appendTextContent(messageContentResult.Get("text").String())
 					case "thinking":
 						appendReasoningContent(messageContentResult)
 					case "image":
+						if len(pendingSystemReminders) > 0 {
+							inputItems = append(inputItems, pendingSystemReminders...)
+							pendingSystemReminders = nil
+						}
 						sourceResult := messageContentResult.Get("source")
 						if sourceResult.Exists() {
 							data := sourceResult.Get("data").String()
@@ -203,6 +229,10 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 							}
 						}
 					case "document":
+						if len(pendingSystemReminders) > 0 {
+							inputItems = append(inputItems, pendingSystemReminders...)
+							pendingSystemReminders = nil
+						}
 						sourceResult := messageContentResult.Get("source")
 						if sourceResult.Get("type").String() != "base64" {
 							continue
@@ -220,6 +250,9 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 						}
 					case "tool_use":
 						flushMessage()
+						if id := messageContentResult.Get("id").String(); id != "" {
+							pendingToolUseIDs = append(pendingToolUseIDs, id)
+						}
 						functionCallMessage := []byte(`{"type":"function_call"}`)
 						functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("id").String()))
 						{
@@ -285,12 +318,23 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 					}
 				}
 				flushMessage()
+				if len(pendingSystemReminders) > 0 {
+					inputItems = append(inputItems, pendingSystemReminders...)
+					pendingSystemReminders = nil
+				}
 			} else if messageContentsResult.Type == gjson.String {
 				appendTextContent(messageContentsResult.String())
 				flushMessage()
+				if len(pendingSystemReminders) > 0 {
+					inputItems = append(inputItems, pendingSystemReminders...)
+					pendingSystemReminders = nil
+				}
 			}
 		}
 
+		if len(pendingSystemReminders) > 0 {
+			inputItems = append(inputItems, pendingSystemReminders...)
+		}
 	}
 
 	// Convert tools declarations to the expected format for the Codex API.
@@ -390,6 +434,30 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	template, _ = sjson.SetBytes(template, "stream", true)
 	template, _ = sjson.SetBytes(template, "store", false)
 	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
+
+	// Map Claude output_config.format to Codex Responses text.format.
+	if format := rootResult.Get("output_config.format"); format.IsObject() && format.Get("type").String() == "json_schema" && format.Get("schema").IsObject() {
+		name := "cli_proxy_structured_output"
+		if n := format.Get("name").String(); n != "" {
+			name = n
+		}
+		strict := true
+		if s := format.Get("strict"); s.Exists() && s.Type == gjson.False {
+			strict = false
+		}
+		// OpenAI strict mode requires every declared property to be listed
+		// in required. Downgrade instead of emitting an unsatisfiable
+		// strict schema that strict backends reject with HTTP 400.
+		if strict && codexSchemaMissesRequired(format.Get("schema")) {
+			strict = false
+		}
+		translatedFormat := []byte(`{"type":"json_schema","name":"","strict":true,"schema":{}}`)
+		translatedFormat, _ = sjson.SetBytes(translatedFormat, "name", name)
+		translatedFormat, _ = sjson.SetBytes(translatedFormat, "strict", strict)
+		translatedFormat, _ = sjson.SetRawBytes(translatedFormat, "schema", []byte(format.Get("schema").Raw))
+		template, _ = sjson.SetRawBytes(template, "text.format", translatedFormat)
+	}
+
 	if toolsResult.IsArray() {
 		template, _ = sjson.SetRawBytes(template, "tools", translatorcommon.JoinRawArray(toolItems))
 	}
@@ -602,21 +670,172 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 	return m
 }
 
-// normalizeToolParameters ensures object schemas contain at least an empty properties map.
+// normalizeToolParameters ensures object schemas contain at least an empty properties map,
+// strips dialect keywords ($schema, $id), and drops regex patterns containing unsupported
+// Unicode property escapes (\p{...} / \P{...}) that cause upstream schema validation failures.
 func normalizeToolParameters(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" || !gjson.Valid(raw) {
 		return `{"type":"object","properties":{}}`
 	}
-	result := gjson.Parse(raw)
-	schema := []byte(raw)
-	schemaType := result.Get("type").String()
-	if schemaType == "" {
-		schema, _ = sjson.SetBytes(schema, "type", "object")
-		schemaType = "object"
+	var root map[string]any
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if errDecode := decoder.Decode(&root); errDecode != nil || root == nil {
+		return `{"type":"object","properties":{}}`
 	}
-	if schemaType == "object" && !result.Get("properties").Exists() {
-		schema, _ = sjson.SetRawBytes(schema, "properties", []byte(`{}`))
+
+	stripDialectKeywordsFromSchema(root)
+
+	typeVal, typeExists := root["type"]
+	isObject := false
+	if !typeExists || typeVal == nil || typeVal == "" {
+		root["type"] = "object"
+		isObject = true
+	} else {
+		switch t := typeVal.(type) {
+		case string:
+			if t == "object" {
+				isObject = true
+			}
+		case []any:
+			for _, elem := range t {
+				if elemStr, ok := elem.(string); ok && elemStr == "object" {
+					isObject = true
+					break
+				}
+			}
+		}
 	}
-	return string(schema)
+	if isObject {
+		if props, ok := root["properties"]; !ok || props == nil {
+			root["properties"] = map[string]any{}
+		}
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if errEncode := enc.Encode(root); errEncode != nil {
+		return `{"type":"object","properties":{}}`
+	}
+	return strings.TrimSpace(buf.String())
+}
+
+func stripDialectKeywordsFromSchema(v any) {
+	switch schema := v.(type) {
+	case map[string]any:
+		delete(schema, "$schema")
+		delete(schema, "$id")
+		if patternVal, ok := schema["pattern"].(string); ok && util.HasUnsupportedUnicodePropertyEscape(patternVal) {
+			delete(schema, "pattern")
+		}
+
+		// Inspect regex keys under patternProperties
+		if patternProps, ok := schema["patternProperties"].(map[string]any); ok {
+			for patternKey, subSchema := range patternProps {
+				if util.HasUnsupportedUnicodePropertyEscape(patternKey) {
+					delete(patternProps, patternKey)
+				} else {
+					stripDialectKeywordsFromSchema(subSchema)
+				}
+			}
+		}
+
+		for _, mapKey := range codexSchemaMapKeywords {
+			if mapKey == "patternProperties" {
+				continue
+			}
+			if subMap, ok := schema[mapKey].(map[string]any); ok {
+				for _, subSchema := range subMap {
+					stripDialectKeywordsFromSchema(subSchema)
+				}
+			}
+		}
+
+		for _, valKey := range codexSchemaValueKeywords {
+			if val, exists := schema[valKey]; exists {
+				switch sub := val.(type) {
+				case map[string]any:
+					stripDialectKeywordsFromSchema(sub)
+				case []any:
+					for _, item := range sub {
+						stripDialectKeywordsFromSchema(item)
+					}
+				}
+			}
+		}
+	case []any:
+		for _, item := range schema {
+			stripDialectKeywordsFromSchema(item)
+		}
+	}
+}
+
+// codexSchemaMapKeywords and codexSchemaValueKeywords reference the unified JSON Schema keywords
+// declared in internal/util.
+var (
+	codexSchemaMapKeywords   = util.SchemaMapKeywords
+	codexSchemaValueKeywords = util.SchemaValueKeywords
+)
+
+// codexSchemaMissesRequired reports whether a JSON Schema has any declared
+// property missing from its sibling required list (recursively). OpenAI
+// strict mode rejects such schemas with HTTP 400, so callers downgrade
+// text.format.strict instead of emitting an unsatisfiable schema.
+func codexSchemaMissesRequired(schema gjson.Result) bool {
+	if !schema.IsObject() {
+		if schema.IsArray() {
+			miss := false
+			schema.ForEach(func(_, child gjson.Result) bool {
+				if codexSchemaMissesRequired(child) {
+					miss = true
+					return false
+				}
+				return true
+			})
+			return miss
+		}
+		return false
+	}
+	if properties := schema.Get("properties"); properties.IsObject() {
+		required := schema.Get("required")
+		if !required.IsArray() {
+			return len(properties.Map()) > 0
+		}
+		names := make(map[string]struct{}, len(required.Array()))
+		for _, item := range required.Array() {
+			if item.Type == gjson.String {
+				names[item.String()] = struct{}{}
+			}
+		}
+		for name := range properties.Map() {
+			if _, ok := names[name]; !ok {
+				return true
+			}
+		}
+	}
+	for _, keyword := range codexSchemaMapKeywords {
+		children := schema.Get(keyword)
+		if !children.IsObject() {
+			continue
+		}
+		miss := false
+		children.ForEach(func(_, child gjson.Result) bool {
+			if codexSchemaMissesRequired(child) {
+				miss = true
+				return false
+			}
+			return true
+		})
+		if miss {
+			return true
+		}
+	}
+	for _, keyword := range codexSchemaValueKeywords {
+		if child := schema.Get(keyword); child.Exists() && codexSchemaMissesRequired(child) {
+			return true
+		}
+	}
+	return false
 }

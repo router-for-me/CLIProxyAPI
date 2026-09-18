@@ -311,6 +311,40 @@ func TestBuildXAIVideosCreateRequestAllowsCustomSeconds(t *testing.T) {
 	}
 }
 
+func TestBuildXAIVideosCreateRequestPreservesMultiReferenceSeconds(t *testing.T) {
+	tests := []struct {
+		seconds  string
+		duration int64
+	}{
+		{seconds: "1", duration: 1},
+		{seconds: "6", duration: 6},
+		{seconds: "10", duration: 10},
+		{seconds: "11", duration: 11},
+		{seconds: "15", duration: 15},
+	}
+
+	for _, tt := range tests {
+		t.Run("seconds_"+tt.seconds, func(t *testing.T) {
+			rawJSON := []byte(`{"prompt":"animate","seconds":"` + tt.seconds + `","reference_images":["https://example.com/first.png","https://example.com/second.png"]}`)
+
+			req, meta, err := buildXAIVideosCreateRequest(rawJSON, defaultXAIVideosModel)
+			if err != nil {
+				t.Fatalf("buildXAIVideosCreateRequest() error = %v", err)
+			}
+
+			if got := gjson.GetBytes(req, "duration").Int(); got != tt.duration {
+				t.Fatalf("duration = %d, want %d", got, tt.duration)
+			}
+			if meta.Seconds != tt.seconds {
+				t.Fatalf("meta seconds = %q, want %q", meta.Seconds, tt.seconds)
+			}
+			if got := gjson.GetBytes(req, "reference_images.#").Int(); got != 2 {
+				t.Fatalf("reference image count = %d, want 2", got)
+			}
+		})
+	}
+}
+
 func TestBuildXAIVideosCreateRequestRejectsFileIDReference(t *testing.T) {
 	rawJSON := []byte(`{"prompt":"animate","input_reference":{"file_id":"file_123"}}`)
 

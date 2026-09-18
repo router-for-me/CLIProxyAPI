@@ -146,6 +146,66 @@ func TestFileTokenStoreSaveExistingMetadataSetsFileAttributes(t *testing.T) {
 	}
 }
 
+func TestFileTokenStoreNormalizesLegacyCredentialMetadata(t *testing.T) {
+	t.Run("save", func(t *testing.T) {
+		baseDir := t.TempDir()
+		store := NewFileTokenStore()
+		store.SetBaseDir(baseDir)
+		auth := &cliproxyauth.Auth{
+			ID:       "legacy-save.json",
+			FileName: "legacy-save.json",
+			Metadata: map[string]any{
+				"type":            "codex",
+				"request-retry":   2,
+				"request_retry":   0,
+				"disable-cooling": true,
+			},
+		}
+
+		path, errSave := store.Save(context.Background(), auth)
+		if errSave != nil {
+			t.Fatalf("Save() error = %v", errSave)
+		}
+		persisted, errRead := os.ReadFile(path)
+		if errRead != nil {
+			t.Fatalf("read saved auth file: %v", errRead)
+		}
+		want := []byte(`{"type":"codex","request_retry":0,"disable_cooling":true,"disabled":false}`)
+		if !jsonEqual(persisted, want) {
+			t.Fatalf("saved auth file = %s, want JSON equal to %s", persisted, want)
+		}
+	})
+
+	t.Run("list", func(t *testing.T) {
+		baseDir := t.TempDir()
+		path := filepath.Join(baseDir, "legacy-list.json")
+		if errWrite := os.WriteFile(path, []byte(`{"type":"codex","request-retry":2,"disable-cooling":true}`), 0o600); errWrite != nil {
+			t.Fatalf("write legacy auth file: %v", errWrite)
+		}
+		store := NewFileTokenStore()
+		store.SetBaseDir(baseDir)
+
+		auths, errList := store.List(context.Background())
+		if errList != nil {
+			t.Fatalf("List() error = %v", errList)
+		}
+		if len(auths) != 1 {
+			t.Fatalf("List() len = %d, want 1", len(auths))
+		}
+		if got := auths[0].Metadata["request_retry"]; got != float64(2) {
+			t.Fatalf("listed request_retry = %#v, want 2", got)
+		}
+		if got := auths[0].Metadata["disable_cooling"]; got != true {
+			t.Fatalf("listed disable_cooling = %#v, want true", got)
+		}
+		for _, legacy := range []string{"request-retry", "disable-cooling"} {
+			if _, exists := auths[0].Metadata[legacy]; exists {
+				t.Fatalf("listed metadata retained %q: %#v", legacy, auths[0].Metadata)
+			}
+		}
+	})
+}
+
 func TestFileTokenStoreSaveRejectsInvalidWeight(t *testing.T) {
 	baseDir := t.TempDir()
 	store := NewFileTokenStore()

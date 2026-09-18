@@ -25,6 +25,7 @@ type rpcCapabilities struct {
 	FrontendAuthProvider          bool                         `json:"frontend_auth_provider"`
 	FrontendAuthProviderExclusive bool                         `json:"frontend_auth_provider_exclusive"`
 	Scheduler                     bool                         `json:"scheduler"`
+	SchedulerAcrossPriorities     bool                         `json:"scheduler_across_priorities,omitempty"`
 	ModelRouter                   bool                         `json:"model_router"`
 	Executor                      bool                         `json:"executor"`
 	ExecutorModelScope            pluginapi.ExecutorModelScope `json:"executor_model_scope"`
@@ -39,10 +40,12 @@ type rpcCapabilities struct {
 	ResponseAfterTranslator       bool                         `json:"response_after_translator"`
 	ResponseInterceptor           bool                         `json:"response_interceptor"`
 	StreamChunkInterceptor        bool                         `json:"response_stream_interceptor"`
+	WebSocketResponseObserver     bool                         `json:"websocket_response_observer"`
 	ThinkingApplier               bool                         `json:"thinking_applier"`
 	UsagePlugin                   bool                         `json:"usage_plugin"`
 	CommandLinePlugin             bool                         `json:"command_line_plugin"`
 	ManagementAPI                 bool                         `json:"management_api"`
+	QuotaProvider                 bool                         `json:"quota_provider"`
 }
 
 type rpcIdentifierResponse struct {
@@ -110,6 +113,11 @@ type rpcStreamChunkInterceptRequest struct {
 	HostCallbackID string `json:"host_callback_id,omitempty"`
 }
 
+type rpcWebSocketResponseEvent struct {
+	pluginapi.WebSocketResponseEvent
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
 type rpcThinkingApplyRequest struct {
 	pluginapi.ThinkingApplyRequest
 	HostCallbackID string `json:"host_callback_id,omitempty"`
@@ -125,7 +133,30 @@ type rpcManagementRegistrationResponse struct {
 	Resources []pluginapi.ResourceRoute   `json:"resources,omitempty"`
 }
 
+type rpcQuotaFetchRequest struct {
+	pluginapi.QuotaFetchRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type rpcQuotaResetRequest struct {
+	pluginapi.QuotaResetRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
 type rpcEmptyResponse struct{}
+
+func schedulerWantsAcrossPriorities(caps pluginapi.Capabilities) bool {
+	if caps.Scheduler == nil {
+		return false
+	}
+	if caps.SchedulerAcrossPriorities {
+		return true
+	}
+	if opt, ok := caps.Scheduler.(interface{ SchedulerWantsAcrossPriorities() bool }); ok && opt != nil {
+		return opt.SchedulerWantsAcrossPriorities()
+	}
+	return false
+}
 
 func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 	caps := plugin.Capabilities
@@ -136,6 +167,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		FrontendAuthProvider:          caps.FrontendAuthProvider != nil,
 		FrontendAuthProviderExclusive: caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
 		Scheduler:                     caps.Scheduler != nil,
+		SchedulerAcrossPriorities:     schedulerWantsAcrossPriorities(caps),
 		ModelRouter:                   caps.ModelRouter != nil,
 		Executor:                      caps.Executor != nil,
 		ExecutorModelScope:            normalizedExecutorModelScope(caps),
@@ -150,10 +182,12 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		ResponseAfterTranslator:       caps.ResponseAfterTranslator != nil,
 		ResponseInterceptor:           caps.ResponseInterceptor != nil,
 		StreamChunkInterceptor:        caps.StreamChunkInterceptor != nil,
+		WebSocketResponseObserver:     caps.WebSocketResponseObserver != nil,
 		ThinkingApplier:               caps.ThinkingApplier != nil,
 		UsagePlugin:                   caps.UsagePlugin != nil,
 		CommandLinePlugin:             caps.CommandLinePlugin != nil,
 		ManagementAPI:                 caps.ManagementAPI != nil,
+		QuotaProvider:                 caps.QuotaProvider != nil,
 	}
 }
 

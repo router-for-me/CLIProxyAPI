@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -190,7 +191,8 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return true
 	}
-	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL)
+	metadata := queryValuesToMetadata(c.Request.URL.Query())
+	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL, metadata)
 	if !handled {
 		return false
 	}
@@ -217,4 +219,19 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": resp.URL, "state": state})
 	return true
+}
+
+func queryValuesToMetadata(values url.Values) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	metadata := make(map[string]any, len(values))
+	for k, v := range values {
+		if len(v) == 1 {
+			metadata[k] = v[0]
+		} else if len(v) > 1 {
+			metadata[k] = append([]string(nil), v...)
+		}
+	}
+	return metadata
 }

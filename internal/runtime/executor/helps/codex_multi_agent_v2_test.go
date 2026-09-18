@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -178,5 +179,40 @@ func TestSameByteSlice(t *testing.T) {
 				t.Fatalf("sameByteSlice() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTranslateRequestEnvelopePairWithCodexMultiAgentV2UsesModelInfo(t *testing.T) {
+	trueVal := true
+	falseVal := false
+	const model = "gemini-3.8-flash-high"
+
+	input := []byte(`{
+		"model": "` + model + `",
+		"input": "Search weather",
+		"tools": [{"type": "web_search"}]
+	}`)
+
+	enabled := &registry.ModelInfo{
+		ID:                 model,
+		NativeCapabilities: &registry.NativeCapabilities{WebSearch: &trueVal},
+	}
+	envelope := sdktranslator.RequestEnvelope{Format: sdktranslator.FormatOpenAIResponse, Model: model, ModelInfo: enabled}
+	base, work := TranslateRequestEnvelopePairWithCodexMultiAgentV2(context.Background(), http.Header{}, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, envelope, input, input)
+	if gjson.GetBytes(base, "requestType").String() != "web_search" {
+		t.Fatalf("expected baseline requestType web_search, got: %s", base)
+	}
+	if gjson.GetBytes(work, "requestType").String() != "web_search" {
+		t.Fatalf("expected working requestType web_search, got: %s", work)
+	}
+
+	disabled := &registry.ModelInfo{
+		ID:                 model,
+		NativeCapabilities: &registry.NativeCapabilities{WebSearch: &falseVal},
+	}
+	envelope.ModelInfo = disabled
+	_, workDisabled := TranslateRequestEnvelopePairWithCodexMultiAgentV2(context.Background(), http.Header{}, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, envelope, input, input)
+	if gjson.GetBytes(workDisabled, "requestType").String() == "web_search" {
+		t.Fatalf("expected non-web_search when capability disabled, got: %s", workDisabled)
 	}
 }

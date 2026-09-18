@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -116,6 +117,13 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 					}
 					(*param).(*ConvertAnthropicResponseToGeminiParams).ToolUseIDs[idx] = toolID
 				}
+			} else if cb.Get("type").String() == "thinking" {
+				if sig := cb.Get("signature"); sig.Exists() && sig.String() != "" {
+					thinkingPart := []byte(`{"thought":true,"thoughtSignature":""}`)
+					thinkingPart, _ = sjson.SetBytes(thinkingPart, "thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(sig.String(), sigcompat.SignatureBlockKindGeminiModelPart))
+					template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", thinkingPart)
+					return [][]byte{template}
+				}
 			}
 		}
 		return [][]byte{}
@@ -138,6 +146,12 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 				if text := delta.Get("thinking"); text.Exists() && text.String() != "" {
 					thinkingPart := []byte(`{"thought":true,"text":""}`)
 					thinkingPart, _ = sjson.SetBytes(thinkingPart, "text", text.String())
+					template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", thinkingPart)
+				}
+			case "signature_delta":
+				if sig := delta.Get("signature"); sig.Exists() && sig.String() != "" {
+					thinkingPart := []byte(`{"thought":true,"thoughtSignature":""}`)
+					thinkingPart, _ = sjson.SetBytes(thinkingPart, "thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(sig.String(), sigcompat.SignatureBlockKindGeminiModelPart))
 					template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", thinkingPart)
 				}
 			case "input_json_delta":
@@ -376,6 +390,12 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 						}
 						newParam.ToolUseIDs[idx] = toolID
 					}
+				} else if cb.Get("type").String() == "thinking" {
+					if sig := cb.Get("signature"); sig.Exists() && sig.String() != "" {
+						partJSON := []byte(`{"thought":true,"thoughtSignature":""}`)
+						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(sig.String(), sigcompat.SignatureBlockKindGeminiModelPart))
+						allParts = append(allParts, partJSON)
+					}
 				}
 			}
 			continue
@@ -397,6 +417,12 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 					if text := delta.Get("thinking"); text.Exists() && text.String() != "" {
 						partJSON := []byte(`{"thought":true,"text":""}`)
 						partJSON, _ = sjson.SetBytes(partJSON, "text", text.String())
+						allParts = append(allParts, partJSON)
+					}
+				case "signature_delta":
+					if sig := delta.Get("signature"); sig.Exists() && sig.String() != "" {
+						partJSON := []byte(`{"thought":true,"thoughtSignature":""}`)
+						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", sigcompat.GeminiReplaySignatureOrBypass(sig.String(), sigcompat.SignatureBlockKindGeminiModelPart))
 						allParts = append(allParts, partJSON)
 					}
 				case "input_json_delta":
@@ -535,6 +561,7 @@ func consolidateParts(parts [][]byte) [][]byte {
 	var consolidated [][]byte
 	var currentTextPart strings.Builder
 	var currentThoughtPart strings.Builder
+	var currentThoughtSignature string
 	var hasText, hasThought bool
 
 	flushText := func() {
@@ -550,11 +577,15 @@ func consolidateParts(parts [][]byte) [][]byte {
 
 	flushThought := func() {
 		// Flush accumulated thinking content to the consolidated parts array
-		if hasThought && currentThoughtPart.Len() > 0 {
+		if hasThought && (currentThoughtPart.Len() > 0 || currentThoughtSignature != "") {
 			thoughtPartJSON := []byte(`{"thought":true,"text":""}`)
 			thoughtPartJSON, _ = sjson.SetBytes(thoughtPartJSON, "text", currentThoughtPart.String())
+			if currentThoughtSignature != "" {
+				thoughtPartJSON, _ = sjson.SetBytes(thoughtPartJSON, "thoughtSignature", currentThoughtSignature)
+			}
 			consolidated = append(consolidated, thoughtPartJSON)
 			currentThoughtPart.Reset()
+			currentThoughtSignature = ""
 			hasThought = false
 		}
 	}
@@ -576,6 +607,10 @@ func consolidateParts(parts [][]byte) [][]byte {
 
 			if text := part.Get("text"); text.Exists() && text.Type == gjson.String {
 				currentThoughtPart.WriteString(text.String())
+				hasThought = true
+			}
+			if sig := part.Get("thoughtSignature"); sig.Exists() && sig.Type == gjson.String && sig.String() != "" {
+				currentThoughtSignature = sig.String()
 				hasThought = true
 			}
 		} else if text := part.Get("text"); text.Exists() && text.Type == gjson.String {

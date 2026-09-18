@@ -12,11 +12,56 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestSaveTokenRecord_PostPersistHookReceivesCanonicalClaudeOAuth(t *testing.T) {
+	authDir := t.TempDir()
+	fileName := "claude-user@example.com.json"
+	accessToken := "sk-ant-oat01-hot-reload"
+
+	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil)
+	var persistedAuth *coreauth.Auth
+	h.SetPostAuthPersistHook(func(_ context.Context, auth *coreauth.Auth) error {
+		persistedAuth = auth.Clone()
+		return nil
+	})
+
+	tokenStorage := &claude.ClaudeTokenStorage{
+		AccessToken:  accessToken,
+		RefreshToken: "refresh-token",
+		LastRefresh:  "2026-03-09T00:00:00Z",
+		Email:        "user@example.com",
+		Expire:       "2026-12-31T23:59:59Z",
+	}
+	record := &coreauth.Auth{
+		ID:       fileName,
+		Provider: "claude",
+		FileName: fileName,
+		Storage:  tokenStorage,
+		Metadata: map[string]any{"email": tokenStorage.Email},
+	}
+
+	if _, errSave := h.saveTokenRecord(context.Background(), record); errSave != nil {
+		t.Fatalf("saveTokenRecord error: %v", errSave)
+	}
+	if persistedAuth == nil {
+		t.Fatal("post-persist hook did not receive auth")
+	}
+	if got, _ := persistedAuth.Metadata["access_token"].(string); got != accessToken {
+		t.Fatalf("post-persist access_token = %q, want %q", got, accessToken)
+	}
+	if got := persistedAuth.AuthKind(); got != coreauth.AuthKindOAuth {
+		t.Fatalf("post-persist auth kind = %q, want %q", got, coreauth.AuthKindOAuth)
+	}
+	if persistedAuth.Status != coreauth.StatusActive {
+		t.Fatalf("post-persist status = %q, want %q", persistedAuth.Status, coreauth.StatusActive)
+	}
+}
 
 func TestSaveTokenRecord_PreservesExistingAuthFileSettings(t *testing.T) {
 	authDir := t.TempDir()
@@ -125,6 +170,87 @@ func TestSaveTokenRecord_PreservesExistingAuthFileSettings(t *testing.T) {
 	}
 	if saved["priority"] != float64(2) {
 		t.Errorf("priority = %v, want 2", saved["priority"])
+	}
+}
+
+func TestSaveTokenRecord_MigratesMatchingLegacyClaudeCredential(t *testing.T) {
+	authDir := t.TempDir()
+	legacyFileName := "claude-user@example.com.json"
+	targetFileName := claude.CredentialFileName("user@example.com", "organization-a", "account-a")
+	legacyPath := filepath.Join(authDir, legacyFileName)
+	targetPath := filepath.Join(authDir, targetFileName)
+
+	existing := map[string]any{
+		"type":              "claude",
+		"email":             "user@example.com",
+		"organization_uuid": "organization-a",
+		"account_uuid":      "account-a",
+		"access_token":      "old-token",
+		"refresh_token":     "old-refresh",
+		"prefix":            "team",
+		"proxy_url":         "http://127.0.0.1:8080",
+		"disabled":          true,
+		"weight":            float64(5),
+	}
+	raw, errMarshal := json.Marshal(existing)
+	if errMarshal != nil {
+		t.Fatalf("marshal legacy credential: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(legacyPath, raw, 0o600); errWrite != nil {
+		t.Fatalf("write legacy credential: %v", errWrite)
+	}
+
+	tokenStorage := &claude.ClaudeTokenStorage{
+		AccessToken:      "new-token",
+		RefreshToken:     "new-refresh",
+		Email:            "user@example.com",
+		OrganizationUUID: "organization-a",
+		AccountUUID:      "account-a",
+		Expire:           "2026-12-31T23:59:59Z",
+	}
+	record := &coreauth.Auth{
+		ID:       targetFileName,
+		Provider: "claude",
+		FileName: targetFileName,
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"email":             tokenStorage.Email,
+			"organization_uuid": tokenStorage.OrganizationUUID,
+			"account_uuid":      tokenStorage.AccountUUID,
+		},
+	}
+
+	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil)
+	savedPath, errSave := h.saveTokenRecord(context.Background(), record)
+	if errSave != nil {
+		t.Fatalf("saveTokenRecord error: %v", errSave)
+	}
+	if savedPath != targetPath {
+		t.Fatalf("savedPath = %s, want %s", savedPath, targetPath)
+	}
+	if _, errStat := os.Stat(legacyPath); !os.IsNotExist(errStat) {
+		t.Fatalf("legacy credential still exists or stat failed: %v", errStat)
+	}
+
+	savedRaw, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("read migrated credential: %v", errRead)
+	}
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("unmarshal migrated credential: %v", errUnmarshal)
+	}
+	for key, want := range map[string]any{
+		"access_token":  "new-token",
+		"refresh_token": "new-refresh",
+		"prefix":        "team",
+		"proxy_url":     "http://127.0.0.1:8080",
+		"disabled":      true,
+		"weight":        float64(5),
+	} {
+		if got := saved[key]; got != want {
+			t.Errorf("%s = %#v, want %#v", key, got, want)
+		}
 	}
 }
 

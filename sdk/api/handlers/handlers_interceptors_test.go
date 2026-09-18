@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,13 +22,16 @@ import (
 )
 
 type handlerInterceptorTestHost struct {
-	interceptRequestBeforeAuth func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
-	interceptRequestAfterAuth  func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
-	interceptResponse          func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
-	interceptStreamChunk       func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
-	completeRequest            func(context.Context, pluginapi.RequestCompletion)
+	interceptRequestBeforeAuth    func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
+	interceptRequestAfterAuth     func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse
+	interceptResponse             func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse
+	interceptStreamChunk          func(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse
+	observeWebSocketResponseEvent func(context.Context, pluginapi.WebSocketResponseEvent)
+	completeRequest               func(context.Context, pluginapi.RequestCompletion)
 	// includeStreamChunkRequestBodies simulates legacy schema_version < 3 plugins.
 	includeStreamChunkRequestBodies bool
+	// includeStreamChunkHistory simulates legacy schema_version < 5 plugins.
+	includeStreamChunkHistory bool
 }
 
 type handlerInterceptorNoStreamTestHost struct {
@@ -92,6 +96,12 @@ func (h *handlerInterceptorTestHost) CompleteRequest(ctx context.Context, comple
 	}
 }
 
+func (h *handlerInterceptorTestHost) ObserveWebSocketResponseEvent(ctx context.Context, event pluginapi.WebSocketResponseEvent) {
+	if h != nil && h.observeWebSocketResponseEvent != nil {
+		h.observeWebSocketResponseEvent(ctx, event)
+	}
+}
+
 // StreamChunkPayloadIncludesRequestBody implements streamChunkRequestBodyPolicy.
 // Default false simulates schema_version >= 3 (omit request bodies on payload chunks).
 func (h *handlerInterceptorTestHost) StreamChunkPayloadIncludesRequestBody() bool {
@@ -99,6 +109,15 @@ func (h *handlerInterceptorTestHost) StreamChunkPayloadIncludesRequestBody() boo
 		return false
 	}
 	return h.includeStreamChunkRequestBodies
+}
+
+// StreamChunkPayloadIncludesHistory implements streamChunkHistoryPolicy.
+// Default false simulates schema_version >= 5 (omit history on payload chunks).
+func (h *handlerInterceptorTestHost) StreamChunkPayloadIncludesHistory() bool {
+	if h == nil {
+		return false
+	}
+	return h.includeStreamChunkHistory
 }
 
 type interceptorCaptureExecutor struct {
@@ -968,6 +987,7 @@ func TestHandlerStreamInterceptorRewritesAndDropsChunks(t *testing.T) {
 	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
 	var streamCalls int
 	handler.SetPluginHost(&handlerInterceptorTestHost{
+		includeStreamChunkHistory: true,
 		interceptRequestBeforeAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
 			headers := cloneHeader(req.Headers)
 			if headers == nil {
@@ -1112,6 +1132,97 @@ func TestHandlerStreamInterceptorLegacySchemaClonesRequestBodiesOnPayloadChunks(
 	}
 	if &payloadBodies[0][0] == &payloadBodies[1][0] {
 		t.Fatal("payload OriginalRequest slices alias across chunks; want fresh clones")
+	}
+}
+
+func TestHandlerStreamInterceptorModernSchemaOmitsHistoryOnPayloadChunks(t *testing.T) {
+	model := "handler-interceptor-stream-modern-omit-history-model"
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("first")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("second")}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream": []string{"stream"}},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
+	var observedHistories [][][]byte
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		includeStreamChunkHistory: false,
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+				return pluginapi.StreamChunkInterceptResponse{}
+			}
+			observedHistories = append(observedHistories, cloneByteSlices(req.HistoryChunks))
+			return pluginapi.StreamChunkInterceptResponse{Body: req.Body}
+		},
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	for range dataChan {
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if len(observedHistories) != 2 {
+		t.Fatalf("payload chunk count = %d, want 2", len(observedHistories))
+	}
+	for i, h := range observedHistories {
+		if len(h) != 0 {
+			t.Fatalf("chunk %d history = %#v, want omitted for schema v5+", i, h)
+		}
+	}
+}
+
+func TestHandlerStreamInterceptorLegacySchemaClonesHistoryChunksOnPayloadChunks(t *testing.T) {
+	model := "handler-interceptor-stream-legacy-history-model"
+	executor := &interceptorCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("first")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("second")}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{"X-Upstream": []string{"stream"}},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: true})
+	var observedHistories [][][]byte
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		includeStreamChunkHistory: true,
+		interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+			if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex {
+				return pluginapi.StreamChunkInterceptResponse{}
+			}
+			observedHistories = append(observedHistories, cloneByteSlices(req.HistoryChunks))
+			return pluginapi.StreamChunkInterceptResponse{Body: req.Body}
+		},
+	})
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	for range dataChan {
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error: %+v", msg)
+		}
+	}
+	if len(observedHistories) != 2 {
+		t.Fatalf("payload chunk count = %d, want 2", len(observedHistories))
+	}
+	if len(observedHistories[0]) != 0 {
+		t.Fatalf("chunk 0 history = %#v, want empty", observedHistories[0])
+	}
+	if len(observedHistories[1]) != 1 || string(observedHistories[1][0]) != "first" {
+		t.Fatalf("chunk 1 history = %#v, want ['first']", observedHistories[1])
 	}
 }
 
@@ -1479,5 +1590,108 @@ func TestHandlerResponseInterceptorSeesRawHeadersWhenPassthroughDisabled(t *test
 	}
 	if headers.Get("X-Upstream") != "" {
 		t.Fatalf("headers leaked raw upstream header with passthrough disabled: %#v", headers)
+	}
+}
+
+func TestHandlerWebSocketResponseObserverForwardsToPluginHost(t *testing.T) {
+	model := "handler-ws-observer-model"
+	var observed []pluginapi.WebSocketResponseEvent
+	executor := &interceptorCaptureExecutor{
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			if opts.WebSocketResponseObserver != nil {
+				opts.WebSocketResponseObserver(ctx, coreexecutor.WebSocketResponseEvent{
+					SourceFormat: opts.SourceFormat.String(),
+					Model:        req.Model,
+					Provider:     "codex",
+					AuthID:       "auth-test",
+					EventType:    "codex.rate_limits",
+					Payload:      []byte(`{"type":"codex.rate_limits"}`),
+				})
+			}
+			return coreexecutor.Response{Payload: []byte(`{"id":"resp-1"}`)}, nil
+		},
+	}
+	handler := newInterceptorHandler(t, model, executor, nil)
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		observeWebSocketResponseEvent: func(ctx context.Context, event pluginapi.WebSocketResponseEvent) {
+			observed = append(observed, event)
+		},
+	})
+
+	_, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+
+	if len(observed) != 1 {
+		t.Fatalf("observed %d events, want 1", len(observed))
+	}
+	if observed[0].EventType != "codex.rate_limits" {
+		t.Fatalf("EventType = %q, want codex.rate_limits", observed[0].EventType)
+	}
+	if observed[0].AuthID != "auth-test" {
+		t.Fatalf("AuthID = %q, want auth-test", observed[0].AuthID)
+	}
+	if observed[0].RequestID == "" {
+		t.Fatal("RequestID is empty, want populated request ID")
+	}
+}
+
+func TestWriteModelListResponse_ExposesResponseToPluginInterceptors(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	var intercepted bool
+	var capturedReq pluginapi.ResponseInterceptRequest
+	var completion pluginapi.RequestCompletion
+
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			intercepted = true
+			capturedReq = req
+			headers := cloneHeader(req.ResponseHeaders)
+			headers.Set("X-Custom-Model-Header", "filtered")
+			return pluginapi.ResponseInterceptResponse{
+				Headers: headers,
+				Body:    []byte(`{"object":"list","data":[{"id":"intercepted-model"}]}`),
+			}
+		},
+		completeRequest: func(_ context.Context, comp pluginapi.RequestCompletion) {
+			completion = comp
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	ctx.Request.Header.Set("Authorization", "Bearer test-token")
+
+	payload := gin.H{"object": "list", "data": []map[string]any{{"id": "original-model"}}}
+	handler.WriteModelListResponse(ctx, "openai", payload)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if !intercepted {
+		t.Fatal("InterceptResponse was not called")
+	}
+	if capturedReq.SourceFormat != "openai" {
+		t.Fatalf("SourceFormat = %q, want openai", capturedReq.SourceFormat)
+	}
+	if capturedReq.RequestHeaders.Get("Authorization") != "Bearer test-token" {
+		t.Fatalf("RequestHeaders missing auth: %#v", capturedReq.RequestHeaders)
+	}
+	if rec.Header().Get("X-Custom-Model-Header") != "filtered" {
+		t.Fatalf("X-Custom-Model-Header = %q, want filtered", rec.Header().Get("X-Custom-Model-Header"))
+	}
+	if !strings.Contains(rec.Body.String(), "intercepted-model") {
+		t.Fatalf("body = %s, want intercepted-model", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "original-model") {
+		t.Fatalf("body should not contain original-model: %s", rec.Body.String())
+	}
+	if completion.Outcome != pluginapi.RequestCompletionSucceeded {
+		t.Fatalf("completion outcome = %v, want succeeded", completion.Outcome)
+	}
+	if apiResp, ok := ctx.Get("API_RESPONSE"); !ok || !strings.Contains(string(apiResp.([]byte)), "intercepted-model") {
+		t.Fatalf("API_RESPONSE not recorded properly: %#v", apiResp)
 	}
 }

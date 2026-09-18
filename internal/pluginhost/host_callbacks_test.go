@@ -750,3 +750,161 @@ func TestHostLogCallbackRestoresRegisteredRequestContext(t *testing.T) {
 		t.Fatalf("log output = %q, want message and request_id field", got)
 	}
 }
+
+func TestDecodeHostHTTPRequestWithWireProfile(t *testing.T) {
+	t.Parallel()
+
+	profile := &pluginapi.HTTPWireProfile{
+		HTTP1Only:              true,
+		DisableAutoCompression: true,
+		HeaderProfile:          []string{"host", "user-agent"},
+	}
+
+	// Flat rpcHostHTTPRequest
+	flatReq := rpcHostHTTPRequest{
+		HostCallbackID: "cb-1",
+		Method:         http.MethodPost,
+		URL:            "https://example.com/api",
+		WireProfile:    profile,
+	}
+	rawFlat, errMarshal := json.Marshal(flatReq)
+	if errMarshal != nil {
+		t.Fatalf("marshal flat request: %v", errMarshal)
+	}
+	decoded, callbackID, errDecode := decodeHostHTTPRequestWithCallbackID(rawFlat)
+	if errDecode != nil {
+		t.Fatalf("decode flat request error = %v", errDecode)
+	}
+	if callbackID != "cb-1" {
+		t.Fatalf("callbackID = %q, want cb-1", callbackID)
+	}
+	if decoded.WireProfile == nil || !decoded.WireProfile.HTTP1Only || !decoded.WireProfile.DisableAutoCompression {
+		t.Fatalf("decoded wire profile mismatch: %#v", decoded.WireProfile)
+	}
+	if len(decoded.WireProfile.HeaderProfile) != 2 || decoded.WireProfile.HeaderProfile[0] != "host" {
+		t.Fatalf("decoded header profile mismatch: %#v", decoded.WireProfile.HeaderProfile)
+	}
+
+	// Nested httpRequest
+	nestedReq := rpcHostHTTPRequest{
+		HostCallbackID: "cb-2",
+		Request: &httpRequest{
+			Method:      http.MethodGet,
+			URL:         "https://example.com/stream",
+			WireProfile: profile,
+		},
+	}
+	rawNested, errMarshalNested := json.Marshal(nestedReq)
+	if errMarshalNested != nil {
+		t.Fatalf("marshal nested request: %v", errMarshalNested)
+	}
+	decodedNested, callbackIDNested, errDecodeNested := decodeHostHTTPRequestWithCallbackID(rawNested)
+	if errDecodeNested != nil {
+		t.Fatalf("decode nested request error = %v", errDecodeNested)
+	}
+	if callbackIDNested != "cb-2" {
+		t.Fatalf("callbackID = %q, want cb-2", callbackIDNested)
+	}
+	if decodedNested.WireProfile == nil || !decodedNested.WireProfile.HTTP1Only {
+		t.Fatalf("decoded nested wire profile mismatch: %#v", decodedNested.WireProfile)
+	}
+
+	// Direct pluginapi.HTTPRequest JSON serialization (SDK contract)
+	sdkReq := pluginapi.HTTPRequest{
+		Method:      http.MethodPost,
+		URL:         "https://example.com/sdk",
+		WireProfile: profile,
+	}
+	rawSDK, errMarshalSDK := json.Marshal(sdkReq)
+	if errMarshalSDK != nil {
+		t.Fatalf("marshal sdk request: %v", errMarshalSDK)
+	}
+	decodedSDK, _, errDecodeSDK := decodeHostHTTPRequestWithCallbackID(rawSDK)
+	if errDecodeSDK != nil {
+		t.Fatalf("decode sdk request error = %v", errDecodeSDK)
+	}
+	if decodedSDK.WireProfile == nil || !decodedSDK.WireProfile.HTTP1Only || !decodedSDK.WireProfile.DisableAutoCompression {
+		t.Fatalf("decoded sdk wire profile mismatch: %#v", decodedSDK.WireProfile)
+	}
+	if len(decodedSDK.WireProfile.HeaderProfile) != 2 || decodedSDK.WireProfile.HeaderProfile[0] != "host" {
+		t.Fatalf("decoded sdk header profile mismatch: %#v", decodedSDK.WireProfile.HeaderProfile)
+	}
+}
+
+func TestHostModelExecutePropagatesForcedProviderAndAuthID(t *testing.T) {
+	host := New()
+	var got handlers.ModelExecutionRequest
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			got = req
+			return handlers.ModelExecutionResponse{
+				StatusCode: http.StatusOK,
+				Body:       []byte(`{"ok":true}`),
+			}, nil
+		},
+	})
+
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol:  "openai",
+			ExitProtocol:   "openai",
+			Model:          "test-model",
+			ForcedProvider: "provider-x",
+			AuthID:         "auth-xyz",
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	_, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawReq)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if got.ForcedProvider != "provider-x" {
+		t.Fatalf("got.ForcedProvider = %q, want %q", got.ForcedProvider, "provider-x")
+	}
+	if got.AuthID != "auth-xyz" {
+		t.Fatalf("got.AuthID = %q, want %q", got.AuthID, "auth-xyz")
+	}
+}
+
+func TestHostModelExecuteStreamPropagatesForcedProviderAndAuthID(t *testing.T) {
+	host := New()
+	var got handlers.ModelExecutionRequest
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			got = req
+			chunks := make(chan handlers.ModelExecutionChunk, 1)
+			chunks <- handlers.ModelExecutionChunk{Payload: []byte("chunk")}
+			close(chunks)
+			return handlers.ModelExecutionStream{
+				StatusCode: http.StatusOK,
+				Chunks:     chunks,
+			}, nil
+		},
+	})
+
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol:  "openai",
+			ExitProtocol:   "openai",
+			Model:          "test-model",
+			Stream:         true,
+			ForcedProvider: "provider-stream",
+			AuthID:         "auth-stream-abc",
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	_, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawReq)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if got.ForcedProvider != "provider-stream" {
+		t.Fatalf("got.ForcedProvider = %q, want %q", got.ForcedProvider, "provider-stream")
+	}
+	if got.AuthID != "auth-stream-abc" {
+		t.Fatalf("got.AuthID = %q, want %q", got.AuthID, "auth-stream-abc")
+	}
+}

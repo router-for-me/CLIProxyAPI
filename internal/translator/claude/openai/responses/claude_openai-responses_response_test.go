@@ -216,14 +216,10 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
 
 	counts := map[string]int{}
-	var outputTextDone gjson.Result
 	var completed gjson.Result
 	for _, output := range outputs {
 		event, data := parseClaudeResponsesSSEEvent(t, output)
 		counts[event]++
-		if event == "response.output_text.done" {
-			outputTextDone = data
-		}
 		if event == "response.completed" {
 			completed = data
 		}
@@ -232,33 +228,35 @@ func TestConvertClaudeResponseToOpenAIResponses_AggregatesTextBlocksUntilMessage
 		}
 	}
 
-	if counts["response.output_item.added"] != 1 {
-		t.Fatalf("response.output_item.added count = %d, want 1", counts["response.output_item.added"])
+	if counts["response.output_item.added"] != 3 {
+		t.Fatalf("response.output_item.added count = %d, want 3", counts["response.output_item.added"])
 	}
-	if counts["response.content_part.added"] != 1 {
-		t.Fatalf("response.content_part.added count = %d, want 1", counts["response.content_part.added"])
+	if counts["response.content_part.added"] != 2 {
+		t.Fatalf("response.content_part.added count = %d, want 2", counts["response.content_part.added"])
 	}
-	if counts["response.output_text.done"] != 1 {
-		t.Fatalf("response.output_text.done count = %d, want 1", counts["response.output_text.done"])
+	if counts["response.output_text.done"] != 2 {
+		t.Fatalf("response.output_text.done count = %d, want 2", counts["response.output_text.done"])
 	}
-	if counts["response.content_part.done"] != 1 {
-		t.Fatalf("response.content_part.done count = %d, want 1", counts["response.content_part.done"])
+	if counts["response.content_part.done"] != 2 {
+		t.Fatalf("response.content_part.done count = %d, want 2", counts["response.content_part.done"])
 	}
-	if counts["response.output_item.done"] != 1 {
-		t.Fatalf("response.output_item.done count = %d, want 1", counts["response.output_item.done"])
+	if counts["response.output_item.done"] != 3 {
+		t.Fatalf("response.output_item.done count = %d, want 3", counts["response.output_item.done"])
 	}
 	if counts["response.function_call_arguments.delta"] != 0 {
 		t.Fatalf("response.function_call_arguments.delta count = %d, want 0", counts["response.function_call_arguments.delta"])
 	}
 
-	wantText := "**Compare competitors**\n- Qwen 3.7 Max leads."
-	if got := outputTextDone.Get("text").String(); got != wantText {
-		t.Fatalf("output_text.done text = %q, want %q", got, wantText)
+	if got := completed.Get("response.output.0.content.0.text").String(); got != "**Compare competitors**\n- " {
+		t.Fatalf("completed message[0] text = %q, want %q", got, "**Compare competitors**\n- ")
 	}
-	if got := completed.Get("response.output.0.content.0.text").String(); got != wantText {
-		t.Fatalf("completed message text = %q, want %q", got, wantText)
+	if got := completed.Get("response.output.1.type").String(); got != "web_search_call" {
+		t.Fatalf("completed output[1].type = %q, want web_search_call", got)
 	}
-	if got := completed.Get("response.output.0.content.0.annotations.0.type").String(); got != "web_search_result_location" {
+	if got := completed.Get("response.output.2.content.0.text").String(); got != "Qwen 3.7 Max leads." {
+		t.Fatalf("completed message[2] text = %q, want %q", got, "Qwen 3.7 Max leads.")
+	}
+	if got := completed.Get("response.output.2.content.0.annotations.0.type").String(); got != "web_search_result_location" {
 		t.Fatalf("completed annotation type = %q", got)
 	}
 }
@@ -392,24 +390,26 @@ func TestConvertClaudeResponseToOpenAIResponses_UsesContiguousIndicesForReasonin
 		case event == "response.output_item.added" || event == "response.output_item.done":
 			itemType = data.Get("item.type").String()
 			switch itemType {
-			case "reasoning":
+			case "web_search_call":
 				wantIndex = 0
-			case "message":
+			case "reasoning":
 				wantIndex = 1
-			case "function_call":
+			case "message":
 				wantIndex = 2
+			case "function_call":
+				wantIndex = 3
 			default:
 				continue
 			}
 		case strings.HasPrefix(event, "response.reasoning_"):
 			itemType = "reasoning"
-			wantIndex = 0
+			wantIndex = 1
 		case strings.HasPrefix(event, "response.output_text.") || strings.HasPrefix(event, "response.content_part."):
 			itemType = "message"
-			wantIndex = 1
+			wantIndex = 2
 		case strings.HasPrefix(event, "response.function_call_arguments."):
 			itemType = "function_call"
-			wantIndex = 2
+			wantIndex = 3
 		case event == "response.completed":
 			completed = data
 			continue
@@ -431,17 +431,17 @@ func TestConvertClaudeResponseToOpenAIResponses_UsesContiguousIndicesForReasonin
 			t.Fatalf("no indexed %s events observed", itemType)
 		}
 	}
-	if got := completed.Get("response.output.#").Int(); got != 3 {
-		t.Fatalf("completed output count = %d, want 3", got)
+	if got := completed.Get("response.output.#").Int(); got != 4 {
+		t.Fatalf("completed output count = %d, want 4", got)
 	}
-	for index, wantType := range []string{"reasoning", "message", "function_call"} {
+	for index, wantType := range []string{"web_search_call", "reasoning", "message", "function_call"} {
 		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
 			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
 		}
 	}
 }
 
-func TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutputIndexGaps(t *testing.T) {
+func TestConvertClaudeResponseToOpenAIResponses_ServerToolsSurfaceWithoutOutputIndexGaps(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`data: {"type":"message_start","message":{"id":"msg_123","usage":{"input_tokens":1,"output_tokens":0}}}`),
 		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
@@ -465,53 +465,35 @@ func TestConvertClaudeResponseToOpenAIResponses_HiddenServerToolsDoNotCreateOutp
 
 	messageAddedCount := 0
 	messageDoneCount := 0
-	var outputTextDone gjson.Result
 	var completed gjson.Result
 	for _, output := range outputs {
 		event, data := parseClaudeResponsesSSEEvent(t, output)
 		switch {
 		case event == "response.output_item.added" && data.Get("item.type").String() == "message":
 			messageAddedCount++
-			if got := data.Get("output_index").Int(); got != 0 {
-				t.Fatalf("message added output_index = %d, want 0", got)
-			}
 		case event == "response.output_item.done" && data.Get("item.type").String() == "message":
 			messageDoneCount++
-			if got := data.Get("output_index").Int(); got != 0 {
-				t.Fatalf("message done output_index = %d, want 0", got)
-			}
-		case strings.HasPrefix(event, "response.output_text.") || strings.HasPrefix(event, "response.content_part."):
-			if got := data.Get("output_index").Int(); got != 0 {
-				t.Fatalf("%s output_index = %d, want 0", event, got)
-			}
-			if event == "response.output_text.done" {
-				outputTextDone = data
-			}
 		case event == "response.output_item.added" && data.Get("item.type").String() == "function_call",
 			event == "response.output_item.done" && data.Get("item.type").String() == "function_call",
 			strings.HasPrefix(event, "response.function_call_arguments."):
-			if got := data.Get("output_index").Int(); got != 1 {
-				t.Fatalf("%s output_index = %d, want 1", event, got)
+			if got := data.Get("output_index").Int(); got != 3 {
+				t.Fatalf("%s output_index = %d, want 3", event, got)
 			}
 		case event == "response.completed":
 			completed = data
 		}
 	}
 
-	if messageAddedCount != 1 || messageDoneCount != 1 {
-		t.Fatalf("message lifecycle counts: added=%d done=%d, want 1 each", messageAddedCount, messageDoneCount)
+	if messageAddedCount != 2 || messageDoneCount != 2 {
+		t.Fatalf("message lifecycle counts: added=%d done=%d, want 2 each", messageAddedCount, messageDoneCount)
 	}
-	if got := outputTextDone.Get("text").String(); got != "Searching. Found it." {
-		t.Fatalf("aggregated message text = %q, want %q", got, "Searching. Found it.")
+	if got := completed.Get("response.output.#").Int(); got != 4 {
+		t.Fatalf("completed output count = %d, want 4", got)
 	}
-	if got := completed.Get("response.output.#").Int(); got != 2 {
-		t.Fatalf("completed output count = %d, want 2", got)
-	}
-	if got := completed.Get("response.output.0.type").String(); got != "message" {
-		t.Fatalf("completed output[0].type = %q, want message", got)
-	}
-	if got := completed.Get("response.output.1.type").String(); got != "function_call" {
-		t.Fatalf("completed output[1].type = %q, want function_call", got)
+	for index, wantType := range []string{"message", "web_search_call", "message", "function_call"} {
+		if got := completed.Get(fmt.Sprintf("response.output.%d.type", index)).String(); got != wantType {
+			t.Fatalf("completed output[%d].type = %q, want %q", index, got, wantType)
+		}
 	}
 }
 
@@ -1183,5 +1165,447 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_RestoresNamespaceFuncti
 	}
 	if got := root.Get("output.0.namespace").String(); got != "mcp__node_repl" {
 		t.Fatalf("non-stream output namespace = %q, want mcp__node_repl", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_MaxTokensEmitsIncomplete(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_max_tokens","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"unfinished reasoning"}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_max_tokens"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var incomplete gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", nil, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.completed" {
+				t.Fatalf("max_tokens response emitted response.completed: %s", output)
+			}
+			if event == "response.incomplete" {
+				incomplete = data
+			}
+		}
+	}
+
+	if !incomplete.Exists() {
+		t.Fatal("expected response.incomplete event")
+	}
+	if got := incomplete.Get("response.status").String(); got != "incomplete" {
+		t.Fatalf("response.status = %q, want incomplete", got)
+	}
+	if got := incomplete.Get("response.incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete reason = %q, want max_output_tokens", got)
+	}
+	if got := incomplete.Get("response.output.0.type").String(); got != "reasoning" {
+		t.Fatalf("response.output.0.type = %q, want reasoning; response=%s", got, incomplete.Raw)
+	}
+	if got := incomplete.Get("response.output.0.status").String(); got != "incomplete" {
+		t.Fatalf("response.output.0.status = %q, want incomplete", got)
+	}
+	if got := incomplete.Get("response.output.0.summary.0.text").String(); got != "unfinished reasoning" {
+		t.Fatalf("reasoning summary = %q, want unfinished reasoning", got)
+	}
+	if got := incomplete.Get("response.usage.output_tokens").Int(); got != 64000 {
+		t.Fatalf("output_tokens = %d, want 64000", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStream_MaxTokensPreservesPartialText(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_partial","usage":{"input_tokens":10,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial answer"}}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+
+	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-fable-5-1", nil, nil, raw, nil)
+	root := gjson.ParseBytes(out)
+	if got := root.Get("status").String(); got != "incomplete" {
+		t.Fatalf("status = %q, want incomplete; response=%s", got, out)
+	}
+	if got := root.Get("incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete reason = %q, want max_output_tokens", got)
+	}
+	if got := root.Get("output.0.status").String(); got != "incomplete" {
+		t.Fatalf("output.0.status = %q, want incomplete", got)
+	}
+	if got := root.Get("output.0.content.0.text").String(); got != "partial answer" {
+		t.Fatalf("partial text = %q, want partial answer", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_MaxTokensWithToolCallAndTextEmitsIncomplete(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_tool_incomplete","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"calling tool"}}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_inc_1","name":"get_weather","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"San"}}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var incomplete gjson.Result
+	var funcDone gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", nil, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.output_item.done" && data.Get("item.type").String() == "function_call" {
+				funcDone = data
+			}
+			if event == "response.incomplete" {
+				incomplete = data
+			}
+		}
+	}
+
+	if !funcDone.Exists() {
+		t.Fatal("expected function_call response.output_item.done event")
+	}
+	if got := funcDone.Get("item.status").String(); got != "incomplete" {
+		t.Fatalf("funcDone item.status = %q, want incomplete", got)
+	}
+	if got := funcDone.Get("item.arguments").String(); got != "{\"city\":\"San" {
+		t.Fatalf("funcDone item.arguments = %q, want '{\"city\":\"San'", got)
+	}
+
+	if !incomplete.Exists() {
+		t.Fatal("expected response.incomplete event")
+	}
+	if got := incomplete.Get("response.status").String(); got != "incomplete" {
+		t.Fatalf("response.status = %q, want incomplete", got)
+	}
+	if got := incomplete.Get("response.incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete reason = %q, want max_output_tokens", got)
+	}
+	if got := incomplete.Get("response.output.0.status").String(); got != "completed" {
+		t.Fatalf("output.0.status = %q, want completed", got)
+	}
+	if got := incomplete.Get("response.output.0.content.0.text").String(); got != "calling tool" {
+		t.Fatalf("output.0 text = %q, want 'calling tool'", got)
+	}
+	if got := incomplete.Get("response.output.1.status").String(); got != "incomplete" {
+		t.Fatalf("output.1.status = %q, want incomplete", got)
+	}
+	if got := incomplete.Get("response.output.1.type").String(); got != "function_call" {
+		t.Fatalf("output.1.type = %q, want function_call", got)
+	}
+	if got := incomplete.Get("response.output.1.arguments").String(); got != "{\"city\":\"San" {
+		t.Fatalf("output.1.arguments = %q, want '{\"city\":\"San'", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_MaxTokensWithWebSearchEmitsIncomplete(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_ws_incomplete","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_1","name":"web_search"}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"golang\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var incomplete gjson.Result
+	var wsDone gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", nil, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.output_item.done" && data.Get("item.type").String() == "web_search_call" {
+				wsDone = data
+			}
+			if event == "response.incomplete" {
+				incomplete = data
+			}
+		}
+	}
+
+	if !wsDone.Exists() {
+		t.Fatal("expected web_search_call response.output_item.done event")
+	}
+	if got := wsDone.Get("item.status").String(); got != "incomplete" {
+		t.Fatalf("wsDone item.status = %q, want incomplete", got)
+	}
+	if !incomplete.Exists() {
+		t.Fatal("expected response.incomplete event")
+	}
+	if got := incomplete.Get("response.output.0.status").String(); got != "incomplete" {
+		t.Fatalf("response.output.0.status = %q, want incomplete", got)
+	}
+
+	// Non-stream
+	raw := []byte(strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_ws_incomplete","usage":{"input_tokens":10,"output_tokens":0}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_1","name":"web_search"}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"golang\"}"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n"))
+	nonStreamOut := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-fable-5-1", nil, nil, raw, nil)
+	nsRoot := gjson.ParseBytes(nonStreamOut)
+	if got := nsRoot.Get("status").String(); got != "incomplete" {
+		t.Fatalf("ns status = %q, want incomplete", got)
+	}
+	if got := nsRoot.Get("output.0.status").String(); got != "incomplete" {
+		t.Fatalf("ns output.0.status = %q, want incomplete", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_MaxTokensReasoningWithoutBlockStop(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_reasoning_nostop","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"partial thought before cut"}}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var incomplete gjson.Result
+	var rsDone gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", nil, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.output_item.done" && data.Get("item.type").String() == "reasoning" {
+				rsDone = data
+			}
+			if event == "response.incomplete" {
+				incomplete = data
+			}
+		}
+	}
+
+	if !rsDone.Exists() {
+		t.Fatal("expected reasoning response.output_item.done event")
+	}
+	if got := rsDone.Get("item.status").String(); got != "incomplete" {
+		t.Fatalf("rsDone item.status = %q, want incomplete", got)
+	}
+	if !incomplete.Exists() {
+		t.Fatal("expected response.incomplete event")
+	}
+	if got := incomplete.Get("response.output.0.status").String(); got != "incomplete" {
+		t.Fatalf("response.output.0.status = %q, want incomplete", got)
+	}
+	if got := incomplete.Get("response.output.0.type").String(); got != "reasoning" {
+		t.Fatalf("response.output.0.type = %q, want reasoning", got)
+	}
+	if got := incomplete.Get("response.output.0.summary.0.text").String(); got != "partial thought before cut" {
+		t.Fatalf("summary = %q, want 'partial thought before cut'", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_MaxTokensWithToolBlockStopEmitsIncomplete(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_tool_blockstop","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_stop_1","name":"do_work","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"step\":1}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var incomplete gjson.Result
+	var funcDone gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", nil, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.output_item.done" && data.Get("item.type").String() == "function_call" {
+				funcDone = data
+			}
+			if event == "response.incomplete" {
+				incomplete = data
+			}
+		}
+	}
+
+	if !funcDone.Exists() {
+		t.Fatal("expected function_call response.output_item.done event")
+	}
+	if got := funcDone.Get("item.status").String(); got != "incomplete" {
+		t.Fatalf("funcDone item.status = %q, want incomplete", got)
+	}
+	if !incomplete.Exists() {
+		t.Fatal("expected response.incomplete event")
+	}
+	if got := incomplete.Get("response.output.0.status").String(); got != "incomplete" {
+		t.Fatalf("output.0.status = %q, want incomplete", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_MaxTokensWithWebSearchResultsEmitsIncomplete(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_ws_res_incomplete","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_2","name":"web_search"}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"golang\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv_2","content":[{"type":"web_search_result","title":"Go","url":"https://golang.org"}]}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var incomplete gjson.Result
+	var wsDone gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", nil, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.output_item.done" && data.Get("item.type").String() == "web_search_call" {
+				wsDone = data
+			}
+			if event == "response.incomplete" {
+				incomplete = data
+			}
+		}
+	}
+
+	if !wsDone.Exists() {
+		t.Fatal("expected web_search_call response.output_item.done event")
+	}
+	if got := wsDone.Get("item.status").String(); got != "incomplete" {
+		t.Fatalf("wsDone item.status = %q, want incomplete", got)
+	}
+	if !incomplete.Exists() {
+		t.Fatal("expected response.incomplete event")
+	}
+	if got := incomplete.Get("response.output.0.status").String(); got != "incomplete" {
+		t.Fatalf("response.output.0.status = %q, want incomplete", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_ReasoningEventsNotDuplicated(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_rs_once","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"full thought"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":10}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	counts := make(map[string]int)
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", nil, nil, chunk, &param) {
+			event, _ := parseClaudeResponsesSSEEvent(t, output)
+			counts[event]++
+		}
+	}
+
+	if counts["response.reasoning_summary_text.done"] != 1 {
+		t.Fatalf("reasoning_summary_text.done count = %d, want 1", counts["response.reasoning_summary_text.done"])
+	}
+	if counts["response.reasoning_summary_part.done"] != 1 {
+		t.Fatalf("reasoning_summary_part.done count = %d, want 1", counts["response.reasoning_summary_part.done"])
+	}
+	if counts["response.output_item.done"] != 1 {
+		t.Fatalf("output_item.done count = %d, want 1", counts["response.output_item.done"])
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_CustomToolTruncatedInputUnwrapped(t *testing.T) {
+	originalRequest := []byte(`{"tools":[{"type":"custom","name":"bash"}]}`)
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_custom_trunc","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_c1","name":"bash","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"echo \\u4F60"}}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var customDone gjson.Result
+	var incomplete gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", originalRequest, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.output_item.done" && data.Get("item.type").String() == "custom_tool_call" {
+				customDone = data
+			}
+			if event == "response.incomplete" {
+				incomplete = data
+			}
+		}
+	}
+
+	if !customDone.Exists() {
+		t.Fatal("expected custom_tool_call response.output_item.done event")
+	}
+	if got := customDone.Get("item.input").String(); got != "echo 你" {
+		t.Fatalf("customDone item.input = %q, want 'echo 你'", got)
+	}
+	if got := customDone.Get("item.status").String(); got != "incomplete" {
+		t.Fatalf("customDone item.status = %q, want incomplete", got)
+	}
+	if !incomplete.Exists() {
+		t.Fatal("expected response.incomplete event")
+	}
+	if got := incomplete.Get("response.output.0.input").String(); got != "echo 你" {
+		t.Fatalf("response.output.0.input = %q, want 'echo 你'", got)
+	}
+	if got := incomplete.Get("response.output.0.status").String(); got != "incomplete" {
+		t.Fatalf("response.output.0.status = %q, want incomplete", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponses_EmptyFunctionArgsConsistentOnTruncation(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_empty_args_trunc","usage":{"input_tokens":10,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_empty","name":"get_info","input":{}}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":64000}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var funcDone gjson.Result
+	var argsDone gjson.Result
+	var incomplete gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-fable-5-1", nil, nil, chunk, &param) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.function_call_arguments.done" {
+				argsDone = data
+			}
+			if event == "response.output_item.done" && data.Get("item.type").String() == "function_call" {
+				funcDone = data
+			}
+			if event == "response.incomplete" {
+				incomplete = data
+			}
+		}
+	}
+
+	if !argsDone.Exists() {
+		t.Fatal("expected response.function_call_arguments.done event")
+	}
+	if !funcDone.Exists() {
+		t.Fatal("expected function_call response.output_item.done event")
+	}
+	if got := argsDone.Get("arguments").String(); got != "" {
+		t.Fatalf("argsDone arguments = %q, want empty string", got)
+	}
+	if got := funcDone.Get("item.arguments").String(); got != "" {
+		t.Fatalf("funcDone arguments = %q, want empty string", got)
+	}
+	if got := funcDone.Get("item.status").String(); got != "incomplete" {
+		t.Fatalf("funcDone item.status = %q, want incomplete", got)
+	}
+	if !incomplete.Exists() {
+		t.Fatal("expected response.incomplete event")
+	}
+	if got := incomplete.Get("response.output.0.arguments").String(); got != "" {
+		t.Fatalf("response.output.0.arguments = %q, want empty string", got)
 	}
 }

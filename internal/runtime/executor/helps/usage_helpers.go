@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,32 +17,39 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 type UsageReporter struct {
-	provider        string
-	executorType    string
-	model           string
-	alias           string
-	authID          string
-	authIndex       string
-	authMu          sync.RWMutex
-	accessTokenHash string
-	authType        string
-	apiKey          string
-	source          string
-	reasoning       string
-	serviceTier     string
-	generate        bool
-	requestedAt     time.Time
-	ttftMu          sync.RWMutex
-	ttft            time.Duration
-	ttftStart       time.Time
-	ttftSet         bool
-	once            sync.Once
+	provider            string
+	baseURL             string
+	executorType        string
+	model               string
+	alias               string
+	authID              string
+	authIndex           string
+	authMu              sync.RWMutex
+	accessTokenHash     string
+	authType            string
+	apiKey              string
+	sessionID           string
+	parentSessionID     string
+	source              string
+	reasoning           string
+	serviceTier         string
+	generate            bool
+	stream              bool
+	requestedAt         time.Time
+	ttftMu              sync.RWMutex
+	ttft                time.Duration
+	firstPacketDuration time.Duration
+	firstPacketSet      bool
+	ttftStart           time.Time
+	ttftSet             bool
+	once                sync.Once
 }
 
 type usageExecutor interface {
@@ -64,17 +72,42 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if alias == "" {
 		alias = model
 	}
+	sessionID := ""
+	parentSessionID := ""
+	clientMeta := internallogging.GetClientRequestMetadata(ctx)
+	if clientMeta.SessionID != "" {
+		sessionID = clientMeta.SessionID
+		parentSessionID = clientMeta.ParentSessionID
+		if sessionID == parentSessionID || !isHierarchyParent(sessionID, parentSessionID) {
+			parentSessionID = ""
+		}
+	}
+	baseURL := ""
+	if auth != nil {
+		if auth.Attributes != nil {
+			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+		}
+		if baseURL == "" && auth.Metadata != nil {
+			if v, ok := auth.Metadata["base_url"].(string); ok {
+				baseURL = strings.TrimSpace(v)
+			}
+		}
+	}
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		authType:    resolveUsageAuthType(auth),
-		reasoning:   usage.ReasoningEffortFromContext(ctx),
-		serviceTier: usage.ServiceTierFromContext(ctx),
-		generate:    usage.GenerateFromContext(ctx),
+		provider:        provider,
+		baseURL:         baseURL,
+		model:           model,
+		alias:           strings.TrimSpace(alias),
+		requestedAt:     time.Now(),
+		apiKey:          apiKey,
+		sessionID:       sessionID,
+		parentSessionID: parentSessionID,
+		source:          resolveUsageSource(auth, apiKey),
+		authType:        resolveUsageAuthType(auth),
+		reasoning:       usage.ReasoningEffortFromContext(ctx),
+		serviceTier:     usage.ServiceTierFromContext(ctx),
+		generate:        usage.GenerateFromContext(ctx),
+		stream:          usage.StreamFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -82,6 +115,45 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
 	}
 	return reporter
+}
+
+// SetStream records whether the request was executed in streaming mode.
+func (r *UsageReporter) SetStream(stream bool) {
+	if r == nil {
+		return
+	}
+	r.stream = stream
+}
+
+// SetSessionHierarchy sets the explicit session and parent session identifiers.
+// Callers should invoke this method before Publish or EnsurePublished on the request thread.
+func (r *UsageReporter) SetSessionHierarchy(sessionID, parentSessionID string) {
+	if r == nil {
+		return
+	}
+	r.sessionID = strings.TrimSpace(sessionID)
+	r.parentSessionID = strings.TrimSpace(parentSessionID)
+	if r.sessionID == "" || r.sessionID == r.parentSessionID || !isHierarchyParent(r.sessionID, r.parentSessionID) {
+		r.parentSessionID = ""
+	}
+}
+
+func isHierarchyParent(primary, parent string) bool {
+	if parent == "" || primary == "" || primary == parent {
+		return false
+	}
+	if strings.Contains(primary, ":agent:") {
+		return true
+	}
+	idx1 := strings.Index(primary, ":")
+	idx2 := strings.Index(parent, ":")
+	if idx1 > 0 && idx2 > 0 && primary[:idx1] == parent[:idx2] {
+		return true
+	}
+	if idx1 == -1 && idx2 == -1 {
+		return true
+	}
+	return false
 }
 
 // UpdateAccessTokenFingerprint records the token version actually used upstream.
@@ -134,6 +206,19 @@ func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format stri
 }
 
 func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
+	return r.trackHTTPClient(client, false)
+}
+
+// TrackHTTPClientRoundTripOnly records the TTFT start time upon sending the request
+// and captures first-packet arrival fallback on initial body reads, while keeping
+// effective TTFT unset. This allows protocol-aware streaming executors (like Codex SSE)
+// to mark effective TTFT explicitly upon receiving substantive token events, while
+// preserving first-packet fallback metrics for non-2xx error bodies or keepalive streams.
+func (r *UsageReporter) TrackHTTPClientRoundTripOnly(client *http.Client) *http.Client {
+	return r.trackHTTPClient(client, true)
+}
+
+func (r *UsageReporter) trackHTTPClient(client *http.Client, packetOnly bool) *http.Client {
 	if r == nil || client == nil {
 		return client
 	}
@@ -143,8 +228,9 @@ func (r *UsageReporter) TrackHTTPClient(client *http.Client) *http.Client {
 		transport = http.DefaultTransport
 	}
 	tracked.Transport = usageTTFTRoundTripper{
-		base:     transport,
-		reporter: r,
+		base:       transport,
+		reporter:   r,
+		packetOnly: packetOnly,
 	}
 	return &tracked
 }
@@ -162,6 +248,19 @@ func (r *UsageReporter) ObserveResponse(resp *http.Response) {
 	}
 }
 
+func (r *UsageReporter) ObserveResponsePacketOnly(resp *http.Response) {
+	if r == nil || resp == nil || resp.Body == nil {
+		return
+	}
+	r.StartResponseTTFT()
+	resp.Body = &usageTTFTReadCloser{
+		ReadCloser: resp.Body,
+		mark: func() {
+			r.RecordFirstPacket()
+		},
+	}
+}
+
 func (r *UsageReporter) StartResponseTTFT() {
 	if r == nil {
 		return
@@ -171,6 +270,70 @@ func (r *UsageReporter) StartResponseTTFT() {
 		r.ttftStart = time.Now()
 	}
 	r.ttftMu.Unlock()
+}
+
+func (r *UsageReporter) IsTTFTSet() bool {
+	if r == nil {
+		return false
+	}
+	r.ttftMu.RLock()
+	defer r.ttftMu.RUnlock()
+	return r.ttftSet
+}
+
+func (r *UsageReporter) IsFirstPacketSet() bool {
+	if r == nil {
+		return false
+	}
+	r.ttftMu.RLock()
+	defer r.ttftMu.RUnlock()
+	return r.firstPacketSet
+}
+
+// RecordFirstPacket records the arrival time of the first packet/chunk from upstream as a fallback.
+func (r *UsageReporter) RecordFirstPacket() {
+	r.ObserveTokenEvent(false)
+}
+
+// ObserveTokenEvent records the first packet fallback time on the first frame,
+// and if isToken is true, records the effective TTFT. It uses a fast-path
+// read check to return immediately with zero write lock contention once TTFT is set
+// or when subsequent non-token metadata frames arrive after the first packet.
+func (r *UsageReporter) ObserveTokenEvent(isToken bool) {
+	if r == nil {
+		return
+	}
+	r.ttftMu.RLock()
+	if r.ttftSet {
+		r.ttftMu.RUnlock()
+		return
+	}
+	start := r.ttftStart
+	alreadyRecordedPacket := r.firstPacketSet
+	r.ttftMu.RUnlock()
+
+	if start.IsZero() {
+		return
+	}
+
+	if !isToken && alreadyRecordedPacket {
+		return
+	}
+
+	r.ttftMu.Lock()
+	defer r.ttftMu.Unlock()
+	if r.ttftSet {
+		return
+	}
+	if !r.firstPacketSet {
+		r.firstPacketDuration = time.Since(start)
+		r.firstPacketSet = true
+	}
+	if isToken {
+		r.ttft = time.Since(start)
+		r.ttftSet = true
+		r.ttftStart = time.Time{}
+	}
 }
 
 func (r *UsageReporter) MarkFirstResponseByte() {
@@ -208,6 +371,10 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
 	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
+}
+
+func (r *UsageReporter) PublishFailureWithDetail(ctx context.Context, detail usage.Detail, errs ...error) {
+	r.publishWithOutcome(ctx, detail, true, failFromErrors(errs...))
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -279,11 +446,14 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	}
 	return usage.Record{
 		Provider:            r.provider,
+		BaseURL:             r.baseURL,
 		ExecutorType:        r.executorType,
 		Model:               model,
 		Alias:               r.alias,
 		Source:              r.source,
 		APIKey:              r.apiKey,
+		SessionID:           r.sessionID,
+		ParentSessionID:     r.parentSessionID,
 		AuthID:              r.authID,
 		AuthIndex:           r.authIndex,
 		AccessTokenSHA256:   r.accessTokenFingerprint(),
@@ -292,6 +462,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ServiceTier:         r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
 		Generate:            usage.GenerateFlag(r.generate),
+		Stream:              r.stream,
 		RequestedAt:         r.requestedAt,
 		Latency:             r.latency(),
 		TTFT:                r.ttftDuration(),
@@ -306,8 +477,18 @@ func failFromErrors(errs ...error) usage.Failure {
 		if err == nil {
 			continue
 		}
+		body := strings.TrimSpace(err.Error())
+		type responseBodyProvider interface {
+			ResponseBody() []byte
+		}
+		var responseErr responseBodyProvider
+		if errors.As(err, &responseErr) && responseErr != nil {
+			if responseBody := responseErr.ResponseBody(); len(responseBody) > 0 {
+				body = string(responseBody)
+			}
+		}
 		return usage.Failure{
-			Body:       strings.TrimSpace(err.Error()),
+			Body:       body,
 			StatusCode: clienterror.HTTPStatusFromError(err),
 		}
 	}
@@ -349,21 +530,33 @@ func (r *UsageReporter) ttftDuration() time.Duration {
 	}
 	r.ttftMu.RLock()
 	defer r.ttftMu.RUnlock()
-	return r.ttft
+	if r.ttftSet {
+		return r.ttft
+	}
+	if r.firstPacketSet {
+		return r.firstPacketDuration
+	}
+	return 0
 }
 
 type usageTTFTRoundTripper struct {
-	base     http.RoundTripper
-	reporter *UsageReporter
+	base       http.RoundTripper
+	reporter   *UsageReporter
+	packetOnly bool
 }
 
 func (t usageTTFTRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	t.reporter.StartResponseTTFT()
 	resp, errRoundTrip := t.base.RoundTrip(req)
 	if errRoundTrip != nil {
 		return resp, errRoundTrip
 	}
-	t.reporter.ObserveResponse(resp)
+	if t.packetOnly {
+		t.reporter.ObserveResponsePacketOnly(resp)
+	} else {
+		t.reporter.ObserveResponse(resp)
+	}
 	return resp, nil
 }
 
@@ -516,12 +709,31 @@ func (b *StreamUsageBuffer) ObserveOpenAIStream(line []byte) {
 	b.Observe(detail, usageOK || detail.ResponseServiceTier != "")
 }
 
+// ObserveClaudeStream records and merges usage from a Claude SSE line.
+func (b *StreamUsageBuffer) ObserveClaudeStream(line []byte) {
+	if b == nil {
+		return
+	}
+	if detail, ok := ParseClaudeStreamUsage(line); ok {
+		ObserveMergedStreamUsage(b, detail)
+	}
+}
+
 // Publish emits the latest observed usage detail, if any.
 func (b *StreamUsageBuffer) Publish(ctx context.Context, reporter *UsageReporter) bool {
 	if b == nil || !b.ok || reporter == nil {
 		return false
 	}
 	reporter.Publish(ctx, b.detail)
+	return true
+}
+
+// PublishFailure emits the latest observed usage detail together with failure details.
+func (b *StreamUsageBuffer) PublishFailure(ctx context.Context, reporter *UsageReporter, errs ...error) bool {
+	if b == nil || reporter == nil {
+		return false
+	}
+	reporter.PublishFailureWithDetail(ctx, b.detail, errs...)
 	return true
 }
 
@@ -698,6 +910,9 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
+	if !usageNode.Exists() {
+		usageNode = gjson.GetBytes(payload, "message.usage")
+	}
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
@@ -1088,14 +1303,14 @@ func StripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
 	var changed bool
 
 	if usageMetadata = gjson.GetBytes(cleaned, "usageMetadata"); usageMetadata.Exists() {
-		// Rename usageMetadata to cpaUsageMetadata in the message_start event of Claude
+		// Rename usageMetadata to cpaUsageMetadata
 		cleaned, _ = sjson.SetRawBytes(cleaned, "cpaUsageMetadata", []byte(usageMetadata.Raw))
 		cleaned, _ = sjson.DeleteBytes(cleaned, "usageMetadata")
 		changed = true
 	}
 
 	if usageMetadata = gjson.GetBytes(cleaned, "response.usageMetadata"); usageMetadata.Exists() {
-		// Rename usageMetadata to cpaUsageMetadata in the message_start event of Claude
+		// Rename usageMetadata to cpaUsageMetadata
 		cleaned, _ = sjson.SetRawBytes(cleaned, "response.cpaUsageMetadata", []byte(usageMetadata.Raw))
 		cleaned, _ = sjson.DeleteBytes(cleaned, "response.usageMetadata")
 		changed = true

@@ -60,13 +60,16 @@ func (b TokenBreakdown) Valid() bool {
 		b.Output.ReasoningTokens < 0 {
 		return false
 	}
-	if b.Input.TotalTokens != b.Input.UncachedTokens+b.Input.CacheReadTokens+b.Input.CacheWriteTokens {
+	inputSum, okInput := nonNegativeSum(b.Input.UncachedTokens, b.Input.CacheReadTokens, b.Input.CacheWriteTokens)
+	if !okInput || b.Input.TotalTokens != inputSum {
 		return false
 	}
-	if b.Output.TotalTokens != b.Output.NonReasoningTokens+b.Output.ReasoningTokens {
+	outputSum, okOutput := nonNegativeSum(b.Output.NonReasoningTokens, b.Output.ReasoningTokens)
+	if !okOutput || b.Output.TotalTokens != outputSum {
 		return false
 	}
-	if b.TotalTokens != b.Input.TotalTokens+b.Output.TotalTokens+b.UnclassifiedTokens {
+	totalSum, okTotal := nonNegativeSum(b.Input.TotalTokens, b.Output.TotalTokens, b.UnclassifiedTokens)
+	if !okTotal || b.TotalTokens != totalSum {
 		return false
 	}
 	if b.Quality == TokenAccountingQualityComplete && b.UnclassifiedTokens != 0 {
@@ -87,9 +90,10 @@ func validTokenAccountingQuality(quality TokenAccountingQuality) bool {
 // NewSubsetTokenBreakdown normalizes protocols where cache tokens are included
 // in input totals and reasoning tokens are included in output totals.
 func NewSubsetTokenBreakdown(inputTotal, cacheRead, cacheWrite, outputTotal, reasoning, total int64) TokenBreakdown {
+	cacheTotal, okCache := nonNegativeSum(cacheRead, cacheWrite)
 	expectedTotal, okExpected := nonNegativeSum(inputTotal, outputTotal)
-	if !okExpected || cacheRead < 0 || cacheWrite < 0 || reasoning < 0 ||
-		cacheRead+cacheWrite > inputTotal || reasoning > outputTotal {
+	if !okCache || !okExpected || reasoning < 0 ||
+		cacheTotal > inputTotal || reasoning > outputTotal {
 		return inconsistentTokenBreakdown(total, expectedTotal)
 	}
 	resolvedTotal, okTotal := resolveAccountingTotal(total, expectedTotal)
@@ -102,7 +106,7 @@ func NewSubsetTokenBreakdown(inputTotal, cacheRead, cacheWrite, outputTotal, rea
 		TotalTokens:   resolvedTotal,
 		Input: TokenInputBreakdown{
 			TotalTokens:      inputTotal,
-			UncachedTokens:   inputTotal - cacheRead - cacheWrite,
+			UncachedTokens:   inputTotal - cacheTotal,
 			CacheReadTokens:  cacheRead,
 			CacheWriteTokens: cacheWrite,
 		},
@@ -188,7 +192,8 @@ func NewIndependentTokenBreakdown(uncachedInput, cacheRead, cacheWrite, nonReaso
 // NewSeparateReasoningTokenBreakdown normalizes protocols where cache tokens
 // are included in input totals while reasoning is separate from ordinary output.
 func NewSeparateReasoningTokenBreakdown(inputTotal, cacheRead, cacheWrite, nonReasoningOutput, reasoning, total int64) TokenBreakdown {
-	if inputTotal < 0 || cacheRead < 0 || cacheWrite < 0 || cacheRead+cacheWrite > inputTotal {
+	cacheTotal, okCache := nonNegativeSum(cacheRead, cacheWrite)
+	if !okCache || inputTotal < 0 || cacheTotal > inputTotal {
 		return inconsistentTokenBreakdown(total, 0)
 	}
 	outputTotal, okOutput := nonNegativeSum(nonReasoningOutput, reasoning)
@@ -206,7 +211,7 @@ func NewSeparateReasoningTokenBreakdown(inputTotal, cacheRead, cacheWrite, nonRe
 		TotalTokens:   resolvedTotal,
 		Input: TokenInputBreakdown{
 			TotalTokens:      inputTotal,
-			UncachedTokens:   inputTotal - cacheRead - cacheWrite,
+			UncachedTokens:   inputTotal - cacheTotal,
 			CacheReadTokens:  cacheRead,
 			CacheWriteTokens: cacheWrite,
 		},

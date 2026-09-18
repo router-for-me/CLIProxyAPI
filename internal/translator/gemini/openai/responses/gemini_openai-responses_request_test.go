@@ -1011,6 +1011,354 @@ func TestConvertOpenAIResponsesRequestToGemini_SystemAndDeveloperRoles(t *testin
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToGemini_MidSessionDeveloperMessageDoesNotMutateSystemInstruction(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"instructions": "Be a helpful assistant",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Turn 1 user"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [
+					{"type": "output_text", "text": "Turn 1 assistant"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "developer",
+				"content": "<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>"
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Turn 2 user"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	// systemInstruction must remain strictly unchanged (only original instructions, not developer notice)
+	systemInstruction := result.Get("systemInstruction")
+	if !systemInstruction.Exists() {
+		t.Fatalf("systemInstruction missing; output=%s", output)
+	}
+	parts := systemInstruction.Get("parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("systemInstruction parts count = %d, want 1; output=%s", len(parts), output)
+	}
+	if got := parts[0].Get("text").String(); got != "Be a helpful assistant" {
+		t.Fatalf("systemInstruction part = %q, want %q; output=%s", got, "Be a helpful assistant", output)
+	}
+
+	// contents should contain user, model, user (with merged developer notice + turn 2 user text)
+	contents := result.Get("contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want 3; output=%s", len(contents), output)
+	}
+	if contents[0].Get("role").String() != "user" || contents[0].Get("parts.0.text").String() != "Turn 1 user" {
+		t.Fatalf("turn 1 user content malformed; output=%s", output)
+	}
+	if contents[1].Get("role").String() != "model" || contents[1].Get("parts.0.text").String() != "Turn 1 assistant" {
+		t.Fatalf("turn 1 model content malformed; output=%s", output)
+	}
+	if contents[2].Get("role").String() != "user" {
+		t.Fatalf("turn 2 user content role = %q, want user; output=%s", contents[2].Get("role").String(), output)
+	}
+	turn2Parts := contents[2].Get("parts").Array()
+	if len(turn2Parts) != 2 {
+		t.Fatalf("turn 2 parts count = %d, want 2; output=%s", len(turn2Parts), output)
+	}
+	expectedDevText := "<system-reminder>\n<image_resize_notice>Image 1 was resized to 800x600</image_resize_notice>\n</system-reminder>"
+	if got := turn2Parts[0].Get("text").String(); got != expectedDevText {
+		t.Fatalf("turn 2 part 0 = %q, want %q; output=%s", got, expectedDevText, output)
+	}
+	if got := turn2Parts[1].Get("text").String(); got != "Turn 2 user" {
+		t.Fatalf("turn 2 part 1 = %q, want Turn 2 user; output=%s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_MidSessionSystemReminderEnvelope(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"instructions": "Be a helpful assistant",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Turn 1 user"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [
+					{"type": "output_text", "text": "Turn 1 assistant"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "developer",
+				"content": "Please decide which tool to call next."
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	contents := result.Get("contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want 3; output=%s", len(contents), output)
+	}
+	expectedReminder := "<system-reminder>\nPlease decide which tool to call next.\n</system-reminder>"
+	if got := contents[2].Get("parts.0.text").String(); got != expectedReminder {
+		t.Fatalf("mid-session system reminder mismatch:\ngot:  %q\nwant: %q", got, expectedReminder)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_MidSessionDeveloperMultiPartContentWrappedOnce(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"instructions": "Be a helpful assistant",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": "Turn 1"
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": "Reply 1"
+			},
+			{
+				"type": "message",
+				"role": "developer",
+				"content": [
+					{"type": "input_text", "text": "Rule line 1"},
+					{"type": "input_text", "text": "Rule line 2"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	contents := result.Get("contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want 3; output=%s", len(contents), output)
+	}
+	expected := "<system-reminder>\nRule line 1\nRule line 2\n</system-reminder>"
+	if got := contents[2].Get("parts.0.text").String(); got != expected {
+		t.Fatalf("multi-part developer reminder mismatch:\ngot:  %q\nwant: %q", got, expected)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_MultipleMidSessionDeveloperMessagesArrayContent(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"instructions": "Be a helpful assistant",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Turn 1"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [
+					{"type": "output_text", "text": "Reply 1"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "developer",
+				"content": [
+					{"type": "input_text", "text": "<permissions instructions>\nApproved: git\n</permissions instructions>"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "developer",
+				"content": [
+					{"type": "input_text", "text": "<collaboration_mode>\nPlan\n</collaboration_mode>"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Proceed"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	// systemInstruction only contains original instructions
+	parts := result.Get("systemInstruction.parts").Array()
+	if len(parts) != 1 || parts[0].Get("text").String() != "Be a helpful assistant" {
+		t.Fatalf("systemInstruction corrupted: %s", output)
+	}
+
+	// All mid-session developer messages coalesced into the final user turn
+	contents := result.Get("contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want 3; output=%s", len(contents), output)
+	}
+	turn2Parts := contents[2].Get("parts").Array()
+	if len(turn2Parts) != 3 {
+		t.Fatalf("turn 2 parts count = %d, want 3; output=%s", len(turn2Parts), output)
+	}
+	if !strings.Contains(turn2Parts[0].Get("text").String(), "permissions instructions") {
+		t.Fatalf("part 0 mismatch; output=%s", output)
+	}
+	if !strings.Contains(turn2Parts[1].Get("text").String(), "collaboration_mode") {
+		t.Fatalf("part 1 mismatch; output=%s", output)
+	}
+	if turn2Parts[2].Get("text").String() != "Proceed" {
+		t.Fatalf("part 2 mismatch; output=%s", output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_InterveningDeveloperMessagePreservesToolPairing(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"instructions": "Be a helpful assistant",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Run tool"}
+				]
+			},
+			{
+				"type": "function_call",
+				"call_id": "call-1",
+				"name": "run_command",
+				"arguments": "{\"command\":\"echo test\"}"
+			},
+			{
+				"type": "message",
+				"role": "developer",
+				"content": "<permissions instructions>\nApproved: echo\n</permissions instructions>"
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call-1",
+				"output": "test"
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	// Validate function call pairing passes strictly (no content turn before pending functionResponse)
+	if errPair := internalsignature.ValidateGeminiFunctionCallPairing(output); errPair != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPair, output)
+	}
+
+	// systemInstruction only contains original instructions
+	parts := result.Get("systemInstruction.parts").Array()
+	if len(parts) != 1 || parts[0].Get("text").String() != "Be a helpful assistant" {
+		t.Fatalf("systemInstruction corrupted: %s", output)
+	}
+
+	// Function response should have matching call id and name
+	foundFR := false
+	for _, content := range result.Get("contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if part.Get("functionResponse.name").String() == "run_command" {
+				foundFR = true
+			}
+		}
+	}
+	if !foundFR {
+		t.Fatalf("functionResponse run_command not found or lost pairing: %s", output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_InterveningDeveloperAndUserMessageFlushesInOrder(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.5-flash",
+		"instructions": "Be a helpful assistant",
+		"input": [
+			{
+				"type": "function_call",
+				"call_id": "call-1",
+				"name": "run_command",
+				"arguments": "{\"command\":\"test\"}"
+			},
+			{
+				"type": "message",
+				"role": "developer",
+				"content": "<permissions instructions>\nApproved: test\n</permissions instructions>"
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Wait, also check this"}
+				]
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call-1",
+				"output": "done"
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.5-flash", []byte(inputJSON), false)
+	result := gjson.ParseBytes(output)
+
+	// Pairing should be valid
+	if errPair := internalsignature.ValidateGeminiFunctionCallPairing(output); errPair != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPair, output)
+	}
+
+	contents := result.Get("contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want 3; output=%s", len(contents), output)
+	}
+	if contents[0].Get("role").String() != "model" {
+		t.Fatalf("turn 0 role = %q, want model", contents[0].Get("role").String())
+	}
+	midParts := contents[1].Get("parts").Array()
+	if len(midParts) != 2 {
+		t.Fatalf("turn 1 parts count = %d, want 2; output=%s", len(midParts), output)
+	}
+	if !strings.Contains(midParts[0].Get("text").String(), "permissions instructions") {
+		t.Fatalf("turn 1 part 0 should be developer notice; got %s", midParts[0].Raw)
+	}
+	if midParts[1].Get("text").String() != "Wait, also check this" {
+		t.Fatalf("turn 1 part 1 should be user text; got %s", midParts[1].Raw)
+	}
+	if !contents[2].Get("parts.0.functionResponse").Exists() {
+		t.Fatalf("turn 2 should be functionResponse; got %s", contents[2].Raw)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToGeminiCleansToolSchemaRequiredFields(t *testing.T) {
 	inputJSON := `{
 		"model": "gemini-2.0-flash",
@@ -1107,8 +1455,8 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputWithImages(t *t
 	}
 
 	parts := userContent.Get("parts").Array()
-	if len(parts) < 2 {
-		t.Fatalf("expected at least 2 parts (functionResponse + inline_data), got %d; raw: %s", len(parts), userContent.Raw)
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part (functionResponse with nested inlineData), got %d; raw: %s", len(parts), userContent.Raw)
 	}
 
 	fr := parts[0].Get("functionResponse")
@@ -1125,12 +1473,12 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputWithImages(t *t
 		t.Fatalf("expected functionResponse.response.result = %q, got %q", "Read image file [image/png]", got)
 	}
 
-	img := parts[1].Get("inline_data")
+	img := fr.Get("parts.0.inlineData")
 	if !img.Exists() {
-		t.Fatalf("expected second part to have inline_data, got %s", parts[1].Raw)
+		t.Fatalf("expected functionResponse.parts.0 to have inlineData, got %s", fr.Raw)
 	}
-	if got := img.Get("mime_type").String(); got != "image/png" {
-		t.Fatalf("expected mime_type = %q, got %q", "image/png", got)
+	if got := img.Get("mimeType").String(); got != "image/png" {
+		t.Fatalf("expected mimeType = %q, got %q", "image/png", got)
 	}
 	if got := img.Get("data").String(); got != "iVBORw0KGgoAAAANSUhEUg==" {
 		t.Fatalf("expected data = %q, got %q", "iVBORw0KGgoAAAANSUhEUg==", got)
@@ -1158,17 +1506,12 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
 		userContent := gjson.GetBytes(output, "contents.1")
 		parts := userContent.Get("parts").Array()
-		if len(parts) != 2 {
-			t.Fatalf("expected 2 parts, got %d; raw: %s", len(parts), userContent.Raw)
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part, got %d; raw: %s", len(parts), userContent.Raw)
 		}
-		if got := parts[0].Get("functionResponse.response.result").String(); got != "done" {
-			t.Fatalf("expected result 'done', got %q", got)
-		}
-		if got := parts[1].Get("inline_data.mime_type").String(); got != "image/jpeg" {
-			t.Fatalf("expected mime_type 'image/jpeg', got %q", got)
-		}
-		if got := parts[1].Get("inline_data.data").String(); got != "/9j/4AAQSkZJRg==" {
-			t.Fatalf("expected image data '/9j/4AAQSkZJRg==', got %q", got)
+		expectedResult := `[{"type":"input_text","text":"done"},{"type":"input_image","image_url":"data:image/jpeg;base64,/9j/4AAQSkZJRg=="}]`
+		if got := parts[0].Get("functionResponse.response.result").String(); got != expectedResult {
+			t.Fatalf("expected result %q, got %q", expectedResult, got)
 		}
 	})
 
@@ -1245,7 +1588,11 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 				{
 					"type": "function_call_output",
 					"call_id": "call_1",
-					"output": "{\"ok\":true,\"caption\":\"hero\",\"image_url\":\"https://example.com/hero.png\"}"
+					"output": {
+						"ok": true,
+						"caption": "hero",
+						"image_url": "https://example.com/hero.png"
+					}
 				}
 			]
 		}`
@@ -1295,7 +1642,7 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		}
 	})
 
-	t.Run("stringified single-element object array preserved as raw JSON", func(t *testing.T) {
+	t.Run("stringified single-element object array preserved as string", func(t *testing.T) {
 		inputJSON := `{
 			"model": "gemini-3.7-flash-high",
 			"input": [
@@ -1318,9 +1665,8 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		if len(parts) != 1 {
 			t.Fatalf("expected 1 part, got %d; raw: %s", len(parts), userContent.Raw)
 		}
-		resultArr := parts[0].Get("functionResponse.response.result").Array()
-		if len(resultArr) != 1 || resultArr[0].Get("id").Int() != 1 {
-			t.Fatalf("expected result to be [{\"id\":1}], got %s", parts[0].Get("functionResponse.response.result").Raw)
+		if got := parts[0].Get("functionResponse.response.result").String(); got != `[{"id":1}]` {
+			t.Fatalf("expected result to be %q, got %q", `[{"id":1}]`, got)
 		}
 	})
 
@@ -1346,14 +1692,923 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputVariations(t *t
 		output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
 		userContent := gjson.GetBytes(output, "contents.1")
 		parts := userContent.Get("parts").Array()
-		if len(parts) != 2 {
-			t.Fatalf("expected 2 parts (functionResponse + inline_data), got %d; raw: %s", len(parts), userContent.Raw)
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part (functionResponse with nested inlineData), got %d; raw: %s", len(parts), userContent.Raw)
 		}
-		if got := parts[1].Get("inline_data.mime_type").String(); got != "image/png" {
-			t.Fatalf("expected mime_type 'image/png', got %q", got)
+		fr := parts[0].Get("functionResponse")
+		if !fr.Exists() {
+			t.Fatalf("expected functionResponse part, got %s", parts[0].Raw)
 		}
-		if got := parts[1].Get("inline_data.data").String(); got != "iVBORw0KGgoAAAANSUhEUg==" {
+		img := fr.Get("parts.0.inlineData")
+		if !img.Exists() {
+			t.Fatalf("expected functionResponse.parts.0 to have inlineData, got %s", fr.Raw)
+		}
+		if got := img.Get("mimeType").String(); got != "image/png" {
+			t.Fatalf("expected mimeType 'image/png', got %q", got)
+		}
+		if got := img.Get("data").String(); got != "iVBORw0KGgoAAAANSUhEUg==" {
 			t.Fatalf("expected data 'iVBORw0KGgoAAAANSUhEUg==', got %q", got)
 		}
 	})
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_ParallelFunctionCallOutputsWithImages(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{
+				"role": "user",
+				"content": [{"type": "input_text", "text": "read both images"}]
+			},
+			{
+				"type": "function_call",
+				"id": "fc_a",
+				"call_id": "call_a",
+				"name": "read_a",
+				"arguments": "{}"
+			},
+			{
+				"type": "function_call",
+				"id": "fc_b",
+				"call_id": "call_b",
+				"name": "read_b",
+				"arguments": "{}"
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call_a",
+				"output": [
+					{"type": "input_text", "text": "file A"},
+					{"type": "input_image", "image_url": "data:image/png;base64,QUJD"}
+				]
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call_b",
+				"output": [
+					{"type": "input_text", "text": "file B"},
+					{"type": "input_image", "image_url": "data:image/jpeg;base64,REVm"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	userContent := gjson.GetBytes(output, "contents.2")
+	if userContent.Get("role").String() != "user" {
+		t.Fatalf("expected role user in tool response content, got %s", userContent.Raw)
+	}
+
+	parts := userContent.Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 functionResponse parts, got %d; raw: %s", len(parts), userContent.Raw)
+	}
+
+	gotByID := make(map[string]gjson.Result)
+	for _, part := range parts {
+		fr := part.Get("functionResponse")
+		if !fr.Exists() {
+			t.Fatalf("expected each part to be functionResponse, got %s", part.Raw)
+		}
+		gotByID[fr.Get("id").String()] = fr
+	}
+
+	frA, okA := gotByID["call_a"]
+	if !okA {
+		t.Fatalf("missing functionResponse for call_a; raw: %s", userContent.Raw)
+	}
+	if got := frA.Get("parts.0.inlineData.mimeType").String(); got != "image/png" {
+		t.Fatalf("expected call_a mimeType image/png, got %q", got)
+	}
+	if got := frA.Get("parts.0.inlineData.data").String(); got != "QUJD" {
+		t.Fatalf("expected call_a data QUJD, got %q", got)
+	}
+
+	frB, okB := gotByID["call_b"]
+	if !okB {
+		t.Fatalf("missing functionResponse for call_b; raw: %s", userContent.Raw)
+	}
+	if got := frB.Get("parts.0.inlineData.mimeType").String(); got != "image/jpeg" {
+		t.Fatalf("expected call_b mimeType image/jpeg, got %q", got)
+	}
+	if got := frB.Get("parts.0.inlineData.data").String(); got != "REVm" {
+		t.Fatalf("expected call_b data REVm, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputWithMultipleImages(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{
+				"role": "user",
+				"content": [{"type": "input_text", "text": "show two screenshots"}]
+			},
+			{
+				"type": "function_call",
+				"id": "fc_multi",
+				"call_id": "call_multi",
+				"name": "take_screenshots",
+				"arguments": "{}"
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call_multi",
+				"output": [
+					{"type": "input_text", "text": "captured 2 images"},
+					{"type": "input_image", "image_url": "data:image/png;base64,QUJD"},
+					{"type": "input_image", "image_url": "data:image/jpeg;base64,REVm"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	userContent := gjson.GetBytes(output, "contents.2")
+	parts := userContent.Get("parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 functionResponse part, got %d; raw: %s", len(parts), userContent.Raw)
+	}
+
+	fr := parts[0].Get("functionResponse")
+	if !fr.Exists() {
+		t.Fatalf("expected functionResponse, got %s", parts[0].Raw)
+	}
+	if got := fr.Get("id").String(); got != "call_multi" {
+		t.Fatalf("expected id call_multi, got %q", got)
+	}
+	if got := fr.Get("response.result").String(); got != "captured 2 images" {
+		t.Fatalf("expected result 'captured 2 images', got %q", got)
+	}
+
+	imageParts := fr.Get("parts").Array()
+	if len(imageParts) != 2 {
+		t.Fatalf("expected 2 nested inlineData parts, got %d; raw: %s", len(imageParts), fr.Raw)
+	}
+	if got := imageParts[0].Get("inlineData.mimeType").String(); got != "image/png" {
+		t.Fatalf("expected first image mimeType image/png, got %q", got)
+	}
+	if got := imageParts[0].Get("inlineData.data").String(); got != "QUJD" {
+		t.Fatalf("expected first image data QUJD, got %q", got)
+	}
+	if got := imageParts[1].Get("inlineData.mimeType").String(); got != "image/jpeg" {
+		t.Fatalf("expected second image mimeType image/jpeg, got %q", got)
+	}
+	if got := imageParts[1].Get("inlineData.data").String(); got != "REVm" {
+		t.Fatalf("expected second image data REVm, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_AdditionalToolsNamespaceAndCustom(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "additional_tools",
+				"role": "developer",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "functions",
+						"tools": [
+							{
+								"type": "custom",
+								"name": "exec",
+								"description": "Execute a command"
+							},
+							{
+								"type": "function",
+								"name": "continuity_probe",
+								"description": "Return a continuity probe",
+								"parameters": {
+									"type": "object",
+									"properties": {
+										"value": {"type": "string"}
+									},
+									"required": ["value"]
+								}
+							}
+						]
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "Run probe"
+					}
+				]
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"name": "continuity_probe",
+			"namespace": "functions"
+		}
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	decls := gjson.GetBytes(output, "tools.0.functionDeclarations").Array()
+	if len(decls) != 2 {
+		t.Fatalf("expected 2 functionDeclarations, got %d; raw: %s", len(decls), output)
+	}
+
+	execDecl := decls[0]
+	if got := execDecl.Get("name").String(); got != "functions__exec" {
+		t.Fatalf("decl 0 name = %q, want functions__exec", got)
+	}
+	if got := execDecl.Get("parametersJsonSchema.properties.input.type").String(); got != "string" {
+		t.Fatalf("decl 0 custom input schema missing: %s", execDecl.Raw)
+	}
+
+	probeDecl := decls[1]
+	if got := probeDecl.Get("name").String(); got != "functions__continuity_probe" {
+		t.Fatalf("decl 1 name = %q, want functions__continuity_probe", got)
+	}
+
+	mode := gjson.GetBytes(output, "toolConfig.functionCallingConfig.mode").String()
+	if mode != "ANY" {
+		t.Fatalf("toolConfig mode = %q, want ANY", mode)
+	}
+	allowed := gjson.GetBytes(output, "toolConfig.functionCallingConfig.allowedFunctionNames.0").String()
+	if allowed != "functions__continuity_probe" {
+		t.Fatalf("allowedFunctionNames = %q, want functions__continuity_probe", allowed)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_ReplaysCustomToolCallAndOutput(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "functions",
+						"tools": [
+							{"type": "custom", "name": "exec"}
+						]
+					}
+				]
+			},
+			{
+				"type": "custom_tool_call",
+				"call_id": "call_1",
+				"name": "exec",
+				"namespace": "functions",
+				"input": "pwd"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_1",
+				"output": "/workspace"
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) < 2 {
+		t.Fatalf("expected at least 2 contents, got %d; raw: %s", len(contents), output)
+	}
+
+	callPart := contents[0].Get("parts.0.functionCall")
+	if !callPart.Exists() {
+		t.Fatalf("missing functionCall in content 0: %s", contents[0].Raw)
+	}
+	if got := callPart.Get("name").String(); got != "functions__exec" {
+		t.Fatalf("functionCall name = %q, want functions__exec", got)
+	}
+	if got := callPart.Get("args.input").String(); got != "pwd" {
+		t.Fatalf("functionCall args.input = %q, want pwd", got)
+	}
+
+	respPart := contents[1].Get("parts.0.functionResponse")
+	if !respPart.Exists() {
+		t.Fatalf("missing functionResponse in content 1: %s", contents[1].Raw)
+	}
+	if got := respPart.Get("name").String(); got != "functions__exec" {
+		t.Fatalf("functionResponse name = %q, want functions__exec", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_TwoTurnCustomToolRoundtripWithReasoning(t *testing.T) {
+	// Turn 2 request: includes reasoning carrier before custom_tool_call, then custom_tool_call_output
+	inputJSON := `{
+		"model": "gemini-3.6-flash-high",
+		"input": [
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "namespace",
+						"name": "functions",
+						"tools": [
+							{"type": "custom", "name": "exec"}
+						]
+					}
+				]
+			},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run pwd"}]},
+			{"type": "reasoning", "encrypted_content": "` + testResponsesGeminiThoughtSignature + `", "summary": [{"type": "summary_text", "text": "executing pwd"}]},
+			{
+				"type": "custom_tool_call",
+				"call_id": "call_1",
+				"name": "exec",
+				"namespace": "functions",
+				"input": "pwd"
+			},
+			{
+				"type": "custom_tool_call_output",
+				"call_id": "call_1",
+				"output": "/workspace"
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents (user, model, user), got %d; raw: %s", len(contents), output)
+	}
+
+	modelParts := contents[1].Get("parts").Array()
+	if len(modelParts) != 2 {
+		t.Fatalf("expected 2 parts in model content (thought + functionCall), got %d; raw: %s", len(modelParts), contents[1].Raw)
+	}
+	if !modelParts[0].Get("thought").Bool() || modelParts[0].Get("text").String() != "executing pwd" {
+		t.Fatalf("expected thought part with 'executing pwd', got: %s", modelParts[0].Raw)
+	}
+	if modelParts[1].Get("functionCall.name").String() != "functions__exec" {
+		t.Fatalf("expected functionCall name 'functions__exec', got: %s", modelParts[1].Raw)
+	}
+	if modelParts[1].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature {
+		t.Fatalf("expected thoughtSignature on functionCall, got: %s", modelParts[1].Raw)
+	}
+
+	userRespParts := contents[2].Get("parts").Array()
+	if len(userRespParts) != 1 {
+		t.Fatalf("expected 1 part in user tool response, got %d; raw: %s", len(userRespParts), contents[2].Raw)
+	}
+	if userRespParts[0].Get("functionResponse.name").String() != "functions__exec" {
+		t.Fatalf("expected functionResponse name 'functions__exec', got: %s", userRespParts[0].Raw)
+	}
+	if userRespParts[0].Get("functionResponse.response.result").String() != "/workspace" {
+		t.Fatalf("expected functionResponse result '/workspace', got: %s", userRespParts[0].Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputAlternateIDsAndQueueFallback(t *testing.T) {
+	testCases := []struct {
+		name        string
+		outputField string
+		wantCallID  string
+		wantName    string
+	}{
+		{
+			name:        "call_id standard",
+			outputField: `"call_id":"call_123"`,
+			wantCallID:  "call_123",
+			wantName:    "Bash",
+		},
+		{
+			name:        "id alternate field",
+			outputField: `"id":"call_123"`,
+			wantCallID:  "call_123",
+			wantName:    "Bash",
+		},
+		{
+			name:        "tool_call_id alternate field",
+			outputField: `"tool_call_id":"call_123"`,
+			wantCallID:  "call_123",
+			wantName:    "Bash",
+		},
+		{
+			name:        "callId alternate field",
+			outputField: `"callId":"call_123"`,
+			wantCallID:  "call_123",
+			wantName:    "Bash",
+		},
+		{
+			name:        "missing call_id with name fallback to pending queue",
+			outputField: `"name":"Bash"`,
+			wantCallID:  "call_123",
+			wantName:    "Bash",
+		},
+		{
+			name:        "missing call_id completely fallback to pending queue",
+			outputField: ``,
+			wantCallID:  "call_123",
+			wantName:    "Bash",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			outputJSON := `{"type":"function_call_output","output":"result"`
+			if tc.outputField != "" {
+				outputJSON += `,` + tc.outputField
+			}
+			outputJSON += `}`
+
+			inputJSON := `{
+				"model": "gemini-3.7-flash-high",
+				"input": [
+					{"role":"user","content":"run bash"},
+					{"type":"function_call","call_id":"call_123","name":"Bash","arguments":"{\"command\":\"pwd\"}"},
+					` + outputJSON + `
+				]
+			}`
+
+			output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+			contents := gjson.GetBytes(output, "contents").Array()
+			if len(contents) != 3 {
+				t.Fatalf("expected 3 contents, got %d; output=%s", len(contents), string(output))
+			}
+
+			userContent := contents[2]
+			parts := userContent.Get("parts").Array()
+			if len(parts) == 0 {
+				t.Fatalf("expected at least 1 part in user response, got 0; output=%s", string(output))
+			}
+
+			fr := parts[0].Get("functionResponse")
+			if !fr.Exists() {
+				t.Fatalf("missing functionResponse: %s", userContent.Raw)
+			}
+			if gotID := fr.Get("id").String(); gotID != tc.wantCallID {
+				t.Fatalf("functionResponse.id = %q, want %q; output=%s", gotID, tc.wantCallID, string(output))
+			}
+			if gotName := fr.Get("name").String(); gotName != tc.wantName {
+				t.Fatalf("functionResponse.name = %q, want %q; output=%s", gotName, tc.wantName, string(output))
+			}
+
+			if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
+				t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errValidate, string(output))
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_ParallelFunctionCallOutputsAlternateIDs(t *testing.T) {
+	// Two tool calls: call-1 and call-2
+	// Two outputs: reversed order with tool_call_id and id
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"role":"user","content":"run tools"},
+			{"type":"function_call","call_id":"call-1","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call-2","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","tool_call_id":"call-2","output":"result_b"},
+			{"type":"function_call_output","id":"call-1","output":"result_a"}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
+		t.Fatalf("parallel tool pairing validation failed: %v; output=%s", errValidate, string(output))
+	}
+
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents (user, model, user), got %d; output=%s", len(contents), string(output))
+	}
+
+	responses := contents[2].Get("parts").Array()
+	if len(responses) != 2 {
+		t.Fatalf("expected 2 response parts, got %d; output=%s", len(responses), string(output))
+	}
+
+	// Must be ordered call-1 then call-2 to match model functionCall order
+	if gotID := responses[0].Get("functionResponse.id").String(); gotID != "call-1" {
+		t.Fatalf("first response id = %q, want call-1", gotID)
+	}
+	if gotName := responses[0].Get("functionResponse.name").String(); gotName != "tool_a" {
+		t.Fatalf("first response name = %q, want tool_a", gotName)
+	}
+	if gotID := responses[1].Get("functionResponse.id").String(); gotID != "call-2" {
+		t.Fatalf("second response id = %q, want call-2", gotID)
+	}
+	if gotName := responses[1].Get("functionResponse.name").String(); gotName != "tool_b" {
+		t.Fatalf("second response name = %q, want tool_b", gotName)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_DedicatedCallIDTakesPrecedenceOverItemID(t *testing.T) {
+	// Items have item IDs (id: "item_b", "item_a") in addition to tool_call_id ("call_b", "call_a") in reverse order.
+	// Dedicated tool_call_id must take precedence over item id so content results are not swapped.
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"role":"user","content":"run tasks"},
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","id":"item_b","tool_call_id":"call_b","output":"content_b"},
+			{"type":"function_call_output","id":"item_a","tool_call_id":"call_a","output":"content_a"}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
+		t.Fatalf("pairing validation failed: %v; output=%s", errValidate, string(output))
+	}
+
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents, got %d; output=%s", len(contents), string(output))
+	}
+
+	responses := contents[2].Get("parts").Array()
+	if len(responses) != 2 {
+		t.Fatalf("expected 2 responses, got %d; output=%s", len(responses), string(output))
+	}
+
+	// First response must pair with call_a and have content_a
+	if gotID := responses[0].Get("functionResponse.id").String(); gotID != "call_a" {
+		t.Fatalf("first response id = %q, want call_a", gotID)
+	}
+	if gotResult := responses[0].Get("functionResponse.response.result").String(); gotResult != "content_a" {
+		t.Fatalf("first response result = %q, want content_a (tool_call_id precedence check failed)", gotResult)
+	}
+
+	// Second response must pair with call_b and have content_b
+	if gotID := responses[1].Get("functionResponse.id").String(); gotID != "call_b" {
+		t.Fatalf("second response id = %q, want call_b", gotID)
+	}
+	if gotResult := responses[1].Get("functionResponse.response.result").String(); gotResult != "content_b" {
+		t.Fatalf("second response result = %q, want content_b (tool_call_id precedence check failed)", gotResult)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_ExplicitUnmatchedCallIDNotRebound(t *testing.T) {
+	// Pending call is call_1, but output has an explicit call_id: "call_other".
+	// It must NOT be hijacked and rewritten to call_1; emit it as user text.
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"role":"user","content":"run bash"},
+			{"type":"function_call","call_id":"call_1","name":"Bash","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_other","output":"other_result"}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
+		t.Fatalf("pairing validation failed: %v; output=%s", errValidate, string(output))
+	}
+
+	unmatchedTextFound := false
+	for _, content := range gjson.GetBytes(output, "contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if fr := part.Get("functionResponse"); fr.Exists() {
+				if fr.Get("id").String() == "call_other" || fr.Get("response.result").String() == "other_result" {
+					t.Fatalf("unmatched explicit call_id emitted as functionResponse: %s", string(output))
+				}
+			}
+			if content.Get("role").String() == "user" && part.Get("text").String() == "other_result" {
+				unmatchedTextFound = true
+			}
+		}
+	}
+	if !unmatchedTextFound {
+		t.Fatalf("expected unmatched call_other output as user text; output=%s", string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_MixedMissingAndExplicitParallelOutputsAcrossUserMessage(t *testing.T) {
+	// Call A, Call B.
+	// Output 1 has NO ID (result B).
+	// Intervening user message.
+	// Output 2 explicitly has call_id: call_a (result A).
+	// Call A must NOT be stolen by Output 1; Output 1 must get Call B.
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","output":"result_b"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"intervening"}]},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+
+	resultMap := make(map[string]string)
+	for _, c := range contents {
+		if c.Get("role").String() == "user" {
+			for _, part := range c.Get("parts").Array() {
+				if fr := part.Get("functionResponse"); fr.Exists() {
+					resultMap[fr.Get("id").String()] = fr.Get("response.result").String()
+				}
+			}
+		}
+	}
+
+	if got := resultMap["call_a"]; got != "result_a" {
+		t.Fatalf("result for call_a = %q, want result_a", got)
+	}
+	if got := resultMap["call_b"]; got != "result_b" {
+		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_AllPendingCallsReservedByFutureExplicitOutputsDoesNotDuplicate(t *testing.T) {
+	// Call A is the only pending call.
+	// Output 1 has NO ID.
+	// Intervening user message.
+	// Output 2 explicitly has call_id: call_a.
+	// Output 1 must NOT be bound to call_a; call_a must not be duplicated.
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call_output","output":"result_1"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]},
+			{"type":"function_call_output","call_id":"call_a","output":"result_2"}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+
+	var responseIDs []string
+	var responseResults []string
+	for _, c := range contents {
+		if c.Get("role").String() == "user" {
+			for _, part := range c.Get("parts").Array() {
+				if fr := part.Get("functionResponse"); fr.Exists() {
+					responseIDs = append(responseIDs, fr.Get("id").String())
+					responseResults = append(responseResults, fr.Get("response.result").String())
+				}
+			}
+		}
+	}
+
+	// Verify call_a is not duplicated
+	callACount := 0
+	for _, id := range responseIDs {
+		if id == "call_a" {
+			callACount++
+		}
+	}
+	if callACount != 1 {
+		t.Fatalf("call_a appeared %d times in responseIDs %v, want exactly 1", callACount, responseIDs)
+	}
+
+	// The response that carries call_a must be result_2 (the explicit one), not result_1
+	for idx, id := range responseIDs {
+		if id == "call_a" && responseResults[idx] != "result_2" {
+			t.Fatalf("call_a was bound to result %q, want result_2", responseResults[idx])
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_InterruptedFunctionCallPreservesPairing(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"List the files."}]},
+			{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"command\":[\"ls\"]}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Stop, do something else instead."}]},
+			{"type":"function_call","call_id":"c2","name":"shell","arguments":"{\"command\":[\"pwd\"]}"},
+			{"type":"function_call_output","call_id":"c2","output":"/tmp\n"}
+		]
+	}`
+
+	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(inputJSON), false)
+	if err := internalsignature.ValidateGeminiFunctionCallPairing(result); err != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Gemini request: %v; output=%s", err, result)
+	}
+
+	// Verify synthesized response for c1
+	c1Resp := gjson.GetBytes(result, "contents.2.parts.0.functionResponse")
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+		t.Fatalf("unexpected synthesized response for c1: %s", c1Resp.Raw)
+	}
+	// Verify real response for c2
+	c2Resp := gjson.GetBytes(result, "contents.5.parts.0.functionResponse")
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+		t.Fatalf("unexpected real response for c2: %s", c2Resp.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_ParallelInterruptedFunctionCallPreservesPairingAndOrder(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"List and print."}]},
+			{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"command\":[\"ls\"]}"},
+			{"type":"function_call","call_id":"c2","name":"shell","arguments":"{\"command\":[\"pwd\"]}"},
+			{"type":"function_call_output","call_id":"c2","output":"/tmp\n"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Stop, do something else instead."}]},
+			{"type":"function_call","call_id":"c3","name":"shell","arguments":"{\"command\":[\"whoami\"]}"},
+			{"type":"function_call_output","call_id":"c3","output":"root\n"}
+		]
+	}`
+
+	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(inputJSON), false)
+	if err := internalsignature.ValidateGeminiFunctionCallPairing(result); err != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on parallel interrupted request: %v; output=%s", err, result)
+	}
+
+	// In the response turn for [c1, c2], c1 must be first (synthesized) and c2 must be second (real)
+	c1Resp := gjson.GetBytes(result, "contents.2.parts.0.functionResponse")
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+		t.Fatalf("unexpected response part 0 for c1: %s", c1Resp.Raw)
+	}
+	c2Resp := gjson.GetBytes(result, "contents.2.parts.1.functionResponse")
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+		t.Fatalf("unexpected response part 1 for c2: %s", c2Resp.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_TrailingPartialParallelCallsPreservesPairingAndOrder(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"List and print."}]},
+			{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"command\":[\"ls\"]}"},
+			{"type":"function_call","call_id":"c2","name":"shell","arguments":"{\"command\":[\"pwd\"]}"},
+			{"type":"function_call_output","call_id":"c2","output":"/tmp\n"}
+		]
+	}`
+
+	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(inputJSON), false)
+	if err := internalsignature.ValidateGeminiFunctionCallPairing(result); err != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on trailing partial parallel request: %v; output=%s", err, result)
+	}
+
+	// In the response turn for [c1, c2], c1 must be first (synthesized) and c2 must be second (real)
+	c1Resp := gjson.GetBytes(result, "contents.2.parts.0.functionResponse")
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+		t.Fatalf("unexpected response part 0 for c1: %s", c1Resp.Raw)
+	}
+	c2Resp := gjson.GetBytes(result, "contents.2.parts.1.functionResponse")
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+		t.Fatalf("unexpected response part 1 for c2: %s", c2Resp.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_InterruptedMessageBeforeRealOutputPreservesPairingAndOrder(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash-high",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"List and print."}]},
+			{"type":"function_call","call_id":"c1","name":"shell","arguments":"{\"command\":[\"ls\"]}"},
+			{"type":"function_call","call_id":"c2","name":"shell","arguments":"{\"command\":[\"pwd\"]}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Stop, do something else instead."}]},
+			{"type":"function_call_output","call_id":"c2","output":"/tmp\n"}
+		]
+	}`
+
+	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(inputJSON), false)
+	if err := internalsignature.ValidateGeminiFunctionCallPairing(result); err != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on interrupted message before real output request: %v; output=%s", err, result)
+	}
+
+	// The user message precedes the completed tool response turn
+	stopText := gjson.GetBytes(result, "contents.2.parts.0.text").String()
+	if stopText != "Stop, do something else instead." {
+		t.Fatalf("unexpected text in contents[2]: %q", stopText)
+	}
+	// In the response turn for [c1, c2], c1 must be first (synthesized) and c2 must be second (real)
+	c1Resp := gjson.GetBytes(result, "contents.3.parts.0.functionResponse")
+	if c1Resp.Get("id").String() != "c1" || c1Resp.Get("name").String() != "shell" || c1Resp.Get("response.result").String() != "call interrupted, no output" {
+		t.Fatalf("unexpected response part 0 for c1: %s", c1Resp.Raw)
+	}
+	c2Resp := gjson.GetBytes(result, "contents.3.parts.1.functionResponse")
+	if c2Resp.Get("id").String() != "c2" || c2Resp.Get("name").String() != "shell" || c2Resp.Get("response.result").String() != "/tmp\n" {
+		t.Fatalf("unexpected response part 1 for c2: %s", c2Resp.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_FunctionCallOutputWithFCOItemID(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"role":"user","content":"run command"},
+			{"type":"function_call","call_id":"call_1788961125480214178_817","name":"Bash","arguments":"{\"command\":\"pwd\"}"},
+			{"type":"function_call_output","id":"fco_01a08664-2d16-7a91-8ab2-2eccd49e4c3e","output":"/tmp"}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
+		t.Fatalf("pairing validation failed: %v; output=%s", errValidate, string(output))
+	}
+
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected 3 contents, got %d; output=%s", len(contents), string(output))
+	}
+
+	responses := contents[2].Get("parts").Array()
+	if len(responses) != 1 {
+		t.Fatalf("expected 1 response part, got %d; output=%s", len(responses), string(output))
+	}
+
+	if gotID := responses[0].Get("functionResponse.id").String(); gotID != "call_1788961125480214178_817" {
+		t.Fatalf("response id = %q, want call_1788961125480214178_817", gotID)
+	}
+	if gotName := responses[0].Get("functionResponse.name").String(); gotName != "Bash" {
+		t.Fatalf("response name = %q, want Bash", gotName)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_OrphanFunctionCallOutputBecomesUserText(t *testing.T) {
+	// Codex multi-agent sub-threads inject a send_message_to_thread card as
+	// function_call_output with an fco_ item id and no preceding function_call.
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"role":"user","content":[{"type":"input_text","text":"Task initialization"}]},
+			{"type":"function_call_output","id":"fco_01a09fca-8d33-73a1-97fd-4d83ecc02f9d","name":"send_message_to_thread","output":"<codex_delegation>\n  <source_thread_id>01a022d7-d4d0-72b2-8571-4590484ccaee</source_thread_id>\n  <input>Execute sub-task</input>\n</codex_delegation>"},
+			{"type":"function_call","call_id":"call_1789387253098037589_85","name":"Bash","arguments":"{\"command\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1789387253098037589_85","id":"fco_01a09fca-a5f0-7b40-9943-21fbc923c537","output":"/Users/developer"}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
+		t.Fatalf("pairing validation failed: %v; output=%s", errValidate, string(output))
+	}
+
+	delegationFound := false
+	bashCallID := ""
+	bashResponseID := ""
+	for _, content := range gjson.GetBytes(output, "contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if fr := part.Get("functionResponse"); fr.Exists() {
+				if fr.Get("id").String() == "" {
+					t.Fatalf("orphan output emitted as functionResponse with empty id: %s", string(output))
+				}
+				if fr.Get("name").String() == "Bash" {
+					bashResponseID = fr.Get("id").String()
+				}
+			}
+			if part.Get("functionCall.name").String() == "Bash" {
+				bashCallID = part.Get("functionCall.id").String()
+			}
+			if content.Get("role").String() == "user" && strings.Contains(part.Get("text").String(), "<codex_delegation>") {
+				delegationFound = true
+			}
+		}
+	}
+	if !delegationFound {
+		t.Fatalf("expected orphan send_message_to_thread output as user text; output=%s", string(output))
+	}
+	if bashCallID != "call_1789387253098037589_85" {
+		t.Fatalf("bash functionCall.id = %q; output=%s", bashCallID, string(output))
+	}
+	if bashResponseID != "call_1789387253098037589_85" {
+		t.Fatalf("bash functionResponse.id = %q; output=%s", bashResponseID, string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_UnpairedExplicitCallIDBecomesUserText(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.7-flash-high",
+		"input": [
+			{"role":"user","content":[{"type":"input_text","text":"Task initialization"}]},
+			{"type":"function_call_output","call_id":"call_missing","name":"send_message_to_thread","output":"<codex_delegation>Execute sub-task</codex_delegation>"},
+			{"type":"function_call","call_id":"call_1789387253098037589_85","name":"Bash","arguments":"{\"command\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1789387253098037589_85","output":"/Users/developer"}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.7-flash-high", []byte(inputJSON), false)
+	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
+		t.Fatalf("pairing validation failed: %v; output=%s", errValidate, string(output))
+	}
+
+	delegationFound := false
+	bashResponseID := ""
+	for _, content := range gjson.GetBytes(output, "contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if fr := part.Get("functionResponse"); fr.Exists() {
+				if fr.Get("id").String() == "call_missing" {
+					t.Fatalf("unpaired output emitted as functionResponse: %s", string(output))
+				}
+				if fr.Get("name").String() == "Bash" {
+					bashResponseID = fr.Get("id").String()
+				}
+			}
+			if content.Get("role").String() == "user" && strings.Contains(part.Get("text").String(), "<codex_delegation>") {
+				delegationFound = true
+			}
+		}
+	}
+	if !delegationFound {
+		t.Fatalf("expected unpaired send_message_to_thread output as user text; output=%s", string(output))
+	}
+	if bashResponseID != "call_1789387253098037589_85" {
+		t.Fatalf("bash functionResponse.id = %q; output=%s", bashResponseID, string(output))
+	}
 }

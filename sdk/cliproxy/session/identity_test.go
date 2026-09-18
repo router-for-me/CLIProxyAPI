@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"net/http"
 	"strings"
 	"testing"
@@ -197,6 +196,14 @@ func TestEnrichSkipsDerivationForExplicitSessions(t *testing.T) {
 				cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:stale",
 			},
 		},
+		{
+			name:    "nested request sessionId",
+			payload: []byte(`{"request":{"sessionId":"nested-session"},"messages":[{"role":"user","content":"hello"}]}`),
+		},
+		{
+			name:    "nested request subagent",
+			payload: []byte(`{"request":{"sessionId":"nested-session","metadata":{"agent_id":"worker"}},"messages":[{"role":"user","content":"hello"}]}`),
+		},
 	}
 
 	for _, test := range tests {
@@ -327,22 +334,290 @@ func TestEnrichCopiesDerivedIdentityToRequestAndOptions(t *testing.T) {
 	}
 }
 
-func TestEnrichCarriesRequestPayloadIntoSelectionOptions(t *testing.T) {
+func TestDeriveIDAntigravityNestedRequestAndEmptyFirstUser(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"conversation":{"id":"request-only-conversation"},"input":"hello"}`)
-	_, enrichedOpts := Enrich(
-		cliproxyexecutor.Request{Payload: payload},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
-	)
+	nestedAntigravity := []byte(`{
+		"project_id": "test-project",
+		"request": {
+			"systemInstruction": {"parts":[{"text":"system prompt"}]},
+			"contents": [
+				{"role":"user","parts":[{"text":""}]},
+				{"role":"user","parts":[{"text":"actual user prompt"}]}
+			]
+		}
+	}`)
+	id := DeriveID(sdktranslator.FormatAntigravity, nestedAntigravity, "caller-a")
+	if id == "" {
+		t.Fatal("DeriveID returned empty for nested Antigravity request with empty first turn")
+	}
 
-	if !bytes.Equal(enrichedOpts.OriginalRequest, payload) {
-		t.Fatalf("OriginalRequest = %q, want request payload %q", enrichedOpts.OriginalRequest, payload)
+	directAntigravity := []byte(`{
+		"systemInstruction": {"parts":[{"text":"system prompt"}]},
+		"contents": [
+			{"role":"user","parts":[{"text":"actual user prompt"}]}
+		]
+	}`)
+	directID := DeriveID(sdktranslator.FormatAntigravity, directAntigravity, "caller-a")
+	if id != directID {
+		t.Fatalf("DeriveID mismatch: nested=%s, direct=%s", id, directID)
 	}
-	if len(enrichedOpts.OriginalRequest) > 0 && &enrichedOpts.OriginalRequest[0] == &payload[0] {
-		t.Fatal("OriginalRequest aliases Request.Payload instead of preserving a snapshot")
+}
+
+func TestClaudeMetadataIdentitiesNormalizesAgentID(t *testing.T) {
+	t.Parallel()
+
+	validPayload := []byte(`{
+		"metadata": {
+			"user_id": "{\"session_id\":\"sess-123\",\"parent_session_id\":\"parent-456\",\"agent_id\":\"  subagent-alpha  \"}"
+		}
+	}`)
+	sessionID, parentSessionID, agentID := ClaudeMetadataIdentities(validPayload)
+	if sessionID != "sess-123" {
+		t.Fatalf("sessionID = %q, want sess-123", sessionID)
 	}
-	if got := DerivedID(enrichedOpts.Metadata); got != "" {
-		t.Fatalf("DerivedSessionID = %q, want explicit conversation to remain authoritative", got)
+	if parentSessionID != "parent-456" {
+		t.Fatalf("parentSessionID = %q, want parent-456", parentSessionID)
+	}
+	if agentID != "subagent-alpha" {
+		t.Fatalf("agentID = %q, want subagent-alpha", agentID)
+	}
+
+	invalidPayload := []byte(`{
+		"metadata": {
+			"user_id": "{\"session_id\":\"sess-123\",\"agent_id\":\"bad\nagent\"}"
+		}
+	}`)
+	_, _, badAgentID := ClaudeMetadataIdentities(invalidPayload)
+	if badAgentID != "" {
+		t.Fatalf("expected badAgentID to be empty for control character, got %q", badAgentID)
+	}
+}
+
+func TestEnrich_ExplicitSessionPreferredOverExecutionSession(t *testing.T) {
+	t.Parallel()
+
+	// Scenario 1: Responses WebSocket provides ExecutionSessionMetadataKey for transport reuse,
+	// but the client payload carries an explicit conversation/session identity.
+	wsPayload := []byte(`{"session_id":"explicit-ws-session"}`)
+	req1 := cliproxyexecutor.Request{
+		Payload: wsPayload,
+	}
+	opts1 := cliproxyexecutor.Options{
+		OriginalRequest: wsPayload,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "conn-ws-uuid-123",
+		},
+	}
+
+	enrichedReq1, enrichedOpts1 := Enrich(req1, opts1)
+	canonical1, ok1 := enrichedOpts1.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+	if !ok1 || canonical1 != "session:explicit-ws-session" {
+		t.Fatalf("canonical session = %q (ok=%v), want session:explicit-ws-session", canonical1, ok1)
+	}
+	execID1, okExec1 := enrichedOpts1.Metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string)
+	if !okExec1 || execID1 != "conn-ws-uuid-123" {
+		t.Fatalf("execution session was not preserved: %q (ok=%v)", execID1, okExec1)
+	}
+	_ = enrichedReq1
+
+	// Scenario 2: Only ExecutionSessionMetadataKey exists (no explicit session headers or payload).
+	req2 := cliproxyexecutor.Request{
+		Payload: []byte(`{"model":"test"}`),
+	}
+	opts2 := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "conn-ws-uuid-456",
+		},
+	}
+	_, enrichedOpts2 := Enrich(req2, opts2)
+	canonical2, ok2 := enrichedOpts2.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+	if !ok2 || canonical2 != "execution:conn-ws-uuid-456" {
+		t.Fatalf("canonical fallback = %q (ok=%v), want execution:conn-ws-uuid-456", canonical2, ok2)
+	}
+	execID2, okExec2 := enrichedOpts2.Metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string)
+	if !okExec2 || execID2 != "conn-ws-uuid-456" {
+		t.Fatalf("execution session was not preserved in fallback: %q (ok=%v)", execID2, okExec2)
+	}
+}
+
+func TestEnrich_MetadataOnlyCanonicalAndParentSessionPreserved(t *testing.T) {
+	t.Parallel()
+
+	// Embeddable SDK caller provides explicit canonical and parent session in Options.Metadata
+	// without HTTP session headers or body session fields.
+	req := cliproxyexecutor.Request{
+		Payload: []byte(`{"model":"gpt-5.4"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:sdk-child-001",
+			cliproxyexecutor.ParentSessionIDMetadataKey:    "session:sdk-parent-999",
+		},
+	}
+
+	_, enrichedOpts := Enrich(req, opts)
+	canonical, ok := enrichedOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
+	if !ok || canonical != "session:sdk-child-001" {
+		t.Fatalf("canonical session = %q (ok=%v), want session:sdk-child-001", canonical, ok)
+	}
+	parent, okParent := enrichedOpts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey].(string)
+	if !okParent || parent != "session:sdk-parent-999" {
+		t.Fatalf("parent session = %q (ok=%v), want session:sdk-parent-999", parent, okParent)
+	}
+
+	// Self-loop elimination in metadata-only mode
+	optsLoop := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:same-loop",
+			cliproxyexecutor.ParentSessionIDMetadataKey:    "session:same-loop",
+		},
+	}
+	_, enrichedLoop := Enrich(req, optsLoop)
+	if _, hasLoopParent := enrichedLoop.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey]; hasLoopParent {
+		t.Fatalf("self-loop parent was not eliminated in metadata-only mode")
+	}
+}
+
+func TestNormalizeToCanonicalUUID(t *testing.T) {
+	t.Parallel()
+
+	// 1. Empty, whitespace, and bare/empty prefixes
+	if got := NormalizeToCanonicalUUID(""); got != "" {
+		t.Fatalf("NormalizeToCanonicalUUID(\"\") = %q, want empty", got)
+	}
+	if got := NormalizeToCanonicalUUID("   "); got != "" {
+		t.Fatalf("NormalizeToCanonicalUUID(\"   \") = %q, want empty", got)
+	}
+	emptyPrefixCases := []string{
+		"lcp:v1:", "lcp:",
+		"ctx:v1:", "ctx:",
+		"codex:", "claude:", "header:", "session:",
+		"affinity:", "slot:", "task:", "conv:",
+		"thread:", "clientreq:", "geminicache:",
+		"pck:", "user:", "execution:", "agy:", "derived:",
+		"slot:   ",
+		"task:   ",
+		"derived:ctx:v1:",
+		"derived:slot:   ",
+	}
+	for _, input := range emptyPrefixCases {
+		if got := NormalizeToCanonicalUUID(input); got != "" {
+			t.Fatalf("NormalizeToCanonicalUUID(%q) = %q, want empty", input, got)
+		}
+	}
+
+	// 2. Native UUIDs (v4 and v7, various casings)
+	rawUUIDv4 := "b2839f64-668d-4dc3-a42a-64da829d1e33"
+	if got := NormalizeToCanonicalUUID(rawUUIDv4); got != rawUUIDv4 {
+		t.Fatalf("NormalizeToCanonicalUUID(rawUUIDv4) = %q, want %q", got, rawUUIDv4)
+	}
+	upperUUID := "B2839F64-668D-4DC3-A42A-64DA829D1E33"
+	if got := NormalizeToCanonicalUUID(upperUUID); got != rawUUIDv4 {
+		t.Fatalf("NormalizeToCanonicalUUID(upperUUID) = %q, want %q", got, rawUUIDv4)
+	}
+	rawUUIDv7 := "01a07e72-c84d-7fd3-8207-d217b41cc649"
+	if got := NormalizeToCanonicalUUID(rawUUIDv7); got != rawUUIDv7 {
+		t.Fatalf("NormalizeToCanonicalUUID(rawUUIDv7) = %q, want %q", got, rawUUIDv7)
+	}
+
+	// 3. Known prefixes with UUIDs
+	prefixedCases := map[string]string{
+		"codex:01a07e72-c84d-7fd3-8207-d217b41cc649":         "01a07e72-c84d-7fd3-8207-d217b41cc649",
+		"claude:b2839f64-668d-4dc3-a42a-64da829d1e33":        "b2839f64-668d-4dc3-a42a-64da829d1e33",
+		"header:7a8b9c0d-1111-2222-3333-444455556666":        "7a8b9c0d-1111-2222-3333-444455556666",
+		"session:b2839f64-668d-4dc3-a42a-64da829d1e33":       "b2839f64-668d-4dc3-a42a-64da829d1e33",
+		"thread:01a07e72-c84d-7fd3-8207-d217b41cc649":        "01a07e72-c84d-7fd3-8207-d217b41cc649",
+		"custom-prefix:01a07e72-c84d-7fd3-8207-d217b41cc649": "01a07e72-c84d-7fd3-8207-d217b41cc649",
+	}
+	for input, want := range prefixedCases {
+		got := NormalizeToCanonicalUUID(input)
+		if got != want {
+			t.Errorf("NormalizeToCanonicalUUID(%q) = %q, want %q", input, got, want)
+		}
+	}
+
+	// 4. LCP 64-hex and non-UUID inputs projected to RFC 9562 UUIDv8
+	nonUUIDCases := []string{
+		"lcp:v1:c28621bab78eacdb3ae128c0f6aaa0147842f063fda10ae9dc5473cc81d58985",
+		"lcp:c28621bab78eacdb3ae128c0f6aaa0147842f063fda10ae9dc5473cc81d58985",
+		"c28621bab78eacdb3ae128c0f6aaa0147842f063fda10ae9dc5473cc81d58985",
+		"claude:b2839f64-668d-4dc3-a42a-64da829d1e33:agent:worker-reviewer",
+		"task:task-abc-1",
+		"slot:pi-slot-789",
+		"ses_f8189891effeCLIq0MasUgMQsC",
+		"my-custom-test-task",
+	}
+
+	for _, input := range nonUUIDCases {
+		got := NormalizeToCanonicalUUID(input)
+		if len(got) != 36 {
+			t.Errorf("NormalizeToCanonicalUUID(%q) length = %d, want 36", input, len(got))
+		}
+		if !canonicalUUIDPattern.MatchString(got) {
+			t.Errorf("NormalizeToCanonicalUUID(%q) = %q, does not match UUID pattern", input, got)
+		}
+		// Verify RFC 9562 Version 8 (13th char is '8', index 14)
+		if got[14] != '8' {
+			t.Errorf("NormalizeToCanonicalUUID(%q) = %q, version char is %c, want '8'", input, got, got[14])
+		}
+		// Verify RFC 4122 Variant (17th char is '8', '9', 'a', or 'b', index 19)
+		variantChar := got[19]
+		if variantChar != '8' && variantChar != '9' && variantChar != 'a' && variantChar != 'b' {
+			t.Errorf("NormalizeToCanonicalUUID(%q) = %q, variant char is %c, want 8/9/a/b", input, got, variantChar)
+		}
+		// Verify Idempotency
+		if reGot := NormalizeToCanonicalUUID(got); reGot != got {
+			t.Errorf("NormalizeToCanonicalUUID is not idempotent: first=%q, second=%q", got, reGot)
+		}
+	}
+
+	// 5. Uniqueness and determinism
+	id1 := NormalizeToCanonicalUUID("lcp:v1:hash-A")
+	id1Again := NormalizeToCanonicalUUID("lcp:v1:hash-A")
+	id2 := NormalizeToCanonicalUUID("lcp:v1:hash-B")
+	if id1 != id1Again {
+		t.Fatalf("NormalizeToCanonicalUUID is non-deterministic: %q != %q", id1, id1Again)
+	}
+	if id1 == id2 {
+		t.Fatalf("NormalizeToCanonicalUUID collided for different inputs: %q == %q", id1, id2)
+	}
+
+	// 6. Same content with or without "lcp:v1:" prefix produces identical UUID
+	lcpPrefixed := "lcp:v1:c28621bab78eacdb3ae128c0f6aaa0147842f063fda10ae9dc5473cc81d58985"
+	lcpBare := "c28621bab78eacdb3ae128c0f6aaa0147842f063fda10ae9dc5473cc81d58985"
+	if NormalizeToCanonicalUUID(lcpPrefixed) != NormalizeToCanonicalUUID(lcpBare) {
+		t.Fatalf("lcp prefixed (%q) and bare (%q) produced different UUIDs",
+			NormalizeToCanonicalUUID(lcpPrefixed), NormalizeToCanonicalUUID(lcpBare))
+	}
+
+	// 7. Same content with or without "ctx:v1:" / "ctx:" prefix produces identical UUID
+	ctxV1Prefixed := "ctx:v1:c28621bab78eacdb3ae128c0f6aaa0147842f063fda10ae9dc5473cc81d58985"
+	ctxShortPrefixed := "ctx:c28621bab78eacdb3ae128c0f6aaa0147842f063fda10ae9dc5473cc81d58985"
+	if NormalizeToCanonicalUUID(ctxV1Prefixed) != NormalizeToCanonicalUUID(lcpBare) {
+		t.Fatalf("ctx:v1: prefixed (%q) and bare (%q) produced different UUIDs: %q vs %q",
+			ctxV1Prefixed, lcpBare, NormalizeToCanonicalUUID(ctxV1Prefixed), NormalizeToCanonicalUUID(lcpBare))
+	}
+	if NormalizeToCanonicalUUID(ctxShortPrefixed) != NormalizeToCanonicalUUID(lcpBare) {
+		t.Fatalf("ctx: prefixed (%q) and bare (%q) produced different UUIDs: %q vs %q",
+			ctxShortPrefixed, lcpBare, NormalizeToCanonicalUUID(ctxShortPrefixed), NormalizeToCanonicalUUID(lcpBare))
+	}
+	// Fixed Golden UUIDv8 check
+	const wantGoldenUUID = "2ad1939c-98ca-81da-8b69-3d084d5614c4"
+	if got := NormalizeToCanonicalUUID(lcpBare); got != wantGoldenUUID {
+		t.Fatalf("NormalizeToCanonicalUUID(lcpBare) = %q, want golden %q", got, wantGoldenUUID)
+	}
+
+	// 8. Chained prefixes (e.g. "derived:ctx:v1:") are stripped iteratively
+	derivedCtxPrefixed := "derived:ctx:v1:c28621bab78eacdb3ae128c0f6aaa0147842f063fda10ae9dc5473cc81d58985"
+	if got := NormalizeToCanonicalUUID(derivedCtxPrefixed); got != NormalizeToCanonicalUUID(lcpBare) {
+		t.Fatalf("derived:ctx:v1: prefixed (%q) produced %q, want %q",
+			derivedCtxPrefixed, got, NormalizeToCanonicalUUID(lcpBare))
+	}
+
+	// 9. Chained prefixes with standard UUID
+	derivedUUID := "derived:ctx:v1:01a07e72-c84d-7fd3-8207-d217b41cc649"
+	if got := NormalizeToCanonicalUUID(derivedUUID); got != "01a07e72-c84d-7fd3-8207-d217b41cc649" {
+		t.Fatalf("NormalizeToCanonicalUUID(%q) = %q, want 01a07e72-c84d-7fd3-8207-d217b41cc649", derivedUUID, got)
 	}
 }

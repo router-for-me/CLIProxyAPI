@@ -26,6 +26,7 @@ var oauthProviders = []oauthProvider{
 	{"Antigravity", "antigravity-auth-url", "🟪", false, ""},
 	{"Kimi", "kimi-auth-url", "🟫", true, ""},
 	{"xAI", "xai-auth-url", "⬛", true, ""},
+	{"Meta", "meta-auth-url", "🔵", true, ""},
 	{"ZCode (Z.ai)", "zcode-auth-url", "🟩", true, ""},
 	{"ZCode (BigModel/智谱)", "zcode-auth-url", "🟩", true, "provider=bigmodel"},
 }
@@ -365,6 +366,8 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "kimi"
 				case "xai-auth-url":
 					providerKey = "xai"
+				case "meta-auth-url":
+					providerKey = "meta"
 				case "zcode-auth-url":
 					providerKey = "zcode"
 				}

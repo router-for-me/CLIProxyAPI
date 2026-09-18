@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -121,11 +122,11 @@ func tryRefreshModels(ctx context.Context, label string) {
 		return
 	}
 
-	// The remote catalog does not publish every provider: zcode ships only in the
-	// embedded catalog, so a wholesale replace would silently drop its models and
-	// leave "unknown provider for model glm-5.3" until restart. Preserve local-only
-	// sections the remote omits. This runs before change detection so a carried-over
-	// section is not reported as changed on every refresh.
+	// The remote catalog does not publish every provider (zcode, and currently
+	// meta): a wholesale replace would silently drop the embedded definitions and
+	// leave "unknown provider for model ..." until restart. Preserve local-only
+	// sections the remote omits. This runs before change detection so a
+	// carried-over section is not reported as changed on every refresh.
 	carryOverLocalOnlySections(oldData, parsed)
 
 	// Detect changes before updating store.
@@ -207,11 +208,14 @@ func carryOverLocalOnlySections(local, remote *staticModelsJSON) {
 	if len(remote.ZCode) == 0 && len(local.ZCode) > 0 {
 		remote.ZCode = local.ZCode
 	}
+	if len(remote.Meta) == 0 && len(local.Meta) > 0 {
+		remote.Meta = local.Meta
+	}
 }
 
 // detectChangedProviders compares two model catalogs and returns provider names
-// whose model definitions differ. Codex tiers (free/team/plus/pro) are grouped
-// under a single "codex" provider.
+// whose model definitions differ. Gemini changes affect both Gemini protocols,
+// while Codex tiers (free/team/plus/pro) are grouped under one "codex" provider.
 func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 	if oldData == nil || newData == nil {
 		return nil
@@ -226,6 +230,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 	sections := []section{
 		{"claude", oldData.Claude, newData.Claude},
 		{"gemini", oldData.Gemini, newData.Gemini},
+		{"gemini-interactions", oldData.Gemini, newData.Gemini},
 		{"vertex", oldData.Vertex, newData.Vertex},
 		{"aistudio", oldData.AIStudio, newData.AIStudio},
 		{"codex", oldData.CodexFree, newData.CodexFree},
@@ -235,6 +240,8 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
+		{"devin", oldData.Devin, newData.Devin},
+		{"meta", oldData.Meta, newData.Meta},
 		{"zcode", oldData.ZCode, newData.ZCode},
 	}
 
@@ -252,13 +259,19 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 	return changed
 }
 
-// modelSectionChanged reports whether two model slices differ.
+// modelSectionChanged reports whether two model slices differ, including
+// internal metadata that is intentionally omitted from normal JSON responses.
 func modelSectionChanged(a, b []*ModelInfo) bool {
 	if len(a) != len(b) {
 		return true
 	}
 	if len(a) == 0 {
 		return false
+	}
+	for i := range a {
+		if a[i] != nil && b[i] != nil && !reflect.DeepEqual(a[i].NativeCapabilities, b[i].NativeCapabilities) {
+			return true
+		}
 	}
 	aj, err1 := json.Marshal(a)
 	bj, err2 := json.Marshal(b)
@@ -360,6 +373,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "kimi", models: data.Kimi},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
+		{name: "meta", models: data.Meta},
 		{name: "zcode", models: data.ZCode, optional: true},
 	}
 

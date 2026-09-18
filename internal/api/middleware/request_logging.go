@@ -320,9 +320,11 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	method := c.Request.Method
 
 	// Capture headers
-	headers := make(map[string][]string)
-	for key, values := range c.Request.Header {
-		headers[key] = values
+	var headers map[string][]string
+	if c.Request.Header != nil {
+		headers = c.Request.Header.Clone()
+	} else {
+		headers = make(map[string][]string)
 	}
 
 	// Capture request body

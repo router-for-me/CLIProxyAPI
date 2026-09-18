@@ -13,6 +13,34 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
+func TestResolveAntigravityRequestBaseURL(t *testing.T) {
+	t.Run("default uses daily endpoint", func(t *testing.T) {
+		if got := resolveAntigravityRequestBaseURL(&cliproxyauth.Auth{}); got != antigravityBaseURLDaily {
+			t.Fatalf("base URL = %q, want %q", got, antigravityBaseURLDaily)
+		}
+	})
+
+	t.Run("custom attribute endpoint remains supported", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://enterprise.example.com/"}}
+		if got := resolveAntigravityRequestBaseURL(auth); got != "https://enterprise.example.com" {
+			t.Fatalf("base URL = %q, want custom endpoint", got)
+		}
+	})
+
+	t.Run("custom auth file endpoint remains supported", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{Metadata: map[string]any{"base_url": "https://enterprise.example.com/"}}
+		if got := resolveAntigravityRequestBaseURL(auth); got != "https://enterprise.example.com" {
+			t.Fatalf("base URL = %q, want custom auth file endpoint", got)
+		}
+	})
+}
+
+func TestAntigravityLoadCodeAssistBaseURLRemainsProdByDefault(t *testing.T) {
+	if got := antigravityLoadCodeAssistBaseURL(&cliproxyauth.Auth{}); got != antigravityBaseURLProd {
+		t.Fatalf("loadCodeAssist base URL = %q, want %q", got, antigravityBaseURLProd)
+	}
+}
+
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
 	body := buildRequestBodyFromPayload(t, "gemini-2.5-pro")
 
@@ -211,17 +239,25 @@ func TestAntigravityBuildRequest_PreservesIndependentWebSearchRequestType(t *tes
 
 func TestShouldResolveAntigravityWebSearchGroundingURLsRequiresTypedWebSearchAndSearchRequest(t *testing.T) {
 	original := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
+	originalResponses := []byte(`{"tools":[{"type":"web_search"}]}`)
+	originalResponsesPreview := []byte(`{"tools":[{"type":"web_search_preview_2025_03_11"}]}`)
 	translatedWithGoogleSearch := []byte(`{"requestType":"web_search","request":{"tools":[{"googleSearch":{}}]}}`)
 	translatedWithoutGoogleSearch := []byte(`{"request":{"contents":[]}}`)
 
 	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatClaude, original, translatedWithGoogleSearch) {
 		t.Fatal("expected typed Claude web search translated to web_search request to resolve grounding URLs")
 	}
+	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAIResponse, originalResponses, translatedWithGoogleSearch) {
+		t.Fatal("expected typed OpenAI Responses web search translated to web_search request to resolve grounding URLs")
+	}
+	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAIResponse, originalResponsesPreview, translatedWithGoogleSearch) {
+		t.Fatal("expected web_search_preview_2025_03_11 translated to web_search request to resolve grounding URLs")
+	}
 	if shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatClaude, original, translatedWithoutGoogleSearch) {
 		t.Fatal("expected request without googleSearch to skip grounding URL resolution")
 	}
 	if shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAI, original, translatedWithGoogleSearch) {
-		t.Fatal("expected non-Claude source format to skip grounding URL resolution")
+		t.Fatal("expected non-Claude/non-Responses source format to skip grounding URL resolution")
 	}
 }
 
@@ -264,6 +300,33 @@ func TestAntigravityPrepareRequestAuth_FetchesMissingProjectID(t *testing.T) {
 	}
 	if got, ok := updated.Metadata["project_id"].(string); !ok || got != "fetched-project" {
 		t.Fatalf("updated auth metadata project_id = %v, want fetched-project", updated.Metadata["project_id"])
+	}
+}
+
+func TestAntigravityPrepareRequestAuth_UpstreamForbiddenPreserves403(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		"access_token": "token",
+		"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+	}}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":403,"message":"The caller does not have permission"}}`)),
+		}, nil
+	}))
+
+	_, err := executor.PrepareRequestAuth(ctx, auth)
+	if err == nil {
+		t.Fatalf("PrepareRequestAuth should fail on upstream 403")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error should expose StatusCode(), got %T (%v)", err, err)
+	}
+	if got := status.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("status code = %d, want %d", got, http.StatusForbidden)
 	}
 }
 

@@ -3,6 +3,7 @@ package helps
 import (
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 )
@@ -168,5 +169,94 @@ func TestNewTransportCacheDefaultsCapacity(t *testing.T) {
 		if cache.capacity != DefaultTransportCacheCapacity {
 			t.Fatalf("NewTransportCache(%d).capacity = %d, want %d", capacity, cache.capacity, DefaultTransportCacheCapacity)
 		}
+	}
+}
+
+func TestTransportCacheCloseKeyAndCloseMatching(t *testing.T) {
+	cache := NewTransportCache[cacheKey](8)
+	build := func() (*http.Transport, error) { return &http.Transport{}, nil }
+
+	cache.Get(cacheKey{"auth-1", "p1"}, build)
+	cache.Get(cacheKey{"auth-1", "p2"}, build)
+	cache.Get(cacheKey{"auth-2", "p1"}, build)
+	if got := cache.Len(); got != 3 {
+		t.Fatalf("Len() = %d, want 3", got)
+	}
+
+	// Close non-existent key
+	if closed := cache.CloseKey(cacheKey{"auth-nonexistent", ""}); closed {
+		t.Fatal("expected CloseKey on missing entry to return false")
+	}
+
+	// Close specific key
+	if closed := cache.CloseKey(cacheKey{"auth-2", "p1"}); !closed {
+		t.Fatal("expected CloseKey on existing entry to return true")
+	}
+	if got := cache.Len(); got != 2 {
+		t.Fatalf("Len() after CloseKey = %d, want 2", got)
+	}
+
+	// Close matching all auth-1
+	closedCount := cache.CloseMatching(func(key cacheKey) bool {
+		return key.scope == "auth-1"
+	})
+	if closedCount != 2 {
+		t.Fatalf("CloseMatching closed %d entries, want 2", closedCount)
+	}
+	if got := cache.Len(); got != 0 {
+		t.Fatalf("Len() after CloseMatching = %d, want 0", got)
+	}
+
+	// Nil cache safety
+	var nilCache *TransportCache[cacheKey]
+	if nilCache.CloseKey(cacheKey{}) {
+		t.Fatal("expected CloseKey on nil cache to return false")
+	}
+	if nilCache.CloseMatching(func(cacheKey) bool { return true }) != 0 {
+		t.Fatal("expected CloseMatching on nil cache to return 0")
+	}
+}
+
+func TestTransportCacheEvictionClosesIdleConnections(t *testing.T) {
+	cache := NewTransportCache[cacheKey](2)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	build := func() (*http.Transport, error) {
+		return &http.Transport{}, nil
+	}
+
+	// Fill 2 entries
+	t1, err1 := cache.Get(cacheKey{"auth-1", ""}, build)
+	if err1 != nil {
+		t.Fatal(err1)
+	}
+	_, err2 := cache.Get(cacheKey{"auth-2", ""}, build)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+
+	// Make request with t1 to establish an idle connection
+	c1 := &http.Client{Transport: t1}
+	resp, errReq := c1.Get(srv.URL)
+	if errReq != nil {
+		t.Fatal(errReq)
+	}
+	_ = resp.Body.Close()
+
+	// Push 3rd entry: t1 should be evicted and its idle connections closed
+	_, err3 := cache.Get(cacheKey{"auth-3", ""}, build)
+	if err3 != nil {
+		t.Fatal(err3)
+	}
+
+	if cache.Contains(cacheKey{"auth-1", ""}) {
+		t.Fatal("expected auth-1 to be evicted from cache")
+	}
+	if !cache.Contains(cacheKey{"auth-2", ""}) || !cache.Contains(cacheKey{"auth-3", ""}) {
+		t.Fatal("expected auth-2 and auth-3 to remain in cache")
 	}
 }

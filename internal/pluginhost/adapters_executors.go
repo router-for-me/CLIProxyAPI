@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -657,11 +659,28 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return coreexecutor.Response{}, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+
+	var reporter *helps.UsageReporter
+	if auth != nil {
+		modelName := strings.TrimSpace(thinking.ParseSuffix(req.Model).ModelName)
+		if modelName == "" {
+			modelName = req.Model
+		}
+		reporter = helps.NewExecutorUsageReporter(ctx, a, modelName, auth)
+	}
+
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.Execute", recovered)
 			resp = coreexecutor.Response{}
 			err = fmt.Errorf("plugin executor %s panic: %v", a.Identifier(), recovered)
+			if reporter != nil {
+				reporter.PublishFailure(ctx, err)
+			}
+			return
+		}
+		if err != nil && reporter != nil {
+			reporter.PublishFailure(ctx, err)
 		}
 	}()
 
@@ -669,10 +688,24 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 	if errPrepare != nil {
 		return coreexecutor.Response{}, errPrepare
 	}
+
+	if reporter != nil {
+		reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
+		reporter.StartResponseTTFT()
+	}
+
 	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecute != nil {
 		return coreexecutor.Response{}, errExecute
 	}
+
+	if reporter != nil {
+		reporter.RecordFirstPacket()
+		detail := helps.ParsePluginExecutorResponseUsage(prepared.outputFormat.String(), pluginResp.Payload)
+		reporter.Publish(ctx, detail)
+		reporter.EnsurePublished(ctx)
+	}
+
 	return coreexecutor.Response{
 		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
 		Metadata: cloneAnyMap(pluginResp.Metadata),
@@ -684,11 +717,28 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+
+	var reporter *helps.UsageReporter
+	if auth != nil {
+		modelName := strings.TrimSpace(thinking.ParseSuffix(req.Model).ModelName)
+		if modelName == "" {
+			modelName = req.Model
+		}
+		reporter = helps.NewExecutorUsageReporter(ctx, a, modelName, auth)
+	}
+
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.ExecuteStream", recovered)
 			result = nil
 			err = fmt.Errorf("plugin executor %s stream panic: %v", a.Identifier(), recovered)
+			if reporter != nil {
+				reporter.PublishFailure(ctx, err)
+			}
+			return
+		}
+		if err != nil && reporter != nil {
+			reporter.PublishFailure(ctx, err)
 		}
 	}()
 
@@ -696,14 +746,134 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
+
+	if reporter != nil {
+		reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
+		reporter.StartResponseTTFT()
+	}
+
 	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecuteStream != nil {
 		return nil, errExecuteStream
 	}
+
+	chunks := a.observeAndTranslateExecutorStream(ctx, prepared, pluginResp.Chunks, reporter)
 	return &coreexecutor.StreamResult{
 		Headers: cloneHeader(pluginResp.Headers),
-		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, pluginResp.Chunks)),
+		Chunks:  chunks,
 	}, nil
+}
+
+func (a *executorAdapter) observeAndTranslateExecutorStream(ctx context.Context, prepared preparedExecutorCall, in <-chan pluginapi.ExecutorStreamChunk, reporter *helps.UsageReporter) <-chan coreexecutor.StreamChunk {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if in == nil {
+		out := make(chan coreexecutor.StreamChunk)
+		close(out)
+		if reporter != nil {
+			reporter.EnsurePublished(ctx)
+		}
+		return out
+	}
+	if reporter == nil {
+		return mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, in))
+	}
+
+	observedIn := make(chan pluginapi.ExecutorStreamChunk)
+	var streamUsage helps.StreamUsageBuffer
+	var streamErr error
+	var publishOnce sync.Once
+	var lineBuffer []byte
+	const maxLineBufferSize = 64 * 1024
+
+	publishResult := func() {
+		publishOnce.Do(func() {
+			if len(lineBuffer) > 0 {
+				helps.ObservePluginExecutorStreamUsage(prepared.outputFormat.String(), lineBuffer, &streamUsage)
+				lineBuffer = nil
+			}
+			if streamErr != nil {
+				if !streamUsage.PublishFailure(ctx, reporter, streamErr) {
+					reporter.PublishFailure(ctx, streamErr)
+				}
+				reporter.EnsurePublished(ctx)
+				return
+			}
+			if ctx.Err() != nil {
+				if !streamUsage.PublishFailure(ctx, reporter, ctx.Err()) {
+					reporter.PublishFailure(ctx, ctx.Err())
+				}
+				reporter.EnsurePublished(ctx)
+				return
+			}
+			if !streamUsage.Publish(ctx, reporter) {
+				reporter.EnsurePublished(ctx)
+			}
+		})
+	}
+
+	go func() {
+		defer close(observedIn)
+		defer publishResult()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-in:
+				if !ok {
+					return
+				}
+				if chunk.Err != nil {
+					if streamErr == nil {
+						streamErr = chunk.Err
+					}
+					publishResult()
+					select {
+					case observedIn <- chunk:
+					case <-ctx.Done():
+						return
+					}
+					continue
+				}
+
+				if len(chunk.Payload) > 0 {
+					helps.ObservePluginExecutorStreamTTFT(prepared.outputFormat.String(), reporter, chunk.Payload)
+
+					lineBuffer = append(lineBuffer, chunk.Payload...)
+					for {
+						idx := bytes.IndexByte(lineBuffer, '\n')
+						if idx < 0 {
+							break
+						}
+						line := lineBuffer[:idx+1]
+						lineBuffer = lineBuffer[idx+1:]
+						helps.ObservePluginExecutorStreamUsage(prepared.outputFormat.String(), line, &streamUsage)
+					}
+					if len(lineBuffer) > 0 {
+						if jsonBytes := helps.ExtractStreamJSONPayload(lineBuffer); len(jsonBytes) > 0 && json.Valid(jsonBytes) {
+							helps.ObservePluginExecutorStreamUsage(prepared.outputFormat.String(), lineBuffer, &streamUsage)
+							lineBuffer = nil
+						}
+					}
+					if len(lineBuffer) > maxLineBufferSize {
+						helps.ObservePluginExecutorStreamUsage(prepared.outputFormat.String(), lineBuffer, &streamUsage)
+						lineBuffer = nil
+					}
+				}
+
+				select {
+				case observedIn <- chunk:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	translatedOut := a.translateExecutorStreamChunks(ctx, prepared, observedIn)
+	return mapExecutorStreamChunks(ctx, translatedOut)
 }
 
 func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, err error) {

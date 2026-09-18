@@ -954,3 +954,315 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_LargeNumberDoesNotHalt
 		t.Fatalf("expected hidden thoughtSignature to be stripped despite large number, got %s", fcSig.Raw)
 	}
 }
+
+func TestFixCLIToolResponse_AttachesSiblingInlineDataToNearestFunctionResponse(t *testing.T) {
+	tests := []struct {
+		name  string
+		parts string
+		want  []struct {
+			id   string
+			mime string
+			data string
+		}
+	}{
+		{
+			name: "snake_case sibling after single response",
+			parts: `{"functionResponse":{"name":"read","response":{"result":"Read image file [image/png]"},"id":"call_1"}},` +
+				`{"inline_data":{"mime_type":"image/png","data":"QUJD"}}`,
+			want: []struct {
+				id   string
+				mime string
+				data string
+			}{{id: "call_1", mime: "image/png", data: "QUJD"}},
+		},
+		{
+			name: "camelCase sibling after single response",
+			parts: `{"functionResponse":{"name":"read","response":{"result":"ok"},"id":"call_1"}},` +
+				`{"inlineData":{"mimeType":"image/webp","data":"NEW"}}`,
+			want: []struct {
+				id   string
+				mime string
+				data string
+			}{{id: "call_1", mime: "image/webp", data: "NEW"}},
+		},
+		{
+			name: "append sibling onto existing functionResponse.parts",
+			parts: `{"functionResponse":{"name":"read","response":{"result":"ok"},"id":"call_1","parts":[{"inlineData":{"mimeType":"image/gif","data":"OLD"}}]}},` +
+				`{"inlineData":{"mimeType":"image/webp","data":"NEW"}}`,
+			want: []struct {
+				id   string
+				mime string
+				data string
+			}{
+				{id: "call_1", mime: "image/gif", data: "OLD"},
+			},
+		},
+		{
+			name: "interleaved siblings attach to nearest response",
+			parts: `{"functionResponse":{"name":"read","response":{"result":"A"},"id":"call_a"}},` +
+				`{"inline_data":{"mime_type":"image/png","data":"AAA"}},` +
+				`{"functionResponse":{"name":"read","response":{"result":"B"},"id":"call_b"}},` +
+				`{"inline_data":{"mime_type":"image/jpeg","data":"BBB"}}`,
+			want: []struct {
+				id   string
+				mime string
+				data string
+			}{
+				{id: "call_a", mime: "image/png", data: "AAA"},
+				{id: "call_b", mime: "image/jpeg", data: "BBB"},
+			},
+		},
+		{
+			name: "leading sibling attaches to first response",
+			parts: `{"inline_data":{"mime_type":"image/png","data":"LEAD"}},` +
+				`{"functionResponse":{"name":"read","response":{"result":"A"},"id":"call_a"}},` +
+				`{"functionResponse":{"name":"read","response":{"result":"B"},"id":"call_b"}}`,
+			want: []struct {
+				id   string
+				mime string
+				data string
+			}{
+				{id: "call_a", mime: "image/png", data: "LEAD"},
+			},
+		},
+		{
+			name: "missing mimeType defaults to image/png",
+			parts: `{"functionResponse":{"name":"read","response":{"result":"ok"},"id":"call_1"}},` +
+				`{"inlineData":{"data":"QUJD"}}`,
+			want: []struct {
+				id   string
+				mime string
+				data string
+			}{{id: "call_1", mime: "image/png", data: "QUJD"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			modelParts := `{"functionCall":{"name":"read","id":"call_1"}}`
+			if tt.name == "interleaved siblings attach to nearest response" || tt.name == "leading sibling attaches to first response" {
+				modelParts = `{"functionCall":{"name":"read","id":"call_a"}},{"functionCall":{"name":"read","id":"call_b"}}`
+			}
+			input := `{"request":{"contents":[` +
+				`{"role":"model","parts":[` + modelParts + `]},` +
+				`{"role":"user","parts":[` + tt.parts + `]}` +
+				`]}}`
+			result, err := fixCLIToolResponse([]byte(input))
+			if err != nil {
+				t.Fatalf("fixCLIToolResponse failed: %v", err)
+			}
+			contents := gjson.GetBytes(result, "request.contents").Array()
+			if len(contents) != 2 {
+				t.Fatalf("contents = %d, want 2. Output: %s", len(contents), result)
+			}
+			funcParts := contents[1].Get("parts").Array()
+			gotByID := map[string][]gjson.Result{}
+			for _, part := range funcParts {
+				fr := part.Get("functionResponse")
+				gotByID[fr.Get("id").String()] = fr.Get("parts").Array()
+			}
+			for _, want := range tt.want {
+				images := gotByID[want.id]
+				found := false
+				for _, img := range images {
+					if img.Get("inlineData.data").String() == want.data && img.Get("inlineData.mimeType").String() == want.mime {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("id=%s missing inlineData mime=%s data=%s. Output: %s", want.id, want.mime, want.data, result)
+				}
+			}
+			if tt.name == "interleaved siblings attach to nearest response" {
+				if len(gotByID["call_a"]) != 1 || len(gotByID["call_b"]) != 1 {
+					t.Fatalf("nearest attribution failed: A=%d B=%d. Output: %s", len(gotByID["call_a"]), len(gotByID["call_b"]), result)
+				}
+			}
+			if tt.name == "leading sibling attaches to first response" {
+				if len(gotByID["call_b"]) != 0 {
+					t.Fatalf("leading image leaked onto call_b. Output: %s", result)
+				}
+			}
+			if tt.name == "append sibling onto existing functionResponse.parts" {
+				images := gotByID["call_1"]
+				if len(images) != 2 {
+					t.Fatalf("existing+sibling parts = %d, want 2. Output: %s", len(images), result)
+				}
+				if images[1].Get("inlineData.data").String() != "NEW" {
+					t.Fatalf("appended sibling data = %q, want NEW. Output: %s", images[1].Get("inlineData.data").String(), result)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_PreservesSiblingToolImageOnUserRole(t *testing.T) {
+	input := []byte(`{
+		"contents": [
+			{"role":"user","parts":[{"text":"read file"}]},
+			{"role":"model","parts":[{"functionCall":{"name":"read","args":{},"id":"call_1"}}]},
+			{"role":"user","parts":[
+				{"functionResponse":{"name":"read","response":{"result":"Read image file [image/png]"},"id":"call_1"}},
+				{"inline_data":{"mime_type":"image/png","data":"QUJD"}}
+			]}
+		]
+	}`)
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents = %d, want 3. Output: %s", len(contents), out)
+	}
+	funcContent := contents[2]
+	if got := funcContent.Get("role").String(); got != "user" {
+		t.Fatalf("role = %q, want user after Antigravity normalization. Output: %s", got, out)
+	}
+	funcResp := funcContent.Get("parts.0.functionResponse")
+	if !funcResp.Exists() {
+		t.Fatalf("functionResponse missing. Output: %s", out)
+	}
+	if got := funcResp.Get("id").String(); got != "call_1" {
+		t.Fatalf("id = %q, want call_1", got)
+	}
+	if got := funcResp.Get("response.result").String(); got != "Read image file [image/png]" {
+		t.Fatalf("result = %q", got)
+	}
+	inlineData := funcResp.Get("parts.0.inlineData")
+	if !inlineData.Exists() {
+		t.Fatalf("functionResponse.parts.0.inlineData missing. Output: %s", out)
+	}
+	if got := inlineData.Get("mimeType").String(); got != "image/png" {
+		t.Fatalf("mimeType = %q, want image/png", got)
+	}
+	if got := inlineData.Get("data").String(); got != "QUJD" {
+		t.Fatalf("data = %q, want QUJD", got)
+	}
+	if funcContent.Get("parts.1.inline_data").Exists() || funcContent.Get("parts.1.inlineData").Exists() {
+		t.Fatalf("sibling inline data should be absorbed into functionResponse.parts. Output: %s", out)
+	}
+}
+
+func TestNormalizeRoles_InvalidRoleWithoutFunctionResponseAlternates(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "first"}]},
+			{"role": "invalid", "parts": [{"text": "second"}]}
+		]
+	}`)
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("expected 2 contents, got %d", len(contents))
+	}
+	if got := contents[1].Get("role").String(); got != "model" {
+		t.Fatalf("text-only invalid role following user should normalize to model, got %q", got)
+	}
+}
+
+func TestNormalizeRoles_InvalidRoleWithFunctionResponseNormalizesToUser(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "model", "parts": [{"functionCall": {"name": "test", "args": {}}}]},
+			{"role": "user", "parts": [{"text": "intervening user message"}]},
+			{"role": "invalid", "parts": [{"functionResponse": {"name": "test", "response": {}}}]}
+		]
+	}`)
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	// Role functionResponse should NEVER be normalized to model
+	for _, content := range gjson.GetBytes(out, "request.contents").Array() {
+		if content.Get("parts.0.functionResponse").Exists() {
+			if got := content.Get("role").String(); got != "user" && got != "function" {
+				t.Fatalf("functionResponse role should be user or function, got %q", got)
+			}
+		}
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_TranslatesResponseJsonSchemaToResponseSchema(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputJSON string
+	}{
+		{
+			name: "camelCase responseJsonSchema",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generationConfig": {
+					"responseMimeType": "application/json",
+					"responseJsonSchema": {
+						"type": "OBJECT",
+						"properties": {"message": {"type": "STRING"}},
+						"required": ["message"]
+					}
+				}
+			}`,
+		},
+		{
+			name: "snake_case response_json_schema",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+				"generationConfig": {
+					"responseMimeType": "application/json",
+					"response_json_schema": {
+						"type": "OBJECT",
+						"properties": {"message": {"type": "STRING"}},
+						"required": ["message"]
+					}
+				}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertGeminiRequestToAntigravity("gemini-3-flash", []byte(tt.inputJSON), false)
+
+			schema := gjson.GetBytes(out, "request.generationConfig.responseSchema")
+			if !schema.Exists() {
+				t.Fatalf("request.generationConfig.responseSchema missing. Output: %s", out)
+			}
+			if got := schema.Get("properties.message.type").String(); got != "STRING" {
+				t.Fatalf("responseSchema.properties.message.type = %q, want STRING. Output: %s", got, out)
+			}
+			if gjson.GetBytes(out, "request.generationConfig.responseJsonSchema").Exists() {
+				t.Fatalf("request.generationConfig.responseJsonSchema should have been removed. Output: %s", out)
+			}
+			if gjson.GetBytes(out, "request.generationConfig.response_json_schema").Exists() {
+				t.Fatalf("request.generationConfig.response_json_schema should have been removed. Output: %s", out)
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_PreservesExistingResponseSchema(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"generationConfig": {
+			"responseMimeType": "application/json",
+			"responseSchema": {
+				"type": "OBJECT",
+				"properties": {"name": {"type": "STRING"}},
+				"required": ["name"]
+			},
+			"responseJsonSchema": {
+				"type": "OBJECT",
+				"properties": {"stale": {"type": "STRING"}}
+			}
+		}
+	}`)
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+
+	schema := gjson.GetBytes(out, "request.generationConfig.responseSchema")
+	if !schema.Exists() {
+		t.Fatalf("request.generationConfig.responseSchema missing. Output: %s", out)
+	}
+	if got := schema.Get("properties.name.type").String(); got != "STRING" {
+		t.Fatalf("responseSchema.properties.name.type = %q, want STRING. Output: %s", got, out)
+	}
+	if schema.Get("properties.stale").Exists() {
+		t.Fatalf("stale properties survived. Output: %s", out)
+	}
+	if gjson.GetBytes(out, "request.generationConfig.responseJsonSchema").Exists() {
+		t.Fatalf("request.generationConfig.responseJsonSchema should have been removed. Output: %s", out)
+	}
+}

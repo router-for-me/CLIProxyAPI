@@ -142,6 +142,129 @@ func TestConvertAntigravityResponseToOpenAIIncludesZeroCompletionTokensWhenMissi
 	}
 }
 
+func TestConvertAntigravityResponseToOpenAI_SynthesizesStopOnUsageChunkWhenFinishReasonOmitted(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// Pure thinking chunk with usageMetadata but NO finishReason (reproducing real Antigravity upstream logs).
+	// Usage alone does not make a chunk terminal: upstream can keep streaming after it.
+	chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Analyzing..."}]}}],"usageMetadata":{"promptTokenCount":100,"totalTokenCount":150,"thoughtsTokenCount":50},"modelVersion":"gemini-3.7-flash","responseId":"resp-999"}}`)
+	result := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.7-flash", nil, nil, chunk, &param)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result from chunk, got %d", len(result))
+	}
+	if fr := gjson.GetBytes(result[0], "choices.0.finish_reason").String(); fr != "" {
+		t.Fatalf("usage chunk without finishReason must not be terminal, got %q", fr)
+	}
+
+	// The terminal chunk is synthesized on [DONE] instead.
+	done := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.7-flash", nil, nil, []byte("[DONE]"), &param)
+	if len(done) != 1 {
+		t.Fatalf("expected 1 synthesized terminal chunk on [DONE], got %d", len(done))
+	}
+	if fr := gjson.GetBytes(done[0], "choices.0.finish_reason").String(); fr != "stop" {
+		t.Fatalf("terminal finish_reason = %q, want stop", fr)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAI_PreservesFilteredUsageUntilDone(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// Mirrors a payload already processed by FilterSSEUsageMetadata, which renames
+	// non-terminal usage to cpaUsageMetadata. It is inlined so this package keeps no
+	// dependency on the executor helpers; the executor tests cover the real filter.
+	filtered := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Thinking..."}]}}],"modelVersion":"gemini-3.7-flash","responseId":"resp-filtered","cpaUsageMetadata":{"promptTokenCount":100,"totalTokenCount":150,"thoughtsTokenCount":50}}}`)
+	result := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.7-flash", nil, nil, filtered, &param)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 intermediate result, got %d", len(result))
+	}
+	if usage := gjson.GetBytes(result[0], "usage"); usage.Exists() {
+		t.Fatalf("intermediate filtered usage should not be emitted: %s", usage.Raw)
+	}
+	if finishReason := gjson.GetBytes(result[0], "choices.0.finish_reason"); finishReason.String() != "" {
+		t.Fatalf("intermediate finish_reason = %q, want null", finishReason.String())
+	}
+
+	done := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.7-flash", nil, nil, []byte("[DONE]"), &param)
+	if len(done) != 1 {
+		t.Fatalf("expected 1 synthetic terminal result, got %d", len(done))
+	}
+	if finishReason := gjson.GetBytes(done[0], "choices.0.finish_reason").String(); finishReason != "stop" {
+		t.Fatalf("terminal finish_reason = %q, want stop", finishReason)
+	}
+	if got := gjson.GetBytes(done[0], "usage.prompt_tokens").Int(); got != 100 {
+		t.Fatalf("terminal prompt_tokens = %d, want 100", got)
+	}
+	if got := gjson.GetBytes(done[0], "usage.total_tokens").Int(); got != 150 {
+		t.Fatalf("terminal total_tokens = %d, want 150", got)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAI_SynthesizesStopOnDoneWhenFinishReasonAndUsageOmitted(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// Intermediate text chunk without finishReason or usage
+	chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Partial output"}]}}],"modelVersion":"gemini-3.7-flash","responseId":"resp-888"}}`)
+	result := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.7-flash", nil, nil, chunk, &param)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result from chunk, got %d", len(result))
+	}
+	fr1 := gjson.GetBytes(result[0], "choices.0.finish_reason")
+	if fr1.Exists() && fr1.String() != "" && fr1.Type.String() != "Null" {
+		t.Fatalf("expected finish_reason to be null on intermediate chunk, got %v", fr1)
+	}
+
+	// [DONE] without prior finishReason or usage -> synthesizes final chunk with finish_reason: "stop"
+	done := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.7-flash", nil, nil, []byte("[DONE]"), &param)
+	if len(done) != 1 {
+		t.Fatalf("expected 1 result on [DONE], got %d", len(done))
+	}
+	frDone := gjson.GetBytes(done[0], "choices.0.finish_reason").String()
+	if frDone != "stop" {
+		t.Fatalf("expected finish_reason 'stop' on [DONE], got %q", frDone)
+	}
+	if mv := gjson.GetBytes(done[0], "model").String(); mv != "gemini-3.7-flash" {
+		t.Fatalf("expected model 'gemini-3.7-flash', got %q", mv)
+	}
+	if rid := gjson.GetBytes(done[0], "id").String(); rid != "resp-888" {
+		t.Fatalf("expected id 'resp-888', got %q", rid)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAI_DoesNotFinalizeEmptyUpstreamStream(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// A 200 response whose body carried no response chunk must not be reported as
+	// a successful empty completion.
+	done := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.7-flash", nil, nil, []byte("[DONE]"), &param)
+	if len(done) != 0 {
+		t.Fatalf("empty stream must not synthesize a terminal chunk, got %d results: %s", len(done), done[0])
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAI_ResponseFreeEventDoesNotStartStream(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// A JSON keepalive or malformed envelope carries no candidates and no usage,
+	// so it must not make an otherwise empty stream look complete.
+	for _, chunk := range [][]byte{
+		[]byte(`{}`),
+		[]byte(`{"response":{}}`),
+		[]byte(`{"response":{"candidates":[]}}`),
+		[]byte(`{"response":{"candidates":[],"usageMetadata":{}}}`),
+	} {
+		ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.7-flash", nil, nil, chunk, &param)
+	}
+	done := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.7-flash", nil, nil, []byte("[DONE]"), &param)
+	if len(done) != 0 {
+		t.Fatalf("response-free events must not synthesize a terminal chunk, got %d results: %s", len(done), done[0])
+	}
+}
+
 func TestConvertAntigravityResponseToOpenAINonStreamRestoresDisambiguatedName(t *testing.T) {
 	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
 	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"

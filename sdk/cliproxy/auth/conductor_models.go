@@ -7,6 +7,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -216,6 +217,60 @@ func (m *Manager) selectionModelKeyForAuth(auth *Auth, routeModel string) string
 	return canonicalModelKey(m.selectionModelForAuth(auth, routeModel))
 }
 
+func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, now time.Time) registry.ClientModelProjection {
+	targetModel := strings.TrimSpace(routeModel)
+	if targetModel == "" {
+		return registry.ClientModelProjection{}
+	}
+	if auth == nil {
+		return registry.ClientModelProjection{ModelID: targetModel}
+	}
+
+	targetKey := ""
+	if m != nil {
+		targetKey = m.selectionModelKeyForAuth(auth, targetModel)
+	}
+	if targetKey == "" {
+		targetKey = canonicalModelKey(targetModel)
+	}
+
+	state := existingModelState(auth, targetKey)
+	isSuspended := auth.Disabled || auth.Status == StatusDisabled
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+		isSuspended = true
+	}
+	isQuotaExceeded := false
+	var suspendReason string
+	if state != nil {
+		if state.Status == StatusDisabled || state.Unavailable || (!state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now)) {
+			isSuspended = true
+		}
+		if state.Quota.Exceeded && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
+			isQuotaExceeded = true
+		}
+		if isSuspended {
+			suspendReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
+		}
+	}
+	if len(auth.ModelStates) == 0 && auth.Unavailable && auth.NextRetryAfter.After(now) {
+		// With no per-model states, scheduling falls back to the credential-wide
+		// cooldown (isAuthBlockedForModel); the projection must agree with it.
+		// When states exist, unmatched models stay schedulable by design, so the
+		// credential-wide fields must not suspend them here either.
+		isSuspended = true
+	}
+	if isSuspended && suspendReason == "" {
+		suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
+	}
+
+	return registry.ClientModelProjection{
+		ModelID:       targetModel,
+		Suspended:     isSuspended,
+		SuspendReason: suspendReason,
+		QuotaExceeded: isQuotaExceeded,
+	}
+}
+
 func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel string, pooled bool) string {
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
@@ -417,6 +472,10 @@ func configuredModelAliasEntries(cfg *internalconfig.Config, auth *Auth) []model
 		if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
 		}
+	case "meta":
+		if entry := resolveMetaAPIKeyConfig(cfg, auth); entry != nil {
+			models = asModelAliasEntries(entry.Models)
+		}
 	default:
 		providerKey := ""
 		compatName := ""
@@ -573,6 +632,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
+		case "meta":
+			if entry := resolveMetaAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
 		default:
 			// OpenAI-compat uses config selection from auth.Attributes.
 			providerKey := ""
@@ -693,6 +756,8 @@ func (m *Manager) applyAPIKeyModelAliasWithRouting(routing *apiKeyModelRoutingSn
 		upstreamModel = resolveUpstreamModelForXAIAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
+	case "meta":
+		upstreamModel = resolveUpstreamModelForMetaAPIKey(cfg, auth, requestedModel)
 	default:
 		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
 	}
@@ -800,6 +865,13 @@ func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 	return resolveAPIKeyConfig(cfg.VertexCompatAPIKey, auth)
 }
 
+func resolveMetaAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.MetaKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.MetaKey, auth)
+}
+
 func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveGeminiAPIKeyConfig(cfg, auth)
 	if entry == nil {
@@ -842,6 +914,14 @@ func resolveUpstreamModelForXAIAPIKey(cfg *internalconfig.Config, auth *Auth, re
 
 func resolveUpstreamModelForVertexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveVertexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForMetaAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveMetaAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}

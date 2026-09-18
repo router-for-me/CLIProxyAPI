@@ -10,14 +10,31 @@ const (
 	// Version 3 omits OriginalRequest/RequestBody on payload stream chunks
 	// (ChunkIndex >= 0); those fields remain on StreamChunkHeaderInitIndex only.
 	// Plugins that still need per-chunk request bodies should keep schema_version < 3.
-	SchemaVersion uint32 = 3
+	// Version 4 adds upstream WebSocket response event observation.
+	// Version 5 omits HistoryChunks on payload stream chunks (ChunkIndex >= 0);
+	// those fields remain on StreamChunkHeaderInitIndex only. Plugins that still need
+	// per-chunk history chunks should keep schema_version < 5.
+	// Version 6 preserves raw JSON bodies for plugin management responses.
+	// Plugins that still require HTML entity escaping on JSON response strings
+	// should keep schema_version < 6.
+	SchemaVersion uint32 = 6
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
+	// SchemaVersionWebSocketResponseObserver is the first schema version that supports
+	// upstream WebSocket response event observation.
+	SchemaVersionWebSocketResponseObserver uint32 = 4
+	// SchemaVersionStreamChunkOmitHistory is the first schema version that omits
+	// history chunks on payload stream-chunk interceptor calls.
+	SchemaVersionStreamChunkOmitHistory uint32 = 5
+	// SchemaVersionRawManagementResponse is the first schema version where plugin
+	// management JSON responses are preserved without HTML-escaping strings.
+	SchemaVersionRawManagementResponse uint32 = 6
 )
 
 const (
 	MethodPluginRegister    = "plugin.register"
+	MethodPluginQuiesce     = "plugin.quiesce"
 	MethodPluginReconfigure = "plugin.reconfigure"
 	MethodPluginShutdown    = "plugin.shutdown"
 
@@ -57,6 +74,8 @@ const (
 	MethodResponseInterceptAfter       = "response.intercept_after"
 	MethodResponseInterceptStreamChunk = "response.intercept_stream_chunk"
 
+	MethodWebSocketResponseEvent = "websocket.response_event"
+
 	MethodThinkingIdentifier = "thinking.identifier"
 	MethodThinkingApply      = "thinking.apply"
 
@@ -67,6 +86,11 @@ const (
 
 	MethodManagementRegister = "management.register"
 	MethodManagementHandle   = "management.handle"
+
+	MethodQuotaIdentifier = "quota.identifier"
+	MethodQuotaDescribe   = "quota.describe"
+	MethodQuotaFetch      = "quota.fetch"
+	MethodQuotaReset      = "quota.reset"
 
 	MethodHostHTTPDo             = "host.http.do"
 	MethodHostHTTPDoStream       = "host.http.do_stream"
@@ -83,6 +107,7 @@ const (
 	MethodHostAuthGet            = "host.auth.get"
 	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
 	MethodHostAuthSave           = "host.auth.save"
+	MethodHostAffinityLookup     = "host.affinity.lookup"
 )
 
 type Envelope struct {
@@ -92,8 +117,47 @@ type Envelope struct {
 }
 
 type Error struct {
-	Code       string `json:"code"`
-	Message    string `json:"message"`
-	Retryable  bool   `json:"retryable,omitempty"`
-	HTTPStatus int    `json:"http_status,omitempty"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable,omitempty"`
+	// HTTPStatus is the HTTP status code (e.g. 401, 403, 429) to surface to the client.
+	// When omitted or 0, CPA defaults to HTTP 500 (internal_server_error).
+	HTTPStatus int `json:"http_status,omitempty"`
+}
+
+// Error implements the error interface for Error.
+func (e *Error) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+// StatusCode returns the HTTP status code embedded in the Error, or 0 if unset.
+func (e *Error) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.HTTPStatus
+}
+
+// NewError creates an Error instance with an optional HTTP status code.
+func NewError(code, message string, httpStatus ...int) *Error {
+	status := 0
+	if len(httpStatus) > 0 {
+		status = httpStatus[0]
+	}
+	return &Error{
+		Code:       code,
+		Message:    message,
+		HTTPStatus: status,
+	}
+}
+
+// NewErrorEnvelope serializes a failed RPC Envelope containing an Error with an optional HTTP status code.
+func NewErrorEnvelope(code, message string, httpStatus ...int) ([]byte, error) {
+	return json.Marshal(Envelope{
+		OK:    false,
+		Error: NewError(code, message, httpStatus...),
+	})
 }

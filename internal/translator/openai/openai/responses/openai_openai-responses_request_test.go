@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -694,6 +695,153 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesStructure
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ConvertsCanonicalResponsesNamedToolChoice(t *testing.T) {
+	raw := []byte(`{
+		"model": "gpt-5.4",
+		"input": [{"role": "user", "content": "Call gateway_echo with value TOOL_OK."}],
+		"tools": [{
+			"type": "function",
+			"name": "gateway_echo",
+			"description": "Returns the given value",
+			"parameters": {
+				"type": "object",
+				"properties": {"value": {"type": "string"}},
+				"required": ["value"],
+				"additionalProperties": false
+			}
+		}],
+		"tool_choice": {"type": "function", "name": "gateway_echo"},
+		"max_output_tokens": 512
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", raw, false)
+
+	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tool_choice.function.name").String(); got != "gateway_echo" {
+		t.Fatalf("tool_choice.function.name = %q, want gateway_echo; output=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice.name").Exists() {
+		t.Fatalf("tool_choice.name should be absent at top-level; output=%s", string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ConvertsNamespaceAndCustomToolChoice(t *testing.T) {
+	rawNamespace := []byte(`{
+		"model": "gpt-5.4",
+		"input": "test",
+		"tools": [
+			{
+				"type": "namespace",
+				"name": "service_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "lookup",
+						"parameters": {"type": "object"}
+					}
+				]
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"name": "lookup"
+		}
+	}`)
+
+	outNamespace := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", rawNamespace, false)
+	if got := gjson.GetBytes(outNamespace, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, string(outNamespace))
+	}
+	if got := gjson.GetBytes(outNamespace, "tool_choice.function.name").String(); got != "service_tools__lookup" {
+		t.Fatalf("tool_choice.function.name = %q, want service_tools__lookup; output=%s", got, string(outNamespace))
+	}
+	if declaredToolName := gjson.GetBytes(outNamespace, "tools.0.function.name").String(); declaredToolName != gjson.GetBytes(outNamespace, "tool_choice.function.name").String() {
+		t.Fatalf("tool_choice.function.name (%q) must match declared tools.0.function.name (%q); output=%s", gjson.GetBytes(outNamespace, "tool_choice.function.name").String(), declaredToolName, string(outNamespace))
+	}
+	if gjson.GetBytes(outNamespace, "tool_choice.name").Exists() {
+		t.Fatalf("tool_choice.name should be absent at top-level; output=%s", string(outNamespace))
+	}
+
+	rawExplicitNamespace := []byte(`{
+		"model": "gpt-5.4",
+		"input": "test",
+		"tools": [
+			{
+				"type": "namespace",
+				"name": "service_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "lookup",
+						"parameters": {"type": "object"}
+					}
+				]
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"name": "lookup",
+			"namespace": "service_tools"
+		}
+	}`)
+
+	outExplicitNamespace := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", rawExplicitNamespace, false)
+	if got := gjson.GetBytes(outExplicitNamespace, "tool_choice.function.name").String(); got != "service_tools__lookup" {
+		t.Fatalf("explicit namespace tool_choice.function.name = %q, want service_tools__lookup; output=%s", got, string(outExplicitNamespace))
+	}
+	if gjson.GetBytes(outExplicitNamespace, "tool_choice.namespace").Exists() {
+		t.Fatalf("tool_choice.namespace should be absent at top-level; output=%s", string(outExplicitNamespace))
+	}
+	if gjson.GetBytes(outExplicitNamespace, "tool_choice.name").Exists() {
+		t.Fatalf("tool_choice.name should be absent at top-level; output=%s", string(outExplicitNamespace))
+	}
+
+	rawCustom := []byte(`{
+		"model": "gpt-5.4",
+		"input": "test",
+		"tools": [
+			{
+				"type": "custom",
+				"name": "patch_runner",
+				"description": "Applies diff"
+			}
+		],
+		"tool_choice": {
+			"type": "custom",
+			"name": "patch_runner"
+		}
+	}`)
+
+	outCustom := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", rawCustom, false)
+	if got := gjson.GetBytes(outCustom, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output=%s", got, string(outCustom))
+	}
+	if got := gjson.GetBytes(outCustom, "tool_choice.function.name").String(); got != "patch_runner" {
+		t.Fatalf("tool_choice.function.name = %q, want patch_runner; output=%s", got, string(outCustom))
+	}
+
+	for _, scalar := range []string{`"auto"`, `"none"`, `"required"`} {
+		rawScalar := []byte(`{
+			"model": "gpt-5.4",
+			"input": "test",
+			"tools": [
+				{
+					"type": "function",
+					"name": "lookup",
+					"parameters": {"type": "object"}
+				}
+			],
+			"tool_choice": ` + scalar + `
+		}`)
+		outScalar := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", rawScalar, false)
+		if got := gjson.GetBytes(outScalar, "tool_choice").Raw; got != scalar {
+			t.Fatalf("tool_choice = %q, want %s; output=%s", got, scalar, string(outScalar))
+		}
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OmitsToolSettingsWithoutTools(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1136,6 +1284,809 @@ func TestResponsesCustomToolNames_OnlyReportsMergedTools(t *testing.T) {
 	for name := range responsesCustomToolNames(raw) {
 		if _, ok := mergedNames[name]; !ok {
 			t.Fatalf("responsesCustomToolNames reported %q, which the merge never emits", name)
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FunctionCallOutputAlternateIDsAndQueueFallback(t *testing.T) {
+	testCases := []struct {
+		name           string
+		outputField    string
+		wantToolCallID string
+	}{
+		{
+			name:           "call_id standard",
+			outputField:    `"call_id":"call_123"`,
+			wantToolCallID: "call_123",
+		},
+		{
+			name:           "tool_call_id alternate field",
+			outputField:    `"tool_call_id":"call_123"`,
+			wantToolCallID: "call_123",
+		},
+		{
+			name:           "callId alternate field",
+			outputField:    `"callId":"call_123"`,
+			wantToolCallID: "call_123",
+		},
+		{
+			name:           "id alternate field",
+			outputField:    `"id":"call_123"`,
+			wantToolCallID: "call_123",
+		},
+		{
+			name:           "missing call_id completely fallback to pending queue",
+			outputField:    ``,
+			wantToolCallID: "call_123",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			outputJSON := `{"type":"function_call_output","output":"tool_result_ok"`
+			if tc.outputField != "" {
+				outputJSON += `,` + tc.outputField
+			}
+			outputJSON += `}`
+
+			inputJSON := []byte(`{
+				"model": "deepseek-v4-flash",
+				"input": [
+					{"type":"function_call","call_id":"call_123","name":"Bash","arguments":"{\"command\":\"ls\"}"},
+					` + outputJSON + `
+				]
+			}`)
+
+			out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", inputJSON, false)
+			messages := gjson.GetBytes(out, "messages").Array()
+			if len(messages) != 2 {
+				t.Fatalf("expected 2 messages (assistant, tool), got %d; output=%s", len(messages), string(out))
+			}
+
+			// Assistant message has tool_calls with id call_123
+			toolCallID := messages[0].Get("tool_calls.0.id").String()
+			if toolCallID != "call_123" {
+				t.Fatalf("tool_calls.0.id = %q, want call_123", toolCallID)
+			}
+
+			// Tool message has tool_call_id matching call_123
+			toolMessage := messages[1]
+			if toolMessage.Get("role").String() != "tool" {
+				t.Fatalf("expected role tool, got %s", toolMessage.Raw)
+			}
+			if gotID := toolMessage.Get("tool_call_id").String(); gotID != tc.wantToolCallID {
+				t.Fatalf("tool_call_id = %q, want %q; output=%s", gotID, tc.wantToolCallID, string(out))
+			}
+			if gotContent := toolMessage.Get("content").String(); gotContent != "tool_result_ok" {
+				t.Fatalf("tool message content = %q, want tool_result_ok", gotContent)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MixedMissingAndExplicitParallelOutputs(t *testing.T) {
+	// Call A, Call B.
+	// Output 1 has NO ID (result B).
+	// Output 2 explicitly has call_id: call_a (result A).
+	// Call A must NOT be stolen by Output 1; Output 1 must get Call B.
+	inputJSON := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","output":"result_b"},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages (assistant, tool_b, tool_a), got %d; output=%s", len(messages), string(out))
+	}
+
+	resultMap := make(map[string]string)
+	for _, m := range messages[1:] {
+		resultMap[m.Get("tool_call_id").String()] = m.Get("content").String()
+	}
+
+	if got := resultMap["call_a"]; got != "result_a" {
+		t.Fatalf("result for call_a = %q, want result_a", got)
+	}
+	if got := resultMap["call_b"]; got != "result_b" {
+		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntilMissingIDToolOutput(t *testing.T) {
+	// Call A -> intervening user message -> Output with missing call_id
+	// The user message must be deferred until AFTER the tool output!
+	inputJSON := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"message","role":"user","content":"User command while running"},
+			{"type":"function_call_output","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages (assistant, tool, user), got %d; output=%s", len(messages), string(out))
+	}
+
+	// Message 0: assistant with tool_call
+	if got := messages[0].Get("role").String(); got != "assistant" {
+		t.Fatalf("messages[0].role = %q, want assistant", got)
+	}
+	// Message 1: tool response for call_a (strictly adjacent to assistant tool_calls!)
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("messages[1].role = %q, want tool (user message was not deferred!)", got)
+	}
+	if got := messages[1].Get("tool_call_id").String(); got != "call_a" {
+		t.Fatalf("messages[1].tool_call_id = %q, want call_a", got)
+	}
+	// Message 2: deferred user message
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("messages[2].role = %q, want user", got)
+	}
+	if got := messages[2].Get("content").String(); got != "User command while running" {
+		t.Fatalf("messages[2].content = %q, want 'User command while running'", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MixedMissingAndExplicitParallelOutputsAcrossUserMessage(t *testing.T) {
+	// Call A, Call B.
+	// Output 1 has NO ID (result B).
+	// Intervening user message.
+	// Output 2 explicitly has call_id: call_a (result A).
+	// Call A must NOT be stolen by Output 1; Output 1 must get Call B.
+	inputJSON := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"type":"function_call_output","output":"result_b"},
+			{"type":"message","role":"user","content":"status?"},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	resultMap := make(map[string]string)
+	for _, m := range messages {
+		if m.Get("role").String() == "tool" {
+			resultMap[m.Get("tool_call_id").String()] = m.Get("content").String()
+		}
+	}
+
+	if got := resultMap["call_a"]; got != "result_a" {
+		t.Fatalf("result for call_a = %q, want result_a", got)
+	}
+	if got := resultMap["call_b"]; got != "result_b" {
+		t.Fatalf("result for call_b = %q, want result_b", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_OrphanFunctionCallOutputBecomesUserMessage(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"role":"user","content":[{"type":"input_text","text":"Task initialization"}]},
+			{"type":"function_call_output","id":"fco_01a09fca-8d33-73a1-97fd-4d83ecc02f9d","name":"send_message_to_thread","output":"<codex_delegation>\n  <source_thread_id>01a022d7-d4d0-72b2-8571-4590484ccaee</source_thread_id>\n  <input>Execute sub-task</input>\n</codex_delegation>"},
+			{"type":"function_call","call_id":"call_1789387253098037589_85","name":"Bash","arguments":"{\"command\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1789387253098037589_85","id":"fco_01a09fca-a5f0-7b40-9943-21fbc923c537","output":"/Users/developer"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	delegationFound := false
+	bashToolFound := false
+	for _, message := range messages {
+		role := message.Get("role").String()
+		if role == "tool" && strings.TrimSpace(message.Get("tool_call_id").String()) == "" {
+			t.Fatalf("orphan output emitted as tool message with empty tool_call_id: %s", string(out))
+		}
+		if role == "user" && strings.Contains(message.Get("content").String(), "<codex_delegation>") {
+			delegationFound = true
+		}
+		if role == "tool" && message.Get("tool_call_id").String() == "call_1789387253098037589_85" {
+			bashToolFound = true
+			if got := message.Get("content").String(); got != "/Users/developer" {
+				t.Fatalf("bash tool content = %q, want /Users/developer; output=%s", got, string(out))
+			}
+		}
+	}
+	if !delegationFound {
+		t.Fatalf("expected orphan send_message_to_thread output as user content; output=%s", string(out))
+	}
+	if !bashToolFound {
+		t.Fatalf("expected paired Bash tool message; output=%s", string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_UnpairedExplicitCallIDBecomesUserMessage(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"role":"user","content":[{"type":"input_text","text":"Task initialization"}]},
+			{"type":"function_call_output","call_id":"call_missing","name":"send_message_to_thread","output":"<codex_delegation>Execute sub-task</codex_delegation>"},
+			{"type":"function_call","call_id":"call_1789387253098037589_85","name":"Bash","arguments":"{\"command\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1789387253098037589_85","output":"/Users/developer"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	delegationFound := false
+	bashToolFound := false
+	for _, message := range messages {
+		role := message.Get("role").String()
+		if role == "tool" && message.Get("tool_call_id").String() == "call_missing" {
+			t.Fatalf("unpaired output emitted as tool message: %s", string(out))
+		}
+		if role == "user" && strings.Contains(message.Get("content").String(), "<codex_delegation>") {
+			delegationFound = true
+		}
+		if role == "tool" && message.Get("tool_call_id").String() == "call_1789387253098037589_85" {
+			bashToolFound = true
+		}
+	}
+	if !delegationFound {
+		t.Fatalf("expected unpaired send_message_to_thread output as user content; output=%s", string(out))
+	}
+	if !bashToolFound {
+		t.Fatalf("expected paired Bash tool message; output=%s", string(out))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_CapsLongNamespaceToolNames(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"hi"}
+		],
+		"tools": [
+			{"type":"function","name":"exec_command","parameters":{"type":"object"}},
+			{
+				"type":"namespace",
+				"name":"mcp__codex_apps__codex_document_control",
+				"tools":[
+					{"type":"function","name":"_execute_document_command","parameters":{"type":"object"}},
+					{"type":"function","name":"_get_document_tool_schemas","parameters":{"type":"object"}}
+				]
+			},
+			{
+				"type":"namespace",
+				"name":"mcp__codex_apps__safety_settings",
+				"tools":[
+					{"type":"function","name":"_prepare_parental_control_update","parameters":{"type":"object"}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", raw, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 4 {
+		t.Fatalf("tools count = %d, want 4; output=%s", len(tools), out)
+	}
+	seen := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		name := tool.Get("function.name").String()
+		if len(name) > 64 {
+			t.Errorf("function.name %q (len %d) exceeds the 64-character limit; output=%s", name, len(name), out)
+		}
+		if seen[name] {
+			t.Errorf("duplicate function.name %q after flattening; output=%s", name, out)
+		}
+		seen[name] = true
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DisambiguatesTruncationCollisions(t *testing.T) {
+	// Two distinct namespace tools whose qualified names both truncate to the
+	// same 64-char tail must survive as two usable chat tools, not be merged
+	// or silently dropped by the first-wins deduplication.
+	filler := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	raw := []byte(`{
+		"input": [
+			{"role":"user","content":"hi"}
+		],
+		"tools": [
+			{
+				"type":"namespace",
+				"name":"mcp__server_one__` + filler + `",
+				"tools":[{"type":"function","name":"_same_tail_tool_name","parameters":{"type":"object"}}]
+			},
+			{
+				"type":"namespace",
+				"name":"mcp__server_two__` + filler + `",
+				"tools":[{"type":"function","name":"_same_tail_tool_name","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", raw, false)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(tools), out)
+	}
+	first := tools[0].Get("function.name").String()
+	second := tools[1].Get("function.name").String()
+	if first == second {
+		t.Fatalf("truncation collision was not disambiguated: both tools are %q; output=%s", first, out)
+	}
+	for _, name := range []string{first, second} {
+		if len(name) > 64 {
+			t.Errorf("disambiguated name %q (len %d) exceeds 64; output=%s", name, len(name), out)
+		}
+	}
+
+	// A replayed call to the renamed declaration must resolve to the renamed
+	// chat name so the assistant history matches the tools array.
+	merged := []byte(`{
+		"input": [
+			{"type":"custom_tool_call","namespace":"mcp__server_two__` + filler + `","name":"_same_tail_tool_name","call_id":"call_1","input":"x"},
+			{"type":"custom_tool_call_output","call_id":"call_1","output":"y"}
+		],
+		"tools": [
+			{
+				"type":"namespace",
+				"name":"mcp__server_one__` + filler + `",
+				"tools":[{"type":"function","name":"_same_tail_tool_name","parameters":{"type":"object"}}]
+			},
+			{
+				"type":"namespace",
+				"name":"mcp__server_two__` + filler + `",
+				"tools":[{"type":"function","name":"_same_tail_tool_name","parameters":{"type":"object"}}]
+			}
+		]
+	}`)
+	replayOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", merged, false)
+	replayedName := ""
+	for _, m := range gjson.GetBytes(replayOut, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			replayedName = m.Get("tool_calls.0.function.name").String()
+		}
+	}
+	if replayedName != second {
+		t.Fatalf("replayed collision-suffixed call name = %q, want %q to match the tools array; output=%s", replayedName, second, replayOut)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongDeclarationDoesNotDisplaceShortOriginal(t *testing.T) {
+	// A long namespace declaration whose capped tail equals a later flat
+	// declaration's original name must take the suffix itself: the flat tool's
+	// original name is what replayed calls and tool_choice carry, so
+	// displacing it would dispatch those calls to the wrong tool.
+	longNamespace := "mcp__a__" + strings.Repeat("b", 60)
+	longChild := "child_tool"
+	qualified := longNamespace + "__" + longChild
+	flatName := capResponsesChatToolName(qualified)
+	if len(qualified) <= 64 || len(flatName) != 64 || flatName == qualified {
+		t.Fatalf("fixture drift: qualified %q (len %d) must exceed the cap and cap to 64 chars", qualified, len(qualified))
+	}
+	suffixed := capResponsesChatToolName(flatName + "_1")
+
+	toolsJSON := `[
+		{
+			"type":"namespace",
+			"name":"` + longNamespace + `",
+			"tools":[{"type":"function","name":"` + longChild + `","parameters":{"type":"object"}}]
+		},
+		{"type":"function","name":"` + flatName + `","parameters":{"type":"object"}}
+	]`
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`
+	}`), false)
+	emitted := gjson.GetBytes(out, "tools").Array()
+	if len(emitted) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(emitted), out)
+	}
+	if got := emitted[1].Get("function.name").String(); got != flatName {
+		t.Fatalf("flat declaration was displaced: its name is %q, want its original %q; output=%s", got, flatName, out)
+	}
+	if got := emitted[0].Get("function.name").String(); got != suffixed {
+		t.Fatalf("long declaration name = %q, want suffixed %q; output=%s", got, suffixed, out)
+	}
+	for _, tool := range emitted {
+		if name := tool.Get("function.name").String(); len(name) > 64 {
+			t.Errorf("function.name %q (len %d) exceeds 64; output=%s", name, len(name), out)
+		}
+	}
+
+	// Replayed calls and tool_choice for the flat tool carry its original
+	// name; they must resolve to the flat declaration, not to the long
+	// declaration that caps onto it.
+	replay := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"` + flatName + `","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": ` + toolsJSON + `
+	}`)
+	replayOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", replay, false)
+	for _, m := range gjson.GetBytes(replayOut, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			if got := m.Get("tool_calls.0.function.name").String(); got != flatName {
+				t.Fatalf("replayed flat call resolved to %q, want %q; output=%s", got, flatName, replayOut)
+			}
+		}
+	}
+
+	forcedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","function":{"name":"`+flatName+`"}}
+	}`), false)
+	if got := gjson.GetBytes(forcedOut, "tool_choice.function.name").String(); got != flatName {
+		t.Fatalf("tool_choice for the flat tool resolved to %q, want %q; output=%s", got, flatName, forcedOut)
+	}
+
+	// A replayed call carrying the long declaration's fully-qualified
+	// uncapped name (history from an older build or a foreign client that
+	// flattened the name itself) must resolve to the suffixed chat name,
+	// not to the capped tail that now belongs to the flat tool.
+	longReplay := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_2","name":"` + qualified + `","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_2","output":"ok"}
+		],
+		"tools": ` + toolsJSON + `
+	}`)
+	longReplayOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", longReplay, false)
+	for _, m := range gjson.GetBytes(longReplayOut, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			if got := m.Get("tool_calls.0.function.name").String(); got != suffixed {
+				t.Fatalf("replayed long-qualified call resolved to %q, want %q; output=%s", got, suffixed, longReplayOut)
+			}
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_AmbiguousLongLocalNameStaysUnresolved(t *testing.T) {
+	// Two namespace declarations sharing the same >64-byte local name, with a
+	// replayed call that omits the namespace: resolution is ambiguous, and the
+	// capped fallback must not land on either declaration's alias, or the call
+	// would silently invoke that namespace's tool.
+	longLocal := "shared_" + strings.Repeat("x", 60)
+	toolsJSON := `[
+		{
+			"type":"namespace",
+			"name":"mcp__alpha",
+			"tools":[{"type":"function","name":"` + longLocal + `","parameters":{"type":"object"}}]
+		},
+		{
+			"type":"namespace",
+			"name":"mcp__beta",
+			"tools":[{"type":"function","name":"` + longLocal + `","parameters":{"type":"object"}}]
+		}
+	]`
+
+	replay := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"` + longLocal + `","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": ` + toolsJSON + `
+	}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", replay, false)
+
+	declaredAliases := map[string]bool{}
+	for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		declaredAliases[tool.Get("function.name").String()] = true
+	}
+	if len(declaredAliases) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(declaredAliases), out)
+	}
+	replayedName := ""
+	for _, m := range gjson.GetBytes(out, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			replayedName = m.Get("tool_calls.0.function.name").String()
+		}
+	}
+	if len(replayedName) > 64 {
+		t.Fatalf("replayed ambiguous name %q (len %d) exceeds 64; output=%s", replayedName, len(replayedName), out)
+	}
+	if declaredAliases[replayedName] {
+		t.Fatalf("ambiguous replayed call resolved to declared alias %q, silently invoking one namespace's tool; output=%s", replayedName, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_LongAliasDoesNotDisplaceNamespacedLocalName(t *testing.T) {
+	// A long declaration's capped alias must not occupy the (<=64-char) local
+	// name of a namespaced declaration whose qualified identity exceeds the
+	// cap: replayed calls and tool_choice that omit the namespace carry the
+	// bare local name, and local-name recovery must resolve them to the
+	// namespaced tool instead of to the earlier long declaration's alias.
+	localName := "l" + strings.Repeat("m", 63) // 64 chars
+	longFlatName := strings.Repeat("n", 11) + localName
+	if len(longFlatName) <= 64 || capResponsesChatToolName(longFlatName) != localName {
+		t.Fatalf("fixture drift: cap(%q) = %q, want %q", longFlatName, capResponsesChatToolName(longFlatName), localName)
+	}
+	// mcp__beta__localName is 75 chars, so the namespaced declaration is long
+	// too, and its 11-char prefix is exactly what the cap drops: its alias is
+	// localName itself unless the reservation keeps the flat tool off it.
+	toolsJSON := `[
+		{"type":"function","name":"` + longFlatName + `","parameters":{"type":"object"}},
+		{
+			"type":"namespace",
+			"name":"mcp__beta",
+			"tools":[{"type":"function","name":"` + localName + `","parameters":{"type":"object"}}]
+		}
+	]`
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`
+	}`), false)
+	emitted := gjson.GetBytes(out, "tools").Array()
+	if len(emitted) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(emitted), out)
+	}
+	if got := emitted[0].Get("function.name").String(); got == localName {
+		t.Fatalf("long declaration claimed the namespaced local name %q as its capped alias; output=%s", localName, out)
+	}
+	namespacedAlias := emitted[1].Get("function.name").String()
+	for i, tool := range emitted {
+		if name := tool.Get("function.name").String(); len(name) > 64 {
+			t.Errorf("tools[%d].function.name %q (len %d) exceeds 64; output=%s", i, name, len(name), out)
+		}
+	}
+
+	// A replayed call omitting the namespace carries the bare local name and
+	// must resolve to the namespaced declaration's alias, not the long one.
+	replay := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"` + localName + `","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": ` + toolsJSON + `
+	}`)
+	replayOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", replay, false)
+	for _, m := range gjson.GetBytes(replayOut, "messages").Array() {
+		if m.Get("role").String() == "assistant" {
+			if got := m.Get("tool_calls.0.function.name").String(); got != namespacedAlias {
+				t.Fatalf("replayed bare local name resolved to %q, want the namespaced alias %q; output=%s", got, namespacedAlias, replayOut)
+			}
+		}
+	}
+
+	// tool_choice carrying the bare local name must resolve the same way.
+	forcedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","function":{"name":"`+localName+`"}}
+	}`), false)
+	if got := gjson.GetBytes(forcedOut, "tool_choice.function.name").String(); got != namespacedAlias {
+		t.Fatalf("tool_choice bare local name resolved to %q, want the namespaced alias %q; output=%s", got, namespacedAlias, forcedOut)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_SharedLocalNameIsNeverEmitted(t *testing.T) {
+	// Two namespaces declaring the same 64-byte local name: both qualified
+	// identities exceed the cap and their tails are exactly that bare local
+	// name, so the name is ambiguous for any namespace-less call yet also the
+	// natural capped alias of both declarations. Reserving it for the first
+	// declaration alone would make it emit the ambiguous name verbatim, where
+	// the exact-emitted-alias match attributes every namespace-less call and
+	// tool_choice to that namespace. The name must be burned instead, leaving
+	// both declarations on distinct aliases.
+	sharedLocal := "s" + strings.Repeat("t", 63) // exactly 64 chars
+	for _, namespace := range []string{"mcp__alpha", "mcp__beta"} {
+		if got := capResponsesChatToolName(rawResponsesNamespaceQualifiedName(namespace, sharedLocal)); got != sharedLocal {
+			t.Fatalf("fixture drift: %s alias = %q, want the ambiguous bare name %q", namespace, got, sharedLocal)
+		}
+	}
+	toolsJSON := `[
+		{
+			"type":"namespace",
+			"name":"mcp__alpha",
+			"tools":[{"type":"function","name":"` + sharedLocal + `","parameters":{"type":"object"}}]
+		},
+		{
+			"type":"namespace",
+			"name":"mcp__beta",
+			"tools":[{"type":"function","name":"` + sharedLocal + `","parameters":{"type":"object"}}]
+		}
+	]`
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`
+	}`), false)
+	emitted := gjson.GetBytes(out, "tools").Array()
+	if len(emitted) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(emitted), out)
+	}
+	aliases := make(map[string]bool, len(emitted))
+	for i, tool := range emitted {
+		name := tool.Get("function.name").String()
+		if len(name) > 64 {
+			t.Errorf("tools[%d].function.name %q (len %d) exceeds 64; output=%s", i, name, len(name), out)
+		}
+		if name == sharedLocal {
+			t.Errorf("tools[%d] emits the ambiguous local name %q; output=%s", i, name, out)
+		}
+		if aliases[name] {
+			t.Errorf("tools[%d] duplicates alias %q; output=%s", i, name, out)
+		}
+		aliases[name] = true
+	}
+	alphaAlias := emitted[0].Get("function.name").String()
+	betaAlias := emitted[1].Get("function.name").String()
+
+	// Each namespace still reaches its own declaration.
+	for _, tc := range []struct {
+		namespace string
+		want      string
+	}{
+		{"mcp__alpha", alphaAlias},
+		{"mcp__beta", betaAlias},
+	} {
+		namespacedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+			"input": [
+				{"type":"function_call","call_id":"call_1","namespace":"`+tc.namespace+`","name":"`+sharedLocal+`","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_1","output":"ok"}
+			],
+			"tools": `+toolsJSON+`
+		}`), false)
+		got := ""
+		for _, m := range gjson.GetBytes(namespacedOut, "messages").Array() {
+			if m.Get("role").String() == "assistant" {
+				got = m.Get("tool_calls.0.function.name").String()
+			}
+		}
+		if got != tc.want {
+			t.Fatalf("namespaced replay for %s resolved to %q, want %q; output=%s", tc.namespace, got, tc.want, namespacedOut)
+		}
+	}
+
+	// A namespace-less replayed call or tool_choice carrying the ambiguous
+	// bare name must stay unresolved rather than pick a winner.
+	bareOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"`+sharedLocal+`","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": `+toolsJSON+`
+	}`), false)
+	for _, m := range gjson.GetBytes(bareOut, "messages").Array() {
+		if m.Get("role").String() != "assistant" {
+			continue
+		}
+		got := m.Get("tool_calls.0.function.name").String()
+		if len(got) > 64 {
+			t.Fatalf("ambiguous replayed name %q (len %d) exceeds 64; output=%s", got, len(got), bareOut)
+		}
+		if aliases[got] {
+			t.Fatalf("ambiguous replayed call resolved to declared alias %q, silently invoking one namespace's tool; output=%s", got, bareOut)
+		}
+	}
+	bareForced := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","function":{"name":"`+sharedLocal+`"}}
+	}`), false)
+	if got := gjson.GetBytes(bareForced, "tool_choice.function.name").String(); aliases[got] {
+		t.Fatalf("ambiguous tool_choice resolved to declared alias %q, silently invoking one namespace's tool; output=%s", got, bareForced)
+	}
+	forcedAlpha := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","namespace":"mcp__beta","function":{"name":"`+sharedLocal+`"}}
+	}`), false)
+	if got := gjson.GetBytes(forcedAlpha, "tool_choice.function.name").String(); got != betaAlias {
+		t.Fatalf("namespaced tool_choice resolved to %q, want %q; output=%s", got, betaAlias, forcedAlpha)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_QualifiedIdentityOutranksForeignLocalName(t *testing.T) {
+	// A replayed call or tool_choice carrying a fully-qualified uncapped name
+	// can match two things: the declaration whose qualified identity it is (A),
+	// and a different namespace's child that literally uses that whole
+	// qualified string as its own name (B). Local-name recovery runs on a bare
+	// name and is a guess about the namespace, so it must not outrank the
+	// identity match, or the call gets dispatched to B's tool.
+	longChild := "read_" + strings.Repeat("f", 60)
+	qualified := rawResponsesNamespaceQualifiedName("alpha_ns", longChild)
+	if len(qualified) <= responsesChatToolNameLimit {
+		t.Fatalf("fixture drift: qualified identity %q (len %d) must exceed the cap", qualified, len(qualified))
+	}
+	if capResponsesChatToolName(rawResponsesNamespaceQualifiedName("beta_ns", qualified)) != capResponsesChatToolName(qualified) {
+		t.Fatalf("fixture drift: the two declarations must cap onto the same alias; got %q and %q",
+			capResponsesChatToolName(rawResponsesNamespaceQualifiedName("beta_ns", qualified)),
+			capResponsesChatToolName(qualified))
+	}
+	toolsJSON := `[
+		{
+			"type":"namespace",
+			"name":"alpha_ns",
+			"tools":[{"type":"function","name":"` + longChild + `","parameters":{"type":"object"}}]
+		},
+		{
+			"type":"namespace",
+			"name":"beta_ns",
+			"tools":[{"type":"function","name":"` + qualified + `","parameters":{"type":"object"}}]
+		}
+	]`
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`
+	}`), false)
+	emitted := gjson.GetBytes(out, "tools").Array()
+	if len(emitted) != 2 {
+		t.Fatalf("tools count = %d, want 2; output=%s", len(emitted), out)
+	}
+	alphaAlias := emitted[0].Get("function.name").String()
+	betaAlias := emitted[1].Get("function.name").String()
+	if alphaAlias == betaAlias {
+		t.Fatalf("both declarations emitted %q; output=%s", alphaAlias, out)
+	}
+	for i, tool := range emitted {
+		if name := tool.Get("function.name").String(); len(name) > 64 {
+			t.Errorf("tools[%d].function.name %q (len %d) exceeds 64; output=%s", i, name, len(name), out)
+		}
+	}
+
+	// Bare qualified name: provenance points at the alpha declaration.
+	bareOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_1","name":"`+qualified+`","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"tools": `+toolsJSON+`
+	}`), false)
+	for _, m := range gjson.GetBytes(bareOut, "messages").Array() {
+		if m.Get("role").String() != "assistant" {
+			continue
+		}
+		if got := m.Get("tool_calls.0.function.name").String(); got != alphaAlias {
+			t.Fatalf("bare qualified name resolved to %q, want the identity owner's alias %q (beta's alias is %q); output=%s", got, alphaAlias, betaAlias, bareOut)
+		}
+	}
+	bareForced := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+		"input": [{"role":"user","content":"hi"}],
+		"tools": `+toolsJSON+`,
+		"tool_choice": {"type":"function","function":{"name":"`+qualified+`"}}
+	}`), false)
+	if got := gjson.GetBytes(bareForced, "tool_choice.function.name").String(); got != alphaAlias {
+		t.Fatalf("tool_choice bare qualified name resolved to %q, want %q; output=%s", got, alphaAlias, bareForced)
+	}
+
+	// Both namespaces stay individually reachable when the namespace is present.
+	for _, tc := range []struct {
+		namespace string
+		name      string
+		want      string
+	}{
+		{"alpha_ns", longChild, alphaAlias},
+		{"beta_ns", qualified, betaAlias},
+	} {
+		namespacedOut := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("z-ai/glm-5.3-free", []byte(`{
+			"input": [
+				{"type":"function_call","call_id":"call_1","namespace":"`+tc.namespace+`","name":"`+tc.name+`","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_1","output":"ok"}
+			],
+			"tools": `+toolsJSON+`
+		}`), false)
+		got := ""
+		for _, m := range gjson.GetBytes(namespacedOut, "messages").Array() {
+			if m.Get("role").String() == "assistant" {
+				got = m.Get("tool_calls.0.function.name").String()
+			}
+		}
+		if got != tc.want {
+			t.Fatalf("namespaced replay for %s/%s resolved to %q, want %q; output=%s", tc.namespace, tc.name, got, tc.want, namespacedOut)
 		}
 	}
 }

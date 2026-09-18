@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,17 +19,25 @@ import (
 	gin "github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	runtimehelps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
+	"gopkg.in/yaml.v3"
 )
 
 type codexSearchCaptureExecutor struct {
@@ -41,6 +50,7 @@ type codexSearchCaptureExecutor struct {
 	statuses     []int
 	refreshCalls int
 	httpCalls    int
+	beforeReturn func()
 }
 
 func (e *codexSearchCaptureExecutor) Identifier() string { return "codex" }
@@ -138,6 +148,9 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 	if e.httpCalls <= len(e.statuses) && e.statuses[e.httpCalls-1] > 0 {
 		statusCode = e.statuses[e.httpCalls-1]
 	}
+	if e.beforeReturn != nil {
+		e.beforeReturn()
+	}
 	return &http.Response{
 		StatusCode: statusCode,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -146,26 +159,71 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 }
 
 type codexSearchHomeDispatcher struct {
+	authID string
 	calls  atomic.Int32
 	policy atomic.Value
+}
+
+type homeUnauthorizedUsageCapture struct {
+	authID  string
+	records chan coreusage.Record
+}
+
+func (p *homeUnauthorizedUsageCapture) HandleUsage(_ context.Context, record coreusage.Record) {
+	if p == nil || record.ExecutorType != "home-result" || record.AuthID != p.authID {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func (p *homeUnauthorizedUsageCapture) wait(t *testing.T) coreusage.Record {
+	t.Helper()
+	select {
+	case record := <-p.records:
+		return record
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Home unauthorized usage record")
+		return coreusage.Record{}
+	}
+}
+
+type noopHomeUnauthorizedUsagePlugin struct{}
+
+func (noopHomeUnauthorizedUsagePlugin) HandleUsage(context.Context, coreusage.Record) {}
+
+func registerHomeUnauthorizedUsageCapture(t *testing.T, name, authID string) *homeUnauthorizedUsageCapture {
+	t.Helper()
+	capture := &homeUnauthorizedUsageCapture{authID: authID, records: make(chan coreusage.Record, 1)}
+	coreusage.RegisterNamedPlugin(name, capture)
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin(name, noopHomeUnauthorizedUsagePlugin{})
+	})
+	return capture
 }
 
 func (*codexSearchHomeDispatcher) HeartbeatOK() bool { return true }
 
 func (d *codexSearchHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
 	d.calls.Add(1)
+	authID := d.authID
+	if authID == "" {
+		authID = "home-codex-search"
+	}
 	return json.Marshal(map[string]any{
 		"model":      model,
-		"auth_index": "home-codex-search",
+		"auth_index": authID,
 		"auth": map[string]any{
-			"id":       "home-codex-search",
+			"id":       authID,
 			"provider": "codex",
 			"status":   "active",
 			"metadata": map[string]any{"access_token": "home-search-token"},
 		},
 		"concurrency": map[string]any{
 			"accounted":     true,
-			"credential_id": "home-codex-search",
+			"credential_id": authID,
 			"model":         model,
 		},
 	})
@@ -195,6 +253,24 @@ type trackedSearchResponseBody struct {
 }
 
 func (b *trackedSearchResponseBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+type errorSearchResponseBody struct {
+	payload []byte
+	read    atomic.Bool
+	closed  atomic.Bool
+}
+
+func (b *errorSearchResponseBody) Read(p []byte) (int, error) {
+	if !b.read.CompareAndSwap(false, true) {
+		return 0, io.EOF
+	}
+	return copy(p, b.payload), io.ErrUnexpectedEOF
+}
+
+func (b *errorSearchResponseBody) Close() error {
 	b.closed.Store(true)
 	return nil
 }
@@ -324,30 +400,137 @@ func TestAuditHomeCodexSearchBodyCloseBeforeRelease(t *testing.T) {
 	}
 }
 
-func TestHomeCodexAlphaSearchRefreshesUnauthorizedSelectionOnce(t *testing.T) {
+func TestHomeCodexAlphaSearchForwardsUnauthorizedResponseWithoutRefresh(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
 	server := newTestServer(t)
+	server.cfg.RequestLog = true
 	dispatcher := &codexSearchHomeDispatcher{}
 	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
 	server.handlers.AuthManager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
-	executor := &codexSearchCaptureExecutor{statuses: []int{http.StatusUnauthorized, http.StatusOK}}
+	executor := &codexSearchCaptureExecutor{
+		statuses:     []int{http.StatusUnauthorized},
+		responseBody: io.NopCloser(strings.NewReader(upstreamError)),
+	}
 	server.handlers.AuthManager.RegisterExecutor(executor)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"id":"home-search-refresh","model":"gpt-5-codex","query":"test"}`))
 	req.Header.Set("Authorization", "Bearer test-key")
 	rr := httptest.NewRecorder()
-	server.engine.ServeHTTP(rr, req)
+	c, _ := gin.CreateTestContext(rr)
+	c.Request = req
+	server.codexAlphaSearch(c)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
 	}
-	if executor.refreshCalls != 1 || executor.httpCalls != 2 {
-		t.Fatalf("refresh/http calls = %d/%d, want 1/2", executor.refreshCalls, executor.httpCalls)
+	if got := rr.Body.String(); got != upstreamError {
+		t.Fatalf("body = %q, want original upstream error %q", got, upstreamError)
 	}
-	if got := executor.request.Header.Get("Authorization"); got != "Bearer refreshed-home-search-token" {
-		t.Fatalf("retry Authorization = %q, want refreshed token", got)
+	if executor.refreshCalls != 0 || executor.httpCalls != 1 {
+		t.Fatalf("refresh/http calls = %d/%d, want 0/1", executor.refreshCalls, executor.httpCalls)
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer home-search-token" {
+		t.Fatalf("Authorization = %q, want original Home token", got)
 	}
 	if got := dispatcher.calls.Load(); got != 1 {
 		t.Fatalf("Home RPOP calls = %d, want 1", got)
+	}
+	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
+	if !okResponse {
+		t.Fatal("API_RESPONSE was not captured")
+	}
+	apiResponse, _ := rawAPIResponse.([]byte)
+	if !strings.Contains(string(apiResponse), "Status: 401") || !strings.Contains(string(apiResponse), upstreamError) {
+		t.Fatalf("API_RESPONSE = %q, want original upstream 401", apiResponse)
+	}
+}
+
+func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	tests := []struct {
+		name         string
+		responseBody func() io.ReadCloser
+		beforeReturn func(*executionregistry.Registry)
+		wantStatus   int
+		wantFailBody string
+	}{
+		{
+			name: "response bind failure",
+			responseBody: func() io.ReadCloser {
+				return &trackedSearchResponseBody{Reader: strings.NewReader(upstreamError)}
+			},
+			beforeReturn: func(registry *executionregistry.Registry) {
+				_ = registry.Close()
+			},
+			wantStatus:   http.StatusServiceUnavailable,
+			wantFailBody: "upstream unauthorized",
+		},
+		{
+			name: "response read failure",
+			responseBody: func() io.ReadCloser {
+				return &errorSearchResponseBody{payload: []byte(upstreamError)}
+			},
+			wantStatus:   http.StatusBadGateway,
+			wantFailBody: upstreamError,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(t)
+			registry := executionregistry.New()
+			server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+			testAuthID := "home-codex-search-" + strings.ReplaceAll(test.name, " ", "-")
+			server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{authID: testAuthID}, registry, 1)
+			executor := &codexSearchCaptureExecutor{
+				statuses:     []int{http.StatusUnauthorized},
+				responseBody: test.responseBody(),
+			}
+			if test.beforeReturn != nil {
+				executor.beforeReturn = func() { test.beforeReturn(registry) }
+			}
+			server.handlers.AuthManager.RegisterExecutor(executor)
+			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), testAuthID)
+
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
+			request.Header.Set("Authorization", "Bearer test-key")
+			server.engine.ServeHTTP(recorder, request)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			record := usageCapture.wait(t)
+			if record.Fail.StatusCode != http.StatusUnauthorized || record.Fail.Body != test.wantFailBody {
+				t.Fatalf("Home unauthorized failure = status %d body %q, want status 401 body %q", record.Fail.StatusCode, record.Fail.Body, test.wantFailBody)
+			}
+		})
+	}
+}
+
+func TestHomeCodexAlphaSearchRequestLogPreservesBodyReturnedWithReadError(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	server := newTestServer(t)
+	server.cfg.RequestLog = true
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+	server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{}, executionregistry.New(), 1)
+	server.handlers.AuthManager.RegisterExecutor(&codexSearchCaptureExecutor{
+		statuses:     []int{http.StatusUnauthorized},
+		responseBody: &errorSearchResponseBody{payload: []byte(upstreamError)},
+	})
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
+	server.codexAlphaSearch(c)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
+	apiResponse, _ := rawAPIResponse.([]byte)
+	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
 	}
 }
 
@@ -486,6 +669,65 @@ func TestHealthz(t *testing.T) {
 			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
 		}
 	})
+}
+
+func TestHealthzAccessLogging(t *testing.T) {
+	server := newTestServer(t)
+	previousHome := home.Current()
+	home.ClearCurrent()
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.InfoLevel)
+	t.Cleanup(func() { logger.ReplaceHooks(previousHooks); logger.SetLevel(previousLevel) })
+	for _, tc := range []struct {
+		name        string
+		homeEnabled bool
+		status      int
+	}{
+		{"healthy", false, http.StatusOK},
+		{"home_unavailable", true, http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server.cfg.Home.Enabled = tc.homeEnabled
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				t.Run(method, func(t *testing.T) {
+					hook.Reset()
+					recorder := httptest.NewRecorder()
+					server.engine.ServeHTTP(recorder, httptest.NewRequest(method, "/healthz", nil))
+					if recorder.Code != tc.status {
+						t.Fatalf("status = %d, want %d", recorder.Code, tc.status)
+					}
+					count := 0
+					for _, entry := range hook.AllEntries() {
+						if _, ok := entry.Data["request_id"]; ok && strings.Contains(entry.Message, `"/healthz"`) {
+							count++
+							if tc.homeEnabled && entry.Level != log.ErrorLevel {
+								t.Errorf("failed probe log level = %v, want error", entry.Level)
+							}
+						}
+					}
+					wantCount := 0
+					if tc.homeEnabled {
+						wantCount = 1
+					}
+					if count != wantCount {
+						t.Errorf("probe access logs = %d, want %d", count, wantCount)
+					}
+					hook.Reset()
+					server.engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz-access-log-control", nil))
+					for _, entry := range hook.AllEntries() {
+						if _, ok := entry.Data["request_id"]; ok && strings.Contains(entry.Message, `"/healthz-access-log-control"`) {
+							return
+						}
+					}
+					t.Error("ordinary request did not emit an access log after health probe")
+				})
+			}
+		})
+	}
 }
 
 func TestCodexLiveRoutesRequireAuthAndAreRegistered(t *testing.T) {
@@ -1830,7 +2072,7 @@ func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"
-	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
 		{
 			ID:                  "gpt-5.5",
 			Object:              "model",
@@ -1855,6 +2097,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		},
 		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5-flare", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5-sunburst", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-image-2.0", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
@@ -1959,6 +2204,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	hiddenModels := map[string]bool{
 		"grok-imagine-image-quality":     false,
 		"gpt-image-2":                    false,
+		"gpt-image-2.5-flare":            false,
+		"gpt-image-2.5-sunburst":         false,
+		"gpt-image-2.5":                  false,
 		"grok-imagine-image":             false,
 		"grok-imagine-image-2.0":         false,
 		"grok-imagine-video":             false,
@@ -1978,6 +2226,135 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	for slug, found := range hiddenModels {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
+		}
+	}
+}
+
+func TestCodexClientModelsEndpoint_FiltersMaxAndUltraForOlderClientVersion(t *testing.T) {
+	clientID := "codex-client-version-filter-test"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+		{
+			ID:          "gpt-5.6-sol",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "openai",
+			DisplayName: "GPT-5.6-Sol",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+
+	// Older client version 0.137.0 should NOT have max or ultra reasoning levels
+	reqOld := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.137.0", nil)
+	reqOld.Header.Set("Authorization", "Bearer test-key")
+	rrOld := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrOld, reqOld)
+
+	if rrOld.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rrOld.Code, http.StatusOK, rrOld.Body.String())
+	}
+
+	var respOld struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rrOld.Body.Bytes(), &respOld); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	foundSol := false
+	for _, m := range respOld.Models {
+		if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+			foundSol = true
+			levels, ok := m["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("expected supported_reasoning_levels for gpt-5.6-sol, got %#v", m["supported_reasoning_levels"])
+			}
+			for _, rawLevel := range levels {
+				level, _ := rawLevel.(map[string]any)
+				effort, _ := level["effort"].(string)
+				if effort == "max" || effort == "ultra" {
+					t.Fatalf("older client 0.137.0 received unsupported reasoning effort %q", effort)
+				}
+			}
+		}
+	}
+	if !foundSol {
+		t.Fatal("expected gpt-5.6-sol in codex catalog")
+	}
+
+	// Newer client version 0.149.1 should preserve max and ultra reasoning levels
+	reqNew := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.149.1", nil)
+	reqNew.Header.Set("Authorization", "Bearer test-key")
+	rrNew := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrNew, reqNew)
+
+	if rrNew.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rrNew.Code, http.StatusOK, rrNew.Body.String())
+	}
+
+	var respNew struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rrNew.Body.Bytes(), &respNew); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	foundNewUltra := false
+	for _, m := range respNew.Models {
+		if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+			levels, ok := m["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("expected supported_reasoning_levels for gpt-5.6-sol, got %#v", m["supported_reasoning_levels"])
+			}
+			for _, rawLevel := range levels {
+				level, _ := rawLevel.(map[string]any)
+				if effort, _ := level["effort"].(string); effort == "ultra" {
+					foundNewUltra = true
+				}
+			}
+		}
+	}
+	if !foundNewUltra {
+		t.Fatal("expected ultra reasoning effort for newer client 0.149.1")
+	}
+
+	// Unparseable / empty client versions (e.g. client_version=, client_version=pi) should also preserve max and ultra (unfiltered)
+	for _, unparsedVersion := range []string{"", "pi", "latest"} {
+		path := "/v1/models?client_version=" + unparsedVersion
+		reqUnparsed := httptest.NewRequest(http.MethodGet, path, nil)
+		reqUnparsed.Header.Set("Authorization", "Bearer test-key")
+		rrUnparsed := httptest.NewRecorder()
+		server.engine.ServeHTTP(rrUnparsed, reqUnparsed)
+
+		if rrUnparsed.Code != http.StatusOK {
+			t.Fatalf("path %q status = %d, want %d body=%s", path, rrUnparsed.Code, http.StatusOK, rrUnparsed.Body.String())
+		}
+
+		var respUnparsed struct {
+			Models []map[string]any `json:"models"`
+		}
+		if err := json.Unmarshal(rrUnparsed.Body.Bytes(), &respUnparsed); err != nil {
+			t.Fatalf("path %q parse error: %v", path, err)
+		}
+
+		foundUltra := false
+		for _, m := range respUnparsed.Models {
+			if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+				levels, _ := m["supported_reasoning_levels"].([]any)
+				for _, rawLevel := range levels {
+					level, _ := rawLevel.(map[string]any)
+					if effort, _ := level["effort"].(string); effort == "ultra" {
+						foundUltra = true
+					}
+				}
+			}
+		}
+		if !foundUltra {
+			t.Fatalf("path %q expected ultra reasoning effort to be preserved for unparsed client_version", path)
 		}
 	}
 }
@@ -2193,7 +2570,13 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 			{
 				"name": "models/gemini-3-pro",
 				"inputTokenLimit": 1048576,
-				"outputTokenLimit": 65536
+				"outputTokenLimit": 65536,
+				"thinking": {
+					"min": 128,
+					"max": 65535,
+					"dynamic_allowed": true,
+					"levels": ["low", "medium", "high"]
+				}
 			}
 		]
 	}`))
@@ -2218,6 +2601,17 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	}
 	if geminiEntry.contextLength != 1048576 || geminiEntry.maxCompletionTokens != 65536 {
 		t.Fatalf("gemini token metadata = %d/%d, want 1048576/65536", geminiEntry.contextLength, geminiEntry.maxCompletionTokens)
+	}
+	if geminiEntry.thinking == nil || !reflect.DeepEqual(geminiEntry.thinking.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("gemini thinking metadata = %#v, want low/medium/high", geminiEntry.thinking)
+	}
+
+	formatted := formatHomeCodexModel(geminiEntry)
+	if got := homeModelInt64Value(formatted, "context_length"); got != 1048576 {
+		t.Fatalf("formatted Gemini context_length = %d, want 1048576", got)
+	}
+	if got, ok := formatted["thinking"].(*registry.ThinkingSupport); !ok || !reflect.DeepEqual(got.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("formatted Gemini thinking metadata = %#v, want low/medium/high", formatted["thinking"])
 	}
 }
 
@@ -2265,5 +2659,440 @@ func TestInteractionsRouteRegistered(t *testing.T) {
 	server.engine.ServeHTTP(rr, req)
 	if rr.Code == http.StatusNotFound {
 		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUpdateClientsContext_AntigravityConnectionPoolPurgesTransports(t *testing.T) {
+	server := newTestServer(t)
+
+	enabled := true
+	disabled := false
+
+	cfg1 := *server.cfg
+	cfg1.Antigravity.ConnectionPool.Enabled = &enabled
+	cfg1.Antigravity.ConnectionPool.IdleConnTimeout = "30s"
+	server.oldConfigYaml, _ = yaml.Marshal(&cfg1)
+
+	// Pre-populate the cache before reload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	testAuth := &auth.Auth{
+		ID:         "hot-reload-test-auth",
+		Provider:   "antigravity",
+		Attributes: map[string]string{"base_url": srv.URL},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "proj",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	exec := executor.NewAntigravityExecutor(&cfg1)
+	req := httptest.NewRequest(http.MethodGet, srv.URL, nil)
+	_, _ = exec.HttpRequest(context.Background(), testAuth, req)
+
+	if executor.AntigravityTransportsLen() == 0 {
+		t.Fatal("expected Antigravity transports to be cached before hot reload")
+	}
+
+	cfg2 := cfg1
+	cfg2.Antigravity.ConnectionPool.Enabled = &disabled
+	cfg2.Antigravity.ConnectionPool.IdleConnTimeout = "10s"
+
+	if ok := server.UpdateClientsContext(context.Background(), &cfg2); !ok {
+		t.Fatal("UpdateClientsContext returned false")
+	}
+
+	if got := executor.AntigravityTransportsLen(); got != 0 {
+		t.Fatalf("AntigravityTransportsLen() after reload = %d, want 0", got)
+	}
+}
+
+type mockServerStreamingCaptureExecutor struct {
+	cfg            *proxyconfig.Config
+	capturedCtx    context.Context
+	executionCalls int
+}
+
+func (e *mockServerStreamingCaptureExecutor) Identifier() string { return "codex-test" }
+
+func (e *mockServerStreamingCaptureExecutor) Execute(ctx context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	e.capturedCtx = ctx
+	return coreexecutor.Response{Payload: []byte(`{"id":"resp-1","status":"completed"}`)}, nil
+}
+
+func (e *mockServerStreamingCaptureExecutor) ExecuteStream(ctx context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.capturedCtx = ctx
+	e.executionCalls++
+
+	runtimehelps.RecordAPIRequest(ctx, e.cfg, runtimehelps.UpstreamRequestLog{
+		URL:     "https://api.example.com/v1/responses",
+		Method:  http.MethodPost,
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-5-codex","input":[]}`),
+	})
+
+	ch := make(chan coreexecutor.StreamChunk, 2)
+	chunkPayload := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\"}\n\n")
+	runtimehelps.AppendAPIResponseChunk(ctx, e.cfg, chunkPayload)
+	ch <- coreexecutor.StreamChunk{Payload: chunkPayload}
+
+	terminalPayload := []byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n")
+	runtimehelps.AppendAPIResponseChunk(ctx, e.cfg, terminalPayload)
+	ch <- coreexecutor.StreamChunk{Payload: terminalPayload}
+	close(ch)
+
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *mockServerStreamingCaptureExecutor) Refresh(_ context.Context, auth *auth.Auth) (*auth.Auth, error) {
+	return auth, nil
+}
+
+func (e *mockServerStreamingCaptureExecutor) CountTokens(_ context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *mockServerStreamingCaptureExecutor) HttpRequest(_ context.Context, _ *auth.Auth, _ *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestServerResponsesStreamingRequestLogCapturesUpstreamSections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	logsDir := filepath.Join(tmpDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+
+	mockLogger := internallogging.NewFileRequestLogger(true, logsDir, "", 10)
+	server := newTestServerWithOptions(t, WithRequestLoggerFactory(func(*proxyconfig.Config, string) internallogging.RequestLogger {
+		return mockLogger
+	}))
+	server.cfg.RequestLog = true
+	server.cfg.LoggingToFile = true
+
+	mockExec := &mockServerStreamingCaptureExecutor{cfg: server.cfg}
+	server.handlers.AuthManager.RegisterExecutor(mockExec)
+
+	credential := &auth.Auth{
+		ID:       "codex-stream-auth",
+		Provider: mockExec.Identifier(),
+		Status:   auth.StatusActive,
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5-codex"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	rr := httptest.NewRecorder()
+	body := `{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if mockExec.executionCalls != 1 {
+		t.Fatalf("executor calls = %d, want 1", mockExec.executionCalls)
+	}
+
+	entries, errReadDir := os.ReadDir(logsDir)
+	if errReadDir != nil {
+		t.Fatalf("read logs dir: %v", errReadDir)
+	}
+	var logPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "v1-responses-") && strings.HasSuffix(entry.Name(), ".log") {
+			logPath = filepath.Join(logsDir, entry.Name())
+			break
+		}
+	}
+	if logPath == "" {
+		t.Fatal("streaming request log was not created in logs dir")
+	}
+	content, errReadLog := os.ReadFile(logPath)
+	if errReadLog != nil {
+		t.Fatalf("read log file: %v", errReadLog)
+	}
+	logText := string(content)
+	apiRequestIdx := strings.Index(logText, "=== API REQUEST 1 ===")
+	if apiRequestIdx == -1 {
+		t.Fatalf("streaming log missing API REQUEST 1:\n%s", logText)
+	}
+	apiResponseIdx := strings.Index(logText, "=== API RESPONSE 1 ===")
+	if apiResponseIdx == -1 {
+		t.Fatalf("streaming log missing API RESPONSE 1:\n%s", logText)
+	}
+	downstreamResponseIdx := strings.Index(logText, "=== RESPONSE ===")
+	if downstreamResponseIdx == -1 {
+		t.Fatalf("streaming log missing downstream RESPONSE:\n%s", logText)
+	}
+	if apiRequestIdx >= apiResponseIdx || apiResponseIdx >= downstreamResponseIdx {
+		t.Fatalf("unexpected section order (req=%d, apiResp=%d, resp=%d):\n%s", apiRequestIdx, apiResponseIdx, downstreamResponseIdx, logText)
+	}
+	apiRequestSection := logText[apiRequestIdx:apiResponseIdx]
+	apiResponseSection := logText[apiResponseIdx:downstreamResponseIdx]
+	if !strings.Contains(apiRequestSection, "https://api.example.com/v1/responses") {
+		t.Fatalf("API REQUEST section missing upstream URL:\n%s", apiRequestSection)
+	}
+	if !strings.Contains(apiRequestSection, `"gpt-5-codex"`) {
+		t.Fatalf("API REQUEST section missing request body:\n%s", apiRequestSection)
+	}
+	if !strings.Contains(apiResponseSection, "response.output_item.added") {
+		t.Fatalf("API RESPONSE section missing response chunk data:\n%s", apiResponseSection)
+	}
+}
+
+func TestServerCodexAPIKeyResponsesStreamingRequestLog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamReceived := make(chan struct{}, 1)
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case upstreamReceived <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.added\"}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer mockUpstream.Close()
+
+	tmpDir := t.TempDir()
+	logsDir := filepath.Join(tmpDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+
+	mockLogger := internallogging.NewFileRequestLogger(true, logsDir, "", 10)
+	server := newTestServerWithOptions(t, WithRequestLoggerFactory(func(*proxyconfig.Config, string) internallogging.RequestLogger {
+		return mockLogger
+	}))
+	server.cfg.RequestLog = true
+	server.cfg.LoggingToFile = true
+
+	codexExec := executor.NewCodexExecutor(server.cfg)
+	server.handlers.AuthManager.RegisterExecutor(codexExec)
+
+	credential := &auth.Auth{
+		ID:       "codex-api-key-test",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey: "test-codex-key",
+			"base_url":           mockUpstream.URL,
+		},
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5-codex"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	rr := httptest.NewRecorder()
+	body := `{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	select {
+	case <-upstreamReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
+	}
+
+	entries, errReadDir := os.ReadDir(logsDir)
+	if errReadDir != nil {
+		t.Fatalf("read logs dir: %v", errReadDir)
+	}
+	var logPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "v1-responses-") && strings.HasSuffix(entry.Name(), ".log") {
+			logPath = filepath.Join(logsDir, entry.Name())
+			break
+		}
+	}
+	if logPath == "" {
+		t.Fatal("streaming request log was not created in logs dir")
+	}
+	content, errReadLog := os.ReadFile(logPath)
+	if errReadLog != nil {
+		t.Fatalf("read log file: %v", errReadLog)
+	}
+	logText := string(content)
+	apiRequestIdx := strings.Index(logText, "=== API REQUEST 1 ===")
+	if apiRequestIdx == -1 {
+		t.Fatalf("streaming log missing API REQUEST 1:\n%s", logText)
+	}
+	apiResponseIdx := strings.Index(logText, "=== API RESPONSE 1 ===")
+	if apiResponseIdx == -1 {
+		t.Fatalf("streaming log missing API RESPONSE 1:\n%s", logText)
+	}
+	downstreamResponseIdx := strings.Index(logText, "=== RESPONSE ===")
+	if downstreamResponseIdx == -1 {
+		t.Fatalf("streaming log missing downstream RESPONSE:\n%s", logText)
+	}
+	if apiRequestIdx >= apiResponseIdx || apiResponseIdx >= downstreamResponseIdx {
+		t.Fatalf("unexpected section order (req=%d, apiResp=%d, resp=%d):\n%s", apiRequestIdx, apiResponseIdx, downstreamResponseIdx, logText)
+	}
+	apiRequestSection := logText[apiRequestIdx:apiResponseIdx]
+	apiResponseSection := logText[apiResponseIdx:downstreamResponseIdx]
+	if !strings.Contains(apiRequestSection, mockUpstream.URL) {
+		t.Fatalf("API REQUEST section missing upstream URL %s:\n%s", mockUpstream.URL, apiRequestSection)
+	}
+	if !strings.Contains(apiRequestSection, `"gpt-5-codex"`) {
+		t.Fatalf("API REQUEST section missing request body:\n%s", apiRequestSection)
+	}
+	if !strings.Contains(apiResponseSection, "response.output_item.added") {
+		t.Fatalf("API RESPONSE section missing response chunk data:\n%s", apiResponseSection)
+	}
+}
+
+func TestModelsForCPAClientSerializesWebSearchCapabilities(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	registrations := []struct {
+		clientID string
+		provider string
+		modelID  string
+	}{
+		{"cpa-web-search-codex", "codex", "cpa-search-codex-model"},
+		{"cpa-web-search-xai", "xai", "cpa-search-xai-model"},
+		{"cpa-web-search-claude", "claude", "cpa-search-claude-model"},
+		{"cpa-web-search-gemini", "gemini", "cpa-no-search-gemini-model"},
+		{"cpa-web-search-mixed-codex", "codex", "cpa-mixed-search-model"},
+		{"cpa-web-search-mixed-gemini", "gemini", "cpa-mixed-search-model"},
+		{"cpa-web-search-prefixed", "codex", "team/cpa-prefixed-search-model"},
+	}
+	webSearch := true
+	for _, registration := range registrations {
+		modelRegistry.RegisterClient(registration.clientID, registration.provider, []*registry.ModelInfo{{
+			ID: registration.modelID,
+			NativeCapabilities: &registry.NativeCapabilities{
+				WebSearch: &webSearch,
+			},
+		}})
+	}
+	t.Cleanup(func() {
+		for _, registration := range registrations {
+			modelRegistry.UnregisterClient(registration.clientID)
+		}
+	})
+
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=cpa", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response struct {
+		Models []map[string]any `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("decode response: %v; body=%s", errUnmarshal, recorder.Body.String())
+	}
+	entries := make(map[string]map[string]any, len(response.Models))
+	for _, model := range response.Models {
+		slug, _ := model["slug"].(string)
+		entries[slug] = model
+	}
+	for _, modelID := range []string{"cpa-search-codex-model", "cpa-search-xai-model", "cpa-search-claude-model", "team/cpa-prefixed-search-model"} {
+		assertSerializedCPAWebSearch(t, entries[modelID], true)
+	}
+	for _, modelID := range []string{"cpa-no-search-gemini-model", "cpa-mixed-search-model"} {
+		assertSerializedCPAWebSearch(t, entries[modelID], false)
+	}
+
+	legacyRequest := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil)
+	legacyRequest.Header.Set("Authorization", "Bearer test-key")
+	legacyRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(legacyRecorder, legacyRequest)
+	if strings.Contains(legacyRecorder.Body.String(), "cpa_capabilities") {
+		t.Fatalf("non-CPA response exposed CPA capability: %s", legacyRecorder.Body.String())
+	}
+}
+
+func TestHomeModelsRequirePerEntryWebSearchCapabilityAndConservativeRoutes(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"codex":[
+			{"id":"home-codex","native_capabilities":{"web_search":true}},
+			{"id":"home-unknown"},
+			{"id":"home-duplicate","native_capabilities":{"web_search":true}},
+			{"id":"home-duplicate","native_capabilities":{"web_search":false}}
+		],
+		"xai":[{"id":"home-xai","native_capabilities":{"web_search":true}}],
+		"claude":[{"id":"gpt-5.5","native_capabilities":{"web_search":true}}],
+		"gemini":[{"id":"home-gemini","native_capabilities":{"web_search":true}}],
+		"custom":[{"id":"home-custom","native_capabilities":{"web_search":true}}]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decode Home models: %v", errDecode)
+	}
+
+	models := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, formatHomeCodexModel(entry))
+	}
+	response := codexmodels.BuildResponseForClientWithCPACapabilities(models, nil, homeWebSearchCapabilityForModel(entries), false, "cpa")
+	catalog, ok := response["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models = %#v, want []map[string]any", response["models"])
+	}
+	bySlug := make(map[string]map[string]any, len(catalog))
+	for _, model := range catalog {
+		slug, _ := model["slug"].(string)
+		bySlug[slug] = model
+	}
+	for _, modelID := range []string{"home-codex", "home-xai", "gpt-5.5"} {
+		assertSerializedCPAWebSearch(t, bySlug[modelID], true)
+	}
+	if supportsSearchTool, _ := bySlug["gpt-5.5"]["supports_search_tool"].(bool); !supportsSearchTool {
+		t.Fatal("CPA capability metadata changed legacy Home supports_search_tool")
+	}
+	for _, modelID := range []string{"home-gemini", "home-duplicate"} {
+		assertSerializedCPAWebSearch(t, bySlug[modelID], false)
+	}
+	for _, modelID := range []string{"home-unknown", "home-custom"} {
+		if _, exists := bySlug[modelID]["cpa_capabilities"]; exists {
+			t.Fatalf("%s cpa_capabilities = %#v, want omitted", modelID, bySlug[modelID]["cpa_capabilities"])
+		}
+	}
+}
+
+func assertSerializedCPAWebSearch(t *testing.T, model map[string]any, want bool) {
+	t.Helper()
+	if model == nil {
+		t.Fatal("model entry is missing")
+	}
+	capabilities, ok := model["cpa_capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("model %v cpa_capabilities = %#v, want object", model["slug"], model["cpa_capabilities"])
+	}
+	if got, ok := capabilities["web_search"].(bool); !ok || got != want {
+		t.Fatalf("model %v web_search = %#v, want %v", model["slug"], capabilities["web_search"], want)
 	}
 }

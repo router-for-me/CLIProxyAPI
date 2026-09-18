@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/net/context"
@@ -18,6 +19,51 @@ type preparedModelRouteContextKey struct{}
 type executionSessionContextKey struct{}
 
 type disallowFreeAuthContextKey struct{}
+
+type nestedExecutionTrackerKey struct{}
+
+type nestedExecutionTracker struct {
+	mu     sync.Mutex
+	called bool
+}
+
+func (t *nestedExecutionTracker) mark() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.called = true
+	t.mu.Unlock()
+}
+
+func (t *nestedExecutionTracker) hasNestedExecution() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.called
+}
+
+func withNestedExecutionTracker(ctx context.Context) (context.Context, *nestedExecutionTracker) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if existing, ok := ctx.Value(nestedExecutionTrackerKey{}).(*nestedExecutionTracker); ok && existing != nil {
+		return ctx, existing
+	}
+	tracker := &nestedExecutionTracker{}
+	return context.WithValue(ctx, nestedExecutionTrackerKey{}, tracker), tracker
+}
+
+func markNestedExecution(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if tracker, ok := ctx.Value(nestedExecutionTrackerKey{}).(*nestedExecutionTracker); ok && tracker != nil {
+		tracker.mark()
+	}
+}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
@@ -63,6 +109,24 @@ func preparedModelRouteFromContext(ctx context.Context, skipRouterPluginID strin
 	}
 	decision, ok := ctx.Value(preparedModelRouteContextKey{}).(modelRouteDecision)
 	return decision, ok
+}
+
+// PreparedStreamPluginExecutor returns the executor plugin ID if the prepared route targets a plugin executor.
+func PreparedStreamPluginExecutor(ctx context.Context) string {
+	decision, ok := preparedModelRouteFromContext(ctx, "")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(decision.ExecutorPluginID)
+}
+
+// PreparedStreamProviderRoute returns the provider and target model if the prepared route targets a provider route override.
+func PreparedStreamProviderRoute(ctx context.Context) (string, string) {
+	decision, ok := preparedModelRouteFromContext(ctx, "")
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(decision.Provider), strings.TrimSpace(decision.Model)
 }
 
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
