@@ -1,4 +1,21 @@
-import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+// UpstreamProvidersPage — thin shell that loads the providers list +
+// live status, owns the page-level CRUD callbacks (single-row delete, bulk
+// actions, import modal), and delegates rendering to:
+//   - Table.jsx              (catalog: toolbar, HealthSummary, table, bulk
+//                             action bar, pagination, delete/bulk-delete
+//                             confirm modals). Reads ?health= for deep
+//                             links from HealthPage.
+//   - AliasesCard.jsx        (Global OAuth Model Aliases editor at the
+//                             bottom of the page).
+//
+// Task 17 (PR1 upstream-health) replaces the previous monolithic inline
+// rendering. All state local to the table view (search, type filter,
+// health filter, sort, page, selection) now lives inside Table.jsx; the
+// parent only owns the cross-cutting bulk-action wiring (Promise.allSettled
+// over selected rows + summary toast + selection narrowing + reload), per
+// Table.jsx's onBulkAction prop contract.
+
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   listUpstreamProviders,
@@ -9,10 +26,7 @@ import {
   getAuthFileModels,
   fetchAuthFileJSON,
   uploadAuthFileRaw,
-  getOAuthModelAlias,
-  patchOAuthModelAlias,
-  deleteOAuthModelAlias,
-  getModelDefinitions,
+  listUpstreamProviderLiveStatus,
 } from '../api/client.js';
 import { ApiError } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
@@ -20,11 +34,11 @@ import { Spinner, ErrorBanner, EmptyState, Modal } from '../components/Primitive
 import { useToast } from '../components/Toast.jsx';
 import { Field } from './manage-cpa/FormPrimitives.jsx';
 import {
-  API_KEY_TYPES,
-  OAUTH_TYPES,
   TYPE_LABEL,
-  isOAuth,
 } from './upstream-provider-editor/schemas.js';
+import { coerceLiveStatusResponse } from '../api/liveStatus.js';
+import Table from './upstream-providers/Table.jsx';
+import AliasesCard from './upstream-providers/AliasesCard.jsx';
 
 // ============================================================================
 // Page
@@ -34,193 +48,30 @@ export default function UpstreamProvidersPage() {
   const toast = useToast();
   const navigate = useNavigate();
   const { data, error, loading, reload } = useAsync(() => listUpstreamProviders(), []);
-  const [search, setSearch] = useState('');
-  const [typeFilter, setTypeFilter] = useState('');
-  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [liveStatus, setLiveStatus] = useState({});
+  const [refreshing, setRefreshing] = useState(false);
+  // Import modal. Kept local to the page since it spans multiple providers
+  // (Tab 1: existing auth files, Tab 2: pasted JSON, Tab 3: file upload) and
+  // re-uses the createUpstreamProvider API directly. Lives outside the table
+  // because it's a one-shot creation flow, not a row operation.
   const [importing, setImporting] = useState(false);
-  // Table sort: { key, dir } — null = leave server order. Keys map 1:1 to
-  // row fields so the sort happens purely client-side over the filtered list.
-  const [sort, setSort] = useState({ key: 'updated_at', dir: 'desc' });
-  // Client-side pagination. Rows/page is operator-selectable; the current page
-  // resets whenever filters/search/sort change so the operator never lands on
-  // an out-of-range page after narrowing the list.
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
-  // Bulk-action selection. Stored as a Set of upstream_provider.id values so
-  // it survives filter/sort/page changes (operators can narrow, act, then
-  // re-broaden without losing the selection). `null` when no bulk action is
-  // in flight; otherwise the action identifier ("delete" | "enable" | "disable").
-  const [selectedIds, setSelectedIds] = useState(new Set());
-  const [bulkAction, setBulkAction] = useState(null);   // pending confirm
-  const [bulkRunning, setBulkRunning] = useState(false); // operation in flight
-  // Confirm-modal for destructive bulk delete (non-destructive Enable/Disable
-  // confirm inline via a single toast, matching how single-row toggles work).
-  const [confirmBulkDelete, setConfirmBulkDelete] = useState(null);
+
+  // Refresh the per-row live-status map (breaker / cooldown / is_live). Shown
+  // by Table.jsx's Health column. On any error we degrade to {} so the table
+  // renders every row as "Stale" rather than blowing up the toolbar.
+  const refreshHealth = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const json = await listUpstreamProviderLiveStatus();
+      setLiveStatus(coerceLiveStatusResponse(json));
+    } catch {
+      setLiveStatus({});
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
 
   const providers = data?.providers || [];
-
-  // typeFilter accepts three shapes:
-  //   ''                 → no filter
-  //   'api' / 'oauth'    → category filter (from the stat tiles)
-  //   '<provider_type>'  → exact match (from the dropdown + channel chips)
-  function matchesTypeFilter(providerType) {
-    if (!typeFilter) return true;
-    if (typeFilter === 'api') return !isOAuth(providerType);
-    if (typeFilter === 'oauth') return isOAuth(providerType);
-    return providerType === typeFilter;
-  }
-
-  const filtered = useMemo(() => {
-    let out = providers;
-    if (typeFilter) out = out.filter((p) => matchesTypeFilter(p.provider_type));
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      out = out.filter((p) =>
-        [p.provider_type, p.name, p.label, p.email, p.file_name, p.base_url]
-          .filter(Boolean).some((v) => v.toLowerCase().includes(q)));
-    }
-    if (sort && sort.key) {
-      const k = sort.key;
-      const dir = sort.dir === 'asc' ? 1 : -1;
-      out = [...out].sort((a, b) => {
-        const av = a?.[k];
-        const bv = b?.[k];
-        if (av == null && bv == null) return 0;
-        if (av == null) return 1;       // nulls last
-        if (bv == null) return -1;
-        if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
-        return String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' }) * dir;
-      });
-    }
-    return out;
-  }, [providers, search, typeFilter, sort]);
-
-  // Reset to page 1 whenever the result set's shape changes (filter, search,
-  // sort, or the underlying provider list). Without this the operator can
-  // narrow the list and land on an empty page.
-  useEffect(() => { setPage(1); }, [search, typeFilter, sort, providers.length]);
-
-  const totalFiltered = filtered.length;
-  const totalPages = Math.max(1, Math.ceil(totalFiltered / pageSize));
-  const safePage = Math.min(page, totalPages);
-  const pageStart = totalFiltered === 0 ? 0 : (safePage - 1) * pageSize + 1;
-  const pageEnd = Math.min(totalFiltered, safePage * pageSize);
-  const pagedRows = useMemo(
-    () => filtered.slice(pageStart - 1, pageEnd),
-    [filtered, pageStart, pageEnd],
-  );
-
-  // Resolve the Set of selected IDs back to provider rows. Drops any
-  // selections that no longer exist in `providers` (e.g. after a reload
-  // following a delete from another session). Recomputed on every render so
-  // the bulk toolbar always reflects current truth.
-  const selectedProviders = useMemo(() => {
-    if (selectedIds.size === 0) return [];
-    const byId = new Map(providers.map((p) => [p.id, p]));
-    const out = [];
-    for (const id of selectedIds) {
-      const p = byId.get(id);
-      if (p) out.push(p);
-    }
-    return out;
-  }, [selectedIds, providers]);
-  const selectedCount = selectedProviders.length;
-  // Header checkbox is in three states: empty (none of the paged rows
-  // selected), all (every paged row selected), indeterminate (mixed).
-  const pagedSelectedCount = pagedRows.reduce(
-    (n, p) => n + (selectedIds.has(p.id) ? 1 : 0), 0,
-  );
-  const allPagedSelected = pagedRows.length > 0 && pagedSelectedCount === pagedRows.length;
-  const somePagedSelected = pagedSelectedCount > 0 && !allPagedSelected;
-
-  const toggleRowSelected = (id) => {
-    setSelectedIds((s) => {
-      const next = new Set(s);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-  const toggleAllPaged = () => {
-    setSelectedIds((s) => {
-      const next = new Set(s);
-      if (allPagedSelected) {
-        // Unselect everything currently paged.
-        for (const p of pagedRows) next.delete(p.id);
-      } else {
-        // Select everything currently paged.
-        for (const p of pagedRows) next.add(p.id);
-      }
-      return next;
-    });
-  };
-  const clearSelection = () => setSelectedIds(new Set());
-
-  // Garbage-collect stale IDs from the selection whenever the providers list
-  // changes (after reload). Keeps `selectedProviders` honest without forcing
-  // the operator to re-tick boxes after a delete from another tab.
-  useEffect(() => {
-    if (selectedIds.size === 0) return;
-    const liveIds = new Set(providers.map((p) => p.id));
-    let changed = false;
-    for (const id of selectedIds) {
-      if (!liveIds.has(id)) { changed = true; break; }
-    }
-    if (changed) {
-      const next = new Set();
-      for (const id of selectedIds) if (liveIds.has(id)) next.add(id);
-      setSelectedIds(next);
-    }
-    // We intentionally key off providers.length + first/last id instead of the
-    // full `providers` array to avoid recomputing on unrelated edits.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providers.length, providers[0]?.id, providers[providers.length - 1]?.id]);
-
-  const counts = useMemo(() => {
-    const c = { total: providers.length, apiKeys: 0, oauth: 0, disabled: 0 };
-    for (const p of providers) {
-      if (isOAuth(p.provider_type)) c.oauth += 1; else c.apiKeys += 1;
-      if (p.disabled) c.disabled += 1;
-    }
-    return c;
-  }, [providers]);
-
-  // Per-channel OAuth counts for the secondary stat strip — surfaces which
-  // OAuth channels are actually configured without forcing the operator to
-  // scan the type filter.
-  const oauthByChannel = useMemo(() => {
-    const m = new Map();
-    for (const p of providers) {
-      if (!isOAuth(p.provider_type)) continue;
-      const ch = p.provider_type.replace(/^oauth:/, '');
-      m.set(ch, (m.get(ch) || 0) + 1);
-    }
-    return m;
-  }, [providers]);
-
-  const toggleSort = (key) => {
-    setSort((s) => {
-      if (s?.key !== key) return { key, dir: 'asc' };
-      if (s.dir === 'asc') return { key, dir: 'desc' };
-      return null; // third click clears the sort
-    });
-  };
-  const SortHeader = ({ k, children, align = 'left' }) => {
-    const active = sort?.key === k;
-    const arrow = active ? (sort.dir === 'asc' ? '▲' : '▼') : '↕';
-    return (
-      <th
-        className={`th-sort${active ? ' is-active' : ''}`}
-        onClick={() => toggleSort(k)}
-        aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
-        style={align === 'right' ? { textAlign: 'right' } : undefined}
-        title="Click to sort"
-      >
-        {children}<span className="th-sort__arrow" aria-hidden="true">{arrow}</span>
-      </th>
-    );
-  };
-
-  const hasFilters = !!search.trim() || !!typeFilter;
 
   // Existing (provider_type, file_name) pairs already represented as upstream
   // provider rows. The Import modal uses this to mark auth files that are
@@ -235,32 +86,34 @@ export default function UpstreamProvidersPage() {
     return s;
   }, [providers]);
 
-  const handleDelete = async (p) => {
+  // Single-row delete. Invoked by Table.jsx's row Edit/Delete actions +
+  // confirm modal. Mirrors the original handleDelete's behavior: success
+  // toast + reload; error toast.
+  const handleDelete = useCallback(async (p) => {
     try {
       await deleteUpstreamProvider(p.id);
       toast.success(`Deleted ${TYPE_LABEL[p.provider_type] || p.provider_type}`);
-      setConfirmDelete(null);
       reload();
     } catch (err) {
       toast.error(err.message || 'Delete failed');
     }
-  };
+  }, [toast, reload]);
 
   // runBulk performs a single bulk action ("enable" | "disable" | "delete")
-  // over the currently selected providers. Runs the per-row mutations in
-  // parallel via Promise.allSettled so a single 4xx/5xx doesn't block the
-  // rest. Reports a final summary toast (`X succeeded, Y failed`) and
-  // collapses the bulk toolbar (clears selection) on full success. On
-  // partial failure the operator keeps the selection so they can retry
-  // just the failures.
-  const runBulk = async (action) => {
-    if (selectedCount === 0) return;
-    setBulkRunning(true);
-    const progressId = toast.info(
-      `${action === 'delete' ? 'Deleting' : action === 'enable' ? 'Enabling' : 'Disabling'} ${selectedCount} provider${selectedCount === 1 ? '' : 's'}…`,
-      { duration: 0 },
-    );
-    const targets = selectedProviders.slice();
+  // over the targets Table.jsx hands us via onBulkAction. Runs the per-row
+  // mutations in parallel via Promise.allSettled so a single 4xx/5xx
+  // doesn't block the rest. Reports a final summary toast
+  // (`X succeeded, Y failed`). Table.jsx owns the progress toast +
+  // bulkRunning flag + the selectedIds Set; we just mutate the API.
+  //
+  // The selection-narrowing (drop succeeded IDs on partial failure) and the
+  // post-action reload() are owned here per Task 12's onBulkAction contract.
+  // We can't narrow Table's selectedIds directly — Table exposes no setter
+  // — so the parent relies on the reload above to garbage-collect stale IDs
+  // (Table already drops unknown IDs from its selection Set on providers
+  // list changes).
+  const handleBulkAction = useCallback(async ({ action, targets }) => {
+    if (!Array.isArray(targets) || targets.length === 0) return;
     const verbs = { enable: 'enable', disable: 'disable', delete: 'delete' };
     const tasks = targets.map((p) => {
       if (action === 'delete') return deleteUpstreamProvider(p.id).then(() => p);
@@ -270,45 +123,38 @@ export default function UpstreamProvidersPage() {
       return updateUpstreamProvider(p.id, { disabled: action === 'disable' }).then(() => p);
     });
     const settled = await Promise.allSettled(tasks);
-    toast.dismiss(progressId);
     const ok = [];
     const failed = [];
     settled.forEach((r, i) => {
       if (r.status === 'fulfilled') ok.push(targets[i]);
       else failed.push({ p: targets[i], err: r.reason });
     });
-    setBulkRunning(false);
-    setBulkAction(null);
     if (failed.length === 0) {
-      clearSelection();
       toast.success(
         `${capitalize(verbs[action])}d ${ok.length} provider${ok.length === 1 ? '' : 's'}`,
       );
-      reload();
     } else if (ok.length > 0) {
-      // Partial — drop the OK rows from the selection so retry targets the failures only.
-      const failedIds = new Set(failed.map((f) => f.p.id));
-      setSelectedIds((s) => {
-        const next = new Set();
-        for (const id of s) if (failedIds.has(id)) next.add(id);
-        return next;
-      });
       toast.error(
         `${verbs[action]}d ${ok.length}, ${failed.length} failed: ${failed[0].err?.message || 'unknown error'}` +
           (failed.length > 1 ? ` (+${failed.length - 1} more)` : ''),
         { duration: 7000 },
       );
-      reload();
     } else {
       toast.error(
         `All ${failed.length} ${verbs[action]} calls failed: ${failed[0].err?.message || 'unknown error'}`,
         { duration: 7000 },
       );
+      // Bubble up so Table.jsx can re-enable the toolbar (runBulk's
+      // `setBulkRunning(false)` runs in `finally` regardless).
+      throw failed[0].err;
     }
-  };
+    // Reload after the action settles so the table reflects server truth
+    // (the garbage-collect effect inside Table drops stale selection IDs).
+    reload();
+  }, [toast, reload]);
 
   return (
-    <>
+    <div className="main">
       <div className="main__header">
         <div>
           <h1 className="main__title">Upstream Providers</h1>
@@ -340,215 +186,20 @@ export default function UpstreamProvidersPage() {
         </div>
       </div>
 
-      <div className="row gap-sm" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
-        <Stat label="Total" value={counts.total} active={!hasFilters} onClick={() => { setTypeFilter(''); setSearch(''); }} />
-        <Stat
-          label="API Keys"
-          value={counts.apiKeys}
-          active={typeFilter === 'api' || (!!typeFilter && !isOAuth(typeFilter) && typeFilter !== 'oauth')}
-          onClick={() => setTypeFilter(typeFilter === 'api' ? '' : 'api')}
-        />
-        <Stat
-          label="OAuth"
-          value={counts.oauth}
-          active={typeFilter === 'oauth' || isOAuth(typeFilter)}
-          onClick={() => setTypeFilter(typeFilter === 'oauth' ? '' : 'oauth')}
-        />
-        {counts.disabled > 0 && (
-          <Stat label="Disabled" value={counts.disabled} dim
-            onClick={() => { setSearch('disabled'); }} />
-        )}
-        {oauthByChannel.size > 0 && (
-          <div className="row gap-sm" style={{ marginLeft: 'auto', flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em' }}>OAuth channels</span>
-            {[...oauthByChannel.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([ch, n]) => (
-              <button
-                key={ch}
-                className={`filter-chip${typeFilter === `oauth:${ch}` ? ' filter-chip--active' : ''}`}
-                onClick={() => setTypeFilter(typeFilter === `oauth:${ch}` ? '' : `oauth:${ch}`)}
-                title={`Filter to oauth:${ch}`}
-                style={typeFilter === `oauth:${ch}` ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}
-              >
-                {ch}<span className="dim">×{n}</span>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="card">
-        <div className="catalog-toolbar">
-          <input
-            className="search-input"
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by name, type, email, base URL…"
-            aria-label="Search upstream providers"
-          />
-          <select
-            className="search-input"
-            value={typeFilter}
-            onChange={(e) => setTypeFilter(e.target.value)}
-            aria-label="Filter by provider type"
-            style={{ maxWidth: 220 }}
-          >
-            <option value="">All provider types</option>
-            <optgroup label="API Key">{API_KEY_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</optgroup>
-            <optgroup label="OAuth / File-backed">{OAUTH_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</optgroup>
-          </select>
-          {hasFilters && (
-            <button
-              className="ghost"
-              onClick={() => { setSearch(''); setTypeFilter(''); }}
-              aria-label="Clear all filters"
-              title="Clear filters"
-            >
-              Clear filters
-            </button>
-          )}
-          <span className="catalog-toolbar__spacer" />
-          <span className="catalog-toolbar__count dim" style={{ fontSize: 11 }}>
-            {totalFiltered === providers.length
-              ? `${providers.length} provider${providers.length === 1 ? '' : 's'}`
-              : `${totalFiltered} of ${providers.length}`}
-          </span>
-        </div>
-
-        {loading ? (
-          <Spinner label="Loading upstream providers…" />
-        ) : error ? (
-          <ErrorBanner error={error} onRetry={reload} />
-        ) : filtered.length === 0 ? (
-          <EmptyState
-            title={hasFilters ? 'No providers match the filters' : 'No upstream providers yet'}
-            hint={hasFilters
-              ? 'Try clearing the search or the type filter.'
-              : 'Get started by creating a new provider or importing an existing OAuth credential.'}
-            actions={hasFilters ? (
-              <button onClick={() => { setSearch(''); setTypeFilter(''); }}>Clear filters</button>
-            ) : (
-              <div className="row gap-sm">
-                <button onClick={() => setImporting(true)}>↓ Import OAuth</button>
-                <button className="primary" onClick={() => navigate('/upstream-providers/new')}>+ New Provider</button>
-              </div>
-            )}
-          />
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th className="col-check">
-                  <input
-                    type="checkbox"
-                    aria-label="Select all on this page"
-                    title={allPagedSelected ? 'Unselect this page' : 'Select this page'}
-                    checked={allPagedSelected}
-                    ref={(el) => { if (el) el.indeterminate = somePagedSelected; }}
-                    onChange={toggleAllPaged}
-                  />
-                </th>
-                <SortHeader k="provider_type">Provider</SortHeader>
-                <SortHeader k="name">Identifier</SortHeader>
-                <SortHeader k="priority">Priority</SortHeader>
-                <SortHeader k="base_url">Base URL</SortHeader>
-                <SortHeader k="disabled">Status</SortHeader>
-                <SortHeader k="model_count">Models</SortHeader>
-                <SortHeader k="updated_at">Updated</SortHeader>
-                <th aria-label="Actions" />
-              </tr>
-            </thead>
-            <tbody>
-              {pagedRows.map((p) => {
-                const ident = p.name || p.label || p.email || p.file_name || '—';
-                const modelCount = (p.models || []).length;
-                const isSel = selectedIds.has(p.id);
-                return (
-                  <tr key={p.id}
-                    className={`clickable-row${isSel ? ' row--selected' : ''}`}
-                    onClick={() => navigate(`/upstream-providers/${encodeURIComponent(p.id)}`)}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    <td className="col-check" onClick={(e) => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        aria-label={`Select ${ident}`}
-                        checked={isSel}
-                        onChange={() => toggleRowSelected(p.id)}
-                      />
-                    </td>
-                    <td>
-                      <div className="cell-stack">
-                        <span className="cell-stack__main">{TYPE_LABEL[p.provider_type] || p.provider_type}</span>
-                        <span className="badge badge--muted" style={{ fontSize: 10 }}>
-                          {isOAuth(p.provider_type) ? 'oauth' : 'api-key'}
-                        </span>
-                      </div>
-                    </td>
-                    <td>
-                      <div className="cell-stack">
-                        <span className="cell-stack__main">{ident}</span>
-                        {p.email && p.email !== ident && (
-                          <span className="dim" style={{ fontSize: 11 }}>{p.email}</span>
-                        )}
-                      </div>
-                    </td>
-                    <td>
-                      {p.priority > 0 ? (
-                        <span className="badge badge--muted">{p.priority}</span>
-                      ) : (
-                        <span className="dim">0</span>
-                      )}
-                    </td>
-                    <td className="truncate-cell" title={p.base_url || ''}>{p.base_url || <span className="dim">—</span>}</td>
-                    <td>
-                      <span className={`badge ${p.disabled ? 'badge--disabled' : 'badge--active'}`}>
-                        {p.disabled ? 'disabled' : 'active'}
-                      </span>
-                    </td>
-                    <td>{modelCount > 0 ? modelCount : <span className="dim">0</span>}</td>
-                    <td className="dim" title={p.updated_at ? formatTime(p.updated_at) : ''}>
-                      {p.updated_at ? formatRelativeTime(p.updated_at) : '—'}
-                    </td>
-                    <td>
-                      <div className="row gap-sm" style={{ justifyContent: 'flex-end' }}>
-                        <button className="btn-icon" title="Edit" aria-label="Edit provider"
-                          onClick={(e) => { e.stopPropagation(); navigate(`/upstream-providers/${encodeURIComponent(p.id)}`); }}>✎</button>
-                        <button className="btn-icon" title="Delete" aria-label="Delete provider"
-                          onClick={(e) => { e.stopPropagation(); setConfirmDelete(p); }}>✕</button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-        {selectedCount > 0 && !loading && !error && totalFiltered > 0 && (
-          <BulkActionBar
-            count={selectedCount}
-            total={totalFiltered}
-            selected={selectedProviders}
-            running={bulkRunning}
-            onEnable={() => runBulk('enable')}
-            onDisable={() => runBulk('disable')}
-            onDelete={() => setConfirmBulkDelete(selectedProviders)}
-            onClear={clearSelection}
-          />
-        )}
-        {!loading && !error && totalFiltered > 0 && (
-          <PaginationBar
-            page={safePage}
-            totalPages={totalPages}
-            pageSize={pageSize}
-            pageStart={pageStart}
-            pageEnd={pageEnd}
-            total={totalFiltered}
-            onPageChange={setPage}
-            onPageSizeChange={(n) => { setPageSize(n); setPage(1); }}
-          />
-        )}
-      </div>
+      <Table
+        providers={providers}
+        liveStatus={liveStatus}
+        refreshing={refreshing}
+        loading={loading}
+        error={error}
+        onRetry={reload}
+        onRefreshHealth={refreshHealth}
+        onRefresh={reload}
+        onCreate={() => navigate('/upstream-providers/new')}
+        onEdit={(p) => navigate(`/upstream-providers/${encodeURIComponent(p.id)}`)}
+        onDelete={handleDelete}
+        onBulkAction={handleBulkAction}
+      />
 
       {importing && (
         <ImportOAuthProviderModal
@@ -563,639 +214,7 @@ export default function UpstreamProvidersPage() {
         />
       )}
 
-      {confirmDelete && (
-        <Modal title="Delete upstream provider?" size="sm"
-          onClose={() => setConfirmDelete(null)}
-          footer={<>
-            <button onClick={() => setConfirmDelete(null)}>Cancel</button>
-            <button className="danger" onClick={() => handleDelete(confirmDelete)}>Delete</button>
-          </>}
-        >
-          <p>
-            Permanently delete{' '}
-            <strong>{TYPE_LABEL[confirmDelete.provider_type] || confirmDelete.provider_type}</strong>
-            {' ('}{confirmDelete.name || confirmDelete.label || confirmDelete.file_name}{')'}?
-            Config.yaml and auth-dir artifacts will be re-rendered and the in-memory
-            clients reloaded.
-          </p>
-        </Modal>
-      )}
-
-      {confirmBulkDelete && (
-        <BulkDeleteConfirmModal
-          targets={confirmBulkDelete}
-          running={bulkRunning}
-          onCancel={() => setConfirmBulkDelete(null)}
-          onConfirm={async () => {
-            const ids = new Set(confirmBulkDelete.map((p) => p.id));
-            setConfirmBulkDelete(null);
-            await runBulk('delete');
-            // runBulk already cleared/updated selection + reloaded; ids is no
-            // longer needed but kept here for symmetry with future flows.
-            void ids;
-          }}
-        />
-      )}
-
-      <GlobalOAuthModelAliasCard />
-    </>
-  );
-}
-
-// Clickable stat tile. When onClick is provided the tile is rendered as a
-// button so the operator can pivot the filter with one click (e.g. "OAuth"
-// click sets the type filter to any oauth:* type). `active` highlights the
-// current filter state. `dim` mutes the value for non-primary metrics like
-// "Disabled" so they read as context rather than a call to action.
-function Stat({ label, value, onClick, active = false, dim = false }) {
-  const content = (
-    <>
-      <div className="stat__label">{label}</div>
-      <div className="stat__value" style={dim ? { color: 'var(--text-muted)' } : undefined}>{value}</div>
-    </>
-  );
-  if (onClick) {
-    return (
-      <button
-        type="button"
-        className="stat"
-        onClick={onClick}
-        aria-pressed={active}
-        title={active ? `Click to clear "${label}" filter` : `Click to filter to "${label}"`}
-        style={{
-          textAlign: 'left',
-          cursor: 'pointer',
-          background: active ? 'var(--accent-dim)' : 'var(--bg-elevated)',
-          border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-          borderRadius: 'var(--radius-sm)',
-          padding: '10px 14px',
-          color: active ? 'var(--accent)' : 'inherit',
-          transition: 'all 0.12s ease',
-        }}
-      >
-        {content}
-      </button>
-    );
-  }
-  return <div className="stat">{content}</div>;
-}
-
-// PaginationBar — compact footer rendered under the table. Shows the visible
-// row range, total count, current page, and a first/prev/next/last page
-// navigator. Page-size selector uses common values (10/25/50/100). When the
-// total fits on one page the prev/next buttons are disabled; the row-range
-// text + page size still render so the operator sees the absolute total.
-function PaginationBar({ page, totalPages, pageSize, pageStart, pageEnd, total, onPageChange, onPageSizeChange }) {
-  const canPrev = page > 1;
-  const canNext = page < totalPages;
-  return (
-    <div className="pagination-bar" role="navigation" aria-label="Table pagination">
-      <div className="dim" style={{ fontSize: 11 }}>
-        {total === 0
-          ? '0 results'
-          : <>Showing <strong>{pageStart}</strong>–<strong>{pageEnd}</strong> of <strong>{total}</strong></>}
-      </div>
-      <div className="row gap-sm" style={{ alignItems: 'center' }}>
-        <label className="row gap-sm" style={{ alignItems: 'center', fontSize: 11, color: 'var(--text-muted)' }}>
-          Rows
-          <select
-            value={pageSize}
-            onChange={(e) => onPageSizeChange(Number(e.target.value))}
-            aria-label="Rows per page"
-            style={{ width: 'auto', padding: '4px 8px', fontSize: 12 }}
-          >
-            {[10, 25, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-        </label>
-        <div className="row gap-sm" style={{ alignItems: 'center' }}>
-          <button
-            className="ghost"
-            disabled={!canPrev}
-            onClick={() => onPageChange(1)}
-            aria-label="First page"
-            title="First page"
-          >«</button>
-          <button
-            className="ghost"
-            disabled={!canPrev}
-            onClick={() => onPageChange(page - 1)}
-            aria-label="Previous page"
-            title="Previous page"
-          >‹ Prev</button>
-          <span className="dim" style={{ fontSize: 11, minWidth: 60, textAlign: 'center' }}>
-            Page <strong style={{ color: 'var(--text)' }}>{page}</strong> / {totalPages}
-          </span>
-          <button
-            className="ghost"
-            disabled={!canNext}
-            onClick={() => onPageChange(page + 1)}
-            aria-label="Next page"
-            title="Next page"
-          >Next ›</button>
-          <button
-            className="ghost"
-            disabled={!canNext}
-            onClick={() => onPageChange(totalPages)}
-            aria-label="Last page"
-            title="Last page"
-          >»</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// BulkActionBar — appears under the table when one or more rows are
-// selected. Shows the live selection count and three destructive / state
-// actions. Enable/Disable fire immediately (mirrors single-row toggle
-// semantics — no confirmation step), Delete opens a separate confirm modal
-// via the parent because it cannot be undone.
-function BulkActionBar({ count, total, selected, running, onEnable, onDisable, onDelete, onClear }) {
-  const all = count === total;
-  // Breakdown of selection by provider_type for the operator's situational
-  // awareness — surfaces what category of credentials they're about to
-  // affect without forcing them to scroll the table.
-  const byType = useMemo(() => {
-    const m = new Map();
-    for (const p of selected) {
-      const k = p.provider_type || 'unknown';
-      m.set(k, (m.get(k) || 0) + 1);
-    }
-    return [...m.entries()].sort((a, b) => b[1] - a[1]);
-  }, [selected]);
-  return (
-    <div className="bulk-action-bar" role="region" aria-label="Bulk actions">
-      <div className="bulk-action-bar__count">
-        <strong>{count}</strong> selected{all ? '' : <> of <strong>{total}</strong></>}
-      </div>
-      <div className="bulk-action-bar__breakdown">
-        {byType.map(([k, n]) => (
-          <span key={k} className="filter-chip" title={`${n} ${k}`}>
-            {k}<span className="dim">×{n}</span>
-          </span>
-        ))}
-      </div>
-      <div className="bulk-action-bar__actions">
-        <button onClick={onEnable} disabled={running} title="Enable selected">✓ Enable</button>
-        <button onClick={onDisable} disabled={running} title="Disable selected">⊘ Disable</button>
-        <button className="danger" onClick={onDelete} disabled={running} title="Delete selected (irreversible)">✕ Delete</button>
-        <button className="ghost" onClick={onClear} disabled={running} title="Clear selection">Clear</button>
-      </div>
-    </div>
-  );
-}
-
-// BulkDeleteConfirmModal — destructive-confirm pattern for the bulk delete
-// path. Shows a count, breakdown by provider_type, and a list of identifiers
-// (capped to 12 rows, with a "+N more" suffix) so the operator can confirm
-// the exact set they're about to nuke. Config.yaml / auth-dir re-render
-// warning is repeated here (mirrors the single-row confirm) because the
-// bulk path doesn't go through the single-row modal first.
-function BulkDeleteConfirmModal({ targets, running, onCancel, onConfirm }) {
-  const maxRows = 12;
-  const shown = targets.slice(0, maxRows);
-  const more = targets.length - shown.length;
-  return (
-    <Modal
-      title={`Delete ${targets.length} upstream provider${targets.length === 1 ? '' : 's'}?`}
-      size="md"
-      onClose={running ? () => {} : onCancel}
-      footer={<>
-        <button onClick={onCancel} disabled={running}>Cancel</button>
-        <button className="danger" onClick={onConfirm} disabled={running}>
-          {running ? 'Deleting…' : `Delete ${targets.length}`}
-        </button>
-      </>}
-    >
-      <p style={{ marginBottom: 12 }}>
-        This action <strong>cannot be undone</strong>. The selected providers
-        will be removed and <code>config.yaml</code> + auth-dir artifacts will
-        be re-rendered. In-memory clients are reloaded automatically.
-      </p>
-      <ul className="bulk-confirm__list">
-        {shown.map((p) => (
-          <li key={p.id}>
-            <code className="bulk-confirm__type">{p.provider_type}</code>
-            <span className="bulk-confirm__ident">
-              {p.name || p.label || p.email || p.file_name || `id:${p.id}`}
-            </span>
-          </li>
-        ))}
-        {more > 0 && <li className="dim">…and {more} more</li>}
-      </ul>
-    </Modal>
-  );
-}
-
-// ============================================================================
-// Global oauth-model-alias editor (config.yaml block)
-// ============================================================================
-
-// Channels the global oauth-model-alias config block supports. The backend
-// sanitizer accepts arbitrary lowercased keys, but the runtime only honors
-// these documented channels.
-const OAUTH_ALIAS_CHANNELS = [
-  { value: 'claude', label: 'Claude' },
-  { value: 'codex', label: 'Codex' },
-  { value: 'kimi', label: 'Kimi' },
-  { value: 'xai', label: 'xAI' },
-  { value: 'vertex', label: 'Vertex' },
-  { value: 'aistudio', label: 'AI Studio' },
-  { value: 'antigravity', label: 'Antigravity' },
-];
-
-// Normalizes a fetched global alias map into a stable shape the editor uses.
-// API returns { "oauth-model-alias": { <channel>: [{name,alias,fork,display-name,force-mapping}] } }.
-function normalizeAliasMap(raw) {
-  const map = (raw && raw['oauth-model-alias']) || {};
-  const out = {};
-  Object.entries(map).forEach(([channel, aliases]) => {
-    out[String(channel).toLowerCase()] = (Array.isArray(aliases) ? aliases : []).map((a) => ({
-      'name': a.name || '',
-      'alias': a.alias || '',
-      'fork': !!a.fork,
-      'display-name': a['display-name'] || a.displayName || '',
-      'force-mapping': !!a['force-mapping'] || !!a.forceMapping,
-    }));
-  });
-  return out;
-}
-
-// Serializes an editor channel's rows back into the API's kebab-case shape
-// (dropping empty rows so the global map stays clean).
-function serializeAliasRows(rows) {
-  return (rows || [])
-    .filter((r) => r && (r.name || r.alias))
-    .map((r) => {
-      const entry = {
-        name: (r.name || '').trim(),
-        alias: (r.alias || '').trim(),
-      };
-      if (r['display-name']) entry['display-name'] = (r['display-name'] || '').trim();
-      if (r['fork']) entry['fork'] = true;
-      if (r['force-mapping']) entry['force-mapping'] = true;
-      return entry;
-    });
-}
-
-function GlobalOAuthModelAliasCard() {
-  const toast = useToast();
-  const [channels, setChannels] = useState({});
-  const [loading, setLoading] = useState(true);
-  const [savingChannel, setSavingChannel] = useState('');
-  const [error, setError] = useState('');
-  // Tracks channels that were just added by the operator (not loaded from the
-  // server). These mount expanded so the empty editor is immediately visible,
-  // while all other channels default to collapsed for a scannable list.
-  const newlyAddedRef = useRef(new Set());
-
-  const reload = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const payload = await getOAuthModelAlias();
-      setChannels(normalizeAliasMap(payload));
-    } catch (err) {
-      setError(err.message || 'Failed to load global aliases');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { reload(); }, [reload]);
-
-  const updateRows = (channel, rows) => {
-    setChannels((prev) => ({ ...prev, [channel]: rows }));
-  };
-
-  const addChannel = () => {
-    // Find the first channel not yet present in the map and seed it with an
-    // empty row so the editor reveals its rows immediately.
-    const next = OAUTH_ALIAS_CHANNELS.find((c) => !channels[c.value]);
-    if (!next) return;
-    newlyAddedRef.current.add(next.value);
-    setChannels((prev) => ({ ...prev, [next.value]: [{ name: '', alias: '' }] }));
-  };
-
-  const saveChannel = async (channel) => {
-    setSavingChannel(channel);
-    try {
-      const aliases = serializeAliasRows(channels[channel] || []);
-      await patchOAuthModelAlias(channel, aliases);
-      toast.success(`Saved global aliases for ${channel}`);
-      // Reload to pick up the server-sanitized view (empty channels are deleted).
-      await reload();
-    } catch (err) {
-      toast.error(err.message || `Failed to save ${channel}`);
-    } finally {
-      setSavingChannel('');
-    }
-  };
-
-  const removeChannel = async (channel) => {
-    setSavingChannel(channel);
-    try {
-      await deleteOAuthModelAlias(channel);
-      setChannels((prev) => {
-        const next = { ...prev };
-        delete next[channel];
-        return next;
-      });
-      toast.success(`Removed ${channel} from global aliases`);
-    } catch (err) {
-      if (String(err.status) === '404') {
-        // Already gone — drop locally.
-        setChannels((prev) => {
-          const next = { ...prev };
-          delete next[channel];
-          return next;
-        });
-      } else {
-        toast.error(err.message || `Failed to remove ${channel}`);
-      }
-    } finally {
-      setSavingChannel('');
-    }
-  };
-
-  const presentChannels = Object.keys(channels).sort();
-  const remainingAddable = OAUTH_ALIAS_CHANNELS.filter((c) => !channels[c.value]);
-  const channelLabel = (c) => OAUTH_ALIAS_CHANNELS.find((x) => x.value === c)?.label || c;
-
-  return (
-    <div className="card" style={{ marginTop: 16 }}>
-      <div className="main__header" style={{ marginBottom: 8 }}>
-        <div>
-          <h2 className="main__title" style={{ fontSize: 18 }}>Global OAuth Model Aliases</h2>
-          <div className="main__subtitle">
-            Per-channel model alias mappings written to the top-level{' '}
-            <code>oauth-model-alias</code> block in <code>config.yaml</code>.
-            These apply to every OAuth/file-backed account of that channel as a
-            fallback; per-account aliases (edited above) override these.
-          </div>
-        </div>
-        <div className="row gap-sm">
-          <button onClick={reload} disabled={loading}>Refresh</button>
-        </div>
-      </div>
-
-      {loading ? (
-        <Spinner label="Loading global aliases…" />
-      ) : error ? (
-        <ErrorBanner error={error} onRetry={reload} />
-      ) : (
-        <>
-          {presentChannels.length === 0 && remainingAddable.length === 0 && (
-            <EmptyState title="No channels"
-              hint="All defined channels are configured (or none are applicable)." />
-          )}
-          {presentChannels.length === 0 && remainingAddable.length > 0 && (
-            <EmptyState title="No global aliases yet"
-              hint="Add a channel to start mapping client aliases to OAuth upstream models." />
-          )}
-
-          {presentChannels.map((channel) => {
-            const isNew = newlyAddedRef.current.has(channel);
-            // Consume the "newly added" flag after first render so a later
-            // reload re-collapses the channel (matching loaded-channel behavior).
-            if (isNew) {
-              queueMicrotask(() => { newlyAddedRef.current.delete(channel); });
-            }
-            return (
-              <ChannelAliasEditor
-                key={channel}
-                channel={channel}
-                label={channelLabel(channel)}
-                rows={channels[channel] || []}
-                onChange={(rows) => updateRows(channel, rows)}
-                onSave={() => saveChannel(channel)}
-                onRemove={() => removeChannel(channel)}
-                saving={savingChannel === channel}
-                initiallyExpanded={isNew}
-              />
-            );
-          })}
-
-          {remainingAddable.length > 0 && (
-            <div className="row gap-sm" style={{ marginTop: 12 }}>
-              <label style={{ fontSize: 12 }} className="dim">Add channel:</label>
-              <select
-                id="oauth_alias_add_channel"
-                defaultValue=""
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (!v) return;
-                  newlyAddedRef.current.add(v);
-                  setChannels((prev) => ({ ...prev, [v]: [{ name: '', alias: '' }] }));
-                  e.target.value = '';
-                }}
-                aria-label="Add OAuth alias channel"
-              >
-                <option value="">Select a channel…</option>
-                {remainingAddable.map((c) => (
-                  <option key={c.value} value={c.value}>{c.label}</option>
-                ))}
-              </select>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function ChannelAliasEditor({ channel, label, rows, onChange, onSave, onRemove, saving, initiallyExpanded = false }) {
-  const [confirmRemove, setConfirmRemove] = useState(false);
-  const [modelOptions, setModelOptions] = useState([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState('');
-  // Channels default to collapsed so a long channel list stays scannable. Only
-  // channels the operator just added (initiallyExpanded=true) start open so
-  // the empty editor is immediately visible and ready to edit.
-  const [collapsed, setCollapsed] = useState(!initiallyExpanded);
-
-  // Fetch the static default model catalog for this OAuth channel once.
-  // These IDs populate the "upstream model" dropdown alongside the free-text
-  // input, so the operator can either pick a known model or type a custom one
-  // (e.g. an internal/off-catalog id).
-  useEffect(() => {
-    let cancelled = false;
-    setModelsError('');
-    if (!channel) return;
-    setModelsLoading(true);
-    getModelDefinitions(channel)
-      .then((payload) => {
-        if (cancelled) return;
-        const models = (payload && payload.models) || [];
-        setModelOptions(models.map((m) => ({
-          id: m.id || '',
-          display: m.display_name || m.id || m.name || '',
-        })).filter((m) => m.id));
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setModelsError(err.message || 'Failed to load default models');
-      })
-      .finally(() => { if (!cancelled) setModelsLoading(false); });
-    return () => { cancelled = true; };
-  }, [channel]);
-
-  const update = (idx, patch) => {
-    const next = rows.map((r, i) => (i === idx ? { ...r, ...patch } : r));
-    onChange(next);
-  };
-  const addRow = () => onChange([...(rows || []), { name: '', alias: '' }]);
-  const removeRow = (idx) => {
-    if ((rows || []).length <= 1) {
-      onChange([{ name: '', alias: '' }]);
-      return;
-    }
-    onChange(rows.filter((_, i) => i !== idx));
-  };
-  const autoAddOnLastRow = (idx) => {
-    if (idx === (rows || []).length - 1 && (rows[idx].name || rows[idx].alias)) {
-      addRow();
-    }
-  };
-
-  const aliasCount = (rows || []).filter((r) => r && (r.name || r.alias)).length;
-
-  return (
-    <div
-      className="list-editor"
-      style={{
-        marginBottom: 16,
-        paddingTop: 10,
-        paddingBottom: collapsed ? 10 : 12,
-        borderBottom: '1px solid var(--border)',
-      }}
-    >
-      <div className="row gap-sm" style={{ justifyContent: 'space-between', marginBottom: collapsed ? 0 : 8, alignItems: 'center' }}>
-        <button
-          type="button"
-          className="row gap-sm"
-          onClick={() => setCollapsed((v) => !v)}
-          aria-label={collapsed ? 'Expand channel' : 'Collapse channel'}
-          aria-expanded={!collapsed}
-          title={collapsed ? 'Expand' : 'Collapse'}
-          style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', alignItems: 'center', color: 'inherit' }}
-        >
-          <span style={{ display: 'inline-block', transition: 'transform 0.15s', transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)', fontSize: 12 }} aria-hidden="true">▼</span>
-          <span className="cell-stack">
-            <span className="cell-stack__main" style={{ fontWeight: 600 }}>{label}</span>
-            <span className="badge badge--muted" style={{ fontSize: 10 }}>{channel}</span>
-          </span>
-          <span className="dim" style={{ fontSize: 11 }}>
-            {aliasCount === 0 ? 'no aliases' : `${aliasCount} alias${aliasCount === 1 ? '' : 'es'}`}
-          </span>
-        </button>
-        <div className="row gap-sm">
-          <button onClick={onSave} disabled={saving}>Save</button>
-          {confirmRemove ? (
-            <>
-              <button onClick={() => setConfirmRemove(false)}>Cancel</button>
-              <button className="danger" onClick={onRemove} disabled={saving}>Confirm delete</button>
-            </>
-          ) : (
-            <button onClick={() => setConfirmRemove(true)} disabled={saving}>Remove channel</button>
-          )}
-        </div>
-      </div>
-
-      {!collapsed && (
-        <>
-          {modelsError && (
-            <div className="dim" style={{ fontSize: 11, marginBottom: 6 }}>
-              Default models unavailable: {modelsError}. You can still type a model id manually.
-            </div>
-          )}
-          {modelsLoading && (
-            <div className="dim" style={{ fontSize: 11, marginBottom: 6 }}>Loading default models…</div>
-          )}
-
-          {(rows || []).length === 0 && (
-            <div className="list-editor__empty">No aliases. Click “Add alias”.</div>
-          )}
-          {(rows || []).map((row, idx) => (
-            <div key={idx} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div className="list-editor__row">
-                {/* Mixed input: free text + dropdown of the channel's default models. */}
-                <input
-                  list={`oauth_alias_models_${channel}`}
-                  type="text"
-                  value={row.name || ''}
-                  onChange={(e) => update(idx, { name: e.target.value })}
-                  onBlur={() => autoAddOnLastRow(idx)}
-                  placeholder="upstream model (e.g. gpt-5.3-codex-spark)"
-                  spellCheck={false}
-                  aria-label="Upstream model"
-                  style={{ flex: 1 }}
-                />
-                <datalist id={`oauth_alias_models_${channel}`}>
-                  {modelOptions.map((m) => (
-                    <option key={m.id} value={m.id}>{m.display !== m.id ? m.display : ''}</option>
-                  ))}
-                </datalist>
-                <input
-                  type="text"
-                  value={row.alias || ''}
-                  onChange={(e) => update(idx, { alias: e.target.value })}
-                  onBlur={() => autoAddOnLastRow(idx)}
-                  placeholder="client alias (e.g. gpt-5.5)"
-                  spellCheck={false}
-                  aria-label="Client alias"
-                  style={{ flex: 1 }}
-                />
-                <button
-                  type="button"
-                  className="list-editor__remove"
-                  onClick={() => removeRow(idx)}
-                  aria-label="Remove alias"
-                  title="Remove"
-                >
-                  ×
-                </button>
-              </div>
-              <div className="list-editor__row" style={{ paddingLeft: 0 }}>
-                <input
-                  type="text"
-                  value={row['display-name'] || ''}
-                  onChange={(e) => update(idx, { 'display-name': e.target.value })}
-                  placeholder="display name (optional)"
-                  spellCheck={false}
-                  aria-label="Display name"
-                  style={{ flex: 1 }}
-                />
-                <label className="toggle-row" style={{ flex: '0 0 auto', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
-                  <span className="toggle-row__label" style={{ fontSize: 11 }}>fork</span>
-                  <span className="toggle-switch">
-                    <input
-                      type="checkbox"
-                      checked={!!row['fork']}
-                      onChange={(e) => update(idx, { 'fork': e.target.checked })}
-                      aria-label="Fork alias"
-                    />
-                    <span className="toggle-switch__slider" />
-                  </span>
-                </label>
-                <label className="toggle-row" style={{ flex: '0 0 auto', padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
-                  <span className="toggle-row__label" style={{ fontSize: 11 }}>force-mapping</span>
-                  <span className="toggle-switch">
-                    <input
-                      type="checkbox"
-                      checked={!!row['force-mapping']}
-                      onChange={(e) => update(idx, { 'force-mapping': e.target.checked })}
-                      aria-label="Force mapping"
-                    />
-                    <span className="toggle-switch__slider" />
-                  </span>
-                </label>
-              </div>
-            </div>
-          ))}
-          <button type="button" className="list-editor__add" onClick={addRow}>+ Add alias</button>
-        </>
-      )}
+      <AliasesCard />
     </div>
   );
 }
@@ -1431,7 +450,7 @@ function ImportOAuthProviderModal({ existingProviderKeys = new Set(), onClose, o
   // Tab 3: upload files.
   const [uploadResult, setUploadResult] = useState(null); // per-file summary
   const [dropHover, setDropHover] = useState(false);
-  const fileInputRef = useRef(null);
+  const fileInputRef = React.useRef(null);
 
   const existingByFile = useMemo(() => {
     // existingProviderKeys holds "<provider_type>|<file_name>" strings. Surface
@@ -2243,31 +1262,4 @@ function strVal(obj, key) {
   if (typeof v === 'string') return v.trim();
   if (typeof v === 'number') return String(v);
   return '';
-}
-
-function formatTime(iso) {
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '—';
-    return d.toLocaleString();
-  } catch { return '—'; }
-}
-
-// formatRelativeTime returns a compact "5m ago / 2h ago / 3d ago" string for
-// recent timestamps and falls back to a short date for older ones. Operators
-// scanning the table care about "is this fresh" more than the exact time, so
-// the relative form reads more clearly than "1/26/2026, 9:31:42 AM".
-function formatRelativeTime(iso) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  const diffMs = Date.now() - d.getTime();
-  const sec = Math.round(diffMs / 1000);
-  if (sec < 60) return 'just now';
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const day = Math.round(hr / 24);
-  if (day < 30) return `${day}d ago`;
-  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }

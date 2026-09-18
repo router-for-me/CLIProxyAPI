@@ -14,13 +14,13 @@
 // Task 17 wires the parent to use this component.
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Spinner, ErrorBanner, EmptyState, Modal } from '../../components/Primitives.jsx';
 import { useToast } from '../../components/Toast.jsx';
 import { StatusDot } from './components/StatusDot.jsx';
 import { HealthSummary } from './HealthSummary.jsx';
 import { applyFilters, applySort } from './filters.js';
-import { statusFromHealth, cooldownReason, getHealthSummary } from './health.js';
+import { statusFromHealth, cooldownReason, getHealthSummary, HEALTH_STATES } from './health.js';
 import { formatRelativeTime } from '../../utils/formatRelativeTime.js';
 import {
   API_KEY_TYPES,
@@ -58,11 +58,18 @@ export default function UpstreamProvidersTable({
 }) {
   const toast = useToast();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   // Multi-select health filter — empty set = no filter (show all). The
   // HealthSummary's onNavigate(key|null) toggles this set; null clears it.
-  const [healthFilters, setHealthFilters] = useState(() => new Set());
+  // Seeded from the ?health= query param so the HealthPage's "Live" / "Cooldown"
+  // tile click (`/upstream-providers?health=live`) lands on a pre-filtered view.
+  // Unknown values are dropped silently — only HEALTH_STATES keys are honored.
+  const [healthFilters, setHealthFilters] = useState(() => {
+    const key = searchParams.get('health');
+    return key && HEALTH_STATES.includes(key) ? new Set([key]) : new Set();
+  });
   // Table sort: { key, dir } — null = leave server order. Keys map 1:1 to
   // row fields so the sort happens purely client-side over the filtered list.
   const [sort, setSort] = useState({ key: 'updated_at', dir: 'desc' });
