@@ -10,7 +10,11 @@ import (
 
 // EmitWebSocketResponseEvent delivers an upstream WebSocket response frame to any configured observer.
 func EmitWebSocketResponseEvent(ctx context.Context, opts cliproxyexecutor.Options, auth *cliproxyauth.Auth, provider, model string, payload []byte) {
-	if opts.WebSocketResponseObserver == nil || len(payload) == 0 {
+	if len(payload) == 0 {
+		return
+	}
+	ObserveUpstreamResponseBytes(ctx, payload)
+	if opts.WebSocketResponseObserver == nil {
 		return
 	}
 	var authID, authLabel, authType string

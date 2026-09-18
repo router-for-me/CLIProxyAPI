@@ -1,0 +1,26 @@
+format_version: 1
+current: T10
+tasks:
+  T00: { status: completed, commit: 3ad8a0dc3ee3ca925839b9656f19519bfb0dcfce, tests: pass }
+  T01: { status: completed, commit: 9cee4a6abf674fe108664422a1ef7847ccd7f485, tests: pass }
+  T02: { status: completed, commit: e1b65036237fa7e1ee3962ef81c1d7067c85e80e, tests: pass }
+  T03: { status: completed, commit: e7abd6958c810bc30da7f5e833dd979de21c54cc, tests: pass }
+  T04: { status: completed, commit: 9b4f4e672a69bdb2caa621e2eb7ca1f17698a055, tests: pass }
+  T05: { status: completed, commit: ca213271c3744455aeb2a2262babf8b723385163, tests: pass }
+  T06: { status: completed, commit: ff1d1fc6b41f975f33ce0ed230d8d3d42b324ac3, tests: pass }
+  T07: { status: completed, commit: 206607264a0ad52aa43689d11800c762099d3108, tests: pass }
+  T08: { status: completed, commit: 47c6a6c832cf6bd47fc72c9101eafd69fe0057e5, tests: pass }
+  T09: { status: completed, commit: 928d8987b7bfa5daddebd93f1ca927048b159030, tests: pass }
+  T10: { status: pending }
+resources:
+  - "worktree: /Users/maverick/CLIProxyAPI/.worktrees/plan/2026-09-17-01-upstream-response-model —— git -C /Users/maverick/CLIProxyAPI worktree remove .worktrees/plan/2026-09-17-01-upstream-response-model"
+  - "worktree: /Users/maverick/cpa-usage-keeper/.worktrees/plan/2026-09-17-01-upstream-response-model —— git -C /Users/maverick/cpa-usage-keeper worktree remove .worktrees/plan/2026-09-17-01-upstream-response-model"
+notes:
+  - "CPA source: /Users/maverick/CLIProxyAPI branch=main HEAD=3ad8a0dc3ee3ca925839b9656f19519bfb0dcfce; impl: /Users/maverick/CLIProxyAPI/.worktrees/plan/2026-09-17-01-upstream-response-model branch=plan/2026-09-17-01-upstream-response-model created"
+  - "Keeper source: /Users/maverick/cpa-usage-keeper branch=main HEAD=68a9d99596f8d797d0a513a5baa58bfdf855fdf9; impl: /Users/maverick/cpa-usage-keeper/.worktrees/plan/2026-09-17-01-upstream-response-model branch=plan/2026-09-17-01-upstream-response-model created"
+  - "T00 baseline: CPA go test 749 passed; Keeper go test 489 passed; vitest RequestEventsDetailsCardModelAlias 5 passed. worktree web/node_modules installed after ignored-build warning."
+  - "T01 added UpstreamResponseModelFamilyFromContext so helps can read the bound family."
+  - "T03 bind test uses OpenAI-shaped payloads so Claude family binding is observable."
+  - "T04 RequestLog is set via SDKConfig because it is a promoted field."
+  - "T08 i18n getInitialLanguage uses localStorage optional chaining so happy-dom tests can import i18n. Credential virtualization height tests still fail in this worktree (happy-dom/localStorage warning); new mismatch/hide tests passed."
+  - "T09: user compose is official latest (no auths, no new CSV column). Isolated worktree stack 18080/18317/18388 passed mismatch third-line + CSV. T06 migration order test list patched in Keeper d8f97f2."

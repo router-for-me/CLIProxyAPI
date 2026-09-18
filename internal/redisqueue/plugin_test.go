@@ -31,21 +31,22 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
-			Provider:            "openai",
-			ExecutorType:        "KimiExecutor",
-			Model:               "gpt-5.4",
-			Alias:               "client-gpt",
-			APIKey:              "test-key",
-			AuthIndex:           "0",
-			AccessTokenSHA256:   "token-version-hash",
-			AuthType:            "apikey",
-			Source:              "user@example.com",
-			ReasoningEffort:     "medium",
-			ServiceTier:         "auto",
-			ResponseServiceTier: "default",
-			Generate:            coreusage.GenerateFlag(true),
-			RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:             1500 * time.Millisecond,
+			Provider:              "openai",
+			ExecutorType:          "KimiExecutor",
+			Model:                 "gpt-5.4",
+			Alias:                 "client-gpt",
+			APIKey:                "test-key",
+			AuthIndex:             "0",
+			AccessTokenSHA256:     "token-version-hash",
+			AuthType:              "apikey",
+			Source:                "user@example.com",
+			ReasoningEffort:       "medium",
+			ServiceTier:           "auto",
+			ResponseServiceTier:   "default",
+			UpstreamResponseModel: "claude-sonnet-4-6",
+			Generate:              coreusage.GenerateFlag(true),
+			RequestedAt:           time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:               1500 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
@@ -72,6 +73,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "service_tier", "auto")
 		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
+		requireStringField(t, payload, "upstream_response_model", "claude-sonnet-4-6")
 		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
 		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 30)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
@@ -81,6 +83,16 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireBoolField(t, payload, "generate", true)
 		requireBoolField(t, payload, "stream", false)
 		requireFailField(t, payload, http.StatusOK, "")
+	})
+}
+
+func TestUsageQueuePluginOmitsEmptyUpstreamResponseModel(t *testing.T) {
+	withEnabledQueue(t, func() {
+		(&usageQueuePlugin{}).HandleUsage(context.Background(), coreusage.Record{
+			Provider: "openai", Model: "gpt-5.4", ExecutorType: "OpenAIExecutor", AuthType: "apikey",
+		})
+		payload := popSinglePayload(t)
+		requireMissingField(t, payload, "upstream_response_model")
 	})
 }
 
