@@ -946,6 +946,22 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("postgres store: migrate upstream entries proxy_pool_id column: %w", err)
 	}
 
+	// upstream_provider_api_key_entries retry columns. Per-entry overrides
+	// for the routing.retry block in config (zero-downtime design 2026-09-18).
+	// All three are nullable; NULL means "fall back to global config default."
+	// retry_max_attempts SMALLINT (matches RoutingConfig.Retry.MaxAttempts uint16).
+	// retry_max_time_ms / retry_backoff_ms INTEGER (matches uint32 in Go;
+	// PG INTEGER is int4 / ~2.1e9 — far above any sane budget).
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s
+			ADD COLUMN IF NOT EXISTS retry_max_attempts SMALLINT,
+			ADD COLUMN IF NOT EXISTS retry_max_time_ms INTEGER,
+			ADD COLUMN IF NOT EXISTS retry_backoff_ms INTEGER`,
+		upstreamEntriesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream entries retry columns: %w", err)
+	}
+
 	// usage_stat_day is the pre-aggregated daily rollup of usage_events. It folds
 	// per-request rows into per-(day, user, api_key, model, provider, source)
 	// counters so daily aggregate queries (LiteLLM /spend/users, per-model/API-key

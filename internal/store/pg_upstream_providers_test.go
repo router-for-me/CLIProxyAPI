@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+func uint16PtrForRetry(v uint16) *uint16 { return &v }
+func uint32PtrForRetry(v uint32) *uint32 { return &v }
+
 // TestValidateUpstreamProviderEntryNameRules exercises the validation rules for
 // per-entry identity on an OpenAI Compatibility provider. The suite covers the
 // shared helpers (slug syntax, reserved name, case-insensitive duplicates,
@@ -1000,5 +1003,125 @@ func TestUpstreamProviderStoreModelWireFormatRoundTrip(t *testing.T) {
 	}
 	if len(updated.Models) != 1 || (updated.Models[0].WireFormat != "" && updated.Models[0].WireFormat != "openai") {
 		t.Fatalf("Update did not reset WireFormat: %+v", updated.Models)
+	}
+}
+
+// TestUpstreamProviderStoreRetryColumnsRoundTrip pins the per-entry retry
+// override schema: SMALLINT retry_max_attempts + INTEGER retry_max_time_ms +
+// INTEGER retry_backoff_ms on upstream_provider_api_key_entries, all nullable
+// (NULL = fall back to global config). Round-trips through Create/Update/Get
+// and stays distinct from "inherit" (zero test exercises the null path).
+// Mirrors the routing_strategy / priority round-trip test shape.
+func TestUpstreamProviderStoreRetryColumnsRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_entry_retry")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Schema contract: nullable SMALLINT retry_max_attempts + INTEGER
+	// retry_max_time_ms / retry_backoff_ms, no DEFAULT so legacy rows
+	// survive the upgrade with NULL (= inherit).
+	expected := []struct {
+		table, column, wantType, wantNullable string
+	}{
+		{pg.cfg.UpstreamProviderEntriesTable, "retry_max_attempts", "smallint", "YES"},
+		{pg.cfg.UpstreamProviderEntriesTable, "retry_max_time_ms", "integer", "YES"},
+		{pg.cfg.UpstreamProviderEntriesTable, "retry_backoff_ms", "integer", "YES"},
+	}
+	for _, e := range expected {
+		var gotType, gotNullable, gotDefault string
+		if err := pg.DB().QueryRowContext(ctx, `
+			SELECT data_type, is_nullable, COALESCE(column_default, '')
+			FROM information_schema.columns
+			WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
+		`, pg.cfg.Schema, e.table, e.column).Scan(&gotType, &gotNullable, &gotDefault); err != nil {
+			t.Fatalf("query %s.%s column: %v", e.table, e.column, err)
+		}
+		if gotType != e.wantType || gotNullable != e.wantNullable {
+			t.Fatalf("%s.%s = %s/%s, want %s/%s", e.table, e.column, gotType, gotNullable, e.wantType, e.wantNullable)
+		}
+		if gotDefault != "" {
+			t.Fatalf("%s.%s default = %q, want empty (NULL default so 'inherit' survives)", e.table, e.column, gotDefault)
+		}
+	}
+
+	maxAttempts := uint16(5)
+	maxTime := uint32(8000)
+	backoff := uint32(300)
+
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType: "openai-compatibility",
+		Name:         "retry-rt",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "retry-secret-a", Name: "alpha", RetryMaxAttempts: uint16PtrForRetry(maxAttempts), RetryMaxTimeMS: uint32PtrForRetry(maxTime), RetryBackoffMS: uint32PtrForRetry(backoff)},
+			{APIKey: "retry-secret-b", Name: "beta"}, // nil retry fields = inherit
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatal("Create returned zero provider ID")
+	}
+	firstID := created.APIKeyEntries[0].ID
+
+	loaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(loaded.APIKeyEntries) != 2 {
+		t.Fatalf("Get returned %d entries, want 2", len(loaded.APIKeyEntries))
+	}
+
+	// alpha: round-trip with all three retry fields populated.
+	if loaded.APIKeyEntries[0].RetryMaxAttempts == nil || *loaded.APIKeyEntries[0].RetryMaxAttempts != maxAttempts {
+		t.Fatalf("entry 0 RetryMaxAttempts = %#v, want pointer to %d", loaded.APIKeyEntries[0].RetryMaxAttempts, maxAttempts)
+	}
+	if loaded.APIKeyEntries[0].RetryMaxTimeMS == nil || *loaded.APIKeyEntries[0].RetryMaxTimeMS != maxTime {
+		t.Fatalf("entry 0 RetryMaxTimeMS = %#v, want pointer to %d", loaded.APIKeyEntries[0].RetryMaxTimeMS, maxTime)
+	}
+	if loaded.APIKeyEntries[0].RetryBackoffMS == nil || *loaded.APIKeyEntries[0].RetryBackoffMS != backoff {
+		t.Fatalf("entry 0 RetryBackoffMS = %#v, want pointer to %d", loaded.APIKeyEntries[0].RetryBackoffMS, backoff)
+	}
+
+	// beta: nil retry fields must round-trip as nil ("fall back to global").
+	if loaded.APIKeyEntries[1].RetryMaxAttempts != nil {
+		t.Fatalf("entry 1 RetryMaxAttempts = %#v, want nil (inherit)", loaded.APIKeyEntries[1].RetryMaxAttempts)
+	}
+	if loaded.APIKeyEntries[1].RetryMaxTimeMS != nil {
+		t.Fatalf("entry 1 RetryMaxTimeMS = %#v, want nil (inherit)", loaded.APIKeyEntries[1].RetryMaxTimeMS)
+	}
+	if loaded.APIKeyEntries[1].RetryBackoffMS != nil {
+		t.Fatalf("entry 1 RetryBackoffMS = %#v, want nil (inherit)", loaded.APIKeyEntries[1].RetryBackoffMS)
+	}
+
+	// Clearing the retry fields back to nil must round-trip; explicit 0
+	// stays distinct from "inherit" (just like the priority column).
+	zeroAttempts := uint16(0)
+	updated, err := src.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "openai-compatibility",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: firstID, APIKey: "retry-secret-a", Name: "alpha", RetryMaxAttempts: uint16PtrForRetry(zeroAttempts)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if updated.APIKeyEntries[0].RetryMaxAttempts == nil || *updated.APIKeyEntries[0].RetryMaxAttempts != 0 {
+		t.Fatalf("explicit 0 should round-trip as pointer-to-0, got %#v", updated.APIKeyEntries[0].RetryMaxAttempts)
+	}
+	reloaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after Update: %v", err)
+	}
+	if reloaded.APIKeyEntries[0].RetryMaxAttempts == nil || *reloaded.APIKeyEntries[0].RetryMaxAttempts != 0 {
+		t.Fatalf("after reload: explicit 0 collapsed to nil (inherit) — schema does not distinguish explicit zero from unset")
+	}
+	if reloaded.APIKeyEntries[0].RetryMaxTimeMS != nil || reloaded.APIKeyEntries[0].RetryBackoffMS != nil {
+		t.Fatalf("after reload: cleared retry_max_time_ms/backoff should be nil, got max_time_ms=%#v backoff=%#v", reloaded.APIKeyEntries[0].RetryMaxTimeMS, reloaded.APIKeyEntries[0].RetryBackoffMS)
 	}
 }

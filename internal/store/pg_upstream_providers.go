@@ -135,6 +135,20 @@ type UpstreamProviderAPIKey struct {
 	// into config.yaml. Stored NOT NULL DEFAULT FALSE so legacy rows survive
 	// the column add with unchanged behavior.
 	Disabled bool `json:"disabled,omitempty"`
+
+	// RetryMaxAttempts is the optional per-entry retry attempt cap. nil =
+	// fall back to RoutingConfig.Retry.MaxAttempts global default.
+	// Stored as nullable SMALLINT so "inherit" stays distinct from
+	// explicit zero. uint16 in Go fits SMALLINT (int2) range.
+	RetryMaxAttempts *uint16 `json:"retry_max_attempts,omitempty"`
+	// RetryMaxTimeMS is the optional per-entry retry wall-time budget in
+	// milliseconds. nil = fall back to global default. Stored nullable
+	// INTEGER (int4 in PG; uint32 in Go fits comfortably).
+	RetryMaxTimeMS *uint32 `json:"retry_max_time_ms,omitempty"`
+	// RetryBackoffMS is the optional per-entry inter-attempt backoff base
+	// in milliseconds. nil = fall back to global default. Stored nullable
+	// INTEGER.
+	RetryBackoffMS *uint32 `json:"retry_backoff_ms,omitempty"`
 }
 
 // UpstreamProviderStore is the contract the management API consumes for the
@@ -534,7 +548,7 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 
 	// API-key entries (openai-compatibility only).
 	aRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled
+		SELECT id, provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled, retry_max_attempts, retry_max_time_ms, retry_backoff_ms
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.entries), p.ID)
 	if err != nil {
@@ -543,8 +557,8 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	for aRows.Next() {
 		var e UpstreamProviderAPIKey
 		var entryName, proxyURL sql.NullString
-		var weight, priority, entryPoolID sql.NullInt64
-		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &entryPoolID, &e.SortOrder, &weight, &priority, &e.Disabled); err != nil {
+		var weight, priority, entryPoolID, retryMaxAttempts, retryMaxTimeMS, retryBackoffMS sql.NullInt64
+		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &entryPoolID, &e.SortOrder, &weight, &priority, &e.Disabled, &retryMaxAttempts, &retryMaxTimeMS, &retryBackoffMS); err != nil {
 			aRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider api key entry: %w", err)
 		}
@@ -563,6 +577,9 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 			pr := int(priority.Int64)
 			e.Priority = &pr
 		}
+		e.RetryMaxAttempts = nullableUint16FromScan(retryMaxAttempts)
+		e.RetryMaxTimeMS = nullableUint32FromScan(retryMaxTimeMS)
+		e.RetryBackoffMS = nullableUint32FromScan(retryBackoffMS)
 		p.APIKeyEntries = append(p.APIKeyEntries, e)
 	}
 	aRows.Close()
@@ -723,20 +740,20 @@ func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *s
 		entry.SortOrder = sortOrder
 		if entry.ID == 0 {
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-				INSERT INTO %s (provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+				INSERT INTO %s (provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled, retry_max_attempts, retry_max_time_ms, retry_backoff_ms)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 				RETURNING id
-			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled).Scan(&entry.ID); err != nil {
+			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, nullableUint16(entry.RetryMaxAttempts), nullableUint32(entry.RetryMaxTimeMS), nullableUint32(entry.RetryBackoffMS)).Scan(&entry.ID); err != nil {
 				return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
 			}
 		} else {
 			var persistedID int64
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 				UPDATE %s
-				SET api_key = $1, name = $2, proxy_url = $3, proxy_pool_id = $4, sort_order = $5, weight = $6, priority = $7, disabled = $8
-				WHERE id = $9 AND provider_id = $10
+				SET api_key = $1, name = $2, proxy_url = $3, proxy_pool_id = $4, sort_order = $5, weight = $6, priority = $7, disabled = $8, retry_max_attempts = $9, retry_max_time_ms = $10, retry_backoff_ms = $11
+				WHERE id = $12 AND provider_id = $13
 				RETURNING id
-			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, entry.ID, providerID).Scan(&persistedID); err != nil {
+			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, nullableUint16(entry.RetryMaxAttempts), nullableUint32(entry.RetryMaxTimeMS), nullableUint32(entry.RetryBackoffMS), entry.ID, providerID).Scan(&persistedID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return fmt.Errorf("postgres store: upstream provider api key entry id %d is missing from upstream provider %d", entry.ID, providerID)
 				}
@@ -1041,6 +1058,45 @@ func nullableInt(i *int) any {
 		return nil
 	}
 	return *i
+}
+
+// nullableUint16 mirrors nullableInt but for uint16 (used by the SMALLINT
+// retry_max_attempts column). Returns nil for a nil pointer so the PG
+// driver writes SQL NULL.
+func nullableUint16(i *uint16) any {
+	if i == nil {
+		return nil
+	}
+	return int(*i)
+}
+
+// nullableUint32 mirrors nullableInt but for uint32 (used by the INTEGER
+// retry_max_time_ms / retry_backoff_ms columns).
+func nullableUint32(i *uint32) any {
+	if i == nil {
+		return nil
+	}
+	return int64(*i)
+}
+
+// nullableUint16FromScan reads a SMALLINT column into *uint16, treating
+// sql.NullInt64 NULL as a nil pointer.
+func nullableUint16FromScan(n sql.NullInt64) *uint16 {
+	if !n.Valid {
+		return nil
+	}
+	v := uint16(n.Int64)
+	return &v
+}
+
+// nullableUint32FromScan reads an INTEGER column into *uint32, treating
+// sql.NullInt64 NULL as a nil pointer.
+func nullableUint32FromScan(n sql.NullInt64) *uint32 {
+	if !n.Valid {
+		return nil
+	}
+	v := uint32(n.Int64)
+	return &v
 }
 
 // Compile-time assertion that *pgUpstreamProviderStore implements the contract.
