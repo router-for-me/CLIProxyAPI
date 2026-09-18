@@ -220,3 +220,54 @@ func TestMergeAuthsByID(t *testing.T) {
 		t.Fatalf("merged groups = %v, want %v", got, want)
 	}
 }
+
+// mutatingFallbackSelector stands in for an SDK-provided fallback that writes to the candidates it
+// receives, which the Selector contract permits.
+type mutatingFallbackSelector struct {
+	label string
+}
+
+func (s *mutatingFallbackSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	auths[0].Label = s.label
+	return auths[0], nil
+}
+
+func TestManagerPickNextMixed_CustomAffinityFallbackNeverSeesSchedulerSnapshots(t *testing.T) {
+	ctx := context.Background()
+	const model = "affinity-custom-fallback-model"
+	const authID = "affinity-custom-fallback"
+	registerSchedulerModels(t, "gemini", model, authID)
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &mutatingFallbackSelector{label: "mutated-by-fallback"},
+		TTL:      time.Hour,
+	})
+	t.Cleanup(selector.Stop)
+	manager := NewManager(nil, selector, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
+	if _, errRegister := manager.Register(ctx, &Auth{ID: authID, Provider: "gemini", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+
+	got, _, _, errPick := manager.pickNextMixed(ctx, []string{"gemini"}, model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil || got == nil {
+		t.Fatalf("pickNextMixed() = %v, %v", got, errPick)
+	}
+	if got.Label != "mutated-by-fallback" {
+		t.Fatalf("returned auth label = %q, want the fallback to have run", got.Label)
+	}
+
+	manager.mu.RLock()
+	liveLabel := manager.auths[authID].Label
+	manager.mu.RUnlock()
+	if liveLabel != "" {
+		t.Fatalf("custom fallback mutated the manager auth: label = %q", liveLabel)
+	}
+	manager.scheduler.mu.Lock()
+	defer manager.scheduler.mu.Unlock()
+	if scheduled := manager.scheduler.providers["gemini"].auths[authID]; scheduled.auth.Label != "" {
+		t.Fatalf("custom fallback mutated the scheduler snapshot: label = %q", scheduled.auth.Label)
+	}
+}

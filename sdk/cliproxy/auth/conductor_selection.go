@@ -1596,13 +1596,19 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 
 // schedulerSelection reports whether picks can be served from the scheduler. It also returns the
 // session-affinity selector when that selector must choose among the scheduler's ready auths.
+// Scheduler-owned snapshots are only handed to selectors that are known to treat candidates as
+// read-only, so an affinity selector with a custom fallback keeps the legacy path, which clones
+// every candidate before the selector sees it.
 func (m *Manager) schedulerSelection() (*SessionAffinitySelector, bool) {
 	if m == nil || m.scheduler == nil || m.hasPluginScheduler() {
 		return nil, false
 	}
 	selector := m.Selector()
 	if affinity, ok := selector.(*SessionAffinitySelector); ok {
-		return affinity, true
+		if isBuiltInSelector(affinity.fallback) {
+			return affinity, true
+		}
+		return nil, false
 	}
 	return nil, isBuiltInSelector(selector)
 }
