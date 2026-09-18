@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,4 +212,114 @@ func TestAttemptsExhaustedFiresOnNoCandidates(t *testing.T) {
 	if !sawAttemptsExhausted {
 		t.Fatalf("routing.attempts_exhausted event not recorded; got events=%+v", snap)
 	}
+}
+
+// TestAttemptsExhaustedCarriesLastTriedAuthID closes the spec gap from
+// Task 12's review (commit adcffddb): when the inner retry loop has at
+// least one auth to try and that auth's dispatch fails, the outer loop's
+// routing.attempts_exhausted event must carry that auth's ID. Before the
+// fix, the outer loop cleared lastAuthID on every iteration and the event
+// always recorded AuthID="". This test registers a single auth backed by an
+// executor that always returns 500, drives the retry loop to its
+// give-up path, and asserts the recorded event's AuthID matches the
+// registered auth. The no-candidates test above covers the legitimately
+// empty-AuthID path.
+func TestAttemptsExhaustedCarriesLastTriedAuthID(t *testing.T) {
+	ring := withEventRing(t)
+
+	const (
+		provider = "attempts-exhausted-auth-provider"
+		authID   = "attempts-exhausted-auth"
+		model    = "attempts-exhausted-model"
+	)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	// Single credential, no cross-credential retries, no cooldown so the
+	// outer loop breaks on the first failure. The inner loop's
+	// maxRetryCredentials=1 guard fires after the first attempt, returning
+	// the failing error along with lastAuth = the auth we just dispatched.
+	manager.SetRetryConfig(0, 0, 1)
+	exec := &exhaustionAttemptExecutor{id: provider}
+	manager.RegisterExecutor(exec)
+
+	auth := &Auth{ID: authID, Provider: provider, Status: StatusActive}
+	if _, errReg := manager.Register(context.Background(), auth); errReg != nil {
+		t.Fatalf("Register() error = %v", errReg)
+	}
+
+	_, errExec := manager.Execute(context.Background(), []string{provider},
+		cliproxyexecutor.Request{Model: model},
+		cliproxyexecutor.Options{})
+	if errExec == nil {
+		t.Fatal("Execute should fail when every auth returns 500")
+	}
+
+	snap := ring.Snapshot()
+	var exhaustion *events.Event
+	for i := range snap {
+		if snap[i].Type == "routing.attempts_exhausted" && snap[i].Model == model {
+			exhaustion = &snap[i]
+			break
+		}
+	}
+	if exhaustion == nil {
+		t.Fatalf("routing.attempts_exhausted event not recorded; got events=%+v", snap)
+	}
+	if exhaustion.AuthID != authID {
+		t.Errorf("routing.attempts_exhausted AuthID = %q, want %q (the auth the inner loop actually dispatched)", exhaustion.AuthID, authID)
+	}
+	if exec.Calls() != 1 {
+		t.Errorf("executor was called %d times; want 1 (single credential, max-retry-credentials=1)", exec.Calls())
+	}
+}
+
+// exhaustionAttemptExecutor is a minimal ProviderExecutor that always
+// fails with 500. Used by TestAttemptsExhaustedCarriesLastTriedAuthID to
+// drive the inner retry loop's exhaustion path with a real auth under
+// dispatch — the precondition for populating the events.AuthID field.
+type exhaustionAttemptExecutor struct {
+	id string
+
+	mu    sync.Mutex
+	calls int
+}
+
+func (e *exhaustionAttemptExecutor) Identifier() string { return e.id }
+
+func (e *exhaustionAttemptExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.recordCall()
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusInternalServerError, Message: "synthetic exhaustion failure"}
+}
+
+func (e *exhaustionAttemptExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.recordCall()
+	return nil, &Error{HTTPStatus: http.StatusInternalServerError, Message: "synthetic exhaustion failure"}
+}
+
+func (e *exhaustionAttemptExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *exhaustionAttemptExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return e.Execute(context.Background(), nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
+}
+
+func (e *exhaustionAttemptExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "HttpRequest not implemented"}
+}
+
+func (e *exhaustionAttemptExecutor) recordCall() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+}
+
+func (e *exhaustionAttemptExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
 }
