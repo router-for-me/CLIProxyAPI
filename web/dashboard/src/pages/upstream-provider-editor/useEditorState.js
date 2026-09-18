@@ -41,7 +41,7 @@
 //   liveStatus,            // /v0/management/upstream-providers/live-status (PR 1)
 //   attemptBack(),         // window.confirm guard + navigate('/upstream-providers')
 //   handleOAuthCompleted(authData), // create-mode OAuth callback (merged authData)
-//   prevTypeRef,           // ref used by the provider_type switch effect (advanced)
+//   pickProviderType(value),       // create-mode type-picker (sets type + opencode-go base_url)
 //
 // What lives outside the context (still in the parent ./index.jsx):
 //   - The actual <form> JSX, including the type-picker step (create mode only).
@@ -64,7 +64,6 @@ import { useNavigate } from 'react-router-dom';
 import {
   ApiError,
   createUpstreamProvider,
-  getUpstreamProvider,
   listUpstreamProviderLiveStatus,
   oauthChannelToAuthProvider,
   seedUpstreamProviderModels,
@@ -308,22 +307,6 @@ export function EditorStateProvider({ initial, siblingNames = [], children }) {
     }
   }, []);
 
-  // Reload the row after an opencode-go catalog seed/refresh — verbatim from
-  // the old onCatalogChanged callback. Kept here so the next PR 2 task
-  // (OpenCodeGoActions rewrite) can call it without duplicating the
-  // refetch-and-rehydrate plumbing.
-  const reloadRow = useCallback(async (rowId) => {
-    const id = rowId || initial?.id;
-    if (!id) return;
-    try {
-      const row = await getUpstreamProvider(id);
-      // The page shell owns the row; the editor only rehydrates its own
-      // form. The next PR 2 task will add a sibling hook so the page shell
-      // picks up the same row refresh.
-      setForm(buildForm(providerType, row));
-    } catch { /* keep the stale form; save still works */ }
-  }, [providerType, initial]);
-
   // title / summary strings — kept here so the editor's sticky header can
   // pull them from context instead of recomputing per tab.
   const title = isEdit
@@ -367,22 +350,18 @@ export function EditorStateProvider({ initial, siblingNames = [], children }) {
     reset,
     attemptBack,
     handleOAuthCompleted,
-    reloadRow,
     // Display strings.
     title,
     summary,
     // PR 1 surface.
     liveStatus,
-    // Escape hatches for the next PR 2 task's wiring.
-    prevTypeRef,
-    schemas,
   }), [
     form, providerType, pickProviderType, isEdit, schema, errors, hasErrors,
     touched, dirty, saving, serverError,
     oauthConnected, oauthConnectable, oauthChannel,
     setField, setModels, setEntries, touch, save, reset,
-    attemptBack, handleOAuthCompleted, reloadRow,
-    title, summary, liveStatus, schemas, initial,
+    attemptBack, handleOAuthCompleted,
+    title, summary, liveStatus, initial,
   ]);
 
   return (
