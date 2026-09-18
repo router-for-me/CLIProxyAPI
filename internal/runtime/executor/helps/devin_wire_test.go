@@ -679,9 +679,11 @@ func TestParseDevinUsageField_HeadersAndField4(t *testing.T) {
 		t.Fatal("expected non-nil usage")
 	}
 
-	// 3 + 58 = 61
-	if usage.PromptTokens != 61 {
-		t.Errorf("PromptTokens = %d, want 61 (3 turn + 58 context)", usage.PromptTokens)
+	if usage.PromptTokens != 3 {
+		t.Errorf("PromptTokens = %d, want 3", usage.PromptTokens)
+	}
+	if usage.CacheWriteTokens != 58 {
+		t.Errorf("CacheWriteTokens = %d, want 58", usage.CacheWriteTokens)
 	}
 	if usage.CompletionTokens != 39 {
 		t.Errorf("CompletionTokens = %d, want 39", usage.CompletionTokens)
@@ -873,5 +875,118 @@ func TestBuildDevinGetChatMessageRequest_FiltersAutomationUpdateAndObfuscatesDes
 	}
 	if !strings.Contains(reqStr, "to a existing unified") {
 		t.Fatalf("wire bytes should contain 'to a existing unified'")
+	}
+}
+
+func TestRegressionIssue5910_ClientMetadata(t *testing.T) {
+	b := BuildDevinClientMetadataBytes("test-session-token", "device-seed", "linux")
+	pos := 0
+	var ideName string
+	hasTag28 := false
+
+	for pos < len(b) {
+		num, typ, n := protowire.ConsumeTag(b[pos:])
+		if n <= 0 {
+			t.Fatalf("corrupt tag at %d", pos)
+		}
+		pos += n
+
+		if num == 1 && typ == protowire.BytesType {
+			val, bn := protowire.ConsumeBytes(b[pos:])
+			if bn <= 0 {
+				t.Fatalf("corrupt bytes at %d", pos)
+			}
+			pos += bn
+			ideName = string(val)
+		} else if num == 28 {
+			hasTag28 = true
+			nSkip := protowire.ConsumeFieldValue(num, typ, b[pos:])
+			if nSkip <= 0 {
+				t.Fatalf("corrupt field at %d", pos)
+			}
+			pos += nSkip
+		} else {
+			nSkip := protowire.ConsumeFieldValue(num, typ, b[pos:])
+			if nSkip <= 0 {
+				t.Fatalf("corrupt field at %d", pos)
+			}
+			pos += nSkip
+		}
+	}
+
+	if ideName != DevinDefaultClientName {
+		t.Errorf("BuildDevinClientMetadataBytes field 1 = %q, want %q", ideName, DevinDefaultClientName)
+	}
+	if hasTag28 {
+		t.Errorf("BuildDevinClientMetadataBytes should not emit field 28")
+	}
+}
+
+func TestRegressionIssue5910_UsageStatsCacheWriteTokens(t *testing.T) {
+	var f7Bytes []byte
+	// Field 2: input_tokens = 3
+	f7Bytes = protowire.AppendTag(f7Bytes, 2, protowire.VarintType)
+	f7Bytes = protowire.AppendVarint(f7Bytes, 3)
+
+	// Field 4: cache_write_tokens = 14361
+	f7Bytes = protowire.AppendTag(f7Bytes, 4, protowire.VarintType)
+	f7Bytes = protowire.AppendVarint(f7Bytes, 14361)
+
+	usage := parseDevinUsageField(f7Bytes)
+	if usage == nil {
+		t.Fatal("expected non-nil usage")
+	}
+
+	if usage.PromptTokens != 3 {
+		t.Errorf("PromptTokens = %d, want 3 (cache_write_tokens must not inflate prompt_tokens)", usage.PromptTokens)
+	}
+	if usage.CacheWriteTokens != 14361 {
+		t.Errorf("CacheWriteTokens = %d, want 14361", usage.CacheWriteTokens)
+	}
+}
+
+func TestRegressionIssue5910_ToolCallDeltaFields(t *testing.T) {
+	var tcBytes []byte
+	// Field 1: id
+	tcBytes = protowire.AppendTag(tcBytes, 1, protowire.BytesType)
+	tcBytes = protowire.AppendString(tcBytes, "call_999")
+	// Field 2: name
+	tcBytes = protowire.AppendTag(tcBytes, 2, protowire.BytesType)
+	tcBytes = protowire.AppendString(tcBytes, "custom_bash")
+	// Field 3: arguments
+	tcBytes = protowire.AppendTag(tcBytes, 3, protowire.BytesType)
+	tcBytes = protowire.AppendString(tcBytes, `{"cmd":"pwd"}`)
+	// Field 4: invalid_json_str
+	tcBytes = protowire.AppendTag(tcBytes, 4, protowire.BytesType)
+	tcBytes = protowire.AppendString(tcBytes, `pwd && ls`)
+	// Field 5: invalid_json_err
+	tcBytes = protowire.AppendTag(tcBytes, 5, protowire.BytesType)
+	tcBytes = protowire.AppendString(tcBytes, "syntax error near unexpected token")
+	// Field 6: is_custom_tool_call
+	tcBytes = protowire.AppendTag(tcBytes, 6, protowire.VarintType)
+	tcBytes = protowire.AppendVarint(tcBytes, 1)
+
+	tc, err := parseDevinToolCallDelta(tcBytes)
+	if err != nil {
+		t.Fatalf("parseDevinToolCallDelta failed: %v", err)
+	}
+
+	if tc.ID != "call_999" {
+		t.Errorf("tc.ID = %q, want call_999", tc.ID)
+	}
+	if tc.Name != "custom_bash" {
+		t.Errorf("tc.Name = %q, want custom_bash", tc.Name)
+	}
+	if tc.Arguments != `{"cmd":"pwd"}` {
+		t.Errorf("tc.Arguments = %q, want {\"cmd\":\"pwd\"}", tc.Arguments)
+	}
+	if tc.InvalidJSONStr != "pwd && ls" {
+		t.Errorf("tc.InvalidJSONStr = %q, want 'pwd && ls'", tc.InvalidJSONStr)
+	}
+	if tc.InvalidJSONErr != "syntax error near unexpected token" {
+		t.Errorf("tc.InvalidJSONErr = %q, want 'syntax error near unexpected token'", tc.InvalidJSONErr)
+	}
+	if !tc.IsCustomToolCall {
+		t.Errorf("tc.IsCustomToolCall = %v, want true", tc.IsCustomToolCall)
 	}
 }

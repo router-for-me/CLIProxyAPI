@@ -1424,3 +1424,118 @@ func TestConvertClaudeRequestToOpenAI_ToolResultUnknownIDNoName(t *testing.T) {
 		t.Errorf("expected no name for unknown tool_use_id, got %q", toolMsg.Get("name").String())
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_ToolCallPairingByID(t *testing.T) {
+	inputJSON := `{
+		"model": "deepseek-v4.1-flash",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Run analysis"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "fetch_data", "input": {"id": 123}},
+					{"type": "tool_use", "id": "call_2", "name": "calc_metric", "input": {"scale": 1.5}}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "Waiting for results to continue"},
+					{"type": "thinking", "thinking": "Thinking about next steps", "signature": "sig_abc"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Reminder: keep timeout short"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_2", "content": "metric_ok"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "data_ok"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("deepseek-v4.1-flash", []byte(inputJSON), false)
+	messages := gjson.GetBytes(result, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Tool results must be paired immediately following the assistant tool_calls message.
+	// Expected:
+	// messages[0]: user ("Run analysis")
+	// messages[1]: assistant (tool_calls [call_1, call_2])
+	// messages[2]: tool (tool_call_id: call_2 or call_1)
+	// messages[3]: tool (tool_call_id: call_1 or call_2)
+	// messages[4]: assistant (content: "Waiting for results to continue", reasoning_content: ...)
+	// messages[5]: user ("Reminder: keep timeout short")
+	if len(messages) != 6 {
+		t.Fatalf("expected 6 messages, got %d: %s", len(messages), result)
+	}
+	if roles[1] != "assistant" || !messages[1].Get("tool_calls").Exists() {
+		t.Fatalf("messages[1] must be assistant with tool_calls, got %s", roles[1])
+	}
+	if roles[2] != "tool" || roles[3] != "tool" {
+		t.Fatalf("messages[2] and messages[3] must be tool messages immediately following assistant tool_calls, got roles: %v", roles)
+	}
+	toolIDs := []string{messages[2].Get("tool_call_id").String(), messages[3].Get("tool_call_id").String()}
+	if toolIDs[0] != "call_2" || toolIDs[1] != "call_1" {
+		t.Fatalf("expected tool messages to strictly preserve input relative order [call_2, call_1], got: %v", toolIDs)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolCallPairing_OrphanAndIncompletePreserved(t *testing.T) {
+	// Orphan tool results and incomplete histories must not be rearranged or guessed
+	inputJSON := `{
+		"model": "deepseek-v4.1-flash",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Start"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_alpha", "name": "do_a", "input": {}},
+					{"type": "tool_use", "id": "call_beta", "name": "do_b", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Waiting on results"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_unmatched", "content": "orphan_result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("deepseek-v4.1-flash", []byte(inputJSON), false)
+	messages := gjson.GetBytes(result, "messages").Array()
+
+	// Incomplete history (call_alpha and call_beta are unanswered) and orphan result
+	// (call_unmatched has no matching assistant tool_calls) must remain untouched.
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+	// messages[0]: user
+	// messages[1]: assistant (tool_calls [call_alpha, call_beta])
+	// messages[2]: user ("Waiting on results")
+	// messages[3]: tool (tool_call_id: call_unmatched)
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %s", len(messages), result)
+	}
+	if roles[1] != "assistant" || roles[2] != "user" || roles[3] != "tool" {
+		t.Fatalf("expected untouched order [user, assistant, user, tool], got: %v", roles)
+	}
+}
