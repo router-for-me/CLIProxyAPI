@@ -111,6 +111,13 @@ func defaultPluginInstanceConfigNode() *yaml.Node {
 	}
 }
 
+// ClaudeConfig configures provider-wide Claude request behavior.
+type ClaudeConfig struct {
+	// ModelLevelCooling scopes Claude quota cooldowns to the requested model
+	// rather than cooling down the entire credential across all sibling models.
+	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
+}
+
 // ClaudeHeaderDefaults configures the measured Claude Code software baseline.
 // Verified native requests preserve their entrypoint and software shape only when their
 // Claude Code, package, and runtime versions exactly match this baseline; unmeasured
