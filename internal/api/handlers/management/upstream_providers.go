@@ -504,12 +504,15 @@ func (h *Handler) GetUpstreamProvidersLiveStatus(c *gin.Context) {
 				}
 			}
 			row.IsLive = liveKeys[key]
-			if !row.IsLive && key != "" {
-				prefix := key + ":"
-				for lk := range liveKeys {
-					if strings.HasPrefix(lk, prefix) {
-						row.IsLive = true
-						break
+			if !row.IsLive {
+				const openaiPrefix = "openai-compatible-"
+				if strings.HasPrefix(key, openaiPrefix) && !strings.Contains(key, ":") {
+					prefix := key + ":"
+					for lk := range liveKeys {
+						if strings.HasPrefix(lk, prefix) {
+							row.IsLive = true
+							break
+						}
 					}
 				}
 			}
