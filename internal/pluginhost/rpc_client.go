@@ -400,6 +400,18 @@ func marshalRPCError(code, message string) []byte {
 	return raw
 }
 
+func marshalHostCallError(err error) []byte {
+	raw, _ := json.Marshal(pluginabi.Envelope{
+		OK: false,
+		Error: &pluginabi.Error{
+			Code:       "host_call_failed",
+			Message:    err.Error(),
+			HTTPStatus: hostErrorStatus(err),
+		},
+	})
+	return raw
+}
+
 func (a *rpcPluginAdapter) openHostCallbackContext(ctx context.Context) (string, func()) {
 	if a == nil || a.host == nil {
 		return "", func() {}

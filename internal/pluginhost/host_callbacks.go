@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -335,14 +336,58 @@ func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}
-	if errMsg.Error != nil {
-		return errMsg.Error
+	err := errMsg.Error
+	if err == nil {
+		if errMsg.StatusCode > 0 {
+			err = fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
+		} else {
+			err = fmt.Errorf("model execution failed")
+		}
 	}
-	if errMsg.StatusCode > 0 {
-		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
+	status := hostErrorStatus(err)
+	if status == 0 {
+		status = errMsg.StatusCode
 	}
-	return fmt.Errorf("model execution failed")
+	if status < 400 || status > 599 {
+		status = http.StatusInternalServerError
+	}
+	return modelExecutionStatusError{err: err, status: status}
 }
+
+// hostErrorStatus returns the first valid HTTP error status in depth-first,
+// pre-order traversal. Invalid outer statuses do not hide their causes.
+func hostErrorStatus(err error) int {
+	for err != nil {
+		if statusErr, ok := err.(interface{ StatusCode() int }); ok {
+			if status := statusErr.StatusCode(); status >= 400 && status <= 599 {
+				return status
+			}
+		}
+		switch wrapped := err.(type) {
+		case interface{ Unwrap() error }:
+			err = wrapped.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, child := range wrapped.Unwrap() {
+				if status := hostErrorStatus(child); status != 0 {
+					return status
+				}
+			}
+			return 0
+		default:
+			return 0
+		}
+	}
+	return 0
+}
+
+type modelExecutionStatusError struct {
+	err    error
+	status int
+}
+
+func (e modelExecutionStatusError) Error() string   { return e.err.Error() }
+func (e modelExecutionStatusError) Unwrap() error   { return e.err }
+func (e modelExecutionStatusError) StatusCode() int { return e.status }
 
 func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) {
 	var req rpcHostLogRequest
