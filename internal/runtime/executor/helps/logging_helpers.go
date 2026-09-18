@@ -63,6 +63,18 @@ func requestLogCaptureEnabled(cfg *config.Config) bool {
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	recordAPIRequest(ctx, cfg, info, false)
+}
+
+// RecordAPIRequestImmutableBody records a finalized request without copying its body
+// for deferred logging. The caller must keep the body immutable for the request's
+// lifetime. Truncated captures still copy their prefix to avoid retaining a larger
+// backing buffer. RecordAPIRequest retains snapshot semantics for general callers.
+func RecordAPIRequestImmutableBody(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	recordAPIRequest(ctx, cfg, info, true)
+}
+
+func recordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog, immutableBody bool) {
 	if cfg == nil || cfg.CommercialMode {
 		return
 	}
@@ -71,7 +83,7 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 		return
 	}
 	if !cfg.RequestLog {
-		deferAPIRequest(ginCtx, info)
+		deferAPIRequest(ginCtx, info, immutableBody)
 		return
 	}
 
@@ -125,7 +137,7 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	}
 }
 
-func deferAPIRequest(ginCtx *gin.Context, info UpstreamRequestLog) {
+func deferAPIRequest(ginCtx *gin.Context, info UpstreamRequestLog, immutableBody bool) {
 	if ginCtx == nil {
 		return
 	}
@@ -146,10 +158,17 @@ func deferAPIRequest(ginCtx *gin.Context, info UpstreamRequestLog) {
 	if captureLength > remaining {
 		captureLength = remaining
 	}
-	capturedInfo.Body = bytes.Clone(info.Body[:captureLength])
+	retainedBytes := captureLength
+	if immutableBody && captureLength > 0 && captureLength == len(info.Body) && cap(info.Body) <= remaining {
+		capturedInfo.Body = info.Body
+		// Charge the retained capacity, including spare space, to the same budget.
+		retainedBytes = cap(info.Body)
+	} else {
+		capturedInfo.Body = bytes.Clone(info.Body[:captureLength])
+	}
 	bodyEmpty := len(info.Body) == 0
 	bodyTruncated := captureLength < len(info.Body)
-	ginCtx.Set(deferredAPIRequestBytesKey, bytesUsed+captureLength)
+	ginCtx.Set(deferredAPIRequestBytesKey, bytesUsed+retainedBytes)
 	requests = append(requests, func() []byte {
 		builder := newAPIRequestLogBuilder(index, capturedInfo, capturedAt)
 		if bodyEmpty {
