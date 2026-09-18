@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -382,4 +385,148 @@ func (h *Handler) DeleteUpstreamProvider(c *gin.Context) {
 	}
 	h.applyUpstreamProviders(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// UpstreamProviderLiveStatus is the dashboard-facing live-status row for
+// one upstream provider. last_check_at is the most recent auth-manager
+// timestamp we observed for this provider key (cooldown or breaker record);
+// the dashboard uses it to show "as of" freshness in tooltips.
+type UpstreamProviderLiveStatus struct {
+	IsLive        bool       `json:"is_live"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+	BreakerOpen   bool       `json:"breaker_open"`
+	LastCheckAt   *time.Time `json:"last_check_at,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
+}
+
+// UpstreamProviderLiveStatusResponse is the GET
+// /v0/management/upstream-providers/live-status payload. Rows is keyed by
+// the persisted upstream_providers.id. The dashboard merges this onto its
+// already-loaded provider list — no extra round trips.
+type UpstreamProviderLiveStatusResponse struct {
+	Rows map[string]UpstreamProviderLiveStatus `json:"rows"`
+	AsOf time.Time                             `json:"as_of"`
+}
+
+// GetUpstreamProvidersLiveStatus handles
+// GET /v0/management/upstream-providers/live-status. Returns 503 when the
+// PG store or auth manager is unavailable; 200 with empty rows when no
+// providers are configured.
+func (h *Handler) GetUpstreamProvidersLiveStatus(c *gin.Context) {
+	srcs, ok := h.upstreamProvidersStore(c)
+	if !ok {
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+			"type": "core_unavailable", "message": "core auth manager unavailable",
+		}})
+		return
+	}
+	providers, err := srcs.List(c.Request.Context())
+	if err != nil {
+		h.upstreamProviderErrorResponse(c, err)
+		return
+	}
+	cooldown := h.authManager.CooldownStateSnapshot()
+	breakers := coreauth.PoolBreakerSnapshot()
+	// Build the union of "live" provider keys across every model the auth
+	// manager has reported recently. We avoid per-model iteration by
+	// collecting models from the cooldown snapshot (the only signal we
+	// have without forcing a list-models fetch). When the snapshot is
+	// empty, is_live is false for everyone — that's the desired
+	// "no-evidence" state.
+	models := map[string]struct{}{}
+	for _, r := range cooldown {
+		if r.Model != "" {
+			models[r.Model] = struct{}{}
+		}
+	}
+	liveKeys := map[string]bool{}
+	for model := range models {
+		for _, k := range h.authManager.LiveProviderKeysForModel(model) {
+			liveKeys[strings.ToLower(strings.TrimSpace(k))] = true
+		}
+	}
+	// Aggregate breaker records keyed by pool (provider key).
+	breakerOpen := map[string]bool{}
+	breakerUntil := map[string]time.Time{}
+	for _, b := range breakers {
+		pool := strings.ToLower(strings.TrimSpace(b.PoolKey))
+		if pool == "" {
+			continue
+		}
+		if !b.OpenUntil.IsZero() && b.OpenUntil.After(time.Now()) {
+			breakerOpen[pool] = true
+			breakerUntil[pool] = b.OpenUntil
+		}
+	}
+	// Aggregate cooldown records keyed by provider (model-agnostic — the
+	// dashboard's per-row cooldown_until is "earliest retry across models").
+	cooldownUntil := map[string]time.Time{}
+	cooldownReason := map[string]string{}
+	for _, r := range cooldown {
+		p := strings.ToLower(strings.TrimSpace(r.Provider))
+		if p == "" {
+			continue
+		}
+		if !r.NextRetryAfter.IsZero() {
+			if existing, ok := cooldownUntil[p]; !ok || r.NextRetryAfter.Before(existing) {
+				cooldownUntil[p] = r.NextRetryAfter
+				if r.Reason != "" {
+					cooldownReason[p] = r.Reason
+				}
+			}
+		}
+	}
+	rows := make(map[string]UpstreamProviderLiveStatus, len(providers))
+	for _, p := range providers {
+		rp := toUpstreamProviderResponse(p)
+		key := strings.ToLower(strings.TrimSpace(rp.ProviderKey))
+		row := UpstreamProviderLiveStatus{}
+		if key != "" {
+			if cd, ok := cooldownUntil[key]; ok {
+				row.CooldownUntil = &cd
+				row.LastError = cooldownReason[key]
+			}
+			if breakerOpen[key] {
+				row.BreakerOpen = true
+			}
+			// OpenAI-compat compound-row fallback: a breaker record on
+			// "openai-compatible-foo" also covers "openai-compatible-foo:bar".
+			if !row.BreakerOpen {
+				prefix := key + ":"
+				for bp, open := range breakerOpen {
+					if open && strings.HasPrefix(bp, prefix) {
+						row.BreakerOpen = true
+						break
+					}
+				}
+			}
+			row.IsLive = liveKeys[key]
+			if !row.IsLive && key != "" {
+				prefix := key + ":"
+				for lk := range liveKeys {
+					if strings.HasPrefix(lk, prefix) {
+						row.IsLive = true
+						break
+					}
+				}
+			}
+		}
+		// last_check_at = the most recent signal we have, regardless of
+		// whether the row is currently healthy.
+		var last time.Time
+		if cd, ok := cooldownUntil[key]; ok && (last.IsZero() || cd.After(last)) {
+			last = cd
+		}
+		if bu, ok := breakerUntil[key]; ok && (last.IsZero() || bu.After(last)) {
+			last = bu
+		}
+		if !last.IsZero() {
+			row.LastCheckAt = &last
+		}
+		rows[strconv.FormatInt(p.ID, 10)] = row
+	}
+	c.JSON(http.StatusOK, UpstreamProviderLiveStatusResponse{Rows: rows, AsOf: time.Now()})
 }
