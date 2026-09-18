@@ -632,6 +632,7 @@ nonstream-keepalive-interval: 0
 #       strict-mode: false           # false (default): legacy-model whitelist uses a user system-reminder;
 #                                    # all other and future models use messages[].role=system
 #                                    # true: strip caller prompts and keep generated Claude Code system blocks
+#       # An explicit relaxed-system-prompt value overrides credential metadata, including false.
 #       relaxed-system-prompt: false # optional: keep caller text system blocks in the top-level system array
 #                                    # after billing and identity; keep caller messages free of generated currentDate content
 #                                    # and preserve caller cache metadata; generated breakpoints are deferred until after

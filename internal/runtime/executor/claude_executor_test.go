@@ -4948,7 +4948,7 @@ func TestCheckSystemInstructionsWithMode_ClientToolNamedAdvisorRelocatesSystemPr
 			t.Fatalf("system[%d] unexpectedly contains caller guidance: %s", i, b.Raw)
 		}
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 1, "caller guidance", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "caller guidance")
 }
 
 func TestRelocateClaudeSystemPromptForCountTokens_ClientToolNamedAdvisorRelocatesSystemPrompt(t *testing.T) {
@@ -4983,7 +4983,7 @@ func TestRelocateClaudeSystemPromptForCountTokens_ClientToolNamedAdvisorRelocate
 	if gjson.GetBytes(out, "system").Exists() {
 		t.Fatalf("count_tokens system field should have been relocated out of top-level system: %s", out)
 	}
-	assertClaudeMidConversationSystemMessage(t, out, 1, "caller guidance", "")
+	assertClaudeMidConversationSystemMessage(t, out, 1, "caller guidance")
 }
 
 // Test case 5: Special characters survive the mid-conversation system move.
