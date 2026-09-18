@@ -42,6 +42,11 @@ type Service struct {
 	authRevisions          map[string]uint64
 	authRegWaitMu          sync.Mutex
 	authRegWaiters         map[string]chan struct{}
+	// modelRegistrationLocks serializes model registration per auth ID (striped by hash).
+	// Startup and hot-reload paths may register the same credential concurrently from
+	// snapshots of different ages; without ordering, an older snapshot can overwrite the
+	// registry entry that a newer snapshot already produced.
+	modelRegistrationLocks [modelRegistrationLockStripes]sync.Mutex
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
 

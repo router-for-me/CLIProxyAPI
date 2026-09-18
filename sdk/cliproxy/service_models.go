@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,25 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+// modelRegistrationLockStripes bounds the number of per-auth registration locks.
+const modelRegistrationLockStripes = 256
+
+// lockModelRegistration acquires the registration lock for authID and returns the
+// matching unlock function. Registration for one credential must not interleave:
+// the startup batch in syncPluginModelRuntime and the file watcher's incremental
+// updates both register the same auths concurrently, and their snapshots can differ
+// (for example, before and after per-account excluded_models were applied).
+func (s *Service) lockModelRegistration(authID string) func() {
+	if s == nil {
+		return func() {}
+	}
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(authID))
+	lock := &s.modelRegistrationLocks[hasher.Sum32()%modelRegistrationLockStripes]
+	lock.Lock()
+	return lock.Unlock
+}
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
@@ -28,6 +48,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	if ctx.Err() != nil {
 		return
 	}
+	unlock := s.lockModelRegistration(a.ID)
+	defer unlock()
 	if a.Disabled {
 		if s != nil && s.coreManager != nil {
 			if current, ok := s.coreManager.GetByID(a.ID); ok && current != nil && !current.Disabled {
@@ -38,9 +60,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		return
 	}
 	if s != nil && s.coreManager != nil {
-		if current, ok := s.coreManager.GetByID(a.ID); !ok || current == nil || current.Disabled {
+		current, ok := s.coreManager.GetByID(a.ID)
+		if !ok || current == nil || current.Disabled {
 			return
 		}
+		// Always register from the latest runtime snapshot. The caller may hold an
+		// older clone (e.g. the startup batch taken before the file watcher applied
+		// per-account attributes such as excluded_models and plan_type); registering
+		// that clone would silently widen the credential's model list.
+		a = current
 	}
 	authKind := a.AuthKind()
 	// Unregister legacy client ID (if present) to avoid double counting

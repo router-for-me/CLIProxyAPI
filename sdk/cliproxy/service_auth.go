@@ -463,9 +463,10 @@ func (s *Service) shouldSkipModelRegistration(authID string, expectedGeneration 
 	if !ok || current == nil {
 		return !expectedDisabled
 	}
-	if expectedGeneration > 0 && current.Generation > expectedGeneration {
-		return true
-	}
+	// A newer generation is not a reason to skip: registration always reads the latest
+	// runtime snapshot, and background updates (token refresh, request results) bump the
+	// generation without re-registering models themselves. Skipping here could leave a
+	// stale registry entry in place with nothing scheduled to correct it.
 	return current.Disabled != expectedDisabled
 }
 
