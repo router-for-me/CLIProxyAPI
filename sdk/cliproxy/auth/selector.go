@@ -175,9 +175,20 @@ func (s *HeadroomByUsageSelector) Pick(ctx context.Context, provider, model stri
 	return available[0], nil
 }
 
-// FillFirstSelector selects the first available credential (deterministic ordering).
-// This "burns" one account before moving to the next, which can help stagger
-// rolling-window subscription caps (e.g. chat message limits).
+// FillFirstSelector maps to the scheduler fast-path pick (round-2
+// semantics: "highest in-flight below max_parallel cap"; see
+// pickFillFirst in scheduler_fillfirst.go). The Pick method here is
+// defensive-only (slow-path fallback) and is rarely reached in
+// production — the active auth scheduler takes the fast path through
+// selectorStrategy → schedulerStrategyFillFirst, which keeps one auth
+// busy to the brim before touching the next.
+//
+// Round-2 semantics change: the round-1 FillFirstSelector picked
+// "first-available-by-ID" deterministically; the round-2 fast path picks
+// the auth with the highest in-flight count below its per-auth
+// max_parallel_requests cap (tie-broken by auth.ID ascending). Operators
+// who need the legacy "first-available-by-ID" behavior should use a
+// custom selector type registered through the scheduler.
 type FillFirstSelector struct{}
 
 // P2CSelector implements the "power-of-two-choices" strategy. The real

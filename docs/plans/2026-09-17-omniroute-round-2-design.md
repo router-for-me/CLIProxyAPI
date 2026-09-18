@@ -61,6 +61,8 @@ Data flow stays canonical: PG row → render → auth attribute → conductor �
 
 Add the three to `internal/config/strategy.go` alongside round-1 entries. Same DTO/renderer/seed round-trip validation. Aliases: `fill-first`/`ff`, `weighted`/`w`, `headroom`/`hr`.
 
+> Note: the existing `FillFirstSelector` type now maps to the round-2 `pickFillFirst` (highest-in-flight-below-cap). The slow-path `Pick` is defensive-only. Operators seeing changed behavior should consult the round-2 changelog.
+
 ### Architecture placement
 
 All three live in the scheduler pick path. No new layer.

@@ -73,21 +73,9 @@ func pickHeadroom(entries []*scheduledAuth, lookup HeadroomLookup, inFlight func
 	return best, false
 }
 
-// pickHeadroomFromView is the readyView-scoped wrapper used by the scheduler's
-// pickReadyAtPriorityLocked switch. It mirrors pickFillFirst and
-// pickWeightedFromView: candidates are filtered through the predicate first,
-// then handed to the pure pickHeadroom helper. Returns nil when no candidate
-// matches the predicate.
-func (v *readyView) pickHeadroomFromView(predicate func(*scheduledAuth) bool, lookup HeadroomLookup, inFlightCount func(string) int) (*scheduledAuth, bool) {
-	if v == nil || len(v.flat) == 0 {
-		return nil, false
-	}
-	candidates := make([]*scheduledAuth, 0, len(v.flat))
-	for _, entry := range v.flat {
-		if predicate != nil && !predicate(entry) {
-			continue
-		}
-		candidates = append(candidates, entry)
-	}
-	return pickHeadroom(candidates, lookup, inFlightCount)
-}
+// Note: there is intentionally no readyView.pickHeadroomFromView wrapper,
+// even though pickFillFirst / pickWeightedFromView expose one. The headroom
+// branch is hand-rolled inline in pickSingleWithStrategy /
+// pickMixedWithStrategy so the call site can co-set
+// authScheduler.lastHeadroomExhausted alongside the returned pick without
+// invasive plumbing through the shared readyView API.

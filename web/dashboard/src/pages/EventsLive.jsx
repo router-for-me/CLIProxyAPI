@@ -55,6 +55,15 @@ export function buildEventsPollingParams(filter, limit) {
   return params;
 }
 
+// buildEventsPollingURL composes the polling-fallback path (no /v0/management
+// prefix; api/client.js's fetchJSON prepends it for us). Exported so the
+// regression test pins the URL builder and any future consumer of the
+// polling endpoint cannot reintroduce the doubled-prefix bug.
+export function buildEventsPollingURL(filter, limit) {
+  const qs = buildEventsPollingParams(filter, limit);
+  return `/events?${qs.toString()}`;
+}
+
 // parseSSEFrame parses a single SSE frame's raw text into a
 // { type, data } object, or null when the frame is a keep-alive comment /
 // blank / unparseable. The format follows the WHATWG spec:
@@ -215,8 +224,7 @@ export default function EventsLive() {
   // completely (intervalMs=null contract in useAutoRefresh) once SSE is
   // healthy.
   const pollFetcher = useCallback(async () => {
-    const qs = buildEventsPollingParams(filter, POLL_LIMIT);
-    const path = `/v0/management/events?${qs.toString()}`;
+    const path = buildEventsPollingURL(filter, POLL_LIMIT);
     const token = (() => {
       try { return localStorage.getItem('nixllm.dashboard.token') || ''; } catch { return ''; }
     })();

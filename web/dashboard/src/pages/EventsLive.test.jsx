@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import {
   buildEventsStreamURL,
   buildEventsPollingParams,
+  buildEventsPollingURL,
   parseSSEFrame,
   appendEventCapped,
   eventsFilterQuery,
@@ -57,6 +58,36 @@ test('buildEventsPollingParams: omits empty filter values but keeps limit', () =
 test('buildEventsPollingParams: clamps non-positive limits to 1', () => {
   assert.equal(buildEventsPollingParams({}, 0).get('limit'), '1');
   assert.equal(buildEventsPollingParams({}, -50).get('limit'), '1');
+});
+
+// --- buildEventsPollingURL ------------------------------------------------
+//
+// Regression pin: the polling-fallback URL must NOT carry the
+// /v0/management prefix. api/client.js's fetchJSON prepends it once,
+// so the path returned here is concatenated to form the final URL.
+// Earlier this code built `/v0/management/events?limit=100` and then
+// did `fetch(\`/v0/management${path}\`)` which produced the doubled
+// prefix `/v0/management/v0/management/events?limit=100` and 404'd.
+
+test('buildEventsPollingURL: returns a bare /events path with no /v0/management prefix', () => {
+  const url = buildEventsPollingURL({ type: '', auth: '' }, 100);
+  assert.equal(url, '/events?limit=100');
+  assert.ok(!url.startsWith('/v0/management'), 'polling URL must not include the /v0/management prefix');
+});
+
+test('buildEventsPollingURL: concatenates with /v0/management to form a single canonical URL', () => {
+  const path = buildEventsPollingURL({ type: 'routing.decision', auth: 'openai#0' }, 100);
+  const full = `/v0/management${path}`;
+  assert.ok(full.startsWith('/v0/management/events?'), 'full URL must target the /v0/management/events endpoint');
+  assert.ok(!full.includes('/v0/management/v0/management'), 'no doubled prefix');
+});
+
+test('buildEventsPollingURL: preserves filter params from buildEventsPollingParams', () => {
+  const url = buildEventsPollingURL({ type: 'breaker.tripped', auth: 'openai#0' }, 250);
+  assert.ok(url.startsWith('/events?'));
+  assert.ok(url.includes('type=breaker.tripped'));
+  assert.ok(url.includes('auth=openai%230'));
+  assert.ok(url.includes('limit=250'));
 });
 
 // --- parseSSEFrame --------------------------------------------------------
