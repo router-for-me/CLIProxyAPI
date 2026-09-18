@@ -5035,6 +5035,57 @@ button.ghost:hover:not(:disabled) {
   font-size: 12px;
 }
 
+/* Live events tab (round-2 Workstream 3) ---------------------------------- */
+.events-live__panel {
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.events-live__list {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+}
+
+.events-live__item {
+  display: grid;
+  grid-template-columns: 90px 180px 160px 140px 1fr;
+  gap: 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.05));
+  align-items: baseline;
+}
+
+.events-live__item:hover {
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.02));
+}
+
+.events-live__ts {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.events-live__type {
+  color: var(--accent, #5eead4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.events-live__auth,
+.events-live__model {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.events-live__payload {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Quota panel (/dashboard/quota) ----------------------------------------- */
 .quota-grid {
   display: grid;

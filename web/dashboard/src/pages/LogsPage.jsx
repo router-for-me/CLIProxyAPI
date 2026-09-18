@@ -4,27 +4,22 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { Spinner } from '../components/Primitives.jsx';
 import { Modal } from '../components/Primitives.jsx';
 import { useToast } from '../components/Toast.jsx';
+import EventsLive from './EventsLive.jsx';
 
-// LogsPage — live/raw viewer for server logs served by GET /v0/management/logs
-// (logrus output with the custom LogFormatter from internal/logging).
-//
-// Data flow:
-//  - Initial load / manual refresh: tail semantics (limit, no cursor) which
-//    replaces the whole buffer — simple and bounded.
-//  - Auto-refresh tick: incremental read with the stored cursor; new lines
-//    are appended (FIFO-capped). `cursor-reset: true` (log rotation) falls
-//    back to a full tail.
-//  - Level filter + text search are client-side only; the server always
-//    returns raw lines.
-//
-// The endpoint answers 400 "logging to file disabled" when logging-to-file
-// is off; that state is surfaced as an informative banner instead of an
-// error.
+// LogsPage — combined "Logs" hub: server log lines (Static) + live
+// structured event stream (Live). Round-2 (docs/plans/2026-09-17-...)
+// added the Live tab via the new /v0/management/events endpoint + SSE
+// stream.
 
 const POLL_INTERVAL_MS = 3 * 1000;
 const AUTOREFRESH_STORAGE = 'nixllm.dashboard.logsAutorefresh';
 const MAX_LINES = 10000;
 const INITIAL_TAIL = 1000;
+
+// Tab keys for the Logs hub. 'static' is the original logrus-line viewer;
+// 'live' is the round-2 SSE-driven event feed.
+const TAB_STATIC = 'static';
+const TAB_LIVE = 'live';
 
 const LEVELS = ['info', 'warn', 'error', 'debug', 'panic', 'fatal'];
 
@@ -67,6 +62,7 @@ function writeAutoRefresh(on) {
 
 export default function LogsPage() {
   const toast = useToast();
+  const [activeTab, setActiveTab] = useState(TAB_STATIC);
   const [lines, setLines] = useState([]);
   const [capped, setCapped] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh());
@@ -213,9 +209,11 @@ export default function LogsPage() {
     [lines, levelFilter, search],
   );
 
-  const headerSubtitle = disabledReason
-    ? 'Server log file access is disabled.'
-    : 'Server logs (logrus). Manual refresh by default; auto-poll every 3s when live. Last 1,000 lines on reload, newest appended at the bottom.';
+  const headerSubtitle = activeTab === TAB_LIVE
+    ? 'Live structured event stream from /v0/management/events. SSE with a 10s polling fallback.'
+    : disabledReason
+      ? 'Server log file access is disabled.'
+      : 'Server logs (logrus). Manual refresh by default; auto-poll every 3s when live. Last 1,000 lines on reload, newest appended at the bottom.';
 
   return (
     <>
@@ -225,7 +223,7 @@ export default function LogsPage() {
           <div className="main__subtitle">{headerSubtitle}</div>
         </div>
         <div className="row gap-sm">
-          {disabledReason ? null : (
+          {activeTab === TAB_STATIC && !disabledReason && (
             <>
               <button
                 className={`autorefresh-chip ${autoRefresh && !pollStalled ? '' : 'autorefresh-chip--off'}`}
@@ -248,8 +246,28 @@ export default function LogsPage() {
         </div>
       </div>
 
-      {disabledReason && (
-        <div className="card logs-disabled-banner">
+      {/* Tabs */}
+      <div className="card logs-view-toggle" role="group" aria-label="Logs view" style={{ marginTop: 16 }}>
+        <button
+          className={activeTab === TAB_STATIC ? 'is-active' : ''}
+          onClick={() => setActiveTab(TAB_STATIC)}
+          aria-pressed={activeTab === TAB_STATIC}
+        >
+          Static
+        </button>
+        <button
+          className={activeTab === TAB_LIVE ? 'is-active' : ''}
+          onClick={() => setActiveTab(TAB_LIVE)}
+          aria-pressed={activeTab === TAB_LIVE}
+        >
+          Live
+        </button>
+      </div>
+
+      {activeTab === TAB_LIVE && <EventsLive />}
+
+      {activeTab === TAB_STATIC && disabledReason && (
+        <div className="card logs-disabled-banner" style={{ marginTop: 16 }}>
           <strong>Logging to file is disabled.</strong>{' '}
           The server answered: <code>{disabledReason}</code>. Enable{' '}
           <code>logging-to-file: true</code> in <code>config.yaml</code> and
@@ -257,7 +275,7 @@ export default function LogsPage() {
         </div>
       )}
 
-      {!disabledReason && (
+      {activeTab === TAB_STATIC && !disabledReason && (
         <>
           {/* Toolbar */}
           <div className="card" style={{ marginTop: 16 }}>
