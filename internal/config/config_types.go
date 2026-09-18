@@ -309,6 +309,13 @@ type RoutingConfig struct {
 	// reclassification. See CooldownWaitConfig for defaults.
 	CooldownWait CooldownWaitConfig `yaml:"cooldown-wait,omitempty" json:"cooldown-wait,omitempty"`
 
+	// Retry configures per-entry auto-retry on transient upstream failures
+	// (zero-downtime routing design 2026-09-18). The conductor wraps the
+	// existing single-attempt path with RunInnerLoop when this block is
+	// present. Per-entry overrides on upstream_provider_api_key_entries
+	// take precedence over these global defaults.
+	Retry RetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+
 	// Events configures the in-process events ring recorder that backs
 	// the /v0/management/events and /events/stats endpoints (and the
 	// future /events/stream SSE feed). RingCapacity sets the post-clamp
@@ -316,6 +323,18 @@ type RoutingConfig struct {
 	// to internal/events.DefaultRingCapacity (5000). The ring itself
 	// clamps to [100, 50000].
 	Events EventsRingConfig `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// RetryConfig configures per-entry auto-retry on transient upstream
+// failures. Defaults: MaxAttempts=3, MaxTimeMS=5000, BackoffMS=200, RetryOn
+// defaults to [408, 429, 500, 502, 503, 504]. A zero MaxAttempts disables
+// retry (the conductor runs exactly one attempt per entry, today's
+// behavior).
+type RetryConfig struct {
+	MaxAttempts uint16 `yaml:"max-attempts,omitempty" json:"max-attempts,omitempty"`
+	MaxTimeMS   uint32 `yaml:"max-time-ms,omitempty"  json:"max-time-ms,omitempty"`
+	BackoffMS   uint32 `yaml:"backoff-ms,omitempty"  json:"backoff-ms,omitempty"`
+	RetryOn     []int  `yaml:"retry-on,omitempty"     json:"retry-on,omitempty"`
 }
 
 // EventsRingConfig configures the in-memory events ring. See

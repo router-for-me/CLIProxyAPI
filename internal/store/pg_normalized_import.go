@@ -527,6 +527,17 @@ type entrySig struct {
 	Pool                int64
 	Weight, Priority    int
 	Disabled            bool
+	// Retry overrides (zero-downtime design 2026-09-18). Plain values
+	// (not pointers): the normalized-import SELECT path uses
+	// coalesce(col, 0) so the nullable distinction is collapsed at this
+	// layer. The struct-level path in pg_upstream_providers.go preserves
+	// the nullable distinction via *uint16/*uint32 on
+	// UpstreamProviderAPIKey. Treating 0 as "no override" is acceptable
+	// because explicit 0 max_attempts/0 max_time_ms/0 backoff_ms are
+	// semantically equivalent to "use global default".
+	RetryMaxAttempts uint16
+	RetryMaxTimeMS   uint32
+	RetryBackoffMS   uint32
 }
 
 // entrySigFromUpstream derives the canonical identity from an incoming
@@ -541,7 +552,10 @@ func entrySigFromUpstream(e UpstreamProviderAPIKey) entrySig {
 		APIKey: strings.TrimSpace(e.APIKey), Name: strings.TrimSpace(e.Name),
 		Proxy: strings.TrimSpace(e.ProxyURL), Pool: pool,
 		Weight: trimIntPtr(e.Weight), Priority: trimIntPtr(e.Priority),
-		Disabled: e.Disabled,
+		Disabled:         e.Disabled,
+		RetryMaxAttempts: trimUint16Ptr(e.RetryMaxAttempts),
+		RetryMaxTimeMS:   trimUint32Ptr(e.RetryMaxTimeMS),
+		RetryBackoffMS:   trimUint32Ptr(e.RetryBackoffMS),
 	}
 }
 
@@ -553,20 +567,42 @@ func trimIntPtr(p *int) int {
 	return *p
 }
 
+// trimUint16Ptr returns *p or 0 when p is nil. Used by entrySigFromUpstream
+// to flatten the nullable retry override into the entrySig plain-value form.
+func trimUint16Ptr(p *uint16) uint16 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// trimUint32Ptr returns *p or 0 when p is nil.
+func trimUint32Ptr(p *uint32) uint32 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
 func (s *pgUpstreamProviderStore) readEntrySigTx(ctx context.Context, tx *sql.Tx, id int64) (entrySig, bool) {
 	var sig entrySig
 	var pool sql.NullInt64
+	var retryMaxAttempts, retryMaxTimeMS, retryBackoffMS sql.NullInt64
 	err := tx.QueryRowContext(ctx, fmt.Sprintf(
 		`SELECT api_key, coalesce(name,''), coalesce(proxy_url,''),
-		        proxy_pool_id, coalesce(weight,0), coalesce(priority,0), disabled
+		        proxy_pool_id, coalesce(weight,0), coalesce(priority,0), disabled,
+		        coalesce(retry_max_attempts, 0), coalesce(retry_max_time_ms, 0), coalesce(retry_backoff_ms, 0)
 		 FROM %s WHERE id = $1`, s.entries), id,
-	).Scan(&sig.APIKey, &sig.Name, &sig.Proxy, &pool, &sig.Weight, &sig.Priority, &sig.Disabled)
+	).Scan(&sig.APIKey, &sig.Name, &sig.Proxy, &pool, &sig.Weight, &sig.Priority, &sig.Disabled, &retryMaxAttempts, &retryMaxTimeMS, &retryBackoffMS)
 	if err != nil {
 		return entrySig{}, false
 	}
 	if pool.Valid {
 		sig.Pool = pool.Int64
 	}
+	sig.RetryMaxAttempts = uint16(retryMaxAttempts.Int64)
+	sig.RetryMaxTimeMS = uint32(retryMaxTimeMS.Int64)
+	sig.RetryBackoffMS = uint32(retryBackoffMS.Int64)
 	return sig, true
 }
 
@@ -577,10 +613,13 @@ func (s *pgUpstreamProviderStore) updateEntrySigTx(ctx context.Context, tx *sql.
 	}
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(
 		`UPDATE %s SET name = $1, proxy_url = $2, proxy_pool_id = $3,
-		        weight = $4, priority = $5, disabled = $6, sort_order = $7
-		WHERE id = $8`, s.entries),
+		        weight = $4, priority = $5, disabled = $6, sort_order = $7,
+		        retry_max_attempts = $8, retry_max_time_ms = $9, retry_backoff_ms = $10
+		WHERE id = $11`, s.entries),
 		nullableString(sig.Name), nullableString(sig.Proxy), poolArg,
-		nullableInt(intPtrForImport(sig.Weight)), nullableInt(intPtrForImport(sig.Priority)), sig.Disabled, sortOrder, id,
+		nullableInt(intPtrForImport(sig.Weight)), nullableInt(intPtrForImport(sig.Priority)), sig.Disabled, sortOrder,
+		nullableUint16ForImport(&sig.RetryMaxAttempts), nullableUint32ForImport(&sig.RetryMaxTimeMS), nullableUint32ForImport(&sig.RetryBackoffMS),
+		id,
 	)
 	return err
 }
@@ -599,10 +638,12 @@ func (s *pgUpstreamProviderStore) insertEntrySigTx(
 	}
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(
 		`INSERT INTO %s (provider_id, api_key, name, proxy_url, proxy_pool_id,
-		        weight, priority, disabled, sort_order)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, s.entries),
+		        weight, priority, disabled, sort_order,
+		        retry_max_attempts, retry_max_time_ms, retry_backoff_ms)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`, s.entries),
 		providerID, sig.APIKey, nullableString(sig.Name), nullableString(sig.Proxy),
 		poolArg, weight, priority, sig.Disabled, sortOrder,
+		nullableUint16ForImport(&sig.RetryMaxAttempts), nullableUint32ForImport(&sig.RetryMaxTimeMS), nullableUint32ForImport(&sig.RetryBackoffMS),
 	)
 	return err
 }
@@ -610,6 +651,32 @@ func (s *pgUpstreamProviderStore) insertEntrySigTx(
 // intPtrForImport wraps a plain int as *int so nullableInt can bind zero as
 // an explicit 0. Named distinctly from the test-only intPtr helper.
 func intPtrForImport(v int) *int { return &v }
+
+// uint16PtrForImport mirrors intPtrForImport for uint16 (retry_max_attempts).
+func uint16PtrForImport(v uint16) *uint16 { return &v }
+
+// uint32PtrForImport mirrors intPtrForImport for uint32
+// (retry_max_time_ms / retry_backoff_ms).
+func uint32PtrForImport(v uint32) *uint32 { return &v }
+
+// nullableUint16ForImport wraps a *uint16 as `any` for the PG driver so nil
+// writes SQL NULL. Always non-nil at the entrySig layer (trimUint16Ptr
+// collapses nil to 0), so the actual bound value is always a real uint16 —
+// the wrapping just satisfies the existing nullable helper signature.
+func nullableUint16ForImport(p *uint16) any {
+	if p == nil {
+		return nil
+	}
+	return int(*p)
+}
+
+// nullableUint32ForImport mirrors nullableUint16ForImport for uint32.
+func nullableUint32ForImport(p *uint32) any {
+	if p == nil {
+		return nil
+	}
+	return int64(*p)
+}
 
 // jsonOrNil marshals v and returns the bytes as an any suitable for a
 // jsonb parameter; nil input binds as nil so absent collections stay NULL.

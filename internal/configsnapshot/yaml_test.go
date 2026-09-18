@@ -423,3 +423,43 @@ func TestNormalizeStringKeyedNestedMapsSurvive(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeRetryBlockSurvives pins the routing.retry YAML round-trip
+// (zero-downtime design 2026-09-18). The snapshot layer is content-agnostic
+// — it preserves whatever the YAML lib hands it — but the config-side test
+// alone doesn't cover the snapshot path. This test asserts the hyphenated
+// retry block survives UnmarshalYAML → MarshalYAML with all sub-keys.
+func TestNormalizeRetryBlockSurvives(t *testing.T) {
+	raw := []byte("port: 9000\nrouting:\n  strategy: round-robin\n  retry:\n    max-attempts: 5\n    max-time-ms: 8000\n    backoff-ms: 250\n    retry-on: [408, 429, 503]\n")
+	var snap Snapshot
+	if err := UnmarshalYAML(raw, &snap); err != nil {
+		t.Fatalf("UnmarshalYAML: %v", err)
+	}
+	routing, ok := snap.Settings["routing"].(map[string]any)
+	if !ok {
+		t.Fatalf("routing not a map[string]any; got %T", snap.Settings["routing"])
+	}
+	retry, ok := routing["retry"].(map[string]any)
+	if !ok {
+		t.Fatalf("retry not preserved as map[string]any; got %T", routing["retry"])
+	}
+	if retry["max-attempts"] != 5 {
+		t.Fatalf("retry.max-attempts = %v, want 5", retry["max-attempts"])
+	}
+	if retry["max-time-ms"] != 8000 {
+		t.Fatalf("retry.max-time-ms = %v, want 8000", retry["max-time-ms"])
+	}
+	if retry["backoff-ms"] != 250 {
+		t.Fatalf("retry.backoff-ms = %v, want 250", retry["backoff-ms"])
+	}
+	out, err := MarshalYAML(&snap)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+	body := string(out)
+	for _, want := range []string{"retry:", "max-attempts: 5", "max-time-ms: 8000", "backoff-ms: 250"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in output:\n%s", want, body)
+		}
+	}
+}
