@@ -202,6 +202,12 @@ transient-error-cooldown-seconds: 0
 # "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
 
+# Provider-wide Claude settings.
+claude:
+  # When true, scope quota cooldowns to the requested model rather than cooling down
+  # the entire credential across all sibling models. Default is false.
+  model-level-cooling: false
+
 # Claude Code compatibility settings.
 claude-code:
   # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.

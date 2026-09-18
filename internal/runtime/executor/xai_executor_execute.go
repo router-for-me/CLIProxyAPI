@@ -92,6 +92,9 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
 		eventData = namespaceRestorer.restore(eventData)
+		if prepared.webSearchAlias != "" {
+			eventData = restoreXAIClientWebSearchName(eventData, prepared.webSearchAlias)
+		}
 		eventData = responseFilter.apply(eventData)
 		if len(eventData) == 0 {
 			continue
