@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zcode"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -147,5 +149,78 @@ func TestZCodeExecutor_ExecuteStream_RoutesToUltraAndSendsIdentityHeaders(t *tes
 	}
 	if gotHeaders.Get("X-Client-Timezone") != "Asia/Shanghai" {
 		t.Fatalf("X-Client-Timezone = %q", gotHeaders.Get("X-Client-Timezone"))
+	}
+}
+
+// TestZCodeExecutor_ReloadedCredentialSendsFullKey covers the production restart
+// path end to end: a credential is persisted to an auth file, reloaded by the
+// file store (which does NOT persist Attributes), and executed. The api_key must
+// be reconstructed as api_key.secret from metadata and the identity headers must
+// be rebuilt from the persisted "headers" map.
+func TestZCodeExecutor_ReloadedCredentialSendsFullKey(t *testing.T) {
+	var gotHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"glm-5.3","content":[{"type":"text","text":"hi"}]}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	store := sdkAuth.NewFileTokenStore()
+	store.SetBaseDir(dir)
+
+	original := sdkAuth.BuildZCodeAuth(
+		&zcode.Credential{APIKey: "k-1", Secret: "s-1"}, "jwt", "u-1", "bigmodel")
+	if _, err := store.Save(context.Background(), original); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	reloadedAuths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(reloadedAuths) != 1 {
+		t.Fatalf("expected 1 reloaded auth, got %d", len(reloadedAuths))
+	}
+	reloaded := reloadedAuths[0]
+
+	// Guard: prove we are exercising the metadata reconstruction path, not the
+	// in-memory attributes (which are not persisted to the auth file).
+	if reloaded.Attributes["api_key"] != "" || reloaded.Attributes["base_url"] != "" {
+		t.Fatalf("reloaded auth unexpectedly carries api_key/base_url attributes: %+v", reloaded.Attributes)
+	}
+	if got, _ := reloaded.Metadata["base_url"].(string); got != "https://open.bigmodel.cn/api/anthropic" {
+		t.Fatalf("reloaded base_url = %q", got)
+	}
+	if reloaded.Provider != "zcode" {
+		t.Fatalf("reloaded provider = %q", reloaded.Provider)
+	}
+
+	// Keep the test hermetic: point the reloaded credential at the test server.
+	// The api_key/secret and headers under test are untouched.
+	reloaded.Metadata["base_url"] = srv.URL
+
+	reqBody, _ := json.Marshal(map[string]any{
+		"model":      "glm-5.3",
+		"max_tokens": 128,
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+	})
+	req := cliproxyexecutor.Request{Model: "glm-5.3", Payload: reqBody, Format: sdktranslator.FormatClaude}
+
+	e := NewZCodeExecutor(nil)
+	e.routes = &stubZCodeRouter{base: srv.URL}
+	if _, err := e.Execute(context.Background(), reloaded, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if got := gotHeaders.Get("Authorization"); got != "Bearer k-1.s-1" {
+		t.Fatalf("Authorization = %q, want Bearer k-1.s-1", got)
+	}
+	if got := gotHeaders.Get("User-Agent"); got != "ZCode/3.12.0" {
+		t.Fatalf("User-Agent = %q (identity headers not reconstructed)", got)
+	}
+	if got := gotHeaders.Get("X-ZCode-Agent"); got != "glm" {
+		t.Fatalf("X-ZCode-Agent = %q (identity headers not reconstructed)", got)
 	}
 }

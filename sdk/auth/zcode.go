@@ -3,24 +3,16 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zcode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-)
-
-// zcodeLoginTimeout bounds how long we wait for the user to authorize.
-const zcodeLoginTimeout = 5 * time.Minute
-
-// ZCode OAuth provider variants.
-const (
-	zcodeProviderZai      = "zai"
-	zcodeProviderBigmodel = "bigmodel"
 )
 
 // zCodeVersion is the ZCode desktop client version whose user-agent and identity
@@ -57,18 +49,14 @@ func (a ZCodeAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 
 // zcodeProviderFromOptions reads the ZCode OAuth provider variant ("zai"
 // global, default; "bigmodel" China) from LoginOptions.Metadata.
-func zcodeProviderFromOptions(opts *LoginOptions) string {
+// zcodeProviderFromOptions reads the ZCode OAuth provider variant ("zai"
+// global, default; "bigmodel" China) from LoginOptions.Metadata. Unknown values
+// are rejected so a typo cannot silently perform a Z.ai login.
+func zcodeProviderFromOptions(opts *LoginOptions) (string, error) {
 	if opts == nil || opts.Metadata == nil {
-		return zcodeProviderZai
+		return zcode.ProviderZai, nil
 	}
-	return normalizeZCodeProvider(opts.Metadata["provider"])
-}
-
-func normalizeZCodeProvider(provider string) string {
-	if strings.EqualFold(strings.TrimSpace(provider), zcodeProviderBigmodel) {
-		return zcodeProviderBigmodel
-	}
-	return zcodeProviderZai
+	return zcode.NormalizeProvider(opts.Metadata["provider"])
 }
 
 // runZCodeLogin builds the OAuth flow, resolver and token storage, then returns
@@ -77,12 +65,16 @@ func runZCodeLogin(ctx context.Context, cfg *config.Config, opts *LoginOptions) 
 	if opts == nil {
 		opts = &LoginOptions{}
 	}
-	provider := zcodeProviderFromOptions(opts)
+	provider, err := zcodeProviderFromOptions(opts)
+	if err != nil {
+		return nil, err
+	}
 
 	// The ZCode server owns the OAuth callback for both providers
 	// (zcode.z.ai/api/v1/oauth/cli/callback/<provider>), so cross-device login
 	// needs no localhost redirect: the same cli/init + poll flow serves both.
-	login := &zcode.CliLogin{Provider: provider}
+	credClient := zcodeHTTPClient(cfg)
+	login := &zcode.CliLogin{Provider: provider, HTTP: credClient}
 	flow, err := login.Start(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("zcode: %w", err)
@@ -96,12 +88,12 @@ func runZCodeLogin(ctx context.Context, cfg *config.Config, opts *LoginOptions) 
 	}
 	fmt.Println("Waiting for authorization...")
 
-	tokens, err := login.Complete(ctx, flow, zcodeLoginTimeout)
+	tokens, err := login.Complete(ctx, flow, zcode.LoginTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("zcode: %w", err)
 	}
 
-	cred, err := (&zcode.Resolver{}).ResolveCredential(ctx, tokens.AccessToken, provider)
+	cred, err := (&zcode.Resolver{HTTP: credClient}).ResolveCredential(ctx, tokens.AccessToken, provider)
 	if err != nil {
 		return nil, fmt.Errorf("zcode: %w", err)
 	}
@@ -109,6 +101,20 @@ func runZCodeLogin(ctx context.Context, cfg *config.Config, opts *LoginOptions) 
 	cred.UserID = tokens.UserID
 
 	return BuildZCodeAuth(cred, cred.JWT, cred.UserID, provider), nil
+}
+
+// zcodeHTTPClient builds the HTTP client used for ZCode credential acquisition
+// (OAuth init/poll and the biz credential resolution). It honors the configured
+// proxy-url, matching the kimi precedent, so a deployment behind a proxy can log
+// in as well as serve traffic. The timeout is allowed here: this is credential
+// acquisition, never the established model connection.
+func zcodeHTTPClient(cfg *config.Config) *http.Client {
+	client := &http.Client{Timeout: 30 * time.Second}
+	if cfg == nil {
+		return client
+	}
+	sdkCfg := cfg.SDKConfig
+	return util.SetProxy(&sdkCfg, client)
 }
 
 // ZCode coding-plan Anthropic endpoints per provider variant.
@@ -120,7 +126,7 @@ const (
 // anthropicBaseForProvider returns the coding-plan Anthropic endpoint for a
 // provider variant ("bigmodel" China, anything else Z.ai global).
 func anthropicBaseForProvider(provider string) string {
-	if provider == zcodeProviderBigmodel {
+	if provider == zcode.ProviderBigmodel {
 		return zcodeBigmodelAnthropicBase
 	}
 	return zcodeZaiAnthropicBase
@@ -159,7 +165,7 @@ func BuildZCodeAuth(cred *zcode.Credential, jwt, userID, provider string) *corea
 		"user_id":    userID,
 		"device_mid": deviceMid,
 		"base_url":   baseURL,
-		"headers":    identity,
+		"headers":    copyStringMap(identity),
 		"timestamp":  time.Now().UnixMilli(),
 	}
 
@@ -168,10 +174,20 @@ func BuildZCodeAuth(cred *zcode.Credential, jwt, userID, provider string) *corea
 		Provider:   "zcode",
 		FileName:   fileName,
 		Label:      "ZCode User",
-		Storage:    &zcode.TokenStorage{APIKey: cred.APIKey, Secret: cred.Secret, JWT: jwt, UserID: userID, DeviceMid: deviceMid, Provider: "zcode", BaseURL: baseURL, Headers: identity},
+		Storage:    &zcode.TokenStorage{APIKey: cred.APIKey, Secret: cred.Secret, JWT: jwt, UserID: userID, DeviceMid: deviceMid, Provider: "zcode", BaseURL: baseURL, Headers: copyStringMap(identity)},
 		Metadata:   metadata,
 		Attributes: attrs,
 	}
+}
+
+// copyStringMap returns an independent copy so the metadata and token-storage
+// views of the identity headers do not share one mutable map.
+func copyStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func identityHeaders(deviceMid string) map[string]string {

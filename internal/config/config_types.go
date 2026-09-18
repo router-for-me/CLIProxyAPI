@@ -137,6 +137,16 @@ type XAIConfig struct {
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
 }
 
+// ZCodeConfig configures ZCode provider-wide behavior.
+type ZCodeConfig struct {
+	// UltraRouting enables rewriting the coding-plan Anthropic endpoint to the
+	// entitlement-gated ZCode ultra gateway when the server publishes a mapping at
+	// /api/v1/agent/configs. The mapping fetch is unauthenticated while the gateway
+	// is entitlement-gated, so this is unverified against a real entitled account;
+	// leave false (the default) to always use the pinned coding-plan endpoint.
+	UltraRouting bool `yaml:"ultra-routing" json:"ultra-routing"`
+}
+
 // AntigravityConfig configures provider-wide Antigravity request behavior.
 type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.

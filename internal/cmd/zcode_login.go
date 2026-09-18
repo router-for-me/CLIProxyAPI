@@ -3,21 +3,12 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zcode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
-
-// zcodeProviderFlag normalizes the --zcode-provider value ("zai" global,
-// default; "bigmodel" China).
-func zcodeProviderFlag(provider string) string {
-	if strings.EqualFold(strings.TrimSpace(provider), "bigmodel") {
-		return "bigmodel"
-	}
-	return "zai"
-}
 
 // DoZCodeLogin triggers the ZCode OAuth login and saves the credential.
 //
@@ -30,10 +21,16 @@ func DoZCodeLogin(cfg *config.Config, options *LoginOptions, provider string) {
 		options = &LoginOptions{}
 	}
 
+	normalized, errProvider := zcode.NormalizeProvider(provider)
+	if errProvider != nil {
+		log.Errorf("ZCode authentication failed: %v", errProvider)
+		return
+	}
+
 	manager := newAuthManager()
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser: options.NoBrowser,
-		Metadata:  map[string]string{"provider": zcodeProviderFlag(provider)},
+		Metadata:  map[string]string{"provider": normalized},
 		Prompt:    options.Prompt,
 	}
 

@@ -114,3 +114,23 @@ func TestGetZCodeModels(t *testing.T) {
 		t.Fatal("model missing id")
 	}
 }
+
+// Every zcode model must declare a thinking capability: without it the thinking
+// pipeline resolves the model and then strips all thinking config (including the
+// model[level] suffix), silently disabling reasoning on an endpoint that supports
+// it (verified against the BigModel Anthropic endpoint, which returns thinking
+// blocks).
+func TestGetZCodeModels_DeclareThinking(t *testing.T) {
+	for _, m := range GetZCodeModels() {
+		if m == nil {
+			continue
+		}
+		if m.Thinking == nil {
+			t.Errorf("zcode model %q declares no thinking capability; thinking config would be stripped", m.ID)
+			continue
+		}
+		if m.Thinking.Min <= 0 || m.Thinking.Max < m.Thinking.Min {
+			t.Errorf("zcode model %q thinking range invalid: min=%d max=%d", m.ID, m.Thinking.Min, m.Thinking.Max)
+		}
+	}
+}

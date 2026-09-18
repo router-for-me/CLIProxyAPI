@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,8 +26,14 @@ const (
 // ZCodeRouteResolver fetches the ZCode endpoint-routing mapping table and
 // rewrites coding-plan base URLs to the ultra gateway. Fail-open: any error
 // keeps the previous snapshot or falls back to the plain endpoint.
+//
+// Routing is opt-in (config `zcode.ultra-routing`, default false). The mapping
+// endpoint is unauthenticated while the gateway is entitlement-gated, so the
+// rewrite has not been verifiably exercised against an entitled account; with
+// the flag off the resolver never fetches and never rewrites, and the pinned
+// coding-plan endpoint is always used.
 type ZCodeRouteResolver struct {
-	cfg       *config.Config
+	enabled   bool
 	http      *http.Client
 	configURL string
 
@@ -41,9 +48,14 @@ type ZCodeRouteResolver struct {
 // control-plane metadata fetch (analogous to the management APICall timeout) and
 // is never applied to the model connection, which sets no timeout.
 func NewZCodeRouteResolver(cfg *config.Config) *ZCodeRouteResolver {
+	client := &http.Client{Timeout: 3 * time.Second}
+	if cfg != nil {
+		sdkCfg := cfg.SDKConfig
+		client = util.SetProxy(&sdkCfg, client)
+	}
 	return &ZCodeRouteResolver{
-		cfg:       cfg,
-		http:      &http.Client{Timeout: 3 * time.Second},
+		enabled:   cfg != nil && cfg.ZCode.UltraRouting,
+		http:      client,
 		configURL: zcodeConfigURL,
 		mapping:   map[string]string{},
 	}
@@ -51,6 +63,9 @@ func NewZCodeRouteResolver(cfg *config.Config) *ZCodeRouteResolver {
 
 // Refresh pulls a fresh snapshot if not cached/cooldowned.
 func (r *ZCodeRouteResolver) Refresh(ctx context.Context) error {
+	if !r.enabled {
+		return nil
+	}
 	r.mu.Lock()
 	if time.Since(r.loadedAt) < zcodeRouteTTL {
 		r.mu.Unlock()
@@ -115,6 +130,9 @@ func (r *ZCodeRouteResolver) Refresh(ctx context.Context) error {
 
 // BaseURL returns the mapped base for path, falling back to the plain endpoint.
 func (r *ZCodeRouteResolver) BaseURL(_ *cliproxyauth.Auth, path string) string {
+	if !r.enabled {
+		return zcodeDefaultBase
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	// Map the plain coding endpoint to the ultra gateway, if a snapshot exists.

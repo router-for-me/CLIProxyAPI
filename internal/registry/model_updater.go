@@ -121,14 +121,15 @@ func tryRefreshModels(ctx context.Context, label string) {
 		return
 	}
 
-	// Detect changes before updating store.
-	changed := detectChangedProviders(oldData, parsed)
-
 	// The remote catalog does not publish every provider: zcode ships only in the
 	// embedded catalog, so a wholesale replace would silently drop its models and
 	// leave "unknown provider for model glm-5.3" until restart. Preserve local-only
-	// sections the remote omits.
+	// sections the remote omits. This runs before change detection so a carried-over
+	// section is not reported as changed on every refresh.
 	carryOverLocalOnlySections(oldData, parsed)
+
+	// Detect changes before updating store.
+	changed := detectChangedProviders(oldData, parsed)
 
 	// Update store with new data regardless.
 	modelsCatalogStore.mu.Lock()
@@ -195,9 +196,6 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 	return nil, ""
 }
 
-// detectChangedProviders compares two model catalogs and returns provider names
-// whose model definitions differ. Codex tiers (free/team/plus/pro) are grouped
-// under a single "codex" provider.
 // carryOverLocalOnlySections retains sections that exist in the local catalog
 // but are absent from the fetched one. Currently only zcode is local-only; keep
 // this explicit rather than a generic merge so that a genuine upstream removal
@@ -211,6 +209,9 @@ func carryOverLocalOnlySections(local, remote *staticModelsJSON) {
 	}
 }
 
+// detectChangedProviders compares two model catalogs and returns provider names
+// whose model definitions differ. Codex tiers (free/team/plus/pro) are grouped
+// under a single "codex" provider.
 func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 	if oldData == nil || newData == nil {
 		return nil
@@ -234,6 +235,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
+		{"zcode", oldData.ZCode, newData.ZCode},
 	}
 
 	seen := make(map[string]bool, len(sections))
@@ -342,6 +344,10 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 	requiredSections := []struct {
 		name   string
 		models []*ModelInfo
+		// optional sections may be absent from a catalog that does not manage
+		// them (the remote catalog omits zcode); an absent optional section is
+		// validated without the empty-section warning.
+		optional bool
 	}{
 		{name: "claude", models: data.Claude},
 		{name: "gemini", models: data.Gemini},
@@ -354,9 +360,13 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "kimi", models: data.Kimi},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
+		{name: "zcode", models: data.ZCode, optional: true},
 	}
 
 	for _, section := range requiredSections {
+		if section.optional && len(section.models) == 0 {
+			continue
+		}
 		if err := validateModelSection(section.name, section.models); err != nil {
 			return err
 		}

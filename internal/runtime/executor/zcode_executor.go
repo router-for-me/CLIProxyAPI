@@ -122,8 +122,12 @@ func zcodeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 			if v, ok := a.Metadata["api_key"].(string); ok {
 				apiKey = v
 			}
-			if v, ok := a.Metadata["secret"].(string); ok && v != "" {
-				apiKey = apiKey + "." + v
+			// Only append the secret to a non-empty key, so a metadata set with a
+			// secret but no api_key cannot yield a bare ".secret" credential.
+			if apiKey != "" {
+				if v, ok := a.Metadata["secret"].(string); ok && v != "" {
+					apiKey = apiKey + "." + v
+				}
 			}
 		}
 		if baseURL == "" {

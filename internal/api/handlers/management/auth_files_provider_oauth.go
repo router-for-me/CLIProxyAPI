@@ -719,10 +719,6 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 	c.JSON(200, response)
 }
 
-// zcodeLoginTimeout bounds how long the ZCode server-mediated OAuth flow waits
-// for the user to authorize.
-const zcodeLoginTimeout = 5 * time.Minute
-
 var (
 	// newZCodeLogin and newZCodeResolver build the ZCode login and credential
 	// resolver for a provider variant ("zai" global, "bigmodel" China). Both
@@ -733,14 +729,23 @@ var (
 )
 
 // zcodeProviderFromQuery reads the optional ?provider= variant (default "zai").
-func zcodeProviderFromQuery(c *gin.Context) string {
+// Unknown values are rejected rather than silently coerced.
+func zcodeProviderFromQuery(c *gin.Context) (string, error) {
 	if c == nil {
-		return "zai"
+		return zcode.ProviderZai, nil
 	}
-	if strings.EqualFold(strings.TrimSpace(c.Query("provider")), "bigmodel") {
-		return "bigmodel"
+	return zcode.NormalizeProvider(c.Query("provider"))
+}
+
+// zcodeManagedHTTPClient builds the credential-acquisition client for the
+// management login, honoring the configured proxy-url (matching the CLI path).
+func (h *Handler) zcodeManagedHTTPClient() *http.Client {
+	client := &http.Client{Timeout: 30 * time.Second}
+	if h == nil || h.cfg == nil {
+		return client
 	}
-	return "zai"
+	sdkCfg := h.cfg.SDKConfig
+	return util.SetProxy(&sdkCfg, client)
 }
 
 // RequestZCodeToken starts the ZCode OAuth login and returns the authorize URL.
@@ -751,12 +756,19 @@ func (h *Handler) RequestZCodeToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
-	provider := zcodeProviderFromQuery(c)
+	provider, errProvider := zcodeProviderFromQuery(c)
+	if errProvider != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errProvider.Error()})
+		return
+	}
 	fmt.Printf("Initializing ZCode authentication (%s)...\n", provider)
 
 	state := fmt.Sprintf("zcd-%d", time.Now().UnixNano())
 
 	login := newZCodeLogin(provider)
+	if login != nil && login.HTTP == nil {
+		login.HTTP = h.zcodeManagedHTTPClient()
+	}
 	flow, errStart := login.Start(ctx)
 	if errStart != nil {
 		log.WithError(errStart).Error("failed to generate ZCode authorization URL")
@@ -776,7 +788,7 @@ func (h *Handler) RequestZCodeToken(c *gin.Context) {
 		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "zcode")
 
 		fmt.Println("Waiting for authorization...")
-		tokens, errComplete := login.Complete(pollCtx, flow, zcodeLoginTimeout)
+		tokens, errComplete := login.Complete(pollCtx, flow, zcode.LoginTimeout)
 		if errComplete != nil {
 			if !IsOAuthSessionPending(state, "zcode") {
 				return
@@ -789,7 +801,11 @@ func (h *Handler) RequestZCodeToken(c *gin.Context) {
 			return
 		}
 
-		cred, errResolve := newZCodeResolver().ResolveCredential(pollCtx, tokens.AccessToken, provider)
+		resolver := newZCodeResolver()
+		if resolver != nil && resolver.HTTP == nil {
+			resolver.HTTP = h.zcodeManagedHTTPClient()
+		}
+		cred, errResolve := resolver.ResolveCredential(pollCtx, tokens.AccessToken, provider)
 		if errResolve != nil {
 			if !IsOAuthSessionPending(state, "zcode") {
 				return

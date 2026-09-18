@@ -15,6 +15,14 @@ import (
 // ZCodeAPIBase is the zcode.z.ai API base for CLI login and token endpoints.
 const ZCodeAPIBase = "https://zcode.z.ai/api/v1"
 
+// maxPollInterval caps a server-supplied poll interval.
+const maxPollInterval = 30 * time.Second
+
+// LoginTimeout is the shared bound on how long the OAuth flow waits for the user
+// to authorize. Callers (CLI runner and management handler) use it directly so the
+// value is defined once.
+const LoginTimeout = 5 * time.Minute
+
 // ZCodeEnvelope is the {code,data,msg} wrapper returned by zcode.z.ai.
 type ZCodeEnvelope struct {
 	Code int             `json:"code"`
@@ -60,29 +68,48 @@ type CliLogin struct {
 // historical type name for callers that only need the Z.ai provider.
 type ZaiCliLogin = CliLogin
 
-func (c *CliLogin) provider() string {
-	if strings.EqualFold(strings.TrimSpace(c.Provider), "bigmodel") {
-		return "bigmodel"
+// ZCode account platforms. These are the accepted values of --zcode-provider
+// and the management ?provider= query.
+const (
+	ProviderZai      = "zai"
+	ProviderBigmodel = "bigmodel"
+)
+
+// NormalizeProvider canonicalizes a ZCode provider identifier. Unknown values
+// are rejected so a typo (e.g. "bigmodele") cannot silently perform a Z.ai
+// login and persist a credential pointed at the wrong endpoint. An empty value
+// defaults to the global Z.ai platform.
+func NormalizeProvider(provider string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", ProviderZai:
+		return ProviderZai, nil
+	case ProviderBigmodel:
+		return ProviderBigmodel, nil
+	default:
+		return "", fmt.Errorf("zcode: unknown provider %q (want %q or %q)", provider, ProviderZai, ProviderBigmodel)
 	}
-	return "zai"
 }
 
-func (c *ZaiCliLogin) base() string {
+func (c *CliLogin) provider() (string, error) {
+	return NormalizeProvider(c.Provider)
+}
+
+func (c *CliLogin) base() string {
 	if c.baseURL != "" {
 		return c.baseURL
 	}
 	return ZCodeAPIBase
 }
 
-func randomHex(n int) string {
+func randomHex(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		panic(err) // crypto/rand never fails on supported platforms
+		return "", fmt.Errorf("zcode: read random bytes: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
-func (c *ZaiCliLogin) sleep(d time.Duration) {
+func (c *CliLogin) sleep(d time.Duration) {
 	if c.Sleep != nil {
 		c.Sleep(d)
 		return
@@ -90,7 +117,24 @@ func (c *ZaiCliLogin) sleep(d time.Duration) {
 	time.Sleep(d)
 }
 
-func (c *ZaiCliLogin) now() time.Time {
+// sleepCtx waits for d, aborting early when ctx is done. An injected Sleep (used
+// by tests to avoid wall-clock waits) is honored as-is.
+func (c *CliLogin) sleepCtx(ctx context.Context, d time.Duration) error {
+	if c.Sleep != nil {
+		c.Sleep(d)
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (c *CliLogin) now() time.Time {
 	if c.Now != nil {
 		return c.Now()
 	}
@@ -136,10 +180,18 @@ func (c *ZaiCliLogin) doEnvelope(ctx context.Context, method, url string, body i
 
 // Start calls oauth/cli/init and returns the flow to authorize.
 func (c *CliLogin) Start(ctx context.Context) (*CliFlow, error) {
-	c.PollToken = randomHex(32)
+	provider, err := c.provider()
+	if err != nil {
+		return nil, err
+	}
+	pollToken, err := randomHex(32)
+	if err != nil {
+		return nil, err
+	}
+	c.PollToken = pollToken
 	var flow CliFlow
-	body := fmt.Sprintf(`{"provider":%q}`, c.provider())
-	err := c.doEnvelope(ctx, http.MethodPost,
+	body := fmt.Sprintf(`{"provider":%q}`, provider)
+	err = c.doEnvelope(ctx, http.MethodPost,
 		c.base()+"/oauth/cli/init",
 		strings.NewReader(body),
 		c.PollToken, &flow)
@@ -149,7 +201,7 @@ func (c *CliLogin) Start(ctx context.Context) (*CliFlow, error) {
 	if flow.FlowID == "" || flow.AuthorizeURL == "" {
 		return nil, fmt.Errorf("zcode: cli/init returned empty flow")
 	}
-	flow.Provider = c.provider()
+	flow.Provider = provider
 	return &flow, nil
 }
 
@@ -159,12 +211,20 @@ func (c *CliLogin) Complete(ctx context.Context, flow *CliFlow, timeout time.Dur
 		return nil, fmt.Errorf("zcode: flow not started")
 	}
 	deadline := c.now().Add(timeout)
-	if exp := time.Unix(flow.ExpiresAt, 0); exp.Before(deadline) {
-		deadline = exp
+	// expires_at is optional; a zero value must not collapse the deadline to 1970.
+	if flow.ExpiresAt > 0 {
+		if exp := time.Unix(flow.ExpiresAt, 0); exp.Before(deadline) {
+			deadline = exp
+		}
 	}
+	// Clamp a server-supplied poll interval so a hostile/large value cannot park
+	// the login goroutine for an unbounded time.
 	interval := time.Duration(flow.PollIntervalSec) * time.Second
 	if interval < time.Second {
 		interval = time.Second
+	}
+	if interval > maxPollInterval {
+		interval = maxPollInterval
 	}
 	for {
 		if !c.now().Before(deadline) {
@@ -192,14 +252,17 @@ func (c *CliLogin) Complete(ctx context.Context, flow *CliFlow, timeout time.Dur
 		}
 		switch data.Status {
 		case "ready":
-			// The ready payload carries the provider-scoped token; accept either
-			// field so a provider mismatch or a future rename still resolves.
-			accessToken := strings.TrimSpace(data.Zai.AccessToken)
-			if accessToken == "" {
+			// Select the token field for the flow's provider (empty = zai) so a
+			// provider mismatch is a loud error rather than a silent cross-provider
+			// credential.
+			var accessToken string
+			if flow.Provider == ProviderBigmodel {
 				accessToken = strings.TrimSpace(data.Bigmodel.AccessToken)
+			} else {
+				accessToken = strings.TrimSpace(data.Zai.AccessToken)
 			}
 			if accessToken == "" {
-				return nil, fmt.Errorf("zcode: ready response missing access_token")
+				return nil, fmt.Errorf("zcode: ready response missing access_token for provider %q", flow.Provider)
 			}
 			return &CliTokens{
 				AccessToken: accessToken,
@@ -209,7 +272,9 @@ func (c *CliLogin) Complete(ctx context.Context, flow *CliFlow, timeout time.Dur
 		case "failed":
 			return nil, fmt.Errorf("zcode: authorization failed")
 		case "pending":
-			c.sleep(interval)
+			if err := c.sleepCtx(ctx, interval); err != nil {
+				return nil, err
+			}
 		default:
 			return nil, fmt.Errorf("zcode: unexpected poll status %q", data.Status)
 		}

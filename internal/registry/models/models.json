@@ -3853,7 +3853,12 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 65536,
+        "zero_allowed": true
+      }
     },
     {
       "id": "glm-5.3-flash",
@@ -3869,7 +3874,12 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "thinking": {
+        "min": 1024,
+        "max": 32768,
+        "zero_allowed": true
+      }
     }
   ]
 }

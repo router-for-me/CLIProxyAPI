@@ -67,7 +67,7 @@ func newZCodeFakeServer(t *testing.T) *httptest.Server {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		resp(w, `{"code":0,"data":{"status":"ready","token":"jwt-token","user":{"user_id":"user-1"},"zai":{"access_token":"access-token"}},"msg":""}`)
+		resp(w, `{"code":0,"data":{"status":"ready","token":"jwt-token","user":{"user_id":"user-1"},"zai":{"access_token":"access-token"},"bigmodel":{"access_token":"bigmodel-access-token"}},"msg":""}`)
 	})
 	// Resolver: exchange OAuth token for a biz access token.
 	mux.HandleFunc("/api/auth/z/login", func(w http.ResponseWriter, r *http.Request) {
@@ -172,5 +172,97 @@ func TestRequestZCodeToken_ReturnsAuthURLAndSavesAuthFile(t *testing.T) {
 	}
 	if saved["api_key"] != "api-key-zd" || saved["secret"] != "secret-zd" {
 		t.Errorf("saved api_key/secret = %v/%v, want api-key-zd/secret-zd", saved["api_key"], saved["secret"])
+	}
+	// The endpoint and identity headers must persist so a restart reconstructs them.
+	if saved["base_url"] != "https://api.z.ai/api/anthropic" {
+		t.Errorf("saved base_url = %v, want the Z.ai anthropic endpoint", saved["base_url"])
+	}
+	if headers, ok := saved["headers"].(map[string]any); !ok || headers["User-Agent"] == "" {
+		t.Errorf("saved headers = %v, want the identity header set", saved["headers"])
+	}
+}
+
+// The ?provider=bigmodel query must drive the BigModel variant end to end: the
+// provider is threaded to both the login flow and the credential resolver, and the
+// persisted credential points at the BigModel endpoint.
+func TestRequestZCodeToken_BigmodelProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	fake := newZCodeFakeServer(t)
+	fakeHost := strings.TrimPrefix(fake.URL, "http://")
+
+	origLogin := newZCodeLogin
+	origResolver := newZCodeResolver
+	var loginProvider string
+	newZCodeLogin = func(provider string) *zcode.CliLogin {
+		loginProvider = provider
+		l := newZCodeLoginForTest(fakeHost)
+		l.Provider = provider
+		return l
+	}
+	newZCodeResolver = func() *zcode.Resolver { return &zcode.Resolver{TestHost: fake.URL} }
+	defer func() {
+		newZCodeLogin = origLogin
+		newZCodeResolver = origResolver
+	}()
+
+	authDir := filepath.Join(t.TempDir(), "auths")
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+	h.tokenStore = sdkAuth.NewFileTokenStore()
+
+	router := gin.New()
+	router.GET("/zcode-auth-url", h.RequestZCodeToken)
+
+	req := httptest.NewRequest(http.MethodGet, "/zcode-auth-url?provider=bigmodel", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if loginProvider != "bigmodel" {
+		t.Fatalf("login provider = %q, want bigmodel", loginProvider)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var found string
+	for time.Now().Before(deadline) {
+		matches, errGlob := filepath.Glob(filepath.Join(authDir, "zcode-*.json"))
+		if errGlob == nil && len(matches) > 0 {
+			found = matches[0]
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if found == "" {
+		t.Fatal("timed out waiting for zcode auth file to be saved")
+	}
+	raw, errRead := os.ReadFile(found)
+	if errRead != nil {
+		t.Fatalf("read saved zcode auth file: %v", errRead)
+	}
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &saved); errUnmarshal != nil {
+		t.Fatalf("unmarshal saved zcode auth file: %v", errUnmarshal)
+	}
+	if saved["base_url"] != "https://open.bigmodel.cn/api/anthropic" {
+		t.Errorf("saved base_url = %v, want the BigModel anthropic endpoint", saved["base_url"])
+	}
+}
+
+// An unknown provider must be rejected rather than silently coerced to Z.ai.
+func TestRequestZCodeToken_UnknownProviderRejected(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: filepath.Join(t.TempDir(), "auths")}, nil)
+	h.tokenStore = sdkAuth.NewFileTokenStore()
+	router := gin.New()
+	router.GET("/zcode-auth-url", h.RequestZCodeToken)
+
+	req := httptest.NewRequest(http.MethodGet, "/zcode-auth-url?provider=bigmodele", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d for an unknown provider, got %d with body %s",
+			http.StatusBadRequest, w.Code, w.Body.String())
 	}
 }

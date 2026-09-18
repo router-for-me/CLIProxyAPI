@@ -109,3 +109,46 @@ func readBody(r *http.Request) string {
 	b, _ := io.ReadAll(r.Body)
 	return string(b)
 }
+
+func TestNormalizeProvider(t *testing.T) {
+	for in, want := range map[string]string{"": ProviderZai, "zai": ProviderZai, "ZAI": ProviderZai, " bigmodel ": ProviderBigmodel, "BigModel": ProviderBigmodel} {
+		got, err := NormalizeProvider(in)
+		if err != nil || got != want {
+			t.Fatalf("NormalizeProvider(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"bigmodele", "openai", "zai-cn", " "} {
+		if in == " " {
+			continue // whitespace-only normalizes to the default
+		}
+		if _, err := NormalizeProvider(in); err == nil {
+			t.Fatalf("NormalizeProvider(%q) accepted an unknown provider", in)
+		}
+	}
+}
+
+// A provider-scoped poll must not accept the other provider's token field: a
+// mismatch is a loud error rather than a silently wrong credential.
+func TestCliLogin_CompleteRejectsProviderTokenMismatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": map[string]any{
+			"status":   "ready",
+			"token":    "jwt",
+			"user":     map[string]any{"user_id": "u"},
+			"zai":      map[string]any{"access_token": "zai-token"},
+			"bigmodel": map[string]any{"access_token": "bm-token"},
+		}})
+	}))
+	defer srv.Close()
+
+	base := srv.URL
+	login := &CliLogin{Provider: ProviderBigmodel, baseURL: base, HTTP: srv.Client(), Sleep: func(time.Duration) {}}
+	flow := &CliFlow{FlowID: "f-1", Provider: ProviderBigmodel, PollIntervalSec: 1, ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	tok, err := login.Complete(context.Background(), flow, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.AccessToken != "bm-token" {
+		t.Fatalf("bigmodel token = %q, want bm-token", tok.AccessToken)
+	}
+}

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Credential is the resolved static coding-plan credential.
@@ -247,14 +249,18 @@ func (r *Resolver) ResolveZaiCredential(ctx context.Context, accessToken string)
 		return nil, err
 	}
 	secret := r.copySecret(ctx, r.host(), auth, orgID, projectID, apiKey)
-	return &Credential{APIKey: apiKey, Secret: secret}, nil
+	return &Credential{APIKey: apiKey, Secret: secret}, warnIfSecretMissing(secret, apiKey)
 }
 
 // ResolveCredential exchanges an OAuth access token for a static coding-plan
 // credential, selecting the resolution path by provider: "zai" (global) or
-// "bigmodel" (China). Any other value falls back to the Z.ai path.
+// "bigmodel" (China). Unknown providers are rejected.
 func (r *Resolver) ResolveCredential(ctx context.Context, accessToken, provider string) (*Credential, error) {
-	if strings.EqualFold(strings.TrimSpace(provider), "bigmodel") {
+	normalized, err := NormalizeProvider(provider)
+	if err != nil {
+		return nil, err
+	}
+	if normalized == ProviderBigmodel {
 		return r.resolveBigmodelCredential(ctx, accessToken)
 	}
 	return r.ResolveZaiCredential(ctx, accessToken)
@@ -279,5 +285,26 @@ func (r *Resolver) resolveBigmodelCredential(ctx context.Context, accessToken st
 		return nil, err
 	}
 	secret := r.copySecret(ctx, host, auth, orgID, projectID, apiKey)
-	return &Credential{APIKey: apiKey, Secret: secret}, nil
+	return &Credential{APIKey: apiKey, Secret: secret}, warnIfSecretMissing(secret, apiKey)
+}
+
+// warnIfSecretMissing reports a credential that will 401 upstream: the coding-plan
+// endpoints require the api_key.secret form, so a missing secret yields a bare key
+// the gateway rejects. The login still succeeds (some deployments may not expose a
+// secret) but the operator is warned instead of discovering it as a 401 later.
+func warnIfSecretMissing(secret, apiKey string) error {
+	if strings.TrimSpace(secret) != "" {
+		return nil
+	}
+	log.Warnf("zcode: credential %s resolved without a secret; upstream may reject it with 401", logmask(apiKey))
+	return nil
+}
+
+// logmask returns a short, secret-free prefix of a key for log correlation.
+func logmask(value string) string {
+	v := strings.TrimSpace(value)
+	if len(v) <= 8 {
+		return "(key)"
+	}
+	return v[:8] + "..."
 }
