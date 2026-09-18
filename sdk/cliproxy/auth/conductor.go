@@ -2337,10 +2337,20 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	homeMode := m.HomeEnabled()
+	// triedAuths accumulates every credential selected during this client
+	// request, so a request-retry round cannot select a credential that was
+	// already attempted. A round that can no longer select a new credential
+	// reports the error accumulated so far instead of lapping the whole pool.
+	triedAuths := make(map[string]struct{})
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		triedBefore := len(triedAuths)
+		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, triedAuths)
 		if errExec == nil {
 			return resp, nil
+		}
+		if !homeMode && lastErr != nil && len(triedAuths) == triedBefore {
+			break
 		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
@@ -2372,10 +2382,18 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	homeMode := m.HomeEnabled()
+	// See Execute: credentials selected earlier in this request are not reused,
+	// and a round that cannot select a new one reports the accumulated error.
+	triedAuths := make(map[string]struct{})
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		triedBefore := len(triedAuths)
+		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, triedAuths)
 		if errExec == nil {
 			return resp, nil
+		}
+		if !homeMode && lastErr != nil && len(triedAuths) == triedBefore {
+			break
 		}
 		lastErr = errExec
 		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, retryModel, maxWait)
@@ -2401,10 +2419,18 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 
 	var lastErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	homeMode := m.HomeEnabled()
+	// See Execute: credentials selected earlier in this request are not reused,
+	// and a round that cannot select a new one reports the accumulated error.
+	triedAuths := make(map[string]struct{})
 	for attempt := 0; ; attempt++ {
-		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		triedBefore := len(triedAuths)
+		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, triedAuths)
 		if errStream == nil {
 			return result, nil
+		}
+		if !homeMode && lastErr != nil && len(triedAuths) == triedBefore {
+			break
 		}
 		lastErr = errStream
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, retryModel, maxWait)
@@ -2520,7 +2546,7 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 	return out
 }
 
-func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, triedAuths map[string]struct{}) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -2529,7 +2555,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
-	tried := make(map[string]struct{})
+	// triedAuths accumulates the credentials selected in earlier rounds of the
+	// same client request, so a later round cannot select one of them again.
+	// Home mode keeps a per-round set because its dispatcher owns repeat detection.
+	tried := triedAuths
+	if homeMode || tried == nil {
+		tried = make(map[string]struct{})
+	}
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {
@@ -2633,7 +2665,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 }
 
-func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, triedAuths map[string]struct{}) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -2642,7 +2674,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
-	tried := make(map[string]struct{})
+	// See executeMixedOnce: triedAuths carries credentials already selected in
+	// earlier rounds of the same client request.
+	tried := triedAuths
+	if homeMode || tried == nil {
+		tried = make(map[string]struct{})
+	}
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {
@@ -2754,7 +2791,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 }
 
-func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, triedAuths map[string]struct{}) (*cliproxyexecutor.StreamResult, error) {
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -2763,7 +2800,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
-	tried := make(map[string]struct{})
+	// See executeMixedOnce: triedAuths carries credentials already selected in
+	// earlier rounds of the same client request.
+	tried := triedAuths
+	if homeMode || tried == nil {
+		tried = make(map[string]struct{})
+	}
 	attempted := make(map[string]struct{})
 	var lastErr error
 	for {

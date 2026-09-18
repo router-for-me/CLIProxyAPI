@@ -1106,7 +1106,11 @@ func TestManager_Execute_DisableCooling_DoesNotBlackoutAfter429RetryAfter(t *tes
 	}
 }
 
-func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) {
+// TestManager_Execute_DisableCoolingDoesNotRepeatTriedCredential covers a
+// 429 that carries RetryAfter while the credential's cooling is disabled: the
+// request-retry budget must not select the same credential a second time, so
+// with a single credential the accumulated 429 is reported to the caller.
+func TestManager_Execute_DisableCoolingDoesNotRepeatTriedCredential(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
@@ -1152,8 +1156,93 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 	}
 
 	calls := executor.ExecuteCalls()
-	if len(calls) != 4 {
-		t.Fatalf("execute calls = %d, want 4 (initial + 3 retries)", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("execute calls = %d, want 1 (a tried credential is not selected again)", len(calls))
+	}
+}
+
+// TestManager_DoesNotSelectTriedCredentialTwice covers a pool in which every
+// credential answers 429: one client request may select each credential once,
+// and the request-retry rounds must not lap the whole pool again.
+func TestManager_DoesNotSelectTriedCredentialTwice(t *testing.T) {
+	model := "test-model-no-second-lap"
+	authIDs := []string{"aa-429-exec", "bb-429-exec", "cc-429-exec"}
+
+	for _, tc := range []struct {
+		name   string
+		stream bool
+	}{
+		{name: "execute"},
+		{name: "execute stream", stream: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			// request-retry 1 allows two rounds, which used to mean two full laps.
+			m.SetRetryConfig(1, 30*time.Second, 0)
+
+			executor := &authFallbackExecutor{
+				id:                "claude",
+				executeErrors:     make(map[string]error, len(authIDs)),
+				streamFirstErrors: make(map[string]error, len(authIDs)),
+			}
+			for _, authID := range authIDs {
+				errQuota := &retryAfterStatusError{
+					status:     http.StatusTooManyRequests,
+					message:    "quota exhausted",
+					retryAfter: 5 * time.Millisecond,
+				}
+				executor.executeErrors[authID] = errQuota
+				executor.streamFirstErrors[authID] = errQuota
+			}
+			m.RegisterExecutor(executor)
+
+			reg := registry.GetGlobalRegistry()
+			for _, authID := range authIDs {
+				reg.RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { reg.UnregisterClient(authID) })
+				if _, errRegister := m.Register(context.Background(), &Auth{ID: authID, Provider: "claude"}); errRegister != nil {
+					t.Fatalf("register auth %s: %v", authID, errRegister)
+				}
+			}
+
+			req := cliproxyexecutor.Request{Model: model}
+			opts := cliproxyexecutor.Options{Stream: tc.stream}
+			var calls []string
+			if tc.stream {
+				result, errStream := m.ExecuteStream(context.Background(), []string{"claude"}, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v, want stream result carrying the 429", errStream)
+				}
+				if result == nil {
+					t.Fatal("ExecuteStream() result = nil")
+				}
+				for range result.Chunks {
+				}
+				calls = executor.StreamCalls()
+			} else {
+				_, errExecute := m.Execute(context.Background(), []string{"claude"}, req, opts)
+				if errExecute == nil {
+					t.Fatal("Execute() error = nil, want 429")
+				}
+				if statusCodeFromError(errExecute) != http.StatusTooManyRequests {
+					t.Fatalf("Execute() status = %d, want %d", statusCodeFromError(errExecute), http.StatusTooManyRequests)
+				}
+				calls = executor.ExecuteCalls()
+			}
+
+			if len(calls) > len(authIDs) {
+				t.Fatalf("credential calls = %v, want at most %d", calls, len(authIDs))
+			}
+			seen := make(map[string]int, len(calls))
+			for _, authID := range calls {
+				seen[authID]++
+			}
+			for _, authID := range authIDs {
+				if seen[authID] > 1 {
+					t.Fatalf("credential %s selected %d times, want at most once (calls=%v)", authID, seen[authID], calls)
+				}
+			}
+		})
 	}
 }
 

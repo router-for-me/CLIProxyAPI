@@ -208,29 +208,6 @@ func TestClassifyAntigravity429(t *testing.T) {
 	})
 }
 
-func TestAntigravityShouldRetryNoCapacity_Standard503(t *testing.T) {
-	body := []byte(`{
-		"error": {
-			"code": 503,
-			"message": "No capacity available for model gemini-3.1-flash-image on the server",
-			"status": "UNAVAILABLE",
-			"details": [
-				{
-					"@type": "type.googleapis.com/google.rpc.ErrorInfo",
-					"reason": "MODEL_CAPACITY_EXHAUSTED",
-					"domain": "cloudcode-pa.googleapis.com",
-					"metadata": {
-						"model": "gemini-3.1-flash-image"
-					}
-				}
-			]
-		}
-	}`)
-	if !antigravityShouldRetryNoCapacity(http.StatusServiceUnavailable, body) {
-		t.Fatal("antigravityShouldRetryNoCapacity() = false, want true")
-	}
-}
-
 func TestInjectEnabledCreditTypes(t *testing.T) {
 	body := []byte(`{"model":"claude-sonnet-4-6","request":{}}`)
 	got := injectEnabledCreditTypes(body)
@@ -261,23 +238,18 @@ func TestParseRetryDelay_HumanReadableDuration(t *testing.T) {
 	}
 }
 
-func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
+// TestAntigravityExecuteStream_Transient429IssuesSingleRequest pins the executor
+// to exactly one upstream request per invocation: a transient 429 must be
+// reported to the conductor instead of being retried inside the executor.
+func TestAntigravityExecuteStream_Transient429IssuesSingleRequest(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
-		switch requestCount {
-		case 1:
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
-		case 2:
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`))
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
 	}))
 	defer server.Close()
 
@@ -294,20 +266,74 @@ func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
 		},
 	}
 
-	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-sonnet-4-6",
 		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatAntigravity,
 	})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	if err == nil {
+		t.Fatal("ExecuteStream() error = nil, want 429")
 	}
-	if len(resp.Payload) == 0 {
-		t.Fatal("Execute() returned empty payload")
+	statusErr, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("ExecuteStream() error type = %T, want status error", err)
 	}
-	if requestCount != 2 {
-		t.Fatalf("request count = %d, want 2", requestCount)
+	if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("ExecuteStream() status = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if requestCount != 1 {
+		t.Fatalf("upstream request count = %d, want 1", requestCount)
+	}
+}
+
+// TestAntigravityExecute_SingleRequestOnPrimaryEndpoint ensures the executor
+// does not silently move a request to a second Antigravity endpoint: without a
+// per-credential base_url override exactly one request must go to the primary
+// (daily) endpoint.
+func TestAntigravityExecute_SingleRequestOnPrimaryEndpoint(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var requestURLs []string
+	// ProxyEnabledByDefault with no proxy URL configured leaves the transport to
+	// the injected context RoundTripper, which records the upstream requests
+	// while the default (primary) base URL is in effect.
+	exec := NewAntigravityExecutor(&config.Config{
+		RequestRetry: 1,
+		SDKConfig:    config.SDKConfig{ProxyEnabledByDefault: true},
+	})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-primary-endpoint",
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		requestURLs = append(requestURLs, req.URL.String())
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`)),
+		}, nil
+	}))
+
+	_, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-6",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want 429")
+	}
+	if len(requestURLs) != 1 {
+		t.Fatalf("upstream request urls = %v, want exactly one request", requestURLs)
+	}
+	if !strings.HasPrefix(requestURLs[0], antigravityBaseURLDaily) {
+		t.Fatalf("upstream request url = %q, want primary endpoint %s", requestURLs[0], antigravityBaseURLDaily)
 	}
 }
 
