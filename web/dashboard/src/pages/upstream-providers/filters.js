@@ -18,6 +18,17 @@ function matchesSearch(row, search) {
 
 function matchesType(row, typeFilter) {
   if (!typeFilter) return true;
+  // 'api' / 'oauth' are category shortcuts (used by the upstream-providers
+  // Stat tiles and any future "filter to API-key only" affordance). They
+  // match by prefix rather than exact provider_type because the actual
+  // provider_type list is owned by upstream-provider-editor/schemas.js —
+  // importing those lists here would couple two unrelated modules.
+  if (typeFilter === 'api') {
+    return row.provider_type && !row.provider_type.startsWith('oauth:');
+  }
+  if (typeFilter === 'oauth') {
+    return row.provider_type && row.provider_type.startsWith('oauth:');
+  }
   return row.provider_type === typeFilter;
 }
 

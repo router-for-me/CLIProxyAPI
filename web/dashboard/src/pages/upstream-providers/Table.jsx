@@ -21,6 +21,7 @@ import { StatusDot } from './components/StatusDot.jsx';
 import { HealthSummary } from './HealthSummary.jsx';
 import { applyFilters, applySort } from './filters.js';
 import { statusFromHealth, cooldownReason, getHealthSummary } from './health.js';
+import { formatRelativeTime } from '../../utils/formatRelativeTime.js';
 import {
   API_KEY_TYPES,
   OAUTH_TYPES,
@@ -38,7 +39,18 @@ export default function UpstreamProvidersTable({
   onRefreshHealth,
   onRefresh,
   onCreate,
-  onBulkAction,   // parent may pass a notification callback (toast etc.); bulk work happens here
+  /**
+   * Parent handler that performs the bulk API mutation. Contract:
+   *   - Receives `{ action, targets }` where `action` ∈ "enable" | "disable" | "delete".
+   *   - Owns the per-row mutation strategy (parallel Promise.allSettled,
+   *     PUT vs DELETE, etc.), the per-action summary toast ("Enabled 3 of 5"),
+   *     selection narrowing on partial failure (drop the succeeded IDs so
+   *     the operator can retry just the failures), and the post-action
+   *     `reload()`.
+   *   - Throws on full failure; Table surfaces the error via toast.error
+   *     and re-enables the toolbar.
+   */
+  onBulkAction,
   refreshing = false,
   loading = false,
   error = null,
@@ -79,20 +91,6 @@ export default function UpstreamProvidersTable({
     () => getHealthSummary(providers, liveStatus),
     [providers, liveStatus],
   );
-
-  // typeFilter accepts three shapes:
-  //   ''                 → no filter
-  //   'api' / 'oauth'    → category filter (from the stat tiles)
-  //   '<provider_type>'  → exact match (from the dropdown)
-  // The current spec drops the legacy 'api' / 'oauth' shortcuts; the
-  // dropdown is exact-match only. We mirror filters.js's contract: only the
-  // exact provider_type passes the type filter, no implicit category
-  // shortcut. Operators wanting the broader view should use the dropdown's
-  // optgroup headings.
-  function matchesTypeFilter(providerType) {
-    if (!typeFilter) return true;
-    return providerType === typeFilter;
-  }
 
   const filtered = useMemo(() => {
     // Defer to the shared pure helper so behavior matches other surfaces
@@ -216,13 +214,13 @@ export default function UpstreamProvidersTable({
 
   const hasFilters = !!search.trim() || !!typeFilter || (healthFilters && healthFilters.size > 0);
 
-  // runBulk performs a single bulk action ("enable" | "disable" | "delete")
-  // over the currently selected providers. Runs the per-row mutations in
-  // parallel via Promise.allSettled so a single 4xx/5xx doesn't block the
-  // rest. If the parent supplied `onBulkAction`, we forward a batch
-  // payload (action + targets) and let the parent own the API call so the
-  // existing refresh / toast wiring stays in one place. Falls back to a
-  // no-op with a toast when no parent handler is registered.
+  // runBulk kicks off a bulk action via the parent's `onBulkAction` callback.
+  // Table's only job here is the progress toast (so the operator sees
+  // "Deleting 5 providers…" immediately) + the `bulkRunning` flag (so the
+  // toolbar can disable buttons mid-flight). Selection narrowing on
+  // partial failure and the final summary toast are owned by the parent —
+  // it has the per-row API mutation context (enable/disable PUT, delete,
+  // parallel Promise.allSettled) and reloads the list after.
   const runBulk = async (action) => {
     if (selectedCount === 0) return;
     if (typeof onBulkAction !== 'function') {
@@ -230,18 +228,16 @@ export default function UpstreamProvidersTable({
       return;
     }
     setBulkRunning(true);
+    const progressId = toast.info(
+      `${action === 'delete' ? 'Deleting' : action === 'enable' ? 'Enabling' : 'Disabling'} ${selectedCount} provider${selectedCount === 1 ? '' : 's'}…`,
+      { duration: 0 },
+    );
     try {
-      // The parent decides how to talk to the server (single calls in
-      // parallel, batched PUTs, etc.). Table owns selection state only.
       await onBulkAction({ action, targets: selectedProviders });
-      // Optimistic: clear selection on full success. Partial-failure
-      // narrowing is the parent's job (it returns / throws appropriately).
-      // We mirror the original parent logic by clearing selection here and
-      // letting the parent call reload() as needed.
-      clearSelection();
     } catch (err) {
       toast.error(err?.message || `Bulk ${action} failed`);
     } finally {
+      toast.dismiss(progressId);
       setBulkRunning(false);
       setConfirmBulkDelete(null);
     }
@@ -276,7 +272,12 @@ export default function UpstreamProvidersTable({
       <HealthSummary
         summary={healthSummary}
         onNavigate={onHealthNavigate}
-        activeKey={null}
+        // activeKey is single-value: when 0 or 2+ chips are active we fall
+        // back to "All". Highlighting only one chip at a time would require
+        // an API change on HealthSummary (it was built for the HealthPage's
+        // single-quadrant navigation). The 2+ case is rare — operators
+        // usually pick one bucket at a time.
+        activeKey={healthFilters.size === 1 ? [...healthFilters][0] : null}
       />
 
       <div className="card">
@@ -729,22 +730,10 @@ function formatTime(iso) {
   } catch { return '—'; }
 }
 
-// formatRelativeTime returns a compact "5m ago / 2h ago / 3d ago" string
-// for recent timestamps and falls back to a short date for older ones.
-// Operators scanning the table care about "is this fresh" more than the
-// exact time, so the relative form reads more clearly than a full locale
-// timestamp. Mirrors the behavior in UpstreamProvidersPage.jsx.
-function formatRelativeTime(iso) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  const diffMs = Date.now() - d.getTime();
-  const sec = Math.round(diffMs / 1000);
-  if (sec < 60) return 'just now';
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const day = Math.round(hr / 24);
-  if (day < 30) return `${day}d ago`;
-  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-}
+// formatRelativeTime is imported from ../../utils/formatRelativeTime.js so
+// the Updated column stays consistent with the rest of the dashboard
+// (ModelsCatalogPage, PricingSourcesModal, alerts dropdown, etc.). The
+// shared util does not have a 30-day cutoff — &gt;30d timestamps render as
+// "365d ago" instead of falling through to a locale date. Acceptable per
+// the design: the dashboard is intentionally consistent in the lossy
+// direction (raw timestamps don't usually matter at this granularity).

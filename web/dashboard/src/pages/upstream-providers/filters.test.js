@@ -39,6 +39,32 @@ test('applyFilters: type filter', () => {
   assert.equal(out.length, 1);
 });
 
+test('applyFilters: type filter "api" matches non-OAuth rows', () => {
+  const rows = [
+    row({ id: 1, provider_type: 'openai-compatibility' }),
+    row({ id: 2, provider_type: 'claude-api-key' }),
+    row({ id: 3, provider_type: 'oauth:claude' }),
+  ];
+  const out = applyFilters(rows, {
+    search: '', typeFilter: 'api', healthFilters: new Set(), liveStatus: {},
+  });
+  assert.equal(out.length, 2);
+  assert.deepEqual(out.map((r) => r.id).sort(), [1, 2]);
+});
+
+test('applyFilters: type filter "oauth" matches OAuth-prefixed rows', () => {
+  const rows = [
+    row({ id: 1, provider_type: 'openai-compatibility' }),
+    row({ id: 2, provider_type: 'oauth:claude' }),
+    row({ id: 3, provider_type: 'oauth:codex' }),
+  ];
+  const out = applyFilters(rows, {
+    search: '', typeFilter: 'oauth', healthFilters: new Set(), liveStatus: {},
+  });
+  assert.equal(out.length, 2);
+  assert.deepEqual(out.map((r) => r.id).sort(), [2, 3]);
+});
+
 test('applyFilters: health filter (multi-select)', () => {
   const rows = [
     row({ id: 1 }),
