@@ -7,6 +7,8 @@ import react from '@vitejs/plugin-react';
 // NixLLM Go server (default :8317) so the dashboard can authenticate
 // against the existing /v0/management routes using MANAGEMENT_PASSWORD,
 // avoiding CORS in development.
+// The Go server's configured port lives in config.yaml (top-level `port:`).
+// Today that defaults to 8317; keep these in sync if you change one.
 //
 // Override the upstream port with `VITE_API_HOST` if your dev server
 // does not run on 8317.
