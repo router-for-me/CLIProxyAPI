@@ -1,0 +1,270 @@
+// ============================================================================
+// Upstream provider editor — Entries tab
+// ============================================================================
+//
+// EntriesTab renders the `api_key_entries` editor (formerly the
+// APIKeyEntriesEditor section of the monolithic ProviderEditorForm) lifted
+// verbatim from ./EntriesEditor.jsx, plus a per-row StatusDot column that
+// surfaces the runtime health of each entry. It is one of the tabs the new
+// tabbed editor (PR 2) mounts under /upstream-providers/:id/:tab; the route
+// shell (./index.jsx) supplies the EditorStateProvider context, the sticky
+// header, and the TabBar.
+//
+// State source: useEditorState() (./useEditorState.jsx). The context exposes
+// `state`, `setEntries`, and `liveStatus` — EntriesTab only needs those
+// three. proxyPools is fetched locally (matching the OverviewTab pattern)
+// so the per-entry pool picker stays populated.
+//
+// StatusDot keying: the liveStatus map (see ../api/liveStatus.js +
+// useEditorState.jsx) is keyed by provider row id in the current dashboard
+// convention. Per-entry live evidence would require mapping each entry to
+// its compound `provider_key` (e.g. "openai-compatible-7:3"), which the
+// editor does not expose today. The plan accepts the pragmatic fallback:
+// key by `String(entry.id)` and render "—" when no entry is present in
+// the map. Future PRs that expose per-entry provider keys from the
+// EditorStateProvider can swap the lookup without changing the column
+// shape.
+
+import React, { useEffect, useMemo, useState } from 'react';
+import { PasswordInput } from '../manage-cpa/FormPrimitives.jsx';
+import { listProxyPools } from '../../api/client.js';
+import { validateAPIKeyEntries, idHintForIdentity } from './form.js';
+import { useEditorState } from './useEditorState.jsx';
+import { StatusDot, statusFromRow } from '../upstream-providers/components/StatusDot.jsx';
+
+// APIKeyEntriesEditor — verbatim lift of the previous
+// pages/upstream-provider-editor/EntriesEditor.jsx component. The only
+// change vs the source file is the additional StatusDot column at the head
+// of each row, which consumes `liveStatus[entry.id]` and falls back to
+// "—" when the entry is not represented in the live-status payload.
+function APIKeyEntriesEditor({ entries, onChange, error = '', proxyPools = [], liveStatus = {} }) {
+  const safe = Array.isArray(entries) ? entries : [];
+  const pools = Array.isArray(proxyPools) ? proxyPools : [];
+  function update(idx, patch) {
+    onChange(safe.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
+  }
+  function add() {
+    onChange([...safe, { api_key: '', proxy_url: '', proxy_pool_id: '', name: '', id: 0, weight: '', priority: '', disabled: false }]);
+  }
+  function remove(idx) { onChange(safe.filter((_, i) => i !== idx)); }
+
+  // Entry identity rules mirror the backend's normalizeUpstreamProviderEntryName.
+  // Errors are surfaced inline, never include the secret, and the raw API key
+  // is never used as a label or placeholder.
+  const errors = useMemo(() => validateAPIKeyEntries(safe), [safe]);
+
+  function rowKey(e, idx) {
+    const id = Number(e && e.id) || 0;
+    return id > 0 ? `entry-${id}` : `entry-new-${idx}`;
+  }
+
+  return (
+    <div className="list-editor">
+      {safe.length === 0 && <div className="list-editor__empty">No API key entries. Click "+ Add key".</div>}
+      {error && (
+        <div className="error-banner" role="alert" style={{ marginTop: 4 }}>{error}</div>
+      )}
+      {safe.map((e, idx) => {
+        const id = Number(e && e.id) || 0;
+        const rowErr = errors[idx] || {};
+        const isOff = !!e.disabled;
+        const hint = id > 0
+          ? `Persisted as entry #${id}. ${idHintForIdentity(e)}`
+          : 'Blank identity will become key-<id> after save.';
+        // liveStatus is keyed by provider row id (String(row.id)) in the
+        // current dashboard convention. Unsaved rows (id === 0) never have
+        // a live entry — fall back to "—". The lookup tolerates either
+        // shape (raw entry or undefined) so future key changes don't
+        // require touching this column.
+        const liveEntry = id > 0 ? liveStatus[String(id)] : null;
+        const status = liveEntry
+          ? statusFromRow({
+              isLive: !!liveEntry.is_live,
+              cooldownUntil: liveEntry.cooldown_until,
+              breakerOpen: !!liveEntry.breaker_open,
+            })
+          : null;
+        return (
+          <div className={`list-editor__rowgroup${isOff ? ' list-editor__rowgroup--disabled' : ''}`} key={rowKey(e, idx)}>
+            <div className="list-editor__row">
+              <StatusDotColumn status={status} entryId={id} disabled={isOff} />
+              <label
+                className="toggle-switch entry-toggle"
+                title={isOff ? 'Entry is disabled — excluded from routing' : 'Entry is active'}
+                data-testid={`api-key-entry-disabled-${idx}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={isOff}
+                  onChange={(ev) => update(idx, { disabled: ev.target.checked })}
+                  aria-label="Disable entry"
+                />
+                <span className="toggle-switch__slider" />
+              </label>
+              <input
+                type="text"
+                value={e.name || ''}
+                onChange={(ev) => update(idx, { name: ev.target.value })}
+                placeholder="identity (optional, e.g. team-a)"
+                spellCheck={false}
+                aria-label="API key entry identity"
+                aria-invalid={!!rowErr.name}
+                data-testid={`api-key-entry-name-${idx}`}
+              />
+              <PasswordInput
+                value={e.api_key}
+                onChange={(v) => update(idx, { api_key: v })}
+                placeholder="api key"
+              />
+              <select
+                value={e.proxy_pool_id ? String(e.proxy_pool_id) : ''}
+                onChange={(ev) => {
+                  const v = ev.target.value;
+                  // Mutually exclusive: picking a pool clears the manual URL;
+                  // "none" pins explicit direct egress; inherit keeps both empty.
+                  update(idx, v === '' || v === 'none'
+                    ? { proxy_pool_id: '', proxy_url: v === 'none' ? 'none' : '' }
+                    : { proxy_pool_id: Number(v), proxy_url: '' });
+                }}
+                aria-label="API key entry proxy pool"
+                data-testid={`api-key-entry-proxy-pool-${idx}`}
+              >
+                <option value="">pool: inherit row</option>
+                {pools.filter((p) => p.is_active).map((p) => (
+                  <option key={p.id} value={String(p.id)}>{p.name}</option>
+                ))}
+                <option value="none">direct (no proxy)</option>
+              </select>
+              <input
+                type="text"
+                value={e.proxy_pool_id ? '' : (e.proxy_url || '')}
+                onChange={(ev) => update(idx, { proxy_url: ev.target.value, proxy_pool_id: ev.target.value ? '' : e.proxy_pool_id })}
+                placeholder="proxy url (optional)"
+                spellCheck={false}
+                aria-label="API key entry proxy URL"
+                disabled={!!e.proxy_pool_id}
+                title={e.proxy_pool_id ? `Bound to proxy pool #${e.proxy_pool_id} — clear the picker to edit the manual URL` : undefined}
+              />
+              <input
+                type="text"
+                inputMode="numeric"
+                value={e.weight ?? ''}
+                onChange={(ev) => update(idx, { weight: ev.target.value })}
+                placeholder="weight"
+                title="Positive integer 1..1000000. Blank = default."
+                spellCheck={false}
+                aria-label="API key entry weight"
+                aria-invalid={!!rowErr.weight}
+                data-testid={`api-key-entry-weight-${idx}`}
+              />
+              <input
+                type="text"
+                inputMode="numeric"
+                value={e.priority ?? ''}
+                onChange={(ev) => update(idx, { priority: ev.target.value })}
+                placeholder="priority"
+                title="Selection tier within this pool. Blank = inherit the row priority. Higher tiers are served first and descend on cooldown."
+                spellCheck={false}
+                aria-label="API key entry priority"
+                aria-invalid={!!rowErr.priority}
+                data-testid={`api-key-entry-priority-${idx}`}
+              />
+              <button
+                type="button"
+                className="list-editor__remove"
+                onClick={() => remove(idx)}
+                aria-label="Remove entry"
+                title="Remove"
+              >×</button>
+            </div>
+            <div className="list-editor__rowhint muted" style={{ fontSize: 11 }}>
+              {hint}
+              {isOff && (
+                <span className="badge badge--disabled" style={{ marginLeft: 6, fontSize: 10 }}>disabled</span>
+              )}
+            </div>
+            {rowErr.name && (
+              <div className="form__error" role="alert">{rowErr.name}</div>
+            )}
+            {rowErr.weight && (
+              <div className="form__error" role="alert">{rowErr.weight}</div>
+            )}
+            {rowErr.priority && (
+              <div className="form__error" role="alert">{rowErr.priority}</div>
+            )}
+          </div>
+        );
+      })}
+      <button type="button" className="list-editor__add" onClick={add}>+ Add key</button>
+    </div>
+  );
+}
+
+// StatusDotColumn — single-cell wrapper that renders the runtime-health
+// StatusDot for a single entry. Falls back to "—" when the editor's
+// liveStatus map has no entry for the row's id (the common case for
+// unsaved/new rows and for entries whose compound provider_key is not
+// yet registered in the runtime).
+function StatusDotColumn({ status, entryId, disabled }) {
+  const label = status ? undefined : 'No live evidence yet';
+  const reason = disabled ? 'Entry is disabled' : undefined;
+  if (!status) {
+    return (
+      <span
+        className="inline-flex items-center text-xs text-zinc-500"
+        title={label}
+        aria-label={label}
+        data-testid={`api-key-entry-status-${entryId}`}
+      >
+        —
+      </span>
+    );
+  }
+  return (
+    <span data-testid={`api-key-entry-status-${entryId}`}>
+      <StatusDot status={status} reason={reason} />
+    </span>
+  );
+}
+
+export function EntriesTab() {
+  const { state, setEntries, liveStatus } = useEditorState();
+  const entries = state.api_key_entries || [];
+
+  // Proxy pools feed the per-entry pool picker. Fetched locally so this
+  // tab is self-sufficient — the page shell doesn't expose proxy pools
+  // through context yet. Mirrors the OverviewTab pattern.
+  const [proxyPools, setProxyPools] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    listProxyPools()
+      .then((res) => { if (!cancelled) setProxyPools(Array.isArray(res?.pools) ? res.pools : []); })
+      .catch(() => { /* picker degrades to manual URL only */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  return (
+    <section>
+      <div className="form-section">
+        <div className="form-section__title">API Key Entries</div>
+        <div className="form-section__hint">
+          One row per credential this provider serves. Identity normalises
+          to <code className="mono">key-&lt;n&gt;</code> after save when blank.
+          The runtime status dot surfaces whether each entry currently
+          serves requests; new rows render <code className="mono">—</code>
+          until the server registers them.
+        </div>
+        <div className="form-section__row">
+          <APIKeyEntriesEditor
+            entries={entries}
+            onChange={setEntries}
+            proxyPools={proxyPools}
+            liveStatus={liveStatus}
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export default EntriesTab;

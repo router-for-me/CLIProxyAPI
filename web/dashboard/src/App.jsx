@@ -32,6 +32,7 @@ import UpstreamProviderEditorPage from './pages/upstream-provider-editor/index.j
 import UpstreamProviderEditorCreatePage from './pages/upstream-provider-editor/CreateMode.jsx';
 import UpstreamProviderOverviewTab from './pages/upstream-provider-editor/OverviewTab.jsx';
 import UpstreamProviderModelsTab from './pages/upstream-provider-editor/ModelsTab.jsx';
+import UpstreamProviderEntriesTab from './pages/upstream-provider-editor/EntriesTab.jsx';
 import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import ModelHealthPage from './pages/ModelHealthPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
@@ -311,6 +312,7 @@ export default function App() {
               <Route index element={<Navigate to="overview" replace />} />
               <Route path="overview" element={<UpstreamProviderOverviewTab />} />
               <Route path="models" element={<UpstreamProviderModelsTab />} />
+              <Route path="entries" element={<UpstreamProviderEntriesTab />} />
             </Route>
             <Route path="/proxy-pools" element={<ProxyPoolsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
