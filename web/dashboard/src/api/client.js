@@ -1866,6 +1866,13 @@ export async function listUpstreamProviders({ providerType = '' } = {}) {
   return fetchJSON(`/upstream-providers${suffix}`);
 }
 
+// GET /v0/management/upstream-providers/live-status
+// Returns { rows: { [id]: { is_live, cooldown_until, breaker_open, last_check_at, last_error } }, as_of: ISO }
+// fetchJSON throws ApiError on non-2xx; callers (liveStatus.js) catch and degrade to {}.
+export async function listUpstreamProviderLiveStatus() {
+  return fetchJSON('/upstream-providers/live-status');
+}
+
 export async function getUpstreamProvider(id) {
   return fetchJSON(`/upstream-providers/${encodeURIComponent(id)}`);
 }

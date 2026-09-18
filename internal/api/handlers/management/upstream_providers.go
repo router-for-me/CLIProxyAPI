@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -382,4 +385,168 @@ func (h *Handler) DeleteUpstreamProvider(c *gin.Context) {
 	}
 	h.applyUpstreamProviders(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// UpstreamProviderLiveStatus is the dashboard-facing live-status row for
+// one upstream provider. last_check_at is the most recent auth-manager
+// timestamp we observed for this provider key (cooldown or breaker record);
+// the dashboard uses it to show "as of" freshness in tooltips.
+type UpstreamProviderLiveStatus struct {
+	IsLive        bool       `json:"is_live"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+	BreakerOpen   bool       `json:"breaker_open"`
+	LastCheckAt   *time.Time `json:"last_check_at,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
+}
+
+// UpstreamProviderLiveStatusResponse is the GET
+// /v0/management/upstream-providers/live-status payload. Rows is keyed by
+// the persisted upstream_providers.id. The dashboard merges this onto its
+// already-loaded provider list — no extra round trips.
+type UpstreamProviderLiveStatusResponse struct {
+	Rows map[string]UpstreamProviderLiveStatus `json:"rows"`
+	AsOf time.Time                             `json:"as_of"`
+}
+
+// GetUpstreamProvidersLiveStatus handles
+// GET /v0/management/upstream-providers/live-status. Returns 503 when the
+// PG store or auth manager is unavailable; 200 with empty rows when no
+// providers are configured.
+func (h *Handler) GetUpstreamProvidersLiveStatus(c *gin.Context) {
+	srcs, ok := h.upstreamProvidersStore(c)
+	if !ok {
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+			"type": "core_unavailable", "message": "core auth manager unavailable",
+		}})
+		return
+	}
+	providers, err := srcs.List(c.Request.Context())
+	if err != nil {
+		h.upstreamProviderErrorResponse(c, err)
+		return
+	}
+	cooldown := h.authManager.CooldownStateSnapshot()
+	breakers := coreauth.PoolBreakerSnapshot()
+	// Build the union of "live" provider keys across every model the auth
+	// manager could serve. We seed the model set from the configured
+	// upstream providers (so a healthy provider that has never cooldowned
+	// still shows is_live=true when its auth is registered for any of its
+	// declared models), then union with models seen in the cooldown
+	// snapshot. Iterating every model in the registry would force a
+	// list-models fetch; the configured + cooldown set is sufficient
+	// evidence for the dashboard's per-row dot.
+	models := map[string]struct{}{}
+	for _, p := range providers {
+		for _, m := range p.Models {
+			if name := strings.TrimSpace(m.Name); name != "" {
+				models[name] = struct{}{}
+			}
+		}
+	}
+	for _, r := range cooldown {
+		if r.Model != "" {
+			models[r.Model] = struct{}{}
+		}
+	}
+	liveKeys := map[string]bool{}
+	for model := range models {
+		for _, k := range h.authManager.LiveProviderKeysForModel(model) {
+			liveKeys[strings.ToLower(strings.TrimSpace(k))] = true
+		}
+	}
+	// Aggregate breaker records keyed by pool (provider key).
+	breakerOpen := map[string]bool{}
+	breakerUntil := map[string]time.Time{}
+	for _, b := range breakers {
+		pool := strings.ToLower(strings.TrimSpace(b.PoolKey))
+		if pool == "" {
+			continue
+		}
+		if !b.OpenUntil.IsZero() && b.OpenUntil.After(time.Now()) {
+			breakerOpen[pool] = true
+			breakerUntil[pool] = b.OpenUntil
+		}
+	}
+	// Aggregate cooldown records keyed by provider (model-agnostic — the
+	// dashboard's per-row cooldown_until is "earliest retry across models").
+	cooldownUntil := map[string]time.Time{}
+	cooldownReason := map[string]string{}
+	for _, r := range cooldown {
+		p := strings.ToLower(strings.TrimSpace(r.Provider))
+		if p == "" {
+			continue
+		}
+		if !r.NextRetryAfter.IsZero() {
+			if existing, ok := cooldownUntil[p]; !ok || r.NextRetryAfter.Before(existing) {
+				cooldownUntil[p] = r.NextRetryAfter
+				if r.Reason != "" {
+					cooldownReason[p] = r.Reason
+				}
+			}
+		}
+	}
+	rows := make(map[string]UpstreamProviderLiveStatus, len(providers))
+	for _, p := range providers {
+		rp := toUpstreamProviderResponse(p)
+		key := strings.ToLower(strings.TrimSpace(rp.ProviderKey))
+		row := UpstreamProviderLiveStatus{}
+		if key != "" {
+			if cd, ok := cooldownUntil[key]; ok {
+				row.CooldownUntil = &cd
+				row.LastError = cooldownReason[key]
+			}
+			if breakerOpen[key] {
+				row.BreakerOpen = true
+			}
+			// Compound-row fallback: a breaker record on a compound child key
+			// (e.g. "openai-compatible-foo:bar") also surfaces as breaker_open
+			// on the parent provider row (e.g. "openai-compatible-foo").
+			//
+			// Asymmetric with the IsLive fallback above on purpose: breaker
+			// keys come from operator-defined pool identifiers and may have
+			// any shape; restricting to openai-compat would hide breaker
+			// trips on legacy/custom channels. Live evidence keys, by
+			// contrast, are auth-manager-issued and known to be one of the
+			// narrow shapes that IsProviderRowLive already restricts.
+			if !row.BreakerOpen {
+				prefix := key + ":"
+				for bp, open := range breakerOpen {
+					if open && strings.HasPrefix(bp, prefix) {
+						row.BreakerOpen = true
+						break
+					}
+				}
+			}
+			row.IsLive = liveKeys[key]
+			if !row.IsLive {
+				const openaiPrefix = "openai-compatible-"
+				if strings.HasPrefix(key, openaiPrefix) && !strings.Contains(key, ":") {
+					prefix := key + ":"
+					for lk := range liveKeys {
+						if strings.HasPrefix(lk, prefix) {
+							row.IsLive = true
+							break
+						}
+					}
+				}
+			}
+			// last_check_at = the most recent signal we have, regardless of
+			// whether the row is currently healthy.
+			var last time.Time
+			if cd, ok := cooldownUntil[key]; ok && (last.IsZero() || cd.After(last)) {
+				last = cd
+			}
+			if bu, ok := breakerUntil[key]; ok && (last.IsZero() || bu.After(last)) {
+				last = bu
+			}
+			if !last.IsZero() {
+				row.LastCheckAt = &last
+			}
+		}
+		rows[strconv.FormatInt(p.ID, 10)] = row
+	}
+	c.JSON(http.StatusOK, UpstreamProviderLiveStatusResponse{Rows: rows, AsOf: time.Now()})
 }
