@@ -298,7 +298,8 @@ export default function App() {
             <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
             <Route path="/upstream-providers/new" element={<UpstreamProviderEditorPage />} />
             <Route path="/upstream-providers/health" element={<HealthPage />} />
-            <Route path="/upstream-providers/:id" element={<UpstreamProviderEditorPage />} />
+            <Route path="/upstream-providers/:id" element={<Navigate to="/upstream-providers/:id/overview" replace />} />
+            <Route path="/upstream-providers/:id/:tab" element={<UpstreamProviderEditorPage />} />
             <Route path="/proxy-pools" element={<ProxyPoolsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
             <Route path="/settings" element={<SettingsPage />} />
