@@ -89,6 +89,11 @@ const (
 	defaultConfigImportsTable = "config_imports"
 )
 
+// loggedMissingUpstreamProvider tracks which auth filenames we've already
+// logged a "no upstream_providers row" warning for, so refresh loops don't
+// flood the log with the same message every 15 minutes.
+var loggedMissingUpstreamProvider sync.Map // map[string]struct{}
+
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
 type PostgresStoreConfig struct {
 	DSN         string
@@ -2836,7 +2841,9 @@ func (s *PostgresStore) syncUpstreamProviderToken(ctx context.Context, auth *cli
 	if n, _ := res.RowsAffected(); n == 0 {
 		// Row not present yet (table unseeded or this auth has no normalized
 		// row). Not an error — seeding or a later management write will create it.
-		log.Debugf("postgres store: no upstream_providers row for auth %s", fileName)
+		if _, loaded := loggedMissingUpstreamProvider.LoadOrStore(fileName, struct{}{}); !loaded {
+			log.Debugf("postgres store: no upstream_providers row for auth %s (further occurrences suppressed)", fileName)
+		}
 	}
 }
 
