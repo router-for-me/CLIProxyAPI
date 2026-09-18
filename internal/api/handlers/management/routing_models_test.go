@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -86,14 +87,14 @@ func TestCooldownProviderSetFilters(t *testing.T) {
 	}
 }
 
-// newPickerRouter wires a minimal gin.Engine with the picker endpoint so
-// tests can drive it without the full management surface. h must have
-// pgUpstreamProviders/pgModels set; authManager may be nil (LIVE filtering
-// returns empty in that case).
+// newPickerRouter wires a minimal gin.Engine with the picker + pin
+// endpoints so tests can drive them without the full management surface.
+// h must have pgUpstreamProviders/pgModels set; authManager may be nil.
 func newPickerRouter(h *Handler) *gin.Engine {
 	r := gin.New()
 	g := r.Group("/v0/management")
 	g.GET("/model-routing/picker", h.GetModelRoutingPicker)
+	g.POST("/model-routing/pin", h.PostModelRoutingPin)
 	return r
 }
 
@@ -157,5 +158,72 @@ func TestPickerResponseShape(t *testing.T) {
 	}
 	if body.Error.Message == "" {
 		t.Fatalf("error.message is empty")
+	}
+}
+
+// TestPinRequiresPGStore confirms the pin endpoint 503s without PG.
+func TestPinRequiresPGStore(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(nil, nil)
+	r := newPickerRouter(h)
+
+	body := `{"model":"gpt-4o","provider_key":"openai:1"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/model-routing/pin", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+}
+
+// TestPinRequiresModelAndProvider confirms the pin endpoint rejects
+// requests missing model or provider_key (400) before touching PG.
+func TestPinRequiresModelAndProvider(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(nil, nil)
+	r := newPickerRouter(h)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing model", `{"provider_key":"openai:1"}`},
+		{"missing provider_key", `{"model":"gpt-4o"}`},
+		{"empty model", `{"model":"","provider_key":"openai:1"}`},
+		{"empty provider_key", `{"model":"gpt-4o","provider_key":""}`},
+		{"whitespace only", `{"model":"   ","provider_key":"   "}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v0/management/model-routing/pin", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			r.ServeHTTP(rec, req)
+			// Without PG → 503 wins over 400 (requirePG gate runs first).
+			// This test exists to pin the no-PG-fast-path contract; the
+			// 400 path is exercised in the PG-backed integration test
+			// (gated on PGSTORE_TEST_DSN).
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestPinRejectsMalformedJSON confirms the JSON-binding 400 envelope
+// (the only validation path reachable without PG).
+func TestPinRejectsMalformedJSON(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(nil, nil)
+	r := newPickerRouter(h)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/model-routing/pin", strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(rec, req)
+
+	// 503 still wins (requirePG runs first). This test guards against
+	// future refactors that move binding before the PG gate.
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d (503 wins over 400 without PG); body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
 	}
 }

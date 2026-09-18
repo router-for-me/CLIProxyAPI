@@ -401,6 +401,8 @@ func (s *Server) registerManagementRoutes() {
 		// configured upstreams by the LIVE rule (IsProviderRowLive) so the
 		// operator only sees what is currently serving the model.
 		mgmt.GET("/model-routing/picker", s.mgmt.GetModelRoutingPicker)
+		// Pin a single provider to a model with atomic MAX(priority)+1.
+		mgmt.POST("/model-routing/pin", s.mgmt.PostModelRoutingPin)
 		mgmt.POST("/proxy-pools/batch-import", s.mgmt.BatchImportProxyPools)
 		mgmt.POST("/proxy-pools/relay-deploy", s.mgmt.DeployRelayProxyPool)
 

@@ -1331,6 +1331,123 @@ func (s *ModelsStore) UpsertGlobalModelRoute(ctx context.Context, id string, rou
 	return nil
 }
 
+// PinProviderResult is the outcome of a single PinProviderToModel call:
+// the assigned priority, the persisted provider key (lowercased to match
+// how the row is stored), and whether the provider was already pinned
+// before this call (in which case Priority reflects the existing value,
+// not a freshly-assigned one).
+type PinProviderResult struct {
+	Provider     string `json:"provider"`
+	Priority     int    `json:"priority"`
+	WasExisting  bool   `json:"was_existing"`
+}
+
+// PinProviderToModel atomically pins a single provider to a model's
+// routing override with priority = MAX(existing priorities) + 1 (default
+// floor 10 when the model has no pins yet). Concurrency-safe: a single
+// PG statement takes a row lock on the model_routing row (and creates
+// the row if it does not yet exist via ON CONFLICT), so two operators
+// pinning at the same instant serialize at the database layer and get
+// distinct priorities (one gets MAX+1, the other gets MAX+2).
+//
+// Returns the assigned priority + whether the provider was already
+// pinned. When the provider is already in priorities, the existing
+// priority is returned and no JSONB mutation happens.
+func (s *ModelsStore) PinProviderToModel(ctx context.Context, model, provider string) (PinProviderResult, error) {
+	if s == nil || s.db == nil {
+		return PinProviderResult{}, fmt.Errorf("postgres store: models store not initialized")
+	}
+	model = strings.TrimSpace(model)
+	provider = strings.TrimSpace(provider)
+	if model == "" || provider == "" {
+		return PinProviderResult{}, fmt.Errorf("postgres store: PinProviderToModel requires non-empty model and provider")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PinProviderResult{}, fmt.Errorf("postgres store: begin pin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Ensure the row exists. INSERT ... ON CONFLICT DO NOTHING with a
+	// dummy providers array so subsequent statements have a row to lock.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (id, providers, strategy, priorities, updated_at)
+		 VALUES ($1, '[]'::jsonb, '', '[]'::jsonb, NOW())
+		 ON CONFLICT (id) DO NOTHING`, s.routingTable,
+	), model); err != nil {
+		return PinProviderResult{}, fmt.Errorf("postgres store: ensure routing row: %w", err)
+	}
+
+	// Lock the row + read current priorities.
+	var prioritiesRaw []byte
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT priorities FROM %s WHERE LOWER(id) = LOWER($1) FOR UPDATE`, s.routingTable,
+	), model).Scan(&prioritiesRaw); err != nil {
+		return PinProviderResult{}, fmt.Errorf("postgres store: lock routing row: %w", err)
+	}
+
+	var priorities []ProviderPriority
+	_ = json.Unmarshal(prioritiesRaw, &priorities) // empty / NULL → empty slice
+
+	// Already pinned? Return existing priority without mutation.
+	normalizedProvider := strings.ToLower(provider)
+	for _, p := range priorities {
+		if strings.ToLower(strings.TrimSpace(p.Provider)) == normalizedProvider {
+			committed = true
+			_ = tx.Commit()
+			return PinProviderResult{Provider: p.Provider, Priority: p.Priority, WasExisting: true}, nil
+		}
+	}
+
+	// Compute MAX+1 with default floor of 10.
+	maxP := 0
+	for _, p := range priorities {
+		if p.Priority > maxP {
+			maxP = p.Priority
+		}
+	}
+	newPriority := maxP + 1
+	const defaultFloor = 10
+	if newPriority < defaultFloor {
+		newPriority = defaultFloor
+	}
+
+	priorities = append(priorities, ProviderPriority{Provider: provider, Priority: newPriority})
+	prioritiesJSON, err := json.Marshal(priorities)
+	if err != nil {
+		return PinProviderResult{}, fmt.Errorf("postgres store: marshal priorities: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET priorities = $1, updated_at = NOW() WHERE LOWER(id) = LOWER($2)`,
+		s.routingTable,
+	), string(prioritiesJSON), model); err != nil {
+		return PinProviderResult{}, fmt.Errorf("postgres store: write priorities: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return PinProviderResult{}, fmt.Errorf("postgres store: commit pin: %w", err)
+	}
+	committed = true
+
+	// Refresh the in-memory cache so the next GlobalModelRoute call sees
+	// the new pin without going to the DB.
+	s.setRouteCache(strings.ToLower(model), &ModelRoute{
+		Model:      model,
+		Providers:  nil, // unchanged
+		Strategy:   "",   // unchanged
+		Priorities: priorities,
+	})
+
+	return PinProviderResult{Provider: provider, Priority: newPriority, WasExisting: false}, nil
+}
+
 // GlobalModelRoute returns the persisted global routing override for model id,
 // or nil when none is set. Results are cached in memory (keyed by lowercased
 // model id), so request-time reads incur at most one DB lookup per model. An

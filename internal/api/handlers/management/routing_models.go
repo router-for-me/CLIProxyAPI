@@ -316,3 +316,68 @@ func extractPriorities(route *store.ModelRoute) []store.ProviderPriority {
 	}
 	return route.Priorities
 }
+
+// PinRequest is the body for POST /v0/management/model-routing/pin.
+type PinRequest struct {
+	Model       string `json:"model"`
+	ProviderKey string `json:"provider_key"`
+	Force       bool   `json:"force"` // pin anyway when LIVE filter would reject
+}
+
+// PinResponse mirrors store.PinProviderResult with the assigned priority,
+// was_existing flag, and the entry identity echoed back so the dashboard
+// can update its local state without a follow-up GET.
+type PinResponse struct {
+	Model       string `json:"model"`
+	ProviderKey string `json:"provider_key"`
+	Priority    int    `json:"priority"`
+	WasExisting bool   `json:"was_existing"`
+}
+
+// PostModelRoutingPin handles POST /v0/management/model-routing/pin.
+//
+// Pins a single provider to a model with atomic priority assignment
+// (MAX(existing pinned) + 1, default floor 10). Rejects non-LIVE pins
+// unless force=true (matches the picker UX: Stale rows show a "Pin
+// anyway" button). Returns 503 without PG, 400 on missing fields,
+// 409 when the provider is not LIVE and force=false.
+func (h *Handler) PostModelRoutingPin(c *gin.Context) {
+	if h == nil || h.pgModels == nil || h.pgUpstreamProviders == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"type": "pg_not_configured", "message": "PG store is not configured"}})
+		return
+	}
+	var req PinRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": err.Error()}})
+		return
+	}
+	model := strings.TrimSpace(req.Model)
+	provider := strings.TrimSpace(req.ProviderKey)
+	if model == "" || provider == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": "model and provider_key are required"}})
+		return
+	}
+	if !req.Force {
+		liveEvidence := h.authManager.LiveProviderKeysForModel(model)
+		cooldown := CooldownProviderSet(h.authManager.CooldownStateSnapshot())
+		if !IsProviderRowLive(provider, liveEvidence, cooldown) {
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{
+				"type":    "not_live",
+				"message": "provider is not LIVE for this model; pass force=true to pin anyway",
+			}})
+			return
+		}
+	}
+	ctx := c.Request.Context()
+	res, err := h.pgModels.PinProviderToModel(ctx, model, provider)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"type": "internal_error", "message": err.Error()}})
+		return
+	}
+	c.JSON(http.StatusOK, PinResponse{
+		Model:       model,
+		ProviderKey: res.Provider,
+		Priority:    res.Priority,
+		WasExisting: res.WasExisting,
+	})
+}
