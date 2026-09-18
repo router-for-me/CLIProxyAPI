@@ -65,7 +65,7 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 }
 
 func (o *CodexAuth) effectiveUserAgent() string {
-	if o != nil && o.cfg != nil {
+	if o != nil && o.cfg != nil && o.cfg.Codex.DisableCodexCloaking {
 		if ua := strings.TrimSpace(o.cfg.CodexHeaderDefaults.UserAgent); ua != "" {
 			return ua
 		}

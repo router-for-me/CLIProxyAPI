@@ -195,70 +195,99 @@ func TestNewCodexAuthWithProxyURL_OverrideProxyTakesPrecedence(t *testing.T) {
 	}
 }
 
-func TestCodexAuth_EffectiveUserAgent(t *testing.T) {
-	// 1. Default fallback
-	authDefault := NewCodexAuth(nil)
-	if got := authDefault.effectiveUserAgent(); got != constant.DefaultCodexUserAgent {
-		t.Fatalf("effectiveUserAgent() = %q, want default %q", got, constant.DefaultCodexUserAgent)
+func TestCodexAuth_TokenRequestsUserAgent(t *testing.T) {
+	configured := func(disabled bool, ua string) *config.Config {
+		return &config.Config{
+			Codex:               config.CodexConfig{DisableCodexCloaking: disabled},
+			CodexHeaderDefaults: config.CodexHeaderDefaults{UserAgent: ua},
+		}
 	}
-
-	// 2. Config override
-	customUA := "codex-test/1.0.0"
-	cfg := &config.Config{
-		CodexHeaderDefaults: config.CodexHeaderDefaults{
-			UserAgent: customUA,
-		},
+	cases := []struct {
+		name string
+		cfg  *config.Config
+		want string
+	}{
+		{"nil_config", nil, constant.DefaultCodexUserAgent},
+		{"empty_config", &config.Config{}, constant.DefaultCodexUserAgent},
+		{"cloaking_overrides_config", configured(false, "custom-ua"), constant.DefaultCodexUserAgent},
+		{"configured", configured(true, "custom-ua"), "custom-ua"},
+		{"trimmed", configured(true, "  custom-ua  "), "custom-ua"},
+		{"empty", configured(true, ""), constant.DefaultCodexUserAgent},
+		{"whitespace", configured(true, " \t "), constant.DefaultCodexUserAgent},
 	}
-	authCustom := NewCodexAuth(cfg)
-	if got := authCustom.effectiveUserAgent(); got != customUA {
-		t.Fatalf("effectiveUserAgent() = %q, want custom %q", got, customUA)
+	for _, flow := range []string{"authorization_code", "refresh_token"} {
+		for _, tc := range cases {
+			t.Run(flow+"/"+tc.name, func(t *testing.T) {
+				resetCodexRefreshGroupForTest()
+				t.Cleanup(resetCodexRefreshGroupForTest)
+				auth := NewCodexAuth(tc.cfg)
+				calls := 0
+				auth.httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					if req.Method != http.MethodPost || req.URL.String() != TokenURL {
+						t.Errorf("request = %s %s, want POST %s", req.Method, req.URL, TokenURL)
+					}
+					if got := req.Header.Get("User-Agent"); got != tc.want {
+						t.Errorf("User-Agent = %q, want %q", got, tc.want)
+					}
+					if err := req.ParseForm(); err != nil {
+						t.Errorf("parse token form: %v", err)
+					}
+					if got := req.PostForm.Get("grant_type"); got != flow {
+						t.Errorf("grant_type = %q, want %q", got, flow)
+					}
+					if flow == "authorization_code" {
+						if req.PostForm.Get("code") != "test-code" || req.PostForm.Get("code_verifier") != "test-verifier" || req.PostForm.Get("redirect_uri") != RedirectURI {
+							t.Error("exchange form did not preserve code, verifier, or redirect URI")
+						}
+					} else if req.PostForm.Get("refresh_token") != "test-refresh" {
+						t.Error("refresh form did not preserve refresh token")
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`)),
+						Header:     make(http.Header),
+						Request:    req,
+					}, nil
+				})
+				if flow == "authorization_code" {
+					bundle, err := auth.ExchangeCodeForTokensWithRedirect(context.Background(), "test-code", RedirectURI, &PKCECodes{CodeVerifier: "test-verifier"})
+					if err != nil {
+						t.Fatalf("exchange: %v", err)
+					}
+					if bundle.TokenData.AccessToken != "new-access" {
+						t.Error("unexpected exchange access token")
+					}
+				} else {
+					tokens, err := auth.RefreshTokens(context.Background(), "test-refresh")
+					if err != nil {
+						t.Fatalf("refresh: %v", err)
+					}
+					if tokens.AccessToken != "new-access" {
+						t.Error("unexpected refresh access token")
+					}
+				}
+				if calls != 1 {
+					t.Fatalf("transport calls = %d, want 1", calls)
+				}
+			})
+		}
 	}
 }
 
-func TestRefreshTokens_SetsUserAgent(t *testing.T) {
-	resetCodexRefreshGroupForTest()
-	defer resetCodexRefreshGroupForTest()
-
-	var capturedUA string
-	auth := &CodexAuth{
-		httpClient: &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				capturedUA = req.Header.Get("User-Agent")
-				return &http.Response{
-					StatusCode: http.StatusBadRequest,
-					Body:       io.NopCloser(strings.NewReader(`{"error":"test_probe"}`)),
-					Header:     make(http.Header),
-					Request:    req,
-				}, nil
-			}),
-		},
+func TestNewCodexAuthWithProxyURL_FallsBackToGlobalProxy(t *testing.T) {
+	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://global.example.com:8080"}}
+	auth := NewCodexAuthWithProxyURL(cfg, "")
+	transport, ok := auth.httpClient.Transport.(*http.Transport)
+	if !ok || transport.Proxy == nil {
+		t.Fatalf("expected transport with global proxy, got %T", auth.httpClient.Transport)
 	}
-
-	_, _ = auth.RefreshTokens(context.Background(), "test-token")
-	if capturedUA != constant.DefaultCodexUserAgent {
-		t.Fatalf("captured User-Agent = %q, want %q", capturedUA, constant.DefaultCodexUserAgent)
+	req, err := http.NewRequest(http.MethodPost, TokenURL, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestExchangeCodeForTokens_SetsUserAgent(t *testing.T) {
-	var capturedUA string
-	auth := &CodexAuth{
-		httpClient: &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				capturedUA = req.Header.Get("User-Agent")
-				return &http.Response{
-					StatusCode: http.StatusBadRequest,
-					Body:       io.NopCloser(strings.NewReader(`{"error":"test_probe"}`)),
-					Header:     make(http.Header),
-					Request:    req,
-				}, nil
-			}),
-		},
-	}
-
-	pkce := &PKCECodes{CodeVerifier: "test-verifier"}
-	_, _ = auth.ExchangeCodeForTokensWithRedirect(context.Background(), "test-code", "http://localhost:1455/auth/callback", pkce)
-	if capturedUA != constant.DefaultCodexUserAgent {
-		t.Fatalf("captured User-Agent = %q, want %q", capturedUA, constant.DefaultCodexUserAgent)
+	proxyURL, errProxy := transport.Proxy(req)
+	if errProxy != nil || proxyURL == nil || proxyURL.String() != cfg.ProxyURL {
+		t.Fatalf("proxy = %v, error = %v, want %s", proxyURL, errProxy, cfg.ProxyURL)
 	}
 }
