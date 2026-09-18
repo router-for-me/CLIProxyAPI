@@ -110,8 +110,20 @@ type InnerLoopResult struct {
 //     ReasonNonTransient respectively. The caller distinguishes 2xx from
 //     hard-fail by inspecting Result.Last.Status and Result.Last.Err.
 //
+// Conductor integration shape (deferred to a follow-up PR — the helper is
+// shipped in isolation first so the hot-path diff can be reviewed against
+// the unit tests): the AttemptFn for executeMixedOnce / executeCountMixedOnce
+// wraps the existing single executor.Execute(...) call (and the
+// tryRefreshAfterUnauthorized retry block). MarkResult is invoked per
+// attempt exactly as today, so cooldown accounting is preserved. For
+// streaming, the AttemptFn wraps executeStreamWithModelPool; FirstByte
+// is set to true once the stream's first read returns any byte. When
+// cfg.Routing.Retry.MaxAttempts == 0 the helper degrades to one attempt
+// (today's behavior), so default config = zero production risk.
+//
 // Concurrency: RunInnerLoop is single-goroutine by design; the caller
 // invokes it from the per-attempt loop in executeMixedOnce /
+// executeStreamMixedOnce (one RunInnerLoop per picked auth, in series).
 func RunInnerLoop(parent context.Context, opts InnerLoopOpts, attempt AttemptFn) InnerLoopResult {
 	maxAttempts := opts.MaxAttempts
 	if maxAttempts == 0 {
