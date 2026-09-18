@@ -52,13 +52,13 @@ func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 		},
 	}
 
+	// Disabled auths must be unscheduled: nextRefreshCheckAt returns ok=false
+	// so the auto-refresh loop never schedules a refresh for them, even if
+	// their token is near expiry. This avoids spurious refresh attempts for
+	// credentials the user has explicitly disabled.
 	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
-	if !ok {
-		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
-	}
-	want := expiry.Add(-lead)
-	if !got.Equal(want) {
-		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	if ok {
+		t.Fatalf("nextRefreshCheckAt() ok = true, want false (disabled auth should be unscheduled); got next=%s", got)
 	}
 }
 
