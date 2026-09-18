@@ -40,6 +40,36 @@ export const isOpenAI = (t) => t === 'openai-compatibility';
 export const isOpenCodeGo = (t) => t === 'opencode-go';
 export const isClaude = (t) => t === 'claude-api-key' || t === 'oauth:claude';
 
+// isEntryBearingType reports whether the provider type uses the multi-row
+// api_key_entries editor (openai-compatibility, claude-api-key, and
+// opencode-go). Mirrors the predicate already used by form.js::buildPayload
+// and TestPanel.jsx::isEntryBearing; lifted to schemas.js so the editor
+// context (useEditorState.js) + future tabs can import a single source of
+// truth without a cross-module import dance.
+export function isEntryBearingType(providerType) {
+  return providerType === 'openai-compatibility'
+    || providerType === 'claude-api-key'
+    || providerType === 'opencode-go';
+}
+
+// TESTABLE_TYPES enumerates the API-key provider types the editor's Test
+// tab (and any future "live" affordances) can probe. Matches the values in
+// API_KEY_TYPES above — kept as a separate constant so a future change to
+// the type catalog (e.g. an oauth:* becoming testable) doesn't silently
+// rewire the test panel. OAuth providers are excluded by definition: the
+// server's /upstream-providers/:id/test endpoint expects a real entry
+// credential, and oauth:* rows only have an auth file the registry tracks.
+export const TESTABLE_TYPES = [
+  'gemini-api-key',
+  'claude-api-key',
+  'openai-compatibility',
+  'codex-api-key',
+  'xai-api-key',
+  'vertex-api-key',
+  'interactions-api-key',
+  'opencode-go',
+];
+
 // OPENCODE_GO_BASE_URL prefills the base URL when the operator picks the
 // OpenCode Go type in the create flow.
 export const OPENCODE_GO_BASE_URL = 'https://opencode.ai/zen/go/v1';

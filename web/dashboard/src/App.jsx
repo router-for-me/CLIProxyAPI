@@ -29,6 +29,13 @@ import UpstreamProvidersPage from './pages/UpstreamProvidersPage.jsx';
 import HealthPage from './pages/upstream-providers/HealthPage.jsx';
 import ProxyPoolsPage from './pages/ProxyPoolsPage.jsx';
 import UpstreamProviderEditorPage from './pages/upstream-provider-editor/index.jsx';
+import UpstreamProviderEditorCreatePage from './pages/upstream-provider-editor/CreateMode.jsx';
+import UpstreamProviderOverviewTab from './pages/upstream-provider-editor/OverviewTab.jsx';
+import UpstreamProviderModelsTab from './pages/upstream-provider-editor/ModelsTab.jsx';
+import UpstreamProviderEntriesTab from './pages/upstream-provider-editor/EntriesTab.jsx';
+import UpstreamProviderQuotaTab from './pages/upstream-provider-editor/QuotaTab.jsx';
+import UpstreamProviderTestTab from './pages/upstream-provider-editor/TestTab.jsx';
+import UpstreamProviderLogsTab from './pages/upstream-provider-editor/LogsTab.jsx';
 import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import ModelHealthPage from './pages/ModelHealthPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
@@ -296,9 +303,27 @@ export default function App() {
             <Route path="/api-tokens/:id" element={<ApiTokenDetailPage />} />
             <Route path="/developer" element={<DeveloperPage />} />
             <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
-            <Route path="/upstream-providers/new" element={<UpstreamProviderEditorPage />} />
+            {/* /upstream-providers/new keeps the legacy single-form create
+                flow (type picker + form body) until OverviewTab lands in
+                Task 3. The /new route MUST be declared before the :id
+                redirect so it wins on route matching — React Router 6
+                matches in declaration order. */}
+            <Route path="/upstream-providers/new" element={<UpstreamProviderEditorCreatePage />} />
             <Route path="/upstream-providers/health" element={<HealthPage />} />
-            <Route path="/upstream-providers/:id" element={<UpstreamProviderEditorPage />} />
+            <Route path="/upstream-providers/:id" element={<Navigate to="/upstream-providers/:id/overview" replace />} />
+            <Route path="/upstream-providers/:id/:tab" element={<UpstreamProviderEditorPage />}>
+              <Route index element={<Navigate to="overview" replace />} />
+              <Route path="overview" element={<UpstreamProviderOverviewTab />} />
+              <Route path="models" element={<UpstreamProviderModelsTab />} />
+              <Route path="entries" element={<UpstreamProviderEntriesTab />} />
+              <Route path="quota" element={<UpstreamProviderQuotaTab />} />
+              <Route path="test" element={<UpstreamProviderTestTab />} />
+              <Route path="logs" element={<UpstreamProviderLogsTab />} />
+              {/* Catch-all for unknown :tab segments: fall back to the
+                  Overview tab. Keeps a stale bookmark from blowing up into
+                  a 404, and matches the design doc's behaviour. */}
+              <Route path="*" element={<Navigate to="overview" replace />} />
+            </Route>
             <Route path="/proxy-pools" element={<ProxyPoolsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
             <Route path="/settings" element={<SettingsPage />} />
