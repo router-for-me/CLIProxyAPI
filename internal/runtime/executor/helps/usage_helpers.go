@@ -37,6 +37,7 @@ type UsageReporter struct {
 	apiKey              string
 	sessionID           string
 	parentSessionID     string
+	pluginRequestID     string
 	source              string
 	reasoning           string
 	serviceTier         string
@@ -74,6 +75,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	}
 	sessionID := ""
 	parentSessionID := ""
+	pluginRequestID := usage.PluginRequestIDFromContext(ctx)
 	clientMeta := internallogging.GetClientRequestMetadata(ctx)
 	if clientMeta.SessionID != "" {
 		sessionID = clientMeta.SessionID
@@ -102,6 +104,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		apiKey:          apiKey,
 		sessionID:       sessionID,
 		parentSessionID: parentSessionID,
+		pluginRequestID: pluginRequestID,
 		source:          resolveUsageSource(auth, apiKey),
 		authType:        resolveUsageAuthType(auth),
 		reasoning:       usage.ReasoningEffortFromContext(ctx),
@@ -454,6 +457,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		APIKey:              r.apiKey,
 		SessionID:           r.sessionID,
 		ParentSessionID:     r.parentSessionID,
+		PluginRequestID:     r.pluginRequestID,
 		AuthID:              r.authID,
 		AuthIndex:           r.authIndex,
 		AccessTokenSHA256:   r.accessTokenFingerprint(),

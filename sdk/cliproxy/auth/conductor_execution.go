@@ -1587,6 +1587,9 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 	if generate, ok := generateFromOptions(opts); ok {
 		ctx = coreusage.WithGenerate(ctx, generate)
 	}
+	if requestID := pluginRequestIDFromOptions(opts); requestID != "" {
+		ctx = coreusage.WithPluginRequestID(ctx, requestID)
+	}
 	ctx = coreusage.WithStream(ctx, opts.Stream)
 	return ctx
 }
@@ -1614,6 +1617,25 @@ func requestedModelAliasFromOptions(opts cliproxyexecutor.Options, fallback stri
 	default:
 		return fallback
 	}
+}
+
+// pluginRequestIDFromOptions reads the plugin-facing request id the API layer
+// published on the execution metadata.
+func pluginRequestIDFromOptions(opts cliproxyexecutor.Options) string {
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.PluginRequestIDMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	}
+	return ""
 }
 
 func reasoningEffortFromOptions(opts cliproxyexecutor.Options) string {

@@ -171,6 +171,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 		APIKey:          record.APIKey,
 		SessionID:       sessionID,
 		ParentSessionID: parentSessionID,
+		PluginRequestID: record.PluginRequestID,
 		AuthID:          record.AuthID,
 		AuthIndex:       record.AuthIndex,
 		AuthType:        record.AuthType,

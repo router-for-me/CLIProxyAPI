@@ -1418,6 +1418,10 @@ type UsageRecord struct {
 	SessionID string
 	// ParentSessionID identifies the parent session in a hierarchy or fork.
 	ParentSessionID string
+	// PluginRequestID ties this usage record to the request the plugin saw on
+	// request.intercept_before and request.complete. Empty on a host that does
+	// not publish it.
+	PluginRequestID string
 	// AuthID identifies the selected credential.
 	AuthID string
 	// AuthIndex identifies the credential index when applicable.

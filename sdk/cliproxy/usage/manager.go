@@ -30,6 +30,12 @@ type Record struct {
 	APIKey          string
 	SessionID       string
 	ParentSessionID string
+	// PluginRequestID is the request id plugins receive on
+	// request.intercept_before and request.complete. It lets a usage plugin
+	// attribute an upstream attempt to the request that caused it; without it
+	// the plugin can only guess by matching the key, the credential and a time
+	// window, which collides whenever one key has several requests in flight.
+	PluginRequestID string
 	AuthID          string
 	AuthIndex       string
 	// AccessTokenSHA256 identifies the OAuth token version without exposing the token.
@@ -87,6 +93,8 @@ type generateContextKey struct{}
 type streamContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
+type pluginRequestIDContextKey struct{}
+
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -96,6 +104,29 @@ func WithRequestedModelAlias(ctx context.Context, alias string) context.Context 
 		return ctx
 	}
 	return context.WithValue(ctx, requestedModelAliasContextKey{}, alias)
+}
+
+// WithPluginRequestID stores the plugin-facing request id in ctx.
+func WithPluginRequestID(ctx context.Context, id string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, pluginRequestIDContextKey{}, id)
+}
+
+// PluginRequestIDFromContext returns the plugin-facing request id stored in ctx.
+func PluginRequestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(pluginRequestIDContextKey{}).(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
 }
 
 // RequestedModelAliasFromContext returns the client-requested model name stored in ctx.
