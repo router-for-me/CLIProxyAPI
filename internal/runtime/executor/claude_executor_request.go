@@ -1970,10 +1970,19 @@ type claudeMCPAliasEntry struct {
 	parts    claudeMCPAliasParts
 }
 
+// claudeMCPPassthroughEntry is a caller-owned MCP tool that was forwarded
+// unchanged. It is kept apart from aliases so it never registers a virtual
+// server and never joins the fuzzy alias recovery.
+type claudeMCPPassthroughEntry struct {
+	name string
+	tool string
+}
+
 type claudeMCPAliasResolver struct {
-	exact   map[string]string
-	aliases []claudeMCPAliasEntry
-	servers map[string]struct{}
+	exact       map[string]string
+	aliases     []claudeMCPAliasEntry
+	passthrough []claudeMCPPassthroughEntry
+	servers     map[string]struct{}
 }
 
 type claudeMCPAliasRestoreError struct {
@@ -1998,6 +2007,9 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 		if alias == original {
 			// Caller-owned MCP tool recorded for exact passthrough only. It must not
 			// register a virtual server or take part in fuzzy alias recovery.
+			if tool := claudeMCPAliasTool(alias); tool != "" {
+				resolver.passthrough = append(resolver.passthrough, claudeMCPPassthroughEntry{name: alias, tool: tool})
+			}
 			continue
 		}
 		parts, ok := parseClaudeMCPAlias(alias)
@@ -2043,6 +2055,20 @@ func claudeMCPAliasServer(name string) string {
 		return ""
 	}
 	return server
+}
+
+// claudeMCPAliasTool returns the tool component after the server of an MCP tool
+// name, or "" when the name has no server component.
+func claudeMCPAliasTool(name string) string {
+	rest, ok := strings.CutPrefix(name, "mcp__")
+	if !ok {
+		return ""
+	}
+	server, tool, ok := strings.Cut(rest, "__")
+	if !ok || server == "" {
+		return ""
+	}
+	return tool
 }
 
 // recordPassthroughMCPTools remembers caller-owned MCP tool names that were left
@@ -2159,7 +2185,45 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)}
 	}
 
+	// The model may glue the virtual server prefix onto a caller-owned MCP tool
+	// that passed through unchanged. Those tools are not aliases, so nothing
+	// above can see them. This runs last on purpose: a proxied tool whose
+	// semantic suffix matches the same name keeps precedence over the caller's
+	// server.
+	if restored, ok, errPassthrough := resolver.resolvePassthrough(name, suffix); ok || errPassthrough != nil {
+		return restored, ok, errPassthrough
+	}
+
 	return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)}
+}
+
+// resolvePassthrough restores a hybrid name whose suffix, after the virtual
+// server prefix, is either a whole passthrough name minus its "mcp__" prefix
+// or the tool component of exactly one passthrough name.
+func (resolver claudeMCPAliasResolver) resolvePassthrough(name, suffix string) (string, bool, error) {
+	if suffix == "" || len(resolver.passthrough) == 0 {
+		return "", false, nil
+	}
+	if candidate := "mcp__" + suffix; resolver.exact[candidate] == candidate {
+		log.Debugf("claude oauth mcp alias: recovered hybrid tool name %q as passthrough %q", name, candidate)
+		return candidate, true, nil
+	}
+	matched := ""
+	matchCount := 0
+	for _, entry := range resolver.passthrough {
+		if entry.tool == suffix {
+			matched = entry.name
+			matchCount++
+		}
+	}
+	if matchCount > 1 {
+		return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: suffix matches multiple passthrough MCP tools", name)}
+	}
+	if matchCount == 1 {
+		log.Debugf("claude oauth mcp alias: recovered hybrid tool name %q as passthrough %q", name, matched)
+		return matched, true, nil
+	}
+	return "", false, nil
 }
 
 // reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses

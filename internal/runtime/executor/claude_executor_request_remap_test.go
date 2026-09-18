@@ -745,3 +745,100 @@ func reverseMapKeyFor(m map[string]string, val string) string {
 	}
 	return ""
 }
+
+// TestReverseRemapRecoversHybridPassthroughAliases covers the model gluing the
+// virtual server prefix onto a caller-owned MCP tool that passed through
+// unchanged, in both shapes that occur and on both response paths.
+func TestReverseRemapRecoversHybridPassthroughAliases(t *testing.T) {
+	const secret = "hybrid-passthrough-caller"
+	server := strings.Split(helps.ClaudeMCPToolAlias(secret, "probe", 0), "__")[1]
+	const passthrough = "mcp__acme__link_pull_request"
+	body := []byte(fmt.Sprintf(
+		`{"tools":[{"name":"Bash","input_schema":{"type":"object"}},{"name":%q},{"name":"mcp__acme__list_threads"}]}`,
+		passthrough))
+	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: secret})
+	if reverseMap[passthrough] != passthrough {
+		t.Fatalf("passthrough tool %q not recorded in reverse map %v", passthrough, reverseMap)
+	}
+
+	tests := []struct {
+		name string
+		emit string
+	}{
+		{name: "declared name", emit: passthrough},
+		{name: "virtual prefix plus tool component", emit: "mcp__" + server + "__link_pull_request"},
+		{name: "virtual prefix plus whole real name", emit: "mcp__" + server + "__acme__link_pull_request"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.emit))
+			restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
+			if err != nil {
+				t.Fatalf("restoreClaudeOAuthToolNamesFromResponse(%q) error = %v", test.emit, err)
+			}
+			if got := gjson.GetBytes(restored, "content.0.name").String(); got != passthrough {
+				t.Fatalf("restored tool name = %q, want %q", got, passthrough)
+			}
+
+			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.emit))
+			restoredLine, errLine := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errLine != nil {
+				t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine(%q) error = %v", test.emit, errLine)
+			}
+			if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != passthrough {
+				t.Fatalf("stream restored tool name = %q, want %q", got, passthrough)
+			}
+		})
+	}
+}
+
+// TestReverseRemapHybridPassthroughYieldsToSemanticSuffix pins the recovery
+// order: a proxied client tool whose semantic suffix matches the emitted name
+// wins over a caller-owned MCP tool with the same tool component.
+func TestReverseRemapHybridPassthroughYieldsToSemanticSuffix(t *testing.T) {
+	const secret = "hybrid-precedence-caller"
+	server := strings.Split(helps.ClaudeMCPToolAlias(secret, "probe", 0), "__")[1]
+	body := []byte(`{"tools":[{"name":"Bash","input_schema":{"type":"object"}},{"name":"mcp__shell__Bash"}]}`)
+	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: secret})
+	if reverseMap["mcp__shell__Bash"] != "mcp__shell__Bash" {
+		t.Fatalf("passthrough tool not recorded in reverse map %v", reverseMap)
+	}
+
+	emit := "mcp__" + server + "__Bash"
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, emit))
+	restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
+	if err != nil {
+		t.Fatalf("restoreClaudeOAuthToolNamesFromResponse(%q) error = %v", emit, err)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
+		t.Fatalf("restored tool name = %q, want Bash (client tool must win over mcp__shell__Bash)", got)
+	}
+}
+
+// TestReverseRemapHybridPassthroughRejectsAmbiguousSuffix keeps the fail-closed
+// behaviour when the emitted tool component belongs to more than one
+// caller-owned MCP server.
+func TestReverseRemapHybridPassthroughRejectsAmbiguousSuffix(t *testing.T) {
+	const secret = "hybrid-ambiguous-caller"
+	server := strings.Split(helps.ClaudeMCPToolAlias(secret, "probe", 0), "__")[1]
+	body := []byte(`{"tools":[{"name":"Read","input_schema":{"type":"object"}},{"name":"mcp__acme__list_threads"},{"name":"mcp__other__list_threads"}]}`)
+	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: secret})
+
+	emit := "mcp__" + server + "__list_threads"
+	const wantError = "suffix matches multiple passthrough MCP tools"
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, emit))
+	_, errReverse := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
+	if errReverse == nil || !strings.Contains(errReverse.Error(), wantError) {
+		t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v, want %q", errReverse, wantError)
+	}
+	var requestErr cliproxyexecutor.RequestScopedError
+	if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %T %v, want request-scoped", errReverse, errReverse)
+	}
+
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, emit))
+	_, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+	if errStream == nil || !strings.Contains(errStream.Error(), wantError) {
+		t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, wantError)
+	}
+}
