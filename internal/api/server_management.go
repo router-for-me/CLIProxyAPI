@@ -395,6 +395,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/proxy-pools/:id", s.mgmt.UpdateProxyPool)
 		mgmt.DELETE("/proxy-pools/:id", s.mgmt.DeleteProxyPool)
 		mgmt.POST("/proxy-pools/:id/test", s.mgmt.TestProxyPool)
+
+		// Model-routing picker (zero-downtime design 2026-09-18). Returns
+		// 503 when the PG store is not configured. The picker filters
+		// configured upstreams by the LIVE rule (IsProviderRowLive) so the
+		// operator only sees what is currently serving the model.
+		mgmt.GET("/model-routing/picker", s.mgmt.GetModelRoutingPicker)
 		mgmt.POST("/proxy-pools/batch-import", s.mgmt.BatchImportProxyPools)
 		mgmt.POST("/proxy-pools/relay-deploy", s.mgmt.DeployRelayProxyPool)
 

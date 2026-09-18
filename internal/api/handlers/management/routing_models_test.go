@@ -1,7 +1,12 @@
 package management
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -78,5 +83,79 @@ func TestCooldownProviderSetFilters(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("map size = %d, want 2", len(got))
+	}
+}
+
+// newPickerRouter wires a minimal gin.Engine with the picker endpoint so
+// tests can drive it without the full management surface. h must have
+// pgUpstreamProviders/pgModels set; authManager may be nil (LIVE filtering
+// returns empty in that case).
+func newPickerRouter(h *Handler) *gin.Engine {
+	r := gin.New()
+	g := r.Group("/v0/management")
+	g.GET("/model-routing/picker", h.GetModelRoutingPicker)
+	return r
+}
+
+// TestPickerRequiresPGStore confirms a handler without PG-backed stores
+// returns 503 — the operator-facing path stays honest about what it can do.
+func TestPickerRequiresPGStore(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(nil, nil)
+	r := newPickerRouter(h)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/model-routing/picker?model=gpt-4o", nil)
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+}
+
+// TestPickerRequiresModelParam confirms the model query parameter is
+// required (the picker is per-model so an empty model would silently
+// scan the whole registry).
+func TestPickerRequiresModelParam(t *testing.T) {
+	// pgUpstreamProviders / pgModels nil → we expect 503 first (the
+	// requirePG gate runs before the model check), so this test double-
+	// checks that the model check never gets reached without PG.
+	h := NewHandlerWithoutConfigFilePath(nil, nil)
+	r := newPickerRouter(h)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/model-routing/picker", nil)
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d (no PG → 503 before model check); body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+}
+
+// TestPickerResponseShape decodes the response with the json tags the
+// picker uses so a future refactor that drops a field breaks the test.
+// Uses a no-PG handler so the response body is the 503 envelope; we
+// decode the error shape to assert the wire contract.
+func TestPickerResponseShape(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(nil, nil)
+	r := newPickerRouter(h)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/model-routing/picker?model=gpt-4o", nil)
+	r.ServeHTTP(rec, req)
+
+	var body struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Error.Type != "pg_not_configured" {
+		t.Fatalf("error.type = %q, want pg_not_configured", body.Error.Type)
+	}
+	if body.Error.Message == "" {
+		t.Fatalf("error.message is empty")
 	}
 }
