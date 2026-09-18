@@ -337,12 +337,12 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	}
 
 	// Pointer-backed booleans (such as cache-user-id and disable-cooling): explicit false is meaningful and must be preserved.
-	if len(path) > 0 && (path[len(path)-1] == "cache-user-id" || path[len(path)-1] == "disable-cooling") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+	if len(path) > 0 && (path[len(path)-1] == "cache-user-id" || path[len(path)-1] == "disable-cooling" || path[len(path)-1] == "relaxed-system-prompt") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
 		return false
 	}
 
 	// First check if it's a zero value
-	if isZeroValueNode(node) {
+	if isZeroValueNode(node, path) {
 		return true
 	}
 
@@ -419,7 +419,7 @@ func pruneKnownDefaultsInNewNode(path []string, node *yaml.Node) {
 // isZeroValueNode returns true if the YAML node represents a zero/default value
 // that should not be written as a new key to preserve config cleanliness.
 // For mappings and sequences, recursively checks if all children are zero values.
-func isZeroValueNode(node *yaml.Node) bool {
+func isZeroValueNode(node *yaml.Node, path []string) bool {
 	if node == nil {
 		return true
 	}
@@ -441,7 +441,7 @@ func isZeroValueNode(node *yaml.Node) bool {
 		}
 		// Check if all elements are zero values
 		for _, child := range node.Content {
-			if !isZeroValueNode(child) {
+			if !isKnownDefaultValue(path, child) {
 				return false
 			}
 		}
@@ -450,9 +450,9 @@ func isZeroValueNode(node *yaml.Node) bool {
 		if len(node.Content) == 0 {
 			return true
 		}
-		// Check if all values are zero values (values are at odd indices)
+		// Respect explicit-value rules when deciding whether the parent is empty.
 		for i := 1; i < len(node.Content); i += 2 {
-			if !isZeroValueNode(node.Content[i]) {
+			if !isKnownDefaultValue(appendPath(path, node.Content[i-1].Value), node.Content[i]) {
 				return false
 			}
 		}
