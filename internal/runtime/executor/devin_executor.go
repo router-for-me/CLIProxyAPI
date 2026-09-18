@@ -462,6 +462,9 @@ func (e *DevinExecutor) streamDevinFrames(
 		name      string
 	}
 	activeToolSlots := make(map[int]*devinActiveToolSlot)
+	activeCallByID := make(map[string]*devinActiveToolSlot)
+	var activeCallSlot *devinActiveToolSlot
+	toolCallCount := 0
 	thinkingBuf := &helps.UTF8SplitBuffer{}
 	contentBuf := &helps.UTF8SplitBuffer{}
 	var accumulatedThinking strings.Builder
@@ -583,10 +586,6 @@ func (e *DevinExecutor) streamDevinFrames(
 	}
 
 	emitToolCall := func(tc helps.DevinToolCallDelta) bool {
-		if tc.Index < 0 || tc.Index >= maxDevinToolCalls {
-			log.Warnf("devin executor: tool call index %d out of bounds (max %d), dropping", tc.Index, maxDevinToolCalls)
-			return true
-		}
 		if thoughtStarted {
 			stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", stepIndex)
 			_ = emitInteractionsEvent(stopEvent)
@@ -600,16 +599,24 @@ func (e *DevinExecutor) streamDevinFrames(
 			stepIndex++
 		}
 
-		slot, exists := activeToolSlots[tc.Index]
-		if exists && slot.id != "" && tc.ID != "" && tc.ID != slot.id {
-			stopEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.stop","index":0}`), "index", slot.stepIndex)
-			if !emitInteractionsEvent(stopEvent) {
-				return false
-			}
-			exists = false
+		argsChunk := tc.Arguments
+		if argsChunk == "" {
+			argsChunk = tc.InvalidJSONStr
 		}
 
-		if !exists {
+		var slot *devinActiveToolSlot
+		if tc.ID != "" {
+			slot = activeCallByID[tc.ID]
+		} else if activeCallSlot != nil {
+			slot = activeCallSlot
+		}
+
+		if slot == nil {
+			if toolCallCount >= maxDevinToolCalls {
+				log.Warnf("devin executor: total tool calls exceeded max %d, dropping", maxDevinToolCalls)
+				return true
+			}
+			toolCallCount++
 			sIdx := stepIndex
 			stepIndex++
 			slot = &devinActiveToolSlot{
@@ -617,7 +624,11 @@ func (e *DevinExecutor) streamDevinFrames(
 				id:        tc.ID,
 				name:      tc.Name,
 			}
-			activeToolSlots[tc.Index] = slot
+			activeToolSlots[sIdx] = slot
+			if tc.ID != "" {
+				activeCallByID[tc.ID] = slot
+			}
+			activeCallSlot = slot
 			startEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","name":"","id":"","call_id":"","arguments":{}}}`), "index", sIdx)
 			startEvent, _ = sjson.SetBytes(startEvent, "step.name", tc.Name)
 			startEvent, _ = sjson.SetBytes(startEvent, "step.id", tc.ID)
@@ -626,9 +637,11 @@ func (e *DevinExecutor) streamDevinFrames(
 				return false
 			}
 		} else {
+			activeCallSlot = slot
 			updated := false
 			if slot.id == "" && tc.ID != "" {
 				slot.id = tc.ID
+				activeCallByID[tc.ID] = slot
 				updated = true
 			}
 			if slot.name == "" && tc.Name != "" {
@@ -644,9 +657,9 @@ func (e *DevinExecutor) streamDevinFrames(
 			}
 		}
 
-		if tc.Arguments != "" {
+		if argsChunk != "" {
 			deltaEvent, _ := sjson.SetBytes([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":""}}`), "index", slot.stepIndex)
-			deltaEvent, _ = translatorcommon.SetStringWithoutHTMLEscape(deltaEvent, "delta.arguments", tc.Arguments)
+			deltaEvent, _ = translatorcommon.SetStringWithoutHTMLEscape(deltaEvent, "delta.arguments", argsChunk)
 			if !emitInteractionsEvent(deltaEvent) {
 				return false
 			}
@@ -674,6 +687,8 @@ func (e *DevinExecutor) streamDevinFrames(
 				_ = emitInteractionsEvent(stopEvent)
 			}
 			clear(activeToolSlots)
+			clear(activeCallByID)
+			activeCallSlot = nil
 		}
 	}
 
@@ -728,6 +743,9 @@ func (e *DevinExecutor) streamDevinFrames(
 				}
 				if frameRes.Usage.CachedTokens > 0 {
 					finalUsage.CachedTokens = frameRes.Usage.CachedTokens
+				}
+				if frameRes.Usage.CacheWriteTokens > 0 {
+					finalUsage.CacheWriteTokens = frameRes.Usage.CacheWriteTokens
 				}
 				if frameRes.Usage.RequestID != "" {
 					finalUsage.RequestID = frameRes.Usage.RequestID
@@ -915,6 +933,9 @@ func (e *DevinExecutor) streamDevinFrames(
 		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_input_tokens", totalInput)
 		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_output_tokens", totalOutput)
 		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_cached_tokens", finalUsage.CachedTokens)
+		if finalUsage.CacheWriteTokens > 0 {
+			completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.cache_write_tokens", finalUsage.CacheWriteTokens)
+		}
 		completedEvent, _ = sjson.SetBytes(completedEvent, "interaction.usage.total_tokens", totalTokens)
 		if detail, ok := helps.ParseInteractionsStreamUsage(completedEvent); ok {
 			if reporter != nil {
@@ -976,7 +997,8 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		args strings.Builder
 	}
 	var toolBuilders []*devinToolCallBuilder
-	slotToBuilderIndex := make(map[int]int)
+	callIDToBuilderIndex := make(map[string]int)
+	lastBuilderIdx := -1
 
 	getToolCalls := func() []helps.DevinToolCall {
 		if len(toolBuilders) == 0 {
@@ -1078,6 +1100,9 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 				if frameRes.Usage.CachedTokens > 0 {
 					finalUsage.CachedTokens = frameRes.Usage.CachedTokens
 				}
+				if frameRes.Usage.CacheWriteTokens > 0 {
+					finalUsage.CacheWriteTokens = frameRes.Usage.CacheWriteTokens
+				}
 				if frameRes.Usage.RequestID != "" {
 					finalUsage.RequestID = frameRes.Usage.RequestID
 				}
@@ -1123,32 +1148,47 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 			textParts = append(textParts, frameRes.ContentText)
 		}
 		for _, tc := range frameRes.ToolCallDeltas {
-			slotIdx := tc.Index
-			if slotIdx < 0 || slotIdx >= maxDevinToolCalls {
-				log.Warnf("devin executor: tool call index %d out of bounds (max %d), dropping", slotIdx, maxDevinToolCalls)
-				continue
+			argsChunk := tc.Arguments
+			if argsChunk == "" {
+				argsChunk = tc.InvalidJSONStr
 			}
-			bIdx, exists := slotToBuilderIndex[slotIdx]
-			if exists && tc.ID != "" && toolBuilders[bIdx].id != "" && tc.ID != toolBuilders[bIdx].id {
-				exists = false
+
+			var bIdx int
+			var exists bool
+			if tc.ID != "" {
+				bIdx, exists = callIDToBuilderIndex[tc.ID]
+			} else if lastBuilderIdx >= 0 {
+				bIdx = lastBuilderIdx
+				exists = true
 			}
+
 			if !exists {
 				if len(toolBuilders) >= maxDevinToolCalls {
 					log.Warnf("devin executor: total tool calls exceeded max %d, dropping", maxDevinToolCalls)
 					continue
 				}
 				bIdx = len(toolBuilders)
-				toolBuilders = append(toolBuilders, &devinToolCallBuilder{})
-				slotToBuilderIndex[slotIdx] = bIdx
+				toolBuilders = append(toolBuilders, &devinToolCallBuilder{
+					id:   tc.ID,
+					name: tc.Name,
+				})
+				if tc.ID != "" {
+					callIDToBuilderIndex[tc.ID] = bIdx
+				}
+				lastBuilderIdx = bIdx
+			} else {
+				lastBuilderIdx = bIdx
+				if toolBuilders[bIdx].id == "" && tc.ID != "" {
+					toolBuilders[bIdx].id = tc.ID
+					callIDToBuilderIndex[tc.ID] = bIdx
+				}
+				if tc.Name != "" {
+					toolBuilders[bIdx].name = tc.Name
+				}
 			}
-			if tc.ID != "" {
-				toolBuilders[bIdx].id = tc.ID
-			}
-			if tc.Name != "" {
-				toolBuilders[bIdx].name = tc.Name
-			}
-			if tc.Arguments != "" {
-				toolBuilders[bIdx].args.WriteString(tc.Arguments)
+
+			if argsChunk != "" {
+				toolBuilders[bIdx].args.WriteString(argsChunk)
 			}
 		}
 	}
@@ -1221,8 +1261,12 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		fnStep, _ = sjson.SetBytes(fnStep, "name", tc.Name)
 		fnStep, _ = sjson.SetBytes(fnStep, "id", tc.ID)
 		fnStep, _ = sjson.SetBytes(fnStep, "call_id", tc.ID)
-		if tc.Arguments != "" && json.Valid([]byte(tc.Arguments)) {
-			fnStep, _ = sjson.SetRawBytes(fnStep, "arguments", []byte(tc.Arguments))
+		if tc.Arguments != "" {
+			if json.Valid([]byte(tc.Arguments)) {
+				fnStep, _ = sjson.SetRawBytes(fnStep, "arguments", []byte(tc.Arguments))
+			} else {
+				fnStep, _ = translatorcommon.SetStringWithoutHTMLEscape(fnStep, "arguments", tc.Arguments)
+			}
 		}
 		steps = append(steps, fnStep)
 	}
@@ -1248,6 +1292,9 @@ func consumeDevinFramesToInteractions(body io.Reader, model, chatModelUID string
 		out, _ = sjson.SetBytes(out, "usage.total_input_tokens", totalInput)
 		out, _ = sjson.SetBytes(out, "usage.total_output_tokens", totalOutput)
 		out, _ = sjson.SetBytes(out, "usage.total_cached_tokens", finalUsage.CachedTokens)
+		if finalUsage.CacheWriteTokens > 0 {
+			out, _ = sjson.SetBytes(out, "usage.cache_write_tokens", finalUsage.CacheWriteTokens)
+		}
 		out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
 	}
 
@@ -1334,6 +1381,31 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 	cascadeID = sessionID
 
 	// 4. Repeated History Prompts
+	var pendingToolCalls []string
+	matchPendingToolCall := func(id string) (bool, string) {
+		matchedIdx := -1
+		if id != "" {
+			for idx, pendingID := range pendingToolCalls {
+				if pendingID == id {
+					matchedIdx = idx
+					break
+				}
+			}
+		} else if len(pendingToolCalls) > 0 {
+			matchedIdx = 0
+		}
+		if matchedIdx >= 0 {
+			matchedID := pendingToolCalls[matchedIdx]
+			pendingToolCalls = append(pendingToolCalls[:matchedIdx], pendingToolCalls[matchedIdx+1:]...)
+			finalID := id
+			if finalID == "" {
+				finalID = matchedID
+			}
+			return true, finalID
+		}
+		return false, ""
+	}
+
 	inputRes := root.Get("input")
 	if inputRes.IsArray() {
 		for _, step := range inputRes.Array() {
@@ -1400,7 +1472,13 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 			case "function_call":
 				name := step.Get("name").String()
 				id := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String())
-				args := step.Get("arguments").Raw
+				argsRes := step.Get("arguments")
+				var args string
+				if argsRes.Type == gjson.String {
+					args = argsRes.String()
+				} else if argsRes.Exists() {
+					args = argsRes.Raw
+				}
 				tc := helps.DevinToolCall{ID: id, Name: name, Arguments: args}
 				if len(prompts) > 0 && prompts[len(prompts)-1].Source == 2 {
 					prompts[len(prompts)-1].ToolCalls = append(prompts[len(prompts)-1].ToolCalls, tc)
@@ -1411,17 +1489,29 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 						ToolCalls: []helps.DevinToolCall{tc},
 					})
 				}
+				pendingToolCalls = append(pendingToolCalls, id)
 
 			case "function_result":
 				id := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String())
 				resText, resImages := extractFunctionResultContent(step)
-				prompts = append(prompts, helps.DevinPrompt{
-					MessageID:  uuid.New().String(),
-					Source:     4,
-					ToolCallID: id,
-					Content:    resText,
-					Images:     resImages,
-				})
+				if matched, matchedID := matchPendingToolCall(id); matched {
+					prompts = append(prompts, helps.DevinPrompt{
+						MessageID:  uuid.New().String(),
+						Source:     4,
+						ToolCallID: matchedID,
+						Content:    resText,
+						Images:     resImages,
+					})
+				} else {
+					prompts = append(prompts, helps.DevinPrompt{
+						MessageID:          uuid.New().String(),
+						Source:             1,
+						OriginalToolCallID: id,
+						IsOrphanedTool:     true,
+						Content:            resText,
+						Images:             resImages,
+					})
+				}
 			}
 		}
 	} else if messagesRes := root.Get("messages"); messagesRes.IsArray() {
@@ -1443,21 +1533,59 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 				})
 			case "assistant":
 				text := extractInteractionsStepText(m)
+				var toolCalls []helps.DevinToolCall
+				if tcRes := m.Get("tool_calls"); tcRes.IsArray() {
+					for _, tcItem := range tcRes.Array() {
+						tcID := firstNonEmpty(tcItem.Get("id").String(), tcItem.Get("call_id").String())
+						tcName := tcItem.Get("function.name").String()
+						if tcName == "" {
+							tcName = tcItem.Get("name").String()
+						}
+						var tcArgs string
+						fnArgs := tcItem.Get("function.arguments")
+						if !fnArgs.Exists() {
+							fnArgs = tcItem.Get("arguments")
+						}
+						if fnArgs.Type == gjson.String {
+							tcArgs = fnArgs.String()
+						} else if fnArgs.Exists() {
+							tcArgs = fnArgs.Raw
+						}
+						toolCalls = append(toolCalls, helps.DevinToolCall{
+							ID:        tcID,
+							Name:      tcName,
+							Arguments: tcArgs,
+						})
+						pendingToolCalls = append(pendingToolCalls, tcID)
+					}
+				}
 				prompts = append(prompts, helps.DevinPrompt{
 					MessageID: uuid.New().String(),
 					Source:    2,
 					Content:   text,
+					ToolCalls: toolCalls,
 				})
 			case "tool":
-				id := firstNonEmpty(m.Get("tool_call_id").String(), m.Get("id").String())
+				id := firstNonEmpty(m.Get("tool_call_id").String(), m.Get("id").String(), m.Get("call_id").String())
 				resText, resImages := extractFunctionResultContent(m)
-				prompts = append(prompts, helps.DevinPrompt{
-					MessageID:  uuid.New().String(),
-					Source:     4,
-					ToolCallID: id,
-					Content:    resText,
-					Images:     resImages,
-				})
+				if matched, matchedID := matchPendingToolCall(id); matched {
+					prompts = append(prompts, helps.DevinPrompt{
+						MessageID:  uuid.New().String(),
+						Source:     4,
+						ToolCallID: matchedID,
+						Content:    resText,
+						Images:     resImages,
+					})
+				} else {
+					prompts = append(prompts, helps.DevinPrompt{
+						MessageID:          uuid.New().String(),
+						Source:             1,
+						OriginalToolCallID: id,
+						IsOrphanedTool:     true,
+						Content:            resText,
+						Images:             resImages,
+					})
+				}
 			}
 		}
 	}
@@ -1600,23 +1728,86 @@ func extractDevinImage(part gjson.Result) (helps.DevinImage, bool) {
 	}, true
 }
 
-func extractFunctionResultContent(step gjson.Result) (string, []helps.DevinImage) {
-	target := step.Get("result")
-	if !target.Exists() {
-		target = step.Get("output")
+const devinEmptyToolResultPlaceholder = "{}"
+
+func isProtocolWrapperObject(obj gjson.Result, wrapperKey string) bool {
+	if !obj.IsObject() {
+		return false
 	}
-	if !target.Exists() {
-		target = step.Get("content")
+	targetVal := obj.Get(wrapperKey)
+	if !targetVal.Exists() {
+		return false
 	}
 
+	// Case 1: Explicit tool_result protocol block (e.g. Claude tool_result)
+	if strings.EqualFold(strings.TrimSpace(obj.Get("type").String()), "tool_result") {
+		allAllowed := true
+		obj.ForEach(func(k, _ gjson.Result) bool {
+			key := k.String()
+			if key == wrapperKey || key == "type" || key == "tool_use_id" || key == "id" || key == "is_error" || key == "cache_control" {
+				return true
+			}
+			allAllowed = false
+			return false
+		})
+		return allAllowed
+	}
+
+	// Case 2: Pure single-key envelope containing only wrapperKey (and optional cache_control)
+	allAllowed := true
+	hasWrapper := false
+	obj.ForEach(func(k, _ gjson.Result) bool {
+		key := k.String()
+		if key == wrapperKey {
+			hasWrapper = true
+			return true
+		}
+		if key == "cache_control" {
+			return true
+		}
+		allAllowed = false
+		return false
+	})
+	return hasWrapper && allAllowed
+}
+
+func extractFunctionResultTarget(target gjson.Result) (string, []helps.DevinImage) {
 	if !target.Exists() {
 		return "", nil
 	}
-
 	if target.Type == gjson.String {
 		return target.String(), nil
 	}
-
+	if img, ok := extractDevinImage(target); ok {
+		return "", []helps.DevinImage{img}
+	}
+	if target.IsObject() {
+		if isProtocolWrapperObject(target, "content") {
+			return extractFunctionResultTarget(target.Get("content"))
+		}
+		if isProtocolWrapperObject(target, "output") {
+			return extractFunctionResultTarget(target.Get("output"))
+		}
+		if isProtocolWrapperObject(target, "result") {
+			return extractFunctionResultTarget(target.Get("result"))
+		}
+		itemType := strings.ToLower(strings.TrimSpace(target.Get("type").String()))
+		if itemType == "text" {
+			isPureTextPart := true
+			target.ForEach(func(k, _ gjson.Result) bool {
+				key := k.String()
+				if key != "type" && key != "text" && key != "cache_control" {
+					isPureTextPart = false
+					return false
+				}
+				return true
+			})
+			if isPureTextPart {
+				return target.Get("text").String(), nil
+			}
+		}
+		return target.Raw, nil
+	}
 	if target.IsArray() {
 		var textParts []string
 		var images []helps.DevinImage
@@ -1628,10 +1819,43 @@ func extractFunctionResultContent(step gjson.Result) (string, []helps.DevinImage
 				hasStructuredParts = true
 				continue
 			}
-			itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
-			if itemType == "text" {
-				isPureTextPart := true
-				if item.IsObject() {
+			if item.IsObject() {
+				if isProtocolWrapperObject(item, "content") {
+					hasStructuredParts = true
+					txt, imgs := extractFunctionResultTarget(item.Get("content"))
+					if txt != "" {
+						textParts = append(textParts, txt)
+					}
+					if len(imgs) > 0 {
+						images = append(images, imgs...)
+					}
+					continue
+				}
+				if isProtocolWrapperObject(item, "output") {
+					hasStructuredParts = true
+					txt, imgs := extractFunctionResultTarget(item.Get("output"))
+					if txt != "" {
+						textParts = append(textParts, txt)
+					}
+					if len(imgs) > 0 {
+						images = append(images, imgs...)
+					}
+					continue
+				}
+				if isProtocolWrapperObject(item, "result") {
+					hasStructuredParts = true
+					txt, imgs := extractFunctionResultTarget(item.Get("result"))
+					if txt != "" {
+						textParts = append(textParts, txt)
+					}
+					if len(imgs) > 0 {
+						images = append(images, imgs...)
+					}
+					continue
+				}
+				itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+				if itemType == "text" {
+					isPureTextPart := true
 					item.ForEach(func(k, _ gjson.Result) bool {
 						key := k.String()
 						if key != "type" && key != "text" && key != "cache_control" {
@@ -1640,47 +1864,69 @@ func extractFunctionResultContent(step gjson.Result) (string, []helps.DevinImage
 						}
 						return true
 					})
-				}
-				if isPureTextPart {
-					if t := item.Get("text").String(); t != "" {
-						textParts = append(textParts, t)
+					if isPureTextPart {
+						hasStructuredParts = true
+						if t := item.Get("text").String(); t != "" {
+							textParts = append(textParts, t)
+						}
+						continue
+					} else {
+						if raw := strings.TrimSpace(item.Raw); raw != "" {
+							textParts = append(textParts, raw)
+						}
 					}
-					hasStructuredParts = true
-				} else {
-					if raw := strings.TrimSpace(item.Raw); raw != "" {
-						textParts = append(textParts, raw)
-					}
+					continue
 				}
-			} else {
-				// Preserve unconsumed array items (e.g. arbitrary business JSON or string parts)
-				if raw := strings.TrimSpace(item.Raw); raw != "" {
-					textParts = append(textParts, raw)
-				}
+			}
+			// Preserve unconsumed array items (e.g. arbitrary business JSON or string parts)
+			if raw := strings.TrimSpace(item.Raw); raw != "" {
+				textParts = append(textParts, raw)
 			}
 		}
 
 		if hasStructuredParts || len(images) > 0 {
-			resText := strings.Join(textParts, "\n")
-			if len(images) > 0 && !strings.Contains(resText, "[Image ") {
-				var imgHeaders []string
-				for i, img := range images {
-					ext := mimeExtension(img.MimeType)
-					imgHeaders = append(imgHeaders, fmt.Sprintf("[Image %d: pasted_image_%d.%s]", i+1, i+1, ext))
-				}
-				header := strings.Join(imgHeaders, "\n")
-				if resText != "" {
-					resText = header + "\n\n" + resText
-				} else {
-					resText = header
-				}
-			}
-			return resText, images
+			return strings.Join(textParts, "\n"), images
 		}
 
 		return target.Raw, nil
 	}
 
 	return target.Raw, nil
+}
+
+func extractFunctionResultContent(step gjson.Result) (string, []helps.DevinImage) {
+	target := step.Get("result")
+	if !target.Exists() {
+		target = step.Get("output")
+	}
+	if !target.Exists() {
+		target = step.Get("content")
+	}
+
+	if !target.Exists() {
+		return devinEmptyToolResultPlaceholder, nil
+	}
+
+	resText, images := extractFunctionResultTarget(target)
+	if len(images) > 0 && !strings.Contains(resText, "[Image ") {
+		var imgHeaders []string
+		for i, img := range images {
+			ext := mimeExtension(img.MimeType)
+			imgHeaders = append(imgHeaders, fmt.Sprintf("[Image %d: pasted_image_%d.%s]", i+1, i+1, ext))
+		}
+		header := strings.Join(imgHeaders, "\n")
+		if resText != "" {
+			resText = header + "\n\n" + resText
+		} else {
+			resText = header
+		}
+	}
+
+	if strings.TrimSpace(resText) == "" && len(images) == 0 {
+		resText = devinEmptyToolResultPlaceholder
+	}
+
+	return resText, images
 }
 
 func extractInteractionsStepContent(step gjson.Result) (string, []helps.DevinImage) {
@@ -1808,6 +2054,27 @@ func supplementImagesFromOriginal(original []byte, prompts []helps.DevinPrompt) 
 	userPromptIdx := 0
 	for i := range prompts {
 		if prompts[i].Source == 1 {
+			if prompts[i].IsOrphanedTool {
+				// Downgraded orphaned tool result; do not consume userImages from user messages
+				if len(prompts[i].Images) == 0 && prompts[i].OriginalToolCallID != "" {
+					if matchedImgs, ok := toolImagesByID[prompts[i].OriginalToolCallID]; ok && len(matchedImgs) > 0 {
+						prompts[i].Images = matchedImgs
+						if !strings.Contains(prompts[i].Content, "[Image ") {
+							var imgHeaders []string
+							for imgIdx, img := range prompts[i].Images {
+								imgHeaders = append(imgHeaders, fmt.Sprintf("[Image %d: pasted_image_%d.%s]", imgIdx+1, imgIdx+1, mimeExtension(img.MimeType)))
+							}
+							header := strings.Join(imgHeaders, "\n")
+							if prompts[i].Content != "" {
+								prompts[i].Content = header + "\n\n" + prompts[i].Content
+							} else {
+								prompts[i].Content = header
+							}
+						}
+					}
+				}
+				continue
+			}
 			if len(prompts[i].Images) == 0 && userPromptIdx < len(userImages) && len(userImages[userPromptIdx]) > 0 {
 				prompts[i].Images = userImages[userPromptIdx]
 				if !strings.Contains(prompts[i].Content, "[Image ") {

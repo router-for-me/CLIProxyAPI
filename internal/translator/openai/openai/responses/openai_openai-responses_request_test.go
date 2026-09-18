@@ -2090,3 +2090,292 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_QualifiedIdentityO
 		}
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_IncompleteToolCallsDoNotDeferMessages(t *testing.T) {
+	// If assistant issues function_call(a) and function_call(b), but only function_call_output(a)
+	// arrives, the history is incomplete. Intervening messages (e.g. user reminder) must NOT
+	// be deferred; original order must be preserved.
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"role":"user","content":"reminder before results"},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Incomplete history must stay untouched:
+	// messages[0]: assistant (tool_calls [call_a, call_b])
+	// messages[1]: user ("reminder before results")
+	// messages[2]: tool (tool_call_id: call_a)
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %s", len(messages), out)
+	}
+	if roles[0] != "assistant" || roles[1] != "user" || roles[2] != "tool" {
+		t.Fatalf("expected untouched order [assistant, user, tool], got: %v (output=%s)", roles, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_CompleteToolCallsDoPairMessages(t *testing.T) {
+	// If assistant issues function_call(a) and function_call(b), and both function_call_output(a)
+	// and function_call_output(b) arrive, with an intervening user reminder, the tool outputs
+	// must be paired immediately following the assistant tool_calls message.
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"type":"function_call","call_id":"call_a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"call_b","name":"tool_b","arguments":"{}"},
+			{"role":"user","content":"reminder during execution"},
+			{"type":"function_call_output","call_id":"call_b","output":"result_b"},
+			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Expected:
+	// messages[0]: assistant (tool_calls [call_a, call_b])
+	// messages[1]: tool
+	// messages[2]: tool
+	// messages[3]: user ("reminder during execution")
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %s", len(messages), out)
+	}
+	if roles[0] != "assistant" || roles[1] != "tool" || roles[2] != "tool" || roles[3] != "user" {
+		t.Fatalf("expected order [assistant, tool, tool, user], got: %v (output=%s)", roles, out)
+	}
+	toolIDs := []string{messages[1].Get("tool_call_id").String(), messages[2].Get("tool_call_id").String()}
+	if toolIDs[0] != "call_b" || toolIDs[1] != "call_a" {
+		t.Fatalf("expected tool messages in relative input order [call_b, call_a], got: %v", toolIDs)
+	}
+	if messages[1].Get("content").String() != "result_b" || messages[2].Get("content").String() != "result_a" {
+		t.Fatalf("expected contents [result_b, result_a], got [%s, %s]", messages[1].Get("content").String(), messages[2].Get("content").String())
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MixedEmptyIDDoesNotReorder(t *testing.T) {
+	// Mixed empty call_id and valid call_a: incomplete/ambiguous history must remain untouched
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"type":"function_call","call_id":"","name":"unknown","arguments":"{}"},
+			{"type":"function_call","call_id":"a","name":"known","arguments":"{}"},
+			{"role":"user","content":"reminder"},
+			{"type":"function_call_output","call_id":"a","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Must stay in natural input order: assistant -> user -> tool
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %s", len(messages), out)
+	}
+	if roles[0] != "assistant" || roles[1] != "user" || roles[2] != "tool" {
+		t.Fatalf("expected untouched order [assistant, user, tool], got: %v (output=%s)", roles, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DuplicateCallIDDoesNotReorder(t *testing.T) {
+	// Duplicate call_id: ambiguous history must remain untouched
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"type":"function_call","call_id":"dup","name":"tool_1","arguments":"{}"},
+			{"type":"function_call","call_id":"dup","name":"tool_2","arguments":"{}"},
+			{"role":"user","content":"reminder"},
+			{"type":"function_call_output","call_id":"dup","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Must stay in natural input order: assistant -> user -> tool
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %s", len(messages), out)
+	}
+	if roles[0] != "assistant" || roles[1] != "user" || roles[2] != "tool" {
+		t.Fatalf("expected untouched order [assistant, user, tool], got: %v (output=%s)", roles, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DuplicateOutputCallIDDoesNotReorder(t *testing.T) {
+	// Duplicate function_call_output for the same call_id: ambiguous results must not be prematurely reordered
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"type":"function_call","call_id":"call_dup_out","name":"tool_a","arguments":"{}"},
+			{"role":"user","content":"reminder before results"},
+			{"type":"function_call_output","call_id":"call_dup_out","output":"first"},
+			{"type":"function_call_output","call_id":"call_dup_out","output":"second"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Must stay in natural input order: assistant -> user ("reminder before results") -> tool/user
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %s", len(messages), out)
+	}
+	if roles[0] != "assistant" || roles[1] != "user" {
+		t.Fatalf("expected natural order with user reminder preserved at index 1, got roles: %v (output=%s)", roles, out)
+	}
+	if messages[1].Get("content").String() != "reminder before results" {
+		t.Fatalf("expected message[1] to be reminder, got: %s", messages[1].Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DuplicateCustomOutputCallIDDoesNotReorder(t *testing.T) {
+	// Duplicate custom_tool_call_output for the same call_id: ambiguous results must not be prematurely reordered
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"type":"custom_tool_call","call_id":"custom_dup","name":"custom_a","input":"{}"},
+			{"role":"user","content":"reminder before custom results"},
+			{"type":"custom_tool_call_output","call_id":"custom_dup","output":"output 1"},
+			{"type":"custom_tool_call_output","call_id":"custom_dup","output":"output 2"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Must stay in natural input order: assistant -> user ("reminder before custom results") -> tool/user
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %s", len(messages), out)
+	}
+	if roles[0] != "assistant" || roles[1] != "user" {
+		t.Fatalf("expected natural order with user reminder preserved at index 1, got roles: %v (output=%s)", roles, out)
+	}
+	if messages[1].Get("content").String() != "reminder before custom results" {
+		t.Fatalf("expected message[1] to be reminder, got: %s", messages[1].Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MultipleOutputsWithoutIDDoNotGuessOrReorder(t *testing.T) {
+	// If assistant issues function_call(a) and function_call(b), and multiple outputs arrive
+	// without call_ids, the assignment is a non-unique guess. The history must stay untouched!
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"type":"function_call","call_id":"a","name":"unknown_a","arguments":"{}"},
+			{"type":"function_call","call_id":"b","name":"unknown_b","arguments":"{}"},
+			{"role":"user","content":"reminder before results"},
+			{"type":"function_call_output","output":"output X"},
+			{"type":"function_call_output","output":"output Y"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Must stay in natural input order: assistant -> user ("reminder before results") -> user ("output X") -> user ("output Y")
+	// Crucially, outputs X and Y must NOT be given guessed tool_call_id "a" or "b" and must NOT be fabricated as tool messages.
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %s", len(messages), out)
+	}
+	if roles[0] != "assistant" || roles[1] != "user" || roles[2] != "user" || roles[3] != "user" {
+		t.Fatalf("expected natural order with user reminder and un-guessed outputs preserved, got roles: %v (output=%s)", roles, out)
+	}
+	if messages[1].Get("content").String() != "reminder before results" {
+		t.Fatalf("expected message[1] to be reminder, got: %s", messages[1].Raw)
+	}
+	if messages[2].Get("content").String() != "output X" || messages[3].Get("content").String() != "output Y" {
+		t.Fatalf("expected outputs X and Y as standalone user messages, got msg2=%s msg3=%s", messages[2].Raw, messages[3].Raw)
+	}
+	// Verify no tool messages were created with guessed call IDs
+	for _, m := range messages {
+		if m.Get("role").String() == "tool" {
+			t.Fatalf("unexpected tool message created via guessing: %s", m.Raw)
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MultipleOutputsWithoutIDAndOrphanOutputDoNotGuessOrReorder(t *testing.T) {
+	// Call A, Call B.
+	// User reminder.
+	// Output 1 has NO ID (X).
+	// Output 2 has NO ID (Y).
+	// Output 3 has orphan explicit ID (Z).
+	// The presence of orphan_id must NOT cause X/Y to be guessed and reordered before the reminder!
+	inputJSON := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"input": [
+			{"type":"function_call","call_id":"a","name":"tool_a","arguments":"{}"},
+			{"type":"function_call","call_id":"b","name":"tool_b","arguments":"{}"},
+			{"role":"user","content":"reminder before results"},
+			{"type":"function_call_output","output":"output X"},
+			{"type":"function_call_output","output":"output Y"},
+			{"type":"function_call_output","call_id":"orphan_id","output":"output Z"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Must stay in natural input order: assistant -> user ("reminder before results") -> user (X) -> user (Y) -> user (Z)
+	// Outputs X and Y must NOT be guessed as tool calls "a" and "b" and must NOT be moved before reminder!
+	if len(messages) != 5 {
+		t.Fatalf("expected 5 messages, got %d: %s", len(messages), out)
+	}
+	if roles[0] != "assistant" || roles[1] != "user" {
+		t.Fatalf("expected natural order with user reminder preserved at index 1 without guessing, got roles: %v (output=%s)", roles, out)
+	}
+	if messages[1].Get("content").String() != "reminder before results" {
+		t.Fatalf("expected message[1] to be reminder, got: %s", messages[1].Raw)
+	}
+	// Verify no tool messages were created with guessed call IDs
+	for _, m := range messages {
+		if m.Get("role").String() == "tool" {
+			t.Fatalf("unexpected tool message created via guessing: %s", m.Raw)
+		}
+	}
+}

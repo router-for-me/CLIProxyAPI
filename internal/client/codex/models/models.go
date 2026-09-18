@@ -105,6 +105,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			if optimizeMultiAgentV2 {
 				entry["multi_agent_version"] = "v2"
 			}
+			applyCodexClientDevinDisplayName(entry, id, model, providersForModel)
 			result = append(result, entry)
 			continue
 		}
@@ -116,6 +117,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 		applyCodexClientVisibilityOverride(entry, id)
+		applyCodexClientDevinDisplayName(entry, id, model, providersForModel)
 		result = append(result, entry)
 	}
 
@@ -241,6 +243,94 @@ func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	if displayName := stringModelValue(model, "display_name"); displayName != "" {
 		entry["display_name"] = displayName
 	}
+}
+
+func applyCodexClientDevinDisplayName(entry map[string]any, id string, model map[string]any, providersForModel ProvidersForModelFunc) {
+	if !isCodexClientDevinModel(id, model, entry, providersForModel) {
+		return
+	}
+	displayName := stringModelValue(entry, "display_name")
+	if displayName == "" {
+		displayName = id
+	}
+	trimmed := strings.TrimSpace(displayName)
+	if strings.HasSuffix(trimmed, " (Devin)") {
+		return
+	}
+	if strings.HasSuffix(strings.ToLower(trimmed), " (devin)") {
+		entry["display_name"] = trimmed[:len(trimmed)-len(" (devin)")] + " (Devin)"
+		return
+	}
+	if strings.HasSuffix(strings.ToLower(trimmed), "(devin)") {
+		entry["display_name"] = strings.TrimSpace(trimmed[:len(trimmed)-len("(devin)")]) + " (Devin)"
+		return
+	}
+	entry["display_name"] = trimmed + " (Devin)"
+}
+
+func isCodexClientDevinModel(id string, model map[string]any, entry map[string]any, providersForModel ProvidersForModelFunc) bool {
+	idLower := strings.ToLower(strings.TrimSpace(id))
+	if strings.HasPrefix(idLower, "devin/") {
+		return true
+	}
+	if idx := strings.Index(idLower, "/"); idx != -1 {
+		rest := idLower[idx+1:]
+		if strings.HasPrefix(rest, "devin/") {
+			return true
+		}
+	}
+	if entry != nil {
+		slugLower := strings.ToLower(strings.TrimSpace(stringModelValue(entry, "slug")))
+		if strings.HasPrefix(slugLower, "devin/") {
+			return true
+		}
+		if idx := strings.Index(slugLower, "/"); idx != -1 {
+			rest := slugLower[idx+1:]
+			if strings.HasPrefix(rest, "devin/") {
+				return true
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(entry, "type")), "devin") {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(entry, "owned_by")), "cognition") {
+			return true
+		}
+	}
+	if model != nil {
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(model, "type")), "devin") {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(model, "owned_by")), "cognition") {
+			return true
+		}
+	}
+	if info := registry.LookupModelInfo(id); info != nil {
+		if strings.EqualFold(info.Type, "devin") || strings.EqualFold(info.OwnedBy, "cognition") || strings.HasPrefix(strings.ToLower(info.ID), "devin/") {
+			return true
+		}
+	} else if idx := strings.Index(id, "/"); idx != -1 {
+		base := strings.TrimSpace(id[idx+1:])
+		if info := registry.LookupModelInfo(base); info != nil {
+			if strings.EqualFold(info.Type, "devin") || strings.EqualFold(info.OwnedBy, "cognition") || strings.HasPrefix(strings.ToLower(info.ID), "devin/") {
+				return true
+			}
+		}
+	}
+	if providersForModel != nil {
+		providers := providersForModel(id)
+		if len(providers) == 0 && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			base := strings.TrimSpace(id[idx+1:])
+			providers = providersForModel(base)
+		}
+		for _, p := range providers {
+			if strings.EqualFold(strings.TrimSpace(p), "devin") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func applyCodexClientDescription(entry map[string]any, model map[string]any) {
