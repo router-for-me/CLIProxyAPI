@@ -25,8 +25,8 @@ func TestPostgresStoreBootstrapDoesNotWriteSpoolConfig(t *testing.T) {
 	// Use a tempdir for SpoolDir so we never touch a real spool location.
 	tmpDir := t.TempDir()
 	pg, err := store.NewPostgresStore(ctx, store.PostgresStoreConfig{
-		DSN:    dsn,
-		Schema: "test_p5_no_spool",
+		DSN:      dsn,
+		Schema:   "test_p5_no_spool",
 		SpoolDir: tmpDir,
 	})
 	if err != nil {

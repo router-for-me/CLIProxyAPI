@@ -1337,9 +1337,9 @@ func (s *ModelsStore) UpsertGlobalModelRoute(ctx context.Context, id string, rou
 // before this call (in which case Priority reflects the existing value,
 // not a freshly-assigned one).
 type PinProviderResult struct {
-	Provider     string `json:"provider"`
-	Priority     int    `json:"priority"`
-	WasExisting  bool   `json:"was_existing"`
+	Provider    string `json:"provider"`
+	Priority    int    `json:"priority"`
+	WasExisting bool   `json:"was_existing"`
 }
 
 // PinProviderToModel atomically pins a single provider to a model's
@@ -1441,7 +1441,7 @@ func (s *ModelsStore) PinProviderToModel(ctx context.Context, model, provider st
 	s.setRouteCache(strings.ToLower(model), &ModelRoute{
 		Model:      model,
 		Providers:  nil, // unchanged
-		Strategy:   "",   // unchanged
+		Strategy:   "",  // unchanged
 		Priorities: priorities,
 	})
 
