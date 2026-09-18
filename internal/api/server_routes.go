@@ -713,6 +713,12 @@ func formatHomeCodexModel(entry homeModelEntry) map[string]any {
 	if entry.ownedBy != "" {
 		model["owned_by"] = entry.ownedBy
 	}
+	for _, p := range entry.providers {
+		if strings.EqualFold(p, "devin") {
+			model["type"] = "devin"
+			break
+		}
+	}
 	if entry.displayName != "" {
 		model["display_name"] = entry.displayName
 		model["description"] = entry.displayName

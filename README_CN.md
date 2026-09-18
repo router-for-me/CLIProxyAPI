@@ -95,6 +95,14 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td width="180"><a href="https://www.rapidproxy.io/?code=KHM9B6E6M"><img src="./assets/rapidproxy.png" alt="RapidProxy" width="150"></a></td>
 <td><a href="https://www.rapidproxy.io/?code=KHM9B6E6M">RapidProxy</a> 是一家专为自动化和多账户运营打造的高性能代理服务商，提供纯净住宅代理和原生静态 ISP IP。RapidProxy 拥有遍布全球的 9000 万+住宅 IP，并支持智能轮换、稳定会话和高并发，是网页抓取、浏览器自动化、社交媒体账户管理、电商运营、批量账户注册等场景的理想选择。住宅代理仅 &#36;0.55/GB 起，流量永不过期。使用优惠码 RAPID10 可享 9 折优惠，<a href="https://www.rapidproxy.io/?code=KHM9B6E6M">立即开始免费试用</a>。</td>
 </tr>
+<tr>
+<td width="180"><a href="https://pateway.ai/?ch=jjvdb"><img src="./assets/patewayai.png" alt="PatewayAI" width="150"></a></td>
+<td>PatewayAI 是一家面向资深 AI 开发者的 API 中继服务商，完整支持 Claude 与 Codex 系列模型。所有模型均来自官方高质量渠道，绝无稀释、绝无伪造，计费明细透明可查。经济模式低至 0.5 折，通过<a href="https://pateway.ai/?ch=jjvdb">此链接</a>注册即可获得试用额度，还可参与不定时营销活动领取免费额度。平台同时支持企业级并发、专属管理后台、正式合同与发票，并提供最高 150 美元的双向推荐奖励。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://agentmarket.fluxapay.xyz/marketplace/tokenplans"><img src="./assets/fluxa-baidu-ai-cloud.png" alt="FluxA &amp; Baidu AI Cloud" width="150"></a></td>
+<td>感谢 FluxA &amp; Baidu AI Cloud 对本项目的支持！ FluxA 与百度智能云联合推出 AgenticPlan，为 AI Agent 提供自主购买/管理/使用模型、API、工具的能力。内含百度千帆 TokenPlan，低至6折，可使用 DeepSeek V4、GLM 5.2、Kimi 等旗舰模型，并获赠 FluxA AgentMarket API的调用额度，解锁搜索、数据抓取、社交媒体、金融、加密、生图、视频等 1000+ 付费 API。<br><br>在用户授权下，AI Agent 还可借助官方的Visa卡支付自主采购资源、管理 API Key、监控用量并规划续费，帮助 Agent 从「自主完成任务」升级为真正能够「自主规划预算，完成任务」。</td>
+</tr>
 </tbody>
 </table>
 
