@@ -29,6 +29,7 @@ import UpstreamProvidersPage from './pages/UpstreamProvidersPage.jsx';
 import HealthPage from './pages/upstream-providers/HealthPage.jsx';
 import ProxyPoolsPage from './pages/ProxyPoolsPage.jsx';
 import UpstreamProviderEditorPage from './pages/upstream-provider-editor/index.jsx';
+import UpstreamProviderEditorCreatePage from './pages/upstream-provider-editor/CreateMode.jsx';
 import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import ModelHealthPage from './pages/ModelHealthPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
@@ -296,7 +297,12 @@ export default function App() {
             <Route path="/api-tokens/:id" element={<ApiTokenDetailPage />} />
             <Route path="/developer" element={<DeveloperPage />} />
             <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
-            <Route path="/upstream-providers/new" element={<UpstreamProviderEditorPage />} />
+            {/* /upstream-providers/new keeps the legacy single-form create
+                flow (type picker + form body) until OverviewTab lands in
+                Task 3. The /new route MUST be declared before the :id
+                redirect so it wins on route matching — React Router 6
+                matches in declaration order. */}
+            <Route path="/upstream-providers/new" element={<UpstreamProviderEditorCreatePage />} />
             <Route path="/upstream-providers/health" element={<HealthPage />} />
             <Route path="/upstream-providers/:id" element={<Navigate to="/upstream-providers/:id/overview" replace />} />
             <Route path="/upstream-providers/:id/:tab" element={<UpstreamProviderEditorPage />} />
