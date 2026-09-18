@@ -141,7 +141,11 @@ logs-max-total-size-mb: 0
 # When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 error-logs-max-files: 10
 
-# When false, disable in-memory usage statistics aggregation
+# When false, disable in-memory usage statistics aggregation.
+# When true, also persists per-request usage records to <logs>/usage-stats/usage-YYYY-MM-DD.jsonl
+# (90-day retention), queryable via GET /v0/management/usage-stats?from=YYYY-MM-DD&to=YYYY-MM-DD.
+# Ignored (treated as disabled) when Home mode forces this on, so Home users don't get
+# unexpected persistent writes.
 usage-statistics-enabled: false
 
 # How long (in seconds) usage queue items are retained in memory for the Management API.
