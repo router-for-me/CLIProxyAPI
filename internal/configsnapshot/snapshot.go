@@ -4,11 +4,11 @@
 //
 // A Snapshot is the unit of revision that the PostgreSQL-first control plane
 // stores, validates, projects to the ephemeral compatibility bridge, and
-// surfaces through the dashboard. The type is a plain Go struct without JSON
-// tags: persistence as JSONB and exchange with import/export pipelines must
-// go through the custom canonical encoder (see Checksum) rather than a raw
-// encoding/json.Marshal call, which would otherwise emit Go-style
-// capitalized keys.
+// surfaces through the dashboard. Snapshot has json: tags so the management
+// HTTP layer can hand it to encoding/json without bespoke codecs; persistence
+// as JSONB and exchange with import/export pipelines must still go through
+// the custom canonical encoder (see Checksum), which is independent of the
+// wire-format tags.
 package configsnapshot
 
 import (
@@ -55,30 +55,30 @@ type Snapshot struct {
 	// Settings is the normalized scalar/runtime configuration. It is never
 	// nil for a Snapshot returned by the repository; NewEmpty initializes
 	// it to a non-nil empty map.
-	Settings map[string]any
+	Settings map[string]any `json:"settings"`
 
 	// Extra holds forward-compatible fields that have not yet been promoted
 	// to a dedicated section. It is never nil for a Snapshot returned by
 	// the repository.
-	Extra map[string]any
+	Extra map[string]any `json:"extra"`
 
 	// ResourceRefs references normalized PostgreSQL tables by stable
 	// identity. Order is preserved.
-	ResourceRefs []ResourceRef
+	ResourceRefs []ResourceRef `json:"resource_refs"`
 
 	// Revision is the active revision assigned by the repository. It is
 	// excluded from the deterministic checksum.
-	Revision int64
+	Revision int64 `json:"revision"`
 
 	// UpdatedAt is the database-side modification timestamp. It is excluded
 	// from the deterministic checksum.
-	UpdatedAt time.Time
+	UpdatedAt time.Time `json:"updated_at"`
 
 	// UpdatedBy identifies the actor that produced the revision.
-	UpdatedBy string
+	UpdatedBy string `json:"updated_by"`
 
 	// UpdatedSource records the channel that produced the revision.
-	UpdatedSource string
+	UpdatedSource string `json:"updated_source"`
 }
 
 // ResourceRef references a row in a normalized PostgreSQL table from a
@@ -92,19 +92,19 @@ type Snapshot struct {
 type ResourceRef struct {
 	// Kind names the normalized table (e.g. "upstream_provider",
 	// "proxy_pool", "model_group").
-	Kind string
+	Kind string `json:"kind"`
 
 	// ID is the primary key of the row.
-	ID string
+	ID string `json:"id"`
 
 	// StableKey is a human-stable identifier suitable for diff/import/export
 	// (e.g. provider name). It may equal ID when no separate stable
 	// identifier exists.
-	StableKey string
+	StableKey string `json:"stable_key"`
 
 	// Projection carries the snapshot-relevant fields. Order within slices
 	// is preserved by Checksum; map keys are sorted.
-	Projection map[string]any
+	Projection map[string]any `json:"projection"`
 }
 
 // NewEmpty returns a Snapshot with non-nil empty maps, an empty
