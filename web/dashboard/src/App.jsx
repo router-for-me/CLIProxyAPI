@@ -33,6 +33,7 @@ import UpstreamProviderEditorCreatePage from './pages/upstream-provider-editor/C
 import UpstreamProviderOverviewTab from './pages/upstream-provider-editor/OverviewTab.jsx';
 import UpstreamProviderModelsTab from './pages/upstream-provider-editor/ModelsTab.jsx';
 import UpstreamProviderEntriesTab from './pages/upstream-provider-editor/EntriesTab.jsx';
+import UpstreamProviderQuotaTab from './pages/upstream-provider-editor/QuotaTab.jsx';
 import UpstreamSyncLogPage from './pages/UpstreamSyncLogPage.jsx';
 import ModelHealthPage from './pages/ModelHealthPage.jsx';
 import CooldownProvidersPage from './pages/CooldownProvidersPage.jsx';
@@ -313,6 +314,7 @@ export default function App() {
               <Route path="overview" element={<UpstreamProviderOverviewTab />} />
               <Route path="models" element={<UpstreamProviderModelsTab />} />
               <Route path="entries" element={<UpstreamProviderEntriesTab />} />
+              <Route path="quota" element={<UpstreamProviderQuotaTab />} />
             </Route>
             <Route path="/proxy-pools" element={<ProxyPoolsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
