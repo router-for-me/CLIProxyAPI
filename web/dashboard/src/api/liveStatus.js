@@ -76,6 +76,73 @@ export async function fetchLiveProviderKeys(model) {
   }
 }
 
+// fetchPicker queries GET /v0/management/model-routing/picker?model=...
+// and returns the parsed response. Returns null when the server returns
+// 503 (PG not configured) so the picker can render a "not available" state.
+export async function fetchPicker(model) {
+  if (!model) return null;
+  try {
+    const r = await fetch(`/v0/management/model-routing/picker?model=${encodeURIComponent(model)}`, { credentials: 'include' });
+    if (r.status === 503) return null;
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+// pinProvider calls POST /v0/management/model-routing/pin. body is
+// { model, provider_key, force? }. Returns the parsed PinResponse on
+// 200, throws ApiError-shape { status, type, message } on non-2xx so
+// callers can distinguish 409 (not live) from 503 (no PG).
+export async function pinProvider({ model, providerKey, force = false }) {
+  if (!model || !providerKey) {
+    const err = new Error('model and providerKey are required');
+    err.status = 400;
+    err.type = 'invalid_request';
+    throw err;
+  }
+  let r;
+  try {
+    r = await fetch('/v0/management/model-routing/pin', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, provider_key: providerKey, force }),
+    });
+  } catch (e) {
+    const err = new Error('Network error');
+    err.status = 0;
+    err.type = 'network_error';
+    throw err;
+  }
+  let payload = null;
+  try {
+    payload = await r.json();
+  } catch {
+    payload = null;
+  }
+  if (!r.ok) {
+    const err = new Error(payload?.error?.message || `pin failed (${r.status})`);
+    err.status = r.status;
+    err.type = payload?.error?.type || 'unknown';
+    throw err;
+  }
+  return payload;
+}
+
+// unpinProvider calls POST /model-routing/unpin (added in the Phase F3
+// follow-up alongside the picker API). For now it's a stub that returns
+// false so callers can wire the UI before the server endpoint ships.
+export async function unpinProvider({ model, providerKey }) {
+  // The unpin endpoint is deferred to a follow-up PR. Until then, this
+  // is a no-op stub that surfaces the missing endpoint to the operator.
+  const err = new Error('unpin endpoint not yet available');
+  err.status = 501;
+  err.type = 'not_implemented';
+  throw err;
+}
+
 /**
  * useLiveStatus polls fetchLiveStatus on a 15s cadence (60s when the tab
  * is hidden, paused entirely when unmounted). Returns the latest status
