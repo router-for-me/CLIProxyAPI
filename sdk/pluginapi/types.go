@@ -74,6 +74,8 @@ type Capabilities struct {
 	ModelRegistrar ModelRegistrar
 	// ModelProvider contributes provider-native static and per-auth model metadata.
 	ModelProvider ModelProvider
+	// ModelVisibility narrows the model list a caller may see on the listing endpoints.
+	ModelVisibility ModelVisibility
 	// AuthProvider lets the host parse, login, poll, and refresh plugin provider auths.
 	AuthProvider AuthProvider
 	// FrontendAuthProvider authenticates frontend requests before proxy handling.
@@ -388,6 +390,41 @@ type ModelRegistrationResponse struct {
 	Provider string
 	// Models is the complete set of plugin-provided models.
 	Models []ModelInfo
+}
+
+// ModelVisibilityRequest asks a plugin which models one caller may see.
+type ModelVisibilityRequest struct {
+	// Plugin is the metadata of the plugin being executed.
+	Plugin Metadata
+	// Principal identifies the caller, as resolved by the access layer.
+	Principal string
+	// Provider names the access provider that authenticated the caller.
+	Provider string
+	// Metadata is provider-supplied caller metadata.
+	Metadata map[string]string
+	// Handler is the API surface being served: openai, claude or gemini.
+	Handler string
+	// Models is the model id list the host is about to return, in order.
+	Models []string
+}
+
+// ModelVisibilityResponse carries the narrowed list.
+type ModelVisibilityResponse struct {
+	// Handled reports whether the plugin has an opinion. False keeps the full list.
+	Handled bool
+	// Models is the subset the caller may see. Empty with Handled true hides everything.
+	Models []string
+}
+
+// ModelVisibility narrows the model list a caller may see.
+//
+// It is the only hook that runs on the LISTING endpoints. model.register,
+// model.static and model.for_auth add models at auth-registration time and never
+// see a caller; the response interceptors run only on the execution path. A
+// gateway plugin that restricts which models a key may call needs this to keep
+// the listing and the execution gate telling the same story.
+type ModelVisibility interface {
+	VisibleModels(context.Context, ModelVisibilityRequest) (ModelVisibilityResponse, error)
 }
 
 // ModelProvider contributes provider-native static and per-auth model metadata.

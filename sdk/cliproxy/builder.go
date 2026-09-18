@@ -244,6 +244,7 @@ func (b *Builder) Build() (*Service, error) {
 	if b.cfg != nil {
 		pluginHost.ApplyConfig(context.Background(), b.cfg)
 		pluginHost.RegisterFrontendAuthProviders()
+		pluginHost.RegisterModelVisibility()
 	}
 	accessManager.SetProviders(sdkaccess.RegisteredProviders())
 

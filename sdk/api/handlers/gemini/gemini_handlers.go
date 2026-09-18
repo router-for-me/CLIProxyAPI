@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/modelvisibility"
 )
 
 // GeminiAPIHandler contains the handlers for Gemini API endpoints.
@@ -48,7 +50,10 @@ func (h *GeminiAPIHandler) Models() []map[string]any {
 // GeminiModels handles the Gemini models listing endpoint.
 // It returns a JSON response containing available Gemini models and their specifications.
 func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
-	rawModels := h.Models()
+	// Narrow the list to what this caller may see. Without a plugin filter
+	// installed this is the identity function.
+	rawModels := modelvisibility.FilterMaps(modelvisibility.GinContext(c),
+		modelvisibility.FromGin(c, "gemini"), h.Models())
 	normalizedModels := make([]map[string]any, 0, len(rawModels))
 	defaultMethods := []string{"generateContent"}
 	for _, model := range rawModels {

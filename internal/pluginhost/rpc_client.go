@@ -97,6 +97,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.ModelProvider {
 		plugin.Capabilities.ModelProvider = adapter
 	}
+	if resp.Capabilities.ModelVisibility {
+		plugin.Capabilities.ModelVisibility = adapter
+	}
 	if resp.Capabilities.AuthProvider {
 		if err := ctx.Err(); err != nil {
 			return pluginapi.Plugin{}, err
@@ -493,6 +496,10 @@ func (a *rpcPluginAdapter) RefreshAuth(ctx context.Context, req pluginapi.AuthRe
 		AuthRefreshRequest: req,
 		HostCallbackID:     callbackID,
 	})
+}
+
+func (a *rpcPluginAdapter) VisibleModels(ctx context.Context, req pluginapi.ModelVisibilityRequest) (pluginapi.ModelVisibilityResponse, error) {
+	return callPlugin[pluginapi.ModelVisibilityResponse](ctx, a.client, pluginabi.MethodModelVisible, req)
 }
 
 func (a *rpcPluginAdapter) Authenticate(ctx context.Context, req pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error) {

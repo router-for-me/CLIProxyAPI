@@ -6,12 +6,20 @@ import (
 )
 
 func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) map[string]any {
+	return h.codexClientModelsResponseFrom(h.Models(), clientVersion...)
+}
+
+// codexClientModelsResponseFrom builds the Codex client response from an
+// explicit model list. A caller that narrowed the list for the current
+// requester keeps that narrowing; passing h.Models() reproduces the
+// unnarrowed response exactly.
+func (h *OpenAIAPIHandler) codexClientModelsResponseFrom(models []map[string]any, clientVersion ...string) map[string]any {
 	version := ""
 	if len(clientVersion) > 0 {
 		version = clientVersion[0]
 	}
 	optimizeMultiAgentV2 := h != nil && h.Cfg != nil && h.Cfg.CodexOptimizeMultiAgentV2
-	return codexmodels.BuildResponseForClient(h.Models(), registry.GetGlobalRegistry().GetModelProviders, optimizeMultiAgentV2, version)
+	return codexmodels.BuildResponseForClient(models, registry.GetGlobalRegistry().GetModelProviders, optimizeMultiAgentV2, version)
 }
 
 // CodexClientModelsResponse builds a Codex client model response.

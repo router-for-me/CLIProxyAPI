@@ -18,11 +18,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/modelvisibility"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -156,7 +158,11 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 	disableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
-	h.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(h.Models(), disableCloaking))
+	// Narrow the list to what this caller may see. Without a plugin filter
+	// installed this is the identity function.
+	models := modelvisibility.FilterMaps(modelvisibility.GinContext(c),
+		modelvisibility.FromGin(c, "claude"), h.Models())
+	h.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(models, disableCloaking))
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.

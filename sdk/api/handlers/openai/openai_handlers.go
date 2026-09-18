@@ -14,11 +14,13 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/modelvisibility"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -59,14 +61,21 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
+	// Narrow the list to what this caller may see. Without a plugin filter
+	// installed this is the identity function.
+	//
+	// This runs before the Codex branch below on purpose: the Codex client
+	// asks this same endpoint with a client_version query, so answering it
+	// from the unnarrowed list would hand that one client every model.
+	allModels := modelvisibility.FilterMaps(modelvisibility.GinContext(c),
+		modelvisibility.FromGin(c, "openai"), h.Models())
+
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
 		clientVersion := c.Query("client_version")
-		h.WriteModelListResponse(c, h.HandlerType(), h.codexClientModelsResponse(clientVersion))
+		h.WriteModelListResponse(c, h.HandlerType(),
+			h.codexClientModelsResponseFrom(allModels, clientVersion))
 		return
 	}
-
-	// Get all available models
-	allModels := h.Models()
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
 	filteredModels := make([]map[string]any, len(allModels))

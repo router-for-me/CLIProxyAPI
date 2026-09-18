@@ -41,6 +41,8 @@ const (
 	MethodModelRegister = "model.register"
 	MethodModelStatic   = "model.static"
 	MethodModelForAuth  = "model.for_auth"
+	// MethodModelVisible narrows the model list a caller may see.
+	MethodModelVisible = "model.visible"
 
 	MethodAuthIdentifier = "auth.identifier"
 	MethodAuthParse      = "auth.parse"

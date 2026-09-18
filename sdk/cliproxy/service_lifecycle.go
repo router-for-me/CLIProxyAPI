@@ -347,6 +347,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				includePlugins: true,
 			})
 			s.pluginHost.RegisterFrontendAuthProviders()
+			s.pluginHost.RegisterModelVisibility()
 			s.pluginHost.ShutdownAllContext(ctx)
 			if s.accessManager != nil {
 				s.accessManager.SetProviders(sdkaccess.RegisteredProviders())

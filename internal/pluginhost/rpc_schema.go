@@ -21,6 +21,7 @@ type rpcRegistration struct {
 type rpcCapabilities struct {
 	ModelRegistrar                bool                         `json:"model_registrar"`
 	ModelProvider                 bool                         `json:"model_provider"`
+	ModelVisibility               bool                         `json:"model_visibility"`
 	AuthProvider                  bool                         `json:"auth_provider"`
 	FrontendAuthProvider          bool                         `json:"frontend_auth_provider"`
 	FrontendAuthProviderExclusive bool                         `json:"frontend_auth_provider_exclusive"`

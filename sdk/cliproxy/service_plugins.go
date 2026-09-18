@@ -118,6 +118,7 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		return false
 	}
 	s.pluginHost.RegisterFrontendAuthProviders()
+	s.pluginHost.RegisterModelVisibility()
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}

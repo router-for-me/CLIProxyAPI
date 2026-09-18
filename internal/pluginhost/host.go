@@ -632,6 +632,7 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 
 	h.refreshThinkingProviders(records)
 	h.RegisterFrontendAuthProviders()
+	h.RegisterModelVisibility()
 	for _, target := range targets {
 		if target.client != nil {
 			shutdownPluginClient(ctx, target.client)
@@ -707,6 +708,7 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 
 	h.refreshThinkingProviders(nil)
 	h.RegisterFrontendAuthProviders()
+	h.RegisterModelVisibility()
 	for id, request := range loading {
 		h.cleanupCanceledPluginLoad(id, request)
 	}
