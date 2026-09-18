@@ -522,7 +522,7 @@ func TestAdvertiserAndBrowser_Integration(t *testing.T) {
 	browser := NewZeroconfBrowser(ifaces...)
 	results, err := browser.Browse(browseCtx, DefaultServiceType, DefaultDomain)
 	if err != nil {
-		t.Skipf("skipping live multicast test: environment lacks IPv6 multicast: %v", err)
+		t.Skipf("skipping live multicast test: %v", err)
 	}
 
 	found := false
