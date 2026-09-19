@@ -340,6 +340,61 @@ func (r *ModelRegistry) GetResponsesWebSearchCapability(modelID string) *bool {
 	return ResolveResponsesWebSearchCapability(routes)
 }
 
+// GetModelModalities resolves declared modalities across every exact registered
+// client route. A missing declaration makes that direction unknown (nil), while
+// an empty non-nil intersection means no modality is common to every route.
+func (r *ModelRegistry) GetModelModalities(modelID string) (inputs, outputs []string) {
+	if r == nil || strings.TrimSpace(modelID) == "" {
+		return nil, nil
+	}
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	clientIDs := make([]string, 0, len(r.clientModels))
+	for clientID := range r.clientModels {
+		clientIDs = append(clientIDs, clientID)
+	}
+	sort.Strings(clientIDs)
+	initialized := false
+	for _, clientID := range clientIDs {
+		for _, registeredID := range r.clientModels[clientID] {
+			if registeredID != modelID {
+				continue
+			}
+			info := r.clientModelInfos[clientID][modelID]
+			if info == nil {
+				return nil, nil
+			}
+			if !initialized {
+				inputs = append([]string(nil), info.SupportedInputModalities...)
+				outputs = append([]string(nil), info.SupportedOutputModalities...)
+				initialized = true
+			} else {
+				inputs = intersectDeclaredModalities(inputs, info.SupportedInputModalities)
+				outputs = intersectDeclaredModalities(outputs, info.SupportedOutputModalities)
+			}
+			break
+		}
+	}
+	return inputs, outputs
+}
+
+func intersectDeclaredModalities(common, declared []string) []string {
+	if common == nil || len(declared) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(common))
+	for _, modality := range common {
+		for _, candidate := range declared {
+			if strings.EqualFold(strings.TrimSpace(modality), strings.TrimSpace(candidate)) {
+				result = append(result, modality)
+				break
+			}
+		}
+	}
+	return result
+}
+
 // ModelOverrideHeaders returns models.json config.override_header for the model, if any.
 // The returned map is a defensive copy and may be empty but never nil when overrides exist.
 func ModelOverrideHeaders(modelID string, provider ...string) map[string]string {
@@ -1076,13 +1131,29 @@ func (r *ModelRegistry) ApplyClientModelCapabilities(clientID string, expectedEp
 	provider := r.clientProviders[clientID]
 	for id, info := range clientInfos {
 		if info != nil {
+			previousContext := info.ContextLength
+			previousOutput := info.MaxCompletionTokens
 			mutate(id, info)
 			if reg, okReg := r.models[id]; okReg && reg != nil {
+				context, output := r.modelTokenLimitsLocked(id, "")
+				providerContext, providerOutput := r.modelTokenLimitsLocked(id, provider)
 				hasWebSearch := r.hasClientSupportingWebSearchLocked(id, "", "")
 				if reg.Info != nil {
+					if info.ContextLength != previousContext {
+						reg.Info.ContextLength = context
+					}
+					if info.MaxCompletionTokens != previousOutput {
+						reg.Info.MaxCompletionTokens = output
+					}
 					reg.Info.SupportsWebSearch = hasWebSearch
 				}
 				if provider != "" && reg.InfoByProvider != nil && reg.InfoByProvider[provider] != nil {
+					if info.ContextLength != previousContext {
+						reg.InfoByProvider[provider].ContextLength = providerContext
+					}
+					if info.MaxCompletionTokens != previousOutput {
+						reg.InfoByProvider[provider].MaxCompletionTokens = providerOutput
+					}
 					reg.InfoByProvider[provider].SupportsWebSearch = r.hasClientSupportingWebSearchLocked(id, provider, "")
 				}
 			}
@@ -1090,6 +1161,36 @@ func (r *ModelRegistry) ApplyClientModelCapabilities(clientID string, expectedEp
 	}
 	r.invalidateAvailableModelsCacheLocked()
 	return true
+}
+
+// modelTokenLimitsLocked returns the smallest declared limits across every
+// exact route in the selected pool. A missing limit stays unknown (zero).
+func (r *ModelRegistry) modelTokenLimitsLocked(modelID, provider string) (context, output int) {
+	initialized := false
+	for clientID, modelIDs := range r.clientModels {
+		if provider != "" && r.clientProviders[clientID] != provider {
+			continue
+		}
+		for _, registeredID := range modelIDs {
+			if registeredID != modelID {
+				continue
+			}
+			info := r.clientModelInfos[clientID][modelID]
+			if info == nil {
+				return 0, 0
+			}
+			if !initialized {
+				context = max(0, info.ContextLength)
+				output = max(0, info.MaxCompletionTokens)
+				initialized = true
+			} else {
+				context = max(0, min(context, info.ContextLength))
+				output = max(0, min(output, info.MaxCompletionTokens))
+			}
+			break
+		}
+	}
+	return context, output
 }
 
 func (r *ModelRegistry) hasClientSupportingWebSearchLocked(modelID, provider, excludeClientID string) bool {
