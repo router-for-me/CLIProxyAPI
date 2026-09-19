@@ -269,6 +269,7 @@ codex:
   # Keep the downstream User-Agent and Originator when the request already presents a coherent
   # first-party Codex identity (originator codex_cli_rs / codex-tui / codex_vscode / codex_exec, or
   # prefixed "Codex ", together with a matching "<originator>/<version>" User-Agent).
+  # Such a User-Agent also takes precedence over codex-header-defaults.user-agent.
   # All other requests are still cloaked. Ignored when disable-codex-cloaking is true.
   preserve-native-client-identity: true
   # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
@@ -722,6 +723,9 @@ nonstream-keepalive-interval: 0
 # These are used only for file-backed/OAuth Codex requests when the client
 # does not send the header. `user-agent` applies to HTTP and websocket requests;
 # `beta-features` only applies to websocket requests. They do not apply to codex-api-key entries.
+# `user-agent` is also skipped when the client already presents a coherent first-party Codex
+# identity and preserve-native-client-identity is enabled, so a genuine Codex client keeps its own
+# version instead of being relabelled with the value configured here.
 # codex-header-defaults:
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"

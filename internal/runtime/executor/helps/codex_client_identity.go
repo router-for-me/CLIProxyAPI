@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -50,4 +51,21 @@ func PreserveNativeCodexIdentity(cfg *config.Config) bool {
 		return true
 	}
 	return *cfg.Codex.PreserveNativeClientIdentity
+}
+
+// NativeCodexUserAgent returns the downstream User-Agent when identity preservation is enabled and
+// the downstream request already presents a coherent first-party Codex identity. Callers keep that
+// value instead of the configured default so the User-Agent follows the same downstream-first rule
+// as Originator; otherwise a configured default would silently rewrite a genuine client's version
+// while the body and x-codex-turn-metadata still carry the real one. An empty result means no
+// native identity was presented and the usual config-first precedence applies.
+func NativeCodexUserAgent(cfg *config.Config, source http.Header) string {
+	if source == nil || !PreserveNativeCodexIdentity(cfg) {
+		return ""
+	}
+	userAgent := strings.TrimSpace(source.Get("User-Agent"))
+	if !IsFirstPartyCodexIdentity(userAgent, source.Get("Originator")) {
+		return ""
+	}
+	return userAgent
 }

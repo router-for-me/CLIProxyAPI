@@ -94,6 +94,8 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	if isAPIKey {
 		ensureHeaderWithPriority(headers, ginHeaders, "User-Agent", "", "")
+	} else if nativeUserAgent := helps.NativeCodexUserAgent(cfg, ginHeaders); nativeUserAgent != "" {
+		headers.Set("User-Agent", nativeUserAgent)
 	} else {
 		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 	}

@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -44,5 +45,39 @@ func TestPreserveNativeCodexIdentity(t *testing.T) {
 	disabled := false
 	if PreserveNativeCodexIdentity(&config.Config{Codex: config.CodexConfig{PreserveNativeClientIdentity: &disabled}}) {
 		t.Error("explicit false should not preserve")
+	}
+}
+
+func TestNativeCodexUserAgent(t *testing.T) {
+	const nativeUserAgent = "codex-tui/0.155.1 (Mac OS 15.7.9; arm64) Apple_Terminal/455.1 (codex-tui; 0.155.1)"
+
+	nativeHeaders := func() http.Header {
+		headers := http.Header{}
+		headers.Set("User-Agent", nativeUserAgent)
+		headers.Set("Originator", "codex-tui")
+		return headers
+	}
+
+	if got := NativeCodexUserAgent(&config.Config{}, nativeHeaders()); got != nativeUserAgent {
+		t.Errorf("first-party identity = %q, want the downstream value", got)
+	}
+	if got := NativeCodexUserAgent(nil, nativeHeaders()); got != nativeUserAgent {
+		t.Errorf("nil config = %q, want the downstream value", got)
+	}
+	if got := NativeCodexUserAgent(&config.Config{}, nil); got != "" {
+		t.Errorf("nil headers = %q, want empty", got)
+	}
+
+	disabled := false
+	cfgDisabled := &config.Config{Codex: config.CodexConfig{PreserveNativeClientIdentity: &disabled}}
+	if got := NativeCodexUserAgent(cfgDisabled, nativeHeaders()); got != "" {
+		t.Errorf("preservation disabled = %q, want empty so the configured default applies", got)
+	}
+
+	thirdParty := http.Header{}
+	thirdParty.Set("User-Agent", "my-proxy/1.0.0")
+	thirdParty.Set("Originator", "my-proxy")
+	if got := NativeCodexUserAgent(&config.Config{}, thirdParty); got != "" {
+		t.Errorf("third-party identity = %q, want empty so cloaking applies", got)
 	}
 }
