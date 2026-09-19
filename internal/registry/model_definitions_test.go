@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGetStaticModelDefinitionsByChannelSupportsGeminiInteractions(t *testing.T) {
 	models := GetStaticModelDefinitionsByChannel("gemini-interactions")
@@ -267,5 +270,75 @@ func TestGetDevinModelsFallback(t *testing.T) {
 	}
 	if info.DisplayName != "SWE-2" {
 		t.Errorf("info.DisplayName = %q, want SWE-2", info.DisplayName)
+	}
+}
+
+func TestValidateModelsCatalog_Mistral(t *testing.T) {
+	valid := &staticModelsJSON{
+		Mistral: []*ModelInfo{
+			{ID: "mistral-medium-latest"},
+		},
+	}
+	if err := validateModelsCatalog(valid); err != nil {
+		t.Fatalf("expected valid Mistral catalog to pass, got: %v", err)
+	}
+
+	withNull := &staticModelsJSON{
+		Mistral: []*ModelInfo{nil},
+	}
+	if err := validateModelsCatalog(withNull); err == nil {
+		t.Fatal("expected error for Mistral section with null model, got nil")
+	}
+
+	withEmptyID := &staticModelsJSON{
+		Mistral: []*ModelInfo{{ID: " "}},
+	}
+	if err := validateModelsCatalog(withEmptyID); err == nil {
+		t.Fatal("expected error for Mistral section with empty model id, got nil")
+	}
+
+	withDuplicate := &staticModelsJSON{
+		Mistral: []*ModelInfo{
+			{ID: "mistral-medium-latest"},
+			{ID: "mistral-medium-latest"},
+		},
+	}
+	if err := validateModelsCatalog(withDuplicate); err == nil {
+		t.Fatal("expected error for Mistral section with duplicate model id, got nil")
+	}
+}
+
+// The remote catalog does not publish a mistral section, so a refresh that
+// omits it must keep the embedded definitions instead of dropping the provider.
+func TestDetectChangedProvidersIncludesMistral(t *testing.T) {
+	oldData := &staticModelsJSON{Mistral: []*ModelInfo{{ID: "mistral-medium-latest"}}}
+	newData := &staticModelsJSON{Mistral: []*ModelInfo{{ID: "mistral-medium-latest"}, {ID: "devstral-small-latest"}}}
+
+	changed := detectChangedProviders(oldData, newData)
+	found := false
+	for _, provider := range changed {
+		if provider == "mistral" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected mistral in changed providers, got %v", changed)
+	}
+}
+
+// The embedded catalog must serve the Mistral defaults the importer advertises.
+func TestGetMistralModelsFromEmbeddedCatalog(t *testing.T) {
+	models := GetMistralModels()
+	if len(models) == 0 {
+		t.Fatal("expected embedded Mistral model definitions")
+	}
+	for _, model := range models {
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			t.Fatalf("invalid model entry: %+v", model)
+		}
+		if LookupStaticModelInfo(model.ID) == nil {
+			t.Errorf("model %q is not reachable through LookupStaticModelInfo", model.ID)
+		}
 	}
 }

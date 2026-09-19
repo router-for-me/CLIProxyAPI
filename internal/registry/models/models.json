@@ -4177,5 +4177,55 @@
         "text"
       ]
     }
+  ],
+  "mistral": [
+    {
+      "id": "mistral-vibe-cli-latest",
+      "object": "model",
+      "created": 1787000000,
+      "owned_by": "mistral",
+      "type": "openai-compatibility",
+      "display_name": "Mistral Vibe CLI (latest)",
+      "name": "mistral-vibe-cli-latest",
+      "description": "Model alias served to the Mistral Vibe CLI",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "mistral-medium-latest",
+      "object": "model",
+      "created": 1787000000,
+      "owned_by": "mistral",
+      "type": "openai-compatibility",
+      "display_name": "Mistral Medium (latest)",
+      "name": "mistral-medium-latest",
+      "description": "Mistral general-purpose medium model, latest alias",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "devstral-small-latest",
+      "object": "model",
+      "created": 1787000000,
+      "owned_by": "mistral",
+      "type": "openai-compatibility",
+      "display_name": "Devstral Small (latest)",
+      "name": "devstral-small-latest",
+      "description": "Mistral coding-focused small model, latest alias",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    }
   ]
 }
