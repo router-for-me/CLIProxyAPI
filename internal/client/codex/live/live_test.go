@@ -310,6 +310,63 @@ func multipartBody(boundary, sdp, session string) string {
 	return body + "--" + boundary + "--\r\n"
 }
 
+func TestRewriteCallRequestModelSetsQuicksilverSessionType(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "omitted type",
+			body: `{"sdp":"v=0","session":{"model":"gpt-realtime","voice":"marin","delegation":{"target":"tool"},"instructions":"help","custom":{"keep":true}}}`,
+		},
+		{
+			name: "existing quicksilver type",
+			body: `{"sdp":"v=0","session":{"type":"quicksilver","model":"gpt-realtime","voice":"marin","delegation":{"target":"tool"},"instructions":"help","custom":{"keep":true}}}`,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			rewritten, model, errRewrite := rewriteCallRequestModel([]byte(testCase.body), "application/json", "gpt-realtime")
+			if errRewrite != nil {
+				t.Fatalf("rewriteCallRequestModel() error = %v", errRewrite)
+			}
+			if model != defaultLiveModel {
+				t.Fatalf("model = %q, want %q", model, defaultLiveModel)
+			}
+
+			var payload struct {
+				SDP     string         `json:"sdp"`
+				Session map[string]any `json:"session"`
+			}
+			if errUnmarshal := json.Unmarshal(rewritten, &payload); errUnmarshal != nil {
+				t.Fatalf("unmarshal rewritten request: %v; body=%s", errUnmarshal, rewritten)
+			}
+			if payload.SDP != "v=0" {
+				t.Fatalf("sdp = %q, want v=0", payload.SDP)
+			}
+			if got := payload.Session["type"]; got != "quicksilver" {
+				t.Fatalf("session type = %#v, want quicksilver; body=%s", got, rewritten)
+			}
+			if got := payload.Session["model"]; got != defaultLiveModel {
+				t.Fatalf("session model = %#v, want %q", got, defaultLiveModel)
+			}
+			if got := payload.Session["voice"]; got != "marin" {
+				t.Fatalf("session voice = %#v, want marin", got)
+			}
+			if got := payload.Session["instructions"]; got != "help" {
+				t.Fatalf("session instructions = %#v, want help", got)
+			}
+			if got := payload.Session["delegation"].(map[string]any)["target"]; got != "tool" {
+				t.Fatalf("session delegation target = %#v, want tool", got)
+			}
+			if got := payload.Session["custom"].(map[string]any)["keep"]; got != true {
+				t.Fatalf("session custom.keep = %#v, want true", got)
+			}
+		})
+	}
+}
+
 func TestHandlerRewritesLiveCallAndSchedulesOAuth(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -374,6 +431,9 @@ func TestHandlerRewritesLiveCallAndSchedulesOAuth(t *testing.T) {
 	}
 	if got := upstreamPayload.Session["model"]; got != "gpt-live-1-codex" {
 		t.Fatalf("upstream session model = %#v", got)
+	}
+	if got := upstreamPayload.Session["type"]; got != "quicksilver" {
+		t.Fatalf("upstream session type = %#v, want quicksilver", got)
 	}
 	if got := executor.request.Header.Get("Content-Type"); got != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", got)
