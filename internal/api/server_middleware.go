@@ -117,7 +117,7 @@ func isExampleAPIKeySafeModeProxyPath(path string) bool {
 		return true
 	case path == "/openai/v1" || strings.HasPrefix(path, "/openai/v1/"):
 		return true
-	case path == "/backend-api/codex" || strings.HasPrefix(path, "/backend-api/codex/"):
+	case path == "/backend-api" || strings.HasPrefix(path, "/backend-api/"):
 		return true
 	default:
 		return false

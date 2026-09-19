@@ -12,6 +12,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// CodexClientDefaultModel is the template every Codex client catalog must carry.
+const CodexClientDefaultModel = "gpt-5.5"
+
 //go:embed models/codex_client_models.json
 var embeddedCodexClientModelsJSON []byte
 
@@ -96,8 +99,8 @@ func ValidateCodexClientModelsJSON(data []byte) error {
 			return fmt.Errorf("Codex client model catalog model %q: %w", slug, err)
 		}
 	}
-	if _, ok := seen["gpt-5.5"]; !ok {
-		return fmt.Errorf("Codex client model catalog is missing default template %q", "gpt-5.5")
+	if _, ok := seen[CodexClientDefaultModel]; !ok {
+		return fmt.Errorf("Codex client model catalog is missing default template %q", CodexClientDefaultModel)
 	}
 	return nil
 }
