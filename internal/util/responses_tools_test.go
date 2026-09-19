@@ -226,3 +226,127 @@ func TestBuildGeminiFunctionDeclarations_DisambiguationAndLongNames(t *testing.T
 		t.Fatalf("unexpected reverse identity for long name: %+v", identityLong)
 	}
 }
+
+func TestBuildGeminiFunctionDeclarations_ClientToolSearchShim(t *testing.T) {
+	raw := `{
+		"tools": [
+			{"type": "function", "name": "exec_command", "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}},
+			{"type": "tool_search", "execution": "client", "description": "Search deferred tools.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "number"}}, "required": ["query"], "additionalProperties": false}},
+			{"type": "web_search"}
+		]
+	}`
+	declarations, forwardMap, reverseMap := BuildGeminiFunctionDeclarations(gjson.Parse(raw))
+
+	if len(declarations) != 2 {
+		t.Fatalf("expected exec_command and tool_search declarations, got %d: %s", len(declarations), declarations)
+	}
+	shim := gjson.ParseBytes(declarations[1])
+	if got := shim.Get("name").String(); got != ResponsesToolSearchFunctionName {
+		t.Fatalf("shim name = %q, want %q", got, ResponsesToolSearchFunctionName)
+	}
+	if got := shim.Get("description").String(); got != "Search deferred tools." {
+		t.Fatalf("shim description = %q, want original description", got)
+	}
+	if got := shim.Get("parametersJsonSchema.required.0").String(); got != "query" {
+		t.Fatalf("shim parameters not preserved: %s", shim.Raw)
+	}
+	if got := forwardMap[ResponsesToolSearchFunctionName]; got != ResponsesToolSearchFunctionName {
+		t.Fatalf("forward map for shim = %q", got)
+	}
+	identity, ok := reverseMap[ResponsesToolSearchFunctionName]
+	if !ok || !identity.ToolSearch || identity.Custom || identity.Namespace != "" {
+		t.Fatalf("shim identity = %+v, want ToolSearch", identity)
+	}
+	if identity := reverseMap["exec_command"]; identity.ToolSearch {
+		t.Fatalf("regular function must not be marked ToolSearch: %+v", identity)
+	}
+}
+
+func TestBuildGeminiFunctionDeclarations_ToolSearchShimDefaultsAndSkips(t *testing.T) {
+	t.Run("default parameters", func(t *testing.T) {
+		raw := `{"tools": [{"type": "tool_search", "execution": "client"}]}`
+		declarations, _, _ := BuildGeminiFunctionDeclarations(gjson.Parse(raw))
+		if len(declarations) != 1 {
+			t.Fatalf("expected one shim declaration, got %d", len(declarations))
+		}
+		if got := gjson.GetBytes(declarations[0], "parametersJsonSchema.properties.query.type").String(); got != "string" {
+			t.Fatalf("default parameters missing query: %s", declarations[0])
+		}
+	})
+	t.Run("server executed search is not emulated", func(t *testing.T) {
+		raw := `{"tools": [{"type": "tool_search"}, {"type": "tool_search", "execution": "server"}]}`
+		declarations, _, reverseMap := BuildGeminiFunctionDeclarations(gjson.Parse(raw))
+		if len(declarations) != 0 || len(reverseMap) != 0 {
+			t.Fatalf("server-executed tool_search must be dropped, got %s", declarations)
+		}
+	})
+	t.Run("existing function keeps the shim name", func(t *testing.T) {
+		raw := `{"tools": [{"type": "function", "name": "tool_search", "description": "user tool"}, {"type": "tool_search", "execution": "client"}]}`
+		declarations, _, reverseMap := BuildGeminiFunctionDeclarations(gjson.Parse(raw))
+		if len(declarations) != 1 {
+			t.Fatalf("expected the user function only, got %d declarations", len(declarations))
+		}
+		if identity := reverseMap["tool_search"]; identity.ToolSearch {
+			t.Fatalf("user function must win over the shim: %+v", identity)
+		}
+	})
+	t.Run("additional_tools declaration", func(t *testing.T) {
+		raw := `{"input": [{"type": "additional_tools", "tools": [{"type": "tool_search", "execution": "client"}]}]}`
+		_, _, reverseMap := BuildGeminiFunctionDeclarations(gjson.Parse(raw))
+		if !reverseMap[ResponsesToolSearchFunctionName].ToolSearch {
+			t.Fatalf("tool_search inside additional_tools must be exposed: %+v", reverseMap)
+		}
+	})
+}
+
+func TestBuildGeminiFunctionDeclarations_CollectsToolSearchOutputTools(t *testing.T) {
+	raw := `{
+		"tools": [
+			{"type": "namespace", "name": "mcp__cua_repl", "tools": [{"type": "function", "name": "js", "description": "current"}]}
+		],
+		"input": [
+			{"type": "tool_search_call", "execution": "client", "call_id": "search_1", "status": "completed", "arguments": {"query": "fixture"}},
+			{"type": "tool_search_output", "execution": "client", "call_id": "search_1", "status": "completed", "tools": [
+				{"type": "namespace", "name": "fixture_tools", "description": "fixture", "tools": [
+					{"type": "function", "name": "ping", "defer_loading": true, "parameters": {"type": "object", "properties": {}, "additionalProperties": false}}
+				]},
+				{"type": "namespace", "name": "mcp__cua_repl", "tools": [{"type": "function", "name": "js", "description": "discovered"}]}
+			]},
+			{"type": "tool_search_output", "execution": "client", "call_id": "search_2", "status": "completed", "tools": [
+				{"type": "namespace", "name": "fixture_tools", "tools": [{"type": "function", "name": "ping", "description": "again"}]}
+			]}
+		]
+	}`
+	declarations, forwardMap, reverseMap := BuildGeminiFunctionDeclarations(gjson.Parse(raw))
+
+	names := make([]string, 0, len(declarations))
+	for _, declaration := range declarations {
+		names = append(names, gjson.GetBytes(declaration, "name").String())
+	}
+	if len(names) != 2 || names[0] != "mcp__cua_repl__js" || names[1] != "fixture_tools__ping" {
+		t.Fatalf("declarations = %v, want current js then discovered ping exactly once", names)
+	}
+	if got := gjson.GetBytes(declarations[0], "description").String(); got != "current" {
+		t.Fatalf("top-level declaration must win over a discovered duplicate, got %q", got)
+	}
+	if got := forwardMap["fixture_tools__ping"]; got != "fixture_tools__ping" {
+		t.Fatalf("forward map for discovered tool = %q", got)
+	}
+	identity := reverseMap["fixture_tools__ping"]
+	if identity.Name != "ping" || identity.Namespace != "fixture_tools" || identity.ToolSearch {
+		t.Fatalf("discovered identity = %+v, want ping in fixture_tools", identity)
+	}
+}
+
+func TestFindResponsesClientToolSearch(t *testing.T) {
+	if _, ok := FindResponsesClientToolSearch(gjson.Parse(`{"tools": [{"type": "function", "name": "a"}]}`)); ok {
+		t.Fatalf("no tool_search declared, but one was found")
+	}
+	if _, ok := FindResponsesClientToolSearch(gjson.Parse(`{"input": [{"type": "tool_search_output", "tools": [{"type": "tool_search", "execution": "client"}]}]}`)); ok {
+		t.Fatalf("tool_search_output tools must not count as a declaration")
+	}
+	tool, ok := FindResponsesClientToolSearch(gjson.Parse(`{"tools": [{"type": "tool_search", "execution": "client", "description": "d"}]}`))
+	if !ok || tool.Get("description").String() != "d" {
+		t.Fatalf("expected the client tool_search declaration, got ok=%v tool=%s", ok, tool.Raw)
+	}
+}
