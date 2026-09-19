@@ -22,6 +22,7 @@
 
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { Spinner, ErrorBanner } from '../../components/Primitives.jsx';
+import { useToast } from '../../components/Toast.jsx';
 import {
   fetchOpenAICompatModels,
   fetchProviderModelsFromAuth,
@@ -29,6 +30,20 @@ import {
   setStoredCallerKey,
   listAuthFiles,
 } from '../../api/client.js';
+
+// dedupeById — preserves the first occurrence of each `id`. Used by the
+// bulk "Add selected" action so re-selecting already-added models is a
+// no-op (and so the toast can report how many were skipped).
+function dedupeById(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const r of rows || []) {
+    if (!r || r.id == null || seen.has(r.id)) continue;
+    seen.add(r.id);
+    out.push(r);
+  }
+  return out;
+}
 
 // stages: 'idle' | 'fetching' | 'ready' | 'error'
 // We deliberately keep this minimal — the inline component shares the
@@ -61,6 +76,7 @@ export default function FetchModelsInline({
   const [filter, setFilter] = useState('');
   const [callerKey, setCallerKey] = useState(() => getStoredCallerKey() || '');
   const [rememberKey, setRememberKey] = useState(false);
+  const toast = useToast();
 
   // authFileName: the first auth-file that matches this provider type
   // (used for the 'auth' mode during edit). Loaded lazily when the
@@ -202,8 +218,14 @@ export default function FetchModelsInline({
     );
   }, [fetched, filter]);
 
+  const selectedFilteredCount = filtered.reduce(
+    (acc, m) => acc + (selected[m.id] ? 1 : 0),
+    0,
+  );
   const allFilteredSelected =
-    filtered.length > 0 && filtered.every((m) => selected[m.id]);
+    filtered.length > 0 && selectedFilteredCount === filtered.length;
+  const someFilteredSelected =
+    selectedFilteredCount > 0 && selectedFilteredCount < filtered.length;
   const selectedCount = Object.values(selected).filter(Boolean).length;
 
   function toggleAll() {
@@ -223,9 +245,29 @@ export default function FetchModelsInline({
     const chosen = fetched.filter((m) => selected[m.id]);
     if (chosen.length === 0) return;
     if (rememberKey && callerKey) setStoredCallerKey(callerKey);
-    onAddModels(chosen);
+    // Bulk dedup: the inline computes the union of the parent's current
+    // `form.models` (which use a `name` field rather than `id`) plus the
+    // selected fetched rows, then dedupes by id before handing the result
+    // to the parent. Parents re-dedupe defensively, but doing it here lets
+    // us surface a useful "Skipped N duplicates" toast.
+    const existingRows = Array.isArray(form?.models) ? form.models : [];
+    const existingAsFetched = existingRows
+      .map((r) => ({ id: (r?.name || r?.id || '').trim() }))
+      .filter((r) => r.id);
+    const pickedIds = new Set(chosen.map((m) => m.id));
+    const skipped = existingAsFetched.filter((r) => pickedIds.has(r.id)).length;
+    const deduped = dedupeById([...existingAsFetched, ...chosen]);
+    const added = deduped.length - existingAsFetched.length;
+    onAddModels(deduped);
     // Clear the picker so the operator can refetch and add more if needed.
     setSelected({});
+    if (added > 0 && skipped > 0) {
+      toast.success(`Added ${added} models — skipped ${skipped} duplicate${skipped === 1 ? '' : 's'}`);
+    } else if (added > 0) {
+      toast.success(`Added ${added} model${added === 1 ? '' : 's'}`);
+    } else if (skipped > 0) {
+      toast.info(`Skipped ${skipped} duplicate${skipped === 1 ? '' : 's'}`);
+    }
   }
 
   return (
@@ -323,9 +365,6 @@ export default function FetchModelsInline({
                   placeholder="Filter by id, owner, type…"
                   style={{ flex: 1 }}
                 />
-                <button onClick={toggleAll} type="button">
-                  {allFilteredSelected ? 'Clear filter' : 'Select all visible'}
-                </button>
               </div>
 
               <div
@@ -336,6 +375,50 @@ export default function FetchModelsInline({
                   <div className="list-editor__empty">
                     No models match "{filter}".
                   </div>
+                )}
+                {filtered.length > 0 && (
+                  <label
+                    className="toggle-row"
+                    style={{
+                      cursor: 'pointer',
+                      borderBottom: '1px solid var(--border)',
+                      padding: '6px 8px',
+                      background: 'var(--bg-sunken, transparent)',
+                      fontWeight: 600,
+                    }}
+                  >
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="toggle-row__label">
+                        {someFilteredSelected
+                          ? `Selected ${selectedFilteredCount} of ${filtered.length} visible`
+                          : allFilteredSelected
+                            ? `All ${filtered.length} visible selected`
+                            : `Select all ${filtered.length} visible`}
+                      </div>
+                      <div
+                        className="toggle-row__hint"
+                        style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}
+                      >
+                        <span className="dim">
+                          {fetched.length === filtered.length
+                            ? `${fetched.length} discovered from upstream`
+                            : `${filtered.length} of ${fetched.length} shown`}
+                        </span>
+                      </div>
+                    </div>
+                    <span className="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = someFilteredSelected;
+                        }}
+                        onChange={toggleAll}
+                        aria-label={`Select all ${filtered.length} visible rows`}
+                      />
+                      <span className="toggle-switch__slider" />
+                    </span>
+                  </label>
                 )}
                 {filtered.map((m) => {
                   const checked = !!selected[m.id];
@@ -397,8 +480,9 @@ export default function FetchModelsInline({
                   className="primary"
                   onClick={handleAdd}
                   disabled={selectedCount === 0}
+                  aria-disabled={selectedCount === 0}
                 >
-                  Add {selectedCount > 0 ? `(${selectedCount})` : 'selected'} to models
+                  Add selected ({selectedCount})
                 </button>
               </div>
             </>
