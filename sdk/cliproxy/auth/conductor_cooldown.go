@@ -878,6 +878,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
 								}
+								if result.Error != nil {
+									if hint, okHint := quotaResetHint(extractErrorBody(result.Error), now); okHint && hint.After(next) {
+										next = hint
+									}
+								}
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
 								}
@@ -2229,6 +2234,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 					next = now.Add(cooldown).Round(0)
 				} else {
 					next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
+				}
+				if resultErr != nil {
+					if hint, okHint := quotaResetHint(extractErrorBody(resultErr), now); okHint && hint.After(next) {
+						next = hint
+					}
 				}
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
