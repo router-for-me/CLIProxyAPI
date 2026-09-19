@@ -735,6 +735,10 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
+#     auto-discover-models: false # optional: fetch the model list from this provider's /models endpoint.
+#       # Discovered models are added underneath any explicit "models" entries below, which keep priority,
+#       # so new upstream models appear without editing the config. Use "excluded-models" to hide the rest.
+#       # The list refreshes on startup and on config reload; a failed refresh keeps the last known models.
 #     disable-cooling: false # optional provider override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional per-provider override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
@@ -780,6 +784,11 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#     excluded-models: # optional: hide models from this provider (matched against the client-visible alias)
+#       - "glm-4.7"          # exclude a specific model (exact match)
+#       - "glm-4.*"          # wildcard matching prefix (e.g. glm-4.5, glm-4.6)
+#       - "*-preview"        # wildcard matching suffix
+#       - "*flash*"          # wildcard matching substring
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
