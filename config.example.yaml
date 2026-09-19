@@ -378,9 +378,14 @@ codex:
 
 # Antigravity provider behavior.
 # antigravity:
-#   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions
-#     - "API"
-#     - "proxy"
+#   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions.
+#                                # Useful for avoiding upstream WAF false-positive triggers (e.g. 429 RESOURCE_EXHAUSTED)
+#                                # caused by coding agent system prompt conventions (OpenCode, Claude Code, OMP, etc.).
+#     - "system-conventions"
+#     - "system_conventions"
+#     - "system-directive"
+#     - "system_directive"
+#     - "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
 #   connection-pool:             # optional: upstream HTTP connection pool settings
 #     enabled: false             # whether to enable connection pooling (default: false; set to true to enable connection pooling)
 #     idle-conn-timeout: "30s"   # idle keep-alive timeout (default: 30s, capped at 210s)
