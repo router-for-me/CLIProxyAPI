@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -336,13 +337,36 @@ func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 		return nil
 	}
 	if errMsg.Error != nil {
+		// Most producers report the upstream status on StatusCode and put a plain
+		// error in Error. Returning only the inner error discards the status, so
+		// callers such as the plugin host callbacks cannot classify the failure.
+		if errMsg.StatusCode > 0 && clienterror.HTTPStatusFromError(errMsg.Error) <= 0 {
+			return hostCallStatusError{err: errMsg.Error, status: errMsg.StatusCode}
+		}
 		return errMsg.Error
 	}
 	if errMsg.StatusCode > 0 {
-		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
+		return hostCallStatusError{
+			err:    fmt.Errorf("model execution failed with status %d", errMsg.StatusCode),
+			status: errMsg.StatusCode,
+		}
 	}
 	return fmt.Errorf("model execution failed")
 }
+
+// hostCallStatusError attaches an upstream HTTP status to an error that does not
+// report one itself. It keeps the original message and stays unwrappable, so
+// errors.Is and errors.As continue to see the wrapped error.
+type hostCallStatusError struct {
+	err    error
+	status int
+}
+
+func (e hostCallStatusError) Error() string { return e.err.Error() }
+
+func (e hostCallStatusError) Unwrap() error { return e.err }
+
+func (e hostCallStatusError) StatusCode() int { return e.status }
 
 func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) {
 	var req rpcHostLogRequest
