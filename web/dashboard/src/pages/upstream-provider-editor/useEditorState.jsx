@@ -25,7 +25,9 @@
 //   errors,                // derived via validate(state, schema, providerType, siblingNames, isEdit)
 //   touched,               // object { [fieldName]: true } (matches the old useState)
 //   setTouched,            // raw setter
-//   dirty,                 // JSON.stringify(state) !== initialSnapshot
+//   dirty,                 // JSON.stringify(state) !== initialSnapshot;
+//                          // baseline advances to the saved state after a
+//                          // successful edit-mode save
 //   saving,                // boolean
 //   savingError,           // string | null (renamed from serverError for context parity)
 //   oauthConnected,        // boolean (create-mode OAuth connect flow state)
@@ -121,7 +123,7 @@ export function EditorStateProvider({ initial, siblingNames = [], children }) {
   const [touched, setTouched] = useState({});
   const [saving, setSaving] = useState(false);
   const [serverError, setServerError] = useState('');
-  const [initialSnapshot] = useState(() => JSON.stringify(form));
+  const [initialSnapshot, setInitialSnapshot] = useState(() => JSON.stringify(form));
   const prevTypeRef = useRef(providerType);
 
   // When the provider_type changes (create mode), re-build the form to match
@@ -210,6 +212,12 @@ export function EditorStateProvider({ initial, siblingNames = [], children }) {
         // Stay on the editor after saving so the operator can keep tuning
         // the same row; the toast confirms the save.
         await updateUpstreamProvider(initial.id, payload);
+        // Advance the dirty baseline to the just-saved state so the
+        // header's "unsaved changes" marker clears. The closure's `form`
+        // is what this save persisted; edits made while the request was
+        // in flight live in newer state and keep the row dirty — exactly
+        // the desired behaviour.
+        setInitialSnapshot(JSON.stringify(form));
         toast.success('Provider updated');
       } else {
         const created = await createUpstreamProvider(payload);
