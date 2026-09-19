@@ -609,6 +609,44 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "openai-compatibility:")
 }
 
+func TestBuildConfigChangeDetails_RelaxedSystemPromptPreservesOverridePresence(t *testing.T) {
+	disabled := false
+	enabled := true
+	claudeConfig := func(cloak *config.CloakConfig) *config.Config {
+		return &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", Cloak: cloak}}}
+	}
+
+	tests := []struct {
+		name string
+		old  *config.CloakConfig
+		new  *config.CloakConfig
+		want string
+	}{
+		{name: "omitted field to absent block", old: &config.CloakConfig{}, new: nil},
+		{name: "disabled unchanged", old: &config.CloakConfig{RelaxedSystemPrompt: &disabled}, new: &config.CloakConfig{RelaxedSystemPrompt: &disabled}},
+		{name: "omitted field to disabled", old: &config.CloakConfig{}, new: &config.CloakConfig{RelaxedSystemPrompt: &disabled}, want: "claude[0].cloak.relaxed-system-prompt: inherit -> false"},
+		{name: "absent block to disabled", old: nil, new: &config.CloakConfig{RelaxedSystemPrompt: &disabled}, want: "claude[0].cloak.relaxed-system-prompt: inherit -> false"},
+		{name: "disabled to absent block", old: &config.CloakConfig{RelaxedSystemPrompt: &disabled}, new: nil, want: "claude[0].cloak.relaxed-system-prompt: false -> inherit"},
+		{name: "omitted field to enabled", old: &config.CloakConfig{}, new: &config.CloakConfig{RelaxedSystemPrompt: &enabled}, want: "claude[0].cloak.relaxed-system-prompt: inherit -> true"},
+		{name: "absent block to enabled", old: nil, new: &config.CloakConfig{RelaxedSystemPrompt: &enabled}, want: "claude[0].cloak.relaxed-system-prompt: inherit -> true"},
+		{name: "enabled to absent block", old: &config.CloakConfig{RelaxedSystemPrompt: &enabled}, new: nil, want: "claude[0].cloak.relaxed-system-prompt: true -> inherit"},
+		{name: "disabled to enabled", old: &config.CloakConfig{RelaxedSystemPrompt: &disabled}, new: &config.CloakConfig{RelaxedSystemPrompt: &enabled}, want: "claude[0].cloak.relaxed-system-prompt: false -> true"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changes := BuildConfigChangeDetails(claudeConfig(test.old), claudeConfig(test.new))
+			if test.want == "" {
+				if len(changes) != 0 {
+					t.Fatalf("expected no effective change, got %v", changes)
+				}
+				return
+			}
+			expectContains(t, changes, test.want)
+		})
+	}
+}
+
 func TestFormatProxyURL(t *testing.T) {
 	tests := []struct {
 		name string
