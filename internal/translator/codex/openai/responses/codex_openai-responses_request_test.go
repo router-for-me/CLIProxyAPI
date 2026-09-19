@@ -317,6 +317,38 @@ func TestConvertOpenAIResponsesRequestToCodex_FiltersPromptCacheRetention(t *tes
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_FiltersMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata string
+	}{
+		{name: "empty", metadata: `{}`},
+		{name: "populated", metadata: `{"probe":"terra-metadata-test"}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"model":"gpt-5.6-terra",
+				"metadata":` + test.metadata + `,
+				"client_metadata":{"probe":"preserve"},
+				"input":"hello"
+			}`)
+
+			output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6-terra", inputJSON, true)
+			if gjson.GetBytes(output, "metadata").Exists() {
+				t.Fatalf("metadata should be removed: %s", string(output))
+			}
+			if got := gjson.GetBytes(output, "client_metadata.probe").String(); got != "preserve" {
+				t.Fatalf("client_metadata.probe = %q, want preserve: %s", got, string(output))
+			}
+			if got := gjson.GetBytes(output, "input.0.content.0.text").String(); got != "hello" {
+				t.Fatalf("input text = %q, want hello: %s", got, string(output))
+			}
+		})
+	}
+}
+
 // TestConvertSystemRoleToDeveloper_AssistantRole tests that assistant role is preserved
 func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	inputJSON := []byte(`{
