@@ -127,6 +127,18 @@ func TestResolveClaudeDeviceProfileLocalUsesBaselineForInvalidSignals(t *testing
 	}
 }
 
+func TestResolveClaudeDeviceProfileLocalKeepsExactMeasuredSoftwareBaseline(t *testing.T) {
+	ResetClaudeDeviceProfileCache()
+	auth := &cliproxyauth.Auth{ID: "auth-newer-patch-signals"}
+	headers := claudeDeviceHeaders("claude-cli/2.1.263 (external, cli)")
+
+	profile := resolveClaudeDeviceProfileLocal(auth, "api-key", headers, nil)
+	baseline := defaultClaudeDeviceProfile(nil)
+	if profile.UserAgent != baseline.UserAgent || profile.PackageVersion != baseline.PackageVersion || profile.RuntimeVersion != baseline.RuntimeVersion {
+		t.Fatalf("unmeasured profile = %#v, want exact local baseline %#v", profile, baseline)
+	}
+}
+
 func TestApplyClaudeLegacyDeviceHeadersReplacesInvalidNativeSoftwareSignals(t *testing.T) {
 	request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
 	if errRequest != nil {

@@ -708,9 +708,10 @@ nonstream-keepalive-interval: 0
 #
 # Default headers for Claude API requests. Update only after measuring a new Claude Code release.
 # Unconfirmed clients use this CLI baseline. Verified native Claude Code CLI, sdk-cli,
-# and VSCode requests preserve their measured entrypoint and software shape only when the
-# Claude Code version, package version, and runtime version exactly match this configured
-# baseline; unmeasured versions fall back to it. In legacy mode, timeout is a fallback and
+# and VSCode requests preserve their measured entrypoint when the Claude Code version is a
+# patch release in the configured major/minor line at or above this baseline. Older versions
+# and newer major/minor lines fall back to the baseline until measured. In legacy mode,
+# timeout is a fallback and
 # verified native OS/arch values remain client-supplied. When stabilize-device-profile is
 # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
 # the same exact software baseline rather than learning newer client versions.
