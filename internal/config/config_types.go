@@ -200,11 +200,11 @@ type CodexConfig struct {
 	// reasoning phase instead of ending at the first keepalive: a clean end with no terminal event
 	// is request-scoped on SSE and stops there, while a websocket close or a transport error on
 	// either transport is not, so the request may be retried on another credential.
-	// Default is false.
+	// Default is true.
 	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
 	// StreamBootstrapTimeout specifies an optional maximum duration to hold back uncommitted response
 	// headers during bootstrap buffering before releasing the stream to the client.
-	// Defaults to "0" (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
+	// Config loaders default this to 30 seconds. A zero-value CodexConfig remains unlimited.
 	// When set (e.g. "20s"), the stream is released once the time ceiling is reached, avoiding
 	// reverse-proxy timeouts (e.g. Nginx 60s proxy_read_timeout).
 	StreamBootstrapTimeout string `yaml:"stream-bootstrap-timeout,omitempty" json:"stream-bootstrap-timeout,omitempty"`
@@ -220,13 +220,13 @@ type CodexConfig struct {
 }
 
 // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.
-// By default, it is 0 (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
+// A loaded runtime config initializes the field to 30 seconds before reaching this fallback.
 const DefaultCodexStreamBootstrapTimeout = 0
 
 const maxBootstrapTimeoutSeconds = int64(math.MaxInt64 / time.Second)
 
 // StreamBootstrapTimeoutDuration returns the maximum duration to buffer bootstrap events.
-// Defaults to 0 (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
+// Defaults to 0 for a zero-value CodexConfig; loaded runtime configs initialize the field to 30 seconds.
 // If explicitly set to a positive duration (e.g. "10s", "500ms", "15"), returns that duration.
 // If set to "0", "0s", "none", "unlimited", "disabled", "off", "never", or invalid strings, returns 0.
 func (c *CodexConfig) StreamBootstrapTimeoutDuration() time.Duration {
