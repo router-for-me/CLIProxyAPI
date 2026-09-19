@@ -35,9 +35,10 @@ jobs:
               go version
               git rev-parse HEAD HEAD^{tree}
               go build -p=2 -o "$TMPDIR/test-output" ./cmd/server
-              # Bounded diagnosis of the first full-run failure; these are observations, not gates.
+              # Bounded diagnosis of the bootstrap-clock failure; these are observations, not gates.
               base=b532db9c4b14addd23bee542f7135a49c979bc6a
-              failed_candidate=42aae4051689aca504b4e44221dd2cc4b9464a96
+              failed_candidate=39ad394ea60d4ea6b0c4bf1505a97d24f9383542
+              case_pattern="^TestCodex(Executor|WebsocketsExecutor)_BootstrapBuffering_(TimeBudgetReleasesStream|DisabledTimeBudget|DefaultUnsetTimeoutIsUnlimited|OverloadDirectlyAfterTimeoutDeliveredInStream|StatusBearingErrorAfterTimeoutDeliveredInStream)$"
               git fetch --no-tags --depth=1 origin "$base" "$failed_candidate"
               for revision in "$base" "$failed_candidate"; do
                 source="$TMPDIR/$revision"
@@ -45,7 +46,7 @@ jobs:
                 git archive "$revision" | tar -x -C "$source"
                 git rev-parse "$revision" "$revision^{tree}"
                 if (cd "$source" && go test -p=2 -parallel=2 -count=100 -timeout=5m -json \
-                  -run "^TestWebsocketRetryBindFailureClearsActiveSessionState$/^Codex_stream$" \
+                  -run "$case_pattern" \
                   ./internal/runtime/executor); then
                   echo "DIAGNOSIS revision=$revision exit=0"
                 else
@@ -54,7 +55,7 @@ jobs:
               done
               # The repaired case and the full suite remain required, with no automatic retry.
               go test -p=2 -parallel=2 -count=100 -timeout=5m -json \
-                -run "^TestWebsocketRetryBindFailureClearsActiveSessionState$/^Codex_stream$" \
+                -run "$case_pattern" \
                 ./internal/runtime/executor
               go test -p=2 -parallel=2 -count=1 -timeout=10m -json ./...
             '
