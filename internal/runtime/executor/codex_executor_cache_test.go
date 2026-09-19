@@ -384,11 +384,58 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 		t.Fatalf("resolved model key fragmented by request alias: first=%q alias=%q", childKey, aliasKey)
 	}
 
-	websocketBody, _, errWebsocket := applyCodexPromptCacheHeadersWithContext(context.Background(), sdktranslator.FromString("claude"), aliasReq, rawJSON, childHeaders)
+	websocketBody, _, errWebsocket := applyCodexPromptCacheHeadersWithContext(context.Background(), sdktranslator.FromString("claude"), aliasReq, rawJSON, nil, childHeaders)
 	if errWebsocket != nil {
 		t.Fatalf("websocket prompt cache error: %v", errWebsocket)
 	}
 	if websocketKey := gjson.GetBytes(websocketBody, "prompt_cache_key").String(); websocketKey != childKey {
 		t.Fatalf("HTTP/WebSocket prompt keys differ: http=%q websocket=%q", childKey, websocketKey)
+	}
+}
+
+func TestCodexExecutorCacheHelper_SharedCacheKeyKeepsSessionHeaderAgentScoped(t *testing.T) {
+	perAgent := false
+	executor := NewCodexExecutor(&config.Config{CodexCacheKeyPerAgent: &perAgent})
+	ctx := context.Background()
+	url := "https://example.com/responses"
+	rawJSON := []byte(`{"model":"gpt-5.4","stream":true}`)
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"metadata":{"user_id":"{\"device_id\":\"device-a\",\"account_uuid\":\"\",\"session_id\":\"cache-session-shared\"}"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+		}`),
+	}
+
+	agentRequest := func(agentID string) (string, string) {
+		t.Helper()
+		headers := http.Header{}
+		headers.Set(helps.ClaudeCodeSessionHeader, "cache-session-shared")
+		if agentID != "" {
+			headers.Set(helps.ClaudeCodeAgentHeader, agentID)
+		}
+		httpReq, body, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("claude"), url, nil, req, req.Payload, rawJSON, headers)
+		if err != nil {
+			t.Fatalf("cacheHelper(%q) error: %v", agentID, err)
+		}
+		return gjson.GetBytes(body, "prompt_cache_key").String(), httpReq.Header.Get("Session-Id")
+	}
+
+	rootKey, rootSession := agentRequest("")
+	keyA, sessionA := agentRequest("agent-a")
+	keyB, sessionB := agentRequest("agent-b")
+
+	if rootKey == "" || rootSession == "" {
+		t.Fatalf("empty root key or session: key=%q session=%q", rootKey, rootSession)
+	}
+	if keyA != rootKey || keyB != rootKey {
+		t.Fatalf("prompt_cache_key not shared across agents: root=%q a=%q b=%q", rootKey, keyA, keyB)
+	}
+	if sessionA == sessionB || sessionA == rootSession || sessionB == rootSession {
+		t.Fatalf("Session-Id collapsed across agents: root=%q a=%q b=%q", rootSession, sessionA, sessionB)
+	}
+	if againKey, againSession := agentRequest("agent-a"); againKey != keyA || againSession != sessionA {
+		t.Fatalf("agent-a identity unstable: key %q->%q session %q->%q", keyA, againKey, sessionA, againSession)
 	}
 }

@@ -102,17 +102,23 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		headers = headerSets[0]
 	}
 	var cache helps.CodexCache
+	// Session-Id must stay agent-scoped even when codex-cache-key-per-agent collapses the
+	// prompt_cache_key, or concurrent sibling agents would share one upstream conversation.
+	var conversationID string
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
 		modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
 		if modelName == "" {
 			modelName = thinking.ParseSuffix(req.Model).ModelName
 		}
-		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, headers)
+		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, headers, e.cfg)
 		if errCache != nil {
 			return nil, nil, codexIdentityConfuseState{}, errCache
 		}
 		if ok {
 			cache = cached
+		}
+		if conversationCache, okConversation, errConversation := helps.ClaudeCodeConversationCache(ctx, modelName, req.Payload, headers); errConversation == nil && okConversation {
+			conversationID = conversationCache.ID
 		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
 		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
@@ -149,8 +155,12 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if err != nil {
 		return nil, nil, codexIdentityConfuseState{}, err
 	}
-	if cache.ID != "" {
-		httpReq.Header.Set("Session-Id", cache.ID)
+	sessionHeaderID := cache.ID
+	if conversationID != "" && identityState.promptCacheKey == "" {
+		sessionHeaderID = conversationID
+	}
+	if sessionHeaderID != "" {
+		httpReq.Header.Set("Session-Id", sessionHeaderID)
 	}
 	return httpReq, rawJSON, identityState, nil
 }

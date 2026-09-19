@@ -19,11 +19,11 @@ import (
 )
 
 func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
-	body, headers, _ := applyCodexPromptCacheHeadersWithContext(context.Background(), from, req, rawJSON)
+	body, headers, _ := applyCodexPromptCacheHeadersWithContext(context.Background(), from, req, rawJSON, nil)
 	return body, headers
 }
 
-func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, headerSets ...http.Header) ([]byte, http.Header, error) {
+func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, cfg *config.Config, headerSets ...http.Header) ([]byte, http.Header, error) {
 	headers := http.Header{}
 	if len(rawJSON) == 0 {
 		return rawJSON, headers, nil
@@ -34,17 +34,24 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 		requestHeaders = headerSets[0]
 	}
 	var cache helps.CodexCache
+	// session_id/Conversation_id must stay agent-scoped even when codex-cache-key-per-agent
+	// collapses the prompt_cache_key, or concurrent sibling agents would share one upstream
+	// conversation.
+	var conversationID string
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
 		modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
 		if modelName == "" {
 			modelName = thinking.ParseSuffix(req.Model).ModelName
 		}
-		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, requestHeaders)
+		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, requestHeaders, cfg)
 		if errCache != nil {
 			return nil, nil, errCache
 		}
 		if ok {
 			cache = cached
+		}
+		if conversationCache, okConversation, errConversation := helps.ClaudeCodeConversationCache(ctx, modelName, req.Payload, requestHeaders); errConversation == nil && okConversation {
+			conversationID = conversationCache.ID
 		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
 		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
@@ -57,8 +64,10 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 
 	if cache.ID != "" {
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
-		setHeaderCasePreserved(headers, "session_id", cache.ID)
-		headers.Set("Conversation_id", cache.ID)
+	}
+	if sessionHeaderID := firstNonEmpty(conversationID, cache.ID); sessionHeaderID != "" {
+		setHeaderCasePreserved(headers, "session_id", sessionHeaderID)
+		headers.Set("Conversation_id", sessionHeaderID)
 	}
 
 	return rawJSON, headers, nil
