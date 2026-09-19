@@ -785,6 +785,32 @@ nonstream-keepalive-interval: 0
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
 
+# Mistral (https://api.mistral.ai/v1) is served through the OpenAI-compatibility
+# executor. Either declare it here, or run `cli-proxy-api -mistral-import` to save
+# a credential from the Mistral Vibe CLI sign-in (it reads MISTRAL_API_KEY, falling
+# back to ~/.vibe/.env, and writes auths/mistral-default.json).
+#
+# An imported credential serves the Mistral section of the model catalog
+# (mistral-vibe-cli-latest, mistral-medium-latest, devstral-small-latest), which
+# refreshes with the rest of the catalog. Declaring an openai-compatibility entry
+# named "mistral" below replaces that list. Only the name "mistral" has these
+# built-in defaults: an auth file whose compat_name is changed to anything else
+# serves models only from a same-named openai-compatibility entry.
+#
+# Codestral models are not in the default list. If your key can use them, add an
+# openai-compatibility entry named "mistral" listing every model you want: the
+# entry replaces the default list rather than extending it.
+# openai-compatibility:
+#   - name: "mistral"
+#     base-url: "https://api.mistral.ai/v1"
+#     api-key-entries:
+#       - api-key: "YOUR_MISTRAL_API_KEY"
+#     models:
+#       - name: "mistral-vibe-cli-latest"
+#         alias: "mistral-medium-3.5"
+#       - name: "devstral-small-latest"
+#         alias: "devstral-small"
+
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header

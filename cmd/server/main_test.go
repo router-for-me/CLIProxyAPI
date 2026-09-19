@@ -21,6 +21,8 @@ func TestArgvEnablesBoolFlag(t *testing.T) {
 		{name: "stops at terminator", args: []string{"--", "--discover-json"}, flag: "discover-json", want: false},
 		{name: "stops at non-flag", args: []string{"foo", "--discover-json"}, flag: "discover-json", want: false},
 		{name: "skips config value", args: []string{"--config", "config.yaml", "--discover-json"}, flag: "discover-json", want: true},
+		{name: "mistral-import takes no value", args: []string{"--mistral-import", "--discover-json"}, flag: "discover-json", want: true},
+		{name: "skips mistral-api-key value", args: []string{"--mistral-api-key", "sk-test", "--discover-json"}, flag: "discover-json", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

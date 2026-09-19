@@ -120,6 +120,10 @@ func main() {
 	var discoverServiceType string
 	var discoverInclude []string
 	var discoverExclude []string
+	var mistralImport bool
+	var mistralAPIKey string
+	var mistralVibeEnv string
+	var mistralLabel string
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
@@ -148,6 +152,10 @@ func main() {
 	flag.Func("discover-include", "Comma-separated interface names to scan during LAN discovery", appendCSV(&discoverInclude))
 	flag.Func("discover-exclude", "Comma-separated interface names to skip during LAN discovery", appendCSV(&discoverExclude))
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
+	flag.BoolVar(&mistralImport, "mistral-import", false, "Import Mistral API key from Mistral Vibe (~/.vibe/.env)")
+	flag.StringVar(&mistralAPIKey, "mistral-api-key", "", "Mistral API key override (use with -mistral-import)")
+	flag.StringVar(&mistralVibeEnv, "mistral-vibe-env", "", "Path to the Mistral Vibe .env file (use with -mistral-import)")
+	flag.StringVar(&mistralLabel, "mistral-label", "", "Custom label for the saved auth file (use with -mistral-import)")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&password, "password", "", "")
@@ -650,7 +658,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || devinLogin || metaLogin
+	commandMode := vertexImport != "" || mistralImport || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || devinLogin || metaLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -708,6 +716,13 @@ func main() {
 	if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport, vertexImportPrefix)
+	} else if mistralImport {
+		// Handle Mistral API key import
+		cmd.DoMistralImport(cfg, &cmd.MistralImportOptions{
+			APIKey:      mistralAPIKey,
+			VibeEnvPath: mistralVibeEnv,
+			Label:       mistralLabel,
+		})
 	} else if antigravityLogin {
 		// Handle Antigravity login
 		cmd.DoAntigravityLogin(cfg, options)
@@ -942,7 +957,7 @@ func argvFlagConsumesValue(name string) bool {
 	switch name {
 	case "codex-login", "codex-device-login", "claude-login", "no-browser",
 		"antigravity-login", "kimi-login", "xai-login", "devin-login",
-		"discover", "discover-json", "home-disable-cluster-discovery",
+		"mistral-import", "discover", "discover-json", "home-disable-cluster-discovery",
 		"tui", "standalone", "local-model":
 		return false
 	default:
