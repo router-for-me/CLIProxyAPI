@@ -2,9 +2,11 @@ package helps
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strings"
@@ -26,7 +28,85 @@ import (
 // providers that require a browser-like TLS and HTTP/2 transport. Each request
 // gets a dedicated connection that is closed with the response body.
 type utlsRoundTripper struct {
-	dialer proxy.Dialer
+	dialer  proxy.Dialer
+	rootCAs *x509.CertPool
+}
+
+const utlsConnectionAttempts = 3
+
+// A setup failure is safe to retry because no HTTP request has been sent.
+// Give the credential retry layer a transport status only after these bounded
+// attempts are exhausted. Certificate and caller cancellation errors stay raw.
+type utlsConnectionError struct{ err error }
+
+func (e *utlsConnectionError) Error() string   { return e.err.Error() }
+func (e *utlsConnectionError) Unwrap() error   { return e.err }
+func (e *utlsConnectionError) StatusCode() int { return http.StatusBadGateway }
+func (e *utlsConnectionError) RetryAfter() *time.Duration {
+	// Short enough to fit the credential retry window (max-retry-interval)
+	// instead of cooling a valid credential for the generic upstream-error
+	// period. Only connection setup produces this error.
+	delay := 5 * time.Second
+	return &delay
+}
+
+func retryableUtlsConnectionError(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return false
+	}
+	var certificateErr *tls.CertificateVerificationError
+	if errors.As(err, &certificateErr) {
+		return false
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return true
+	}
+	var operationErr *net.OpError
+	return errors.As(err, &operationErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// connectWithRetry adds no deadline of its own: each attempt runs under the
+// caller's request context, exactly like a single createConnection call.
+// Only setup failures that surface as errors (reset, EOF, OS dial timeout)
+// are retried, and nothing has been sent upstream when they occur.
+func (t *utlsRoundTripper) connectWithRetry(ctx context.Context, host, addr string) (*http2.ClientConn, error) {
+	for attempt := 1; attempt <= utlsConnectionAttempts; attempt++ {
+		if errContext := ctx.Err(); errContext != nil {
+			return nil, errContext
+		}
+		started := time.Now()
+		connection, errConnect := t.createConnection(ctx, host, addr)
+		if errConnect == nil {
+			return connection, nil
+		}
+		if errContext := ctx.Err(); errContext != nil {
+			return nil, errContext
+		}
+		if !retryableUtlsConnectionError(errConnect) {
+			return nil, errConnect
+		}
+		if attempt == utlsConnectionAttempts {
+			return nil, &utlsConnectionError{err: errConnect}
+		}
+		phase := "dial"
+		if strings.Contains(errConnect.Error(), "TLS handshake") {
+			phase = "handshake"
+		}
+		log.WithFields(log.Fields{
+			"host": host, "phase": phase, "attempt": attempt,
+			"max_attempts": utlsConnectionAttempts, "elapsed_ms": time.Since(started).Milliseconds(),
+		}).Warn("utls: retrying connection setup after transient failure")
+		timer := time.NewTimer(time.Duration(100+rand.IntN(151)) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("utls: connection attempts exhausted")
 }
 
 type closeConnectionBody struct {
@@ -77,7 +157,7 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
+	tlsConfig := &tls.Config{ServerName: host, RootCAs: t.rootCAs}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
 	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
@@ -110,7 +190,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	h2Conn, err := t.createConnection(req.Context(), hostname, addr)
+	h2Conn, err := t.connectWithRetry(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
