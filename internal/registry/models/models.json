@@ -3543,7 +3543,11 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "supports_web_search": true,
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.7-flash-high",
@@ -3573,7 +3577,11 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "supports_web_search": true,
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.8-flash-high",
@@ -3634,7 +3642,11 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "supports_web_search": true,
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-image",
@@ -3690,7 +3702,11 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "supports_web_search": true,
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-low",
@@ -3769,7 +3785,11 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "supports_web_search": true,
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash-lite",
