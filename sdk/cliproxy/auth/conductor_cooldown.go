@@ -874,6 +874,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									if cooldown < minQuotaCooldownFloor {
 										cooldown = minQuotaCooldownFloor
 									}
+									cooldown, backoffLevel = boundedQuotaCooldown(cooldown, state.Quota, now, m.maxTrustedQuotaCooldown())
 									next = now.Add(cooldown).Round(0)
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
@@ -954,7 +955,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling, m.maxTrustedQuotaCooldown())
 			}
 		}
 
@@ -2145,7 +2146,7 @@ func isRequestInvalidError(err error) bool {
 	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool, maxTrustedCooldown time.Duration) {
 	if auth == nil {
 		return
 	}
@@ -2220,6 +2221,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 					if cooldown < minQuotaCooldownFloor {
 						cooldown = minQuotaCooldownFloor
 					}
+					cooldown, auth.Quota.BackoffLevel = boundedQuotaCooldown(cooldown, auth.Quota, now, maxTrustedCooldown)
 					next = now.Add(cooldown).Round(0)
 				} else {
 					next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)

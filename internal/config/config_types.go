@@ -344,6 +344,18 @@ type QuotaExceeded struct {
 	// When all free-tier auths are exhausted (429/503), the conductor retries with
 	// an auth that has available Google One AI credits.
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+
+	// MaxTrustedCooldown bounds how far ahead an upstream supplied quota reset
+	// deadline is trusted locally, for example "1h". Upstream deadlines are
+	// advisory: a credential can become usable again well before the advertised
+	// time after a manual quota reset or a plan change. Recording the full
+	// deadline keeps the credential unselectable until it passes, so the
+	// recovery is never observed and an operator has to clear the state by hand.
+	// A bounded deadline expires, the next real request retries the credential,
+	// and a fresh quota error records a longer bounded deadline.
+	// Empty uses the default of one hour. "0" disables the bound and trusts the
+	// upstream deadline verbatim.
+	MaxTrustedCooldown string `yaml:"max-trusted-cooldown,omitempty" json:"max-trusted-cooldown,omitempty"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
