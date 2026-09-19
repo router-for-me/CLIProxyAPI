@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"sort"
@@ -875,19 +876,29 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										cooldown = minQuotaCooldownFloor
 									}
 									next = now.Add(cooldown).Round(0)
+									next = capQuotaCooldown(next, now)
 								} else {
+									reused := state.Quota.NextRecoverAt.After(now)
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
+									if !reused {
+										next = applyProviderQuotaFloor(auth.Provider, next, now)
+									}
 								}
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
 								}
 							}
 							state.NextRetryAfter = next
+							firstExceeded := state.Quota.FirstExceededAt
+							if firstExceeded.IsZero() {
+								firstExceeded = now
+							}
 							applyCooldownFields(&state.Quota, QuotaState{
-								Exceeded:      true,
-								Reason:        "quota",
-								NextRecoverAt: next,
-								BackoffLevel:  backoffLevel,
+								Exceeded:        true,
+								Reason:          "quota",
+								NextRecoverAt:   next,
+								BackoffLevel:    backoffLevel,
+								FirstExceededAt: firstExceeded,
 							})
 							if result.CredentialScope && !disableCooling {
 								for _, otherState := range auth.ModelStates {
@@ -903,6 +914,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										// per-model deadline; it never shortens one.
 										if !otherState.NextRetryAfter.IsZero() && otherState.NextRetryAfter.After(otherRetryAfter) {
 											otherRetryAfter = otherState.NextRetryAfter
+										}
+										if capDeadline := now.Add(quotaBackoffMax); otherQuotaNext.After(capDeadline) {
+											otherQuotaNext = capDeadline
 										}
 										otherState.NextRetryAfter = otherRetryAfter
 										applyCooldownFields(&otherState.Quota, QuotaState{
@@ -1189,6 +1203,30 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
 	applyCooldownFields(&state.Quota, QuotaState{})
+	state.UpdatedAt = now
+}
+
+// resetModelStateKeepingQuota clears transient error state while leaving quota accounting intact.
+func resetModelStateKeepingQuota(state *ModelState, now time.Time) {
+	if state == nil {
+		return
+	}
+	prev := state.Quota
+	if prev.Exceeded && prev.NextRecoverAt.After(now) {
+		state.LastError = nil
+		state.NextRetryAfter = prev.NextRecoverAt
+		state.Unavailable = true
+		state.Status = StatusError
+		state.StatusMessage = prev.Reason
+		state.UpdatedAt = now
+		return
+	}
+	state.Unavailable = false
+	state.Status = StatusActive
+	state.StatusMessage = ""
+	state.NextRetryAfter = time.Time{}
+	state.LastError = nil
+	state.Quota = QuotaState{BackoffLevel: prev.BackoffLevel}
 	state.UpdatedAt = now
 }
 
@@ -2227,12 +2265,18 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 						cooldown = minQuotaCooldownFloor
 					}
 					next = now.Add(cooldown).Round(0)
+					next = capQuotaCooldown(next, now)
 				} else {
 					next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
 				}
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
 				}
+				// Carrying the previous window forward must stay bounded. Without
+				// this cap a single far-future upstream reset latches: the
+				// credential is only retried after NextRetryAfter, so it can never
+				// shorten its own window.
+				next = capQuotaCooldown(next, now)
 			}
 			auth.Quota.NextRecoverAt = next
 			auth.NextRetryAfter = next
@@ -2272,11 +2316,22 @@ func quotaCooldownAfterFailure(quota QuotaState, now time.Time) (time.Time, int)
 	var next time.Time
 	if cooldown > 0 {
 		next = now.Add(cooldown).Round(0)
+		next = capQuotaCooldown(next, now)
 	}
 	return next, nextLevel
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
+func capQuotaCooldown(next, now time.Time) time.Time {
+	if next.IsZero() {
+		return next
+	}
+	if max := now.Add(quotaBackoffMax); next.After(max) {
+		return max
+	}
+	return next
+}
+
 func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) {
 	if prevLevel < 0 {
 		prevLevel = 0
@@ -2289,7 +2344,38 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 		cooldown = quotaBackoffBase
 	}
 	if cooldown >= quotaBackoffMax {
-		return quotaBackoffMax, prevLevel
+		return withCooldownJitter(quotaBackoffMax), prevLevel
 	}
-	return cooldown, prevLevel + 1
+	return withCooldownJitter(cooldown), prevLevel + 1
+}
+
+var anthropicQuotaFloor = 15 * time.Minute
+
+func SetAnthropicQuotaFloor(d time.Duration) { anthropicQuotaFloor = d }
+
+func applyProviderQuotaFloor(provider string, next, now time.Time) time.Time {
+	if anthropicQuotaFloor <= 0 || next.IsZero() {
+		return next
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude", "anthropic":
+		if floor := now.Add(withCooldownJitter(anthropicQuotaFloor)); floor.After(next) {
+			return floor
+		}
+	}
+	return next
+}
+
+// withCooldownJitter spreads recovery across credentials that hit the same quota
+// ceiling at the same moment. Without it every credential in the pool recovers in
+// lockstep, retries together, and re-trips the upstream limit.
+func withCooldownJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	delta := int64(d) / 5 // +/-20%
+	if delta <= 0 {
+		return d
+	}
+	return time.Duration(int64(d) - delta + rand.Int63n(2*delta+1))
 }

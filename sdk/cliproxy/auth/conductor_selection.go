@@ -316,7 +316,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 					continue
 				}
 				clonedState := state.Clone()
-				resetModelState(clonedState, now)
+				resetModelStateKeepingQuota(clonedState, now)
 				candidateAuth.ModelStates[modelKey] = clonedState
 				candidateChanged = true
 			}
