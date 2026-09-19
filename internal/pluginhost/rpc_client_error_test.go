@@ -19,6 +19,39 @@ func (c staticEnvelopePluginClient) Call(context.Context, string, []byte) ([]byt
 
 func (c staticEnvelopePluginClient) Shutdown() {}
 
+func TestMarshalRPCErrorPreservesHTTPStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status []int
+		want   int
+	}{
+		{name: "unknown"},
+		{name: "zero", status: []int{0}},
+		{name: "bad_request", status: []int{400}, want: 400},
+		{name: "unprocessable", status: []int{422}, want: 422},
+		{name: "rate_limit", status: []int{429}, want: 429},
+		{name: "unavailable", status: []int{503}, want: 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := marshalRPCError("host_call_failed", "synthetic", tc.status...)
+			_, errDecode := decodeRPCEnvelope[rpcEmptyResponse](raw)
+			if errDecode == nil {
+				t.Fatal("decodeRPCEnvelope returned nil error")
+			}
+			if got := errDecode.Error(); got != "synthetic" {
+				t.Fatalf("error = %q, want synthetic", got)
+			}
+			statusProvider, ok := errDecode.(interface{ StatusCode() int })
+			if !ok {
+				t.Fatalf("error %T does not expose StatusCode", errDecode)
+			}
+			if got := statusProvider.StatusCode(); got != tc.want {
+				t.Fatalf("status = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDecodeEnvelopeResultPreservesPluginHTTPStatus(t *testing.T) {
 	_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](pluginabi.Envelope{
 		OK: false,
