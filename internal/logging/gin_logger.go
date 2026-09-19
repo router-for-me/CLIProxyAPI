@@ -56,7 +56,7 @@ func GinLogrusLogger() gin.HandlerFunc {
 		c.Next()
 
 		// Keep failed health probes visible, including responses from global middleware.
-		if path == "/healthz" && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) &&
+		if (path == "/healthz" || path == "/api/hello") && (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) &&
 			c.Writer.Status() >= http.StatusOK && c.Writer.Status() < http.StatusMultipleChoices {
 			return
 		}

@@ -172,6 +172,14 @@ func TestGinLogrusLoggerHealthProbeStatus(t *testing.T) {
 		{"server_error", "HEAD", "/healthz", 503, true},
 		{"similar_path", "GET", "/healthz-extra", 200, true},
 		{"other_method", "POST", "/healthz", 200, true},
+		{"api_hello_get_ok", "GET", "/api/hello", 200, false},
+		{"api_hello_head_ok", "HEAD", "/api/hello", 200, false},
+		{"api_hello_success_boundary", "GET", "/api/hello", 299, false},
+		{"api_hello_redirect", "GET", "/api/hello", 300, true},
+		{"api_hello_client_error", "GET", "/api/hello", 400, true},
+		{"api_hello_server_error", "HEAD", "/api/hello", 503, true},
+		{"api_hello_similar_path", "GET", "/api/hello-extra", 200, true},
+		{"api_hello_other_method", "POST", "/api/hello", 200, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			engine := gin.New()
