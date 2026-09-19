@@ -384,7 +384,7 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 		t.Fatalf("resolved model key fragmented by request alias: first=%q alias=%q", childKey, aliasKey)
 	}
 
-	websocketBody, _, errWebsocket := applyCodexPromptCacheHeadersWithContext(context.Background(), sdktranslator.FromString("claude"), aliasReq, rawJSON, childHeaders)
+	websocketBody, _, errWebsocket := applyCodexPromptCacheHeadersWithContext(context.Background(), sdktranslator.FromString("claude"), aliasReq, rawJSON, nil, childHeaders)
 	if errWebsocket != nil {
 		t.Fatalf("websocket prompt cache error: %v", errWebsocket)
 	}
