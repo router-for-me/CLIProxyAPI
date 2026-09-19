@@ -4,12 +4,25 @@ package browser
 
 import (
 	"fmt"
+	"net/url"
 	"os/exec"
 	"runtime"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/skratchdot/open-golang/open"
 )
+
+// isValidHTTPURL reports whether rawURL is a well-formed absolute URL using
+// the http or https scheme. This guards against passing attacker-controlled
+// or malformed strings (e.g. values starting with "-" or using other URL
+// schemes) to the OS commands used to launch a browser.
+func isValidHTTPURL(rawURL string) bool {
+	parsed, err := url.ParseRequestURI(rawURL)
+	if err != nil {
+		return false
+	}
+	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+}
 
 // OpenURL opens the specified URL in the default web browser.
 // It first attempts to use a platform-agnostic library and falls back to
