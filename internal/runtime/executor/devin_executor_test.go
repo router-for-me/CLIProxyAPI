@@ -641,6 +641,15 @@ func TestDevinExecutor_Refresh(t *testing.T) {
 			"api_key":  "devin-session-token$test",
 			"base_url": server.URL,
 		},
+		Quota: cliproxyauth.QuotaState{
+			ObservedAt: time.Unix(10, 0),
+			Signals: map[string]string{
+				"plan":            "Free",
+				"plan_start":      "2025-01-01T00:00:00Z",
+				"plan_end":        "2025-02-01T00:00:00Z",
+				"obsolete_signal": "stale",
+			},
+		},
 	}
 
 	updated, err := exec.Refresh(context.Background(), auth)
@@ -668,6 +677,11 @@ func TestDevinExecutor_Refresh(t *testing.T) {
 	}
 	if updated.Quota.Signals["weekly_quota_remaining_percent"] != "45%" {
 		t.Errorf("expected quota signal 45%%, got %q", updated.Quota.Signals["weekly_quota_remaining_percent"])
+	}
+	for _, staleKey := range []string{"plan_start", "plan_end", "obsolete_signal"} {
+		if _, exists := updated.Quota.Signals[staleKey]; exists {
+			t.Errorf("expected stale quota signal %q to be removed, got %#v", staleKey, updated.Quota.Signals)
+		}
 	}
 	if updated.Quota.ObservedAt.IsZero() {
 		t.Error("expected non-zero Quota.ObservedAt")
