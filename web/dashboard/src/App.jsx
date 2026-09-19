@@ -29,6 +29,7 @@ import UpstreamProvidersPage from './pages/UpstreamProvidersPage.jsx';
 import HealthPage from './pages/upstream-providers/HealthPage.jsx';
 import ProxyPoolsPage from './pages/ProxyPoolsPage.jsx';
 import UpstreamProviderEditorPage from './pages/upstream-provider-editor/index.jsx';
+import { UpstreamDetailRedirect } from './pages/upstream-provider-editor/index.jsx';
 import UpstreamProviderEditorCreatePage from './pages/upstream-provider-editor/CreateMode.jsx';
 import UpstreamProviderOverviewTab from './pages/upstream-provider-editor/OverviewTab.jsx';
 import UpstreamProviderModelsTab from './pages/upstream-provider-editor/ModelsTab.jsx';
@@ -310,7 +311,11 @@ export default function App() {
                 matches in declaration order. */}
             <Route path="/upstream-providers/new" element={<UpstreamProviderEditorCreatePage />} />
             <Route path="/upstream-providers/health" element={<HealthPage />} />
-            <Route path="/upstream-providers/:id" element={<Navigate to="/upstream-providers/:id/overview" replace />} />
+            {/* The :id redirect must interpolate the real id — a static
+                <Navigate to="/:id/..."> does NOT interpolate params and
+                would match the tabbed route with the literal id ":id"
+                (server 400: "id must be a positive integer"). */}
+            <Route path="/upstream-providers/:id" element={<UpstreamDetailRedirect />} />
             <Route path="/upstream-providers/:id/:tab" element={<UpstreamProviderEditorPage />}>
               <Route index element={<Navigate to="overview" replace />} />
               <Route path="overview" element={<UpstreamProviderOverviewTab />} />

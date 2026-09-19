@@ -18,7 +18,7 @@
 // routes ship incrementally).
 
 import React from 'react';
-import { Outlet, useNavigate, useParams } from 'react-router-dom';
+import { Navigate, Outlet, useNavigate, useParams } from 'react-router-dom';
 import { useAsync } from '../../hooks/useAsync.js';
 import { getUpstreamProvider } from '../../api/client.js';
 import { Spinner, ErrorBanner } from '../../components/Primitives.jsx';
@@ -39,6 +39,24 @@ import { TabBar } from './TabBar.jsx';
 export function resolveEditorMode(id) {
   const isCreate = id === 'new' || id === undefined;
   return { isCreate, providerId: isCreate ? null : id };
+}
+
+// detailRedirectTarget builds the /overview target for the legacy detail
+// URL. A function (not a static string) because React Router 6 does NOT
+// interpolate route params inside <Navigate to="..."> — a static
+// "/upstream-providers/:id/overview" sends the browser to a literal ":id"
+// path, which the tabbed route then matches as id=":id" and the API
+// rejects with "id must be a positive integer".
+export function detailRedirectTarget(id) {
+  return `/upstream-providers/${id}/overview`;
+}
+
+// UpstreamDetailRedirect is the route element for /upstream-providers/:id
+// (no tab segment): it forwards old bookmarks to the Overview tab while
+// preserving the real provider id.
+export function UpstreamDetailRedirect() {
+  const { id } = useParams();
+  return <Navigate to={detailRedirectTarget(id)} replace />;
 }
 
 export function UpstreamProviderEditorPage() {
