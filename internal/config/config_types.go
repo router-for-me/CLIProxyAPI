@@ -805,6 +805,12 @@ type OpenAICompatibility struct {
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
+	// SynthesizeResponsesCompaction is opt-in and defaults to false.
+	// When false, CPA keeps forwarding /responses/compact to the upstream.
+	// When true, CPA generates and returns the compaction summary locally instead of relying on the upstream to provide a /responses/compact endpoint.
+	// The name deliberately avoids support-* so it cannot be misread as indicating native upstream support.
+	SynthesizeResponsesCompaction bool `yaml:"synthesize-responses-compaction,omitempty" json:"synthesize-responses-compaction,omitempty"`
+
 	// DisableCooling overrides the global cooling policy for this provider when set.
 	// True disables auth/model cooldowns; false explicitly enables them.
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`

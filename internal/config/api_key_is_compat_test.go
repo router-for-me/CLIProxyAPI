@@ -74,3 +74,36 @@ openai-compatibility:
 		t.Fatal("openai-compatibility omitted IsCompat = true, want default false")
 	}
 }
+
+func TestParseConfigBytesOpenAICompatibilitySynthesizeResponsesCompactionDefaultsFalse(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`openai-compatibility:
+  - name: compat
+    base-url: https://compat.example.com/v1
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if len(cfg.OpenAICompatibility) != 1 {
+		t.Fatalf("openai-compatibility count = %d, want 1", len(cfg.OpenAICompatibility))
+	}
+	if cfg.OpenAICompatibility[0].SynthesizeResponsesCompaction {
+		t.Fatal("synthesize-responses-compaction = true, want default false")
+	}
+}
+
+func TestParseConfigBytesOpenAICompatibilitySynthesizeResponsesCompactionEnabled(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`openai-compatibility:
+  - name: compat
+    base-url: https://compat.example.com/v1
+    synthesize-responses-compaction: true
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if len(cfg.OpenAICompatibility) != 1 {
+		t.Fatalf("openai-compatibility count = %d, want 1", len(cfg.OpenAICompatibility))
+	}
+	if !cfg.OpenAICompatibility[0].SynthesizeResponsesCompaction {
+		t.Fatal("synthesize-responses-compaction = false, want true")
+	}
+}

@@ -91,6 +91,20 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
 
+	synthesizeAlt := opts.Alt == "responses/compact" && e.shouldSynthesizeResponsesCompaction(auth)
+	// A CPA-sealed capsule must never reach the upstream, not even when a compact
+	// request is forwarded to the upstream's native endpoint: the upstream cannot
+	// decrypt it and rejects the whole request. Non-CPA items are preserved on that
+	// path because they may be the upstream's own capsule.
+	expandMode := openAICompatCompactionExpandTranslate
+	if opts.Alt == "responses/compact" && !synthesizeAlt {
+		expandMode = openAICompatCompactionExpandPassthrough
+	}
+	req.Payload, opts.OriginalRequest = e.expandResponsesCompactionPayloads(ctx, auth, req.Payload, opts.OriginalRequest, expandMode)
+	if mode := detectOpenAICompatResponsesCompactionMode(opts, req.Payload, opts.OriginalRequest); mode == openAICompatResponsesCompactionTrigger || (mode == openAICompatResponsesCompactionAlt && synthesizeAlt) {
+		return e.executeResponsesCompaction(ctx, auth, req, opts, mode)
+	}
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
@@ -310,9 +324,17 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if opts.Alt == "responses/compact" {
+		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
+	}
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
+	}
+
+	req.Payload, opts.OriginalRequest = e.expandResponsesCompactionPayloads(ctx, auth, req.Payload, opts.OriginalRequest, openAICompatCompactionExpandTranslate)
+	if detectOpenAICompatResponsesCompactionMode(opts, req.Payload, opts.OriginalRequest) == openAICompatResponsesCompactionTrigger {
+		return e.executeResponsesCompactionStream(ctx, auth, req, opts)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName

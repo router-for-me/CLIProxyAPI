@@ -76,6 +76,46 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorCompactSynthesisOutputsCompactionItem(t *testing.T) {
+	tests := []struct {
+		name    string
+		alt     string
+		payload []byte
+	}{
+		{
+			name:    "trigger",
+			payload: openAICompatCompactionTriggerPayload(),
+		},
+		{
+			name:    "alt",
+			alt:     "responses/compact",
+			payload: []byte(`{"model":"gpt-5.6","input":[{"type":"message","role":"user","content":"history"}]}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := newOpenAICompatCompactionTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				writeOpenAICompatCompactionSummary(w)
+			})
+			defer server.Close()
+
+			executor := newOpenAICompatCompactionTestExecutor(server.URL, test.alt != "")
+			resp, errExecute := executor.Execute(context.Background(), openAICompatCompactionTestAuth(server.URL), cliproxyexecutor.Request{
+				Model:   "gpt-5.6",
+				Payload: test.payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				Alt:            test.alt,
+			})
+			if errExecute != nil {
+				t.Fatalf("Execute error: %v", errExecute)
+			}
+			assertOpenAICompatCompactionResponse(t, resp.Payload)
+		})
+	}
+}
+
 func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -508,9 +548,9 @@ func TestOpenAICompatExecutorPromptCacheKeyExecuteStream(t *testing.T) {
 }
 
 func TestOpenAICompatExecutorPromptCacheKeyStreamCompactSkipped(t *testing.T) {
-	var gotBody []byte
+	var upstreamCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotBody, _ = io.ReadAll(r.Body)
+		upstreamCalls++
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[]}` + "\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
@@ -541,16 +581,20 @@ func TestOpenAICompatExecutorPromptCacheKeyStreamCompactSkipped(t *testing.T) {
 		Stream:       true,
 		Metadata:     map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:compact-stream"},
 	})
-	if errExecute != nil {
-		t.Fatalf("ExecuteStream error: %v", errExecute)
+	if result != nil {
+		t.Fatal("expected no stream result for compact alt")
 	}
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("stream chunk error: %v", chunk.Err)
-		}
+	if errExecute == nil {
+		t.Fatal("expected streaming compact rejection")
 	}
-	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
-		t.Fatalf("unexpected prompt_cache_key in streaming compact body: %s", string(gotBody))
+	if status, ok := errExecute.(interface{ StatusCode() int }); !ok || status.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("stream error status = %v, want %d", errExecute, http.StatusBadRequest)
+	}
+	if !strings.Contains(errExecute.Error(), "streaming not supported for /responses/compact") {
+		t.Fatalf("stream error = %v", errExecute)
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("compact alt unexpectedly reached upstream %d times", upstreamCalls)
 	}
 }
 
