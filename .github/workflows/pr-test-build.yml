@@ -24,7 +24,8 @@ jobs:
         shell: bash
         run: |
           state="$(mktemp -d "$RUNNER_TEMP/go-tests.XXXXXX")"
-          trap 'rm -rf "$state"' EXIT
+          # Go module-cache directories are read-only; change only this private job state.
+          trap 'chmod -R u+w "$state" && rm -rf "$state"' EXIT
           mkdir -p "$state/home" "$state/tmp"
           # Do not inherit provider/store credentials or opt-in live-test flags.
           env -i PATH="$PATH" HOME="$state/home" TMPDIR="$state/tmp" \
@@ -35,28 +36,6 @@ jobs:
               go version
               git rev-parse HEAD HEAD^{tree}
               go build -p=2 -o "$TMPDIR/test-output" ./cmd/server
-              # Bounded diagnosis of the bootstrap-clock failure; these are observations, not gates.
-              base=b532db9c4b14addd23bee542f7135a49c979bc6a
-              failed_candidate=39ad394ea60d4ea6b0c4bf1505a97d24f9383542
-              case_pattern="^TestCodex(Executor|WebsocketsExecutor)_BootstrapBuffering_(TimeBudgetReleasesStream|DisabledTimeBudget|DefaultUnsetTimeoutIsUnlimited|OverloadDirectlyAfterTimeoutDeliveredInStream|StatusBearingErrorAfterTimeoutDeliveredInStream)$"
-              git fetch --no-tags --depth=1 origin "$base" "$failed_candidate"
-              for revision in "$base" "$failed_candidate"; do
-                source="$TMPDIR/$revision"
-                mkdir "$source"
-                git archive "$revision" | tar -x -C "$source"
-                git rev-parse "$revision" "$revision^{tree}"
-                if (cd "$source" && go test -p=2 -parallel=2 -count=100 -timeout=5m -json \
-                  -run "$case_pattern" \
-                  ./internal/runtime/executor); then
-                  echo "DIAGNOSIS revision=$revision exit=0"
-                else
-                  echo "DIAGNOSIS revision=$revision exit=$?"
-                fi
-              done
-              # The repaired case and the full suite remain required, with no automatic retry.
-              go test -p=2 -parallel=2 -count=100 -timeout=5m -json \
-                -run "$case_pattern" \
-                ./internal/runtime/executor
               go test -p=2 -parallel=2 -count=1 -timeout=10m -json ./...
             '
       - name: Check source remains unchanged
