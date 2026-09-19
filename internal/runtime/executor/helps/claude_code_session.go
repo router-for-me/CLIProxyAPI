@@ -159,11 +159,10 @@ func ClaudeCodePromptCache(ctx context.Context, modelName string, payload []byte
 }
 
 // ClaudeCodeConversationCache derives the same deterministic identity as ClaudeCodePromptCache but
-// is always agent-scoped, ignoring codex-cache-key-per-agent.
-//
-// Callers use this value as an upstream conversation ID rather than as a cache key: sibling agents
-// of one Claude Code session must never land in the same upstream conversation, because that mixes
-// their conversation state. Only prompt-cache sharing is configurable; conversation identity is not.
+// is always agent-scoped, ignoring codex-cache-key-per-agent. The xAI executor keys per-agent
+// conversation state on it. The codex path must NOT use it for session headers: the ChatGPT codex
+// backend shards its prompt cache by session header, so agent-scoped headers would defeat the
+// collapsed prompt_cache_key.
 func ClaudeCodeConversationCache(ctx context.Context, modelName string, payload []byte, headers http.Header) (CodexCache, bool, error) {
 	return claudeCodeCacheIdentity(ctx, modelName, payload, headers, true)
 }

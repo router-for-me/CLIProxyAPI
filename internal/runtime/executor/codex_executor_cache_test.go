@@ -393,7 +393,10 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 	}
 }
 
-func TestCodexExecutorCacheHelper_SharedCacheKeyKeepsSessionHeaderAgentScoped(t *testing.T) {
+// The codex backend shards its prompt cache by session header, so when
+// codex-cache-key-per-agent is disabled the Session-Id must follow the collapsed
+// cache key — agent-scoped headers would defeat the shared partition upstream.
+func TestCodexExecutorCacheHelper_SharedCacheKeySharesSessionHeader(t *testing.T) {
 	perAgent := false
 	executor := NewCodexExecutor(&config.Config{CodexCacheKeyPerAgent: &perAgent})
 	ctx := context.Background()
@@ -432,8 +435,11 @@ func TestCodexExecutorCacheHelper_SharedCacheKeyKeepsSessionHeaderAgentScoped(t 
 	if keyA != rootKey || keyB != rootKey {
 		t.Fatalf("prompt_cache_key not shared across agents: root=%q a=%q b=%q", rootKey, keyA, keyB)
 	}
-	if sessionA == sessionB || sessionA == rootSession || sessionB == rootSession {
-		t.Fatalf("Session-Id collapsed across agents: root=%q a=%q b=%q", rootSession, sessionA, sessionB)
+	if sessionA != rootSession || sessionB != rootSession {
+		t.Fatalf("Session-Id not shared across agents: root=%q a=%q b=%q", rootSession, sessionA, sessionB)
+	}
+	if rootSession != rootKey {
+		t.Fatalf("Session-Id %q does not follow the shared cache key %q", rootSession, rootKey)
 	}
 	if againKey, againSession := agentRequest("agent-a"); againKey != keyA || againSession != sessionA {
 		t.Fatalf("agent-a identity unstable: key %q->%q session %q->%q", keyA, againKey, sessionA, againSession)

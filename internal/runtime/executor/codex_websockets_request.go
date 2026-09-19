@@ -34,10 +34,6 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 		requestHeaders = headerSets[0]
 	}
 	var cache helps.CodexCache
-	// session_id/Conversation_id must stay agent-scoped even when codex-cache-key-per-agent
-	// collapses the prompt_cache_key, or concurrent sibling agents would share one upstream
-	// conversation.
-	var conversationID string
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
 		modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
 		if modelName == "" {
@@ -50,9 +46,6 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 		if ok {
 			cache = cached
 		}
-		if conversationCache, okConversation, errConversation := helps.ClaudeCodeConversationCache(ctx, modelName, req.Payload, requestHeaders); errConversation == nil && okConversation {
-			conversationID = conversationCache.ID
-		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
 		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
 			cache.ID = promptCacheKey.String()
@@ -64,10 +57,12 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 
 	if cache.ID != "" {
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
-	}
-	if sessionHeaderID := firstNonEmpty(conversationID, cache.ID); sessionHeaderID != "" {
-		setHeaderCasePreserved(headers, "session_id", sessionHeaderID)
-		headers.Set("Conversation_id", sessionHeaderID)
+		// session_id/Conversation_id deliberately follow the (possibly session-collapsed)
+		// cache key: the ChatGPT codex backend shards its prompt cache by session header,
+		// so agent-scoped headers would defeat codex-cache-key-per-agent: false even with
+		// a shared prompt_cache_key (verified by canary probes on 2026-09-19).
+		setHeaderCasePreserved(headers, "session_id", cache.ID)
+		headers.Set("Conversation_id", cache.ID)
 	}
 
 	return rawJSON, headers, nil

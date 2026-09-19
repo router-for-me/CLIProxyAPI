@@ -424,8 +424,9 @@ nonstream-keepalive-interval: 0
 # share an identical system prompt and tool block.
 # When false, all agents of one session share a single partition keyed on the session, so a
 # fan-out can read the prefix the root agent already warmed. Sub-agent sessions that declare a
-# parent_session_id collapse onto the parent session's partition. Reasoning-replay state and
-# upstream conversation identity stay agent-scoped either way.
+# parent_session_id collapse onto the parent session's partition. The upstream session headers
+# follow the collapsed key (the codex backend shards its prompt cache by session header);
+# CPA-internal reasoning-replay state stays agent-scoped either way.
 # codex-cache-key-per-agent: true
 
 # Gemini API keys
