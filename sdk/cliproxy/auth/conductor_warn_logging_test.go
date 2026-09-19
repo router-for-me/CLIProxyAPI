@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -722,4 +723,49 @@ func (e *mockStreamErrorExecutor) CountTokens(ctx context.Context, auth *Auth, r
 
 func (e *mockStreamErrorExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
+}
+
+func TestWarnLogOnAuthUnavailable_BoundsListedCredentials(t *testing.T) {
+	previousCooldown := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previousCooldown) })
+
+	hook := setupTestLoggerHook(t)
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&mockCustomErrorExecutor{identifier: "claude"})
+
+	const model = "claude-bounded-warning"
+	total := maxLoggedCoolingAuths + 5
+	now := time.Now()
+	reg := registry.GetGlobalRegistry()
+	for index := range total {
+		auth := &Auth{
+			ID:             fmt.Sprintf("bounded-cooling-%02d", index),
+			Provider:       "claude",
+			Status:         StatusActive,
+			StatusMessage:  "rate_limit_exceeded",
+			Quota:          QuotaState{Exceeded: true, Reason: "rate_limit_exceeded", NextRecoverAt: now.Add(time.Minute)},
+			NextRetryAfter: now.Add(time.Minute),
+		}
+		reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+	}
+	hook.Reset()
+
+	manager.warnLogAuthUnavailable(context.Background(), []string{"claude"}, model, cliproxyexecutor.Options{}, nil, newModelCooldownError(model, "claude", time.Minute))
+
+	entries := hook.AllEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 Warn log, got %d", len(entries))
+	}
+	message := entries[0].Message
+	if !strings.Contains(message, fmt.Sprintf("%d of %d candidate(s)", total, total)) || !strings.HasSuffix(message, ", and 5 more") {
+		t.Fatalf("unexpected Warn log content: %s", message)
+	}
+	if listed := strings.Count(message, "reason="); listed != maxLoggedCoolingAuths {
+		t.Fatalf("Warn log lists %d credentials, want %d: %s", listed, maxLoggedCoolingAuths, message)
+	}
 }

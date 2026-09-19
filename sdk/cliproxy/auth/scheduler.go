@@ -68,6 +68,7 @@ type scheduledAuthMeta struct {
 	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
 	registryEpoch     uint64
+	tokenExpiresAt    time.Time
 }
 
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
@@ -77,6 +78,9 @@ type modelScheduler struct {
 	priorityOrder   []int
 	readyByPriority map[int]*readyBucket
 	blocked         cooldownQueue
+	// readyTokenExpiry is never later than the earliest access token expiry among ready
+	// entries, so picks can skip the expiry scan until a token may actually have expired.
+	readyTokenExpiry time.Time
 }
 
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
@@ -209,6 +213,99 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	}
 }
 
+// upsertAuths applies lifecycle upserts for a batch of auth snapshots under one lock.
+func (s *authScheduler) upsertAuths(auths []*Auth) {
+	if s == nil || len(auths) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for _, auth := range auths {
+		s.upsertAuthLifecycleLocked(auth, now)
+	}
+}
+
+// schedulerAuthState captures the manager-side inputs that determine the scheduler entries of an auth.
+type schedulerAuthState struct {
+	authID        string
+	providerKey   string
+	schedulable   bool
+	epoch         uint64
+	generation    uint64
+	updatedAt     time.Time
+	registryEpoch uint64
+}
+
+// newSchedulerAuthState describes auth the way a lifecycle upsert would observe it.
+func newSchedulerAuthState(auth *Auth, reg *registry.ModelRegistry) schedulerAuthState {
+	authID := strings.TrimSpace(auth.ID)
+	providerKey := executorKeyFromAuth(auth)
+	return schedulerAuthState{
+		authID:        authID,
+		providerKey:   providerKey,
+		schedulable:   providerKey != "" && !auth.Disabled && auth.Status != StatusDisabled,
+		epoch:         auth.RegistrationEpoch,
+		generation:    auth.Generation,
+		updatedAt:     auth.UpdatedAt,
+		registryEpoch: reg.ClientRegistrationEpoch(authID),
+	}
+}
+
+// divergentAuthStates drops the entries of auths absent from states and returns the indexes of
+// states the scheduler does not reflect yet. Auths it already reflects keep their shard entries,
+// readiness indexes and rotation cursors untouched.
+func (s *authScheduler) divergentAuthStates(states []schedulerAuthState) []int {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	present := make(map[string]struct{}, len(states))
+	var divergent []int
+	for index, state := range states {
+		if state.authID == "" {
+			continue
+		}
+		present[state.authID] = struct{}{}
+		if !s.reflectsAuthStateLocked(state) {
+			divergent = append(divergent, index)
+		}
+	}
+	for authID := range s.authProviders {
+		if _, ok := present[authID]; !ok {
+			s.removeAuthFromProvidersLocked(authID)
+		}
+	}
+	return divergent
+}
+
+// reflectsAuthStateLocked reports whether a lifecycle upsert of the described snapshot would leave
+// the scheduler unchanged: the same generation is already applied against the same registry model
+// set, or the scheduler holds newer state that rejects the snapshot as stale.
+func (s *authScheduler) reflectsAuthStateLocked(state schedulerAuthState) bool {
+	if s.isStaleScheduledAuth(state.authID, state.epoch, state.generation, state.updatedAt) {
+		return true
+	}
+	applied, ok := s.authGenerations[state.authID]
+	if !ok || applied.epoch != state.epoch || applied.generation != state.generation || !applied.updatedAt.Equal(state.updatedAt) {
+		return false
+	}
+	providerKey := s.authProviders[state.authID]
+	if !state.schedulable {
+		return providerKey == ""
+	}
+	if providerKey != state.providerKey {
+		return false
+	}
+	providerState := s.providers[providerKey]
+	if providerState == nil {
+		return false
+	}
+	meta := providerState.auths[state.authID]
+	return meta != nil && meta.registryEpoch == state.registryEpoch
+}
+
 // upsertAuth incrementally synchronizes one auth into the scheduler (lifecycle/update).
 func (s *authScheduler) upsertAuth(auth *Auth) {
 	if s == nil {
@@ -322,15 +419,80 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	if providerState == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	shard := providerState.ensureModelLocked(modelKey, time.Now())
+	now := time.Now()
+	shard := providerState.ensureModelLocked(modelKey, now)
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, now); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
+}
+
+// readyAuths returns the ready auth snapshots for model across providers and every priority tier,
+// ordered by auth ID like the legacy across-priority availability list. Snapshots are immutable
+// once published, so callers may read them after the lock is released but must clone the auth
+// they hand out.
+func (s *authScheduler) readyAuths(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) []*Auth {
+	if s == nil {
+		return nil
+	}
+	modelKey := canonicalModelKey(model)
+	predicate := scheduledAuthPredicate(authSelectionEligibilityForRequest(ctx, opts), tried, pinnedAuthIDFromMetadata(opts.Metadata), false)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	var groups [][]*Auth
+	for _, providerKey := range normalizeProviderKeys(providers) {
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			continue
+		}
+		shard := providerState.ensureModelLocked(modelKey, now)
+		for _, priority := range shard.priorityOrder {
+			flat := shard.readyByPriority[priority].all.flat
+			group := make([]*Auth, 0, len(flat))
+			for _, entry := range flat {
+				if predicate(entry) {
+					group = append(group, entry.auth)
+				}
+			}
+			if len(group) > 0 {
+				groups = append(groups, group)
+			}
+		}
+	}
+	return mergeAuthsByID(groups)
+}
+
+// mergeAuthsByID merges auth slices that are each ordered by ID into a single ID-ordered slice.
+func mergeAuthsByID(groups [][]*Auth) []*Auth {
+	switch len(groups) {
+	case 0:
+		return nil
+	case 1:
+		return groups[0]
+	}
+	total := 0
+	for _, group := range groups {
+		total += len(group)
+	}
+	merged := make([]*Auth, 0, total)
+	heads := make([]int, len(groups))
+	for len(merged) < total {
+		next := -1
+		for index, group := range groups {
+			if heads[index] < len(group) && (next < 0 || group[heads[index]].ID < groups[next][heads[next]].ID) {
+				next = index
+			}
+		}
+		merged = append(merged, groups[next][heads[next]])
+		heads[next]++
+	}
+	return merged
 }
 
 func providerPrefersWebsocketTransport(providerKey string) bool {
@@ -386,9 +548,10 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if providerState == nil {
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		shard := providerState.ensureModelLocked(modelKey, time.Now())
+		now := time.Now()
+		shard := providerState.ensureModelLocked(modelKey, now)
 		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, strategy, predicate, now); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -892,6 +1055,7 @@ func buildScheduledAuthMetaWithModelSet(auth *Auth, modelSet map[string]struct{}
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: modelSet,
 		registryEpoch:     regEpoch,
+		tokenExpiresAt:    accessTokenExpiry(auth),
 	}
 }
 
@@ -1013,8 +1177,9 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 		if meta == nil || !meta.supportsModel(modelKey) {
 			continue
 		}
-		shard.upsertEntryLocked(meta, now)
+		shard.applyEntryLocked(meta, now)
 	}
+	shard.rebuildIndexesLocked()
 	p.modelShards[modelKey] = shard
 	return shard
 }
@@ -1034,8 +1199,16 @@ func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
 
 // upsertEntryLocked updates or inserts one auth entry and rebuilds indexes when ordering changes.
 func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Time) {
+	if m.applyEntryLocked(meta, now) {
+		m.rebuildIndexesLocked()
+	}
+}
+
+// applyEntryLocked updates or inserts one auth entry and reports whether the ready and blocked
+// indexes must be rebuilt to reflect it.
+func (m *modelScheduler) applyEntryLocked(meta *scheduledAuthMeta, now time.Time) bool {
 	if m == nil || meta == nil || meta.auth == nil {
-		return
+		return false
 	}
 	entry, ok := m.entries[meta.auth.ID]
 	if !ok || entry == nil {
@@ -1054,7 +1227,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	entry.meta = meta
 	entry.auth = meta.auth
 	entry.nextRetryAt = time.Time{}
-	blocked, reason, next := isAuthBlockedForModel(meta.auth, m.modelKey, now)
+	blocked, reason, next := isAuthBlockedForModelWithTokenExpiry(meta.auth, m.modelKey, now, meta.tokenExpiresAt)
 	switch {
 	case !blocked:
 		entry.state = scheduledStateReady
@@ -1069,9 +1242,12 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	}
 
 	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousWebsocketEnabled == meta.websocketEnabled {
-		return
+		if entry.state == scheduledStateReady {
+			m.lowerReadyTokenExpiryLocked(meta.tokenExpiresAt)
+		}
+		return false
 	}
-	m.rebuildIndexesLocked()
+	return true
 }
 
 // removeEntryLocked deletes one auth entry and rebuilds the shard indexes if needed.
@@ -1087,34 +1263,57 @@ func (m *modelScheduler) removeEntryLocked(authID string) {
 }
 
 // demoteExpiredTokensLocked checks ready auths and demotes any whose access token has expired.
+// The scan only runs once readyTokenExpiry has passed, so picks between token expiries do not
+// depend on the shard size, and it leaves readyTokenExpiry at the earliest expiry still ahead.
 func (m *modelScheduler) demoteExpiredTokensLocked(now time.Time) bool {
-	if m == nil || len(m.entries) == 0 {
+	if m == nil || len(m.entries) == 0 || m.readyTokenExpiry.IsZero() || m.readyTokenExpiry.After(now) {
 		return false
 	}
 	changed := false
+	var nextExpiry time.Time
 	for _, entry := range m.entries {
 		if entry == nil || entry.auth == nil || entry.state != scheduledStateReady {
 			continue
 		}
-		if exp, ok := entry.auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
-			blocked, reason, next := isAuthBlockedForModel(entry.auth, m.modelKey, now)
-			if blocked {
-				switch {
-				case reason == blockReasonCooldown:
-					entry.state = scheduledStateCooldown
-					entry.nextRetryAt = next
-				case reason == blockReasonDisabled:
-					entry.state = scheduledStateDisabled
-					entry.nextRetryAt = time.Time{}
-				default:
-					entry.state = scheduledStateBlocked
-					entry.nextRetryAt = next
-				}
-				changed = true
-			}
+		exp := entry.meta.tokenExpiresAt
+		if exp.IsZero() {
+			continue
 		}
+		if exp.After(now) {
+			if nextExpiry.IsZero() || exp.Before(nextExpiry) {
+				nextExpiry = exp
+			}
+			continue
+		}
+		blocked, reason, next := isAuthBlockedForModelWithTokenExpiry(entry.auth, m.modelKey, now, exp)
+		if !blocked {
+			continue
+		}
+		switch {
+		case reason == blockReasonCooldown:
+			entry.state = scheduledStateCooldown
+			entry.nextRetryAt = next
+		case reason == blockReasonDisabled:
+			entry.state = scheduledStateDisabled
+			entry.nextRetryAt = time.Time{}
+		default:
+			entry.state = scheduledStateBlocked
+			entry.nextRetryAt = next
+		}
+		changed = true
 	}
+	m.readyTokenExpiry = nextExpiry
 	return changed
+}
+
+// lowerReadyTokenExpiryLocked folds the token expiry of a ready entry into readyTokenExpiry.
+func (m *modelScheduler) lowerReadyTokenExpiryLocked(expiresAt time.Time) {
+	if expiresAt.IsZero() {
+		return
+	}
+	if m.readyTokenExpiry.IsZero() || expiresAt.Before(m.readyTokenExpiry) {
+		m.readyTokenExpiry = expiresAt
+	}
 }
 
 // promoteExpiredLocked reevaluates blocked auths whose retry time has elapsed
@@ -1131,7 +1330,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 		if entry.nextRetryAt.IsZero() || entry.nextRetryAt.After(now) {
 			continue
 		}
-		blocked, reason, next := isAuthBlockedForModel(entry.auth, m.modelKey, now)
+		blocked, reason, next := isAuthBlockedForModelWithTokenExpiry(entry.auth, m.modelKey, now, entry.meta.tokenExpiresAt)
 		switch {
 		case !blocked:
 			entry.state = scheduledStateReady
@@ -1154,11 +1353,11 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, now time.Time) *Auth {
 	if m == nil {
 		return nil
 	}
-	m.promoteExpiredLocked(time.Now())
+	m.promoteExpiredLocked(now)
 	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, predicate)
 	if !okPriority {
 		return nil
@@ -1406,6 +1605,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 	m.readyByPriority = make(map[int]*readyBucket)
 	m.priorityOrder = m.priorityOrder[:0]
 	m.blocked = m.blocked[:0]
+	m.readyTokenExpiry = time.Time{}
 	priorityBuckets := make(map[int][]*scheduledAuth)
 	for _, entry := range m.entries {
 		if entry == nil || entry.auth == nil {
@@ -1415,6 +1615,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		case scheduledStateReady:
 			priority := entry.meta.priority
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
+			m.lowerReadyTokenExpiryLocked(entry.meta.tokenExpiresAt)
 		case scheduledStateCooldown, scheduledStateBlocked:
 			m.blocked = append(m.blocked, entry)
 		}
