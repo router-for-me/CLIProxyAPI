@@ -266,6 +266,11 @@ codex:
   identity-confuse: false
   # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
   disable-codex-cloaking: false
+  # Keep the downstream User-Agent and Originator when the request already presents a coherent
+  # first-party Codex identity (originator codex_cli_rs / codex-tui / codex_vscode / codex_exec, or
+  # prefixed "Codex ", together with a matching "<originator>/<version>" User-Agent).
+  # All other requests are still cloaked. Ignored when disable-codex-cloaking is true.
+  preserve-native-client-identity: true
   # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
   # response.in_progress, the websocket metadata frames), keepalive heartbeats, and the *.added
   # announcements of an item or part that is still empty - until the upstream emits its first

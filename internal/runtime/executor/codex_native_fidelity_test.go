@@ -112,8 +112,11 @@ func testCodexNativeStreamFidelity(t *testing.T, source sdktranslator.Format) {
 						}
 						alias := headerValueCaseInsensitive(upstreamHeaders, "session_id")
 						t.Logf("upstream session alias: %q", alias)
-						if (alias == "") != native {
-							t.Errorf("session alias = %q, native = %t", alias, native)
+						if alias != "" {
+							t.Errorf("unexpected underscore session alias = %q", alias)
+						}
+						if got := upstreamHeaders.Get("Session-Id"); got != "session-1" {
+							t.Errorf("Session-Id = %q, want session-1 (native = %t)", got, native)
 						}
 					}
 					t.Logf("downstream metadata: %q", metadataEvents)
@@ -152,5 +155,57 @@ func TestCodexWebsocketLiteHeaderWithoutSessionHeaders(t *testing.T) {
 				t.Errorf("native=%t disableCloaking=%t: Lite header = %q, want %q", native, disableCloaking, value, want)
 			}
 		}
+	}
+}
+
+func TestApplyCodexCloakingHeadersPreservesNativeIdentity(t *testing.T) {
+	const nativeUA = "codex-tui/0.154.0 (Mac OS 15.7.9; arm64) Apple_Terminal (codex-tui; 0.154.0)"
+	disabled := false
+	cases := []struct {
+		name           string
+		cfg            *config.Config
+		userAgent      string
+		originator     string
+		wantUserAgent  string
+		wantOriginator string
+	}{
+		{
+			name:           "coherent identity preserved by default",
+			cfg:            &config.Config{},
+			userAgent:      nativeUA,
+			originator:     "codex-tui",
+			wantUserAgent:  nativeUA,
+			wantOriginator: "codex-tui",
+		},
+		{
+			name:           "preservation disabled falls back to cloaking",
+			cfg:            &config.Config{Codex: config.CodexConfig{PreserveNativeClientIdentity: &disabled}},
+			userAgent:      nativeUA,
+			originator:     "codex-tui",
+			wantUserAgent:  codexUserAgent,
+			wantOriginator: codexOriginator,
+		},
+		{
+			name:           "incoherent pair still cloaked",
+			cfg:            &config.Config{},
+			userAgent:      nativeUA,
+			originator:     "my-proxy",
+			wantUserAgent:  codexUserAgent,
+			wantOriginator: codexOriginator,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set("User-Agent", tc.userAgent)
+			headers.Set("Originator", tc.originator)
+			applyCodexCloakingHeaders(headers, tc.cfg)
+			if got := headers.Get("User-Agent"); got != tc.wantUserAgent {
+				t.Errorf("User-Agent = %q, want %q", got, tc.wantUserAgent)
+			}
+			if got := headers.Get("Originator"); got != tc.wantOriginator {
+				t.Errorf("Originator = %q, want %q", got, tc.wantOriginator)
+			}
+		})
 	}
 }

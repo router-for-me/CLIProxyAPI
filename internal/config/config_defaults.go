@@ -15,6 +15,9 @@ func applyCodexRuntimeDefaults(cfg *Config) {
 	cfg.DisableImageGeneration = DisableImageGenerationPassthrough
 	cfg.Codex.StreamBootstrapBuffering = true
 	cfg.Codex.StreamBootstrapTimeout = DefaultCodexBootstrapTimeout
+	// Preserving a coherent first-party Codex identity is the default behavior.
+	preserveNativeClientIdentity := true
+	cfg.Codex.PreserveNativeClientIdentity = &preserveNativeClientIdentity
 }
 
 func newOptionalFallbackConfig() *Config {

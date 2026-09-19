@@ -57,8 +57,8 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 
 	if cache.ID != "" {
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
-		setHeaderCasePreserved(headers, "session_id", cache.ID)
-		headers.Set("Conversation_id", cache.ID)
+		// Real Codex clients only carry the canonical Session-Id spelling and never send Conversation_id.
+		setHeaderCasePreserved(headers, "Session-Id", cache.ID)
 	}
 
 	return rawJSON, headers, nil
@@ -112,6 +112,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	ensureCodexWebsocketSessionHeader(headers, ginHeaders, sessionFallback)
 	if nativeRequest && cfg != nil && cfg.Codex.DisableCodexCloaking {
+		deleteHeaderCaseInsensitive(headers, "Session-Id")
 		deleteHeaderCaseInsensitive(headers, "session_id")
 		deleteHeaderCaseInsensitive(headers, "conversation_id")
 		for key, values := range ginHeaders {
@@ -160,9 +161,10 @@ func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, f
 		sessionID = strings.TrimSpace(fallbackValue)
 	}
 	if sessionID != "" {
-		setHeaderCasePreserved(target, "session_id", sessionID)
+		setHeaderCasePreserved(target, "Session-Id", sessionID)
 	}
-	deleteHeaderCaseInsensitive(target, "Session-Id")
+	// The underscore spelling is never produced by a real Codex client.
+	deleteHeaderCaseInsensitive(target, "session_id")
 }
 
 func codexSessionHeaderValue(headers http.Header) string {
