@@ -344,3 +344,36 @@ func TestClaudeExecutorPrepareRequestAuthEmptyAccountUUIDInProfileFallback(t *te
 		t.Fatal("ShouldPrepareRequestAuth() = true after identity was populated")
 	}
 }
+
+func TestClaudeExecutorPrepareRequestAuthRejectsOAuthShapedPlaceholder(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "sk-ant-oat-placeholder"},
+	}
+	fetched := false
+	e := NewClaudeExecutor(&config.Config{})
+	e.oauthProfileFetcher = func(context.Context, *cliproxyauth.Auth, string) (*claudeauth.OAuthProfile, error) {
+		fetched = true
+		t.Fatal("PrepareRequestAuth must not fetch an OAuth profile for a placeholder token")
+		return nil, nil
+	}
+	if !e.ShouldPrepareRequestAuth(auth) {
+		t.Fatal("ShouldPrepareRequestAuth() = false for OAuth-shaped placeholder; manager would skip PrepareRequestAuth")
+	}
+	prepared, err := e.PrepareRequestAuth(context.Background(), auth)
+	if err == nil {
+		t.Fatal("expected error for OAuth-shaped placeholder, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+	if prepared != nil {
+		t.Fatalf("prepared auth = %#v, want nil", prepared)
+	}
+	if fetched {
+		t.Fatal("placeholder must fail before fetchClaudeOAuthProfile")
+	}
+}

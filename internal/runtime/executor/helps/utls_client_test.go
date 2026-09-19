@@ -329,6 +329,21 @@ func TestClaudeCodeRequestHeaderOrderMatchesNative220Capture(t *testing.T) {
 		if name == "X-Stainless-Timeout" {
 			t.Fatal("count_tokens header order unexpectedly contains X-Stainless-Timeout")
 		}
+		if name == "X-Stainless-Helper-Method" {
+			t.Fatal("count_tokens header order unexpectedly contains X-Stainless-Helper-Method")
+		}
+	}
+	foundHelper := false
+	for i, name := range claudeCodeMessagesHeaderOrder {
+		if name == "X-Stainless-Helper-Method" {
+			foundHelper = true
+			if i == 0 || claudeCodeMessagesHeaderOrder[i-1] != "X-Stainless-Arch" {
+				t.Fatalf("X-Stainless-Helper-Method at %d, want immediately after X-Stainless-Arch", i)
+			}
+		}
+	}
+	if !foundHelper {
+		t.Fatal("messages header order missing X-Stainless-Helper-Method")
 	}
 }
 
