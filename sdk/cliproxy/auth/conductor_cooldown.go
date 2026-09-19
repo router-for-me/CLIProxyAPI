@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1579,11 +1580,23 @@ func isTransientTransportError(err error) bool {
 	if isTransientSyscallError(err) {
 		return true
 	}
+	if isTLSRecordError(err) {
+		return true
+	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr != nil {
 		return true
 	}
 	return isTransientTransportMessage(err.Error())
+}
+
+// isTLSRecordError reports mid-connection TLS record-layer failures (for
+// example "local error: tls: bad record MAC"). These surface as
+// tls.RecordHeaderError values rather than *net.OpError, and like handshake
+// failures indicate a broken connection, never a credential fault.
+func isTLSRecordError(err error) bool {
+	var recordErr tls.RecordHeaderError
+	return errors.As(err, &recordErr)
 }
 
 func isTransientTransportResultError(err *Error) bool {
@@ -1621,6 +1634,8 @@ func isTransientTransportMessage(message string) bool {
 	switch {
 	case strings.Contains(lower, "tls: tls handshake"),
 		strings.Contains(lower, "tls handshake timeout"),
+		strings.Contains(lower, "tls: bad record mac"),
+		strings.Contains(lower, "tls: unexpected message"),
 		strings.Contains(lower, "wsarecv"),
 		strings.Contains(lower, "wsasend"),
 		strings.Contains(lower, "a connection attempt failed"),

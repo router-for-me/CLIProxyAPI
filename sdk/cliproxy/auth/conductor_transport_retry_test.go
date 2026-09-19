@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -42,6 +43,14 @@ func dialRefusedError() error {
 	}
 }
 
+func tlsRecordError() error {
+	return &url.Error{
+		Op:  "Post",
+		URL: "https://api.business.githubcopilot.com/chat/completions",
+		Err: tls.RecordHeaderError{Msg: "local error: tls: bad record MAC"},
+	}
+}
+
 func TestManager_ShouldRetryAfterError_RetriesPreHTTPTransportFailure(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(1, 0, 0)
@@ -59,6 +68,7 @@ func TestManager_ShouldRetryAfterError_RetriesPreHTTPTransportFailure(t *testing
 		want bool
 	}{
 		{name: "windows tls handshake", err: windowsCodexTLSHandshakeError(), want: true},
+		{name: "tls bad record mac", err: tlsRecordError(), want: true},
 		{name: "dial refused", err: dialRefusedError(), want: true},
 		{name: "unexpected eof", err: io.ErrUnexpectedEOF, want: true},
 		{name: "unauthorized", err: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}, want: false},
@@ -98,6 +108,8 @@ func TestManager_MarkResult_PreHTTPTransportFailureDoesNotCooldown(t *testing.T)
 		err  *Error
 	}{
 		{name: "typed tls handshake", err: resultErrorFromError(windowsCodexTLSHandshakeError())},
+		{name: "typed tls bad record mac", err: resultErrorFromError(tlsRecordError())},
+		{name: "tls bad record mac message", err: &Error{Message: "Copilot stream error: local error: tls: bad record MAC"}},
 		{name: "connection reset message", err: &Error{Message: "connection reset"}},
 	}
 	for _, tc := range cases {
