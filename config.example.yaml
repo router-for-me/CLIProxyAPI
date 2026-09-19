@@ -720,10 +720,15 @@ nonstream-keepalive-interval: 0
 #   timezone: "Asia/Singapore"  # fallback IANA timezone for cloaked currentDate; a credential JSON "timezone" takes priority
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
-# Default headers for Codex OAuth model requests.
-# These are used only for file-backed/OAuth Codex requests when the client
-# does not send the header. `user-agent` applies to HTTP and websocket requests;
-# `beta-features` only applies to websocket requests. They do not apply to codex-api-key entries.
+# Headers for OAuth/file-backed Codex requests (not codex-api-key entries).
+# With codex.disable-codex-cloaking: false (default), inference and OAuth token
+# exchange/refresh use the shared default User-Agent before model-specific overrides.
+# With cloaking disabled, a non-empty user-agent is preferred over the client UA
+# for HTTP/websocket inference and is used for OAuth token exchange and refresh;
+# an empty/whitespace-only value falls back to the shared default for token requests.
+# Existing inference headers, credential headers, and model overrides retain their
+# precedence, so final inference and token User-Agent values can differ.
+# beta-features is a websocket-only fallback; it is not sent to the token endpoint.
 # codex-header-defaults:
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
