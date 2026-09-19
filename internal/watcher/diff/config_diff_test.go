@@ -87,6 +87,61 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 	expectContains(t, details, "  provider updated: compat-a (models 1 -> 2)")
 }
 
+func TestBuildConfigChangeDetails_ThinkingEffortMapping(t *testing.T) {
+	t.Run("count change", func(t *testing.T) {
+		oldCfg := &config.Config{
+			Thinking: config.ThinkingPolicyConfig{
+				EffortMapping: []config.ThinkingEffortMappingRule{{From: "max", To: "high"}},
+			},
+		}
+		newCfg := &config.Config{
+			Thinking: config.ThinkingPolicyConfig{
+				EffortMapping: []config.ThinkingEffortMappingRule{
+					{From: "max", To: "ultra"},
+					{From: "high", To: "xhigh"},
+				},
+			},
+		}
+
+		details := BuildConfigChangeDetails(oldCfg, newCfg)
+		expectContains(t, details, "thinking.effort-mapping: updated (1 -> 2 rules)")
+	})
+
+	t.Run("same count content change", func(t *testing.T) {
+		oldCfg := &config.Config{
+			Thinking: config.ThinkingPolicyConfig{
+				EffortMapping: []config.ThinkingEffortMappingRule{{From: "max", To: "high"}},
+			},
+		}
+		newCfg := &config.Config{
+			Thinking: config.ThinkingPolicyConfig{
+				EffortMapping: []config.ThinkingEffortMappingRule{{From: "max", To: "ultra"}},
+			},
+		}
+
+		details := BuildConfigChangeDetails(oldCfg, newCfg)
+		expectContains(t, details, "thinking.effort-mapping: updated (1 -> 1 rules)")
+	})
+
+	t.Run("nil and empty collections are equivalent", func(t *testing.T) {
+		oldCfg := &config.Config{}
+		newCfg := &config.Config{
+			Thinking: config.ThinkingPolicyConfig{
+				EffortMapping: []config.ThinkingEffortMappingRule{},
+			},
+		}
+		if details := BuildConfigChangeDetails(oldCfg, newCfg); len(details) != 0 {
+			t.Fatalf("expected no change for nil and empty mappings, got %v", details)
+		}
+
+		oldCfg.Thinking.EffortMapping = []config.ThinkingEffortMappingRule{{From: "max", To: "ultra"}}
+		newCfg.Thinking.EffortMapping = []config.ThinkingEffortMappingRule{{From: "max", To: "ultra", Models: []string{}}}
+		if details := BuildConfigChangeDetails(oldCfg, newCfg); len(details) != 0 {
+			t.Fatalf("expected no change for nil and empty model patterns, got %v", details)
+		}
+	})
+}
+
 func TestBuildConfigChangeDetails_NoChanges(t *testing.T) {
 	cfg := &config.Config{
 		Port: 8080,

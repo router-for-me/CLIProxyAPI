@@ -3,10 +3,84 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// SanitizeThinkingPolicy normalizes thinking effort mapping rules and drops invalid entries.
+func (cfg *Config) SanitizeThinkingPolicy() {
+	if cfg == nil || len(cfg.Thinking.EffortMapping) == 0 {
+		return
+	}
+
+	validFrom := map[string]struct{}{
+		"none":    {},
+		"auto":    {},
+		"minimal": {},
+		"low":     {},
+		"medium":  {},
+		"high":    {},
+		"xhigh":   {},
+		"max":     {},
+	}
+	rules := make([]ThinkingEffortMappingRule, 0, len(cfg.Thinking.EffortMapping))
+	for i := range cfg.Thinking.EffortMapping {
+		rule := cfg.Thinking.EffortMapping[i]
+		rule.From = strings.ToLower(strings.TrimSpace(rule.From))
+		rule.To = strings.ToLower(strings.TrimSpace(rule.To))
+		rule.SourceProtocol = strings.ToLower(strings.TrimSpace(rule.SourceProtocol))
+		rule.TargetProtocol = strings.ToLower(strings.TrimSpace(rule.TargetProtocol))
+		rule.TargetProvider = strings.ToLower(strings.TrimSpace(rule.TargetProvider))
+		hadModelScope := len(rule.Models) > 0
+		rule.Models = sanitizeThinkingModelPatterns(rule.Models)
+
+		_, validSource := validFrom[rule.From]
+		switch {
+		case !validSource:
+			logThinkingRuleDropped(i, "invalid source effort")
+		case rule.To == "":
+			logThinkingRuleDropped(i, "empty destination effort")
+		case rule.From == rule.To:
+			logThinkingRuleDropped(i, "no-op mapping (source equals destination)")
+		case hadModelScope && len(rule.Models) == 0:
+			logThinkingRuleDropped(i, "empty model scope")
+		default:
+			rules = append(rules, rule)
+		}
+	}
+	cfg.Thinking.EffortMapping = rules
+}
+
+func sanitizeThinkingModelPatterns(models []string) []string {
+	if len(models) == 0 {
+		return models
+	}
+	seen := make(map[string]struct{}, len(models))
+	normalized := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, model)
+	}
+	return normalized
+}
+
+func logThinkingRuleDropped(index int, reason string) {
+	log.WithFields(log.Fields{
+		"section":    "thinking.effort-mapping",
+		"rule_index": index + 1,
+		"reason":     reason,
+	}).Warn("thinking effort mapping rule dropped")
+}
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
 func (cfg *Config) SanitizePayloadRules() {
