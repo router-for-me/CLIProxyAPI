@@ -29,11 +29,10 @@
 //   - OAuth connect sub-section (create-mode-only, handled by CreateMode)
 //   - Type-picker step (create-mode-only, handled by CreateMode)
 //
-// The `modelsTab` flag (from the design doc) defaults to false in PR 2.
-// When true (PR 3), the inline `models` field disappears from Overview and
-// moves to the Models tab. The flag is threaded via a module-local constant
-// for now; a future wiring step will hoist it into the route shell or
-// context once the Models tab lands.
+// The `modelsTab` flag (from the design doc) was false during PR 2, keeping
+// the inline `models` field on Overview. PR 3 flipped it to true: the Models
+// tab (./ModelsTab.jsx) now owns the field and the Overview no longer
+// renders it. Still a module-local constant, colocated with the lift site.
 
 import React, { useEffect, useState } from 'react';
 import {
@@ -56,10 +55,10 @@ import {
 } from './schemas.js';
 import { useEditorState } from './useEditorState.jsx';
 
-// PR 2 ships with the models field rendered inline in Overview; PR 3 will
-// flip this to true so ModelsTab owns the field. Held as a module-local
-// constant so the conditional is colocated with the lift site.
-const MODELS_TAB = false;
+// PR 3 has shipped: ModelsTab owns the `models` field, so it no longer
+// renders inline in Overview. Held as a module-local constant so the
+// conditional is colocated with the lift site.
+const MODELS_TAB = true;
 
 // Types where the FetchModelsInline probe is meaningful (has a base_url +
 // api_key the operator can probe, or an auth-file the registry tracks).
@@ -131,10 +130,10 @@ export default function OverviewTab() {
         if (oauthConnectable && !oauthConnected && section.title === 'OAuth token') {
           return null;
         }
-        // When the Models tab ships (PR 3), the inline `models` field moves
-        // out of the Routing section. Filter the field out of the loop
+        // With the Models tab shipped (PR 3), the inline `models` field has
+        // moved out of the Routing section. Filter the field out of the loop
         // output so Overview doesn't duplicate the field while ModelsTab
-        // owns it. Disabled until PR 3.
+        // owns it.
         return (
           <div className="form-section" key={section.title}>
             <div className="form-section__title">{section.title}</div>
