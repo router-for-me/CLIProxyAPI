@@ -640,30 +640,21 @@ func TestScheduler_ReadyAuthDemotedWhenTokenExpires(t *testing.T) {
 		t.Fatalf("pickSingle() got = %v, want %q", got, auth.ID)
 	}
 
-	// Explicitly mutate the internal auth metadata timestamp to the past without re-upserting
-	pastExpiry := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
-	manager.mu.Lock()
-	if current := manager.auths[auth.ID]; current != nil {
-		current.Metadata["expired"] = pastExpiry
-	}
+	// Let the token expire without re-upserting the auth: the next pick must demote the ready
+	// entry instead of handing out the expired credential.
+	afterExpiry := time.Now().Add(20 * time.Minute)
 	manager.scheduler.mu.Lock()
-	if p := manager.scheduler.providers["codex"]; p != nil {
-		if meta := p.auths[auth.ID]; meta != nil && meta.auth != nil {
-			meta.auth.Metadata["expired"] = pastExpiry
-		}
-		for _, shard := range p.modelShards {
-			if entry := shard.entries[auth.ID]; entry != nil && entry.auth != nil {
-				entry.auth.Metadata["expired"] = pastExpiry
-			}
-		}
-	}
+	shard := manager.scheduler.providers["codex"].ensureModelLocked("gpt-5-short-test", afterExpiry)
+	gotAfter := shard.pickReadyLocked(false, schedulerStrategyRoundRobin, nil, afterExpiry)
 	manager.scheduler.mu.Unlock()
-	manager.mu.Unlock()
+	if gotAfter != nil {
+		t.Fatalf("pickReadyLocked() after expiry should not return an auth, got %q", gotAfter.ID)
+	}
 
-	// Second pick: scheduler dynamic check must demote the expired token and reject pick
-	gotAfter, errPickAfter := manager.scheduler.pickSingle(ctx, "codex", "gpt-5-short-test", cliproxyexecutor.Options{}, nil)
-	if errPickAfter == nil && gotAfter != nil {
-		t.Fatalf("pickSingle() after expiry should fail, but got auth %v", gotAfter.ID)
+	// The demotion holds until a refreshed auth is upserted again.
+	gotLater, errPickLater := manager.scheduler.pickSingle(ctx, "codex", "gpt-5-short-test", cliproxyexecutor.Options{}, nil)
+	if errPickLater == nil && gotLater != nil {
+		t.Fatalf("pickSingle() after demotion should fail, but got auth %v", gotLater.ID)
 	}
 }
 

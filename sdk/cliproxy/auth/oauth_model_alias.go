@@ -261,6 +261,9 @@ func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) s
 }
 
 func (m *Manager) resolveOAuthModelAliasWithResult(auth *Auth, requestedModel string) OAuthModelAliasResult {
+	if !m.hasOAuthModelAliasSource(auth) {
+		return OAuthModelAliasResult{}
+	}
 	channel := modelAliasChannel(auth)
 	if channel == "" {
 		return OAuthModelAliasResult{}
@@ -269,6 +272,19 @@ func (m *Manager) resolveOAuthModelAliasWithResult(auth *Auth, requestedModel st
 		return result
 	}
 	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, channel)
+}
+
+// hasOAuthModelAliasSource reports whether a per-auth or global OAuth model alias could map a model
+// for auth, letting callers skip channel resolution when no alias is configured at all.
+func (m *Manager) hasOAuthModelAliasSource(auth *Auth) bool {
+	if strings.TrimSpace(authAttributes(auth)[oauthModelAliasesAttributeKey]) != "" {
+		return true
+	}
+	if m == nil {
+		return false
+	}
+	table, _ := m.oauthModelAlias.Load().(*oauthModelAliasTable)
+	return table != nil && len(table.reverse) > 0
 }
 
 func authAttributes(auth *Auth) map[string]string {
@@ -393,9 +409,6 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 		return OAuthModelAliasResult{}
 	}
 
-	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
-	baseModel := requestResult.ModelName
-
 	raw := m.oauthModelAlias.Load()
 	table, _ := raw.(*oauthModelAliasTable)
 	if table == nil || table.reverse == nil {
@@ -405,6 +418,9 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 	if rev == nil {
 		return OAuthModelAliasResult{}
 	}
+
+	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
+	baseModel := requestResult.ModelName
 
 	for _, candidate := range candidates {
 		key := strings.ToLower(strings.TrimSpace(candidate))

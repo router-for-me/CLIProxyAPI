@@ -163,16 +163,23 @@ func (lastAuthSelector) Pick(_ context.Context, _, _ string, _ cliproxyexecutor.
 func expireSessionAffinityPriorityModelCooldown(t *testing.T, manager *Manager, authID, model string) {
 	t.Helper()
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	auth := manager.auths[authID]
 	if auth == nil {
+		manager.mu.Unlock()
 		t.Fatalf("auth %q not found", authID)
 	}
 	state := auth.ModelStates[model]
 	if state == nil {
+		manager.mu.Unlock()
 		t.Fatalf("model state %q not found for auth %q", model, authID)
 	}
 	expired := time.Now().Add(-time.Second)
 	state.NextRetryAfter = expired
 	state.Quota.NextRecoverAt = expired
+	// Publish the expiry like production state changes do, so scheduler-backed selection observes it.
+	auth.Generation++
+	auth.UpdatedAt = time.Now()
+	snapshot := auth.Clone()
+	manager.mu.Unlock()
+	manager.scheduler.upsertAuth(snapshot)
 }

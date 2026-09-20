@@ -397,6 +397,13 @@ func authWeight(auth *Auth) int64 {
 	return credentialweight.Default
 }
 
+// modelStateKeyMatches reports whether stateModel canonicalizes to modelKey. A canonical key is
+// always a substring of the name it came from, so unrelated names are rejected without parsing
+// their thinking suffix.
+func modelStateKeyMatches(stateModel, modelKey string) bool {
+	return strings.Contains(stateModel, modelKey) && canonicalModelKey(stateModel) == modelKey
+}
+
 func canonicalModelKey(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -821,6 +828,13 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
+	return isAuthBlockedForModelWithTokenExpiry(auth, model, now, accessTokenExpiry(auth))
+}
+
+// isAuthBlockedForModelWithTokenExpiry is isAuthBlockedForModel with the access token expiry
+// supplied by the caller, so callers holding a cached expiry avoid decoding the token again.
+// A zero tokenExpiresAt means the auth has no expiring access token.
+func isAuthBlockedForModelWithTokenExpiry(auth *Auth, model string, now, tokenExpiresAt time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
 	}
@@ -830,7 +844,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if hasUnauthorizedAuthFailure(auth) {
 		return true, blockReasonOther, time.Time{}
 	}
-	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+	if !tokenExpiresAt.IsZero() && !tokenExpiresAt.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
@@ -844,7 +858,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 			blockedReason := blockReasonNone
 			nextRetry := time.Time{}
 			for stateModel, state := range auth.ModelStates {
-				if state == nil || canonicalModelKey(stateModel) != modelKey {
+				if state == nil || !modelStateKeyMatches(stateModel, modelKey) {
 					continue
 				}
 				matched = true

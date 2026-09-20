@@ -642,6 +642,14 @@ func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
 	return a.ExpirationTime()
 }
 
+// accessTokenExpiry returns the access token expiry, or the zero time when the auth has none.
+func accessTokenExpiry(auth *Auth) time.Time {
+	if exp, ok := auth.AccessTokenExpirationTime(); ok {
+		return exp
+	}
+	return time.Time{}
+}
+
 // HasValidAccessToken returns whether the auth has a non-empty access token that is unexpired at the given time.
 func (a *Auth) HasValidAccessToken(now time.Time) bool {
 	if a == nil {
