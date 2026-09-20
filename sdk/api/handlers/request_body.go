@@ -3,18 +3,56 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 )
 
+const requestBodyLimit = 16 << 20
+
+// RequestBodyTooLargeCode is the stable API error code for an oversized request body.
+const RequestBodyTooLargeCode = "request_body_too_large"
+
+// RequestBodyTooLargeError indicates that the request body exceeded the configured limit.
+type RequestBodyTooLargeError struct {
+	Limit int
+}
+
+func (e *RequestBodyTooLargeError) Error() string {
+	if e == nil {
+		return RequestBodyTooLargeCode
+	}
+	return fmt.Sprintf("request body exceeds %d-byte limit", e.Limit)
+}
+
+// WriteRequestBodyError writes the stable client error for an oversized request body.
+func WriteRequestBodyError(c *gin.Context, err error) bool {
+	var tooLargeErr *RequestBodyTooLargeError
+	if c == nil || !errors.As(err, &tooLargeErr) || tooLargeErr == nil {
+		return false
+	}
+	c.JSON(http.StatusRequestEntityTooLarge, ErrorResponse{
+		Error: ErrorDetail{
+			Message: tooLargeErr.Error(),
+			Type:    "invalid_request_error",
+			Code:    RequestBodyTooLargeCode,
+		},
+	})
+	return true
+}
+
 // ReadRequestBody reads the incoming request body and decodes supported
 // Content-Encoding values before handlers inspect JSON fields.
 func ReadRequestBody(c *gin.Context) ([]byte, error) {
-	raw, err := c.GetRawData()
+	if c.Request.Body == nil {
+		return nil, errors.New("cannot read nil body")
+	}
+	raw, err := readRequestBodyWithLimit(c.Request.Body, requestBodyLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -35,6 +73,17 @@ func ReadRequestBody(c *gin.Context) ([]byte, error) {
 		return nil, err
 	}
 	return decoded, nil
+}
+
+func readRequestBodyWithLimit(body io.Reader, limit int) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > limit {
+		return nil, &RequestBodyTooLargeError{Limit: limit}
+	}
+	return data, nil
 }
 
 func decodeRequestBody(raw []byte, encoding string) ([]byte, error) {
