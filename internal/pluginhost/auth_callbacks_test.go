@@ -211,6 +211,131 @@ func TestHostAuthGetRuntimeCallbackReturnsRuntimeInfo(t *testing.T) {
 	}
 }
 
+func TestHostAuthGetRuntimeCallbackReturnsBaseURL(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "demo-base-url.json",
+		Provider: "demo",
+		FileName: "demo-base-url.json",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"runtime_only": "true",
+			"base_url":     "https://api.custom.example.com/v1",
+		},
+	}
+	auth.EnsureIndex()
+
+	authMeta := &coreauth.Auth{
+		ID:       "demo-meta-base-url.json",
+		Provider: "demo",
+		FileName: "demo-meta-base-url.json",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+		Metadata: map[string]any{
+			"base_url": "https://meta.custom.example.com/v1",
+		},
+	}
+	authMeta.EnsureIndex()
+
+	host := New()
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+	if _, errRegister := host.currentAuthManager().Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	if _, errRegister := host.currentAuthManager().Register(context.Background(), authMeta); errRegister != nil {
+		t.Fatalf("register authMeta: %v", errRegister)
+	}
+
+	req, errMarshal := json.Marshal(pluginapi.HostAuthGetRequest{AuthIndex: auth.Index})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGetRuntime, req)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostAuthGetRuntimeResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if resp.Auth.BaseURL != "https://api.custom.example.com/v1" {
+		t.Fatalf("resp.Auth.BaseURL = %q, want %q", resp.Auth.BaseURL, "https://api.custom.example.com/v1")
+	}
+
+	reqMeta, errMarshalMeta := json.Marshal(pluginapi.HostAuthGetRequest{AuthIndex: authMeta.Index})
+	if errMarshalMeta != nil {
+		t.Fatalf("marshal request meta: %v", errMarshalMeta)
+	}
+	rawRespMeta, errCallMeta := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGetRuntime, reqMeta)
+	if errCallMeta != nil {
+		t.Fatalf("callFromPlugin() meta error = %v", errCallMeta)
+	}
+	respMeta, errDecodeMeta := decodeRPCEnvelope[pluginapi.HostAuthGetRuntimeResponse](rawRespMeta)
+	if errDecodeMeta != nil {
+		t.Fatalf("decode response meta: %v", errDecodeMeta)
+	}
+	if respMeta.Auth.BaseURL != "https://meta.custom.example.com/v1" {
+		t.Fatalf("respMeta.Auth.BaseURL = %q, want %q", respMeta.Auth.BaseURL, "https://meta.custom.example.com/v1")
+	}
+
+	authBoth := &coreauth.Auth{
+		ID:       "demo-both-base-url.json",
+		Provider: "demo",
+		FileName: "demo-both-base-url.json",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"runtime_only": "true",
+			"base_url":     "https://attr.custom.example.com/v1",
+		},
+		Metadata: map[string]any{
+			"base_url": "https://meta.custom.example.com/v1",
+		},
+	}
+	authBoth.EnsureIndex()
+	if _, errRegister := host.currentAuthManager().Register(context.Background(), authBoth); errRegister != nil {
+		t.Fatalf("register authBoth: %v", errRegister)
+	}
+
+	reqBoth, errMarshalBoth := json.Marshal(pluginapi.HostAuthGetRequest{AuthIndex: authBoth.Index})
+	if errMarshalBoth != nil {
+		t.Fatalf("marshal request both: %v", errMarshalBoth)
+	}
+	rawRespBoth, errCallBoth := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGetRuntime, reqBoth)
+	if errCallBoth != nil {
+		t.Fatalf("callFromPlugin() both error = %v", errCallBoth)
+	}
+	respBoth, errDecodeBoth := decodeRPCEnvelope[pluginapi.HostAuthGetRuntimeResponse](rawRespBoth)
+	if errDecodeBoth != nil {
+		t.Fatalf("decode response both: %v", errDecodeBoth)
+	}
+	if respBoth.Auth.BaseURL != "https://attr.custom.example.com/v1" {
+		t.Fatalf("respBoth.Auth.BaseURL = %q, want %q", respBoth.Auth.BaseURL, "https://attr.custom.example.com/v1")
+	}
+}
+
+func TestListAuthFilesFromDiskReadsBaseURL(t *testing.T) {
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "test-auth.json")
+	fileData := []byte(`{"type":"openai","base_url":"https://disk-proxy.example.com/v1","email":"user@example.com"}`)
+	if errWrite := os.WriteFile(filePath, fileData, 0o600); errWrite != nil {
+		t.Fatalf("write file: %v", errWrite)
+	}
+
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+	entries, errList := host.listAuthFilesFromDisk()
+	if errList != nil {
+		t.Fatalf("listAuthFilesFromDisk error: %v", errList)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries count = %d, want 1", len(entries))
+	}
+	if entries[0].BaseURL != "https://disk-proxy.example.com/v1" {
+		t.Fatalf("entry BaseURL = %q, want https://disk-proxy.example.com/v1", entries[0].BaseURL)
+	}
+}
+
 func TestHostAuthSaveCallbackRejectsInvalidWeightBeforePersistence(t *testing.T) {
 	for _, rawWeight := range []string{`1.5`, `1000001`, `9223372036854775808`, `"invalid"`} {
 		t.Run(rawWeight, func(t *testing.T) {

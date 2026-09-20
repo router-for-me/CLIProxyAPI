@@ -11,13 +11,24 @@ import (
 func ConvertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
-	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
+	model := firstNonEmpty(modelName, root.Get("model").String())
+	out, _ = sjson.SetBytes(out, "model", model)
 	if streamValue, ok := openAIRequestStreamValue(root, stream); ok {
 		out, _ = sjson.SetBytes(out, "stream", streamValue)
 	}
-	out = appendOpenAIMessagesToInteractions(out, root.Get("messages"))
-	out = copyOpenAIChatGenerationConfigToInteractions(out, root)
-	out = appendOpenAIChatToolsToInteractions(out, root.Get("tools"))
+	if previousResponseID := firstNonEmpty(root.Get("previous_response_id").String(), root.Get("previous_interaction_id").String()); previousResponseID != "" {
+		out, _ = sjson.SetBytes(out, "previous_interaction_id", previousResponseID)
+	}
+	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
+		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
+	}
+	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
+		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
+	}
+	forAntigravity := isAntigravityModel(model)
+	out = appendOpenAIMessagesToInteractions(out, root.Get("messages"), forAntigravity)
+	out = copyOpenAIChatGenerationConfigToInteractions(out, root, model)
+	out = appendOpenAIChatToolsToInteractions(out, root.Get("tools"), forAntigravity)
 	return out
 }
 
@@ -31,12 +42,13 @@ func openAIRequestStreamValue(root gjson.Result, stream bool) (bool, bool) {
 	return false, false
 }
 
-func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byte {
+func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result, forAntigravity bool) []byte {
 	if !messages.Exists() || !messages.IsArray() {
 		return out
 	}
 	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
 	var systemBuilder strings.Builder
+	toolNamesByID := make(map[string]string)
 	messages.ForEach(func(_, message gjson.Result) bool {
 		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 		switch role {
@@ -48,7 +60,7 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 				systemBuilder.WriteString(text)
 			}
 		default:
-			appendOpenAIMessageToInteractions(&inputItems, message)
+			appendOpenAIMessageToInteractions(&inputItems, message, forAntigravity, toolNamesByID)
 		}
 		return true
 	})
@@ -59,7 +71,7 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 	return out
 }
 
-func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result) {
+func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result, forAntigravity bool, toolNamesByID map[string]string) {
 	role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 	switch role {
 	case "assistant":
@@ -73,14 +85,19 @@ func appendOpenAIMessageToInteractions(items *[][]byte, message gjson.Result) {
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
+				if id := toolCall.Get("id").String(); id != "" {
+					if name := toolCall.Get("function.name").String(); name != "" && toolNamesByID != nil {
+						toolNamesByID[id] = name
+					}
+				}
+				if step, ok := openAIToolCallToInteractionsStep(toolCall, forAntigravity); ok {
 					*items = append(*items, step)
 				}
 				return true
 			})
 		}
 	case "tool", "function":
-		*items = append(*items, openAIToolResultToInteractions(message))
+		*items = append(*items, openAIToolResultToInteractions(message, forAntigravity, toolNamesByID))
 	default:
 		if step, ok := openAIChatContentStep("user_input", message.Get("content")); ok {
 			*items = append(*items, step)
@@ -191,13 +208,20 @@ func openAIChatImagePartToInteractions(part gjson.Result) []byte {
 	return out
 }
 
-func openAIToolResultToInteractions(message gjson.Result) []byte {
+func openAIToolResultToInteractions(message gjson.Result, forAntigravity bool, toolNamesByID map[string]string) []byte {
 	out := []byte(`{"type":"function_result","result":""}`)
-	if callID := firstNonEmpty(message.Get("tool_call_id").String(), message.Get("id").String()); callID != "" {
-		out, _ = sjson.SetBytes(out, "id", callID)
+	callID := firstNonEmpty(message.Get("tool_call_id").String(), message.Get("id").String())
+	if callID != "" {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
-	if name := message.Get("name").String(); name != "" {
+	name := message.Get("name").String()
+	if name == "" && callID != "" && toolNamesByID != nil {
+		name = toolNamesByID[callID]
+	}
+	if name != "" {
+		if forAntigravity {
+			name = translatorcommon.AntigravityToolNameToUpstream(name)
+		}
 		out, _ = sjson.SetBytes(out, "name", name)
 	}
 	content := message.Get("content")
@@ -209,18 +233,38 @@ func openAIToolResultToInteractions(message gjson.Result) []byte {
 	return out
 }
 
-func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result) []byte {
-	copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))
-	copyNumber(&out, "generation_config.temperature", root.Get("temperature"))
-	copyNumber(&out, "generation_config.top_p", root.Get("top_p"))
-	copyNumber(&out, "generation_config.presence_penalty", root.Get("presence_penalty"))
-	copyNumber(&out, "generation_config.frequency_penalty", root.Get("frequency_penalty"))
-	copyNumber(&out, "generation_config.candidate_count", root.Get("n"))
-	if stop := root.Get("stop"); stop.Exists() {
-		out, _ = sjson.SetRawBytes(out, "generation_config.stop_sequences", []byte(stop.Raw))
+func isAntigravityModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "antigravity")
+}
+
+func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result, model string) []byte {
+	if isAntigravityModel(model) {
+		if maxOutputTokens := firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens"), root.Get("max_output_tokens")); maxOutputTokens.Exists() && !root.Get("agent_config.max_total_tokens").Exists() {
+			out, _ = sjson.SetBytes(out, "agent_config.max_total_tokens", maxOutputTokens.Int())
+		}
+	} else {
+		copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))
+		copyNumber(&out, "generation_config.temperature", root.Get("temperature"))
+		copyNumber(&out, "generation_config.top_p", root.Get("top_p"))
+		copyNumber(&out, "generation_config.presence_penalty", root.Get("presence_penalty"))
+		copyNumber(&out, "generation_config.frequency_penalty", root.Get("frequency_penalty"))
+		copyNumber(&out, "generation_config.candidate_count", root.Get("n"))
+		if stop := root.Get("stop"); stop.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generation_config.stop_sequences", []byte(stop.Raw))
+		}
 	}
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", []byte(toolChoice.Raw))
+		if isAntigravityModel(model) && toolChoice.IsObject() {
+			tcRaw := []byte(toolChoice.Raw)
+			if fnName := toolChoice.Get("function.name").String(); fnName != "" {
+				tcRaw, _ = sjson.SetBytes(tcRaw, "function.name", translatorcommon.AntigravityToolNameToUpstream(fnName))
+			} else if name := toolChoice.Get("name").String(); name != "" {
+				tcRaw, _ = sjson.SetBytes(tcRaw, "name", translatorcommon.AntigravityToolNameToUpstream(name))
+			}
+			out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", tcRaw)
+		} else {
+			out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", []byte(toolChoice.Raw))
+		}
 	}
 	if effort := root.Get("reasoning_effort"); effort.Exists() && effort.Type == gjson.String {
 		out, _ = sjson.SetBytes(out, "generation_config.thinking_level", strings.ToLower(strings.TrimSpace(effort.String())))
@@ -237,13 +281,13 @@ func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result)
 	return out
 }
 
-func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result) []byte {
+func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result, forAntigravity bool) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
 	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
-		if converted, ok := openAIChatToolToInteractions(tool); ok {
+		if converted, ok := openAIChatToolToInteractions(tool, forAntigravity); ok {
 			toolItems = append(toolItems, converted)
 		}
 		return true
@@ -254,7 +298,7 @@ func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result) []byte 
 	return out
 }
 
-func openAIChatToolToInteractions(tool gjson.Result) ([]byte, bool) {
+func openAIChatToolToInteractions(tool gjson.Result, forAntigravity bool) ([]byte, bool) {
 	toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
 	if toolType != "" && toolType != "function" {
 		return nil, false
@@ -262,6 +306,9 @@ func openAIChatToolToInteractions(tool gjson.Result) ([]byte, bool) {
 	name := firstNonEmpty(tool.Get("function.name").String(), tool.Get("name").String())
 	if name == "" {
 		return nil, false
+	}
+	if forAntigravity {
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
 	}
 	out := []byte(`{"type":"function","name":""}`)
 	out, _ = sjson.SetBytes(out, "name", name)

@@ -71,6 +71,65 @@ func TestRPCCapabilitiesIncludeScheduler(t *testing.T) {
 	if decoded["scheduler"] != true {
 		t.Fatalf("scheduler = %#v, want true", decoded["scheduler"])
 	}
+	if decoded["scheduler_across_priorities"] != nil && decoded["scheduler_across_priorities"] != false {
+		t.Fatalf("scheduler_across_priorities = %#v, want omitted or false", decoded["scheduler_across_priorities"])
+	}
+}
+
+func TestRPCCapabilitiesIncludeSchedulerAcrossPriorities(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{}, nil
+			}),
+			SchedulerAcrossPriorities: true,
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.Scheduler {
+		t.Fatal("Scheduler = false, want true")
+	}
+	if !caps.SchedulerAcrossPriorities {
+		t.Fatal("SchedulerAcrossPriorities = false, want true")
+	}
+
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded["scheduler_across_priorities"] != true {
+		t.Fatalf("scheduler_across_priorities = %#v, want true", decoded["scheduler_across_priorities"])
+	}
+}
+
+type testAcrossPrioritiesSchedulerFunc struct {
+	schedulerFunc
+}
+
+func (testAcrossPrioritiesSchedulerFunc) SchedulerWantsAcrossPriorities() bool {
+	return true
+}
+
+func TestRPCCapabilitiesIncludeSchedulerAcrossPrioritiesViaMethod(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			Scheduler: testAcrossPrioritiesSchedulerFunc{
+				schedulerFunc: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+					return pluginapi.SchedulerPickResponse{}, nil
+				}),
+			},
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.SchedulerAcrossPriorities {
+		t.Fatal("SchedulerAcrossPriorities = false, want true")
+	}
 }
 
 func TestRPCCapabilitiesIncludeModelRouter(t *testing.T) {
@@ -103,16 +162,48 @@ func TestRPCCapabilitiesIncludeModelRouter(t *testing.T) {
 	}
 }
 
+func TestRPCCapabilitiesIncludeQuotaProvider(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			QuotaProvider: &testQuotaProvider{identifier: "quota-test"},
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.QuotaProvider {
+		t.Fatal("QuotaProvider = false, want true")
+	}
+
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	if !json.Valid(raw) {
+		t.Fatalf("marshaled capabilities are invalid JSON: %s", raw)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded["quota_provider"] != true {
+		t.Fatalf("quota_provider = %#v, want true", decoded["quota_provider"])
+	}
+}
+
 func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 	lookup := newTestSymbolLookup(&testPlugin{
 		registerResult: validTestPlugin("schema"),
 	})
 
-	if _, errRegister := registerRPCPlugin(context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, []byte("mode: test")); errRegister != nil {
+	registered, errRegister := registerRPCPlugin(context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, []byte("mode: test"))
+	if errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}
 	if lookup.lastLifecycle.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("lifecycle schema_version = %d, want %d", lookup.lastLifecycle.SchemaVersion, pluginabi.SchemaVersion)
+	}
+	if registered.SchemaVersion != pluginabi.SchemaVersion {
+		t.Fatalf("registered SchemaVersion = %d, want %d", registered.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if string(lookup.lastLifecycle.ConfigYAML) != "mode: test" {
 		t.Fatalf("lifecycle config = %q, want input config", lookup.lastLifecycle.ConfigYAML)
@@ -145,6 +236,9 @@ func TestRegisterRPCPluginAcceptsModelRouterOnSchema1(t *testing.T) {
 	}
 	if registered.Capabilities.ModelRouter == nil {
 		t.Fatal("ModelRouter = nil, want adapter")
+	}
+	if registered.SchemaVersion != 1 {
+		t.Fatalf("registered SchemaVersion = %d, want 1", registered.SchemaVersion)
 	}
 }
 

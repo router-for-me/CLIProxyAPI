@@ -93,6 +93,20 @@ type handlerDirectExecutorRouteHost struct {
 	stream       func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
 }
 
+type handlerSkipAwareDirectExecutorRouteHost struct {
+	handlerDirectExecutorRouteHost
+	routeSkip string
+}
+
+func (h *handlerSkipAwareDirectExecutorRouteHost) RouteModelExcept(ctx context.Context, req pluginapi.ModelRouteRequest, skipPluginID string) (pluginapi.ModelRouteResponse, bool) {
+	h.routeSkip = skipPluginID
+	return pluginapi.ModelRouteResponse{}, false
+}
+
+func (h *handlerSkipAwareDirectExecutorRouteHost) HasModelRoutersExcept(string) bool {
+	return h != nil && h.hasRouters
+}
+
 func (h *handlerDirectExecutorRouteHost) ExecutePluginExecutor(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
 	h.lastPluginID = pluginID
 	h.lastRequest = req
@@ -496,6 +510,42 @@ func TestPrepareStreamModelRouteReusesDecisionDuringExecution(t *testing.T) {
 	}
 }
 
+func TestExecuteModelStreamDoesNotReusePreparedRouteWhenRouterPluginSkipped(t *testing.T) {
+	const originalModel = "prepared-router-model"
+	const mappedModel = "mapped-upstream-model"
+	const originPluginID = "origin-plugin"
+	host := &handlerSkipAwareDirectExecutorRouteHost{}
+	host.hasRouters = true
+	host.route = func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: originPluginID}, true
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(host)
+	body := []byte(`{"model":"prepared-router-model","stream":true}`)
+	ctx, routedToPlugin := handler.PrepareStreamModelRoute(context.Background(), "openai-response", originalModel, body)
+	if !routedToPlugin {
+		t.Fatal("PrepareStreamModelRoute() did not detect plugin executor route")
+	}
+
+	_, errMsg := handler.ExecuteModelStream(ctx, ModelExecutionRequest{
+		EntryProtocol:      "openai-response",
+		ExitProtocol:       "openai-response",
+		Model:              mappedModel,
+		Stream:             true,
+		Body:               []byte(`{"model":"mapped-upstream-model","stream":true}`),
+		SkipRouterPluginID: originPluginID,
+	})
+	if host.routeSkip != originPluginID {
+		t.Fatalf("router skip id = %q, want %q", host.routeSkip, originPluginID)
+	}
+	if host.lastPluginID == originPluginID {
+		t.Fatalf("plugin executor %q was re-entered despite SkipRouterPluginID", host.lastPluginID)
+	}
+	if errMsg == nil {
+		t.Fatal("ExecuteModelStream() error = nil, want normal provider resolution failure with empty auth manager")
+	}
+}
+
 func TestExecuteModelPropagatesRouterSkipPluginID(t *testing.T) {
 	model := "model-execution-router-skip-model"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
@@ -588,6 +638,21 @@ func TestHandlerProvidersForExecutionRejectsImageOnlyModelOnProviderRoute(t *tes
 			name:          "target-model",
 			originalModel: "original-model",
 			decision:      modelRouteDecision{Provider: "claude", Model: "gpt-image-2"},
+		},
+		{
+			name:          "target-model-image-2.5",
+			originalModel: "original-model",
+			decision:      modelRouteDecision{Provider: "claude", Model: "gpt-image-2.5"},
+		},
+		{
+			name:          "target-model-image-2.5-flare",
+			originalModel: "original-model",
+			decision:      modelRouteDecision{Provider: "claude", Model: "gpt-image-2.5-flare"},
+		},
+		{
+			name:          "target-model-image-2.5-sunburst",
+			originalModel: "original-model",
+			decision:      modelRouteDecision{Provider: "claude", Model: "gpt-image-2.5-sunburst"},
 		},
 		{
 			name:          "target-model-thinking-suffix",

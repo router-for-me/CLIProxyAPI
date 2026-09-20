@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -214,6 +215,64 @@ func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 	}
 }
 
+func TestStartLoginPassesMetadataAndClonesMap(t *testing.T) {
+	called := false
+	var receivedMetadata map[string]any
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-plugin",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "plugin-provider",
+					startLogin: func(ctx context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+						called = true
+						receivedMetadata = req.Metadata
+						return pluginapi.AuthLoginStartResponse{
+							Provider: req.Provider,
+							State:    "state-1",
+						}, nil
+					},
+				},
+			},
+		},
+	})
+
+	meta := map[string]any{"region": "us-east-1", "nested": "val"}
+	resp, handled, errStart := host.StartLogin(context.Background(), "plugin-provider", "http://localhost:8080/login", meta)
+	if errStart != nil {
+		t.Fatalf("StartLogin() error = %v", errStart)
+	}
+	if !handled || !called {
+		t.Fatalf("StartLogin() handled=%t called=%t, want handled call", handled, called)
+	}
+	if resp.State != "state-1" {
+		t.Fatalf("StartLogin() response = %#v, want state-1", resp)
+	}
+	if receivedMetadata == nil || receivedMetadata["region"] != "us-east-1" {
+		t.Fatalf("receivedMetadata = %#v, want region=us-east-1", receivedMetadata)
+	}
+
+	// Verify metadata cloning: mutating original meta map must not mutate received map
+	meta["region"] = "mutated"
+	if receivedMetadata["region"] != "us-east-1" {
+		t.Fatalf("receivedMetadata was mutated when caller map changed: %#v", receivedMetadata)
+	}
+
+	// Verify calling StartLogin without metadata sets req.Metadata to nil
+	called = false
+	receivedMetadata = nil
+	_, _, errNoMeta := host.StartLogin(context.Background(), "plugin-provider", "http://localhost:8080/login")
+	if errNoMeta != nil {
+		t.Fatalf("StartLogin() without metadata error = %v", errNoMeta)
+	}
+	if !called {
+		t.Fatal("StartLogin() without metadata was not called")
+	}
+	if receivedMetadata != nil {
+		t.Fatalf("receivedMetadata = %#v, want nil for empty metadata", receivedMetadata)
+	}
+}
+
 func TestPollLoginPassesProviderStateHostAndHTTPClient(t *testing.T) {
 	authDir := t.TempDir()
 	called := false
@@ -368,6 +427,78 @@ func TestPluginTokenStorageMergesRawMetadataAndProviderType(t *testing.T) {
 	}
 	if decoded["old"] != "override" || decoded["new"] != "value" || decoded["type"] != "plugin-provider" {
 		t.Fatalf("saved token decoded = %#v, want merged metadata and provider type", decoded)
+	}
+}
+
+func TestPluginTokenStorageNormalizesCredentialMetadataKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawJSON  []byte
+		metadata map[string]any
+		want     map[string]any
+	}{
+		{
+			name:    "legacy raw keys",
+			rawJSON: []byte(`{"request-retry":2,"disable-cooling":true,"provider-specific-key":"preserved"}`),
+			want: map[string]any{
+				"request_retry":         float64(2),
+				"disable_cooling":       true,
+				"provider-specific-key": "preserved",
+				"type":                  "plugin-provider",
+			},
+		},
+		{
+			name:    "canonical metadata wins",
+			rawJSON: []byte(`{"request-retry":2,"disable-cooling":true}`),
+			metadata: map[string]any{
+				"request_retry":   0,
+				"disable_cooling": false,
+			},
+			want: map[string]any{
+				"request_retry":   float64(0),
+				"disable_cooling": false,
+				"type":            "plugin-provider",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			storage := &pluginTokenStorage{
+				provider: "plugin-provider",
+				rawJSON:  test.rawJSON,
+			}
+			storage.SetMetadata(test.metadata)
+
+			outputs := map[string][]byte{
+				"RawJSON": storage.RawJSON(),
+			}
+			path := filepath.Join(t.TempDir(), "auth.json")
+			if errSave := storage.SaveTokenToFile(path); errSave != nil {
+				t.Fatalf("SaveTokenToFile() error = %v", errSave)
+			}
+			saved, errReadFile := os.ReadFile(path)
+			if errReadFile != nil {
+				t.Fatalf("ReadFile(saved token) error = %v", errReadFile)
+			}
+			outputs["SaveTokenToFile"] = saved
+
+			for outputName, payload := range outputs {
+				var decoded map[string]any
+				if errUnmarshal := json.Unmarshal(payload, &decoded); errUnmarshal != nil {
+					t.Fatalf("%s decode error = %v", outputName, errUnmarshal)
+				}
+				if !reflect.DeepEqual(decoded, test.want) {
+					t.Errorf("%s decoded = %#v, want %#v", outputName, decoded, test.want)
+				}
+				if _, exists := decoded["request-retry"]; exists {
+					t.Errorf("%s retained request-retry: %#v", outputName, decoded)
+				}
+				if _, exists := decoded["disable-cooling"]; exists {
+					t.Errorf("%s retained disable-cooling: %#v", outputName, decoded)
+				}
+			}
+		})
 	}
 }
 

@@ -8,24 +8,25 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/net/context"
 )
 
 func statusFromError(err error) int {
-	if err == nil {
-		return 0
-	}
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-		if code := se.StatusCode(); code > 0 {
-			return code
-		}
-	}
-	return 0
+	return clienterror.HTTPStatusFromError(err)
 }
 
 func isAuthSelectionUnavailable(err error) bool {
+	type modelCooldownMarker interface {
+		IsModelCooldown() bool
+	}
+	var mcm modelCooldownMarker
+	if errors.As(err, &mcm) && mcm != nil && mcm.IsModelCooldown() {
+		return false
+	}
+
 	var authErr *coreauth.Error
 	if !errors.As(err, &authErr) || authErr == nil {
 		return false
@@ -37,6 +38,14 @@ func isAuthSelectionUnavailable(err error) bool {
 func enrichAuthSelectionError(err error, providers []string, model string) error {
 	if err == nil {
 		return nil
+	}
+
+	type modelCooldownMarker interface {
+		IsModelCooldown() bool
+	}
+	var mcm modelCooldownMarker
+	if errors.As(err, &mcm) && mcm != nil && mcm.IsModelCooldown() {
+		return err
 	}
 
 	var authErr *coreauth.Error
@@ -62,7 +71,18 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 	if baseMessage == "" {
 		baseMessage = "no auth available"
 	}
-	detail := fmt.Sprintf("%s (providers=%s, model=%s)", baseMessage, providerText, modelText)
+
+	cause := errors.Unwrap(err)
+	var upstreamSummary string
+	if cause != nil {
+		upstreamSummary = coreauth.ExtractUpstreamErrorSummary(cause.Error())
+	}
+	var detail string
+	if upstreamSummary != "" && !strings.Contains(baseMessage, upstreamSummary) {
+		detail = fmt.Sprintf("%s (providers=%s, model=%s; last upstream error: %s)", baseMessage, providerText, modelText, upstreamSummary)
+	} else {
+		detail = fmt.Sprintf("%s (providers=%s, model=%s)", baseMessage, providerText, modelText)
+	}
 
 	// Clarify the most common alias confusion between Anthropic route names and internal provider keys.
 	if strings.Contains(","+providerText+",", ",claude,") {
@@ -74,12 +94,23 @@ func enrichAuthSelectionError(err error, providers []string, model string) error
 		status = http.StatusServiceUnavailable
 	}
 
-	return &coreauth.Error{
+	enriched := &coreauth.Error{
 		Code:       authErr.Code,
 		Message:    detail,
 		Retryable:  authErr.Retryable,
 		HTTPStatus: status,
 	}
+	var carrier interface{ WithAuthError(*coreauth.Error) error }
+	if errors.As(err, &carrier) && carrier != nil {
+		return carrier.WithAuthError(enriched)
+	}
+	if coreauth.IsTerminalAuthError(err) {
+		return coreauth.NewTerminalAuthError(enriched, cause)
+	}
+	if cause != nil {
+		return coreauth.WithCause(enriched, cause)
+	}
+	return enriched
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
@@ -116,7 +147,11 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		}
 	}
 
-	body := BuildErrorResponseBody(status, errText)
+	var errCause error
+	if msg != nil {
+		errCause = msg.Error
+	}
+	body := BuildErrorResponseBodyWithError(status, errText, errCause)
 	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
 	var previous []byte
 	if existing, exists := c.Get("API_RESPONSE"); exists {

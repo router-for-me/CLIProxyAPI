@@ -1,6 +1,8 @@
 package common
 
 import (
+	"bytes"
+	"encoding/json"
 	"strconv"
 
 	"github.com/tidwall/gjson"
@@ -105,4 +107,19 @@ func AppendSSEEventBytes(out []byte, event string, payload []byte, trailingNewli
 		out = append(out, '\n')
 	}
 	return out
+}
+
+// SetStringWithoutHTMLEscape sets a string field in a JSON payload without escaping
+// HTML characters (<, >, &). Standard sjson.Set/SetBytes delegates string values
+// containing quotes or special characters to encoding/json.Marshal, which unconditionally
+// escapes <, >, & to \u003c, \u003e, \u0026.
+func SetStringWithoutHTMLEscape(data []byte, path, value string) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	if errEncode := enc.Encode(value); errEncode != nil {
+		return sjson.SetBytes(data, path, value)
+	}
+	raw := bytes.TrimRight(buf.Bytes(), "\n")
+	return sjson.SetRawBytes(data, path, raw)
 }

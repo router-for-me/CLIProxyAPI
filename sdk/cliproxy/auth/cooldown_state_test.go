@@ -34,6 +34,12 @@ func (s *recordingCooldownStateStore) Save(_ context.Context, records []Cooldown
 	return nil
 }
 
+func (s *recordingCooldownStateStore) savedRecords() []CooldownStateRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneCooldownStateRecords(s.records)
+}
+
 func cloneCooldownStateRecords(records []CooldownStateRecord) []CooldownStateRecord {
 	if len(records) == 0 {
 		return nil
@@ -252,6 +258,69 @@ func TestManager_MarkResult_PersistsCooldownOnlyWhenStateChanges(t *testing.T) {
 	manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "xai", Model: "grok-4", Success: true})
 	if got := store.saveCount.Load(); got != 2 {
 		t.Fatalf("clean success saved cooldown state %d times, want 2", got)
+	}
+}
+
+func TestManager_Update_ClearsPersistedCooldownWhenCredentialsChange(t *testing.T) {
+	store := &recordingCooldownStateStore{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+
+	auth := &Auth{
+		ID:       "auth-codex-1",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token-1",
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	// 1. Fail with 401 unauthorized
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: "codex",
+		Model:    "gpt-6-astra",
+		Success:  false,
+		Error:    &Error{Message: "invalidated token", HTTPStatus: 401},
+	})
+	if len(store.savedRecords()) == 0 {
+		t.Fatal("expected cooldown record to be saved after unauthorized failure")
+	}
+
+	// 2. Update without credential change (e.g. metadata note update)
+	sameCredAuth := &Auth{
+		ID:       auth.ID,
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token-1",
+			"note":         "updated note",
+		},
+	}
+	if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), sameCredAuth); errUpdate != nil {
+		t.Fatalf("Update() returned error: %v", errUpdate)
+	}
+	if len(store.savedRecords()) == 0 {
+		t.Fatal("expected cooldown record to remain when credentials did not change")
+	}
+
+	// 3. Update with credential change (new access_token)
+	newCredAuth := &Auth{
+		ID:       auth.ID,
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token-2",
+		},
+	}
+	if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), newCredAuth); errUpdate != nil {
+		t.Fatalf("Update() returned error: %v", errUpdate)
+	}
+	if len(store.savedRecords()) != 0 {
+		t.Fatalf("expected cooldown records to be cleared after credential change, got %d records", len(store.savedRecords()))
 	}
 }
 
@@ -492,6 +561,73 @@ func TestManager_RestoreCooldownStates(t *testing.T) {
 	}
 	if got := store.saveCount.Load(); got != 1 {
 		t.Fatalf("restore cleanup saved cooldown state %d times, want 1", got)
+	}
+}
+
+func TestManager_RestoreCooldownStatesCanonicalizesThinkingSuffixes(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	laterRetry := now.Add(2 * time.Hour)
+	store := &recordingCooldownStateStore{
+		load: []CooldownStateRecord{
+			{
+				Provider:       "gemini",
+				AuthID:         "auth-thinking",
+				Model:          "gemini-3.1-pro-preview(high)",
+				NextRetryAfter: now.Add(time.Hour),
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: now.Add(time.Hour),
+				},
+				UpdatedAt: now,
+			},
+			{
+				Provider:       "gemini",
+				AuthID:         "auth-thinking",
+				Model:          "gemini-3.1-pro-preview(low)",
+				NextRetryAfter: laterRetry,
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: laterRetry,
+				},
+				UpdatedAt: now.Add(time.Minute),
+			},
+		},
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-thinking", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register() returned error: %v", errRegister)
+	}
+
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() returned error: %v", errRestore)
+	}
+
+	auth, ok := manager.GetByID("auth-thinking")
+	if !ok || auth == nil {
+		t.Fatal("restored auth was not found")
+	}
+	if len(auth.ModelStates) != 1 {
+		t.Fatalf("len(ModelStates) = %d, want 1: %+v", len(auth.ModelStates), auth.ModelStates)
+	}
+	state := auth.ModelStates["gemini-3.1-pro-preview"]
+	if state == nil || !state.Unavailable || !state.NextRetryAfter.Equal(laterRetry) {
+		t.Fatalf("canonical model state = %+v, want unavailable until %v", state, laterRetry)
+	}
+
+	store.mu.Lock()
+	persisted := cloneCooldownStateRecords(store.records)
+	store.mu.Unlock()
+	modelRecords := make([]CooldownStateRecord, 0, len(persisted))
+	for _, record := range persisted {
+		if record.Model != "" {
+			modelRecords = append(modelRecords, record)
+		}
+	}
+	if len(modelRecords) != 1 || modelRecords[0].Model != "gemini-3.1-pro-preview" || !modelRecords[0].NextRetryAfter.Equal(laterRetry) {
+		t.Fatalf("persisted model records = %+v, want one canonical record until %v", modelRecords, laterRetry)
 	}
 }
 

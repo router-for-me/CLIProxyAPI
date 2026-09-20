@@ -448,6 +448,19 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 	case "r":
 		m.status = ""
 		return m, m.fetchFiles
+	case "R":
+		if m.cursor < len(m.files) {
+			f := m.files[m.cursor]
+			name := getString(f, "name")
+			return m, func() tea.Msg {
+				err := m.client.RefreshAuthFile(name)
+				if err != nil {
+					return authActionMsg{err: err}
+				}
+				return authActionMsg{action: fmt.Sprintf(T("refreshed_auth"), name)}
+			}
+		}
+		return m, nil
 	default:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)

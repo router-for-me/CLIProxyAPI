@@ -252,6 +252,8 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 		"top_p":0.9,
 		"service_tier":"standard",
 		"truncation":"auto",
+		"prompt_cache_options":{"mode":"implicit"},
+		"prompt_cache_retention":"24h",
 		"user":"request-owner",
 		"input":[{"type":"message","role":"system","content":"hello"}]
 	}`)
@@ -281,11 +283,37 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
 		"top_p",
 		"service_tier",
 		"truncation",
+		"prompt_cache_options",
+		"prompt_cache_retention",
 		"user",
 	} {
 		if gjson.GetBytes(output, path).Exists() {
 			t.Fatalf("%s should be removed: %s", path, output)
 		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_FiltersPromptCacheRetention(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.6-terra",
+		"prompt_cache_retention": "24h",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "hello"
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6-terra", inputJSON, true)
+	if gjson.GetBytes(output, "prompt_cache_retention").Exists() {
+		t.Fatalf("prompt_cache_retention should be removed: %s", string(output))
 	}
 }
 
@@ -435,6 +463,201 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 	}
 }
 
+func TestStripCodexResponsesCacheBreakpoints(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "Hello world",
+						"prompt_cache_breakpoint": {"mode": "explicit"}
+					},
+					{
+						"type": "input_text",
+						"text": "Second part"
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if strings.Contains(outputStr, "prompt_cache_breakpoint") {
+		t.Fatalf("prompt_cache_breakpoint should not exist in the output JSON")
+	}
+	if gjson.Get(outputStr, "input.0.content.0.text").String() != "Hello world" {
+		t.Fatalf("text content should be preserved")
+	}
+	if gjson.Get(outputStr, "input.0.content.1.text").String() != "Second part" {
+		t.Fatalf("second content part should be preserved")
+	}
+}
+
+func TestStripCodexResponsesCacheBreakpoints_FunctionCallOutputParts(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "function_call",
+				"name": "shell",
+				"call_id": "call_abc",
+				"arguments": "{}"
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call_abc",
+				"output": [
+					{
+						"type": "input_text",
+						"text": "tool output",
+						"prompt_cache_breakpoint": {"mode": "explicit"}
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if strings.Contains(outputStr, "prompt_cache_breakpoint") {
+		t.Fatalf("prompt_cache_breakpoint should not exist in the output JSON")
+	}
+	if gjson.Get(outputStr, "input.1.output.0.text").String() != "tool output" {
+		t.Fatalf("function_call_output text should be preserved")
+	}
+}
+
+func TestStripCodexResponsesCacheBreakpoints_ItemLevel(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "hi"}],
+				"prompt_cache_breakpoint": {"mode": "explicit"}
+			},
+			{
+				"type": "function_call_output",
+				"call_id": "call_abc",
+				"output": "plain string output",
+				"prompt_cache_breakpoint": {"mode": "explicit"}
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if strings.Contains(outputStr, "prompt_cache_breakpoint") {
+		t.Fatalf("prompt_cache_breakpoint should not exist in the output JSON")
+	}
+	if gjson.Get(outputStr, "input.0.content.0.text").String() != "hi" {
+		t.Fatalf("message content should be preserved")
+	}
+	if gjson.Get(outputStr, "input.1.output").String() != "plain string output" {
+		t.Fatalf("string output should be preserved")
+	}
+}
+
+func TestStripCodexResponsesCacheBreakpoints_CombinedItemAndPartLevel(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "function_call_output",
+				"call_id": "call_123",
+				"prompt_cache_breakpoint": {"mode": "explicit"},
+				"output": [
+					{
+						"type": "input_text",
+						"text": "result part 1",
+						"prompt_cache_breakpoint": {"mode": "explicit"}
+					},
+					{
+						"type": "input_text",
+						"text": "result part 2"
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if strings.Contains(outputStr, "prompt_cache_breakpoint") {
+		t.Fatalf("prompt_cache_breakpoint should not exist in the output JSON")
+	}
+	if gjson.Get(outputStr, "input.#").Int() != 1 {
+		t.Fatalf("expected 1 input item, got %d", gjson.Get(outputStr, "input.#").Int())
+	}
+	if gjson.Get(outputStr, "input.0.call_id").String() != "call_123" {
+		t.Fatalf("call_id should be preserved")
+	}
+	if gjson.Get(outputStr, "input.0.output.0.text").String() != "result part 1" {
+		t.Fatalf("output part 0 text should be preserved")
+	}
+	if gjson.Get(outputStr, "input.0.output.1.text").String() != "result part 2" {
+		t.Fatalf("output part 1 text should be preserved")
+	}
+}
+
+func TestStripCodexResponsesCacheBreakpoints_WithSystemRole(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{
+				"type": "message",
+				"role": "system",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "System prompt",
+						"prompt_cache_breakpoint": {"mode": "explicit"}
+					}
+				]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{
+						"type": "input_text",
+						"text": "User query",
+						"prompt_cache_breakpoint": {"mode": "explicit"}
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	// Check system role is converted to developer
+	if gjson.Get(outputStr, "input.0.role").String() != "developer" {
+		t.Fatalf("expected role 'developer', got %q", gjson.Get(outputStr, "input.0.role").String())
+	}
+	// Check prompt_cache_breakpoint is completely removed from payload
+	if strings.Contains(outputStr, "prompt_cache_breakpoint") {
+		t.Fatalf("prompt_cache_breakpoint should not exist in the output JSON")
+	}
+	if gjson.Get(outputStr, "input.0.content.0.text").String() != "System prompt" {
+		t.Fatalf("expected system prompt text preserved, got %q", gjson.Get(outputStr, "input.0.content.0.text").String())
+	}
+	if gjson.Get(outputStr, "input.1.content.0.text").String() != "User query" {
+		t.Fatalf("expected user query text preserved, got %q", gjson.Get(outputStr, "input.1.content.0.text").String())
+	}
+}
+
 func BenchmarkConvertSystemRoleToDeveloperLargeInput(b *testing.B) {
 	cases := []struct {
 		name      string
@@ -565,4 +788,98 @@ func convertSystemRoleToDeveloperPreviousRootPathRewriteForBenchmark(rawJSON []b
 	}
 
 	return result
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_ServiceTier(t *testing.T) {
+	tests := []struct {
+		name       string
+		tierJSON   string
+		wantExists bool
+		wantTier   string
+	}{
+		{
+			name:       "priority preserved",
+			tierJSON:   `"priority"`,
+			wantExists: true,
+			wantTier:   "priority",
+		},
+		{
+			name:       "priority case insensitive and trimmed",
+			tierJSON:   `" Priority "`,
+			wantExists: true,
+			wantTier:   "priority",
+		},
+		{
+			name:       "fast normalized to priority",
+			tierJSON:   `"fast"`,
+			wantExists: true,
+			wantTier:   "priority",
+		},
+		{
+			name:       "ultrafast preserved",
+			tierJSON:   `"ultrafast"`,
+			wantExists: true,
+			wantTier:   "ultrafast",
+		},
+		{
+			name:       "ultrafast case insensitive and trimmed",
+			tierJSON:   `" UltraFast "`,
+			wantExists: true,
+			wantTier:   "ultrafast",
+		},
+		{
+			name:       "standard stripped",
+			tierJSON:   `"standard"`,
+			wantExists: false,
+		},
+		{
+			name:       "default stripped",
+			tierJSON:   `"default"`,
+			wantExists: false,
+		},
+		{
+			name:       "flex stripped",
+			tierJSON:   `"flex"`,
+			wantExists: false,
+		},
+		{
+			name:       "non-string stripped",
+			tierJSON:   `123`,
+			wantExists: false,
+		},
+		{
+			name:       "null stripped",
+			tierJSON:   `null`,
+			wantExists: false,
+		},
+		{
+			name:       "bool stripped",
+			tierJSON:   `true`,
+			wantExists: false,
+		},
+		{
+			name:       "empty string stripped",
+			tierJSON:   `""`,
+			wantExists: false,
+		},
+		{
+			name:       "whitespace string stripped",
+			tierJSON:   `"   "`,
+			wantExists: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(fmt.Sprintf(`{"model":"gpt-5.6","service_tier":%s,"input":[{"type":"message","role":"user","content":"hello"}]}`, tt.tierJSON))
+			output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+			res := gjson.GetBytes(output, "service_tier")
+			if res.Exists() != tt.wantExists {
+				t.Fatalf("service_tier exists = %v, want %v; output: %s", res.Exists(), tt.wantExists, string(output))
+			}
+			if tt.wantExists && res.String() != tt.wantTier {
+				t.Fatalf("service_tier = %q, want %q; output: %s", res.String(), tt.wantTier, string(output))
+			}
+		})
+	}
 }

@@ -42,6 +42,7 @@ const (
 	antigravitySandboxBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 	antigravityBaseURLProd         = "https://cloudcode-pa.googleapis.com"
 	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
+	maxFetchAttemptsPerEndpoint    = 2
 )
 
 func init() {
@@ -112,6 +113,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: failed to resolve auth directory: %v\n", err)
 		os.Exit(1)
 	}
+	if _, errStat := os.Stat(authsDir); errStat != nil && !authsDirOverridden {
+		localAuths := filepath.Join(wd, "auths")
+		if fi, errLocal := os.Stat(localAuths); errLocal == nil && fi.IsDir() {
+			authsDir = localAuths
+		}
+	}
+	if realDir, errSym := filepath.EvalSymlinks(authsDir); errSym == nil {
+		authsDir = realDir
+	}
 	if !filepath.IsAbs(outputPath) {
 		outputPath = filepath.Join(wd, outputPath)
 	}
@@ -133,35 +143,48 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Find the first enabled antigravity auth.
-	var chosen *coreauth.Auth
+	// Find enabled antigravity auths.
+	var agAuths []*coreauth.Auth
 	for _, a := range auths {
 		if a == nil || a.Disabled {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(a.Provider), "antigravity") {
-			chosen = a
-			break
+			if !strings.Contains(a.ID, ".back") {
+				agAuths = append(agAuths, a)
+			}
 		}
 	}
-	if chosen == nil {
+	if len(agAuths) == 0 {
+		for _, a := range auths {
+			if a != nil && !a.Disabled && strings.EqualFold(strings.TrimSpace(a.Provider), "antigravity") {
+				agAuths = append(agAuths, a)
+			}
+		}
+	}
+	if len(agAuths) == 0 {
 		fmt.Fprintf(os.Stderr, "error: no enabled antigravity auth found in %s\n", authsDir)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Using auth: id=%s label=%s\n", chosen.ID, chosen.Label)
+	// Fetch models from the upstream Antigravity API using available auths.
+	var models []modelEntry
+	for _, chosen := range agAuths {
+		fmt.Printf("Using auth: id=%s label=%s\n", chosen.ID, chosen.Label)
+		fmt.Println("Fetching Antigravity model list from upstream...")
 
-	// Fetch models from the upstream Antigravity API.
-	fmt.Println("Fetching Antigravity model list from upstream...")
+		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		models = fetchModels(fetchCtx, chosen)
+		cancel()
 
-	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	models := fetchModels(fetchCtx, chosen)
+		if len(models) > 0 {
+			fmt.Printf("Fetched %d models.\n", len(models))
+			break
+		}
+		fmt.Fprintln(os.Stderr, "warning: no models returned from this auth, trying next...")
+	}
 	if len(models) == 0 {
-		fmt.Fprintln(os.Stderr, "warning: no models returned (API may be unavailable or token expired)")
-	} else {
-		fmt.Printf("Fetched %d models.\n", len(models))
+		fmt.Fprintln(os.Stderr, "warning: no models returned from any auth (API may be unavailable or tokens expired)")
 	}
 
 	// Build the output payload.
@@ -189,14 +212,23 @@ func main() {
 	fmt.Printf("Model list saved to: %s\n", outputPath)
 }
 
+func defaultAntigravityFetchBaseURLs() []string {
+	return []string{antigravityBaseURLDaily, antigravityBaseURLProd, antigravitySandboxBaseURLDaily}
+}
+
 func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
-	accessToken := metaStringValue(auth.Metadata, "access_token")
+	return fetchModelsFromBaseURLs(ctx, auth, defaultAntigravityFetchBaseURLs(), nil)
+}
+
+func fetchModelsFromBaseURLs(ctx context.Context, auth *coreauth.Auth, baseURLs []string, client *http.Client) []modelEntry {
+	var accessToken string
+	if auth != nil {
+		accessToken = metaStringValue(auth.Metadata, "access_token")
+	}
 	if accessToken == "" {
 		fmt.Fprintln(os.Stderr, "error: no access token found in auth")
 		return nil
 	}
-
-	baseURLs := []string{antigravityBaseURLProd, antigravityBaseURLDaily, antigravitySandboxBaseURLDaily}
 
 	for _, baseURL := range baseURLs {
 		modelsURL := baseURL + antigravityModelsPath
@@ -211,78 +243,87 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 			payload = []byte(`{}`)
 		}
 
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, strings.NewReader(string(payload)))
-		if errReq != nil {
-			continue
-		}
-		httpReq.Close = true
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
-		httpReq.Header.Set("User-Agent", misc.AntigravityUserAgent())
-
-		httpClient := &http.Client{Timeout: 30 * time.Second}
-		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
-			httpClient.Transport = transport
-		}
-		httpResp, errDo := httpClient.Do(httpReq)
-		if errDo != nil {
-			continue
-		}
-
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
-		if errRead != nil {
-			continue
-		}
-
-		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-			continue
-		}
-
-		result := gjson.GetBytes(bodyBytes, "models")
-		if !result.Exists() {
-			continue
-		}
-
-		var models []modelEntry
-
-		for originalName, modelData := range result.Map() {
-			modelID := strings.TrimSpace(originalName)
-			if modelID == "" {
+		for attempt := 1; attempt <= maxFetchAttemptsPerEndpoint; attempt++ {
+			httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, strings.NewReader(string(payload)))
+			if errReq != nil {
 				continue
 			}
-			// Skip internal/experimental models
-			switch modelID {
-			case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
+			httpReq.Close = true
+			httpReq.Header.Set("Content-Type", "application/json")
+			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+			httpReq.Header.Set("User-Agent", misc.AntigravityUserAgent())
+
+			httpClient := client
+			if httpClient == nil {
+				httpClient = &http.Client{Timeout: 30 * time.Second}
+				if auth != nil {
+					if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
+						httpClient.Transport = transport
+					}
+				}
+			}
+			httpResp, errDo := httpClient.Do(httpReq)
+			if errDo != nil {
 				continue
 			}
 
-			displayName := modelData.Get("displayName").String()
-			if displayName == "" {
-				displayName = modelID
+			bodyBytes, errRead := io.ReadAll(httpResp.Body)
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("response body close error: %v", errClose)
+			}
+			if errRead != nil {
+				continue
 			}
 
-			entry := modelEntry{
-				ID:          modelID,
-				Object:      "model",
-				OwnedBy:     "antigravity",
-				Type:        "antigravity",
-				DisplayName: displayName,
-				Name:        modelID,
-				Description: displayName,
+			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+				continue
 			}
 
-			if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
-				entry.ContextLength = int(maxTok)
-			}
-			if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
-				entry.MaxCompletionTokens = int(maxOut)
+			result := gjson.GetBytes(bodyBytes, "models")
+			if !result.Exists() {
+				continue
 			}
 
-			models = append(models, entry)
+			var models []modelEntry
+
+			for originalName, modelData := range result.Map() {
+				modelID := strings.TrimSpace(originalName)
+				if modelID == "" {
+					continue
+				}
+				// Skip internal/experimental models
+				switch modelID {
+				case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
+					continue
+				}
+
+				displayName := modelData.Get("displayName").String()
+				if displayName == "" {
+					displayName = modelID
+				}
+
+				entry := modelEntry{
+					ID:          modelID,
+					Object:      "model",
+					OwnedBy:     "antigravity",
+					Type:        "antigravity",
+					DisplayName: displayName,
+					Name:        modelID,
+					Description: displayName,
+				}
+
+				if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
+					entry.ContextLength = int(maxTok)
+				}
+				if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
+					entry.MaxCompletionTokens = int(maxOut)
+				}
+
+				models = append(models, entry)
+			}
+
+			return models
 		}
-
-		return models
 	}
 
 	return nil

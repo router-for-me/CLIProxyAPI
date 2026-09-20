@@ -28,6 +28,7 @@ func appendCodexWebSearchServerToolUse(output []byte, params *ConvertCodexRespon
 	}
 
 	if !alreadyStarted {
+		output = append(output, stopCodexTextBlock(params)...)
 		output = append(output, finalizeCodexThinkingBlock(params)...)
 		template := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`)
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
@@ -133,7 +134,7 @@ func codexWebSearchResultContent(root, item gjson.Result) []byte {
 	if !results.IsArray() {
 		return nil
 	}
-	content := []byte(`[]`)
+	var resultBlocks [][]byte
 	results.ForEach(func(_, result gjson.Result) bool {
 		url := strings.TrimSpace(result.Get("url").String())
 		if url == "" {
@@ -146,28 +147,31 @@ func codexWebSearchResultContent(root, item gjson.Result) []byte {
 			title = url
 		}
 		block, _ = sjson.SetBytes(block, "title", title)
-		content, _ = sjson.SetRawBytes(content, "-1", block)
+		resultBlocks = append(resultBlocks, block)
 		return true
 	})
-	return content
+	if len(resultBlocks) == 0 {
+		return []byte(`[]`)
+	}
+	return translatorcommon.JoinRawArray(resultBlocks)
 }
 
-func appendCodexWebSearchNonStreamContent(out []byte, item gjson.Result, seen map[string]struct{}) []byte {
+func appendCodexWebSearchNonStreamBlocks(contentBlocks [][]byte, item gjson.Result, seen map[string]struct{}) [][]byte {
 	id := strings.TrimSpace(item.Get("id").String())
 	if id == "" {
-		return out
+		return contentBlocks
 	}
 	if seen == nil {
 		seen = make(map[string]struct{})
 	}
 	if _, ok := seen[id]; ok {
-		return out
+		return contentBlocks
 	}
 	emptyRoot := gjson.Result{}
 	query := codexWebSearchQuery(emptyRoot, item)
 	resultContent := codexWebSearchResultContent(emptyRoot, item)
 	if query == "" && len(resultContent) == 0 {
-		return out
+		return contentBlocks
 	}
 
 	useBlock := []byte(`{"type":"server_tool_use","id":"","name":"web_search","input":{}}`)
@@ -176,14 +180,22 @@ func appendCodexWebSearchNonStreamContent(out []byte, item gjson.Result, seen ma
 		input, _ := json.Marshal(map[string]string{"query": query})
 		useBlock, _ = sjson.SetRawBytes(useBlock, "input", input)
 	}
-	out, _ = sjson.SetRawBytes(out, "content.-1", useBlock)
+	contentBlocks = append(contentBlocks, useBlock)
 
 	resultBlock := []byte(`{"type":"web_search_tool_result","tool_use_id":"","content":[]}`)
 	resultBlock, _ = sjson.SetBytes(resultBlock, "tool_use_id", id)
 	if len(resultContent) > 0 {
 		resultBlock, _ = sjson.SetRawBytes(resultBlock, "content", resultContent)
 	}
-	out, _ = sjson.SetRawBytes(out, "content.-1", resultBlock)
+	contentBlocks = append(contentBlocks, resultBlock)
 	seen[id] = struct{}{}
+	return contentBlocks
+}
+
+func appendCodexWebSearchNonStreamContent(out []byte, item gjson.Result, seen map[string]struct{}) []byte {
+	blocks := appendCodexWebSearchNonStreamBlocks(nil, item, seen)
+	for _, block := range blocks {
+		out, _ = sjson.SetRawBytes(out, "content.-1", block)
+	}
 	return out
 }

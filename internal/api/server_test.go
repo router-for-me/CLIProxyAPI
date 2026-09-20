@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,17 +19,25 @@ import (
 	gin "github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	runtimehelps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
+	"gopkg.in/yaml.v3"
 )
 
 type codexSearchCaptureExecutor struct {
@@ -38,6 +47,10 @@ type codexSearchCaptureExecutor struct {
 	prepareErr   error
 	httpErr      error
 	responseBody io.ReadCloser
+	statuses     []int
+	refreshCalls int
+	httpCalls    int
+	beforeReturn func()
 }
 
 func (e *codexSearchCaptureExecutor) Identifier() string { return "codex" }
@@ -51,7 +64,13 @@ func (e *codexSearchCaptureExecutor) ExecuteStream(context.Context, *auth.Auth, 
 }
 
 func (e *codexSearchCaptureExecutor) Refresh(_ context.Context, a *auth.Auth) (*auth.Auth, error) {
-	return a, nil
+	e.refreshCalls++
+	updated := a.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	updated.Metadata["access_token"] = "refreshed-home-search-token"
+	return updated, nil
 }
 
 func (e *codexSearchCaptureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -63,7 +82,12 @@ func (e *codexSearchCaptureExecutor) PrepareRequest(req *http.Request, a *auth.A
 		return e.prepareErr
 	}
 	token, _ := a.Metadata["access_token"].(string)
-	req.Header.Set("Authorization", "Bearer "+token)
+	if strings.TrimSpace(token) == "" && a.Attributes != nil {
+		token = a.Attributes[auth.AttributeAPIKey]
+	}
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	return nil
 }
 
@@ -110,6 +134,7 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 	}
 	e.request = req.Clone(req.Context())
 	e.authIDs = append(e.authIDs, selected.ID)
+	e.httpCalls++
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
@@ -119,36 +144,94 @@ func (e *codexSearchCaptureExecutor) HttpRequest(_ context.Context, selected *au
 	if responseBody == nil {
 		responseBody = io.NopCloser(strings.NewReader(`{"results":[{"url":"https://example.com"}]}`))
 	}
+	statusCode := http.StatusOK
+	if e.httpCalls <= len(e.statuses) && e.statuses[e.httpCalls-1] > 0 {
+		statusCode = e.statuses[e.httpCalls-1]
+	}
+	if e.beforeReturn != nil {
+		e.beforeReturn()
+	}
 	return &http.Response{
-		StatusCode: http.StatusOK,
+		StatusCode: statusCode,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       responseBody,
 	}, nil
 }
 
 type codexSearchHomeDispatcher struct {
-	calls atomic.Int32
+	authID string
+	calls  atomic.Int32
+	policy atomic.Value
+}
+
+type homeUnauthorizedUsageCapture struct {
+	authID  string
+	records chan coreusage.Record
+}
+
+func (p *homeUnauthorizedUsageCapture) HandleUsage(_ context.Context, record coreusage.Record) {
+	if p == nil || record.ExecutorType != "home-result" || record.AuthID != p.authID {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func (p *homeUnauthorizedUsageCapture) wait(t *testing.T) coreusage.Record {
+	t.Helper()
+	select {
+	case record := <-p.records:
+		return record
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Home unauthorized usage record")
+		return coreusage.Record{}
+	}
+}
+
+type noopHomeUnauthorizedUsagePlugin struct{}
+
+func (noopHomeUnauthorizedUsagePlugin) HandleUsage(context.Context, coreusage.Record) {}
+
+func registerHomeUnauthorizedUsageCapture(t *testing.T, name, authID string) *homeUnauthorizedUsageCapture {
+	t.Helper()
+	capture := &homeUnauthorizedUsageCapture{authID: authID, records: make(chan coreusage.Record, 1)}
+	coreusage.RegisterNamedPlugin(name, capture)
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin(name, noopHomeUnauthorizedUsagePlugin{})
+	})
+	return capture
 }
 
 func (*codexSearchHomeDispatcher) HeartbeatOK() bool { return true }
 
 func (d *codexSearchHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
 	d.calls.Add(1)
+	authID := d.authID
+	if authID == "" {
+		authID = "home-codex-search"
+	}
 	return json.Marshal(map[string]any{
 		"model":      model,
-		"auth_index": "home-codex-search",
+		"auth_index": authID,
 		"auth": map[string]any{
-			"id":       "home-codex-search",
+			"id":       authID,
 			"provider": "codex",
 			"status":   "active",
 			"metadata": map[string]any{"access_token": "home-search-token"},
 		},
 		"concurrency": map[string]any{
 			"accounted":     true,
-			"credential_id": "home-codex-search",
+			"credential_id": authID,
 			"model":         model,
 		},
 	})
+}
+
+func (d *codexSearchHomeDispatcher) RPopAuthWithPolicy(ctx context.Context, model string, sessionID string, headers http.Header, count int, policy string) ([]byte, error) {
+	d.policy.Store(policy)
+	return d.RPopAuth(ctx, model, sessionID, headers, count)
 }
 
 func (*codexSearchHomeDispatcher) AbortAmbiguousDispatch() {}
@@ -159,6 +242,9 @@ func (*codexSearchBusyHomeDispatcher) HeartbeatOK() bool { return true }
 func (*codexSearchBusyHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
 	return []byte(`{"error":{"type":"credential_concurrency_exceeded","message":"busy","retry_after_ms":750}}`), nil
 }
+func (d *codexSearchBusyHomeDispatcher) RPopAuthWithPolicy(ctx context.Context, model string, sessionID string, headers http.Header, count int, _ string) ([]byte, error) {
+	return d.RPopAuth(ctx, model, sessionID, headers, count)
+}
 func (*codexSearchBusyHomeDispatcher) AbortAmbiguousDispatch() {}
 
 type trackedSearchResponseBody struct {
@@ -167,6 +253,24 @@ type trackedSearchResponseBody struct {
 }
 
 func (b *trackedSearchResponseBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+type errorSearchResponseBody struct {
+	payload []byte
+	read    atomic.Bool
+	closed  atomic.Bool
+}
+
+func (b *errorSearchResponseBody) Read(p []byte) (int, error) {
+	if !b.read.CompareAndSwap(false, true) {
+		return 0, io.EOF
+	}
+	return copy(p, b.payload), io.ErrUnexpectedEOF
+}
+
+func (b *errorSearchResponseBody) Close() error {
 	b.closed.Store(true)
 	return nil
 }
@@ -296,6 +400,140 @@ func TestAuditHomeCodexSearchBodyCloseBeforeRelease(t *testing.T) {
 	}
 }
 
+func TestHomeCodexAlphaSearchForwardsUnauthorizedResponseWithoutRefresh(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	server := newTestServer(t)
+	server.cfg.RequestLog = true
+	dispatcher := &codexSearchHomeDispatcher{}
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+	server.handlers.AuthManager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	executor := &codexSearchCaptureExecutor{
+		statuses:     []int{http.StatusUnauthorized},
+		responseBody: io.NopCloser(strings.NewReader(upstreamError)),
+	}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"id":"home-search-refresh","model":"gpt-5-codex","query":"test"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rr)
+	c.Request = req
+	server.codexAlphaSearch(c)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+	if got := rr.Body.String(); got != upstreamError {
+		t.Fatalf("body = %q, want original upstream error %q", got, upstreamError)
+	}
+	if executor.refreshCalls != 0 || executor.httpCalls != 1 {
+		t.Fatalf("refresh/http calls = %d/%d, want 0/1", executor.refreshCalls, executor.httpCalls)
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer home-search-token" {
+		t.Fatalf("Authorization = %q, want original Home token", got)
+	}
+	if got := dispatcher.calls.Load(); got != 1 {
+		t.Fatalf("Home RPOP calls = %d, want 1", got)
+	}
+	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
+	if !okResponse {
+		t.Fatal("API_RESPONSE was not captured")
+	}
+	apiResponse, _ := rawAPIResponse.([]byte)
+	if !strings.Contains(string(apiResponse), "Status: 401") || !strings.Contains(string(apiResponse), upstreamError) {
+		t.Fatalf("API_RESPONSE = %q, want original upstream 401", apiResponse)
+	}
+}
+
+func TestHomeCodexAlphaSearchReportsUnauthorizedBeforeEarlyReturn(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	tests := []struct {
+		name         string
+		responseBody func() io.ReadCloser
+		beforeReturn func(*executionregistry.Registry)
+		wantStatus   int
+		wantFailBody string
+	}{
+		{
+			name: "response bind failure",
+			responseBody: func() io.ReadCloser {
+				return &trackedSearchResponseBody{Reader: strings.NewReader(upstreamError)}
+			},
+			beforeReturn: func(registry *executionregistry.Registry) {
+				_ = registry.Close()
+			},
+			wantStatus:   http.StatusServiceUnavailable,
+			wantFailBody: "upstream unauthorized",
+		},
+		{
+			name: "response read failure",
+			responseBody: func() io.ReadCloser {
+				return &errorSearchResponseBody{payload: []byte(upstreamError)}
+			},
+			wantStatus:   http.StatusBadGateway,
+			wantFailBody: upstreamError,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(t)
+			registry := executionregistry.New()
+			server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+			testAuthID := "home-codex-search-" + strings.ReplaceAll(test.name, " ", "-")
+			server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{authID: testAuthID}, registry, 1)
+			executor := &codexSearchCaptureExecutor{
+				statuses:     []int{http.StatusUnauthorized},
+				responseBody: test.responseBody(),
+			}
+			if test.beforeReturn != nil {
+				executor.beforeReturn = func() { test.beforeReturn(registry) }
+			}
+			server.handlers.AuthManager.RegisterExecutor(executor)
+			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), testAuthID)
+
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
+			request.Header.Set("Authorization", "Bearer test-key")
+			server.engine.ServeHTTP(recorder, request)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			record := usageCapture.wait(t)
+			if record.Fail.StatusCode != http.StatusUnauthorized || record.Fail.Body != test.wantFailBody {
+				t.Fatalf("Home unauthorized failure = status %d body %q, want status 401 body %q", record.Fail.StatusCode, record.Fail.Body, test.wantFailBody)
+			}
+		})
+	}
+}
+
+func TestHomeCodexAlphaSearchRequestLogPreservesBodyReturnedWithReadError(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	server := newTestServer(t)
+	server.cfg.RequestLog = true
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{Home: proxyconfig.HomeConfig{Enabled: true}})
+	server.handlers.AuthManager.PublishHomeDispatch(&codexSearchHomeDispatcher{}, executionregistry.New(), 1)
+	server.handlers.AuthManager.RegisterExecutor(&codexSearchCaptureExecutor{
+		statuses:     []int{http.StatusUnauthorized},
+		responseBody: &errorSearchResponseBody{payload: []byte(upstreamError)},
+	})
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"model":"gpt-5-codex","query":"test"}`))
+	server.codexAlphaSearch(c)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
+	apiResponse, _ := rawAPIResponse.([]byte)
+	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+	}
+}
+
 func TestHomeCodexAlphaSearchEndsSelectionAcrossDirectHTTPPaths(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -348,6 +586,9 @@ func TestHomeCodexAlphaSearchEndsSelectionAcrossDirectHTTPPaths(t *testing.T) {
 			}
 			if got := dispatcher.calls.Load(); got != 1 {
 				t.Fatalf("Home RPOP calls = %d, want 1", got)
+			}
+			if got, _ := dispatcher.policy.Load().(string); got != auth.CredentialPolicyCodexAlphaSearchV1 {
+				t.Fatalf("Home credential policy = %q, want %q", got, auth.CredentialPolicyCodexAlphaSearchV1)
 			}
 			if got := body.closed.Load(); got != test.wantClosed {
 				t.Fatalf("response body closed = %t, want %t", got, test.wantClosed)
@@ -430,6 +671,65 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
+func TestHealthzAccessLogging(t *testing.T) {
+	server := newTestServer(t)
+	previousHome := home.Current()
+	home.ClearCurrent()
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.InfoLevel)
+	t.Cleanup(func() { logger.ReplaceHooks(previousHooks); logger.SetLevel(previousLevel) })
+	for _, tc := range []struct {
+		name        string
+		homeEnabled bool
+		status      int
+	}{
+		{"healthy", false, http.StatusOK},
+		{"home_unavailable", true, http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server.cfg.Home.Enabled = tc.homeEnabled
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				t.Run(method, func(t *testing.T) {
+					hook.Reset()
+					recorder := httptest.NewRecorder()
+					server.engine.ServeHTTP(recorder, httptest.NewRequest(method, "/healthz", nil))
+					if recorder.Code != tc.status {
+						t.Fatalf("status = %d, want %d", recorder.Code, tc.status)
+					}
+					count := 0
+					for _, entry := range hook.AllEntries() {
+						if _, ok := entry.Data["request_id"]; ok && strings.Contains(entry.Message, `"/healthz"`) {
+							count++
+							if tc.homeEnabled && entry.Level != log.ErrorLevel {
+								t.Errorf("failed probe log level = %v, want error", entry.Level)
+							}
+						}
+					}
+					wantCount := 0
+					if tc.homeEnabled {
+						wantCount = 1
+					}
+					if count != wantCount {
+						t.Errorf("probe access logs = %d, want %d", count, wantCount)
+					}
+					hook.Reset()
+					server.engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz-access-log-control", nil))
+					for _, entry := range hook.AllEntries() {
+						if _, ok := entry.Data["request_id"]; ok && strings.Contains(entry.Message, `"/healthz-access-log-control"`) {
+							return
+						}
+					}
+					t.Error("ordinary request did not emit an access log after health probe")
+				})
+			}
+		})
+	}
+}
+
 func TestCodexLiveRoutesRequireAuthAndAreRegistered(t *testing.T) {
 	server := newTestServer(t)
 
@@ -466,6 +766,84 @@ func TestCodexLiveRoutesRequireAuthAndAreRegistered(t *testing.T) {
 		server.engine.ServeHTTP(authorizedRecorder, authorized)
 		if authorizedRecorder.Code != http.StatusUpgradeRequired {
 			t.Fatalf("%s authorized status = %d, want %d; body=%s", path, authorizedRecorder.Code, http.StatusUpgradeRequired, authorizedRecorder.Body.String())
+		}
+	}
+}
+
+func TestRealtimeStandardRoutesAndClientSecretAuth(t *testing.T) {
+	server := newTestServer(t)
+
+	unauthorizedSecret := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	unauthorizedSecretRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(unauthorizedSecretRecorder, unauthorizedSecret)
+	if unauthorizedSecretRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("client_secrets unauthorized status = %d, want %d", unauthorizedSecretRecorder.Code, http.StatusUnauthorized)
+	}
+	var unauthorizedResponse struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(unauthorizedSecretRecorder.Body.Bytes(), &unauthorizedResponse); errUnmarshal != nil {
+		t.Fatalf("unmarshal unauthorized response: %v", errUnmarshal)
+	}
+	if unauthorizedResponse.Error.Type != "authentication_error" || unauthorizedResponse.Error.Code != "invalid_api_key" {
+		t.Fatalf("unauthorized error = %+v", unauthorizedResponse.Error)
+	}
+
+	secretRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/client_secrets", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	secretRequest.Header.Set("Authorization", "Bearer test-key")
+	secretRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(secretRecorder, secretRequest)
+	if secretRecorder.Code != http.StatusOK {
+		t.Fatalf("client_secrets status = %d, want %d; body=%s", secretRecorder.Code, http.StatusOK, secretRecorder.Body.String())
+	}
+	var secretResponse struct {
+		Value string `json:"value"`
+	}
+	if errUnmarshal := json.Unmarshal(secretRecorder.Body.Bytes(), &secretResponse); errUnmarshal != nil {
+		t.Fatalf("unmarshal client secret: %v", errUnmarshal)
+	}
+	if secretResponse.Value == "" {
+		t.Fatal("client secret is empty")
+	}
+
+	callRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls", strings.NewReader("v=0\r\n"))
+	callRequest.Header.Set("Authorization", "Bearer "+secretResponse.Value)
+	callRequest.Header.Set("Content-Type", "application/sdp")
+	callRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(callRecorder, callRequest)
+	if callRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ephemeral call status = %d, want %d; body=%s", callRecorder.Code, http.StatusServiceUnavailable, callRecorder.Body.String())
+	}
+
+	for _, testCase := range []struct {
+		method string
+		path   string
+		status int
+	}{
+		{method: http.MethodGet, path: "/v1/realtime?model=gpt-realtime", status: http.StatusUpgradeRequired},
+		{method: http.MethodPost, path: "/v1/realtime", status: http.StatusServiceUnavailable},
+		{method: http.MethodPost, path: "/v1/realtime/sessions", status: http.StatusOK},
+		{method: http.MethodPost, path: "/v1/realtime/transcription_sessions", status: http.StatusNotImplemented},
+		{method: http.MethodGet, path: "/v1/realtime/translations", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/translations", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/translations/client_secrets", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/accept", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/reject", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/refer", status: http.StatusNotImplemented},
+		{method: http.MethodPost, path: "/v1/realtime/calls/call-123/hangup", status: http.StatusNotFound},
+	} {
+		request := httptest.NewRequest(testCase.method, testCase.path, nil)
+		request.Header.Set("Authorization", "Bearer test-key")
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != testCase.status {
+			t.Errorf("%s %s status = %d, want %d; body=%s", testCase.method, testCase.path, recorder.Code, testCase.status, recorder.Body.String())
+		}
+		if testCase.method == http.MethodGet && testCase.path == "/v1/realtime?model=gpt-realtime" && recorder.Header().Get("Upgrade") != "websocket" {
+			t.Errorf("Upgrade header = %q, want websocket", recorder.Header().Get("Upgrade"))
 		}
 	}
 }
@@ -737,7 +1115,7 @@ func TestCodexAlphaSearchSanitizesResponsesOnlyFields(t *testing.T) {
 	}
 }
 
-func TestCodexAlphaSearchRequiresOAuthCredential(t *testing.T) {
+func TestCodexAlphaSearchCredentialPolicy(t *testing.T) {
 	newServer := func(t *testing.T, credentials ...*auth.Auth) (*Server, *codexSearchCaptureExecutor) {
 		t.Helper()
 		server := newTestServer(t)
@@ -783,7 +1161,7 @@ func TestCodexAlphaSearchRequiresOAuthCredential(t *testing.T) {
 		}
 	})
 
-	t.Run("API key only", func(t *testing.T) {
+	t.Run("ordinary API key only", func(t *testing.T) {
 		server, executor := newServer(t, apiKeyCredential())
 		req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
 		req.Header.Set("Authorization", "Bearer test-key")
@@ -797,6 +1175,212 @@ func TestCodexAlphaSearchRequiresOAuthCredential(t *testing.T) {
 			t.Fatalf("selected auth IDs = %v, want none", executor.authIDs)
 		}
 	})
+}
+
+func TestCodexAlphaSearchOptInAPIKeyUsesConfiguredEndpoint(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{
+		ID:       "codex-alpha-api-key",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey:           "codex-alpha-key",
+			auth.AttributeCodexAlphaSearch: "true",
+			"base_url":                     "https://codex.example.com/v1/",
+		},
+	}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("register Codex API key: %v", errRegister)
+	}
+
+	payload := `{"query":"golang","prompt_cache_key":"cache","prompt_cache_retention":"24h"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.request == nil {
+		t.Fatal("Codex executor did not receive a request")
+	}
+	if got, want := executor.request.URL.String(), "https://codex.example.com/v1/alpha/search"; got != want {
+		t.Fatalf("upstream URL = %q, want %q", got, want)
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer codex-alpha-key" {
+		t.Fatalf("Authorization = %q, want API key bearer", got)
+	}
+	var upstreamBody map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(executor.body, &upstreamBody); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream body: %v", errUnmarshal)
+	}
+	for _, field := range []string{"prompt_cache_key", "prompt_cache_retention"} {
+		if _, exists := upstreamBody[field]; exists {
+			t.Fatalf("upstream body contains %s: %s", field, executor.body)
+		}
+	}
+}
+
+func TestCodexAlphaSearchOptInAPIKeyStripsCredentialPrefix(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	credential := &auth.Auth{
+		ID:       "codex-alpha-api-key-prefix",
+		Provider: "codex",
+		Prefix:   "vendor",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey:           "codex-alpha-key",
+			auth.AttributeCodexAlphaSearch: "true",
+			"base_url":                     "https://codex.example.com/v1",
+		},
+	}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("register Codex API key: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "vendor/gpt-5.6-sol"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	payload := `{"id":"00000000-0000-4000-8000-000000000003","model":"vendor/gpt-5.6-sol","commands":{"search_query":[{"q":"Go programming language official website"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.request == nil {
+		t.Fatal("Codex executor did not receive a request")
+	}
+	var upstreamBody map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(executor.body, &upstreamBody); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream body: %v", errUnmarshal)
+	}
+	var upstreamModel string
+	if errUnmarshal := json.Unmarshal(upstreamBody["model"], &upstreamModel); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream model: %v", errUnmarshal)
+	}
+	if upstreamModel != "gpt-5.6-sol" {
+		t.Fatalf("upstream model = %q, want gpt-5.6-sol", upstreamModel)
+	}
+}
+
+func TestCodexAlphaSearchOptInAPIKeyResolvesModelAlias(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	server.handlers.AuthManager.SetConfig(&proxyconfig.Config{
+		CodexKey: []proxyconfig.CodexKey{{
+			APIKey:      "codex-alpha-key",
+			Prefix:      "vendor",
+			BaseURL:     "https://codex.example.com/v1",
+			AlphaSearch: true,
+			Models: []proxyconfig.CodexModel{{
+				Name:  "gpt-5.6-sol",
+				Alias: "sol-alias",
+			}},
+		}},
+	})
+	credential := &auth.Auth{
+		ID:       "codex-alpha-api-key-alias",
+		Provider: "codex",
+		Prefix:   "vendor",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey:           "codex-alpha-key",
+			auth.AttributeCodexAlphaSearch: "true",
+			"base_url":                     "https://codex.example.com/v1",
+		},
+	}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("register Codex API key: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "vendor/sol-alias"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	payload := `{"model":"vendor/sol-alias","commands":{"search_query":[{"q":"golang"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if executor.request == nil {
+		t.Fatal("Codex executor did not receive a request")
+	}
+	var upstreamBody map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(executor.body, &upstreamBody); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream body: %v", errUnmarshal)
+	}
+	var upstreamModel string
+	if errUnmarshal := json.Unmarshal(upstreamBody["model"], &upstreamModel); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream model: %v", errUnmarshal)
+	}
+	if upstreamModel != "gpt-5.6-sol" {
+		t.Fatalf("upstream model = %q, want gpt-5.6-sol", upstreamModel)
+	}
+}
+
+func TestRewriteCodexAlphaSearchModel(t *testing.T) {
+	original := []byte(`{"id":"search-1","model":"vendor/gpt-5.6-sol","commands":{"search_query":[{"q":"golang"}]}}`)
+	rewritten := rewriteCodexAlphaSearchModel(original, "gpt-5.6-sol")
+	var payload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(rewritten, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal rewritten body: %v", errUnmarshal)
+	}
+	var model string
+	if errUnmarshal := json.Unmarshal(payload["model"], &model); errUnmarshal != nil {
+		t.Fatalf("unmarshal rewritten model: %v", errUnmarshal)
+	}
+	if model != "gpt-5.6-sol" {
+		t.Fatalf("model = %q, want gpt-5.6-sol", model)
+	}
+	if _, exists := payload["commands"]; !exists {
+		t.Fatal("commands field was dropped")
+	}
+	if string(rewriteCodexAlphaSearchModel([]byte(`{"query":"x"}`), "gpt-5.6-sol")) != `{"query":"x"}` {
+		t.Fatal("body without model should remain unchanged")
+	}
+}
+
+func TestCodexAlphaSearchOptInAPIKeyWithoutBaseURLFailsClosed(t *testing.T) {
+	server := newTestServer(t)
+	executor := &codexSearchCaptureExecutor{}
+	server.handlers.AuthManager.RegisterExecutor(executor)
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), &auth.Auth{
+		ID:       "codex-alpha-api-key",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey:           "codex-alpha-key",
+			auth.AttributeCodexAlphaSearch: "true",
+		},
+	}); errRegister != nil {
+		t.Fatalf("register Codex API key: %v", errRegister)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(`{"query":"GPT-5.6"}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if executor.request != nil {
+		t.Fatal("request was sent without an API key base URL")
+	}
 }
 
 func TestCodexAlphaSearchPassesGinContextToAuthSelection(t *testing.T) {
@@ -1488,17 +2072,18 @@ func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"
-	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
 		{
-			ID:            "gpt-5.5",
-			Object:        "model",
-			Created:       1776902400,
-			OwnedBy:       "openai",
-			Type:          "openai",
-			DisplayName:   "GPT 5.5",
-			Description:   "Frontier model for complex coding, research, and real-world work.",
-			ContextLength: 272000,
-			Thinking:      &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+			ID:                  "gpt-5.5",
+			Object:              "model",
+			Created:             1776902400,
+			OwnedBy:             "openai",
+			Type:                "openai",
+			DisplayName:         "GPT 5.5",
+			Description:         "Frontier model for complex coding, research, and real-world work.",
+			ContextLength:       272000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
 		{
 			ID:            "custom-codex-model-test",
@@ -1512,8 +2097,13 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		},
 		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5-flare", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5-sunburst", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
+		{ID: "grok-imagine-image-2.0", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
+		{ID: "grok-imagine-video-1.5", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video-1.5-preview", Object: "model", OwnedBy: "xai", Type: "openai"},
 	})
 	t.Cleanup(func() {
@@ -1564,6 +2154,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if _, ok := gpt55["minimal_client_version"]; !ok {
 		t.Fatal("expected minimal_client_version in codex catalog")
 	}
+	if got, _ := gpt55["max_tokens"].(float64); got != 64000 {
+		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
+	}
 	serviceTiers, ok := gpt55["service_tiers"].([]any)
 	if !ok || len(serviceTiers) != 1 {
 		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
@@ -1611,8 +2204,13 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	hiddenModels := map[string]bool{
 		"grok-imagine-image-quality":     false,
 		"gpt-image-2":                    false,
+		"gpt-image-2.5-flare":            false,
+		"gpt-image-2.5-sunburst":         false,
+		"gpt-image-2.5":                  false,
 		"grok-imagine-image":             false,
+		"grok-imagine-image-2.0":         false,
 		"grok-imagine-video":             false,
+		"grok-imagine-video-1.5":         false,
 		"grok-imagine-video-1.5-preview": false,
 	}
 	for _, model := range resp.Models {
@@ -1628,6 +2226,255 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	for slug, found := range hiddenModels {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
+		}
+	}
+}
+
+func TestModelsWithClientVersion_DevinDisplayName(t *testing.T) {
+	devinClientID := "test-devin-client-version-models"
+	openaiClientID := "test-openai-client-version-models"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(devinClientID, "devin", []*registry.ModelInfo{
+		{
+			ID:          "devin/swe-2",
+			Object:      "model",
+			OwnedBy:     "cognition",
+			Type:        "devin",
+			DisplayName: "SWE-2",
+		},
+		{
+			ID:          "devin/gpt-6-astra",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "devin",
+			DisplayName: "GPT-6 Astra",
+		},
+	})
+	modelRegistry.RegisterClient(openaiClientID, "openai", []*registry.ModelInfo{
+		{
+			ID:          "standard-openai-model",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "openai",
+			DisplayName: "Standard Model",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(devinClientID)
+		modelRegistry.UnregisterClient(openaiClientID)
+	})
+
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Models []map[string]any `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(rr.Body.Bytes(), &resp); errUnmarshal != nil {
+		t.Fatalf("failed to parse response JSON: %v", errUnmarshal)
+	}
+
+	bySlug := make(map[string]map[string]any, len(resp.Models))
+	for _, m := range resp.Models {
+		if slug, ok := m["slug"].(string); ok {
+			bySlug[slug] = m
+		}
+	}
+
+	swe2, ok := bySlug["devin/swe-2"]
+	if !ok {
+		t.Fatal("expected devin/swe-2 in models list")
+	}
+	if got, _ := swe2["display_name"].(string); got != "SWE-2 (Devin)" {
+		t.Fatalf("devin/swe-2 display_name = %q, want SWE-2 (Devin)", got)
+	}
+
+	astra, ok := bySlug["devin/gpt-6-astra"]
+	if !ok {
+		t.Fatal("expected devin/gpt-6-astra in models list")
+	}
+	if got, _ := astra["display_name"].(string); got != "GPT-6 Astra (Devin)" {
+		t.Fatalf("devin/gpt-6-astra display_name = %q, want GPT-6 Astra (Devin)", got)
+	}
+
+	std, ok := bySlug["standard-openai-model"]
+	if !ok {
+		t.Fatal("expected standard-openai-model in models list")
+	}
+	if got, _ := std["display_name"].(string); got != "Standard Model" {
+		t.Fatalf("standard-openai-model display_name = %q, want Standard Model", got)
+	}
+}
+
+func TestHomeCodexClientModels_DevinDisplayName(t *testing.T) {
+	entries := []homeModelEntry{
+		{
+			id:          "devin/swe-2",
+			displayName: "SWE-2",
+			providers:   []string{"devin"},
+		},
+		{
+			id:          "home-regular",
+			displayName: "Home Regular",
+			providers:   []string{"openai"},
+		},
+	}
+	models := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, formatHomeCodexModel(entry))
+	}
+	resp := codexmodels.BuildResponseForClient(models, nil, false, "0.153.4")
+	catalog, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected []map[string]any, got %T", resp["models"])
+	}
+	bySlug := make(map[string]map[string]any, len(catalog))
+	for _, m := range catalog {
+		slug, _ := m["slug"].(string)
+		bySlug[slug] = m
+	}
+	if got, _ := bySlug["devin/swe-2"]["display_name"].(string); got != "SWE-2 (Devin)" {
+		t.Fatalf("devin/swe-2 display_name = %q, want SWE-2 (Devin)", got)
+	}
+	if got, _ := bySlug["home-regular"]["display_name"].(string); got != "Home Regular" {
+		t.Fatalf("home-regular display_name = %q, want Home Regular", got)
+	}
+}
+
+func TestCodexClientModelsEndpoint_FiltersMaxAndUltraForOlderClientVersion(t *testing.T) {
+	clientID := "codex-client-version-filter-test"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+		{
+			ID:          "gpt-5.6-sol",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "openai",
+			DisplayName: "GPT-5.6-Sol",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+
+	// Older client version 0.137.0 should NOT have max or ultra reasoning levels
+	reqOld := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.137.0", nil)
+	reqOld.Header.Set("Authorization", "Bearer test-key")
+	rrOld := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrOld, reqOld)
+
+	if rrOld.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rrOld.Code, http.StatusOK, rrOld.Body.String())
+	}
+
+	var respOld struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rrOld.Body.Bytes(), &respOld); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	foundSol := false
+	for _, m := range respOld.Models {
+		if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+			foundSol = true
+			levels, ok := m["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("expected supported_reasoning_levels for gpt-5.6-sol, got %#v", m["supported_reasoning_levels"])
+			}
+			for _, rawLevel := range levels {
+				level, _ := rawLevel.(map[string]any)
+				effort, _ := level["effort"].(string)
+				if effort == "max" || effort == "ultra" {
+					t.Fatalf("older client 0.137.0 received unsupported reasoning effort %q", effort)
+				}
+			}
+		}
+	}
+	if !foundSol {
+		t.Fatal("expected gpt-5.6-sol in codex catalog")
+	}
+
+	// Newer client version 0.149.1 should preserve max and ultra reasoning levels
+	reqNew := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.149.1", nil)
+	reqNew.Header.Set("Authorization", "Bearer test-key")
+	rrNew := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrNew, reqNew)
+
+	if rrNew.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rrNew.Code, http.StatusOK, rrNew.Body.String())
+	}
+
+	var respNew struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rrNew.Body.Bytes(), &respNew); err != nil {
+		t.Fatalf("failed to parse response JSON: %v", err)
+	}
+
+	foundNewUltra := false
+	for _, m := range respNew.Models {
+		if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+			levels, ok := m["supported_reasoning_levels"].([]any)
+			if !ok {
+				t.Fatalf("expected supported_reasoning_levels for gpt-5.6-sol, got %#v", m["supported_reasoning_levels"])
+			}
+			for _, rawLevel := range levels {
+				level, _ := rawLevel.(map[string]any)
+				if effort, _ := level["effort"].(string); effort == "ultra" {
+					foundNewUltra = true
+				}
+			}
+		}
+	}
+	if !foundNewUltra {
+		t.Fatal("expected ultra reasoning effort for newer client 0.149.1")
+	}
+
+	// Unparseable / empty client versions (e.g. client_version=, client_version=pi) should also preserve max and ultra (unfiltered)
+	for _, unparsedVersion := range []string{"", "pi", "latest"} {
+		path := "/v1/models?client_version=" + unparsedVersion
+		reqUnparsed := httptest.NewRequest(http.MethodGet, path, nil)
+		reqUnparsed.Header.Set("Authorization", "Bearer test-key")
+		rrUnparsed := httptest.NewRecorder()
+		server.engine.ServeHTTP(rrUnparsed, reqUnparsed)
+
+		if rrUnparsed.Code != http.StatusOK {
+			t.Fatalf("path %q status = %d, want %d body=%s", path, rrUnparsed.Code, http.StatusOK, rrUnparsed.Body.String())
+		}
+
+		var respUnparsed struct {
+			Models []map[string]any `json:"models"`
+		}
+		if err := json.Unmarshal(rrUnparsed.Body.Bytes(), &respUnparsed); err != nil {
+			t.Fatalf("path %q parse error: %v", path, err)
+		}
+
+		foundUltra := false
+		for _, m := range respUnparsed.Models {
+			if slug, _ := m["slug"].(string); slug == "gpt-5.6-sol" {
+				levels, _ := m["supported_reasoning_levels"].([]any)
+				for _, rawLevel := range levels {
+					level, _ := rawLevel.(map[string]any)
+					if effort, _ := level["effort"].(string); effort == "ultra" {
+						foundUltra = true
+					}
+				}
+			}
+		}
+		if !foundUltra {
+			t.Fatalf("path %q expected ultra reasoning effort to be preserved for unparsed client_version", path)
 		}
 	}
 }
@@ -1843,7 +2690,13 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 			{
 				"name": "models/gemini-3-pro",
 				"inputTokenLimit": 1048576,
-				"outputTokenLimit": 65536
+				"outputTokenLimit": 65536,
+				"thinking": {
+					"min": 128,
+					"max": 65535,
+					"dynamic_allowed": true,
+					"levels": ["low", "medium", "high"]
+				}
 			}
 		]
 	}`))
@@ -1868,6 +2721,17 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	}
 	if geminiEntry.contextLength != 1048576 || geminiEntry.maxCompletionTokens != 65536 {
 		t.Fatalf("gemini token metadata = %d/%d, want 1048576/65536", geminiEntry.contextLength, geminiEntry.maxCompletionTokens)
+	}
+	if geminiEntry.thinking == nil || !reflect.DeepEqual(geminiEntry.thinking.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("gemini thinking metadata = %#v, want low/medium/high", geminiEntry.thinking)
+	}
+
+	formatted := formatHomeCodexModel(geminiEntry)
+	if got := homeModelInt64Value(formatted, "context_length"); got != 1048576 {
+		t.Fatalf("formatted Gemini context_length = %d, want 1048576", got)
+	}
+	if got, ok := formatted["thinking"].(*registry.ThinkingSupport); !ok || !reflect.DeepEqual(got.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("formatted Gemini thinking metadata = %#v, want low/medium/high", formatted["thinking"])
 	}
 }
 
@@ -1915,5 +2779,440 @@ func TestInteractionsRouteRegistered(t *testing.T) {
 	server.engine.ServeHTTP(rr, req)
 	if rr.Code == http.StatusNotFound {
 		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUpdateClientsContext_AntigravityConnectionPoolPurgesTransports(t *testing.T) {
+	server := newTestServer(t)
+
+	enabled := true
+	disabled := false
+
+	cfg1 := *server.cfg
+	cfg1.Antigravity.ConnectionPool.Enabled = &enabled
+	cfg1.Antigravity.ConnectionPool.IdleConnTimeout = "30s"
+	server.oldConfigYaml, _ = yaml.Marshal(&cfg1)
+
+	// Pre-populate the cache before reload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	testAuth := &auth.Auth{
+		ID:         "hot-reload-test-auth",
+		Provider:   "antigravity",
+		Attributes: map[string]string{"base_url": srv.URL},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "proj",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	exec := executor.NewAntigravityExecutor(&cfg1)
+	req := httptest.NewRequest(http.MethodGet, srv.URL, nil)
+	_, _ = exec.HttpRequest(context.Background(), testAuth, req)
+
+	if executor.AntigravityTransportsLen() == 0 {
+		t.Fatal("expected Antigravity transports to be cached before hot reload")
+	}
+
+	cfg2 := cfg1
+	cfg2.Antigravity.ConnectionPool.Enabled = &disabled
+	cfg2.Antigravity.ConnectionPool.IdleConnTimeout = "10s"
+
+	if ok := server.UpdateClientsContext(context.Background(), &cfg2); !ok {
+		t.Fatal("UpdateClientsContext returned false")
+	}
+
+	if got := executor.AntigravityTransportsLen(); got != 0 {
+		t.Fatalf("AntigravityTransportsLen() after reload = %d, want 0", got)
+	}
+}
+
+type mockServerStreamingCaptureExecutor struct {
+	cfg            *proxyconfig.Config
+	capturedCtx    context.Context
+	executionCalls int
+}
+
+func (e *mockServerStreamingCaptureExecutor) Identifier() string { return "codex-test" }
+
+func (e *mockServerStreamingCaptureExecutor) Execute(ctx context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	e.capturedCtx = ctx
+	return coreexecutor.Response{Payload: []byte(`{"id":"resp-1","status":"completed"}`)}, nil
+}
+
+func (e *mockServerStreamingCaptureExecutor) ExecuteStream(ctx context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.capturedCtx = ctx
+	e.executionCalls++
+
+	runtimehelps.RecordAPIRequest(ctx, e.cfg, runtimehelps.UpstreamRequestLog{
+		URL:     "https://api.example.com/v1/responses",
+		Method:  http.MethodPost,
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-5-codex","input":[]}`),
+	})
+
+	ch := make(chan coreexecutor.StreamChunk, 2)
+	chunkPayload := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\"}\n\n")
+	runtimehelps.AppendAPIResponseChunk(ctx, e.cfg, chunkPayload)
+	ch <- coreexecutor.StreamChunk{Payload: chunkPayload}
+
+	terminalPayload := []byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n")
+	runtimehelps.AppendAPIResponseChunk(ctx, e.cfg, terminalPayload)
+	ch <- coreexecutor.StreamChunk{Payload: terminalPayload}
+	close(ch)
+
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *mockServerStreamingCaptureExecutor) Refresh(_ context.Context, auth *auth.Auth) (*auth.Auth, error) {
+	return auth, nil
+}
+
+func (e *mockServerStreamingCaptureExecutor) CountTokens(_ context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *mockServerStreamingCaptureExecutor) HttpRequest(_ context.Context, _ *auth.Auth, _ *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestServerResponsesStreamingRequestLogCapturesUpstreamSections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	logsDir := filepath.Join(tmpDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+
+	mockLogger := internallogging.NewFileRequestLogger(true, logsDir, "", 10)
+	server := newTestServerWithOptions(t, WithRequestLoggerFactory(func(*proxyconfig.Config, string) internallogging.RequestLogger {
+		return mockLogger
+	}))
+	server.cfg.RequestLog = true
+	server.cfg.LoggingToFile = true
+
+	mockExec := &mockServerStreamingCaptureExecutor{cfg: server.cfg}
+	server.handlers.AuthManager.RegisterExecutor(mockExec)
+
+	credential := &auth.Auth{
+		ID:       "codex-stream-auth",
+		Provider: mockExec.Identifier(),
+		Status:   auth.StatusActive,
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5-codex"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	rr := httptest.NewRecorder()
+	body := `{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if mockExec.executionCalls != 1 {
+		t.Fatalf("executor calls = %d, want 1", mockExec.executionCalls)
+	}
+
+	entries, errReadDir := os.ReadDir(logsDir)
+	if errReadDir != nil {
+		t.Fatalf("read logs dir: %v", errReadDir)
+	}
+	var logPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "v1-responses-") && strings.HasSuffix(entry.Name(), ".log") {
+			logPath = filepath.Join(logsDir, entry.Name())
+			break
+		}
+	}
+	if logPath == "" {
+		t.Fatal("streaming request log was not created in logs dir")
+	}
+	content, errReadLog := os.ReadFile(logPath)
+	if errReadLog != nil {
+		t.Fatalf("read log file: %v", errReadLog)
+	}
+	logText := string(content)
+	apiRequestIdx := strings.Index(logText, "=== API REQUEST 1 ===")
+	if apiRequestIdx == -1 {
+		t.Fatalf("streaming log missing API REQUEST 1:\n%s", logText)
+	}
+	apiResponseIdx := strings.Index(logText, "=== API RESPONSE 1 ===")
+	if apiResponseIdx == -1 {
+		t.Fatalf("streaming log missing API RESPONSE 1:\n%s", logText)
+	}
+	downstreamResponseIdx := strings.Index(logText, "=== RESPONSE ===")
+	if downstreamResponseIdx == -1 {
+		t.Fatalf("streaming log missing downstream RESPONSE:\n%s", logText)
+	}
+	if apiRequestIdx >= apiResponseIdx || apiResponseIdx >= downstreamResponseIdx {
+		t.Fatalf("unexpected section order (req=%d, apiResp=%d, resp=%d):\n%s", apiRequestIdx, apiResponseIdx, downstreamResponseIdx, logText)
+	}
+	apiRequestSection := logText[apiRequestIdx:apiResponseIdx]
+	apiResponseSection := logText[apiResponseIdx:downstreamResponseIdx]
+	if !strings.Contains(apiRequestSection, "https://api.example.com/v1/responses") {
+		t.Fatalf("API REQUEST section missing upstream URL:\n%s", apiRequestSection)
+	}
+	if !strings.Contains(apiRequestSection, `"gpt-5-codex"`) {
+		t.Fatalf("API REQUEST section missing request body:\n%s", apiRequestSection)
+	}
+	if !strings.Contains(apiResponseSection, "response.output_item.added") {
+		t.Fatalf("API RESPONSE section missing response chunk data:\n%s", apiResponseSection)
+	}
+}
+
+func TestServerCodexAPIKeyResponsesStreamingRequestLog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamReceived := make(chan struct{}, 1)
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case upstreamReceived <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.added\"}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer mockUpstream.Close()
+
+	tmpDir := t.TempDir()
+	logsDir := filepath.Join(tmpDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+
+	mockLogger := internallogging.NewFileRequestLogger(true, logsDir, "", 10)
+	server := newTestServerWithOptions(t, WithRequestLoggerFactory(func(*proxyconfig.Config, string) internallogging.RequestLogger {
+		return mockLogger
+	}))
+	server.cfg.RequestLog = true
+	server.cfg.LoggingToFile = true
+
+	codexExec := executor.NewCodexExecutor(server.cfg)
+	server.handlers.AuthManager.RegisterExecutor(codexExec)
+
+	credential := &auth.Auth{
+		ID:       "codex-api-key-test",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey: "test-codex-key",
+			"base_url":           mockUpstream.URL,
+		},
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5-codex"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	rr := httptest.NewRecorder()
+	body := `{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	select {
+	case <-upstreamReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
+	}
+
+	entries, errReadDir := os.ReadDir(logsDir)
+	if errReadDir != nil {
+		t.Fatalf("read logs dir: %v", errReadDir)
+	}
+	var logPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "v1-responses-") && strings.HasSuffix(entry.Name(), ".log") {
+			logPath = filepath.Join(logsDir, entry.Name())
+			break
+		}
+	}
+	if logPath == "" {
+		t.Fatal("streaming request log was not created in logs dir")
+	}
+	content, errReadLog := os.ReadFile(logPath)
+	if errReadLog != nil {
+		t.Fatalf("read log file: %v", errReadLog)
+	}
+	logText := string(content)
+	apiRequestIdx := strings.Index(logText, "=== API REQUEST 1 ===")
+	if apiRequestIdx == -1 {
+		t.Fatalf("streaming log missing API REQUEST 1:\n%s", logText)
+	}
+	apiResponseIdx := strings.Index(logText, "=== API RESPONSE 1 ===")
+	if apiResponseIdx == -1 {
+		t.Fatalf("streaming log missing API RESPONSE 1:\n%s", logText)
+	}
+	downstreamResponseIdx := strings.Index(logText, "=== RESPONSE ===")
+	if downstreamResponseIdx == -1 {
+		t.Fatalf("streaming log missing downstream RESPONSE:\n%s", logText)
+	}
+	if apiRequestIdx >= apiResponseIdx || apiResponseIdx >= downstreamResponseIdx {
+		t.Fatalf("unexpected section order (req=%d, apiResp=%d, resp=%d):\n%s", apiRequestIdx, apiResponseIdx, downstreamResponseIdx, logText)
+	}
+	apiRequestSection := logText[apiRequestIdx:apiResponseIdx]
+	apiResponseSection := logText[apiResponseIdx:downstreamResponseIdx]
+	if !strings.Contains(apiRequestSection, mockUpstream.URL) {
+		t.Fatalf("API REQUEST section missing upstream URL %s:\n%s", mockUpstream.URL, apiRequestSection)
+	}
+	if !strings.Contains(apiRequestSection, `"gpt-5-codex"`) {
+		t.Fatalf("API REQUEST section missing request body:\n%s", apiRequestSection)
+	}
+	if !strings.Contains(apiResponseSection, "response.output_item.added") {
+		t.Fatalf("API RESPONSE section missing response chunk data:\n%s", apiResponseSection)
+	}
+}
+
+func TestModelsForCPAClientSerializesWebSearchCapabilities(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	registrations := []struct {
+		clientID string
+		provider string
+		modelID  string
+	}{
+		{"cpa-web-search-codex", "codex", "cpa-search-codex-model"},
+		{"cpa-web-search-xai", "xai", "cpa-search-xai-model"},
+		{"cpa-web-search-claude", "claude", "cpa-search-claude-model"},
+		{"cpa-web-search-gemini", "gemini", "cpa-no-search-gemini-model"},
+		{"cpa-web-search-mixed-codex", "codex", "cpa-mixed-search-model"},
+		{"cpa-web-search-mixed-gemini", "gemini", "cpa-mixed-search-model"},
+		{"cpa-web-search-prefixed", "codex", "team/cpa-prefixed-search-model"},
+	}
+	webSearch := true
+	for _, registration := range registrations {
+		modelRegistry.RegisterClient(registration.clientID, registration.provider, []*registry.ModelInfo{{
+			ID: registration.modelID,
+			NativeCapabilities: &registry.NativeCapabilities{
+				WebSearch: &webSearch,
+			},
+		}})
+	}
+	t.Cleanup(func() {
+		for _, registration := range registrations {
+			modelRegistry.UnregisterClient(registration.clientID)
+		}
+	})
+
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=cpa", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response struct {
+		Models []map[string]any `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("decode response: %v; body=%s", errUnmarshal, recorder.Body.String())
+	}
+	entries := make(map[string]map[string]any, len(response.Models))
+	for _, model := range response.Models {
+		slug, _ := model["slug"].(string)
+		entries[slug] = model
+	}
+	for _, modelID := range []string{"cpa-search-codex-model", "cpa-search-xai-model", "cpa-search-claude-model", "team/cpa-prefixed-search-model"} {
+		assertSerializedCPAWebSearch(t, entries[modelID], true)
+	}
+	for _, modelID := range []string{"cpa-no-search-gemini-model", "cpa-mixed-search-model"} {
+		assertSerializedCPAWebSearch(t, entries[modelID], false)
+	}
+
+	legacyRequest := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil)
+	legacyRequest.Header.Set("Authorization", "Bearer test-key")
+	legacyRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(legacyRecorder, legacyRequest)
+	if strings.Contains(legacyRecorder.Body.String(), "cpa_capabilities") {
+		t.Fatalf("non-CPA response exposed CPA capability: %s", legacyRecorder.Body.String())
+	}
+}
+
+func TestHomeModelsRequirePerEntryWebSearchCapabilityAndConservativeRoutes(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"codex":[
+			{"id":"home-codex","native_capabilities":{"web_search":true}},
+			{"id":"home-unknown"},
+			{"id":"home-duplicate","native_capabilities":{"web_search":true}},
+			{"id":"home-duplicate","native_capabilities":{"web_search":false}}
+		],
+		"xai":[{"id":"home-xai","native_capabilities":{"web_search":true}}],
+		"claude":[{"id":"gpt-5.5","native_capabilities":{"web_search":true}}],
+		"gemini":[{"id":"home-gemini","native_capabilities":{"web_search":true}}],
+		"custom":[{"id":"home-custom","native_capabilities":{"web_search":true}}]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decode Home models: %v", errDecode)
+	}
+
+	models := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, formatHomeCodexModel(entry))
+	}
+	response := codexmodels.BuildResponseForClientWithCPACapabilities(models, nil, homeWebSearchCapabilityForModel(entries), false, "cpa")
+	catalog, ok := response["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models = %#v, want []map[string]any", response["models"])
+	}
+	bySlug := make(map[string]map[string]any, len(catalog))
+	for _, model := range catalog {
+		slug, _ := model["slug"].(string)
+		bySlug[slug] = model
+	}
+	for _, modelID := range []string{"home-codex", "home-xai", "gpt-5.5"} {
+		assertSerializedCPAWebSearch(t, bySlug[modelID], true)
+	}
+	if supportsSearchTool, _ := bySlug["gpt-5.5"]["supports_search_tool"].(bool); !supportsSearchTool {
+		t.Fatal("CPA capability metadata changed legacy Home supports_search_tool")
+	}
+	for _, modelID := range []string{"home-gemini", "home-duplicate"} {
+		assertSerializedCPAWebSearch(t, bySlug[modelID], false)
+	}
+	for _, modelID := range []string{"home-unknown", "home-custom"} {
+		if _, exists := bySlug[modelID]["cpa_capabilities"]; exists {
+			t.Fatalf("%s cpa_capabilities = %#v, want omitted", modelID, bySlug[modelID]["cpa_capabilities"])
+		}
+	}
+}
+
+func assertSerializedCPAWebSearch(t *testing.T, model map[string]any, want bool) {
+	t.Helper()
+	if model == nil {
+		t.Fatal("model entry is missing")
+	}
+	capabilities, ok := model["cpa_capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("model %v cpa_capabilities = %#v, want object", model["slug"], model["cpa_capabilities"])
+	}
+	if got, ok := capabilities["web_search"].(bool); !ok || got != want {
+		t.Fatalf("model %v web_search = %#v, want %v", model["slug"], capabilities["web_search"], want)
 	}
 }

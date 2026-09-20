@@ -384,6 +384,37 @@ func TestHomeBusyErrorMaps429AndRetryAfter(t *testing.T) {
 	}
 }
 
+func TestHomeNoCandidateErrorsMapToServiceUnavailable(t *testing.T) {
+	for _, code := range []string{"auth_not_found", "auth_unavailable"} {
+		t.Run(code, func(t *testing.T) {
+			errDispatch := decodeHomeDispatchError([]byte(fmt.Sprintf(`{"error":{"type":%q,"message":"no auth available"}}`, code)))
+			var authErr *Error
+			if !errors.As(errDispatch, &authErr) || authErr.Code != code || authErr.HTTPStatus != http.StatusServiceUnavailable {
+				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want 503", code, errDispatch)
+			}
+		})
+	}
+}
+
+func TestHomeUserBillingAndPeriodLimitErrors(t *testing.T) {
+	tests := []struct {
+		code       string
+		wantStatus int
+	}{
+		{code: "user_credits_insufficient", wantStatus: http.StatusPaymentRequired},
+		{code: "user_period_limit_exceeded", wantStatus: http.StatusTooManyRequests},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			errDispatch := decodeHomeDispatchError([]byte(fmt.Sprintf(`{"error":{"type":%q,"message":"limit hit"}}`, tt.code)))
+			var authErr *Error
+			if !errors.As(errDispatch, &authErr) || authErr.Code != tt.code || authErr.HTTPStatus != tt.wantStatus {
+				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want %d", tt.code, errDispatch, tt.wantStatus)
+			}
+		})
+	}
+}
+
 func TestHomeConcurrencyTupleAuthMismatchEndsScope(t *testing.T) {
 	dispatcher := &fixtureHomeDispatcher{payload: []byte(`{"concurrency":{"accounted":true,"credential_id":"cred-1","model":"gpt"},"auth_index":"other","auth":{"id":"cred-1","provider":"codex"}}`)}
 	manager := newHomeSelectionTestManager(t, dispatcher)

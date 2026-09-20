@@ -43,6 +43,43 @@ func TestDiffOpenAICompatibility(t *testing.T) {
 	expectContains(t, changes, "provider updated: provider-a (api-keys 1 -> 2, models 1 -> 2, headers updated)")
 }
 
+func TestDiffOpenAICompatibilityPromptCacheKey(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{Name: "provider-a", SupportPromptCacheKey: false}}
+	newList := []config.OpenAICompatibility{{Name: "provider-a", SupportPromptCacheKey: true}}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (support-prompt-cache-key false -> true)")
+}
+
+func TestDiffOpenAICompatibilityDuplicateNames(t *testing.T) {
+	oldList := []config.OpenAICompatibility{
+		{Name: "duplicate", SupportPromptCacheKey: false},
+		{Name: "duplicate", SupportPromptCacheKey: false},
+	}
+	newList := []config.OpenAICompatibility{
+		{Name: "duplicate", SupportPromptCacheKey: true},
+		{Name: "duplicate", SupportPromptCacheKey: false},
+	}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: duplicate (support-prompt-cache-key false -> true)")
+}
+
+func TestDiffOpenAICompatibilityDuplicateKeyDoesNotCollide(t *testing.T) {
+	oldList := []config.OpenAICompatibility{
+		{Name: "foo"},
+		{Name: "foo#1"},
+	}
+	newList := []config.OpenAICompatibility{
+		{Name: "foo"},
+		{Name: "foo"},
+		{Name: "foo#1"},
+	}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider added: foo (api-keys=0, models=0)")
+}
+
 func TestDiffOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 	oldList := []config.OpenAICompatibility{
 		{

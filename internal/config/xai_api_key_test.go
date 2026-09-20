@@ -41,6 +41,7 @@ func TestParseConfigBytesXAIAPIKeyMatchesCodexShape(t *testing.T) {
     excluded-models:
       - " grok-3-* "
     disable-cooling: true
+    request-retry: 0
   - api-key: dropped
     base-url: " "
 `))
@@ -72,8 +73,11 @@ func TestParseConfigBytesXAIAPIKeyMatchesCodexShape(t *testing.T) {
 	if entry.ProxyURL != " http://proxy.local " {
 		t.Fatalf("proxy-url = %q, want original Codex-compatible value", entry.ProxyURL)
 	}
-	if !entry.DisableCooling {
-		t.Fatal("disable-cooling = false, want true")
+	if entry.DisableCooling == nil || !*entry.DisableCooling {
+		t.Fatalf("disable-cooling = %v, want true", entry.DisableCooling)
+	}
+	if entry.RequestRetry == nil || *entry.RequestRetry != 0 {
+		t.Fatalf("request-retry = %v, want 0", entry.RequestRetry)
 	}
 	if entry.Headers["X-Custom"] != "value" {
 		t.Fatalf("X-Custom header = %q, want value", entry.Headers["X-Custom"])

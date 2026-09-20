@@ -50,6 +50,8 @@ type ModelExecutionRequest struct {
 	Alt                     string
 	SkipInterceptorPluginID string
 	SkipRouterPluginID      string
+	ForcedProvider          string
+	AuthID                  string
 }
 
 // ModelExecutionResponse describes a non-streaming internal model execution response.
@@ -95,8 +97,12 @@ func (e *ModelExecutionStreamError) Error() string {
 // skip plugin IDs are set, that plugin's interceptors and router are skipped
 // for the nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionRequest) (ModelExecutionResponse, *interfaces.ErrorMessage) {
+	markNestedExecution(ctx)
 	if req.Stream {
 		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteModel requires Stream=false")
+	}
+	if req.AuthID != "" {
+		ctx = WithPinnedAuthID(ctx, req.AuthID)
 	}
 	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
 		Headers:                 req.Headers,
@@ -104,6 +110,7 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 		InternalSource:          true,
 		SkipInterceptorPluginID: req.SkipInterceptorPluginID,
 		SkipRouterPluginID:      req.SkipRouterPluginID,
+		ForcedProvider:          req.ForcedProvider,
 	})
 	if errMsg != nil {
 		return ModelExecutionResponse{}, errMsg
@@ -120,8 +127,12 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 // skip plugin IDs are set, that plugin's interceptors and router are skipped
 // for the nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecutionRequest) (ModelExecutionStream, *interfaces.ErrorMessage) {
+	markNestedExecution(ctx)
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteModelStream requires Stream=true")
+	}
+	if req.AuthID != "" {
+		ctx = WithPinnedAuthID(ctx, req.AuthID)
 	}
 	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
 		Headers:                 req.Headers,
@@ -129,6 +140,7 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 		InternalSource:          true,
 		SkipInterceptorPluginID: req.SkipInterceptorPluginID,
 		SkipRouterPluginID:      req.SkipRouterPluginID,
+		ForcedProvider:          req.ForcedProvider,
 	})
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {

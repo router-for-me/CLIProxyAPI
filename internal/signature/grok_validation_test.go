@@ -333,3 +333,60 @@ func grokEncryptedContentSamplesPath() (string, bool) {
 	}
 	return path, true
 }
+
+func TestSignatureProviderFromModelName_Grok(t *testing.T) {
+	for _, model := range []string{"grok-4.5", "grok-4.5-build", "grok-composer-2.5-fast", "grok-code-fast-1"} {
+		t.Run(model, func(t *testing.T) {
+			if got := SignatureProviderFromModelName(model); got != SignatureProviderGrok {
+				t.Errorf("SignatureProviderFromModelName(%q) = %q, want %q", model, got, SignatureProviderGrok)
+			}
+		})
+	}
+}
+
+// TestDetectSignatureProvider_NeverClassifiesGrok pins the contract that xAI is
+// a target-only family. Its ciphertext carries no envelope, no version byte and
+// no fixed length, so a positive detection rule would necessarily also claim
+// unrelated opaque payloads. Callers establish an xAI target from provenance and
+// then use InspectGrokEncryptedContent as a replay-safety check.
+func TestDetectSignatureProvider_NeverClassifiesGrok(t *testing.T) {
+	path, ok := grokEncryptedContentSamplesPath()
+	if !ok {
+		t.Skip("grok encrypted_content corpus missing; run docs/native-prompt-capture/scripts/harvest-grok-encrypted-content.sh")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read grok corpus: %v", err)
+	}
+	var samples []string
+	if err := json.Unmarshal(raw, &samples); err != nil {
+		var wrapped struct {
+			Samples []string `json:"samples"`
+		}
+		if err := json.Unmarshal(raw, &wrapped); err != nil {
+			t.Fatalf("parse grok corpus: %v", err)
+		}
+		samples = wrapped.Samples
+	}
+	if len(samples) == 0 {
+		t.Skip("grok encrypted_content corpus is empty")
+	}
+	for _, sig := range samples {
+		if got := DetectSignatureProvider(sig); got != SignatureProviderUnknown {
+			t.Fatalf("DetectSignatureProvider = %q, want %q for native encrypted_content", got, SignatureProviderUnknown)
+		}
+	}
+}
+
+// TestDecideSignatureCompatibility_GrokDropsBlock contrasts with the Kimi
+// policy: xAI decrypts the blob and answers 400 for foreign or mutated input, so
+// an incompatible block cannot survive by shedding just its signature.
+func TestDecideSignatureCompatibility_GrokDropsBlock(t *testing.T) {
+	decision := DecideSignatureCompatibility(SignatureProviderGrok, observedFable5Sample, SignatureBlockKindUnknown)
+	if decision.Compatible {
+		t.Fatalf("Claude signature reported compatible with a Grok target")
+	}
+	if decision.Action != SignatureActionDropBlock {
+		t.Errorf("Action = %q, want %q", decision.Action, SignatureActionDropBlock)
+	}
+}

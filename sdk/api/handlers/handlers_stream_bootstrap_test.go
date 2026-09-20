@@ -555,6 +555,35 @@ func TestExecuteStreamWithAuthManager_RetriesAfterDroppedBootstrapPayload(t *tes
 	}
 }
 
+func TestExecuteStreamWithAuthManager_ResetsResponsesValidatorOnBootstrapRetry(t *testing.T) {
+	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, call int) (*coreexecutor.StreamResult, error) {
+		chunks := make(chan coreexecutor.StreamChunk, 2)
+		if call == 1 {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",")}
+			chunks <- coreexecutor.StreamChunk{Err: &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}}
+		} else {
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")}
+		}
+		close(chunks)
+		return &coreexecutor.StreamResult{Chunks: chunks}, nil
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", "bootstrap-model", []byte(`{"model":"bootstrap-model"}`), "")
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected stream error after retry: %+v", msg)
+		}
+	}
+	if executor.Calls() != 2 || !strings.Contains(string(got), "response.completed") {
+		t.Fatalf("retry calls=%d payload=%q", executor.Calls(), got)
+	}
+}
+
 func TestExecuteStreamWithAuthManager_CancelDuringSynchronousBootstrap(t *testing.T) {
 	started := make(chan struct{})
 	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
@@ -914,6 +943,105 @@ func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError
 
 	if executor.Calls() != 1 {
 		t.Fatalf("expected exactly one upstream call before retry path selection failure, got %d", executor.Calls())
+	}
+}
+
+type overloadStreamExecutor struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (e *overloadStreamExecutor) Identifier() string { return "codex" }
+
+func (e *overloadStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *overloadStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+
+	return nil, &coreauth.Error{
+		Code:       "server_is_overloaded",
+		Message:    `{"type":"error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","sequence_number":0}`,
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
+}
+
+func (e *overloadStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *overloadStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *overloadStreamExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{Code: "not_implemented", Message: "HttpRequest not implemented"}
+}
+
+func TestExecuteStreamWithAuthManager_ForwardsOverloadErrorWhenAllAuthsOverloaded(t *testing.T) {
+	executor := &overloadStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:       "auth-overload-1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	auth2 := &coreauth.Auth{
+		ID:       "auth-overload-2",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test2@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("manager.Register(auth1): %v", err)
+	}
+	if _, err := manager.Register(context.Background(), auth2); err != nil {
+		t.Fatalf("manager.Register(auth2): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "gpt-5.6-sol"}})
+	registry.GetGlobalRegistry().RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{{ID: "gpt-5.6-sol"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+		registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	// First request tries all accounts, fails with overload, cooling both credentials down.
+	_, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "gpt-5.6-sol", []byte(`{"model":"gpt-5.6-sol"}`), "")
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	if gotErr == nil {
+		t.Fatalf("expected terminal error")
+	}
+	if !strings.Contains(gotErr.Error.Error(), "Our servers are currently overloaded. Please try again later.") && !strings.Contains(gotErr.Error.Error(), "server_is_overloaded") {
+		t.Fatalf("expected error message to contain overload details, got: %q", gotErr.Error.Error())
+	}
+
+	// Subsequent request (e.g. client reconnect) while credentials are in cooldown should still report the upstream error reason.
+	_, _, errChan2 := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "gpt-5.6-sol", []byte(`{"model":"gpt-5.6-sol"}`), "")
+	var gotErr2 *interfaces.ErrorMessage
+	for msg := range errChan2 {
+		if msg != nil {
+			gotErr2 = msg
+		}
+	}
+	if gotErr2 == nil {
+		t.Fatalf("expected terminal error on reconnect request")
+	}
+	if !strings.Contains(gotErr2.Error.Error(), "Our servers are currently overloaded. Please try again later.") && !strings.Contains(gotErr2.Error.Error(), "server_is_overloaded") {
+		t.Fatalf("expected reconnect error message to contain overload details, got: %q", gotErr2.Error.Error())
 	}
 }
 

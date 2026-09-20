@@ -1,12 +1,14 @@
 package openai
 
 import (
-	"encoding/json"
+	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -29,10 +31,10 @@ func writeResponsesWebsocketSyntheticPrewarm(
 	requestJSON []byte,
 	wsTimelineLog websocketTimelineAppender,
 	sessionID string,
-) error {
+) (string, error) {
 	payloads, errPayloads := syntheticResponsesWebsocketPrewarmPayloads(requestJSON)
 	if errPayloads != nil {
-		return errPayloads
+		return "", errPayloads
 	}
 	for i := 0; i < len(payloads); i++ {
 		markAPIResponseTimestamp(c)
@@ -50,10 +52,35 @@ func writeResponsesWebsocketSyntheticPrewarm(
 				websocketPayloadEventType(payloads[i]),
 				errWrite,
 			)
-			return errWrite
+			return "", errWrite
 		}
 	}
-	return nil
+	return gjson.GetBytes(payloads[0], "response.id").String(), nil
+}
+
+// A synthetic warm-up acknowledges input that never reached the upstream.
+// Materialize that input before compacted-history detection can mistake the
+// client's remaining delta for a complete replacement transcript.
+func normalizeResponsesWebsocketPrewarmFollowup(rawJSON, warmupRequest []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
+	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
+	if requestType != wsRequestTypeCreate && requestType != wsRequestTypeAppend {
+		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("unsupported websocket request type: %s", requestType)}
+	}
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("websocket request requires array field: input")}
+	}
+	merged, errMerge := mergeResponsesWebsocketInput(warmupRequest, []byte("[]"), input.Raw)
+	if errMerge != nil {
+		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errMerge}
+	}
+	normalized := normalizeResponseTranscriptReplacement(rawJSON, warmupRequest)
+	var errSet error
+	normalized, errSet = sjson.SetRawBytes(normalized, "input", merged)
+	if errSet != nil {
+		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errSet}
+	}
+	return normalized, normalized, nil
 }
 
 func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, error) {
@@ -76,9 +103,10 @@ func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, e
 		if errSet != nil {
 			return nil, errSet
 		}
+
 	}
 
-	completedPayload := []byte(`{"type":"response.completed","sequence_number":1,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+	completedPayload := []byte(`{"type":"response.completed","sequence_number":1,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}}`)
 	completedPayload, errSet = sjson.SetBytes(completedPayload, "response.id", responseID)
 	if errSet != nil {
 		return nil, errSet
@@ -95,33 +123,6 @@ func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, e
 	}
 
 	return [][]byte{createdPayload, completedPayload}, nil
-}
-
-func mergeJSONArrayRaw(existingRaw, appendRaw string) (string, error) {
-	existingRaw = strings.TrimSpace(existingRaw)
-	appendRaw = strings.TrimSpace(appendRaw)
-	if existingRaw == "" {
-		existingRaw = "[]"
-	}
-	if appendRaw == "" {
-		appendRaw = "[]"
-	}
-
-	var existing []json.RawMessage
-	if err := json.Unmarshal([]byte(existingRaw), &existing); err != nil {
-		return "", err
-	}
-	var appendItems []json.RawMessage
-	if err := json.Unmarshal([]byte(appendRaw), &appendItems); err != nil {
-		return "", err
-	}
-
-	merged := append(existing, appendItems...)
-	out, err := json.Marshal(merged)
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
 }
 
 // inputContainsFullTranscript returns true when the input array carries compact

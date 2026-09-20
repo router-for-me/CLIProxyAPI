@@ -14,6 +14,9 @@ type ClaudeMessagesSignatureSanitizeOptions struct {
 	DropEmptyMessages             bool
 	DropToolSignatures            bool
 	DropEmptyThinkingPlaceholders bool
+	// PreserveEmptyThinkingBlocks preserves compatibility-mode thinking blocks
+	// together with their original signatures, including opaque signatures.
+	PreserveEmptyThinkingBlocks bool
 }
 
 type SignatureSanitizeReport struct {
@@ -41,13 +44,15 @@ func SanitizeClaudeMessagesSignaturesForModel(payload []byte, targetModel string
 // provider-native E-form, valid Claude CAIS signatures are kept,
 // incompatible thinking blocks are dropped, and tool_use blocks keep only their
 // tool-call payload.
-func SanitizeClaudeMessagesForClaudeUpstream(payload []byte, targetModel string) ([]byte, SignatureSanitizeReport) {
+func SanitizeClaudeMessagesForClaudeUpstream(payload []byte, targetModel string, preserveEmptyThinkingBlocks ...bool) ([]byte, SignatureSanitizeReport) {
+	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
 	return SanitizeClaudeMessagesSignaturesForTarget(payload, ClaudeMessagesSignatureSanitizeOptions{
 		TargetProvider:                SignatureProviderClaude,
 		TargetModel:                   targetModel,
 		DropEmptyMessages:             true,
 		DropToolSignatures:            true,
-		DropEmptyThinkingPlaceholders: true,
+		DropEmptyThinkingPlaceholders: !preserveEmpty,
+		PreserveEmptyThinkingBlocks:   preserveEmpty,
 	})
 }
 
@@ -119,12 +124,17 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				continue
 			}
 
+			rawSignature := part.Get("signature").String()
+			if opts.PreserveEmptyThinkingBlocks {
+				report.Preserved++
+				keptParts = append(keptParts, part.Raw)
+				continue
+			}
 			if targetProvider == SignatureProviderClaude && isEmptyClaudeThinkingPlaceholder(part) && !opts.DropEmptyThinkingPlaceholders {
 				keptParts = append(keptParts, part.Raw)
 				continue
 			}
 
-			rawSignature := part.Get("signature").String()
 			decision := DecideSignatureCompatibilityForModel(targetProvider, opts.TargetModel, rawSignature, SignatureBlockKindClaudeThinking)
 			decision.Reason = fmt.Sprintf("messages[%d].content[%d]: %s", i, j, decision.Reason)
 			report.Decisions = append(report.Decisions, decision)

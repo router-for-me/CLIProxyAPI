@@ -72,7 +72,7 @@ func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
 		}
 		normalizedModels = append(normalizedModels, normalizedModel)
 	}
-	c.JSON(http.StatusOK, gin.H{
+	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
 		"models": normalizedModels,
 	})
 }
@@ -219,6 +219,15 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+					h.WriteErrorResponse(c, errMsg)
+					if errMsg != nil {
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				}
 				// Closed without data
 				if alt == "" {
 					setSSEHeaders()

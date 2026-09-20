@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -75,6 +78,30 @@ func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 	}
 }
 
+func TestWriteClaudeErrorResponse_IncludesRetryAfterForModelCooldownDefaultSettings(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	handler := &ClaudeCodeAPIHandler{}
+
+	cooldownErr := coreauth.NewManager(nil, nil, nil)
+	_ = cooldownErr
+	// Create mock model cooldown error
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      coreauth.NewModelCooldownError("claude-sonnet-4-6", "claude", 20*time.Second),
+	}
+
+	handler.WriteErrorResponse(c, msg)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "20" {
+		t.Fatalf("Retry-After = %q, want 20", got)
+	}
+}
+
 func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
 	wantErr := &interfaces.ErrorMessage{
 		StatusCode: http.StatusBadRequest,
@@ -84,7 +111,7 @@ func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
 	errs <- wantErr
 	close(errs)
 
-	gotErr, ok := pendingClaudeStreamError(errs)
+	gotErr, ok := handlers.PendingStreamError(errs)
 	if !ok {
 		t.Fatal("expected pending stream error")
 	}

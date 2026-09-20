@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -23,21 +24,55 @@ type ClaudeExecutor struct {
 	cfg                     *config.Config
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
+	oauthProfileFetcher     claudeOAuthProfileFetcher
 }
 
-// claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
-// Previously "proxy_" was used but this is a detectable fingerprint difference.
-const claudeToolPrefix = ""
+type claudeOAuthCancellationError struct {
+	cause error
+}
+
+func (e *claudeOAuthCancellationError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *claudeOAuthCancellationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *claudeOAuthCancellationError) IsRequestScoped() bool {
+	return e != nil
+}
+
+func newClaudeOAuthCancellationError(ctx context.Context, oauth bool, err error) error {
+	if !oauth {
+		return nil
+	}
+	cause := err
+	if ctx != nil && ctx.Err() != nil {
+		cause = ctx.Err()
+	}
+	if !errors.Is(cause, context.Canceled) {
+		return nil
+	}
+	return &claudeOAuthCancellationError{cause: cause}
+}
 
 func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 	return sigcompat.SignatureProviderFromModelName(baseModel) == sigcompat.SignatureProviderClaude
 }
 
-func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string) []byte {
+func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string, preserveEmptyThinkingBlocks ...bool) []byte {
 	sanitized := body
-	if shouldSanitizeClaudeMessagesForUpstream(baseModel) {
+	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
+	if shouldSanitizeClaudeMessagesForUpstream(baseModel) || preserveEmpty {
 		var report sigcompat.SignatureSanitizeReport
-		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
+		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel, preserveEmptyThinkingBlocks...)
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
 	return sanitizeClaudeWebSearchDomains(sanitized)
@@ -97,38 +132,6 @@ func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, rep
 	helps.LogWithRequestID(ctx).WithFields(fields).Debug("claude executor: sanitized signature history before upstream")
 }
 
-// oauthToolRenameMap maps OpenCode-style (lowercase) tool names to Claude Code-style
-// (TitleCase) names. Anthropic uses tool name fingerprinting to detect third-party
-// clients on OAuth traffic. Renaming to official names avoids extra-usage billing.
-// All tools are mapped to TitleCase equivalents to match Claude Code naming patterns.
-var oauthToolRenameMap = map[string]string{
-	"bash":         "Bash",
-	"read":         "Read",
-	"write":        "Write",
-	"edit":         "Edit",
-	"glob":         "Glob",
-	"grep":         "Grep",
-	"task":         "Task",
-	"webfetch":     "WebFetch",
-	"todowrite":    "TodoWrite",
-	"question":     "Question",
-	"skill":        "Skill",
-	"ls":           "LS",
-	"todoread":     "TodoRead",
-	"notebookedit": "NotebookEdit",
-}
-
-// The reverse map is now computed per-request in remapOAuthToolNames so that
-// only names the client actually caused us to rewrite are restored on the
-// response. A global reverse map — as used previously — corrupted responses
-// for clients that sent mixed casing (e.g. `Bash` TitleCase alongside `glob`
-// lowercase; the request flagged renames via `glob` -> `Glob`, then the global
-// reverse map incorrectly rewrote every `Bash` in the response to `bash`).
-
-// oauthToolsToRemove lists tool names that must be stripped from OAuth requests
-// even after remapping. Currently empty — all tools are mapped instead of removed.
-var oauthToolsToRemove = map[string]bool{}
-
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
@@ -136,6 +139,10 @@ const defaultModelMaxTokens = 1024
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
+
+func (e *ClaudeExecutor) modelLevelCooling() bool {
+	return e != nil && e.cfg != nil && e.cfg.Claude.ModelLevelCooling
+}
 
 func (e *ClaudeExecutor) upstreamRequestLogProvider() string {
 	if provider := strings.TrimSpace(e.requestLogProvider); provider != "" {
@@ -209,17 +216,19 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 		return nil
 	}
 	apiKey, _ := claudeCreds(auth)
-	if strings.TrimSpace(apiKey) == "" {
-		return nil
-	}
-	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	isAnthropicBase := req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") && strings.EqualFold(req.URL.Host, "api.anthropic.com")
-	if isAnthropicBase && useAPIKey {
-		req.Header.Del("Authorization")
-		req.Header.Set("x-api-key", apiKey)
+	useAPIKey := auth != nil && (auth.AuthKind() == cliproxyauth.AuthKindAPIKey || (auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""))
+	isAnthropicBase := isAnthropicUpstreamURL(req.URL)
+	if strings.TrimSpace(apiKey) != "" {
+		if isAnthropicBase && useAPIKey {
+			req.Header.Del("Authorization")
+			req.Header.Set("x-api-key", apiKey)
+		} else {
+			req.Header.Del("x-api-key")
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 	} else {
+		req.Header.Del("Authorization")
 		req.Header.Del("x-api-key")
-		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	var attrs map[string]string
 	if auth != nil {

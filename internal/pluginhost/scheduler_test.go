@@ -205,6 +205,41 @@ func TestHostPickAuthAllowsKnownBuiltinDelegates(t *testing.T) {
 	}
 }
 
+func TestHostSchedulerWantsAcrossPriorities(t *testing.T) {
+	hostDefault := newHostWithRecords(capabilityRecord{
+		id:       "default-sched",
+		priority: 1,
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{}, nil
+			}),
+			SchedulerAcrossPriorities: false,
+		}},
+	})
+	if hostDefault.SchedulerWantsAcrossPriorities() {
+		t.Fatal("hostDefault.SchedulerWantsAcrossPriorities() = true, want false")
+	}
+
+	hostAcross := newHostWithRecords(capabilityRecord{
+		id:       "across-sched",
+		priority: 1,
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{}, nil
+			}),
+			SchedulerAcrossPriorities: true,
+		}},
+	})
+	if !hostAcross.SchedulerWantsAcrossPriorities() {
+		t.Fatal("hostAcross.SchedulerWantsAcrossPriorities() = false, want true")
+	}
+
+	var nilHost *Host
+	if nilHost.SchedulerWantsAcrossPriorities() {
+		t.Fatal("nilHost.SchedulerWantsAcrossPriorities() = true, want false")
+	}
+}
+
 func schedulerRequest(ids ...string) pluginapi.SchedulerPickRequest {
 	req := pluginapi.SchedulerPickRequest{
 		Provider: "test",

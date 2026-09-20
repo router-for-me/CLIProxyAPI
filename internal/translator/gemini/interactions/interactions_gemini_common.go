@@ -192,6 +192,45 @@ func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 	}
 	normalized := make([]map[string]any, 0)
 	tools.ForEach(func(_, tool gjson.Result) bool {
+		if uc := tool.Get("urlContext"); uc.Exists() {
+			entry := map[string]any{"type": "url_context"}
+			if uc.IsObject() && len(uc.Map()) > 0 {
+				entry["url_context"] = json.RawMessage(uc.Raw)
+			}
+			normalized = append(normalized, entry)
+		} else if uc := tool.Get("url_context"); uc.Exists() {
+			entry := map[string]any{"type": "url_context"}
+			if uc.IsObject() && len(uc.Map()) > 0 {
+				entry["url_context"] = json.RawMessage(uc.Raw)
+			}
+			normalized = append(normalized, entry)
+		}
+		if ce := tool.Get("codeExecution"); ce.Exists() {
+			entry := map[string]any{"type": "code_execution"}
+			if ce.IsObject() && len(ce.Map()) > 0 {
+				entry["code_execution"] = json.RawMessage(ce.Raw)
+			}
+			normalized = append(normalized, entry)
+		} else if ce := tool.Get("code_execution"); ce.Exists() {
+			entry := map[string]any{"type": "code_execution"}
+			if ce.IsObject() && len(ce.Map()) > 0 {
+				entry["code_execution"] = json.RawMessage(ce.Raw)
+			}
+			normalized = append(normalized, entry)
+		}
+		if gs := tool.Get("googleSearch"); gs.Exists() {
+			entry := map[string]any{"type": "google_search"}
+			if gs.IsObject() && len(gs.Map()) > 0 {
+				entry["google_search"] = json.RawMessage(gs.Raw)
+			}
+			normalized = append(normalized, entry)
+		} else if gs := tool.Get("google_search"); gs.Exists() {
+			entry := map[string]any{"type": "google_search"}
+			if gs.IsObject() && len(gs.Map()) > 0 {
+				entry["google_search"] = json.RawMessage(gs.Raw)
+			}
+			normalized = append(normalized, entry)
+		}
 		if name := tool.Get("name"); name.Exists() {
 			entry := map[string]any{
 				"type": "function",
@@ -376,12 +415,16 @@ func convertGeminiResponseToInteractionsNonStreamDirect(modelName string, origin
 	}
 	out, _ = sjson.SetBytes(out, "id", id)
 	out, _ = sjson.SetBytes(out, "model", modelName)
+	var steps [][]byte
 	root.Get("candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
 		if step := geminiPartToInteractionsStep(part); len(step) > 0 {
-			out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+			steps = append(steps, step)
 		}
 		return true
 	})
+	if len(steps) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "steps", steps)
+	}
 	out = setInteractionsUsageFromGemini(out, "usage", root)
 	return out
 }
@@ -449,20 +492,17 @@ func normalizeInteractionsGenerationConfig(out []byte) []byte {
 }
 
 func interactionsThinkingSummariesIncludeThoughts(summary gjson.Result) (bool, bool) {
-	switch summary.Type {
-	case gjson.True:
-		return true, true
-	case gjson.False:
-		return false, true
-	case gjson.String:
-		switch strings.ToLower(strings.TrimSpace(summary.String())) {
-		case "", "none", "off", "false", "disabled":
-			return false, true
-		default:
-			return true, true
-		}
+	if summary.Type != gjson.String {
+		return false, false
 	}
-	return false, false
+	switch strings.ToLower(strings.TrimSpace(summary.String())) {
+	case "auto":
+		return true, true
+	case "none":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func copyInteractionsResponseModalities(out []byte, root gjson.Result) []byte {
@@ -665,19 +705,70 @@ func copyInteractionsTools(out []byte, root gjson.Result) []byte {
 			return false
 		}
 		entry := map[string]any{}
-		if decls := tool.Get("function_declarations"); decls.Exists() && decls.IsArray() {
-			entry["functionDeclarations"] = json.RawMessage(decls.Raw)
-		} else if name := tool.Get("name"); name.Exists() {
-			decl := map[string]any{"name": name.String()}
-			if desc := tool.Get("description"); desc.Exists() {
-				decl["description"] = desc.String()
+		toolType := tool.Get("type").String()
+		switch toolType {
+		case "url_context":
+			raw := json.RawMessage(`{}`)
+			if uc := tool.Get("url_context"); uc.Exists() && uc.IsObject() {
+				raw = json.RawMessage(uc.Raw)
+			} else if uc := tool.Get("urlContext"); uc.Exists() && uc.IsObject() {
+				raw = json.RawMessage(uc.Raw)
 			}
-			if params := tool.Get("parameters"); params.Exists() {
-				decl["parameters"] = json.RawMessage(params.Raw)
+			entry["urlContext"] = raw
+		case "code_execution":
+			raw := json.RawMessage(`{}`)
+			if ce := tool.Get("code_execution"); ce.Exists() && ce.IsObject() {
+				raw = json.RawMessage(ce.Raw)
+			} else if ce := tool.Get("codeExecution"); ce.Exists() && ce.IsObject() {
+				raw = json.RawMessage(ce.Raw)
 			}
-			entry["functionDeclarations"] = []map[string]any{decl}
-		} else {
-			entry = nil
+			entry["codeExecution"] = raw
+		case "google_search", "web_search":
+			raw := json.RawMessage(`{}`)
+			if gs := tool.Get("google_search"); gs.Exists() && gs.IsObject() {
+				raw = json.RawMessage(gs.Raw)
+			} else if gs := tool.Get("googleSearch"); gs.Exists() && gs.IsObject() {
+				raw = json.RawMessage(gs.Raw)
+			}
+			entry["googleSearch"] = raw
+		default:
+			if decls := tool.Get("function_declarations"); decls.Exists() && decls.IsArray() {
+				entry["functionDeclarations"] = json.RawMessage(decls.Raw)
+			} else if name := tool.Get("name"); name.Exists() {
+				decl := map[string]any{"name": name.String()}
+				if desc := tool.Get("description"); desc.Exists() {
+					decl["description"] = desc.String()
+				}
+				if params := tool.Get("parameters"); params.Exists() {
+					decl["parameters"] = json.RawMessage(params.Raw)
+				}
+				entry["functionDeclarations"] = []map[string]any{decl}
+			} else {
+				var rawMap map[string]any
+				if errUnmarshal := json.Unmarshal([]byte(tool.Raw), &rawMap); errUnmarshal == nil {
+					if toolType == "" {
+						if uc, ok := rawMap["url_context"]; ok {
+							rawMap["urlContext"] = uc
+							delete(rawMap, "url_context")
+						}
+						if ce, ok := rawMap["code_execution"]; ok {
+							rawMap["codeExecution"] = ce
+							delete(rawMap, "code_execution")
+						}
+						if gs, ok := rawMap["google_search"]; ok {
+							rawMap["googleSearch"] = gs
+							delete(rawMap, "google_search")
+						}
+						if ws, ok := rawMap["web_search"]; ok {
+							rawMap["googleSearch"] = ws
+							delete(rawMap, "web_search")
+						}
+					}
+					entry = rawMap
+				} else {
+					entry = nil
+				}
+			}
 		}
 		if entry != nil {
 			normalized = append(normalized, entry)
@@ -1057,6 +1148,15 @@ func interactionsGeminiContent(role string, parts [][]byte) []byte {
 	return content
 }
 
+func firstInteractionsGeminiUsage(usage gjson.Result, paths ...string) gjson.Result {
+	for _, path := range paths {
+		if value := usage.Get(path); value.Exists() {
+			return value
+		}
+	}
+	return gjson.Result{}
+}
+
 func setInteractionsUsageFromGemini(out []byte, path string, root gjson.Result) []byte {
 	usage := root.Get("usageMetadata")
 	if !usage.Exists() {
@@ -1065,12 +1165,12 @@ func setInteractionsUsageFromGemini(out []byte, path string, root gjson.Result) 
 	if !usage.Exists() {
 		return out
 	}
-	out, _ = sjson.SetBytes(out, path+".input_tokens", usage.Get("promptTokenCount").Int())
-	out, _ = sjson.SetBytes(out, path+".output_tokens", usage.Get("candidatesTokenCount").Int())
-	if reasoning := usage.Get("thoughtsTokenCount"); reasoning.Exists() {
+	out, _ = sjson.SetBytes(out, path+".input_tokens", firstInteractionsGeminiUsage(usage, "promptTokenCount", "prompt_token_count").Int())
+	out, _ = sjson.SetBytes(out, path+".output_tokens", firstInteractionsGeminiUsage(usage, "candidatesTokenCount", "candidates_token_count").Int())
+	if reasoning := firstInteractionsGeminiUsage(usage, "thoughtsTokenCount", "thoughts_token_count"); reasoning.Exists() {
 		out, _ = sjson.SetBytes(out, path+".reasoning_tokens", reasoning.Int())
 	}
-	out, _ = sjson.SetBytes(out, path+".total_tokens", usage.Get("totalTokenCount").Int())
+	out, _ = sjson.SetBytes(out, path+".total_tokens", firstInteractionsGeminiUsage(usage, "totalTokenCount", "total_token_count").Int())
 	if cached := usage.Get("cachedContentTokenCount"); cached.Exists() {
 		out, _ = sjson.SetBytes(out, path+".cached_tokens", cached.Int())
 	} else if cached := usage.Get("cached_content_token_count"); cached.Exists() {
@@ -1087,10 +1187,10 @@ func setInteractionsStreamUsageFromGemini(out []byte, path string, root gjson.Re
 	if !usage.Exists() {
 		return out
 	}
-	inputTokens := usage.Get("promptTokenCount").Int()
-	outputTokens := usage.Get("candidatesTokenCount").Int()
-	totalTokens := usage.Get("totalTokenCount").Int()
-	thoughtTokens := usage.Get("thoughtsTokenCount").Int()
+	inputTokens := firstInteractionsGeminiUsage(usage, "promptTokenCount", "prompt_token_count").Int()
+	outputTokens := firstInteractionsGeminiUsage(usage, "candidatesTokenCount", "candidates_token_count").Int()
+	totalTokens := firstInteractionsGeminiUsage(usage, "totalTokenCount", "total_token_count").Int()
+	thoughtTokens := firstInteractionsGeminiUsage(usage, "thoughtsTokenCount", "thoughts_token_count").Int()
 	cachedTokens := usage.Get("cachedContentTokenCount").Int()
 	if cachedTokens == 0 {
 		cachedTokens = usage.Get("cached_content_token_count").Int()
@@ -1253,7 +1353,7 @@ func geminiPartToInteractionsStep(part gjson.Result) []byte {
 		}
 		item := []byte(`{"text":""}`)
 		item, _ = sjson.SetBytes(item, "text", text.String())
-		step, _ = sjson.SetRawBytes(step, "content.-1", item)
+		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{item})
 		return step
 	}
 	if inline := part.Get("inlineData"); inline.Exists() {
@@ -1263,13 +1363,13 @@ func geminiPartToInteractionsStep(part gjson.Result) []byte {
 		}
 		item := geminiInlineDataToInteractionsContent(mimeType, inline.Get("data").String())
 		step := []byte(`{"type":"model_output","content":[]}`)
-		step, _ = sjson.SetRawBytes(step, "content.-1", item)
+		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{item})
 		return step
 	}
 	if inline := part.Get("inline_data"); inline.Exists() {
 		item := geminiInlineDataToInteractionsContent(inline.Get("mime_type").String(), inline.Get("data").String())
 		step := []byte(`{"type":"model_output","content":[]}`)
-		step, _ = sjson.SetRawBytes(step, "content.-1", item)
+		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{item})
 		return step
 	}
 	return nil

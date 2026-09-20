@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -88,6 +89,9 @@ func (e *GeminiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	if apiKey != "" {
 		req.Header.Set("x-goog-api-key", apiKey)
 		req.Header.Del("Authorization")
+	} else {
+		req.Header.Del("x-goog-api-key")
+		req.Header.Del("Authorization")
 	}
 	applyGeminiHeaders(req, auth)
 	return nil
@@ -123,6 +127,7 @@ func (e *GeminiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 //   - cliproxyexecutor.Response: The response from the API
 //   - error: An error if the request fails
 func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -145,8 +150,8 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, false)
-	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
+	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, false, helps.APIKeyModelIsCompat(req))
+	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false, helps.APIKeyModelIsCompat(req))
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -159,12 +164,17 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = capGeminiMaxOutputTokens(body, baseModel)
+	body = internalsignature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 
 	action := "generateContent"
 	if req.Metadata != nil {
 		if a, _ := req.Metadata["action"].(string); a == "countTokens" {
 			action = "countTokens"
 		}
+	}
+	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
+	if action != "countTokens" {
+		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
 	}
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
@@ -183,7 +193,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -228,15 +238,20 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.ObserveResponseModel(data)
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, data, &param)
+	if responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
 // ExecuteStream performs a streaming request to the Gemini API.
 func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -258,8 +273,8 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
-	body := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true)
+	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true, helps.APIKeyModelIsCompat(req))
+	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true, helps.APIKeyModelIsCompat(req))
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -272,6 +287,8 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = capGeminiMaxOutputTokens(body, baseModel)
+	body = internalsignature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
+	body = helps.EnsureGeminiBoundaryUserContent(body, "contents")
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "streamGenerateContent")
@@ -292,7 +309,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -332,6 +349,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		defer reporter.EnsurePublished(ctx)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("gemini executor: close response body error: %v", errClose)
@@ -344,6 +362,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			reporter.ObserveResponseModel(line)
 			filtered := helps.FilterSSEUsageMetadata(line)
 			payload := helps.JSONPayload(filtered)
 			if len(payload) == 0 {
@@ -387,7 +406,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetName, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body := translateGeminiInteractionsRequestBody(ctx, e.cfg, targetName, req.Payload, opts, false)
+	body := translateGeminiInteractionsRequestBody(ctx, e.cfg, targetName, req.Payload, opts, false, helps.APIKeyModelIsCompat(req))
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
@@ -398,8 +417,9 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	fromProtocol := opts.SourceFormat.String()
-	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, false)
+	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, false, helps.APIKeyModelIsCompat(req))
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = sanitizeGeminiInteractionsUnsupportedInputIDs(body)
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
@@ -411,7 +431,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
 
@@ -451,9 +471,14 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
 		return resp, err
 	}
+	reporter.ObserveResponseModel(data)
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
+	targetFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, cliproxyexecutor.ResponseFormatOrSource(opts), req.Model, opts.OriginalRequest, body, data, &param)
+	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, opts.OriginalRequest, body, data, &param)
+	if targetFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 }
 
@@ -463,7 +488,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetName, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body := translateGeminiInteractionsRequestBody(ctx, e.cfg, targetName, req.Payload, opts, true)
+	body := translateGeminiInteractionsRequestBody(ctx, e.cfg, targetName, req.Payload, opts, true, helps.APIKeyModelIsCompat(req))
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
 		body = helps.SetStringIfDifferent(body, "model", targetName)
 	}
@@ -474,8 +499,9 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	fromProtocol := opts.SourceFormat.String()
-	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, true)
+	originalTranslated := geminiInteractionsPayloadConfigSource(ctx, e.cfg, targetName, req.Payload, opts, true, helps.APIKeyModelIsCompat(req))
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, targetName, "interactions", fromProtocol, "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = sanitizeGeminiInteractionsUnsupportedInputIDs(body)
 	body = helps.SetBoolIfDifferent(body, "stream", true)
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/interactions", baseURL, glAPIVersion)
@@ -487,7 +513,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
 
@@ -524,6 +550,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	go func() {
 		defer close(out)
+		defer reporter.EnsurePublished(ctx)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("gemini executor: close interactions stream body error: %v", errClose)
@@ -553,6 +580,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 				payload = trimmed
 			}
 			if len(payload) > 0 {
+				reporter.ObserveResponseModel(payload)
 				if detail, ok := helps.ParseInteractionsStreamUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
@@ -619,7 +647,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("gemini")
-	translatedReq := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false)
+	translatedReq := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false, helps.APIKeyModelIsCompat(req))
 
 	translatedReq, err := helps.ApplyRequestThinking(translatedReq, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -632,6 +660,8 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
 	translatedReq = helps.SetStringIfDifferent(translatedReq, "model", baseModel)
+	translatedReq = internalsignature.SanitizeGeminiRequestThoughtSignatures(translatedReq, "contents")
+	translatedReq = helps.EnsureGeminiLeadingUserContent(translatedReq, "contents")
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "countTokens")
@@ -646,7 +676,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -666,6 +696,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	})
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -779,19 +810,56 @@ func nativeInteractionsSourceFormat(format sdktranslator.Format) bool {
 	}
 }
 
-func translateGeminiInteractionsRequestBody(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream bool) []byte {
+// sanitizeGeminiInteractionsUnsupportedInputIDs aligns input step IDs with the
+// official Gemini Interactions API schema:
+// - `function_call` (FunctionCallStep) requires `id` and rejects `call_id`
+// - `function_result` (FunctionResultStep) requires `call_id` and rejects `id`
+// - other steps and content parts do not support `id`
+func sanitizeGeminiInteractionsUnsupportedInputIDs(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	for i, item := range input.Array() {
+		stepType := item.Get("type").String()
+		if stepType == "function_call" {
+			if !item.Get("id").Exists() && item.Get("call_id").Exists() {
+				body, _ = sjson.SetBytes(body, fmt.Sprintf("input.%d.id", i), item.Get("call_id").String())
+			}
+			if item.Get("call_id").Exists() {
+				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.call_id", i))
+			}
+		} else {
+			if item.Get("id").Exists() {
+				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.id", i))
+			}
+		}
+		content := item.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for j, part := range content.Array() {
+			if part.Get("id").Exists() {
+				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.content.%d.id", i, j))
+			}
+		}
+	}
+	return body
+}
+
+func translateGeminiInteractionsRequestBody(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream, isCompat bool) []byte {
 	if opts.SourceFormat == "" || opts.SourceFormat == sdktranslator.FormatInteractions {
 		return bytes.Clone(payload)
 	}
-	return helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, cfg, opts.SourceFormat, sdktranslator.FormatInteractions, model, payload, stream)
+	return helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, cfg, opts.SourceFormat, sdktranslator.FormatInteractions, model, payload, stream, isCompat)
 }
 
-func geminiInteractionsPayloadConfigSource(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream bool) []byte {
+func geminiInteractionsPayloadConfigSource(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream, isCompat bool) []byte {
 	source := opts.OriginalRequest
 	if len(source) == 0 {
 		source = payload
 	}
-	return translateGeminiInteractionsRequestBody(ctx, cfg, model, source, opts, stream)
+	return translateGeminiInteractionsRequestBody(ctx, cfg, model, source, opts, stream, isCompat)
 }
 
 func isNativeInteractionsAuth(auth *cliproxyauth.Auth) bool {
@@ -888,12 +956,12 @@ func geminiAuthLogFields(auth *cliproxyauth.Auth) (string, string, string, strin
 	return auth.ID, auth.Label, authType, authValue
 }
 
-func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth) {
+func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth, clientHeaders ...http.Header) {
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	util.ApplyCustomHeadersFromAttrs(req, attrs, clientHeaders...)
 }
 
 func capGeminiMaxOutputTokens(body []byte, modelName string) []byte {

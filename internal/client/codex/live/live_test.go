@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 type apiKeyFirstSelector struct{}
@@ -40,6 +41,10 @@ type captureExecutor struct {
 	selectedAuth *auth.Auth
 	responseBody io.ReadCloser
 	statusCode   int
+	statuses     []int
+	httpCalls    atomic.Int32
+	refreshCalls atomic.Int32
+	beforeReturn func()
 }
 
 func (*captureExecutor) Identifier() string { return "codex" }
@@ -52,8 +57,14 @@ func (*captureExecutor) ExecuteStream(context.Context, *auth.Auth, coreexecutor.
 	return nil, nil
 }
 
-func (*captureExecutor) Refresh(_ context.Context, credential *auth.Auth) (*auth.Auth, error) {
-	return credential, nil
+func (e *captureExecutor) Refresh(_ context.Context, credential *auth.Auth) (*auth.Auth, error) {
+	e.refreshCalls.Add(1)
+	updated := credential.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	updated.Metadata["access_token"] = "refreshed-home-live-token"
+	return updated, nil
 }
 
 func (*captureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -69,14 +80,25 @@ func (*captureExecutor) PrepareRequest(req *http.Request, credential *auth.Auth)
 func (e *captureExecutor) HttpRequest(_ context.Context, credential *auth.Auth, req *http.Request) (*http.Response, error) {
 	e.request = req.Clone(req.Context())
 	e.selectedAuth = credential.Clone()
+	httpCall := int(e.httpCalls.Add(1))
 	body, errRead := io.ReadAll(req.Body)
 	if errRead != nil {
 		return nil, errRead
 	}
 	e.body = body
 	statusCode := e.statusCode
+	if httpCall <= len(e.statuses) && e.statuses[httpCall-1] > 0 {
+		statusCode = e.statuses[httpCall-1]
+	}
 	if statusCode == 0 {
 		statusCode = http.StatusCreated
+	}
+	responseBody := e.responseBody
+	if statusCode == http.StatusUnauthorized && httpCall < len(e.statuses) {
+		responseBody = io.NopCloser(strings.NewReader("unauthorized"))
+	}
+	if e.beforeReturn != nil {
+		e.beforeReturn()
 	}
 	return &http.Response{
 		StatusCode: statusCode,
@@ -88,31 +110,76 @@ func (e *captureExecutor) HttpRequest(_ context.Context, credential *auth.Auth, 
 			"X-Connection-Secret": []string{"secret"},
 			"X-Live-Session":      []string{"live-session-123"},
 		},
-		Body: e.responseBody,
+		Body: responseBody,
 	}, nil
 }
 
 type homeDispatcher struct {
-	model string
+	model  string
+	authID string
+}
+
+type homeUnauthorizedUsageCapture struct {
+	authID  string
+	records chan coreusage.Record
+}
+
+func (p *homeUnauthorizedUsageCapture) HandleUsage(_ context.Context, record coreusage.Record) {
+	if p == nil || record.ExecutorType != "home-result" || record.AuthID != p.authID {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func (p *homeUnauthorizedUsageCapture) wait(t *testing.T) coreusage.Record {
+	t.Helper()
+	select {
+	case record := <-p.records:
+		return record
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Home unauthorized usage record")
+		return coreusage.Record{}
+	}
+}
+
+type noopHomeUnauthorizedUsagePlugin struct{}
+
+func (noopHomeUnauthorizedUsagePlugin) HandleUsage(context.Context, coreusage.Record) {}
+
+func registerHomeUnauthorizedUsageCapture(t *testing.T, name, authID string) *homeUnauthorizedUsageCapture {
+	t.Helper()
+	capture := &homeUnauthorizedUsageCapture{authID: authID, records: make(chan coreusage.Record, 1)}
+	coreusage.RegisterNamedPlugin(name, capture)
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin(name, noopHomeUnauthorizedUsagePlugin{})
+	})
+	return capture
 }
 
 func (*homeDispatcher) HeartbeatOK() bool { return true }
 
 func (d *homeDispatcher) RPopAuth(_ context.Context, model string, _ string, _ http.Header, _ int) ([]byte, error) {
 	d.model = model
+	authID := d.authID
+	if authID == "" {
+		authID = "home-codex-live"
+	}
 	return json.Marshal(map[string]any{
 		"model":      model,
 		"provider":   "codex",
-		"auth_index": "home-codex-live",
+		"auth_index": authID,
 		"auth": map[string]any{
-			"id":       "home-codex-live",
+			"id":       authID,
 			"provider": "codex",
 			"status":   "active",
 			"metadata": map[string]any{"access_token": "home-live-token"},
 		},
 		"concurrency": map[string]any{
 			"accounted":     true,
-			"credential_id": "home-codex-live",
+			"credential_id": authID,
 			"model":         model,
 		},
 	})
@@ -145,6 +212,32 @@ type trackedResponseBody struct {
 func (b *trackedResponseBody) Close() error {
 	b.closed.Store(true)
 	return nil
+}
+
+type errorResponseBody struct {
+	payload []byte
+	read    atomic.Bool
+	closed  atomic.Bool
+}
+
+func (b *errorResponseBody) Read(p []byte) (int, error) {
+	if !b.read.CompareAndSwap(false, true) {
+		return 0, io.EOF
+	}
+	return copy(p, b.payload), io.ErrUnexpectedEOF
+}
+
+func (b *errorResponseBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+func TestReadLimitedBodyPreservesPayloadOnReadError(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	payload, errRead := readLimitedBody(&errorResponseBody{payload: []byte(upstreamError)})
+	if !errors.Is(errRead, io.ErrUnexpectedEOF) || string(payload) != upstreamError {
+		t.Fatalf("readLimitedBody() = %q, %v; want partial payload and unexpected EOF", payload, errRead)
+	}
 }
 
 type fakeMediaRelay struct {
@@ -589,6 +682,125 @@ func TestHandlerClosesMediaWhenResponseWriteFails(t *testing.T) {
 	}
 }
 
+func TestHandlerForwardsUnauthorizedHomeResponseWithoutRefresh(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	gin.SetMode(gin.TestMode)
+	manager := auth.NewManager(nil, nil, nil)
+	manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
+	registry := executionregistry.New()
+	manager.PublishHomeDispatch(&homeDispatcher{}, registry, 1)
+	executor := &captureExecutor{
+		statuses:     []int{http.StatusUnauthorized},
+		responseBody: &trackedResponseBody{Reader: strings.NewReader(upstreamError)},
+	}
+	manager.RegisterExecutor(executor)
+	handler := NewHandler(manager, nil)
+	router := gin.New()
+	router.POST("/v1/live", handler.Handle)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(`{"model":"gpt-live-1-codex","sdp":"v=0"}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusUnauthorized, recorder.Body.String())
+	}
+	if got := recorder.Body.String(); got != upstreamError {
+		t.Fatalf("body = %q, want original upstream error %q", got, upstreamError)
+	}
+	if executor.refreshCalls.Load() != 0 || executor.httpCalls.Load() != 1 {
+		t.Fatalf("refresh/http calls = %d/%d, want 0/1", executor.refreshCalls.Load(), executor.httpCalls.Load())
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer home-live-token" {
+		t.Fatalf("Authorization = %q, want original Home token", got)
+	}
+	if errDrain := registry.Drain(context.Background()); errDrain != nil {
+		t.Fatalf("Drain() error = %v", errDrain)
+	}
+}
+
+func TestHandlerReportsUnauthorizedBeforeEarlyReturn(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	tests := []struct {
+		name         string
+		responseBody func() io.ReadCloser
+		beforeReturn func(*executionregistry.Registry)
+		wantStatus   int
+		wantFailBody string
+	}{
+		{
+			name: "response bind failure",
+			responseBody: func() io.ReadCloser {
+				return &trackedResponseBody{Reader: strings.NewReader(upstreamError)}
+			},
+			beforeReturn: func(registry *executionregistry.Registry) {
+				_ = registry.Close()
+			},
+			wantStatus:   http.StatusServiceUnavailable,
+			wantFailBody: "upstream unauthorized",
+		},
+		{
+			name: "response read failure",
+			responseBody: func() io.ReadCloser {
+				return &errorResponseBody{payload: []byte(upstreamError)}
+			},
+			wantStatus:   http.StatusBadGateway,
+			wantFailBody: upstreamError,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			authID := "home-codex-live-" + strings.ReplaceAll(test.name, " ", "-")
+			runtimeConfig := &config.Config{
+				Home:      config.HomeConfig{Enabled: true},
+				SDKConfig: config.SDKConfig{RequestLog: true},
+			}
+			manager := auth.NewManager(nil, nil, nil)
+			manager.SetConfig(runtimeConfig)
+			registry := executionregistry.New()
+			manager.PublishHomeDispatch(&homeDispatcher{authID: authID}, registry, 1)
+			executor := &captureExecutor{
+				statuses:     []int{http.StatusUnauthorized},
+				responseBody: test.responseBody(),
+			}
+			if test.beforeReturn != nil {
+				executor.beforeReturn = func() { test.beforeReturn(registry) }
+			}
+			manager.RegisterExecutor(executor)
+			usageCapture := registerHomeUnauthorizedUsageCapture(t, t.Name(), authID)
+			handler := NewHandler(manager, runtimeConfig)
+			router := gin.New()
+			var apiResponse []byte
+			router.Use(func(c *gin.Context) {
+				c.Next()
+				if raw, exists := c.Get("API_RESPONSE"); exists {
+					apiResponse, _ = raw.([]byte)
+				}
+			})
+			router.POST("/v1/live", handler.Handle)
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(`{"model":"gpt-live-1-codex","sdp":"v=0"}`))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			record := usageCapture.wait(t)
+			if record.Fail.StatusCode != http.StatusUnauthorized || record.Fail.Body != test.wantFailBody {
+				t.Fatalf("Home unauthorized failure = status %d body %q, want status 401 body %q", record.Fail.StatusCode, record.Fail.Body, test.wantFailBody)
+			}
+			if test.name == "response read failure" && (!strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error())) {
+				t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+			}
+		})
+	}
+}
+
 func TestHandlerUsesLiveModelForHomeDispatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -764,6 +976,125 @@ func TestHandleSidebandPinsAuthAndRelaysBidirectionally(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("upstream sideband headers were not captured")
+	}
+}
+
+func TestHandleSidebandForwardsUnauthorizedHomeHandshakeWithoutRefresh(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name         string
+		upstreamBody string
+	}{
+		{name: "response body", upstreamBody: `{"error":{"message":"access token expired"}}`},
+		{name: "empty response body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var upstreamCalls atomic.Int32
+			upstreamHeaders := make(chan http.Header, 1)
+			upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				upstreamCalls.Add(1)
+				upstreamHeaders <- request.Header.Clone()
+				writer.Header().Set("Content-Type", "application/json")
+				writer.WriteHeader(http.StatusUnauthorized)
+				_, _ = writer.Write([]byte(tc.upstreamBody))
+			}))
+			defer upstreamServer.Close()
+
+			manager := auth.NewManager(nil, nil, nil)
+			manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
+			registry := executionregistry.New()
+			manager.PublishHomeDispatch(&homeDispatcher{}, registry, 1)
+			executor := &captureExecutor{}
+			manager.RegisterExecutor(executor)
+			selection, errSelect := manager.SelectHomeAuthByKind(context.Background(), "codex", defaultLiveModel, auth.AuthKindOAuth, coreexecutor.Options{})
+			if errSelect != nil {
+				t.Fatalf("SelectHomeAuthByKind() error = %v", errSelect)
+			}
+			selection.Retain()
+			defer selection.End("test_complete")
+
+			handler := NewHandler(manager, nil)
+			handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
+			handler.sessions.put("call-home-refresh", liveSession{authID: "home-codex-live", model: defaultLiveModel, homeSelection: selection})
+			router := gin.New()
+			router.GET("/v1/live/:call_id", handler.HandleSideband)
+			downstreamServer := httptest.NewServer(router)
+			defer downstreamServer.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/live/call-home-refresh"
+			client, response, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+			if client != nil {
+				_ = client.Close()
+			}
+			if errDial == nil || response == nil {
+				t.Fatalf("dial downstream sideband = response %#v err %v, want rejected handshake", response, errDial)
+			}
+			defer func() { _ = response.Body.Close() }()
+			responseBody, errRead := io.ReadAll(response.Body)
+			if errRead != nil {
+				t.Fatalf("read downstream rejection: %v", errRead)
+			}
+			if response.StatusCode != http.StatusUnauthorized || string(responseBody) != tc.upstreamBody {
+				t.Fatalf("downstream rejection = status %d body %q, want original upstream 401 body %q", response.StatusCode, responseBody, tc.upstreamBody)
+			}
+			if executor.refreshCalls.Load() != 0 || upstreamCalls.Load() != 1 {
+				t.Fatalf("refresh/upstream calls = %d/%d, want 0/1", executor.refreshCalls.Load(), upstreamCalls.Load())
+			}
+			if got := (<-upstreamHeaders).Get("Authorization"); got != "Bearer home-live-token" {
+				t.Fatalf("upstream Authorization = %q, want original Home token", got)
+			}
+		})
+	}
+}
+
+func TestHandleSidebandDialErrorPreservesBodyReturnedWithReadError(t *testing.T) {
+	const upstreamError = `{"error":{"message":"access token expired"}}`
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/live/call-123", nil)
+	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	response := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       &errorResponseBody{payload: []byte(upstreamError)},
+	}
+
+	responseBody := handleSidebandDialError(c, ctx, &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}, response, errors.New("websocket: bad handshake"))
+	if recorder.Code != http.StatusUnauthorized || recorder.Body.String() != upstreamError || string(responseBody) != upstreamError {
+		t.Fatalf("forwarded response = status %d body %q returned %q, want original upstream 401", recorder.Code, recorder.Body.String(), responseBody)
+	}
+	rawTimeline, okTimeline := c.Get("API_WEBSOCKET_TIMELINE")
+	timeline, _ := rawTimeline.([]byte)
+	if !okTimeline || !strings.Contains(string(timeline), upstreamError) {
+		t.Fatalf("API_WEBSOCKET_TIMELINE = %q, want original upstream error", timeline)
+	}
+}
+
+func TestHandleSidebandDialErrorDoesNotForwardNonUnauthorizedBody(t *testing.T) {
+	const upstreamError = `<html>proxy-01.internal authentication failed</html>`
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/live/call-123", nil)
+	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	response := &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Header:     http.Header{"Content-Type": []string{"text/html"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamError)),
+	}
+
+	responseBody := handleSidebandDialError(c, ctx, &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}, response, errors.New("websocket: bad handshake"))
+	if recorder.Code != http.StatusBadGateway || len(responseBody) != 0 {
+		t.Fatalf("response = status %d returned %q, want generic 502", recorder.Code, responseBody)
+	}
+	if strings.Contains(recorder.Body.String(), upstreamError) || !strings.Contains(recorder.Body.String(), "Codex live sideband upstream unavailable") {
+		t.Fatalf("downstream body = %q, want generic error without proxy detail", recorder.Body.String())
+	}
+	rawTimeline, okTimeline := c.Get("API_WEBSOCKET_TIMELINE")
+	timeline, _ := rawTimeline.([]byte)
+	if !okTimeline || !strings.Contains(string(timeline), upstreamError) {
+		t.Fatalf("API_WEBSOCKET_TIMELINE = %q, want original upstream error", timeline)
 	}
 }
 

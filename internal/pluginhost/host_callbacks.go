@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -15,22 +16,24 @@ import (
 )
 
 type rpcHostHTTPRequest struct {
-	HTTPClientID   string       `json:"http_client_id,omitempty"`
-	HostCallbackID string       `json:"host_callback_id,omitempty"`
-	Method         string       `json:"method,omitempty"`
-	URL            string       `json:"url,omitempty"`
-	Headers        httpHeader   `json:"headers,omitempty"`
-	Body           []byte       `json:"body,omitempty"`
-	Request        *httpRequest `json:"request,omitempty"`
+	HTTPClientID   string                     `json:"http_client_id,omitempty"`
+	HostCallbackID string                     `json:"host_callback_id,omitempty"`
+	Method         string                     `json:"method,omitempty"`
+	URL            string                     `json:"url,omitempty"`
+	Headers        httpHeader                 `json:"headers,omitempty"`
+	Body           []byte                     `json:"body,omitempty"`
+	WireProfile    *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
+	Request        *httpRequest               `json:"request,omitempty"`
 }
 
 type httpHeader map[string][]string
 
 type httpRequest struct {
-	Method  string     `json:"method,omitempty"`
-	URL     string     `json:"url,omitempty"`
-	Headers httpHeader `json:"headers,omitempty"`
-	Body    []byte     `json:"body,omitempty"`
+	Method      string                     `json:"method,omitempty"`
+	URL         string                     `json:"url,omitempty"`
+	Headers     httpHeader                 `json:"headers,omitempty"`
+	Body        []byte                     `json:"body,omitempty"`
+	WireProfile *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
 }
 
 type rpcHostHTTPStreamResponse struct {
@@ -127,6 +130,8 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAuthGetRuntime(ctx, request)
 	case pluginabi.MethodHostAuthSave:
 		return h.callHostAuthSave(ctx, request)
+	case pluginabi.MethodHostAffinityLookup:
+		return h.callHostAffinityLookup(ctx, request)
 	default:
 		return nil, fmt.Errorf("unsupported host callback %s", method)
 	}
@@ -152,6 +157,10 @@ func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, erro
 	return marshalRPCResult(resp)
 }
 
+func newStreamContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(ctx)
+}
+
 func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte, error) {
 	httpReq, callbackID, errDecode := decodeHostHTTPRequestWithCallbackID(request)
 	if errDecode != nil {
@@ -161,7 +170,7 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	streamCtx, cancel := context.WithCancel(ctx)
+	streamCtx, cancel := newStreamContext(ctx)
 	resp, errDo := h.newHTTPClient(nil).DoStream(streamCtx, httpReq)
 	if errDo != nil {
 		cancel()
@@ -227,19 +236,34 @@ func decodeHostHTTPRequestWithCallbackID(raw []byte) (pluginapi.HTTPRequest, str
 		return pluginapi.HTTPRequest{}, "", fmt.Errorf("decode host http request: %w", errUnmarshal)
 	}
 	if req.Request != nil {
+		wireProfile := req.Request.WireProfile
+		if wireProfile == nil {
+			wireProfile = req.WireProfile
+		}
 		return pluginapi.HTTPRequest{
-			Method:  req.Request.Method,
-			URL:     req.Request.URL,
-			Headers: map[string][]string(req.Request.Headers),
-			Body:    append([]byte(nil), req.Request.Body...),
+			Method:      req.Request.Method,
+			URL:         req.Request.URL,
+			Headers:     map[string][]string(req.Request.Headers),
+			Body:        append([]byte(nil), req.Request.Body...),
+			WireProfile: cloneWireProfile(wireProfile),
 		}, req.HostCallbackID, nil
 	}
 	return pluginapi.HTTPRequest{
-		Method:  req.Method,
-		URL:     req.URL,
-		Headers: map[string][]string(req.Headers),
-		Body:    append([]byte(nil), req.Body...),
+		Method:      req.Method,
+		URL:         req.URL,
+		Headers:     map[string][]string(req.Headers),
+		Body:        append([]byte(nil), req.Body...),
+		WireProfile: cloneWireProfile(req.WireProfile),
 	}, req.HostCallbackID, nil
+}
+
+func cloneWireProfile(src *pluginapi.HTTPWireProfile) *pluginapi.HTTPWireProfile {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	dst.HeaderProfile = append([]string(nil), src.HeaderProfile...)
+	return &dst
 }
 
 func (h *Host) callHostStreamEmit(ctx context.Context, request []byte) ([]byte, error) {
@@ -303,42 +327,48 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 		Alt:                     req.Alt,
 		SkipInterceptorPluginID: skipPluginID,
 		SkipRouterPluginID:      skipPluginID,
+		ForcedProvider:          req.ForcedProvider,
+		AuthID:                  req.AuthID,
 	}
 }
 
-type modelExecutionCallbackError struct {
-	cause      error
+type modelExecutionStatusError struct {
+	err        error
 	statusCode int
 }
 
-func (e *modelExecutionCallbackError) Error() string {
-	return e.cause.Error()
+func (e *modelExecutionStatusError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	if e.statusCode > 0 {
+		return fmt.Sprintf("model execution failed with status %d", e.statusCode)
+	}
+	return "model execution failed"
 }
 
-func (e *modelExecutionCallbackError) Unwrap() error {
-	return e.cause
-}
-
-func (e *modelExecutionCallbackError) StatusCode() int {
+func (e *modelExecutionStatusError) StatusCode() int {
 	return e.statusCode
+}
+
+func (e *modelExecutionStatusError) Unwrap() error {
+	return e.err
 }
 
 func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}
-	cause := errMsg.Error
-	if cause == nil {
-		if errMsg.StatusCode > 0 {
-			cause = fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
-		} else {
-			cause = fmt.Errorf("model execution failed")
+	if errMsg.StatusCode > 0 && clienterror.HTTPStatusFromError(errMsg.Error) != errMsg.StatusCode {
+		return &modelExecutionStatusError{
+			err:        errMsg.Error,
+			statusCode: errMsg.StatusCode,
 		}
 	}
-	if errMsg.StatusCode > 0 {
-		return &modelExecutionCallbackError{cause: cause, statusCode: errMsg.StatusCode}
+	if errMsg.Error != nil {
+		return errMsg.Error
 	}
-	return cause
+	return fmt.Errorf("model execution failed")
 }
 
 func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) {

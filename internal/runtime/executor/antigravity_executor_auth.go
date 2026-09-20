@@ -3,11 +3,11 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -72,8 +72,8 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
 	accessToken := metaStringValue(auth.Metadata, "access_token")
-	expiry := tokenExpiry(auth.Metadata)
-	if accessToken != "" && expiry.After(time.Now().Add(refreshSkew)) {
+	expiry, _ := auth.ExpirationTime()
+	if accessToken != "" && expiry.After(time.Now().Add(antigravityRequestTokenSafetyWindow)) {
 		e.maybeRefreshAntigravityCreditsHint(ctx, auth, accessToken)
 		return accessToken, nil, nil
 	}
@@ -255,30 +255,28 @@ func antigravityProjectIDFromAuth(auth *cliproxyauth.Auth) string {
 
 func missingAntigravityProjectIDError(cause error) statusErr {
 	msg := "antigravity auth missing project_id"
+	statusCode := http.StatusBadRequest
+	var retryAfter *time.Duration
 	if cause != nil {
 		msg = fmt.Sprintf("%s: %v", msg, cause)
-	}
-	return statusErr{code: http.StatusBadRequest, msg: msg}
-}
-
-func tokenExpiry(metadata map[string]any) time.Time {
-	if metadata == nil {
-		return time.Time{}
-	}
-	if expStr, ok := metadata["expired"].(string); ok {
-		expStr = strings.TrimSpace(expStr)
-		if expStr != "" {
-			if parsed, errParse := time.Parse(time.RFC3339, expStr); errParse == nil {
-				return parsed
+		type statusCoder interface {
+			StatusCode() int
+		}
+		var sc statusCoder
+		if errors.As(cause, &sc) && sc != nil {
+			if code := sc.StatusCode(); code > 0 {
+				statusCode = code
 			}
 		}
+		type retryAfterProvider interface {
+			RetryAfter() *time.Duration
+		}
+		var rap retryAfterProvider
+		if errors.As(cause, &rap) && rap != nil {
+			retryAfter = rap.RetryAfter()
+		}
 	}
-	expiresIn, hasExpires := int64Value(metadata["expires_in"])
-	tsMs, hasTimestamp := int64Value(metadata["timestamp"])
-	if hasExpires && hasTimestamp {
-		return time.Unix(0, tsMs*int64(time.Millisecond)).Add(time.Duration(expiresIn) * time.Second)
-	}
-	return time.Time{}
+	return statusErr{code: statusCode, msg: msg, retryAfter: retryAfter}
 }
 
 func metaStringValue(metadata map[string]any, key string) string {
@@ -294,27 +292,4 @@ func metaStringValue(metadata map[string]any, key string) string {
 		}
 	}
 	return ""
-}
-
-func int64Value(value any) (int64, bool) {
-	switch typed := value.(type) {
-	case int:
-		return int64(typed), true
-	case int64:
-		return typed, true
-	case float64:
-		return int64(typed), true
-	case json.Number:
-		if i, errParse := typed.Int64(); errParse == nil {
-			return i, true
-		}
-	case string:
-		if strings.TrimSpace(typed) == "" {
-			return 0, false
-		}
-		if i, errParse := strconv.ParseInt(strings.TrimSpace(typed), 10, 64); errParse == nil {
-			return i, true
-		}
-	}
-	return 0, false
 }

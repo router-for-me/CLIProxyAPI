@@ -3,7 +3,56 @@ package auth
 import (
 	"context"
 	"testing"
+	"time"
 )
+
+func TestManager_RegisterCanonicalizesThinkingSuffixModelStates(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	now := time.Now()
+	laterRetry := now.Add(2 * time.Hour)
+
+	registered, errRegister := manager.Register(context.Background(), &Auth{
+		ID:       "auth-thinking-states",
+		Provider: "gemini",
+		ModelStates: map[string]*ModelState{
+			"gemini-3.1-pro-preview(high)": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(time.Hour),
+				Quota: QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: now.Add(time.Hour),
+					BackoffLevel:  1,
+				},
+				UpdatedAt: now,
+			},
+			"gemini-3.1-pro-preview(low)": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: laterRetry,
+				Quota: QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: laterRetry,
+					BackoffLevel:  2,
+				},
+				UpdatedAt: now.Add(time.Minute),
+			},
+		},
+	})
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	if len(registered.ModelStates) != 1 {
+		t.Fatalf("len(ModelStates) = %d, want 1: %+v", len(registered.ModelStates), registered.ModelStates)
+	}
+	state := registered.ModelStates["gemini-3.1-pro-preview"]
+	if state == nil || !state.Unavailable || !state.NextRetryAfter.Equal(laterRetry) {
+		t.Fatalf("canonical model state = %+v, want unavailable until %v", state, laterRetry)
+	}
+	if state.Quota.BackoffLevel != 2 || !state.Quota.NextRecoverAt.Equal(laterRetry) {
+		t.Fatalf("canonical model quota = %+v, want latest cooldown", state.Quota)
+	}
+}
 
 func TestManager_Update_PreservesModelStates(t *testing.T) {
 	m := NewManager(nil, nil, nil)

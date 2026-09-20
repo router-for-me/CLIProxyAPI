@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -36,6 +36,9 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 		ctx = context.Background()
 	}
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	if err != nil {
+		cliproxyexecutor.MarkUpstreamAttempt(ctx)
+	}
 	closer := newWebsocketConnectionCloser(conn)
 	if conn != nil {
 		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.
@@ -45,14 +48,37 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	return conn, closer, resp, err
 }
 
-func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = "codex"
+	}
+	sessionID := ""
 	if sess != nil {
-		return sess.writeMessage(conn, websocket.TextMessage, payload)
+		sessionID = sess.sessionID
 	}
-	if conn == nil {
-		return fmt.Errorf("codex websockets executor: websocket conn is nil")
+	sessionKind := sessionObjectKind(sess)
+	payloadBytes := len(payload)
+	start := time.Now()
+	log.Debugf("%s websockets: write payload started session=%s session_object=%s bytes=%d", provider, sessionID, sessionKind, payloadBytes)
+	var errSend error
+	if sess != nil {
+		errSend = sess.writeMessage(conn, websocket.TextMessage, payload)
+	} else if conn == nil {
+		errSend = fmt.Errorf("%s websockets executor: websocket conn is nil", provider)
+	} else {
+		errSend = conn.WriteMessage(websocket.TextMessage, payload)
 	}
-	return conn.WriteMessage(websocket.TextMessage, payload)
+	if errSend != nil {
+		log.Warnf("%s websockets: write payload failed session=%s session_object=%s bytes=%d duration=%v err=%v", provider, sessionID, sessionKind, payloadBytes, time.Since(start), errSend)
+	} else {
+		log.Debugf("%s websockets: write payload completed session=%s session_object=%s bytes=%d duration=%v", provider, sessionID, sessionKind, payloadBytes, time.Since(start))
+	}
+	return errSend
+}
+
+func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+	return writeWebsocketPayloadMessage("codex", sess, conn, payload)
 }
 
 func mapCodexWebsocketWriteError(sess *codexWebsocketSession, conn *websocket.Conn, err error) error {
@@ -98,7 +124,7 @@ func mapCodexWebsocketReadError(err error) error {
 }
 
 func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) []byte {
-	if !isCodexResponsesLiteRequest(body, headers) {
+	if !util.IsCodexResponsesLiteRequest(body, headers) {
 		return body
 	}
 	body = helps.SetBoolIfDifferent(body, "parallel_tool_calls", false)
@@ -114,13 +140,11 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
 	body = helps.SanitizeCodexInputItemIDs(body)
-	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
+	wsReqBody, errSet := sjson.SetBytes(body, "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
 	}
-	fallback := bytes.Clone(body)
-	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
-	return fallback
+	return body
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -28,6 +30,7 @@ type toolCallStreamState struct {
 
 // ConvertCliToOpenAIParams holds parameters for response conversion.
 type ConvertCliToOpenAIParams struct {
+	ServiceTier           string
 	ResponseID            string
 	CreatedAt             int64
 	Model                 string
@@ -73,6 +76,16 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 	rootResult := gjson.ParseBytes(rawJSON)
 
+	p := (*param).(*ConvertCliToOpenAIParams)
+	if tier := codexResponseServiceTier(rootResult.Get("response")); tier != "" {
+		p.ServiceTier = tier
+	} else if tier := codexResponseServiceTier(rootResult); tier != "" {
+		p.ServiceTier = tier
+	}
+	if p.ServiceTier != "" {
+		template, _ = sjson.SetBytes(template, "service_tier", p.ServiceTier)
+	}
+
 	typeResult := rootResult.Get("type")
 	dataType := typeResult.String()
 	if dataType == "response.created" {
@@ -114,20 +127,18 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		if cachedTokensResult := usageResult.Get("input_tokens_details.cached_tokens"); cachedTokensResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int())
 		}
-		if cacheWriteTokensResult := usageResult.Get("input_tokens_details.cache_write_tokens"); cacheWriteTokensResult.Exists() {
-			template, _ = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_creation_tokens", cacheWriteTokensResult.Int())
-		}
+		template = setCodexCacheWriteTokens(template, usageResult)
 		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
 		}
 	}
 
-	if dataType == "response.reasoning_summary_text.delta" {
+	if dataType == "response.reasoning_summary_text.delta" || dataType == "response.reasoning_text.delta" {
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", deltaResult.String())
 		}
-	} else if dataType == "response.reasoning_summary_text.done" {
+	} else if dataType == "response.reasoning_summary_text.done" || dataType == "response.reasoning_text.done" {
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 		template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", "\n\n")
 	} else if dataType == "response.output_text.delta" {
@@ -383,6 +394,12 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 	template := []byte(`{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
 
+	if tier := codexResponseServiceTier(responseResult); tier != "" {
+		template, _ = sjson.SetBytes(template, "service_tier", tier)
+	} else if tier := codexResponseServiceTier(rootResult); tier != "" {
+		template, _ = sjson.SetBytes(template, "service_tier", tier)
+	}
+
 	// Extract and set the model version.
 	if modelResult := responseResult.Get("model"); modelResult.Exists() {
 		template, _ = sjson.SetBytes(template, "model", modelResult.String())
@@ -414,9 +431,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		if cachedTokensResult := usageResult.Get("input_tokens_details.cached_tokens"); cachedTokensResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int())
 		}
-		if cacheWriteTokensResult := usageResult.Get("input_tokens_details.cache_write_tokens"); cacheWriteTokensResult.Exists() {
-			template, _ = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_creation_tokens", cacheWriteTokensResult.Int())
-		}
+		template = setCodexCacheWriteTokens(template, usageResult)
 		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
 		}
@@ -445,6 +460,17 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 								reasoningText += text
 							}
 							break
+						}
+					}
+				}
+				// Extract reasoning content from content
+				if contentResult := outputItem.Get("content"); contentResult.IsArray() {
+					contentArray := contentResult.Array()
+					for _, contentItem := range contentArray {
+						if contentItem.Get("type").String() == "reasoning_text" {
+							if text := contentItem.Get("text").String(); text != "" {
+								reasoningText += text
+							}
 						}
 					}
 				}
@@ -508,18 +534,12 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 		// Add tool calls if any
 		if len(toolCalls) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", []byte(`[]`))
-			for _, toolCall := range toolCalls {
-				template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls.-1", toolCall)
-			}
+			template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", translatorcommon.JoinRawArray(toolCalls))
 		}
 
 		// Add images if any
 		if len(images) > 0 {
-			template, _ = sjson.SetRawBytes(template, "choices.0.message.images", []byte(`[]`))
-			for _, image := range images {
-				template, _ = sjson.SetRawBytes(template, "choices.0.message.images.-1", image)
-			}
+			template, _ = sjson.SetRawBytes(template, "choices.0.message.images", translatorcommon.JoinRawArray(images))
 		}
 	}
 
@@ -574,13 +594,19 @@ func registerToolCallState(p *ConvertCliToOpenAIParams, eventResult, itemResult 
 
 func findToolCallState(p *ConvertCliToOpenAIParams, eventResult, itemResult gjson.Result) *toolCallStreamState {
 	if itemID := eventResult.Get("item_id").String(); itemID != "" {
-		return p.toolCallStates["item:"+itemID]
+		if state := p.toolCallStates["item:"+itemID]; state != nil {
+			return state
+		}
 	}
 	if itemID := itemResult.Get("id").String(); itemID != "" {
-		return p.toolCallStates["item:"+itemID]
+		if state := p.toolCallStates["item:"+itemID]; state != nil {
+			return state
+		}
 	}
 	if outputIndex := eventResult.Get("output_index"); outputIndex.Exists() {
-		return p.toolCallStates["output:"+outputIndex.Raw]
+		if state := p.toolCallStates["output:"+outputIndex.Raw]; state != nil {
+			return state
+		}
 	}
 	return p.currentToolCall
 }
@@ -599,33 +625,12 @@ func codexToolCallArguments(itemResult gjson.Result) string {
 // buildReverseMapFromOriginalOpenAI builds a map of shortened tool name -> original tool name
 // from the original OpenAI-style request JSON using the same shortening logic.
 func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
-	tools := gjson.GetBytes(original, "tools")
 	rev := map[string]string{}
-	if tools.IsArray() && len(tools.Array()) > 0 {
-		var names []string
-		seenNames := map[string]struct{}{}
-		arr := tools.Array()
-		for i := 0; i < len(arr); i++ {
-			t := arr[i]
-			var name string
-			switch t.Get("type").String() {
-			case "function":
-				name = t.Get("function.name").String()
-			case "custom":
-				name = t.Get("name").String()
-			}
-			if name != "" {
-				if _, seen := seenNames[name]; !seen {
-					names = append(names, name)
-					seenNames[name] = struct{}{}
-				}
-			}
-		}
-		if len(names) > 0 {
-			m := buildShortNameMap(names)
-			for orig, short := range m {
-				rev[short] = orig
-			}
+	names := collectRequestToolNames(original)
+	if len(names) > 0 {
+		m := buildShortNameMap(names)
+		for orig, short := range m {
+			rev[short] = orig
 		}
 	}
 	return rev
@@ -650,4 +655,35 @@ func mimeTypeFromCodexOutputFormat(outputFormat string) string {
 	default:
 		return "image/png"
 	}
+}
+
+// codexResponseServiceTier returns only an actual nonempty upstream tier.
+func codexResponseServiceTier(response gjson.Result) string {
+	tier := response.Get("service_tier")
+	if tier.Type != gjson.String || strings.TrimSpace(tier.Str) == "" {
+		return ""
+	}
+	return strings.TrimSpace(tier.Str)
+}
+
+// setCodexCacheWriteTokens preserves the upstream integer without float conversion.
+func setCodexCacheWriteTokens(template []byte, usage gjson.Result) []byte {
+	value := usage.Get("input_tokens_details.cache_write_tokens")
+	if !value.Exists() || value.Type == gjson.Null {
+		return template
+	}
+	valid := value.Type == gjson.Number && value.Raw != ""
+	for _, digit := range value.Raw {
+		if digit < '0' || digit > '9' {
+			valid = false
+			break
+		}
+	}
+	if !valid {
+		log.WithField("field", "usage.input_tokens_details.cache_write_tokens").Warn("Ignoring invalid Codex cache write token count")
+		return template
+	}
+	template, _ = sjson.SetRawBytes(template, "usage.prompt_tokens_details.cache_write_tokens", []byte(value.Raw))
+	template, _ = sjson.SetRawBytes(template, "usage.prompt_tokens_details.cached_creation_tokens", []byte(value.Raw))
+	return template
 }

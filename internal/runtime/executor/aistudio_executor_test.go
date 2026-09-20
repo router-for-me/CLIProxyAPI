@@ -17,7 +17,220 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
+
+func TestAIStudioTranslateRequestPreservesSummaryFromOriginalRequest(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-3.6-flash",
+		Payload: []byte(`{"model":"gemini-3.6-flash","input":"hi"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: []byte(`{"model":"gemini-3.6-flash","reasoning":{"summary":"auto"},"input":"hi"}`),
+	}
+	payload, _, err := executor.translateRequest(context.Background(), req, opts, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	if !gjson.GetBytes(payload, "generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("original request summary intent was lost: %s", payload)
+	}
+}
+
+func TestAIStudioTranslateRequestNormalizesThinkingLevel(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	req := cliproxyexecutor.Request{
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{
+			"contents":[{"role":"user","parts":[{"text":"Human: Hi"}]}],
+			"model":"gemini-3.7-flash",
+			"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}}
+		}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+
+	payload, _, err := executor.translateRequest(context.Background(), req, opts, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	if got := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "HIGH" {
+		t.Fatalf("thinkingLevel = %q, want HIGH; payload=%s", got, payload)
+	}
+	if !gjson.GetBytes(payload, "generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("includeThoughts was lost: %s", payload)
+	}
+}
+
+func TestAIStudioTranslateRequestNormalizesThinkingLevelAfterPayloadOverride(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+		Models: []config.PayloadModelRule{{Name: "gemini-3.7-flash", Protocol: "gemini"}},
+		Params: map[string]any{"generationConfig.thinkingConfig.thinkingLevel": "medium"},
+	}}}}, "aistudio", nil)
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"model":"gemini-3.7-flash"}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+
+	payload, _, err := executor.translateRequest(context.Background(), req, opts, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	if got := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "MEDIUM" {
+		t.Fatalf("thinkingLevel = %q, want MEDIUM; payload=%s", got, payload)
+	}
+}
+
+func TestNormalizeAIStudioThinkingLevel(t *testing.T) {
+	tests := []struct {
+		name      string
+		levelJSON string
+		want      string
+		unchanged bool
+	}{
+		{name: "minimal", levelJSON: `"minimal"`, want: "MINIMAL"},
+		{name: "low", levelJSON: `"low"`, want: "LOW"},
+		{name: "medium", levelJSON: `"medium"`, want: "MEDIUM"},
+		{name: "mixed case high", levelJSON: `"hIgH"`, want: "HIGH"},
+		{name: "already uppercase", levelJSON: `"HIGH"`, want: "HIGH", unchanged: true},
+		{name: "none", levelJSON: `"none"`, want: "none", unchanged: true},
+		{name: "xhigh", levelJSON: `"xhigh"`, want: "xhigh", unchanged: true},
+		{name: "max", levelJSON: `"max"`, want: "max", unchanged: true},
+		{name: "custom", levelJSON: `"custom"`, want: "custom", unchanged: true},
+		{name: "non-string", levelJSON: `1`, want: "1", unchanged: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := []byte(fmt.Sprintf(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":%s}},"marker":true}`, test.levelJSON))
+			output := normalizeAIStudioThinkingLevel(input)
+			level := gjson.GetBytes(output, "generationConfig.thinkingConfig.thinkingLevel")
+			if got := level.String(); got != test.want {
+				t.Fatalf("thinkingLevel = %q, want %q; payload=%s", got, test.want, output)
+			}
+			if test.unchanged && string(output) != string(input) {
+				t.Fatalf("payload changed from %s to %s", input, output)
+			}
+		})
+	}
+}
+
+func TestAIStudioTranslateRequestPrependsLeadingUserForIssue4959ResponsesHistory(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	_, body, err := executor.translateRequest(context.Background(), cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash-high",
+		Payload: issue4959ResponsesModelFirstPayload(),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	assertIssue4959LeadingUserContents(t, gjson.GetBytes(body.payload, "contents").Array())
+}
+
+func TestAIStudioTranslateRequestAppendsTrailingUserForTrailingModelTurn(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	_, body, err := executor.translateRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[` +
+			`{"role":"user","parts":[{"text":"hello"}]},` +
+			`{"role":"model","parts":[{"text":"answer"}]}` +
+			`]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	contents := gjson.GetBytes(body.payload, "contents").Array()
+	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
+		t.Fatalf("contents roles malformed: %s", body.payload)
+	}
+	if got := contents[2].Get("parts.0.text").String(); got != "" {
+		t.Fatalf("trailing user prompt = %q, want empty string; body=%s", got, body.payload)
+	}
+}
+
+func TestAIStudioTranslateRequestCountTokensPreservesTrailingModelTurn(t *testing.T) {
+	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
+	// When action is countTokens, trailing model turn must not be modified
+	_, body, err := executor.translateRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[` +
+			`{"role":"user","parts":[{"text":"hello"}]},` +
+			`{"role":"model","parts":[{"text":"answer"}]}` +
+			`]}`),
+		Metadata: map[string]any{"action": "countTokens"},
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}, false)
+	if err != nil {
+		t.Fatalf("translateRequest() error = %v", err)
+	}
+	contents := gjson.GetBytes(body.payload, "contents").Array()
+	if len(contents) != 2 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
+		t.Fatalf("countTokens contents roles malformed: %s", body.payload)
+	}
+}
+
+func TestAIStudioExecutorWithoutRelaySessionDoesNotMarkUpstreamAttempt(t *testing.T) {
+	const authID = "aistudio-not-connected"
+	relay := wsrelay.NewManager(wsrelay.Options{})
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-3.1-pro-preview",
+		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}
+
+	tests := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{
+			name: "HTTP request",
+			run: func(ctx context.Context) error {
+				httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/generate", strings.NewReader(`{"contents":[]}`))
+				if errRequest != nil {
+					return errRequest
+				}
+				_, errRequest = exec.HttpRequest(ctx, auth, httpReq)
+				return errRequest
+			},
+		},
+		{
+			name: "execute",
+			run: func(ctx context.Context) error {
+				_, errExecute := exec.Execute(ctx, auth, req, opts)
+				return errExecute
+			},
+		},
+		{
+			name: "stream",
+			run: func(ctx context.Context) error {
+				_, errStream := exec.ExecuteStream(ctx, auth, req, opts)
+				return errStream
+			},
+		},
+		{
+			name: "count tokens",
+			run: func(ctx context.Context) error {
+				_, errCount := exec.CountTokens(ctx, auth, req, opts)
+				return errCount
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+			errRun := test.run(ctx)
+			if errRun == nil || !strings.Contains(errRun.Error(), "not connected") {
+				t.Fatalf("request error = %v, want provider not connected", errRun)
+			}
+			if cliproxyexecutor.UpstreamAttempted(ctx) {
+				t.Fatal("missing relay session was marked as an upstream attempt")
+			}
+		})
+	}
+}
 
 func TestAIStudioExecutorExecuteStartsTTFTBeforeRelayWait(t *testing.T) {
 	const authID = "aistudio-ttft-auth"
@@ -91,12 +304,16 @@ func TestAIStudioExecutorExecuteStartsTTFTBeforeRelayWait(t *testing.T) {
 	plugin := &captureAIStudioUsagePlugin{records: make(chan usage.Record, 16)}
 	usage.RegisterPlugin(plugin)
 	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
-	_, errExecute := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+	_, errExecute := exec.Execute(ctx, &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
 		Model:   "gemini-3.1-pro-preview",
 		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatal("relay request did not mark an upstream attempt")
 	}
 	if errClient := <-clientDone; errClient != nil {
 		t.Fatal(errClient)

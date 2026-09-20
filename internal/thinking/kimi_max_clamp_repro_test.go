@@ -10,8 +10,26 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// Reproduces Claude Code -> Kimi /v1/messages with effort=max.
-// KimiExecutor delegates to ClaudeExecutor, so ApplyThinking sees claude/claude.
+// TestKimiK28ClaudeMessagesMaxPreservesMax verifies that K2.8 models preserve effort=max
+// because their model definition includes "max" in thinking levels.
+func TestKimiK28ClaudeMessagesMaxPreservesMax(t *testing.T) {
+	models := registry.GetKimiModels()
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-kimi-k28-max"
+	reg.RegisterClient(clientID, "kimi", models)
+	t.Cleanup(func() { reg.UnregisterClient(clientID) })
+
+	body := []byte(`{"model":"kimi-k2.8","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
+	out, err := thinking.ApplyThinking(body, "kimi-k2.8", "claude", "claude", "claude")
+	if err != nil {
+		t.Fatalf("ApplyThinking returned error: %v", err)
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "max" {
+		t.Fatalf("output_config.effort = %q, want max", got)
+	}
+}
+
+// Reproduces Claude Code -> Kimi /v1/messages with effort=max on K2.5 (clamps to high).
 func TestKimiClaudeMessagesMaxClampsToHigh(t *testing.T) {
 	models := registry.GetKimiModels()
 	reg := registry.GetGlobalRegistry()

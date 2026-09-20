@@ -19,34 +19,6 @@ func (c staticEnvelopePluginClient) Call(context.Context, string, []byte) ([]byt
 
 func (c staticEnvelopePluginClient) Shutdown() {}
 
-type rpcTestStatusError struct {
-	message string
-	status  int
-}
-
-func (e rpcTestStatusError) Error() string   { return e.message }
-func (e rpcTestStatusError) StatusCode() int { return e.status }
-
-func TestMarshalRPCErrorFromErrorPreservesHTTPStatus(t *testing.T) {
-	raw := marshalRPCErrorFromError("host_call_failed", rpcTestStatusError{
-		message: "upstream timed out",
-		status:  http.StatusGatewayTimeout,
-	})
-	var envelope pluginabi.Envelope
-	if errUnmarshal := json.Unmarshal(raw, &envelope); errUnmarshal != nil {
-		t.Fatalf("unmarshal envelope: %v", errUnmarshal)
-	}
-	if envelope.OK || envelope.Error == nil {
-		t.Fatalf("envelope = %#v, want RPC error", envelope)
-	}
-	if envelope.Error.Message != "upstream timed out" {
-		t.Fatalf("message = %q, want upstream timed out", envelope.Error.Message)
-	}
-	if envelope.Error.HTTPStatus != http.StatusGatewayTimeout {
-		t.Fatalf("status = %d, want %d", envelope.Error.HTTPStatus, http.StatusGatewayTimeout)
-	}
-}
-
 func TestDecodeEnvelopeResultPreservesPluginHTTPStatus(t *testing.T) {
 	_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](pluginabi.Envelope{
 		OK: false,
@@ -106,5 +78,56 @@ func TestIsPluginErrorEnvelopeAcceptsNonzeroReturnEnvelope(t *testing.T) {
 	}
 	if isPluginErrorEnvelope([]byte(`not json`)) {
 		t.Fatal("isPluginErrorEnvelope accepted invalid JSON")
+	}
+}
+
+func TestCallPluginPreservesStatusFromNewErrorEnvelope(t *testing.T) {
+	raw, errMarshal := pluginabi.NewErrorEnvelope("insufficient_quota", "plan limit reached", http.StatusForbidden)
+	if errMarshal != nil {
+		t.Fatalf("NewErrorEnvelope() error = %v", errMarshal)
+	}
+	_, errCall := callPlugin[rpcEmptyResponse](context.Background(), staticEnvelopePluginClient{raw: raw}, pluginabi.MethodExecutorExecute, rpcEmptyResponse{})
+	if errCall == nil {
+		t.Fatal("callPlugin returned nil error")
+	}
+	if got := errCall.Error(); got != "plan limit reached" {
+		t.Fatalf("error = %q, want plan limit reached", got)
+	}
+	statusProvider, ok := errCall.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error %T does not expose StatusCode", errCall)
+	}
+	if got := statusProvider.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
+	}
+}
+
+func TestMarshalRPCErrorPreservesHTTPStatus(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		raw := marshalRPCError("host_call_failed", "synthetic", status)
+		var env pluginabi.Envelope
+		if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal != nil {
+			t.Fatalf("unmarshal envelope: %v", errUnmarshal)
+		}
+		if env.OK {
+			t.Fatal("expected envelope OK=false")
+		}
+		if env.Error == nil {
+			t.Fatal("expected non-nil Error in envelope")
+		}
+		if env.Error.HTTPStatus != status {
+			t.Fatalf("HTTPStatus = %d, want %d", env.Error.HTTPStatus, status)
+		}
+		_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](env)
+		if errDecode == nil {
+			t.Fatal("expected decode error")
+		}
+		statusProvider, ok := errDecode.(interface{ StatusCode() int })
+		if !ok {
+			t.Fatalf("decoded error does not expose StatusCode: %T", errDecode)
+		}
+		if got := statusProvider.StatusCode(); got != status {
+			t.Fatalf("StatusCode = %d, want %d", got, status)
+		}
 	}
 }

@@ -37,12 +37,13 @@
 //     traceable to a prior Gemini model response in the same conversation.
 //   - Opaque-shape tier: for real Gemini signatures, require a non-empty string,
 //     bounded length, successful standard base64 decoding, and a known protobuf
-//     envelope when the caller needs provider compatibility. The only known
+//     envelope when the caller needs provider compatibility. The known
 //     envelope is the Gemini 3.x field-2 -> field-1 payload, whose body holds
-//     either versioned opaque state or a provider UUID. Gemini 2.5 emitted a
-//     repeated field-1 form; those models are out of scope and their signatures
-//     are no longer a known envelope. Bare base64 UUID payloads are classified
-//     separately and should be replaced with the bypass sentinel rather than
+//     versioned opaque Tink state, a provider UUID, or a nested protobuf structure
+//     wrapping Tink ciphertext for server-side tool invocations (toolCall/toolResponse).
+//     Gemini 2.5 emitted a repeated field-1 form; those models are out of scope and
+//     their signatures are no longer a known envelope. Bare base64 UUID payloads are
+//     classified separately and should be replaced with the bypass sentinel rather than
 //     replayed.
 //   - Replay tier: real validation means preserving the exact model part that
 //     came from Gemini, including its thoughtSignature, id/name/function args,
@@ -72,6 +73,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -289,25 +291,31 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 	}
 
 	var pending []geminiFunctionCallRef
-	contentResults := contents.Array()
-	for i := 0; i < len(contentResults); i++ {
-		parts := contentResults[i].Get("parts")
-		if !parts.IsArray() {
+	var validationErr error
+	contents.ForEach(func(contentIndex, content gjson.Result) bool {
+		i := int(contentIndex.Int())
+		parts := content.Get("parts")
+		if !parts.IsArray() || parts.Raw == "[]" || !parts.Get("0").Exists() {
 			if len(pending) > 0 {
-				return fmt.Errorf("%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, i, len(pending))
+				validationErr = fmt.Errorf(
+					"%s[%d]: content appears before %d pending functionResponse part(s)",
+					contentsPath,
+					i,
+					len(pending),
+				)
 			}
-			continue
+			return validationErr == nil
 		}
 
 		var calls []geminiFunctionCallRef
 		var responses []geminiFunctionResponseRef
-		partResults := parts.Array()
-		for j := 0; j < len(partResults); j++ {
-			part := partResults[j]
+		parts.ForEach(func(partIndex, part gjson.Result) bool {
+			j := int(partIndex.Int())
 			partPath := fmt.Sprintf("%s[%d].parts[%d]", contentsPath, i, j)
 			if call := part.Get("functionCall"); call.Exists() {
 				if call.Get("name").String() == "" {
-					return fmt.Errorf("%s: missing functionCall.name", partPath)
+					validationErr = fmt.Errorf("%s: missing functionCall.name", partPath)
+					return false
 				}
 				calls = append(calls, geminiFunctionCallRef{
 					id:   call.Get("id").String(),
@@ -321,58 +329,98 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 					path: partPath,
 				})
 			}
+			return true
+		})
+		if validationErr != nil {
+			return false
 		}
 
-		if len(calls) > 0 && len(responses) > 0 {
-			return fmt.Errorf("%s[%d]: functionCall and functionResponse parts must not be interleaved in the same content", contentsPath, i)
-		}
-
-		if len(calls) > 0 {
-			if len(pending) > 0 {
-				return fmt.Errorf("%s[%d]: functionCall appears before %d pending functionResponse part(s)", contentsPath, i, len(pending))
-			}
+		switch {
+		case len(calls) > 0 && len(responses) > 0:
+			validationErr = fmt.Errorf(
+				"%s[%d]: functionCall and functionResponse parts must not be interleaved in the same content",
+				contentsPath,
+				i,
+			)
+		case len(calls) > 0 && len(pending) > 0:
+			validationErr = fmt.Errorf(
+				"%s[%d]: functionCall appears before %d pending functionResponse part(s)",
+				contentsPath,
+				i,
+				len(pending),
+			)
+		case len(calls) > 0:
 			pending = calls
-			continue
-		}
-
-		if len(responses) == 0 {
-			if len(pending) > 0 {
-				return fmt.Errorf("%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, i, len(pending))
+			return true
+		case len(responses) == 0 && len(pending) > 0:
+			// Allow intervening user content (such as system reminders, mid-session developer notices, or user turns)
+			// to appear before the pending functionResponse turn. Upstream Antigravity accepts this natively.
+			// Reject only if it is a model turn without responses, which breaks turn ownership.
+			role := strings.ToLower(strings.TrimSpace(content.Get("role").String()))
+			if role == "model" {
+				validationErr = fmt.Errorf(
+					"%s[%d]: model content appears before %d pending functionResponse part(s)",
+					contentsPath,
+					i,
+					len(pending),
+				)
 			}
-			continue
+			return validationErr == nil
+		case len(responses) == 0:
+			return true
+		case len(pending) == 0:
+			validationErr = fmt.Errorf("%s[%d]: functionResponse without preceding functionCall", contentsPath, i)
+		case len(responses) != len(pending):
+			validationErr = fmt.Errorf(
+				"%s[%d]: functionResponse count %d does not match pending functionCall count %d",
+				contentsPath,
+				i,
+				len(responses),
+				len(pending),
+			)
 		}
-		if len(pending) == 0 {
-			return fmt.Errorf("%s[%d]: functionResponse without preceding functionCall", contentsPath, i)
-		}
-		if len(responses) != len(pending) {
-			return fmt.Errorf("%s[%d]: functionResponse count %d does not match pending functionCall count %d", contentsPath, i, len(responses), len(pending))
+		if validationErr != nil {
+			return false
 		}
 
-		for j := 0; j < len(responses); j++ {
-			partPath := responses[j].path
-			response := responses[j].part.Get("functionResponse")
-			call := pending[j]
+		for responseIndex, responseRef := range responses {
+			partPath := responseRef.path
+			response := responseRef.part.Get("functionResponse")
+			call := pending[responseIndex]
 			responseID := response.Get("id").String()
 			responseName := response.Get("name").String()
 
-			if call.id != "" && responseID == "" {
-				return fmt.Errorf("%s: missing functionResponse.id for %s", partPath, call.path)
+			switch {
+			case call.id != "" && responseID == "":
+				validationErr = fmt.Errorf("%s: missing functionResponse.id for %s", partPath, call.path)
+			case call.id != "" && responseID != call.id:
+				validationErr = fmt.Errorf(
+					"%s: functionResponse.id %q does not match functionCall.id %q at %s",
+					partPath,
+					responseID,
+					call.id,
+					call.path,
+				)
+			case responseName == "":
+				validationErr = fmt.Errorf("%s: missing functionResponse.name", partPath)
+			case call.name != "" && responseName != call.name:
+				validationErr = fmt.Errorf(
+					"%s: functionResponse.name %q does not match functionCall.name %q at %s",
+					partPath,
+					responseName,
+					call.name,
+					call.path,
+				)
 			}
-			if call.id != "" && responseID != call.id {
-				return fmt.Errorf("%s: functionResponse.id %q does not match functionCall.id %q at %s", partPath, responseID, call.id, call.path)
-			}
-			if responseName == "" {
-				return fmt.Errorf("%s: missing functionResponse.name", partPath)
-			}
-			if call.name != "" && responseName != call.name {
-				return fmt.Errorf("%s: functionResponse.name %q does not match functionCall.name %q at %s", partPath, responseName, call.name, call.path)
+			if validationErr != nil {
+				return false
 			}
 		}
 
 		pending = nil
-	}
-
-	return nil
+		return true
+	})
+	return validationErr
 }
 
 func decodeGeminiThoughtSignature(sig string) ([]byte, error) {
@@ -425,7 +473,7 @@ type geminiEnvelopeInfo struct {
 
 func inspectGeminiField2Envelope(decoded []byte) (geminiEnvelopeInfo, bool) {
 	value, ok := consumeGeminiField2Field1Value(decoded)
-	if !ok || (!isLikelyGeminiOpaquePayload(value) && !isASCIIUUIDBytes(value)) {
+	if !ok || (!isLikelyGeminiOpaquePayload(value) && !isASCIIUUIDBytes(value) && !isLikelyGeminiToolInvocationPayload(value)) {
 		return geminiEnvelopeInfo{}, false
 	}
 	return geminiEnvelopeInfo{
@@ -482,6 +530,59 @@ func isLikelyGeminiOpaquePayload(value []byte) bool {
 	return len(value) > 0 && value[0] == 0x01
 }
 
+func isLikelyGeminiToolInvocationPayload(value []byte) bool {
+	// In Gemini 3 Tool Combination / Context Circulation, server-side tool blocks
+	// (toolCall and toolResponse) wrap the Tink ciphertext in a protobuf message
+	// containing a length-delimited bytes field whose content is a valid Tink payload
+	// starting with 0x01 (commonly preceded by a status/type varint field).
+	// Validate that value is a valid protobuf structure containing at least one
+	// length-delimited bytes field whose content is a valid Gemini Tink payload.
+	if len(value) == 0 {
+		return false
+	}
+	offset := 0
+	hasTinkField := false
+	for offset < len(value) {
+		_, typ, n := protowire.ConsumeTag(value[offset:])
+		if n < 0 {
+			return false
+		}
+		offset += n
+		switch typ {
+		case protowire.VarintType:
+			_, n = protowire.ConsumeVarint(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+		case protowire.BytesType:
+			bytesVal, n := protowire.ConsumeBytes(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+			if isLikelyGeminiOpaquePayload(bytesVal) {
+				hasTinkField = true
+			}
+		case protowire.Fixed32Type:
+			_, n = protowire.ConsumeFixed32(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+		case protowire.Fixed64Type:
+			_, n = protowire.ConsumeFixed64(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+		default:
+			return false
+		}
+	}
+	return hasTinkField && offset == len(value)
+}
+
 func isASCIIUUIDBytes(decoded []byte) bool {
 	if len(decoded) != 36 {
 		return false
@@ -502,8 +603,8 @@ func isASCIIUUIDBytes(decoded []byte) bool {
 }
 
 func geminiContents(inputRawJSON []byte) (gjson.Result, string) {
-	if contents := gjson.GetBytes(inputRawJSON, "contents"); contents.Exists() {
+	if contents := util.GetGJSONBytesNoCopy(inputRawJSON, "contents"); contents.Exists() {
 		return contents, "contents"
 	}
-	return gjson.GetBytes(inputRawJSON, "request.contents"), "request.contents"
+	return util.GetGJSONBytesNoCopy(inputRawJSON, "request.contents"), "request.contents"
 }

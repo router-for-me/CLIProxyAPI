@@ -24,7 +24,7 @@ import (
 func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 	// Fast path: if no contents field, only attach safety settings
-	contents := gjson.GetBytes(rawJSON, "contents")
+	contents := util.GetGJSONBytesNoCopy(rawJSON, "contents")
 	if !contents.Exists() {
 		return common.AttachDefaultSafetySettings(rawJSON, "safetySettings")
 	}
@@ -78,7 +78,11 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		contents.ForEach(func(_, value gjson.Result) bool {
 			role := value.Get("role").String()
 			if role != "user" && role != "model" {
-				role = nextGeminiRole(prevRole)
+				if translatorcommon.ContentHasGeminiFunctionResponse([]byte(value.Raw)) {
+					role = "user"
+				} else {
+					role = nextGeminiRole(prevRole)
+				}
 				rolesChanged = true
 			}
 			prevRole = role
@@ -91,7 +95,11 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 				role := value.Get("role").String()
 				item := []byte(value.Raw)
 				if role != "user" && role != "model" {
-					role = nextGeminiRole(prevRole)
+					if translatorcommon.ContentHasGeminiFunctionResponse([]byte(value.Raw)) {
+						role = "user"
+					} else {
+						role = nextGeminiRole(prevRole)
+					}
 					item, _ = sjson.SetBytes(item, "role", role)
 				}
 				prevRole = role
@@ -105,7 +113,11 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		contents.ForEach(func(_ gjson.Result, value gjson.Result) bool {
 			role := value.Get("role").String()
 			if role != "user" && role != "model" {
-				role = nextGeminiRole(prevRole)
+				if translatorcommon.ContentHasGeminiFunctionResponse([]byte(value.Raw)) {
+					role = "user"
+				} else {
+					role = nextGeminiRole(prevRole)
+				}
 				out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.role", idx), role)
 			}
 			prevRole = role
@@ -134,7 +146,7 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 // For the immediately following user/function turn containing functionResponse
 // parts, any empty name is replaced with the corresponding call name.
 func backfillEmptyFunctionResponseNames(data []byte) []byte {
-	contents := gjson.GetBytes(data, "contents")
+	contents := util.GetGJSONBytesNoCopy(data, "contents")
 	if !contents.Exists() {
 		return data
 	}

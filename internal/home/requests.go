@@ -8,7 +8,12 @@ type authDispatchRequest struct {
 	Count               int               `json:"count"`
 	ConcurrencyProtocol int               `json:"concurrency_protocol,omitempty"`
 	SessionID           string            `json:"session_id,omitempty"`
+	ParentSessionID     string            `json:"parent_session_id,omitempty"`
 	Headers             map[string]string `json:"headers,omitempty"`
+	CredentialPolicy    string            `json:"credential_policy,omitempty"`
+	RetryRound          *int              `json:"retry_round,omitempty"`
+	ExcludedAuthIDs     *[]string         `json:"excluded_auth_ids,omitempty"`
+	PinnedAuthID        string            `json:"pinned_auth_id,omitempty"`
 }
 
 type modelsRequest struct {
@@ -18,8 +23,9 @@ type modelsRequest struct {
 }
 
 type refreshRequest struct {
-	Type      string `json:"type"`
-	AuthIndex string `json:"auth_index"`
+	Type                      string `json:"type"`
+	AuthIndex                 string `json:"auth_index"`
+	ObservedAccessTokenSHA256 string `json:"access_token_sha256,omitempty"`
 }
 
 type InFlightFrameKind string

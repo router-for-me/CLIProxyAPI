@@ -81,21 +81,23 @@ func (e *requestPrepareExecutor) recordPreparedAuth(auth *Auth) error {
 	return nil
 }
 
-func (e *requestPrepareExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *requestPrepareExecutor) Execute(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if errPrepared := e.recordPreparedAuth(auth); errPrepared != nil {
 		return cliproxyexecutor.Response{}, errPrepared
 	}
 	if e.executeErr != nil {
+		cliproxyexecutor.MarkUpstreamAttempt(ctx)
 		return cliproxyexecutor.Response{}, e.executeErr
 	}
 	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
 }
 
-func (e *requestPrepareExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *requestPrepareExecutor) ExecuteStream(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	if errPrepared := e.recordPreparedAuth(auth); errPrepared != nil {
 		return nil, errPrepared
 	}
 	if e.executeErr != nil {
+		cliproxyexecutor.MarkUpstreamAttempt(ctx)
 		return nil, e.executeErr
 	}
 	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
@@ -108,11 +110,12 @@ func (e *requestPrepareExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, 
 	return auth, nil
 }
 
-func (e *requestPrepareExecutor) CountTokens(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *requestPrepareExecutor) CountTokens(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if errPrepared := e.recordPreparedAuth(auth); errPrepared != nil {
 		return cliproxyexecutor.Response{}, errPrepared
 	}
 	if e.executeErr != nil {
+		cliproxyexecutor.MarkUpstreamAttempt(ctx)
 		return cliproxyexecutor.Response{}, e.executeErr
 	}
 	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
@@ -150,6 +153,85 @@ func (d *homeRequestPrepareDispatcher) RPopAuth(context.Context, string, string,
 }
 
 func (*homeRequestPrepareDispatcher) AbortAmbiguousDispatch() {}
+
+type homeErrorPriorityDispatcher struct{}
+
+func (*homeErrorPriorityDispatcher) HeartbeatOK() bool { return true }
+
+func (*homeErrorPriorityDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, count int) ([]byte, error) {
+	switch count {
+	case 1:
+		return json.Marshal(homeAuthDispatchResponse{Auth: Auth{
+			ID:       "model-error-auth",
+			Provider: "antigravity",
+			Status:   StatusActive,
+			Metadata: map[string]any{"access_token": "model-token", "project_id": "prepared-project"},
+		}})
+	case 2:
+		return json.Marshal(homeAuthDispatchResponse{Auth: Auth{
+			ID:       "refresh-error-auth",
+			Provider: "antigravity",
+			Status:   StatusActive,
+			Metadata: map[string]any{"access_token": "refresh-token"},
+		}})
+	default:
+		return json.Marshal(homeErrorEnvelope{Error: &homeErrorDetail{Code: homeRequestRetryExceededErrorCode, Message: "no more Home auths"}})
+	}
+}
+
+func (*homeErrorPriorityDispatcher) AbortAmbiguousDispatch() {}
+
+func TestHomeModelErrorOutranksLaterRefreshPreparationError(t *testing.T) {
+	paths := []struct {
+		name string
+		run  func(*Manager) error
+	}{
+		{
+			name: "Execute",
+			run: func(manager *Manager) error {
+				_, errExecute := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+				return errExecute
+			},
+		},
+		{
+			name: "Count",
+			run: func(manager *Manager) error {
+				_, errCount := manager.ExecuteCount(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{})
+				return errCount
+			},
+		},
+		{
+			name: "Stream",
+			run: func(manager *Manager) error {
+				_, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{Stream: true})
+				return errStream
+			},
+		},
+	}
+
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			modelErr := &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "MODEL_CAPACITY_EXHAUSTED"}
+			refreshErr := &Error{Code: "refresh_temporarily_unavailable", HTTPStatus: http.StatusServiceUnavailable, Message: "credential refresh temporarily unavailable"}
+			executor := &requestPrepareExecutor{prepareErr: refreshErr, executeErr: modelErr}
+			manager := NewManager(nil, nil, nil)
+			manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+			manager.PublishHomeDispatch(&homeErrorPriorityDispatcher{}, executionregistry.New(), 1)
+			manager.RegisterExecutor(executor)
+
+			errRun := path.run(manager)
+			if errRun == nil || errRun.Error() != modelErr.Message || statusCodeFromError(errRun) != http.StatusServiceUnavailable {
+				t.Fatalf("%s error = %v, want upstream model error %q", path.name, errRun, modelErr.Message)
+			}
+			if strings.Contains(errRun.Error(), refreshErr.Message) {
+				t.Fatalf("%s error was overwritten by refresh failure: %v", path.name, errRun)
+			}
+			if executor.executeCalls.Load() != 1 || executor.prepareCalls.Load() != 1 {
+				t.Fatalf("%s calls = execute %d prepare %d, want 1/1", path.name, executor.executeCalls.Load(), executor.prepareCalls.Load())
+			}
+		})
+	}
+}
 
 func TestHomePrepareUsesEphemeralDispatchAuthAcrossExecutionPaths(t *testing.T) {
 	for _, path := range []struct {
@@ -398,6 +480,47 @@ func TestManagerExecute_PreparesAndPersistsMissingRequestAuthMetadata(t *testing
 	}
 	if got := executor.prepareCalls.Load(); got != 1 {
 		t.Fatalf("prepare calls after second execute = %d, want 1", got)
+	}
+}
+
+func TestManagerExecute_PrepareAuth403TriggersCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	const model = "gemini-3.1-pro"
+	store := &requestPrepareStore{}
+	executor := &requestPrepareExecutor{
+		prepareErr: customStatusError{code: http.StatusForbidden, msg: "forbidden"},
+	}
+	manager := NewManager(store, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "auth-prepare-403",
+		Provider: "antigravity",
+		Metadata: map[string]any{"access_token": "token"},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "antigravity", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	_, errExecute := manager.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected Execute error on 403 prepare failure")
+	}
+
+	current, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("expected auth in manager")
+	}
+	if !current.Unavailable {
+		t.Fatal("expected auth to be marked unavailable after 403 prepare failure")
+	}
+	if current.Quota.NextRecoverAt.IsZero() && current.NextRetryAfter.IsZero() {
+		t.Fatal("expected auth cooldown to be scheduled after 403 prepare failure")
 	}
 }
 

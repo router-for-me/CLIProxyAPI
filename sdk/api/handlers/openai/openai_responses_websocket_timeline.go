@@ -221,6 +221,25 @@ func isResponsesWebsocketCompletionEvent(eventType string) bool {
 	return eventType == wsEventTypeCompleted || eventType == wsEventTypeDone
 }
 
+type responsesWebsocketPayloadError struct {
+	status  int
+	payload []byte
+}
+
+func (e *responsesWebsocketPayloadError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return string(e.payload)
+}
+
+func (e *responsesWebsocketPayloadError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.status
+}
+
 func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.ErrorMessage {
 	status := int(gjson.GetBytes(payload, "status").Int())
 	if status <= 0 {
@@ -230,17 +249,17 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 		status = http.StatusInternalServerError
 	}
 
-	errText := strings.TrimSpace(gjson.GetBytes(payload, "error.message").String())
-	if errText == "" {
-		errText = strings.TrimSpace(gjson.GetBytes(payload, "message").String())
+	trimmedPayload := bytes.TrimSpace(payload)
+	if len(trimmedPayload) > 0 {
+		return &interfaces.ErrorMessage{
+			StatusCode: status,
+			Error: &responsesWebsocketPayloadError{
+				status:  status,
+				payload: bytes.Clone(trimmedPayload),
+			},
+		}
 	}
-	if errText == "" {
-		errText = strings.TrimSpace(string(payload))
-	}
-	if errText == "" {
-		errText = http.StatusText(status)
-	}
-	return &interfaces.ErrorMessage{StatusCode: status, Error: fmt.Errorf("%s", errText)}
+	return &interfaces.ErrorMessage{StatusCode: status, Error: fmt.Errorf("%s", http.StatusText(status))}
 }
 
 func setWebsocketTimelineBody(c *gin.Context, body string) {

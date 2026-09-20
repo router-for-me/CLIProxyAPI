@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	log "github.com/sirupsen/logrus"
@@ -280,6 +281,10 @@ func (f *xaiInternalXSearchResponseFilter) filterCompletedOutput(eventData []byt
 }
 
 func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {
+	return normalizeXAIInputNamespaceToolCallsWithFold(body, xaiShouldFoldNamespaceTools(body, false))
+}
+
+func normalizeXAIInputNamespaceToolCallsWithFold(body []byte, shouldFold bool) []byte {
 	if !gjson.ValidBytes(body) {
 		return body
 	}
@@ -293,8 +298,55 @@ func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {
 		}
 		namespaceName := strings.TrimSpace(item.Get("namespace").String())
 		toolName := strings.TrimSpace(item.Get("name").String())
+		if namespaceName == "" {
+			continue
+		}
 		qualifiedName := qualifyXAINamespaceToolName(namespaceName, toolName)
-		if namespaceName == "" || qualifiedName == "" {
+		var isFolded bool
+		if xaiHasFunctionToolNamed(body, namespaceName) {
+			isFolded = true
+		} else if xaiHasFunctionToolNamed(body, qualifiedName) {
+			isFolded = false
+		} else {
+			isFolded = shouldFold
+		}
+		if isFolded {
+			namePath := fmt.Sprintf("input.%d.name", index)
+			namespacePath := fmt.Sprintf("input.%d.namespace", index)
+			argsPath := fmt.Sprintf("input.%d.arguments", index)
+
+			dispatcherArgs := map[string]any{
+				"name": toolName,
+			}
+			if rawArgs := item.Get("arguments").String(); rawArgs != "" {
+				if gjson.Valid(rawArgs) {
+					dispatcherArgs["arguments"] = json.RawMessage(rawArgs)
+				} else {
+					dispatcherArgs["arguments"] = rawArgs
+				}
+			}
+			encodedArgs, errMarshal := json.Marshal(dispatcherArgs)
+			if errMarshal != nil {
+				continue
+			}
+
+			updated, errSet := sjson.SetBytes(body, namePath, namespaceName)
+			if errSet != nil {
+				continue
+			}
+			updated, errSet = sjson.SetBytes(updated, argsPath, string(encodedArgs))
+			if errSet != nil {
+				continue
+			}
+			updated, errDelete := sjson.DeleteBytes(updated, namespacePath)
+			if errDelete != nil {
+				continue
+			}
+			body = updated
+			continue
+		}
+
+		if qualifiedName == "" {
 			continue
 		}
 		namePath := fmt.Sprintf("input.%d.name", index)
@@ -312,29 +364,95 @@ func normalizeXAIInputNamespaceToolCalls(body []byte) []byte {
 	return body
 }
 
-func restoreXAINamespaceToolCalls(data []byte, refs map[string]xaiNamespaceToolRef) []byte {
-	if len(refs) == 0 || len(data) == 0 || !gjson.ValidBytes(data) {
-		return data
-	}
-	data = restoreXAINamespaceToolCallAtPath(data, "item", refs)
-	output := gjson.GetBytes(data, "response.output")
-	if output.Exists() && output.IsArray() {
-		for index := range output.Array() {
-			data = restoreXAINamespaceToolCallAtPath(data, fmt.Sprintf("response.output.%d", index), refs)
-		}
-	}
-	return data
+type xaiNamespaceRestorer struct {
+	refs              map[string]xaiNamespaceToolRef
+	dispatcherItemIDs map[string]string
 }
 
-func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string]xaiNamespaceToolRef) []byte {
+func newXAINamespaceRestorer(refs map[string]xaiNamespaceToolRef) *xaiNamespaceRestorer {
+	return &xaiNamespaceRestorer{
+		refs:              refs,
+		dispatcherItemIDs: make(map[string]string),
+	}
+}
+
+func (r *xaiNamespaceRestorer) restore(data []byte) []byte {
+	if r == nil || len(r.refs) == 0 || len(data) == 0 || !gjson.ValidBytes(data) {
+		return data
+	}
+	eventType := gjson.GetBytes(data, "type").String()
+	switch eventType {
+	case "response.output_item.added":
+		item := gjson.GetBytes(data, "item")
+		if item.Get("type").String() == "function_call" {
+			name := strings.TrimSpace(item.Get("name").String())
+			itemID := strings.TrimSpace(item.Get("id").String())
+			if ref, ok := r.refs[name]; ok && ref.isDispatcher {
+				if itemID != "" {
+					r.dispatcherItemIDs[itemID] = ref.namespace
+				}
+				data, _ = sjson.SetBytes(data, "item.namespace", ref.namespace)
+			}
+		}
+		return data
+
+	case "response.function_call_arguments.done":
+		itemID := strings.TrimSpace(gjson.GetBytes(data, "item_id").String())
+		if namespaceName, isDisp := r.dispatcherItemIDs[itemID]; isDisp {
+			rawArgs := gjson.GetBytes(data, "arguments").String()
+			if _, childArgs, ok := unwrapXAIDispatcherArguments(rawArgs, namespaceName, r.refs); ok {
+				updated, errSet := sjson.SetBytes(data, "arguments", string(childArgs))
+				if errSet == nil {
+					data = updated
+				}
+			}
+		}
+		return data
+
+	default:
+		data = r.restoreAtPath(data, "item")
+		output := gjson.GetBytes(data, "response.output")
+		if output.Exists() && output.IsArray() {
+			for index := range output.Array() {
+				data = r.restoreAtPath(data, fmt.Sprintf("response.output.%d", index))
+			}
+		}
+		return data
+	}
+}
+
+func (r *xaiNamespaceRestorer) restoreAtPath(data []byte, path string) []byte {
 	if gjson.GetBytes(data, path+".type").String() != "function_call" {
 		return data
 	}
 	qualifiedName := strings.TrimSpace(gjson.GetBytes(data, path+".name").String())
-	ref, ok := refs[qualifiedName]
+	ref, ok := r.refs[qualifiedName]
 	if !ok {
 		return data
 	}
+	if ref.isDispatcher {
+		rawArgs := gjson.GetBytes(data, path+".arguments").String()
+		childName, childArgs, unwrapped := unwrapXAIDispatcherArguments(rawArgs, ref.namespace, r.refs)
+		if !unwrapped && childName == "" {
+			childName = ref.name
+		}
+		updated, errSet := sjson.SetBytes(data, path+".namespace", ref.namespace)
+		if errSet != nil {
+			return data
+		}
+		if childName != "" {
+			if updatedName, errSetName := sjson.SetBytes(updated, path+".name", childName); errSetName == nil {
+				updated = updatedName
+			}
+		}
+		if len(childArgs) > 0 {
+			if updatedArgs, errSetArgs := sjson.SetBytes(updated, path+".arguments", string(childArgs)); errSetArgs == nil {
+				updated = updatedArgs
+			}
+		}
+		return updated
+	}
+
 	updated, errSet := sjson.SetBytes(data, path+".name", ref.name)
 	if errSet != nil {
 		return data
@@ -344,6 +462,128 @@ func restoreXAINamespaceToolCallAtPath(data []byte, path string, refs map[string
 		return data
 	}
 	return updated
+}
+
+func unwrapXAIDispatcherArguments(rawArgs string, namespaceName string, refs map[string]xaiNamespaceToolRef) (string, []byte, bool) {
+	if !gjson.Valid(rawArgs) {
+		return "", nil, false
+	}
+	argsParsed := gjson.Parse(rawArgs)
+	nameField := argsParsed.Get("name")
+	if !nameField.Exists() || nameField.Type != gjson.String {
+		return "", nil, false
+	}
+	childName := strings.TrimSpace(nameField.String())
+	if childName == "" {
+		return "", nil, false
+	}
+
+	if namespaceName != "" {
+		qualified := qualifyXAINamespaceToolName(namespaceName, childName)
+		if ref, exists := refs[qualified]; exists && ref.isDispatcher {
+			return "", nil, false
+		}
+	} else {
+		isChildOfDispatcher := false
+		for _, ref := range refs {
+			if ref.isDispatcher && (ref.name == childName || ref.namespace == childName) {
+				isChildOfDispatcher = true
+				break
+			}
+		}
+		if !isChildOfDispatcher && !argsParsed.Get("arguments").Exists() {
+			return "", nil, false
+		}
+	}
+
+	var childArgs []byte
+	if argsField := argsParsed.Get("arguments"); argsField.Exists() {
+		if argsField.Type == gjson.String {
+			childArgs = []byte(argsField.String())
+		} else {
+			childArgs = []byte(argsField.Raw)
+		}
+	} else {
+		cleaned, errDel := sjson.DeleteBytes([]byte(rawArgs), "name")
+		if errDel == nil && len(cleaned) > 0 && string(cleaned) != "{}" {
+			childArgs = cleaned
+		} else {
+			childArgs = []byte("{}")
+		}
+	}
+	if len(childArgs) == 0 {
+		childArgs = []byte("{}")
+	}
+	return childName, childArgs, true
+}
+
+func restoreXAINamespaceToolCalls(data []byte, refs map[string]xaiNamespaceToolRef) []byte {
+	restorer := newXAINamespaceRestorer(refs)
+	return restorer.restore(data)
+}
+
+// restoreXAIClientWebSearchName rewrites the given alias
+// back to the original client tool name "web_search" across event items and
+// completed outputs. Only unnamespaced tool calls are restored so namespaced
+// tools (e.g. acme.clientfn_web_search) are preserved untouched.
+func restoreXAIClientWebSearchName(data []byte, alias string) []byte {
+	if alias == "" || !bytes.Contains(data, []byte(alias)) {
+		return data
+	}
+	if !gjson.ValidBytes(data) {
+		return data
+	}
+
+	// Check item (e.g. response.output_item.added / response.output_item.done)
+	if strings.TrimSpace(gjson.GetBytes(data, "item.namespace").String()) == "" {
+		if strings.TrimSpace(gjson.GetBytes(data, "item.name").String()) == alias {
+			data, _ = sjson.SetBytes(data, "item.name", xaiWebSearchToolType)
+		}
+		if strings.TrimSpace(gjson.GetBytes(data, "item.function.name").String()) == alias {
+			data, _ = sjson.SetBytes(data, "item.function.name", xaiWebSearchToolType)
+		}
+	}
+
+	// Check response.output array (e.g. response.completed / response.incomplete)
+	respOutput := gjson.GetBytes(data, "response.output")
+	if respOutput.IsArray() {
+		for idx, item := range respOutput.Array() {
+			if strings.TrimSpace(item.Get("namespace").String()) != "" {
+				continue
+			}
+			if strings.TrimSpace(item.Get("name").String()) == alias {
+				data, _ = sjson.SetBytes(data, fmt.Sprintf("response.output.%d.name", idx), xaiWebSearchToolType)
+			}
+			if strings.TrimSpace(item.Get("function.name").String()) == alias {
+				data, _ = sjson.SetBytes(data, fmt.Sprintf("response.output.%d.function.name", idx), xaiWebSearchToolType)
+			}
+		}
+	}
+
+	// Check top-level output array (non-stream responses translated)
+	topOutput := gjson.GetBytes(data, "output")
+	if topOutput.IsArray() {
+		for idx, item := range topOutput.Array() {
+			if strings.TrimSpace(item.Get("namespace").String()) != "" {
+				continue
+			}
+			if strings.TrimSpace(item.Get("name").String()) == alias {
+				data, _ = sjson.SetBytes(data, fmt.Sprintf("output.%d.name", idx), xaiWebSearchToolType)
+			}
+			if strings.TrimSpace(item.Get("function.name").String()) == alias {
+				data, _ = sjson.SetBytes(data, fmt.Sprintf("output.%d.function.name", idx), xaiWebSearchToolType)
+			}
+		}
+	}
+
+	// Check top-level name
+	if strings.TrimSpace(gjson.GetBytes(data, "namespace").String()) == "" {
+		if strings.TrimSpace(gjson.GetBytes(data, "name").String()) == alias {
+			data, _ = sjson.SetBytes(data, "name", xaiWebSearchToolType)
+		}
+	}
+
+	return data
 }
 
 // normalizeXAIObjectRootUnionBranchTypes makes untyped root union branches
@@ -364,7 +604,7 @@ func normalizeXAIObjectRootUnionBranchTypes(tool []byte) ([]byte, bool, bool) {
 			continue
 		}
 		for index, branch := range union.Array() {
-			if !branch.IsObject() || branch.Get("type").Exists() {
+			if !branch.IsObject() || branch.Get("type").Exists() || branch.Get("$ref").Exists() {
 				continue
 			}
 			updated, errSet := sjson.SetBytes(tool, fmt.Sprintf("parameters.%s.%d.type", unionName, index), "object")
@@ -397,6 +637,18 @@ func xaiSchemaTypeIsObjectOnly(schemaType gjson.Result) bool {
 	return true
 }
 
+func isXAICodexAppAutomationUpdate(toolName, namespaceName string) bool {
+	cleanNamespace := strings.TrimPrefix(strings.TrimSpace(namespaceName), "mcp__")
+	cleanTool := strings.TrimPrefix(strings.TrimSpace(toolName), "mcp__")
+	if strings.EqualFold(cleanTool, xaiAutomationUpdateToolName) && (strings.EqualFold(cleanNamespace, xaiCodexAppNamespaceName) || strings.EqualFold(cleanNamespace, "codex_apps")) {
+		return true
+	}
+	if strings.EqualFold(cleanTool, xaiCodexAppNamespaceName+"__"+xaiAutomationUpdateToolName) || strings.EqualFold(cleanTool, "codex_apps__"+xaiAutomationUpdateToolName) {
+		return true
+	}
+	return false
+}
+
 // xaiFunctionParametersNeedSimplification reports whether a function tool, or
 // a custom tool normalized to a function, has a schema that xAI cannot accept.
 func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName string) bool {
@@ -408,10 +660,7 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 	}
 
 	toolName := strings.TrimSpace(tool.Get("name").String())
-	qualifiedAutomationName := xaiCodexAppNamespaceName + "__" + xaiAutomationUpdateToolName
-	if isFunction && (strings.EqualFold(toolName, qualifiedAutomationName) ||
-		(strings.EqualFold(strings.TrimSpace(namespaceName), xaiCodexAppNamespaceName) &&
-			strings.EqualFold(toolName, xaiAutomationUpdateToolName))) {
+	if isFunction && isXAICodexAppAutomationUpdate(toolName, namespaceName) {
 		return true
 	}
 
@@ -422,7 +671,7 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 			continue
 		}
 		for _, branch := range union.Array() {
-			if !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
+			if branch.Get("$ref").Exists() || !xaiSchemaTypeIsObjectOnly(branch.Get("type")) {
 				return true
 			}
 		}
@@ -812,6 +1061,7 @@ func xaiCollectOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]b
 }
 
 func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
+	eventData = helps.EnsureResponsesUsageDetails(eventData)
 	outputResult := gjson.GetBytes(eventData, "response.output")
 	shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
 	if !shouldPatchOutput {
@@ -857,13 +1107,25 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 // cli-chat-proxy ("Usage resets over a rolling 24-hour window").
 const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
 
-// xaiStatusErr wraps upstream error bodies so free-tier exhaustion
-// (subscription:free-usage-exhausted) carries a 24h RetryAfter hint for
-// auth cooldown / account rotation. Generic 429s stay without an explicit
-// retry hint so conductor backoff still applies.
+// xaiStatusErr normalizes upstream xAI error bodies for conductor behavior:
+//   - credential invalidation (403 bad-credentials) is remapped to 401 so the
+//     existing OAuth refresh-once-and-retry path runs instead of payment cooldown
+//   - free-tier exhaustion (subscription:free-usage-exhausted) carries a 24h
+//     RetryAfter hint for auth cooldown / account rotation
+//
+// Generic 429s stay without an explicit retry hint so conductor backoff still applies.
 func xaiStatusErr(code int, body []byte) statusErr {
 	err := statusErr{code: code, msg: string(body)}
-	if code != http.StatusTooManyRequests || len(body) == 0 {
+	if len(body) == 0 {
+		return err
+	}
+	if code == http.StatusForbidden && isXAIBadCredentialsBody(body) {
+		// Upstream returns 403 for invalidated OAuth access tokens. Map to 401 so
+		// tryRefreshAfterUnauthorized / MarkResult unauthorized handling applies.
+		err.code = http.StatusUnauthorized
+		return err
+	}
+	if code != http.StatusTooManyRequests {
 		return err
 	}
 	codeStr := strings.ToLower(gjson.GetBytes(body, "code").String())
@@ -878,4 +1140,25 @@ func xaiStatusErr(code int, body []byte) statusErr {
 		err.retryAfter = &d
 	}
 	return err
+}
+
+// isXAIBadCredentialsBody reports whether an xAI error body indicates an
+// invalidated/unusable OAuth access token rather than a generic permission or
+// payment failure. HTTP and websocket payloads both use this helper, so nested
+// error.code / error.message shapes are checked as well as flat bodies.
+func isXAIBadCredentialsBody(body []byte) bool {
+	for _, path := range []string{"code", "error.code", "body.error.code"} {
+		if strings.Contains(strings.ToLower(gjson.GetBytes(body, path).String()), "bad-credentials") {
+			return true
+		}
+	}
+	for _, path := range []string{"error", "error.message", "message", "body.error", "body.error.message"} {
+		msg := strings.ToLower(gjson.GetBytes(body, path).String())
+		if strings.Contains(msg, "access token could not be validated") {
+			return true
+		}
+	}
+	raw := strings.ToLower(string(body))
+	return strings.Contains(raw, "bad-credentials") ||
+		strings.Contains(raw, "access token could not be validated")
 }

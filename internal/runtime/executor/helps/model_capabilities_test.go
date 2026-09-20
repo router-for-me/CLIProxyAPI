@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	helps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/claude"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -16,8 +17,10 @@ import (
 )
 
 type configuredThinkingExecutor struct {
-	seenModel string
-	resolved  bool
+	seenModel        string
+	resolved         bool
+	translateRequest bool
+	translatedBody   []byte
 }
 
 func (*configuredThinkingExecutor) Identifier() string { return "claude" }
@@ -27,6 +30,10 @@ func (e *configuredThinkingExecutor) Execute(_ context.Context, _ *cliproxyauth.
 	modelInfo, resolved := cliproxyauth.ResolvedAPIKeyModelInfo(req)
 	e.resolved = resolved && modelInfo != nil
 	body := []byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}`)
+	if e.translateRequest {
+		body = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatClaude, req.Model, req.Payload, opts.Stream)
+		e.translatedBody = append(e.translatedBody[:0], body...)
+	}
 	out, err := helps.ApplyRequestThinking(body, req, opts, opts.SourceFormat.String(), "claude", "claude")
 	return cliproxyexecutor.Response{Payload: out}, err
 }
@@ -52,6 +59,83 @@ func (e *configuredThinkingExecutor) CountTokens(ctx context.Context, auth *clip
 
 func (*configuredThinkingExecutor) HttpRequest(context.Context, *cliproxyauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+func TestApplyRequestThinkingUsesExactClaudeModeForSummaryOnlyRequest(t *testing.T) {
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{ForceModelPrefix: true},
+		ClaudeKey: []internalconfig.ClaudeKey{{
+			APIKey: "summary-selected-key",
+			Prefix: "summary-tenant",
+			Models: []internalconfig.ClaudeModel{{
+				Name:  "summary-shared-upstream",
+				Alias: "summary-public-model",
+				Thinking: &registry.ThinkingSupport{
+					Min: 1024,
+					Max: 16000,
+				},
+			}},
+		}},
+	})
+	executor := &configuredThinkingExecutor{translateRequest: true}
+	manager.RegisterExecutor(executor)
+	auth := &cliproxyauth.Auth{
+		ID:       "summary-selected-auth",
+		Provider: "claude",
+		Prefix:   "summary-tenant",
+		Attributes: map[string]string{
+			cliproxyauth.AttributeAuthKind: cliproxyauth.AuthKindAPIKey,
+			cliproxyauth.AttributeAPIKey:   "summary-selected-key",
+			cliproxyauth.AttributeSource:   "config:claude[0]",
+		},
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{
+		ID: "summary-tenant/summary-public-model", Type: "claude",
+	}})
+	modelRegistry.RegisterClient("summary-unrelated-auth", auth.Provider, []*registry.ModelInfo{{
+		ID: "summary-shared-upstream", Type: "claude",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+		modelRegistry.UnregisterClient("summary-unrelated-auth")
+	})
+	if registered, errRegister := manager.Register(t.Context(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	} else if registered == nil {
+		t.Fatal("Register() returned nil auth")
+	}
+
+	original := []byte(`{"model":"summary-tenant/summary-public-model","reasoning":{"summary":"auto"},"input":"hi"}`)
+	response, errExecute := manager.Execute(t.Context(), []string{"claude"}, cliproxyexecutor.Request{
+		Model:   "summary-tenant/summary-public-model",
+		Payload: original,
+		Format:  sdktranslator.FormatOpenAIResponse,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: original,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if got := gjson.GetBytes(executor.translatedBody, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("pre-executor thinking.type = %q, want global adaptive trigger; body=%s", got, executor.translatedBody)
+	}
+	if got := gjson.GetBytes(response.Payload, "thinking.type").String(); got != "enabled" {
+		t.Fatalf("thinking.type = %q, want exact manual mode; body=%s", got, response.Payload)
+	}
+	if got := gjson.GetBytes(response.Payload, "thinking.budget_tokens").Int(); got != 1024 {
+		t.Fatalf("thinking.budget_tokens = %d, want exact minimum 1024; body=%s", got, response.Payload)
+	}
+	if got := gjson.GetBytes(response.Payload, "thinking.display").String(); got != "summarized" {
+		t.Fatalf("thinking.display = %q, want summarized; body=%s", got, response.Payload)
+	}
+	if gjson.GetBytes(response.Payload, "output_config.effort").Exists() {
+		t.Fatalf("manual thinking retained adaptive effort: %s", response.Payload)
+	}
 }
 
 func TestApplyRequestThinkingUsesSelectedPrefixedAPIKeyModel(t *testing.T) {

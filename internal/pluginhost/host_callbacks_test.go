@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -291,47 +292,6 @@ func TestHostModelExecuteCallback(t *testing.T) {
 	}
 	if got.Alt != "raw" {
 		t.Fatalf("alt = %q, want raw", got.Alt)
-	}
-}
-
-func TestHostModelExecuteCallbackPreservesErrorStatus(t *testing.T) {
-	host := New()
-	host.SetModelExecutor(&fakeHostModelExecutor{
-		executeModel: func(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
-			return handlers.ModelExecutionResponse{}, &interfaces.ErrorMessage{
-				StatusCode: http.StatusServiceUnavailable,
-				Error:      errors.New("routing unavailable"),
-			}
-		},
-	})
-	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
-		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-			EntryProtocol: "openai",
-			ExitProtocol:  "openai",
-			Model:         "model-1",
-		},
-	})
-	if errMarshal != nil {
-		t.Fatalf("marshal request: %v", errMarshal)
-	}
-
-	_, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawReq)
-	if errCall == nil {
-		t.Fatal("callFromPlugin() returned nil error")
-	}
-	rawResp := marshalRPCErrorFromError("host_call_failed", errCall)
-	var envelope pluginabi.Envelope
-	if errUnmarshal := json.Unmarshal(rawResp, &envelope); errUnmarshal != nil {
-		t.Fatalf("unmarshal envelope: %v", errUnmarshal)
-	}
-	if envelope.OK || envelope.Error == nil {
-		t.Fatalf("envelope = %#v, want RPC error", envelope)
-	}
-	if envelope.Error.Message != "routing unavailable" {
-		t.Fatalf("message = %q, want routing unavailable", envelope.Error.Message)
-	}
-	if envelope.Error.HTTPStatus != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", envelope.Error.HTTPStatus, http.StatusServiceUnavailable)
 	}
 }
 
@@ -790,5 +750,240 @@ func TestHostLogCallbackRestoresRegisteredRequestContext(t *testing.T) {
 	got := out.String()
 	if !strings.Contains(got, "plugin callback message") || !strings.Contains(got, "request_id=request-123") {
 		t.Fatalf("log output = %q, want message and request_id field", got)
+	}
+}
+
+func TestDecodeHostHTTPRequestWithWireProfile(t *testing.T) {
+	t.Parallel()
+
+	profile := &pluginapi.HTTPWireProfile{
+		HTTP1Only:              true,
+		DisableAutoCompression: true,
+		HeaderProfile:          []string{"host", "user-agent"},
+	}
+
+	// Flat rpcHostHTTPRequest
+	flatReq := rpcHostHTTPRequest{
+		HostCallbackID: "cb-1",
+		Method:         http.MethodPost,
+		URL:            "https://example.com/api",
+		WireProfile:    profile,
+	}
+	rawFlat, errMarshal := json.Marshal(flatReq)
+	if errMarshal != nil {
+		t.Fatalf("marshal flat request: %v", errMarshal)
+	}
+	decoded, callbackID, errDecode := decodeHostHTTPRequestWithCallbackID(rawFlat)
+	if errDecode != nil {
+		t.Fatalf("decode flat request error = %v", errDecode)
+	}
+	if callbackID != "cb-1" {
+		t.Fatalf("callbackID = %q, want cb-1", callbackID)
+	}
+	if decoded.WireProfile == nil || !decoded.WireProfile.HTTP1Only || !decoded.WireProfile.DisableAutoCompression {
+		t.Fatalf("decoded wire profile mismatch: %#v", decoded.WireProfile)
+	}
+	if len(decoded.WireProfile.HeaderProfile) != 2 || decoded.WireProfile.HeaderProfile[0] != "host" {
+		t.Fatalf("decoded header profile mismatch: %#v", decoded.WireProfile.HeaderProfile)
+	}
+
+	// Nested httpRequest
+	nestedReq := rpcHostHTTPRequest{
+		HostCallbackID: "cb-2",
+		Request: &httpRequest{
+			Method:      http.MethodGet,
+			URL:         "https://example.com/stream",
+			WireProfile: profile,
+		},
+	}
+	rawNested, errMarshalNested := json.Marshal(nestedReq)
+	if errMarshalNested != nil {
+		t.Fatalf("marshal nested request: %v", errMarshalNested)
+	}
+	decodedNested, callbackIDNested, errDecodeNested := decodeHostHTTPRequestWithCallbackID(rawNested)
+	if errDecodeNested != nil {
+		t.Fatalf("decode nested request error = %v", errDecodeNested)
+	}
+	if callbackIDNested != "cb-2" {
+		t.Fatalf("callbackID = %q, want cb-2", callbackIDNested)
+	}
+	if decodedNested.WireProfile == nil || !decodedNested.WireProfile.HTTP1Only {
+		t.Fatalf("decoded nested wire profile mismatch: %#v", decodedNested.WireProfile)
+	}
+
+	// Direct pluginapi.HTTPRequest JSON serialization (SDK contract)
+	sdkReq := pluginapi.HTTPRequest{
+		Method:      http.MethodPost,
+		URL:         "https://example.com/sdk",
+		WireProfile: profile,
+	}
+	rawSDK, errMarshalSDK := json.Marshal(sdkReq)
+	if errMarshalSDK != nil {
+		t.Fatalf("marshal sdk request: %v", errMarshalSDK)
+	}
+	decodedSDK, _, errDecodeSDK := decodeHostHTTPRequestWithCallbackID(rawSDK)
+	if errDecodeSDK != nil {
+		t.Fatalf("decode sdk request error = %v", errDecodeSDK)
+	}
+	if decodedSDK.WireProfile == nil || !decodedSDK.WireProfile.HTTP1Only || !decodedSDK.WireProfile.DisableAutoCompression {
+		t.Fatalf("decoded sdk wire profile mismatch: %#v", decodedSDK.WireProfile)
+	}
+	if len(decodedSDK.WireProfile.HeaderProfile) != 2 || decodedSDK.WireProfile.HeaderProfile[0] != "host" {
+		t.Fatalf("decoded sdk header profile mismatch: %#v", decodedSDK.WireProfile.HeaderProfile)
+	}
+}
+
+func TestHostModelExecutePropagatesForcedProviderAndAuthID(t *testing.T) {
+	host := New()
+	var got handlers.ModelExecutionRequest
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			got = req
+			return handlers.ModelExecutionResponse{
+				StatusCode: http.StatusOK,
+				Body:       []byte(`{"ok":true}`),
+			}, nil
+		},
+	})
+
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol:  "openai",
+			ExitProtocol:   "openai",
+			Model:          "test-model",
+			ForcedProvider: "provider-x",
+			AuthID:         "auth-xyz",
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	_, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawReq)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if got.ForcedProvider != "provider-x" {
+		t.Fatalf("got.ForcedProvider = %q, want %q", got.ForcedProvider, "provider-x")
+	}
+	if got.AuthID != "auth-xyz" {
+		t.Fatalf("got.AuthID = %q, want %q", got.AuthID, "auth-xyz")
+	}
+}
+
+func TestHostModelExecuteStreamPropagatesForcedProviderAndAuthID(t *testing.T) {
+	host := New()
+	var got handlers.ModelExecutionRequest
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			got = req
+			chunks := make(chan handlers.ModelExecutionChunk, 1)
+			chunks <- handlers.ModelExecutionChunk{Payload: []byte("chunk")}
+			close(chunks)
+			return handlers.ModelExecutionStream{
+				StatusCode: http.StatusOK,
+				Chunks:     chunks,
+			}, nil
+		},
+	})
+
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol:  "openai",
+			ExitProtocol:   "openai",
+			Model:          "test-model",
+			Stream:         true,
+			ForcedProvider: "provider-stream",
+			AuthID:         "auth-stream-abc",
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	_, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawReq)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if got.ForcedProvider != "provider-stream" {
+		t.Fatalf("got.ForcedProvider = %q, want %q", got.ForcedProvider, "provider-stream")
+	}
+	if got.AuthID != "auth-stream-abc" {
+		t.Fatalf("got.AuthID = %q, want %q", got.AuthID, "auth-stream-abc")
+	}
+}
+
+type testHostStatusError struct {
+	error
+	status int
+}
+
+func (e testHostStatusError) StatusCode() int {
+	return e.status
+}
+
+func TestModelExecutionErrorPreservesHTTPStatus(t *testing.T) {
+	baseErr := errors.New("synthetic")
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      baseErr,
+	}
+	err := modelExecutionError(errMsg)
+	if got := clienterror.HTTPStatusFromError(err); got != http.StatusTooManyRequests {
+		t.Fatalf("clienterror.HTTPStatusFromError() = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if !errors.Is(err, baseErr) {
+		t.Fatal("expected errors.Is(err, baseErr) to be true")
+	}
+
+	// Verify status preservation when underlying error is nil
+	errNilBase := modelExecutionError(&interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable})
+	if got := clienterror.HTTPStatusFromError(errNilBase); got != http.StatusServiceUnavailable {
+		t.Fatalf("clienterror.HTTPStatusFromError(nilBase) = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+
+	// Verify status preservation when underlying error already matches status
+	matchingErr := testHostStatusError{error: errors.New("synthetic"), status: http.StatusTooManyRequests}
+	errMatching := modelExecutionError(&interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: matchingErr})
+	if errMatching != matchingErr {
+		t.Fatalf("expected errMatching to return original matchingErr, got %#v", errMatching)
+	}
+
+	// Verify explicit status overrides mismatched underlying status while preserving unwrap
+	errConflict := modelExecutionError(&interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: matchingErr})
+	if got := clienterror.HTTPStatusFromError(errConflict); got != http.StatusServiceUnavailable {
+		t.Fatalf("clienterror.HTTPStatusFromError(errConflict) = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+	var unwrapped testHostStatusError
+	if !errors.As(errConflict, &unwrapped) {
+		t.Fatal("expected errors.As(errConflict, &unwrapped) to be true")
+	}
+}
+
+func TestHostModelExecuteCallbackPreservesHTTPStatusOnError(t *testing.T) {
+	host := New()
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			return handlers.ModelExecutionResponse{}, &interfaces.ErrorMessage{
+				StatusCode: http.StatusTooManyRequests,
+				Error:      errors.New("synthetic"),
+			}
+		},
+	})
+
+	rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         "gpt-5.5",
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	_, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawReq)
+	if errCall == nil {
+		t.Fatal("expected callFromPlugin to fail")
+	}
+	if got := clienterror.HTTPStatusFromError(errCall); got != http.StatusTooManyRequests {
+		t.Fatalf("clienterror.HTTPStatusFromError(errCall) = %d, want %d", got, http.StatusTooManyRequests)
 	}
 }

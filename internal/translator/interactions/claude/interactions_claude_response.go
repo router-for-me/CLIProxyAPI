@@ -61,13 +61,17 @@ func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName s
 		steps = root.Get("steps")
 	}
 	sawToolCall := false
+	var contentBlocks [][]byte
 	steps.ForEach(func(_, step gjson.Result) bool {
 		switch step.Get("type").String() {
 		case "thought":
 			for _, text := range interactionsContentTexts(step.Get("content")) {
 				block := []byte(`{"type":"thinking","thinking":""}`)
 				block, _ = sjson.SetBytes(block, "thinking", text)
-				out, _ = sjson.SetRawBytes(out, "content.-1", block)
+				if signature := interactionsSignature(step); signature != "" {
+					block, _ = sjson.SetBytes(block, "signature", signature)
+				}
+				contentBlocks = append(contentBlocks, block)
 			}
 		case "function_call":
 			sawToolCall = true
@@ -81,18 +85,26 @@ func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName s
 			if args.Exists() && args.IsObject() {
 				block, _ = sjson.SetRawBytes(block, "input", []byte(args.Raw))
 			}
-			out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			contentBlocks = append(contentBlocks, block)
 		default:
 			for _, text := range interactionsContentTexts(step.Get("content")) {
 				block := []byte(`{"type":"text","text":""}`)
 				block, _ = sjson.SetBytes(block, "text", text)
-				out, _ = sjson.SetRawBytes(out, "content.-1", block)
+				contentBlocks = append(contentBlocks, block)
 			}
 		}
 		return true
 	})
+	if len(contentBlocks) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "content", contentBlocks)
+	}
 	if sawToolCall {
 		out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
+	}
+	status := firstNonEmpty(interaction.Get("status").String(), root.Get("status").String())
+	finishReason := firstNonEmpty(interaction.Get("finish_reason").String(), root.Get("finish_reason").String())
+	if status == "incomplete" || finishReason == "length" || finishReason == "max_tokens" {
+		out, _ = sjson.SetBytes(out, "stop_reason", "max_tokens")
 	}
 	out = setClaudeUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root))
 	return out
@@ -270,6 +282,12 @@ func appendClaudeMessageDelta(out [][]byte, root gjson.Result, st *interactionsT
 	if st.SawToolCall {
 		payload, _ = sjson.SetBytes(payload, "delta.stop_reason", "tool_use")
 	}
+	interaction := root.Get("interaction")
+	status := firstNonEmpty(interaction.Get("status").String(), root.Get("status").String())
+	finishReason := firstNonEmpty(interaction.Get("finish_reason").String(), root.Get("finish_reason").String())
+	if status == "incomplete" || finishReason == "length" || finishReason == "max_tokens" {
+		payload, _ = sjson.SetBytes(payload, "delta.stop_reason", "max_tokens")
+	}
 	payload = setClaudeUsageFromInteractions(payload, "usage", translatorcommon.InteractionsUsage(root))
 	out = append(out, translatorcommon.AppendSSEEventBytes(nil, "message_delta", payload, 3))
 	st.Completed = true
@@ -296,11 +314,44 @@ func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result)
 	if !usage.Exists() {
 		return out
 	}
-	if v, ok := firstUsageInt(usage, "input_tokens", "total_input_tokens"); ok {
-		out, _ = sjson.SetBytes(out, path+".input_tokens", v)
+	outputTokens, hasOutput := firstUsageInt(usage, "output_tokens", "total_output_tokens")
+	cachedTokens, hasCached := firstUsageInt(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens", "total_cached_tokens")
+	cacheWriteTokens, hasCacheWrite := firstUsageInt(usage, "cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens")
+
+	totalCache := int64(0)
+	if hasCached && cachedTokens > 0 {
+		totalCache += cachedTokens
 	}
-	if v, ok := firstUsageInt(usage, "output_tokens", "total_output_tokens"); ok {
-		out, _ = sjson.SetBytes(out, path+".output_tokens", v)
+	if hasCacheWrite && cacheWriteTokens > 0 {
+		totalCache += cacheWriteTokens
+	}
+
+	hasInput := false
+	var inputTokens int64
+
+	if inNode := usage.Get("input_tokens"); inNode.Exists() {
+		hasInput = true
+		inputTokens = inNode.Int()
+	} else if totalVal, ok := firstUsageInt(usage, "total_input_tokens", "prompt_tokens"); ok {
+		hasInput = true
+		if totalVal >= totalCache {
+			inputTokens = totalVal - totalCache
+		} else {
+			inputTokens = 0
+		}
+	}
+
+	if hasInput {
+		out, _ = sjson.SetBytes(out, path+".input_tokens", inputTokens)
+	}
+	if hasOutput {
+		out, _ = sjson.SetBytes(out, path+".output_tokens", outputTokens)
+	}
+	if hasCached && cachedTokens > 0 {
+		out, _ = sjson.SetBytes(out, path+".cache_read_input_tokens", cachedTokens)
+	}
+	if hasCacheWrite && cacheWriteTokens > 0 {
+		out, _ = sjson.SetBytes(out, path+".cache_creation_input_tokens", cacheWriteTokens)
 	}
 	return out
 }

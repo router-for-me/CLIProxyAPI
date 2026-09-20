@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -11,6 +12,36 @@ func resetUserIDCache() {
 	userIDCacheMu.Lock()
 	userIDCache = make(map[string]userIDCacheEntry)
 	userIDCacheMu.Unlock()
+}
+
+func TestGenerateFakeUserIDUsesClaudeCode220JSONShape(t *testing.T) {
+	userID := GenerateFakeUserID()
+	if !IsValidUserID(userID) {
+		t.Fatalf("user ID %q is not valid", userID)
+	}
+	var value claudeMetadataUserID
+	if errUnmarshal := json.Unmarshal([]byte(userID), &value); errUnmarshal != nil {
+		t.Fatalf("unmarshal user ID: %v", errUnmarshal)
+	}
+	if value.AccountUUID != "" {
+		t.Fatalf("account_uuid = %q, want empty", value.AccountUUID)
+	}
+}
+
+func TestCachedUserIDUsesCachedClaudeSessionID(t *testing.T) {
+	resetUserIDCache()
+	resetSessionIDCache()
+
+	const key = "api-key-shared-session"
+	sessionID := CachedSessionID(key)
+	userID := CachedUserID(key)
+	var value claudeMetadataUserID
+	if errUnmarshal := json.Unmarshal([]byte(userID), &value); errUnmarshal != nil {
+		t.Fatalf("unmarshal user ID: %v", errUnmarshal)
+	}
+	if value.SessionID != sessionID {
+		t.Fatalf("metadata session_id = %q, header session ID = %q", value.SessionID, sessionID)
+	}
 }
 
 func TestCachedUserID_ReusesWithinTTL(t *testing.T) {
@@ -107,8 +138,8 @@ func TestCachedUserIDRequiredHomeReusesKVAcrossLocalCacheReset(t *testing.T) {
 	if !IsValidUserID(first) {
 		t.Fatalf("user id %q is not valid", first)
 	}
-	if client.setCount != 1 {
-		t.Fatalf("KVSetNX count = %d, want 1", client.setCount)
+	if client.setCount != 2 {
+		t.Fatalf("KVSetNX count = %d, want 2 (session and user ID)", client.setCount)
 	}
 	if client.expireCount != 1 || client.lastExpireTTL != userIDTTL {
 		t.Fatalf("KVExpire count/ttl = %d/%v, want 1/%v", client.expireCount, client.lastExpireTTL, userIDTTL)

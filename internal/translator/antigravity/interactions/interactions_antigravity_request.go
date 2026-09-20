@@ -25,6 +25,9 @@ func ConvertInteractionsRequestToAntigravity(modelName string, inputRawJSON []by
 	appendInteractionsInputToAntigravity(&contentItems, root.Get("input"))
 	out = translatorcommon.SetRawArrayItems(out, "request.contents", contentItems)
 	out = copyInteractionsToolsToAntigravity(out, root, functionNameMap)
+	if gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String() == "NONE" {
+		out, _ = sjson.DeleteBytes(out, "request.tools")
+	}
 	out = rewriteInteractionsFunctionNames(out, functionNameMap)
 	out = attachDefaultAntigravitySafetySettings(out)
 	return out
@@ -195,12 +198,13 @@ func copyInteractionsReasoningToAntigravity(out []byte, root gjson.Result) []byt
 		effort = strings.ToLower(strings.TrimSpace(reasoning.Get("thinking_level").String()))
 	}
 	if effort != "" {
+		// Thinking amount and summary visibility are independent. This OpenAI-style
+		// compatibility alias controls only the amount; includeThoughts is written
+		// below only for an explicit Interactions summary selector.
 		if effort == "auto" {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", -1)
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 		} else {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", effort)
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", effort != "none")
 		}
 	}
 	if summary := reasoning.Get("summary"); summary.Exists() {
@@ -513,6 +517,10 @@ func appendInteractionsFunctionResultToAntigravity(items *[][]byte, step gjson.R
 }
 
 func copyInteractionsToolsToAntigravity(out []byte, root gjson.Result, functionNameMap map[string]string) []byte {
+	if gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String() == "NONE" {
+		out, _ = sjson.DeleteBytes(out, "request.tools")
+		return out
+	}
 	tools := root.Get("tools")
 	if !tools.Exists() {
 		return out
@@ -548,7 +556,56 @@ func copyInteractionsToolsToAntigravity(out []byte, root gjson.Result, functionN
 			}
 			return true
 		}
-		otherTools = append(otherTools, []byte(tool.Raw))
+		toolType := tool.Get("type").String()
+		switch toolType {
+		case "url_context":
+			node := []byte(`{"urlContext":{}}`)
+			if uc := tool.Get("url_context"); uc.Exists() && uc.IsObject() {
+				node, _ = sjson.SetRawBytes(node, "urlContext", []byte(uc.Raw))
+			} else if uc := tool.Get("urlContext"); uc.Exists() && uc.IsObject() {
+				node, _ = sjson.SetRawBytes(node, "urlContext", []byte(uc.Raw))
+			}
+			otherTools = append(otherTools, node)
+			return true
+		case "code_execution":
+			node := []byte(`{"codeExecution":{}}`)
+			if ce := tool.Get("code_execution"); ce.Exists() && ce.IsObject() {
+				node, _ = sjson.SetRawBytes(node, "codeExecution", []byte(ce.Raw))
+			} else if ce := tool.Get("codeExecution"); ce.Exists() && ce.IsObject() {
+				node, _ = sjson.SetRawBytes(node, "codeExecution", []byte(ce.Raw))
+			}
+			otherTools = append(otherTools, node)
+			return true
+		case "google_search", "web_search":
+			node := []byte(`{"googleSearch":{}}`)
+			if gs := tool.Get("google_search"); gs.Exists() && gs.IsObject() {
+				node, _ = sjson.SetRawBytes(node, "googleSearch", []byte(gs.Raw))
+			} else if gs := tool.Get("googleSearch"); gs.Exists() && gs.IsObject() {
+				node, _ = sjson.SetRawBytes(node, "googleSearch", []byte(gs.Raw))
+			}
+			otherTools = append(otherTools, node)
+			return true
+		}
+		rawBytes := []byte(tool.Raw)
+		if toolType == "" {
+			if uc := tool.Get("url_context"); uc.Exists() {
+				rawBytes, _ = sjson.SetRawBytes(rawBytes, "urlContext", []byte(uc.Raw))
+				rawBytes, _ = sjson.DeleteBytes(rawBytes, "url_context")
+			}
+			if ce := tool.Get("code_execution"); ce.Exists() {
+				rawBytes, _ = sjson.SetRawBytes(rawBytes, "codeExecution", []byte(ce.Raw))
+				rawBytes, _ = sjson.DeleteBytes(rawBytes, "code_execution")
+			}
+			if gs := tool.Get("google_search"); gs.Exists() {
+				rawBytes, _ = sjson.SetRawBytes(rawBytes, "googleSearch", []byte(gs.Raw))
+				rawBytes, _ = sjson.DeleteBytes(rawBytes, "google_search")
+			}
+			if ws := tool.Get("web_search"); ws.Exists() {
+				rawBytes, _ = sjson.SetRawBytes(rawBytes, "googleSearch", []byte(ws.Raw))
+				rawBytes, _ = sjson.DeleteBytes(rawBytes, "web_search")
+			}
+		}
+		otherTools = append(otherTools, rawBytes)
 		return true
 	})
 	deduplicated := util.DeduplicateFunctionDeclarations(translatorcommon.JoinRawArray(functionDeclarations))
@@ -707,20 +764,17 @@ func antigravityInputAudioMimeType(format string) string {
 }
 
 func antigravityThinkingSummariesIncludeThoughts(summary gjson.Result) (bool, bool) {
-	switch summary.Type {
-	case gjson.True:
-		return true, true
-	case gjson.False:
-		return false, true
-	case gjson.String:
-		switch strings.ToLower(strings.TrimSpace(summary.String())) {
-		case "", "none", "off", "false", "disabled":
-			return false, true
-		default:
-			return true, true
-		}
+	if summary.Type != gjson.String {
+		return false, false
 	}
-	return false, false
+	switch strings.ToLower(strings.TrimSpace(summary.String())) {
+	case "auto":
+		return true, true
+	case "none":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func convertSnakeCaseKeysToCamelCaseForAntigravity(raw []byte) []byte {

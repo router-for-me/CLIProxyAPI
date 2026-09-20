@@ -1,7 +1,6 @@
 package interactions
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -65,12 +64,16 @@ func convertClaudeMessageToInteractions(modelName string, root gjson.Result) []b
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
 	out, _ = sjson.SetBytes(out, "id", firstNonEmptyString(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())))
 	out, _ = sjson.SetBytes(out, "model", firstNonEmptyString(root.Get("model").String(), modelName))
+	steps := make([][]byte, 0, 4)
 	root.Get("content").ForEach(func(_, part gjson.Result) bool {
 		if step := claudeContentBlockToInteractionsStep(part); len(step) > 0 {
-			out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+			steps = append(steps, step)
 		}
 		return true
 	})
+	if len(steps) > 0 {
+		out, _ = sjson.SetRawBytes(out, "steps", translatorcommon.JoinRawArray(steps))
+	}
 	out = setInteractionsUsageFromClaude(out, "usage", root.Get("usage"))
 	return out
 }
@@ -81,11 +84,19 @@ func convertClaudeSSEToInteractionsNonStream(modelName string, rawJSON []byte) [
 	out, _ = sjson.SetBytes(out, "model", modelName)
 	st := &claudeToInteractionsStreamState{Model: modelName}
 	st.ensureMaps()
-	scanner := bufio.NewScanner(bytes.NewReader(rawJSON))
-	buffer := make([]byte, 1024*1024)
-	scanner.Buffer(buffer, 52_428_800)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
+	steps := make([][]byte, 0, 8)
+	remaining := rawJSON
+	for len(remaining) > 0 {
+		var line []byte
+		idx := bytes.IndexByte(remaining, '\n')
+		if idx >= 0 {
+			line = remaining[:idx]
+			remaining = remaining[idx+1:]
+		} else {
+			line = remaining
+			remaining = nil
+		}
+		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, claudeInteractionsDataTag) {
 			continue
 		}
@@ -110,11 +121,14 @@ func convertClaudeSSEToInteractionsNonStream(modelName string, rawJSON []byte) [
 			claudeNonStreamContentBlockDelta(root, st)
 		case "content_block_stop":
 			if step := claudeNonStreamContentBlockStop(root, st); len(step) > 0 {
-				out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+				steps = append(steps, step)
 			}
 		case "message_delta":
 			mergeClaudeUsage(st, root.Get("usage"))
 		}
+	}
+	if len(steps) > 0 {
+		out, _ = sjson.SetRawBytes(out, "steps", translatorcommon.JoinRawArray(steps))
 	}
 	out = setInteractionsUsageFromClaude(out, "usage", claudeMergedUsage(st))
 	return out
@@ -237,14 +251,12 @@ func claudeContentBlockToInteractionsStep(part gjson.Result) []byte {
 		step := []byte(`{"type":"model_output","content":[]}`)
 		content := []byte(`{"type":"text","text":""}`)
 		content, _ = sjson.SetBytes(content, "text", part.Get("text").String())
-		step, _ = sjson.SetRawBytes(step, "content.-1", content)
-		return step
+		return translatorcommon.SetRawArrayItems(step, "content", [][]byte{content})
 	case "thinking":
 		step := []byte(`{"type":"thought","content":[]}`)
 		content := []byte(`{"type":"text","text":""}`)
 		content, _ = sjson.SetBytes(content, "text", part.Get("thinking").String())
-		step, _ = sjson.SetRawBytes(step, "content.-1", content)
-		return step
+		return translatorcommon.SetRawArrayItems(step, "content", [][]byte{content})
 	case "tool_use":
 		return claudeToolUseToInteractionsStep(part, strings.TrimSpace(part.Get("input").Raw))
 	}
@@ -343,7 +355,7 @@ func claudeNonStreamContentBlockStop(root gjson.Result, st *claudeToInteractions
 		step = []byte(`{"type":"thought","content":[]}`)
 		content := []byte(`{"type":"text","text":""}`)
 		content, _ = sjson.SetBytes(content, "text", text)
-		step, _ = sjson.SetRawBytes(step, "content.-1", content)
+		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{content})
 	case "function_call":
 		part := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 		part, _ = sjson.SetBytes(part, "id", st.ToolIDs[index])
@@ -353,7 +365,7 @@ func claudeNonStreamContentBlockStop(root gjson.Result, st *claudeToInteractions
 		step = []byte(`{"type":"model_output","content":[]}`)
 		content := []byte(`{"type":"text","text":""}`)
 		content, _ = sjson.SetBytes(content, "text", text)
-		step, _ = sjson.SetRawBytes(step, "content.-1", content)
+		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{content})
 	}
 	delete(st.CurrentStepByIndex, index)
 	delete(st.ToolNames, index)

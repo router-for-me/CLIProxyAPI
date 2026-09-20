@@ -18,6 +18,43 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"weather","arguments":"{}"},"output_index":0}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.output_item.done","item":{"id":"fc_done_existing","type":"function_call","call_id":"call_existing","name":"other","arguments":"{}"},"output_index":1}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"id":null,"type":"function_call","call_id":"call_123","name":"weather-terminal","arguments":"{}"},{"id":"fc_existing","type":"function_call","call_id":"call_existing","name":"preserved","arguments":"{}"}]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"What is the weather?"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if got := gjson.GetBytes(resp.Payload, "output.0.id").String(); got != "fc_123" {
+		t.Fatalf("output[0].id = %q, want %q; payload=%s", got, "fc_123", resp.Payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.0.name").String(); got != "weather-terminal" {
+		t.Fatalf("output[0].name = %q, want terminal value; payload=%s", got, resp.Payload)
+	}
+	if got := gjson.GetBytes(resp.Payload, "output.1.id").String(); got != "fc_existing" {
+		t.Fatalf("output[1].id = %q, want existing value; payload=%s", got, resp.Payload)
+	}
+}
+
 func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDone(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -251,6 +288,56 @@ func TestCodexExecutorExecuteStreamExplicitTerminalFailureIsNotSuccessful(t *tes
 	assertNotRequestScopedTestError(t, streamErr)
 }
 
+func TestCodexAutoExecutorHTTPFallbackForwardsSequentialCutoffReasoningSummaryDelivery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		if gjson.GetBytes(body, "stream_options.include_usage").Exists() {
+			t.Errorf("unsupported stream option was forwarded: %s", body)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		if delivery := gjson.GetBytes(body, "stream_options.reasoning_summary_delivery").String(); delivery == "sequential_cutoff" {
+			_, _ = w.Write([]byte(`data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","summary_index":0,"text":"Checking"}` + "\n\n"))
+		} else {
+			_, _ = w.Write([]byte(`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","summary_index":0,"delta":"Checking"}` + "\n\n"))
+		}
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexAutoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"model":"gpt-5.6-sol","input":"hello","reasoning":{"summary":"detailed"},"stream_options":{"reasoning_summary_delivery":"sequential_cutoff","include_usage":true}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FromString("openai-response"),
+		ResponseFormat: sdktranslator.FromString("openai-response"),
+		Stream:         true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var output bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+		output.Write(chunk.Payload)
+	}
+	if !strings.Contains(output.String(), `"type":"response.reasoning_summary_text.done"`) {
+		t.Fatalf("missing sequential-cutoff summary event; output=%s", output.String())
+	}
+}
+
 func TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -470,6 +557,11 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
+			name:       "cyber policy",
+			event:      `{"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk."}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
 			name:       "authentication",
 			event:      `{"type":"response.failed","response":{"error":{"type":"authentication_error","code":"invalid_api_key","message":"Invalid token."}}}`,
 			wantStatus: http.StatusUnauthorized,
@@ -483,6 +575,18 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			name:       "unknown upstream failure",
 			event:      `{"type":"response.failed","response":{"error":{"type":"upstream_error","code":"unknown","message":"Upstream failed."}}}`,
 			wantStatus: http.StatusBadGateway,
+		},
+		// Overload rejections keep falling through to 502 here. The 503 restoration is scoped to
+		// the opt-in bootstrap buffering path so this shared mapping stays unchanged.
+		{
+			name:       "overload stays a bad gateway without buffering",
+			event:      `{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`,
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "model not found with invalid_request_error type maps to 404",
+			event:      `{"type":"error","error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}`,
+			wantStatus: http.StatusNotFound,
 		},
 	}
 

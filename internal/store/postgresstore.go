@@ -211,6 +211,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	if auth == nil {
 		return "", fmt.Errorf("postgres store: auth is nil")
 	}
+	cliproxyauth.NormalizeCredentialMetadata(auth.Metadata)
 	if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
 		return "", fmt.Errorf("postgres store: %w", errWeight)
 	}
@@ -223,7 +224,10 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	// Runtime updates must not recreate a disabled credential whose source file
+	// was deliberately removed. Login and migration callers explicitly mark the
+	// save when creating a missing disabled credential is intentional.
+	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
 		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return "", nil
 		}
@@ -322,6 +326,7 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			log.WithError(err).Warnf("postgres store: skipping auth %s with invalid json", id)
 			continue
 		}
+		cliproxyauth.NormalizeCredentialMetadata(metadata)
 		if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
 			log.WithError(errWeight).Warnf("postgres store: skipping auth %s with invalid weight", id)
 			continue

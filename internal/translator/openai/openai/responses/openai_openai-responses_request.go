@@ -45,9 +45,20 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// Set stream configuration
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
+	// Map Responses text format to Chat Completions response format.
+	if textFormat := root.Get("text.format"); textFormat.Exists() {
+		if responseFormat := convertResponsesTextFormatToChatResponseFormat(textFormat); len(responseFormat) > 0 {
+			out, _ = sjson.SetRawBytes(out, "response_format", responseFormat)
+		}
+	}
+
 	// Map generation parameters from responses format to chat completions format
 	if maxTokens := root.Get("max_output_tokens"); maxTokens.Exists() {
-		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
+		if maxTokens.Raw != "" {
+			out, _ = sjson.SetRawBytes(out, "max_tokens", []byte(maxTokens.Raw))
+		} else {
+			out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Value())
+		}
 	}
 
 	// Convert instructions to system message
@@ -57,27 +68,58 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		appendMessage(systemMessage)
 	}
 
+	duplicateOutputIDs := make(map[string]struct{})
+
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		inputItems := input.Array()
-		outputCallIDs := make(map[string]struct{})
-		for _, item := range inputItems {
+		rawInputArray := input.Array()
+		explicitOutputCounts := make(map[string]int)
+		missingIDOutputsCount := 0
+		for _, item := range rawInputArray {
 			itemType := item.Get("type").String()
-			if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
-				continue
+			if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+				id := translatorcommon.ExtractResponsesCallID(item)
+				if id != "" {
+					explicitOutputCounts[id]++
+				} else {
+					missingIDOutputsCount++
+				}
 			}
-			callID := strings.TrimSpace(item.Get("call_id").String())
-			if callID == "" {
-				continue
+		}
+
+		unclaimedCalls := make(map[string]bool)
+		for _, item := range rawInputArray {
+			itemType := item.Get("type").String()
+			if itemType == "function_call" || itemType == "custom_tool_call" {
+				id := translatorcommon.ExtractResponsesCallID(item)
+				if id != "" && explicitOutputCounts[id] == 0 {
+					unclaimedCalls[id] = true
+				}
 			}
-			outputCallIDs[callID] = struct{}{}
+		}
+
+		inputItems := translatorcommon.NormalizeResponsesToolCallOutputs(rawInputArray)
+		if missingIDOutputsCount > 1 || (missingIDOutputsCount > 0 && len(unclaimedCalls) > 1) {
+			for idx, item := range inputItems {
+				itemType := item.Get("type").String()
+				if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+					if idx < len(rawInputArray) && translatorcommon.ExtractResponsesCallID(rawInputArray[idx]) == "" {
+						raw := []byte(item.Raw)
+						raw, _ = sjson.DeleteBytes(raw, "call_id")
+						raw, _ = sjson.DeleteBytes(raw, "tool_call_id")
+						raw, _ = sjson.DeleteBytes(raw, "callId")
+						inputItems[idx] = gjson.ParseBytes(raw)
+					}
+				}
+			}
 		}
 
 		pendingToolCalls := make([]interface{}, 0)
 		pendingToolCallIDs := make([]string, 0)
 		pendingReasoningContent := ""
 		awaitingToolOutputs := make(map[string]struct{})
-		deferredMessages := make([][]byte, 0)
+		outputCounts := make(map[string]int)
+		mergeableAssistantIndex := -1
 
 		takePendingReasoningContent := func() string {
 			reasoningContent := pendingReasoningContent
@@ -88,43 +130,43 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			if len(pendingToolCalls) == 0 {
 				return
 			}
-			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
-			if reasoningContent := takePendingReasoningContent(); reasoningContent != "" {
-				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+
+			reasoningContent := takePendingReasoningContent()
+			mergedIntoAssistant := false
+			if mergeableAssistantIndex >= 0 && mergeableAssistantIndex == len(messages)-1 {
+				assistantMessage := gjson.ParseBytes(messages[mergeableAssistantIndex])
+				if assistantMessage.Get("role").String() == "assistant" && !assistantMessage.Get("tool_calls").Exists() {
+					updatedMessage, _ := sjson.SetBytes(messages[mergeableAssistantIndex], "tool_calls", pendingToolCalls)
+					combinedReasoning := combineOpenAIResponsesReasoning(assistantMessage.Get("reasoning_content").String(), reasoningContent)
+					if combinedReasoning != "" {
+						updatedMessage, _ = sjson.SetBytes(updatedMessage, "reasoning_content", combinedReasoning)
+					}
+					messages[mergeableAssistantIndex] = updatedMessage
+					mergedIntoAssistant = true
+				}
 			}
-			appendMessage(assistantMessage)
+			if !mergedIntoAssistant {
+				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+				if reasoningContent != "" {
+					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+				}
+				appendMessage(assistantMessage)
+			}
 			for _, id := range pendingToolCallIDs {
-				if strings.TrimSpace(id) == "" {
+				trimmed := strings.TrimSpace(id)
+				if trimmed == "" {
 					continue
 				}
-				awaitingToolOutputs[id] = struct{}{}
+				awaitingToolOutputs[trimmed] = struct{}{}
 			}
 			pendingToolCalls = pendingToolCalls[:0]
 			pendingToolCallIDs = pendingToolCallIDs[:0]
+			mergeableAssistantIndex = -1
 		}
-		flushDeferredMessages := func() {
-			for _, message := range deferredMessages {
-				appendMessage(message)
-			}
-			deferredMessages = deferredMessages[:0]
-		}
-		hasAwaitingToolOutput := func() bool {
-			for id := range awaitingToolOutputs {
-				if _, ok := outputCallIDs[id]; ok {
-					return true
-				}
-			}
-			return false
-		}
-		appendRegularMessage := func(message []byte) {
-			// Keep tool-call adjacency strict for providers that require
-			// assistant(tool_calls) -> tool(tool_call_id) with no message in between.
-			if hasAwaitingToolOutput() {
-				deferredMessages = append(deferredMessages, message)
-				return
-			}
+		appendRegularMessage := func(message []byte) int {
 			appendMessage(message)
+			return len(messages) - 1
 		}
 		appendPendingReasoningMessage := func() {
 			reasoningContent := takePendingReasoningContent()
@@ -152,6 +194,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if role == "developer" {
 					role = "user"
 				}
+				mergeableAssistantIndex = -1
 				if role != "assistant" {
 					appendPendingReasoningMessage()
 				}
@@ -176,8 +219,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							imageURL := contentItem.Get("image_url").String()
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
-							if detail := contentItem.Get("detail"); detail.Exists() {
-								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail.String())
+							if detail, ok := normalizeChatImageDetail(contentItem.Get("detail")); ok && detail != "" {
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail)
 							}
 							contentItems = append(contentItems, contentPart)
 						}
@@ -189,39 +232,36 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 
 				if role == "assistant" {
-					reasoningContent := item.Get("reasoning_content").String()
-					if reasoningContent == "" {
-						reasoningContent = takePendingReasoningContent()
-					} else {
-						pendingReasoningContent = ""
-					}
+					reasoningContent := combineOpenAIResponsesReasoning(takePendingReasoningContent(), item.Get("reasoning_content").String())
 					if reasoningContent != "" {
 						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
 					}
 				}
 
-				appendRegularMessage(message)
+				messageIndex := appendRegularMessage(message)
+				if role == "assistant" {
+					mergeableAssistantIndex = messageIndex
+				}
 
 			case "reasoning":
 				reasoningContent := collectOpenAIResponsesReasoningContent(item)
-				if pendingReasoningContent == "" {
-					pendingReasoningContent = reasoningContent
-				} else {
-					pendingReasoningContent += reasoningContent
-				}
+				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, reasoningContent)
 
 			case "function_call":
+				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, item.Get("reasoning_content").String())
 				// Buffer consecutive function calls and emit them as one assistant message.
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 
-				if callId := item.Get("call_id"); callId.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "id", callId.String())
+				if callId := translatorcommon.ExtractResponsesCallID(item); callId != "" {
+					toolCall, _ = sjson.SetBytes(toolCall, "id", callId)
 				}
 
 				if name := item.Get("name"); name.Exists() {
 					functionName := name.String()
 					if namespace := strings.TrimSpace(item.Get("namespace").String()); namespace != "" {
-						functionName = qualifyResponsesNamespaceToolName(namespace, functionName)
+						functionName = chatNameForResponsesNamespaceToolCall(inputRawJSON, namespace, functionName)
+					} else {
+						functionName = canonicalResponsesToolName(inputRawJSON, functionName)
 					}
 					toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionName)
 				}
@@ -230,64 +270,83 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
 				}
 				pendingToolCalls = append(pendingToolCalls, gjson.ParseBytes(toolCall).Value())
-				if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+				if callID := translatorcommon.ExtractResponsesCallID(item); callID != "" {
 					pendingToolCallIDs = append(pendingToolCallIDs, callID)
 				}
 
 			case "function_call_output":
-				// Handle function call output conversion to tool message
-				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-				callID := ""
-
-				if callId := item.Get("call_id"); callId.Exists() {
-					callID = strings.TrimSpace(callId.String())
-					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
-				}
-
-				if output := item.Get("output"); output.Exists() {
-					toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
-				}
-
-				appendMessage(toolMessage)
+				mergeableAssistantIndex = -1
+				callID := translatorcommon.ExtractResponsesCallID(item)
 				if callID != "" {
-					delete(awaitingToolOutputs, callID)
+					outputCounts[callID]++
+					if outputCounts[callID] > 1 {
+						duplicateOutputIDs[callID] = struct{}{}
+					}
 				}
-				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
-					flushDeferredMessages()
+				if _, awaiting := awaitingToolOutputs[callID]; !awaiting {
+					// Orphan outputs (empty call_id or no matching assistant
+					// tool_calls, e.g. Codex send_message_to_thread cards) must
+					// not become tool messages. Emit as user text instead.
+					appendStandaloneResponsesToolOutputAsUser(item.Get("output"), setFunctionCallOutputContent, appendRegularMessage)
+				} else {
+					toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
+					delete(awaitingToolOutputs, callID)
+					if output := item.Get("output"); output.Exists() {
+						toolMessage = setFunctionCallOutputContent(toolMessage, output)
+					}
+					appendMessage(toolMessage)
 				}
 
 			case "custom_tool_call":
+				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, item.Get("reasoning_content").String())
 				// Codex freeform tool call replay: wrap the raw input so it
 				// matches the {"input": string} function shape used when
 				// converting custom tool definitions.
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-				toolCall, _ = sjson.SetBytes(toolCall, "id", item.Get("call_id").String())
-				toolCall, _ = sjson.SetBytes(toolCall, "function.name", item.Get("name").String())
+				toolCall, _ = sjson.SetBytes(toolCall, "id", translatorcommon.ExtractResponsesCallID(item))
+				functionName := item.Get("name").String()
+				if namespace := item.Get("namespace").String(); namespace != "" {
+					functionName = chatNameForResponsesNamespaceToolCall(inputRawJSON, namespace, functionName)
+				} else {
+					functionName = canonicalResponsesToolName(inputRawJSON, functionName)
+				}
+				toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionName)
 				wrappedArgs, _ := sjson.SetBytes([]byte(`{"input":""}`), "input", item.Get("input").String())
 				toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", string(wrappedArgs))
 				pendingToolCalls = append(pendingToolCalls, gjson.ParseBytes(toolCall).Value())
-				if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+				if callID := translatorcommon.ExtractResponsesCallID(item); callID != "" {
 					pendingToolCallIDs = append(pendingToolCallIDs, callID)
 				}
 
 			case "custom_tool_call_output":
-				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-				callID := strings.TrimSpace(item.Get("call_id").String())
-				toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
-				toolMessage, _ = sjson.SetBytes(toolMessage, "content", responsesToolOutputText(item.Get("output")))
-				appendMessage(toolMessage)
+				mergeableAssistantIndex = -1
+				callID := translatorcommon.ExtractResponsesCallID(item)
 				if callID != "" {
+					outputCounts[callID]++
+					if outputCounts[callID] > 1 {
+						duplicateOutputIDs[callID] = struct{}{}
+					}
+				}
+				if _, awaiting := awaitingToolOutputs[callID]; !awaiting {
+					appendStandaloneResponsesToolOutputAsUser(item.Get("output"), setCustomToolCallOutputContent, appendRegularMessage)
+				} else {
+					toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
 					delete(awaitingToolOutputs, callID)
+					if output := item.Get("output"); output.Exists() {
+						toolMessage = setCustomToolCallOutputContent(toolMessage, output)
+					}
+					appendMessage(toolMessage)
 				}
-				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
-					flushDeferredMessages()
-				}
+
+			default:
+				mergeableAssistantIndex = -1
 			}
 
 		}
 		flushPendingToolCalls()
 		appendPendingReasoningMessage()
-		flushDeferredMessages()
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
@@ -296,6 +355,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	if len(messages) > 0 {
+		var extraAmbiguous []string
+		for id := range duplicateOutputIDs {
+			extraAmbiguous = append(extraAmbiguous, id)
+		}
+		messages = translatorcommon.AlignOpenAIToolCallMessages(messages, extraAmbiguous...)
 		out, _ = sjson.SetRawBytes(out, "messages", translatorcommon.JoinRawArray(messages))
 	}
 
@@ -304,25 +368,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// "additional_tools" input item instead of the top-level "tools" field,
 	// so merge both sources.
 	var chatCompletionsTools []interface{}
-	appendChatTools := func(tools gjson.Result) {
-		if !tools.Exists() || !tools.IsArray() {
-			return
-		}
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			for _, chatTool := range convertResponsesToolToOpenAIChatTools(tool) {
-				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
-			}
-			return true
-		})
-	}
-	appendChatTools(root.Get("tools"))
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			if item.Get("type").String() == "additional_tools" {
-				appendChatTools(item.Get("tools"))
-			}
-			return true
-		})
+	for _, chatTool := range mergeResponsesRequestChatTools(root) {
+		chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 	}
 	if len(chatCompletionsTools) > 0 {
 		out, _ = sjson.SetBytes(out, "tools", chatCompletionsTools)
@@ -330,7 +377,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
 		}
 		if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+			out, _ = sjson.SetRawBytes(out, "tool_choice", convertResponsesToolChoiceToChatCompletions(toolChoice, inputRawJSON))
 		}
 	}
 
@@ -342,6 +389,229 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	return out
+}
+
+func convertResponsesToolChoiceToChatCompletions(toolChoice gjson.Result, inputRawJSON []byte) []byte {
+	if !toolChoice.IsObject() {
+		return []byte(toolChoice.Raw)
+	}
+
+	choiceType := toolChoice.Get("type").String()
+	if choiceType != "function" && choiceType != "custom" {
+		return []byte(toolChoice.Raw)
+	}
+
+	name := toolChoice.Get("function.name").String()
+	if name == "" {
+		name = toolChoice.Get("custom.name").String()
+	}
+	if name == "" {
+		name = toolChoice.Get("name").String()
+	}
+	if name == "" {
+		return []byte(toolChoice.Raw)
+	}
+
+	namespace := strings.TrimSpace(toolChoice.Get("namespace").String())
+	if namespace == "" {
+		namespace = strings.TrimSpace(toolChoice.Get("function.namespace").String())
+	}
+	if namespace == "" {
+		namespace = strings.TrimSpace(toolChoice.Get("custom.namespace").String())
+	}
+	if namespace != "" {
+		name = chatNameForResponsesNamespaceToolCall(inputRawJSON, namespace, name)
+	} else {
+		name = canonicalResponsesToolName(inputRawJSON, name)
+	}
+
+	converted := []byte(`{"type":"function","function":{"name":""}}`)
+	converted, _ = sjson.SetBytes(converted, "function.name", name)
+	return converted
+}
+
+func convertResponsesTextFormatToChatResponseFormat(textFormat gjson.Result) []byte {
+	formatType := textFormat.Get("type").String()
+	switch formatType {
+	case "text", "json_object":
+		responseFormat := []byte(`{"type":""}`)
+		responseFormat, _ = sjson.SetBytes(responseFormat, "type", formatType)
+		return responseFormat
+	case "json_schema":
+		responseFormat := []byte(`{"type":"json_schema","json_schema":{}}`)
+		for _, field := range []string{"name", "description", "strict"} {
+			if value := textFormat.Get(field); value.Exists() {
+				responseFormat, _ = sjson.SetBytes(responseFormat, "json_schema."+field, value.Value())
+			}
+		}
+		if schema := textFormat.Get("schema"); schema.Exists() {
+			responseFormat, _ = sjson.SetRawBytes(responseFormat, "json_schema.schema", []byte(schema.Raw))
+		}
+		return responseFormat
+	default:
+		return nil
+	}
+}
+
+func appendStandaloneResponsesToolOutputAsUser(output gjson.Result, setContent func([]byte, gjson.Result) []byte, appendMessage func([]byte) int) {
+	userMessage := []byte(`{"role":"user","content":""}`)
+	if output.Exists() {
+		userMessage = setContent(userMessage, output)
+	}
+	content := gjson.GetBytes(userMessage, "content")
+	if !content.Exists() {
+		return
+	}
+	if content.Type == gjson.String && strings.TrimSpace(content.String()) == "" {
+		return
+	}
+	if content.IsArray() && !content.Get("0").Exists() {
+		return
+	}
+	appendMessage(userMessage)
+}
+
+func setFunctionCallOutputContent(toolMessage []byte, output gjson.Result) []byte {
+	structuredContent := output
+	if output.Type == gjson.String {
+		if !gjson.Valid(output.String()) {
+			toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
+			return toolMessage
+		}
+		structuredContent = gjson.Parse(output.String())
+	}
+
+	if hasChatToolOutputImagePart(structuredContent) {
+		contentItems := make([][]byte, 0, len(structuredContent.Array()))
+		for _, item := range structuredContent.Array() {
+			contentItems = append(contentItems, chatToolOutputContentPart(item))
+		}
+		return translatorcommon.SetRawArrayItems(toolMessage, "content", contentItems)
+	}
+
+	toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
+	return toolMessage
+}
+
+func setCustomToolCallOutputContent(toolMessage []byte, output gjson.Result) []byte {
+	structuredContent := output
+	if output.Type == gjson.String && gjson.Valid(output.String()) {
+		structuredContent = gjson.Parse(output.String())
+	}
+	if hasChatToolOutputImagePart(structuredContent) {
+		return setFunctionCallOutputContent(toolMessage, output)
+	}
+
+	toolMessage, _ = sjson.SetBytes(toolMessage, "content", responsesToolOutputText(output))
+	return toolMessage
+}
+
+func chatToolOutputContentPart(item gjson.Result) []byte {
+	itemType := item.Get("type").String()
+	switch itemType {
+	case "text", "input_text", "output_text":
+		part := []byte(`{"type":"text","text":""}`)
+		part, _ = sjson.SetBytes(part, "text", item.Get("text").String())
+		return part
+	case "image_url", "input_image":
+		imageURL, detail, ok := chatToolOutputImageFields(item)
+		if !ok {
+			return chatToolOutputFallbackPart(item)
+		}
+		part := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+		part, _ = sjson.SetBytes(part, "image_url.url", imageURL)
+		if detail != "" {
+			part, _ = sjson.SetBytes(part, "image_url.detail", detail)
+		}
+		return part
+	default:
+		return chatToolOutputFallbackPart(item)
+	}
+}
+
+func hasChatToolOutputImagePart(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+
+	hasImage := false
+	for _, item := range content.Array() {
+		itemType := item.Get("type")
+		if itemType.Type != gjson.String {
+			continue
+		}
+		switch itemType.String() {
+		case "text", "input_text", "output_text":
+			if item.Get("text").Type != gjson.String {
+				return false
+			}
+		case "image_url", "input_image":
+			if _, _, ok := chatToolOutputImageFields(item); !ok {
+				return false
+			}
+			hasImage = true
+		}
+	}
+	return hasImage
+}
+
+func chatToolOutputImageFields(item gjson.Result) (imageURL, detail string, ok bool) {
+	var imageURLValue gjson.Result
+	var detailValue gjson.Result
+	switch item.Get("type").String() {
+	case "image_url":
+		imageURLValue = item.Get("image_url.url")
+		detailValue = item.Get("image_url.detail")
+	case "input_image":
+		imageURLValue = item.Get("image_url")
+		detailValue = item.Get("detail")
+	default:
+		return "", "", false
+	}
+
+	if imageURLValue.Type != gjson.String {
+		return "", "", false
+	}
+	imageURL = strings.TrimSpace(imageURLValue.String())
+	if imageURL == "" {
+		return "", "", false
+	}
+
+	detail, ok = normalizeChatImageDetail(detailValue)
+	if !ok {
+		return "", "", false
+	}
+	return imageURL, detail, true
+}
+
+func normalizeChatImageDetail(detailValue gjson.Result) (string, bool) {
+	if !detailValue.Exists() {
+		return "", true
+	}
+	if detailValue.Type != gjson.String {
+		return "", false
+	}
+
+	normalizedDetail := strings.ToLower(strings.TrimSpace(detailValue.String()))
+	switch normalizedDetail {
+	case "auto", "low", "high":
+		return normalizedDetail, true
+	case "original":
+		// Chat Completions does not support Codex's original detail value.
+		return "high", true
+	default:
+		return "", true
+	}
+}
+
+func chatToolOutputFallbackPart(item gjson.Result) []byte {
+	text := item.Raw
+	if item.Type == gjson.String || text == "" {
+		text = item.String()
+	}
+	part := []byte(`{"type":"text","text":""}`)
+	part, _ = sjson.SetBytes(part, "text", text)
+	return part
 }
 
 func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
@@ -359,4 +629,22 @@ func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
 		return "[reasoning unavailable]"
 	}
 	return reasoningText.String()
+}
+
+func combineOpenAIResponsesReasoning(existing, incoming string) string {
+	existingTrimmed := strings.TrimSpace(existing)
+	incomingTrimmed := strings.TrimSpace(incoming)
+
+	switch {
+	case existingTrimmed == "":
+		return incoming
+	case incomingTrimmed == "":
+		return existing
+	case existingTrimmed == "[reasoning unavailable]":
+		return incoming
+	case incomingTrimmed == "[reasoning unavailable]", existingTrimmed == incomingTrimmed:
+		return existing
+	default:
+		return existing + "\n\n" + incoming
+	}
 }

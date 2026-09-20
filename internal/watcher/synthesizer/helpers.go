@@ -103,6 +103,53 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 	}
 }
 
+// addRequestRetryToMetadata copies a per-credential request-retry override into metadata.
+// Nil or negative values are treated as unset and are not written.
+func addRequestRetryToMetadata(requestRetry *int, metadata map[string]any) {
+	if requestRetry == nil || *requestRetry < 0 || metadata == nil {
+		return
+	}
+	metadata["request_retry"] = *requestRetry
+}
+
+// addRequestScopedErrorsToMetadata copies per-credential request-scoped error rules into metadata.
+func addRequestScopedErrorsToMetadata(rules []config.RequestScopedErrorRule, metadata map[string]any) {
+	if len(rules) == 0 || metadata == nil {
+		return
+	}
+	metadata["request_scoped_errors"] = rules
+}
+
+func fingerprintProfileFromMetadata(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	for _, key := range []string{"fingerprint_profile", "fingerprint-profile"} {
+		raw, _ := metadata[key].(string)
+		if profile := strings.ToLower(strings.TrimSpace(raw)); profile != "" {
+			return profile
+		}
+	}
+	return ""
+}
+
+// applyFingerprintProfileAttribute copies fingerprint-profile from an OAuth JSON
+// file (Kimi, Claude, etc.) onto auth attributes so Claude Messages opt-in works
+// the same way as claude-api-key config.
+func applyFingerprintProfileAttribute(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil {
+		return
+	}
+	profile := fingerprintProfileFromMetadata(metadata)
+	if profile == "" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["fingerprint_profile"] = profile
+}
+
 // addConfigHeadersToAttrs adds header configuration to auth attributes.
 // Headers are prefixed with "header:" in the attributes map.
 func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {

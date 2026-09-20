@@ -156,7 +156,7 @@ func TestAttachResolvedAPIKeyModelInfoSupportsKeylessOpenAICompatibility(t *test
 		BaseURL: "https://example.com/v1",
 		Models: []internalconfig.OpenAICompatibilityModel{
 			{
-				Name: "shared-upstream", Alias: "public-model", ForceMapping: true,
+				Name: "shared-upstream", Alias: "public-model", ForceMapping: true, IsCompat: true,
 				Thinking: &registry.ThinkingSupport{Levels: []string{"high"}},
 			},
 			{
@@ -189,6 +189,10 @@ func TestAttachResolvedAPIKeyModelInfoSupportsKeylessOpenAICompatibility(t *test
 	}
 	req := attachResolvedAPIKeyModelInfo(routing, cliproxyexecutor.Request{}, auth, "tenant/public-model", models[0])
 	assertResolvedThinkingLevels(t, req, "high")
+	info, ok := ResolvedAPIKeyModelInfo(req)
+	if !ok || info == nil || !info.IsCompat {
+		t.Fatal("OpenAI compatibility model IsCompat = false, want true")
+	}
 }
 
 func TestAttachResolvedAPIKeyModelInfoBindsUnknownConfiguredCapability(t *testing.T) {
@@ -249,5 +253,46 @@ func assertResolvedThinkingLevels(t *testing.T, req cliproxyexecutor.Request, wa
 		if info.Thinking.Levels[i] != want[i] {
 			t.Fatalf("thinking levels = %v, want %v", info.Thinking.Levels, want)
 		}
+	}
+}
+
+func TestCodexAPIKeyModelIsCompat(t *testing.T) {
+	cfg := &internalconfig.Config{CodexKey: []internalconfig.CodexKey{{
+		APIKey:  "codex-key",
+		BaseURL: "https://compat.example.com/v1",
+		Models: []internalconfig.CodexModel{
+			{Name: "deepseek-v4-flash", Alias: "deepseek-alias", IsCompat: true},
+			{Name: "gpt-5.4", Alias: "codex-native"},
+		},
+	}}}
+	auth := &Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			AttributeAuthKind: AuthKindAPIKey,
+			AttributeAPIKey:   "codex-key",
+			"base_url":        "https://compat.example.com/v1",
+		},
+	}
+
+	if !CodexAPIKeyModelIsCompat(cfg, auth, "deepseek-v4-flash") {
+		t.Fatal("upstream name IsCompat = false, want true")
+	}
+	if !CodexAPIKeyModelIsCompat(cfg, auth, "deepseek-alias") {
+		t.Fatal("alias IsCompat = false, want true")
+	}
+	if !CodexAPIKeyModelIsCompat(cfg, auth, "deepseek-v4-flash(high)") {
+		t.Fatal("suffix model IsCompat = false, want true")
+	}
+	if CodexAPIKeyModelIsCompat(cfg, auth, "gpt-5.4") {
+		t.Fatal("native model IsCompat = true, want false")
+	}
+	if CodexAPIKeyModelIsCompat(cfg, auth, "missing-model") {
+		t.Fatal("missing model IsCompat = true, want false")
+	}
+	if CodexAPIKeyModelIsCompat(cfg, &Auth{Provider: "claude", Attributes: auth.Attributes}, "deepseek-v4-flash") {
+		t.Fatal("non-codex provider IsCompat = true, want false")
+	}
+	if CodexAPIKeyModelIsCompat(nil, auth, "deepseek-v4-flash") {
+		t.Fatal("nil config IsCompat = true, want false")
 	}
 }

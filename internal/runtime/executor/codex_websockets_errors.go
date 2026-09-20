@@ -27,6 +27,10 @@ func (e statusErrWithHeaders) Headers() http.Header {
 }
 
 func parseCodexWebsocketError(payload []byte) (error, bool) {
+	return parseCodexWebsocketErrorWithCooling(payload, false)
+}
+
+func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool) (error, bool) {
 	if len(payload) == 0 {
 		return nil, false
 	}
@@ -43,7 +47,12 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 
 	out := buildCodexWebsocketErrorPayload(payload, status)
 	headers := parseCodexWebsocketErrorHeaders(payload)
-	statusError := statusErr{code: status, msg: string(out)}
+	isUsageLimit := isCodexUsageLimitError(out)
+	statusError := statusErr{
+		code:             status,
+		msg:              string(out),
+		credentialScoped: isUsageLimit && !modelLevelCooling,
+	}
 	if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
 		statusError.retryAfter = retryAfter
 	} else if isCodexWebsocketConnectionLimitError(payload) {
