@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -14,16 +15,70 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// codexIncompleteStreamMessage is the invariant prefix of every incomplete-stream error;
+// shouldReleaseResponsesWebsocketPinnedAuth matches a substring of it, so diagnostics only append.
 const codexIncompleteStreamMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
+
+// codexIncompleteStreamDiagnostics records what an attempt observed before the upstream stream
+// ended. It holds no prompt or response content: an event type, a frame count and an interval.
+type codexIncompleteStreamDiagnostics struct {
+	// lastEventType is the "type" of the last upstream event that carried one, or empty if no
+	// event carried a type. A frame whose JSON has no "type" counts but keeps the previous value.
+	lastEventType string
+	// dataFrames counts "data:" frames only, keepalives included. The event:/id:/blank lines that
+	// frame an SSE event refresh idle without counting as frames.
+	dataFrames int
+	// idle is how long the executor went without reading a line before the stream ended. It is nil
+	// on the non-stream path, which buffers the whole body and so has no per-frame arrival times.
+	idle *time.Duration
+}
+
+// observeDataFrame counts one upstream "data:" frame and remembers its type when it carries one.
+func (d *codexIncompleteStreamDiagnostics) observeDataFrame(eventType string) {
+	d.dataFrames++
+	if eventType != "" {
+		d.lastEventType = eventType
+	}
+}
+
+// withIdle returns a copy that also reports how long the upstream was silent before it ended.
+func (d codexIncompleteStreamDiagnostics) withIdle(idle time.Duration) codexIncompleteStreamDiagnostics {
+	d.idle = &idle
+	return d
+}
+
+// message renders the diagnostics as a suffix of codexIncompleteStreamMessage.
+func (d codexIncompleteStreamDiagnostics) message() string {
+	lastEvent := strings.TrimSpace(d.lastEventType)
+	if lastEvent == "" {
+		lastEvent = "none"
+	}
+	if d.idle == nil {
+		return fmt.Sprintf("%s (last event: %s, data frames: %d)",
+			codexIncompleteStreamMessage, lastEvent, d.dataFrames)
+	}
+	return fmt.Sprintf("%s (last event: %s, data frames: %d, silent for %s)",
+		codexIncompleteStreamMessage, lastEvent, d.dataFrames, codexIncompleteStreamIdle(*d.idle))
+}
+
+// codexIncompleteStreamIdle renders an idle interval rounded to whole seconds, which bounds this
+// field's cardinality; the frame count is unbounded, so aggregate on the unchanged prefix.
+// Shorter or negative intervals render as "<1s", not an ambiguous "0s".
+func codexIncompleteStreamIdle(idle time.Duration) string {
+	if idle < time.Second {
+		return "<1s"
+	}
+	return idle.Round(time.Second).String()
+}
 
 type codexIncompleteStreamError struct {
 	statusErr
 }
 
-func newCodexIncompleteStreamError() codexIncompleteStreamError {
+func newCodexIncompleteStreamError(diag codexIncompleteStreamDiagnostics) codexIncompleteStreamError {
 	return codexIncompleteStreamError{statusErr: statusErr{
 		code: http.StatusRequestTimeout,
-		msg:  codexIncompleteStreamMessage,
+		msg:  diag.message(),
 	}}
 }
 
@@ -469,6 +524,39 @@ func setCodexBootstrapNowForTest(fn func() time.Time) func() {
 		codexBootstrapNowMu.Lock()
 		codexBootstrapNow = orig
 		codexBootstrapNowMu.Unlock()
+	}
+}
+
+// codexStreamNowMu protects codexStreamNow across concurrent tests and goroutines. It is a second
+// hook rather than a reuse of codexBootstrapNow for two reasons: nowCodexBootstrap takes the
+// RLock on every call, so reading it per SSE line would move a lock into the read loop, and a
+// shared hook would let the bootstrap tests that install a mock clock move the idle interval too.
+var (
+	codexStreamNowMu sync.RWMutex
+	codexStreamNow   = time.Now
+)
+
+// codexStreamNowFunc reads the installed hook once, so a caller that reads the clock per SSE line
+// takes the guarding RWMutex once before its loop instead of on every frame.
+func codexStreamNowFunc() func() time.Time {
+	codexStreamNowMu.RLock()
+	fn := codexStreamNow
+	codexStreamNowMu.RUnlock()
+	if fn == nil {
+		return time.Now
+	}
+	return fn
+}
+
+func setCodexStreamNowForTest(fn func() time.Time) func() {
+	codexStreamNowMu.Lock()
+	orig := codexStreamNow
+	codexStreamNow = fn
+	codexStreamNowMu.Unlock()
+	return func() {
+		codexStreamNowMu.Lock()
+		codexStreamNow = orig
+		codexStreamNowMu.Unlock()
 	}
 }
 

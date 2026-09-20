@@ -6253,6 +6253,9 @@ func TestShouldReleaseResponsesWebsocketPinnedAuth(t *testing.T) {
 		{name: "bad request", err: &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("invalid request")}, want: false},
 		{name: "previous response missing", err: &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("previous_response_not_found")}, want: true},
 		{name: "empty stream", err: &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: fmt.Errorf("empty_stream: upstream stream closed before first payload")}, want: true},
+		// The Codex executor appends diagnostics to this message, and the status here is one this
+		// function does not release on, so a match can only come from the message itself.
+		{name: "incomplete stream with diagnostics", err: &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: fmt.Errorf("stream error: stream disconnected before completion: stream closed before response.completed (last event: response.output_text.delta, data frames: 12, silent for 31s)")}, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
