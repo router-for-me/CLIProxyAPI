@@ -54,7 +54,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Map generation parameters from responses format to chat completions format
 	if maxTokens := root.Get("max_output_tokens"); maxTokens.Exists() {
-		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
+		if maxTokens.Raw != "" {
+			out, _ = sjson.SetRawBytes(out, "max_tokens", []byte(maxTokens.Raw))
+		} else {
+			out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Value())
+		}
 	}
 
 	// Convert instructions to system message
@@ -64,27 +68,57 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		appendMessage(systemMessage)
 	}
 
+	duplicateOutputIDs := make(map[string]struct{})
+
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		inputItems := translatorcommon.NormalizeResponsesToolCallOutputs(input.Array())
-		outputCallIDs := make(map[string]struct{})
-		for _, item := range inputItems {
+		rawInputArray := input.Array()
+		explicitOutputCounts := make(map[string]int)
+		missingIDOutputsCount := 0
+		for _, item := range rawInputArray {
 			itemType := item.Get("type").String()
-			if itemType != "function_call_output" && itemType != "custom_tool_call_output" {
-				continue
+			if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+				id := translatorcommon.ExtractResponsesCallID(item)
+				if id != "" {
+					explicitOutputCounts[id]++
+				} else {
+					missingIDOutputsCount++
+				}
 			}
-			callID := translatorcommon.ExtractResponsesCallID(item)
-			if callID == "" {
-				continue
+		}
+
+		unclaimedCalls := make(map[string]bool)
+		for _, item := range rawInputArray {
+			itemType := item.Get("type").String()
+			if itemType == "function_call" || itemType == "custom_tool_call" {
+				id := translatorcommon.ExtractResponsesCallID(item)
+				if id != "" && explicitOutputCounts[id] == 0 {
+					unclaimedCalls[id] = true
+				}
 			}
-			outputCallIDs[callID] = struct{}{}
+		}
+
+		inputItems := translatorcommon.NormalizeResponsesToolCallOutputs(rawInputArray)
+		if missingIDOutputsCount > 1 || (missingIDOutputsCount > 0 && len(unclaimedCalls) > 1) {
+			for idx, item := range inputItems {
+				itemType := item.Get("type").String()
+				if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+					if idx < len(rawInputArray) && translatorcommon.ExtractResponsesCallID(rawInputArray[idx]) == "" {
+						raw := []byte(item.Raw)
+						raw, _ = sjson.DeleteBytes(raw, "call_id")
+						raw, _ = sjson.DeleteBytes(raw, "tool_call_id")
+						raw, _ = sjson.DeleteBytes(raw, "callId")
+						inputItems[idx] = gjson.ParseBytes(raw)
+					}
+				}
+			}
 		}
 
 		pendingToolCalls := make([]interface{}, 0)
 		pendingToolCallIDs := make([]string, 0)
 		pendingReasoningContent := ""
 		awaitingToolOutputs := make(map[string]struct{})
-		deferredMessages := make([][]byte, 0)
+		outputCounts := make(map[string]int)
 		mergeableAssistantIndex := -1
 
 		takePendingReasoningContent := func() string {
@@ -130,27 +164,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			pendingToolCallIDs = pendingToolCallIDs[:0]
 			mergeableAssistantIndex = -1
 		}
-		flushDeferredMessages := func() {
-			for _, message := range deferredMessages {
-				appendMessage(message)
-			}
-			deferredMessages = deferredMessages[:0]
-		}
-		hasAwaitingToolOutput := func() bool {
-			for id := range awaitingToolOutputs {
-				if _, ok := outputCallIDs[id]; ok {
-					return true
-				}
-			}
-			return false
-		}
 		appendRegularMessage := func(message []byte) int {
-			// Keep tool-call adjacency strict for providers that require
-			// assistant(tool_calls) -> tool(tool_call_id) with no message in between.
-			if hasAwaitingToolOutput() {
-				deferredMessages = append(deferredMessages, message)
-				return -1
-			}
 			appendMessage(message)
 			return len(messages) - 1
 		}
@@ -263,6 +277,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "function_call_output":
 				mergeableAssistantIndex = -1
 				callID := translatorcommon.ExtractResponsesCallID(item)
+				if callID != "" {
+					outputCounts[callID]++
+					if outputCounts[callID] > 1 {
+						duplicateOutputIDs[callID] = struct{}{}
+					}
+				}
 				if _, awaiting := awaitingToolOutputs[callID]; !awaiting {
 					// Orphan outputs (empty call_id or no matching assistant
 					// tool_calls, e.g. Codex send_message_to_thread cards) must
@@ -276,9 +296,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 						toolMessage = setFunctionCallOutputContent(toolMessage, output)
 					}
 					appendMessage(toolMessage)
-				}
-				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
-					flushDeferredMessages()
 				}
 
 			case "custom_tool_call":
@@ -305,6 +322,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "custom_tool_call_output":
 				mergeableAssistantIndex = -1
 				callID := translatorcommon.ExtractResponsesCallID(item)
+				if callID != "" {
+					outputCounts[callID]++
+					if outputCounts[callID] > 1 {
+						duplicateOutputIDs[callID] = struct{}{}
+					}
+				}
 				if _, awaiting := awaitingToolOutputs[callID]; !awaiting {
 					appendStandaloneResponsesToolOutputAsUser(item.Get("output"), setCustomToolCallOutputContent, appendRegularMessage)
 				} else {
@@ -316,9 +339,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					}
 					appendMessage(toolMessage)
 				}
-				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
-					flushDeferredMessages()
-				}
 
 			default:
 				mergeableAssistantIndex = -1
@@ -327,7 +347,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 		flushPendingToolCalls()
 		appendPendingReasoningMessage()
-		flushDeferredMessages()
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
@@ -336,6 +355,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	if len(messages) > 0 {
+		var extraAmbiguous []string
+		for id := range duplicateOutputIDs {
+			extraAmbiguous = append(extraAmbiguous, id)
+		}
+		messages = translatorcommon.AlignOpenAIToolCallMessages(messages, extraAmbiguous...)
 		out, _ = sjson.SetRawBytes(out, "messages", translatorcommon.JoinRawArray(messages))
 	}
 

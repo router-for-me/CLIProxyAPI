@@ -127,6 +127,7 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, errRead
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.ObserveResponseModel(data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		return resp, wrapMetaUpstreamError(httpResp.StatusCode, data)
@@ -135,6 +136,9 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	out, errCompleted := e.translateMetaCompleted(ctx, req, prepared, data)
 	if errCompleted != nil {
 		return resp, errCompleted
+	}
+	if len(out.sourceEvent) > 0 {
+		reporter.ObserveResponseModel(out.sourceEvent)
 	}
 	if detail, ok := helps.ParseCodexUsage(out.sourceEvent); ok {
 		reporter.Publish(ctx, detail)

@@ -270,6 +270,22 @@ func (r *Registry) TranslateTokenCount(ctx context.Context, from, to Format, cou
 	return rawJSON
 }
 
+// NormalizeRequest executes registered plugin request normalizer hooks, returning
+// the payload unmodified if no hooks are registered.
+func (r *Registry) NormalizeRequest(ctx context.Context, from, to Format, model string, body []byte, stream bool) []byte {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.mu.RLock()
+	hooks := r.hooks
+	r.mu.RUnlock()
+
+	if hooks != nil {
+		return hooks.NormalizeRequest(ctx, from, to, model, body, stream)
+	}
+	return body
+}
+
 var defaultRegistry = NewRegistry()
 
 // Default exposes the package-level registry for shared use.
@@ -305,6 +321,11 @@ func TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool
 // TranslateRequestEnvelope translates a complete request envelope using the default registry.
 func TranslateRequestEnvelope(ctx context.Context, from, to Format, req RequestEnvelope) RequestEnvelope {
 	return defaultRegistry.TranslateRequestEnvelope(ctx, from, to, req)
+}
+
+// NormalizeRequest executes registered plugin request normalizer hooks on the default registry.
+func NormalizeRequest(ctx context.Context, from, to Format, model string, body []byte, stream bool) []byte {
+	return defaultRegistry.NormalizeRequest(ctx, from, to, model, body, stream)
 }
 
 // HasRequestTransformer inspects the default registry.

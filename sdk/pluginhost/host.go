@@ -197,6 +197,12 @@ func (h *Host) HasScheduler() bool {
 	return h != nil && h.inner != nil && h.inner.HasScheduler()
 }
 
+// SchedulerWantsAcrossPriorities reports whether the active scheduler opted into receiving
+// candidates across all priority tiers.
+func (h *Host) SchedulerWantsAcrossPriorities() bool {
+	return h != nil && h.inner != nil && h.inner.SchedulerWantsAcrossPriorities()
+}
+
 // RegisteredPlugins returns active plugin metadata from the current runtime snapshot.
 func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 	if h == nil || h.inner == nil {

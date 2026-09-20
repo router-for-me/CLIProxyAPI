@@ -65,6 +65,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		serviceTier = coreusage.ServiceTierFromContext(ctx)
 	}
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
+	responseModel := strings.TrimSpace(record.ResponseModel)
 	clientRequestMetadata := internallogging.GetClientRequestMetadata(ctx)
 	sessionID := strings.TrimSpace(record.SessionID)
 	parentSessionID := strings.TrimSpace(record.ParentSessionID)
@@ -138,6 +139,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ReasoningEffort:     reasoningEffort,
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
+		ResponseModel:       responseModel,
 	})
 	if err != nil {
 		return
@@ -162,6 +164,7 @@ type queuedUsageDetail struct {
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+	ResponseModel       string                   `json:"response_model,omitempty"`
 }
 
 type requestDetail struct {

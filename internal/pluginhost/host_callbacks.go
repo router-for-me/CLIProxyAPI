@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
@@ -331,15 +332,41 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 	}
 }
 
+type modelExecutionStatusError struct {
+	err        error
+	statusCode int
+}
+
+func (e *modelExecutionStatusError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	if e.statusCode > 0 {
+		return fmt.Sprintf("model execution failed with status %d", e.statusCode)
+	}
+	return "model execution failed"
+}
+
+func (e *modelExecutionStatusError) StatusCode() int {
+	return e.statusCode
+}
+
+func (e *modelExecutionStatusError) Unwrap() error {
+	return e.err
+}
+
 func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}
+	if errMsg.StatusCode > 0 && clienterror.HTTPStatusFromError(errMsg.Error) != errMsg.StatusCode {
+		return &modelExecutionStatusError{
+			err:        errMsg.Error,
+			statusCode: errMsg.StatusCode,
+		}
+	}
 	if errMsg.Error != nil {
 		return errMsg.Error
-	}
-	if errMsg.StatusCode > 0 {
-		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
 	}
 	return fmt.Errorf("model execution failed")
 }

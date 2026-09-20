@@ -2446,3 +2446,286 @@ func TestCleanJSONSchema_RemovesDraft04IdAndSchemaIdentifierKeywords(t *testing.
 		}
 	}
 }
+
+func TestCleanJSONSchema_TrueBooleanSubschemas(t *testing.T) {
+	// Issue #3551: Antigravity rejects OpenAI function tools containing `true` JSON Schema subschemas.
+	input := `{
+		"type": "object",
+		"properties": {
+			"screenshot_id": true,
+			"filename": true,
+			"file_size": true,
+			"source_file_checksum": true,
+			"disabled_field": false
+		},
+		"additionalProperties": true
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"antigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"gemini":              CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		// true subschemas under properties must be converted to empty object schemas {}
+		for _, prop := range []string{"screenshot_id", "filename", "file_size", "source_file_checksum"} {
+			val := parsed.Get("properties." + prop)
+			if !val.Exists() {
+				t.Fatalf("%s: expected property %q to exist in %s", cleaner, prop, got)
+			}
+			if val.Type != gjson.JSON || val.Raw != "{}" {
+				t.Errorf("%s: property %q should be normalized to {}, got %s (type %v)", cleaner, prop, val.Raw, val.Type)
+			}
+		}
+
+		// false subschema must NOT be converted to {} to preserve rejection semantics
+		disabledVal := parsed.Get("properties.disabled_field")
+		if !disabledVal.Exists() {
+			t.Fatalf("%s: expected property 'disabled_field' to exist in %s", cleaner, got)
+		}
+		if disabledVal.Type != gjson.False {
+			t.Errorf("%s: property 'disabled_field' should remain false, got %s", cleaner, disabledVal.Raw)
+		}
+	}
+}
+
+func TestCleanJSONSchema_NestedTrueBooleanSubschemas(t *testing.T) {
+	// Issue #3551: Verify boolean true subschema normalization in nested schema positions.
+	input := `{
+		"type": "object",
+		"properties": {
+			"tags": {
+				"type": "array",
+				"items": true
+			},
+			"tuple": {
+				"type": "array",
+				"items": [true, {"type": "string"}],
+				"additionalItems": true
+			},
+			"union": {
+				"anyOf": [true, {"type": "string"}]
+			},
+			"combination": {
+				"allOf": [true, {"type": "object", "properties": {"opt": true}}]
+			},
+			"metadata": {
+				"type": "object",
+				"properties": {
+					"nested_true": true,
+					"nested_false": false
+				}
+			},
+			"large_int": 9007199254740993
+		},
+		"$defs": {
+			"custom_schema": true
+		}
+	}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"antigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"gemini":              CleanJSONSchemaForGemini,
+	} {
+		got := clean(input)
+		parsed := gjson.Parse(got)
+
+		// tags.items: true -> {}
+		if val := parsed.Get("properties.tags.items"); val.Exists() && val.Type == gjson.True {
+			t.Errorf("%s: tags.items should not be boolean true: %s", cleaner, got)
+		}
+
+		// nested properties: true -> {}, false preserved
+		if val := parsed.Get("properties.metadata.properties.nested_true"); !val.Exists() || val.Type != gjson.JSON || val.Raw != "{}" {
+			t.Errorf("%s: nested_true should be {}, got %s", cleaner, val.Raw)
+		}
+		if val := parsed.Get("properties.metadata.properties.nested_false"); !val.Exists() || val.Type != gjson.False {
+			t.Errorf("%s: nested_false should remain false, got %s", cleaner, val.Raw)
+		}
+
+		// tuple items: true in list should be normalized to {}
+		if val := parsed.Get("properties.tuple.items.0"); val.Exists() && val.Type == gjson.True {
+			t.Errorf("%s: tuple items[0] should not be boolean true: %s", cleaner, got)
+		}
+
+		// union / combination inner property
+		if val := parsed.Get("properties.combination.properties.opt"); val.Exists() {
+			if val.Type == gjson.True {
+				t.Errorf("%s: combination.properties.opt should not be boolean true: %s", cleaner, got)
+			}
+		}
+
+		// large integer preservation
+		if val := parsed.Get("properties.large_int"); !val.Exists() || val.Raw != "9007199254740993" {
+			t.Errorf("%s: large_int corrupted, got %s", cleaner, val.Raw)
+		}
+	}
+}
+
+func TestCleanJSONSchema_RootAndWrappedTrue(t *testing.T) {
+	// Verify root boolean true normalization to {}
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity":         CleanJSONSchemaForAntigravity,
+		"antigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"gemini":              CleanJSONSchemaForGemini,
+	} {
+		got := clean("true")
+		if got != "{}" {
+			t.Errorf("%s: root true should normalize to {}, got %s", cleaner, got)
+		}
+
+		// Verify wrapped {"schema": true} normalization
+		wrapped := `{"schema": true}`
+		gotWrapped := clean(wrapped)
+		parsed := gjson.Parse(gotWrapped)
+		if parsed.Get("schema").Exists() && parsed.Get("schema").Type == gjson.True {
+			t.Errorf("%s: wrapped schema true should normalize to {}, got %s", cleaner, gotWrapped)
+		}
+	}
+}
+
+func TestCleanJSONSchemaForGeminiJSONSchema_PreservesAdditionalPropertiesAndPattern_Issue5959(t *testing.T) {
+	input := `{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"title": "SubmitTool",
+		"type": "object",
+		"additionalProperties": false,
+		"properties": {
+			"recipient": {
+				"type": "string",
+				"pattern": "^(alice|bob)$",
+				"minLength": 3,
+				"maxLength": 10
+			},
+			"amount": {
+				"type": "number",
+				"minimum": 1
+			},
+			"nested": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"tag": {
+						"type": "string",
+						"pattern": "^[a-z]+$"
+					}
+				}
+			},
+			"items_list": {
+				"type": "array",
+				"items": {
+					"type": "string",
+					"pattern": "^[0-9]+$"
+				}
+			}
+		},
+		"required": ["recipient", "amount", "non_existent"]
+	}`
+
+	cleaned := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(cleaned)
+
+	if got := parsed.Get("additionalProperties"); !got.Exists() || got.Type != gjson.False {
+		t.Fatalf("additionalProperties should be preserved as false, got: %v. Cleaned: %s", got, cleaned)
+	}
+	if got := parsed.Get("properties.recipient.pattern"); !got.Exists() || got.String() != "^(alice|bob)$" {
+		t.Fatalf("pattern should be preserved, got: %v. Cleaned: %s", got, cleaned)
+	}
+	if got := parsed.Get("properties.recipient.minLength").Int(); got != 3 {
+		t.Fatalf("minLength should be preserved as 3, got: %v. Cleaned: %s", got, cleaned)
+	}
+	if got := parsed.Get("properties.recipient.maxLength").Int(); got != 10 {
+		t.Fatalf("maxLength should be preserved as 10, got: %v. Cleaned: %s", got, cleaned)
+	}
+	if got := parsed.Get("properties.amount.minimum").Int(); got != 1 {
+		t.Fatalf("minimum should be preserved as 1, got: %v. Cleaned: %s", got, cleaned)
+	}
+	if got := parsed.Get("properties.nested.additionalProperties"); !got.Exists() || got.Type != gjson.False {
+		t.Fatalf("nested additionalProperties should be preserved as false, got: %v. Cleaned: %s", got, cleaned)
+	}
+	if got := parsed.Get("properties.nested.properties.tag.pattern"); !got.Exists() || got.String() != "^[a-z]+$" {
+		t.Fatalf("nested tag pattern should be preserved, got: %v. Cleaned: %s", got, cleaned)
+	}
+	if got := parsed.Get("properties.items_list.items.pattern"); !got.Exists() || got.String() != "^[0-9]+$" {
+		t.Fatalf("array items pattern should be preserved, got: %v. Cleaned: %s", got, cleaned)
+	}
+	if parsed.Get("title").Exists() {
+		t.Fatalf("title should be removed. Cleaned: %s", cleaned)
+	}
+	if parsed.Get("$schema").Exists() {
+		t.Fatalf("$schema should be removed. Cleaned: %s", cleaned)
+	}
+	if parsed.Get("description").Exists() && parsed.Get("description").String() == "No extra properties allowed" {
+		t.Fatalf("additionalProperties: false should not be converted to description hint. Cleaned: %s", cleaned)
+	}
+	if got := parsed.Get("properties.recipient.description"); got.Exists() && strings.Contains(got.String(), "pattern:") {
+		t.Fatalf("pattern should not be converted to description hint. Cleaned: %s", cleaned)
+	}
+	if got := parsed.Get("properties.nested.properties.tag.description"); got.Exists() && strings.Contains(got.String(), "pattern:") {
+		t.Fatalf("nested pattern should not be converted to description hint. Cleaned: %s", cleaned)
+	}
+	if got := parsed.Get("properties.items_list.items.description"); got.Exists() && strings.Contains(got.String(), "pattern:") {
+		t.Fatalf("array items pattern should not be converted to description hint. Cleaned: %s", cleaned)
+	}
+	// non_existent should be removed from required because it's not in properties
+	required := parsed.Get("required").Array()
+	if len(required) != 2 {
+		t.Fatalf("required length = %d, want 2. Cleaned: %s", len(required), cleaned)
+	}
+
+	// Compare with legacy CleanJSONSchemaForGemini to verify backward compatibility
+	legacyCleaned := CleanJSONSchemaForGemini(input)
+	legacyParsed := gjson.Parse(legacyCleaned)
+	if legacyParsed.Get("additionalProperties").Exists() {
+		t.Fatalf("legacy cleaner should strip additionalProperties. Cleaned: %s", legacyCleaned)
+	}
+	if !strings.Contains(legacyParsed.Get("description").String(), "No extra properties allowed") {
+		t.Fatalf("legacy cleaner should add description hint for additionalProperties. Cleaned: %s", legacyCleaned)
+	}
+	if legacyParsed.Get("properties.recipient.pattern").Exists() {
+		t.Fatalf("legacy cleaner should strip pattern. Cleaned: %s", legacyCleaned)
+	}
+}
+
+func TestCleanJSONSchemaForGeminiJSONSchema_PreservesSchemaValuedAdditionalProperties(t *testing.T) {
+	input := `{
+		"type": "object",
+		"additionalProperties": {
+			"type": "string",
+			"pattern": "^[a-z]+$",
+			"minLength": 2
+		}
+	}`
+
+	cleaned := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(cleaned)
+
+	ap := parsed.Get("additionalProperties")
+	if !ap.Exists() || !ap.IsObject() {
+		t.Fatalf("additionalProperties object should be preserved, got: %s", cleaned)
+	}
+	if got := ap.Get("type").String(); got != "string" {
+		t.Fatalf("additionalProperties.type = %q, want string", got)
+	}
+	if got := ap.Get("pattern").String(); got != "^[a-z]+$" {
+		t.Fatalf("additionalProperties.pattern = %q, want ^[a-z]+$", got)
+	}
+	if got := ap.Get("minLength").Int(); got != 2 {
+		t.Fatalf("additionalProperties.minLength = %d, want 2", got)
+	}
+	if ap.Get("description").Exists() && strings.Contains(ap.Get("description").String(), "pattern:") {
+		t.Fatalf("additionalProperties pattern should not be converted to description hint: %s", cleaned)
+	}
+
+	// Legacy cleaner should strip schema-valued additionalProperties
+	legacyCleaned := CleanJSONSchemaForGemini(input)
+	if gjson.Get(legacyCleaned, "additionalProperties").Exists() {
+		t.Fatalf("legacy CleanJSONSchemaForGemini should strip additionalProperties schema: %s", legacyCleaned)
+	}
+}

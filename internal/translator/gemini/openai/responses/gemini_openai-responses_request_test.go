@@ -2612,3 +2612,763 @@ func TestConvertOpenAIResponsesRequestToGemini_UnpairedExplicitCallIDBecomesUser
 		t.Fatalf("bash functionResponse.id = %q; output=%s", bashResponseID, string(output))
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_ParametersJsonSchema_PreservesAdditionalPropertiesAndPattern_Issue5959(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": "hi",
+		"tools": [{
+			"type": "function",
+			"name": "submit",
+			"description": "Submit a bounded schema test value.",
+			"parameters": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"recipient": {
+						"type": "string",
+						"pattern": "^(alice|bob)$"
+					},
+					"amount": {
+						"type": "number"
+					},
+					"nested": {
+						"type": "object",
+						"additionalProperties": false,
+						"properties": {
+							"tag": {
+								"type": "string",
+								"pattern": "^[a-z]+$"
+							}
+						}
+					}
+				},
+				"required": ["recipient", "amount"]
+			}
+		}]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	schema := gjson.GetBytes(output, "tools.0.functionDeclarations.0.parametersJsonSchema")
+
+	if !schema.Exists() {
+		t.Fatalf("parametersJsonSchema missing. Output: %s", output)
+	}
+	if got := schema.Get("additionalProperties"); !got.Exists() || got.Type != gjson.False {
+		t.Fatalf("root additionalProperties should be preserved as false, got: %v. Schema: %s", got, schema.Raw)
+	}
+	if got := schema.Get("properties.recipient.pattern"); !got.Exists() || got.String() != "^(alice|bob)$" {
+		t.Fatalf("pattern should be preserved, got: %v. Schema: %s", got, schema.Raw)
+	}
+	if got := schema.Get("properties.nested.additionalProperties"); !got.Exists() || got.Type != gjson.False {
+		t.Fatalf("nested additionalProperties should be preserved as false, got: %v. Schema: %s", got, schema.Raw)
+	}
+	if got := schema.Get("properties.nested.properties.tag.pattern"); !got.Exists() || got.String() != "^[a-z]+$" {
+		t.Fatalf("nested pattern should be preserved, got: %v. Schema: %s", got, schema.Raw)
+	}
+	if schema.Get("description").Exists() && strings.Contains(schema.Get("description").String(), "No extra properties allowed") {
+		t.Fatalf("additionalProperties: false should not be converted to description hint. Schema: %s", schema.Raw)
+	}
+	if got := schema.Get("properties.recipient.description"); got.Exists() && strings.Contains(got.String(), "pattern:") {
+		t.Fatalf("pattern should not be converted to description hint. Schema: %s", schema.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_AudioInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputJSON string
+		wantMime  string
+		wantData  string
+	}{
+		{
+			name: "standard nested input_audio object",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}},
+							{"type": "input_text", "text": "Transcribe this audio"}
+						]
+					}
+				]
+			}`,
+			wantMime: "audio/wav",
+			wantData: "UklGRg==",
+		},
+		{
+			name: "flat input_audio fields",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_audio", "data": "SUQzBA==", "format": "mp3"}
+						]
+					}
+				]
+			}`,
+			wantMime: "audio/mpeg",
+			wantData: "SUQzBA==",
+		},
+		{
+			name: "audio_url data URI",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_audio", "audio_url": "data:audio/ogg;base64,T2dnUw=="}
+						]
+					}
+				]
+			}`,
+			wantMime: "audio/ogg",
+			wantData: "T2dnUw==",
+		},
+		{
+			name: "top-level input item audio",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}}
+				]
+			}`,
+			wantMime: "audio/wav",
+			wantData: "UklGRg==",
+		},
+		{
+			name: "nested audio alias object",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "audio", "audio": {"data": "SUQzBA==", "format": "mp3"}}
+						]
+					}
+				]
+			}`,
+			wantMime: "audio/mpeg",
+			wantData: "SUQzBA==",
+		},
+		{
+			name: "nested audio alias object with wav",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "audio", "audio": {"data": "UklGRg==", "format": "wav"}}
+						]
+					}
+				]
+			}`,
+			wantMime: "audio/wav",
+			wantData: "UklGRg==",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(tc.inputJSON), false)
+			contents := gjson.GetBytes(output, "contents").Array()
+			if len(contents) == 0 {
+				t.Fatalf("expected at least 1 content, got 0. Output: %s", output)
+			}
+			parts := contents[0].Get("parts").Array()
+			if len(parts) == 0 {
+				t.Fatalf("expected at least 1 part, got 0. Output: %s", output)
+			}
+			var foundAudio bool
+			for _, part := range parts {
+				inlineData := part.Get("inline_data")
+				if inlineData.Exists() {
+					if got := inlineData.Get("mime_type").String(); got != tc.wantMime {
+						t.Errorf("inline_data.mime_type = %q, want %q", got, tc.wantMime)
+					}
+					if got := inlineData.Get("data").String(); got != tc.wantData {
+						t.Errorf("inline_data.data = %q, want %q", got, tc.wantData)
+					}
+					foundAudio = true
+					break
+				}
+			}
+			if !foundAudio {
+				t.Fatalf("did not find inline_data in parts. Output: %s", output)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_VideoInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputJSON string
+		wantMime  string
+		wantData  string
+	}{
+		{
+			name: "openresponses input_video with data URL string",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_video", "video_url": "data:video/mp4;base64,AAAAIGZ0eXBtcDQy"},
+							{"type": "input_text", "text": "Describe the video"}
+						]
+					}
+				]
+			}`,
+			wantMime: "video/mp4",
+			wantData: "AAAAIGZ0eXBtcDQy",
+		},
+		{
+			name: "openresponses input_video with video_url object",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_video", "video_url": {"url": "data:video/webm;base64,GkXfo59ChoEBQveBAULygQ8="}}
+						]
+					}
+				]
+			}`,
+			wantMime: "video/webm",
+			wantData: "GkXfo59ChoEBQveBAULygQ8=",
+		},
+		{
+			name: "input_file with video filename",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_file", "filename": "sample.mp4", "file_data": "AAAAIGZ0eXA="}
+						]
+					}
+				]
+			}`,
+			wantMime: "video/mp4",
+			wantData: "AAAAIGZ0eXA=",
+		},
+		{
+			name: "top-level input item video and text combined",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{"type": "input_text", "text": "Check video"},
+					{"type": "input_video", "video_url": "data:video/mp4;base64,AAAAIGZ0eXA="}
+				]
+			}`,
+			wantMime: "video/mp4",
+			wantData: "AAAAIGZ0eXA=",
+		},
+		{
+			name: "nested video object with format webm",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "video", "video": {"data": "GkXfo59ChoEBQveBAULygQ8=", "format": "webm"}}
+						]
+					}
+				]
+			}`,
+			wantMime: "video/webm",
+			wantData: "GkXfo59ChoEBQveBAULygQ8=",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(tc.inputJSON), false)
+			contents := gjson.GetBytes(output, "contents").Array()
+			if len(contents) == 0 {
+				t.Fatalf("expected at least 1 content, got 0. Output: %s", output)
+			}
+			var foundVideo bool
+			for _, content := range contents {
+				for _, part := range content.Get("parts").Array() {
+					inlineData := part.Get("inline_data")
+					if inlineData.Exists() && inlineData.Get("mime_type").String() == tc.wantMime {
+						if got := inlineData.Get("data").String(); got != tc.wantData {
+							t.Errorf("inline_data.data = %q, want %q", got, tc.wantData)
+						}
+						foundVideo = true
+						break
+					}
+				}
+			}
+			if !foundVideo {
+				t.Fatalf("did not find inline_data with mime %q. Output: %s", tc.wantMime, output)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_TopLevelVideoAndTextCombined(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{"type": "input_text", "text": "Check video"},
+			{"type": "input_video", "video_url": "data:video/mp4;base64,AAAAIGZ0eXA="}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("expected exactly 1 content, got %d. Output: %s", len(contents), output)
+	}
+	if got := contents[0].Get("role").String(); got != "user" {
+		t.Fatalf("role = %q, want user. Output: %s", got, output)
+	}
+
+	parts := contents[0].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d. Output: %s", len(parts), output)
+	}
+	if got := parts[0].Get("text").String(); got != "Check video" {
+		t.Errorf("parts[0].text = %q, want Check video. Output: %s", got, output)
+	}
+	if got := parts[1].Get("inline_data.mime_type").String(); got != "video/mp4" {
+		t.Errorf("parts[1].inline_data.mime_type = %q, want video/mp4. Output: %s", got, output)
+	}
+	if got := parts[1].Get("inline_data.data").String(); got != "AAAAIGZ0eXA=" {
+		t.Errorf("parts[1].inline_data.data = %q, want AAAAIGZ0eXA=. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_FallbackMIMEOnGenericDataURL(t *testing.T) {
+	// Image data URL with generic MIME and explicit mime_type or filename
+	imgInput := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_image", "image_url": "data:;base64,AAAA", "mime_type": "image/jpeg"},
+					{"type": "input_file", "file_data": "data:;base64,BBBB", "mime_type": "application/pdf"},
+					{"type": "input_image", "image_url": "data:;base64,CCCC", "filename": "photo.jpeg"},
+					{"type": "input_file", "file_data": "data:;base64,DDDD", "format": "pdf"},
+					{"type": "input_image", "image_url": "data:;base64,EEEE", "filename": "photo"},
+					{"type": "input_image", "image_url": "data:;base64,FFFF", "filename": "photo.unknownext"},
+					{"type": "input_image", "image_url": "data:application/octet-stream;base64,GGGG", "filename": "photo.jpeg"},
+					{"type": "input_image", "image_url": "data:binary/octet-stream;base64,HHHH", "filename": "photo.jpeg"},
+					{"type": "input_file", "file_data": "QUJD", "filename": "report.pdf", "mime_type": "binary/octet-stream"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(imgInput), false)
+	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	if len(parts) < 9 {
+		t.Fatalf("expected 9 parts, got %d. Output: %s", len(parts), output)
+	}
+
+	if got := parts[0].Get("inline_data.mime_type").String(); got != "image/jpeg" {
+		t.Errorf("parts[0] inline_data.mime_type = %q, want image/jpeg. Output: %s", got, output)
+	}
+	if got := parts[1].Get("inline_data.mime_type").String(); got != "application/pdf" {
+		t.Errorf("parts[1] inline_data.mime_type = %q, want application/pdf. Output: %s", got, output)
+	}
+	if got := parts[2].Get("inline_data.mime_type").String(); got != "image/jpeg" {
+		t.Errorf("parts[2] (filename fallback) inline_data.mime_type = %q, want image/jpeg. Output: %s", got, output)
+	}
+	if got := parts[3].Get("inline_data.mime_type").String(); got != "application/pdf" {
+		t.Errorf("parts[3] (format fallback) inline_data.mime_type = %q, want application/pdf. Output: %s", got, output)
+	}
+	if got := parts[4].Get("inline_data.mime_type").String(); got != "image/png" {
+		t.Errorf("parts[4] (no extension fallback) inline_data.mime_type = %q, want image/png. Output: %s", got, output)
+	}
+	if got := parts[5].Get("inline_data.mime_type").String(); got != "image/png" {
+		t.Errorf("parts[5] (unknown extension fallback) inline_data.mime_type = %q, want image/png. Output: %s", got, output)
+	}
+	if got := parts[6].Get("inline_data.mime_type").String(); got != "image/jpeg" {
+		t.Errorf("parts[6] (application/octet-stream with filename fallback) inline_data.mime_type = %q, want image/jpeg. Output: %s", got, output)
+	}
+	if got := parts[7].Get("inline_data.mime_type").String(); got != "image/jpeg" {
+		t.Errorf("parts[7] (binary/octet-stream with filename fallback) inline_data.mime_type = %q, want image/jpeg. Output: %s", got, output)
+	}
+	if got := parts[8].Get("inline_data.mime_type").String(); got != "application/pdf" {
+		t.Errorf("parts[8] (raw base64 file with binary/octet-stream fallback) inline_data.mime_type = %q, want application/pdf. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_RemoteURLDoesNotOverrideExplicitFormat(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_audio", "audio_url": "https://example.com/download.bin", "format": "wav"},
+					{"type": "input_video", "video_url": "https://example.com/stream.bin", "format": "mp4"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	if len(parts) < 2 {
+		t.Fatalf("expected 2 parts, got %d. Output: %s", len(parts), output)
+	}
+
+	if got := parts[0].Get("file_data.mime_type").String(); got != "audio/wav" {
+		t.Errorf("audio file_data.mime_type = %q, want audio/wav. Output: %s", got, output)
+	}
+	if got := parts[1].Get("file_data.mime_type").String(); got != "video/mp4" {
+		t.Errorf("video file_data.mime_type = %q, want video/mp4. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_UnknownExtensionFallsBackToDefaults(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_audio", "audio_url": "https://example.com/download.bin", "mime_type": "application/octet-stream"},
+					{"type": "input_video", "video_url": "https://example.com/download.bin", "mime_type": "application/octet-stream"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	if len(parts) < 2 {
+		t.Fatalf("expected 2 parts, got %d. Output: %s", len(parts), output)
+	}
+
+	if got := parts[0].Get("file_data.mime_type").String(); got != "audio/wav" {
+		t.Errorf("audio file_data.mime_type = %q, want audio/wav. Output: %s", got, output)
+	}
+	if got := parts[1].Get("file_data.mime_type").String(); got != "video/mp4" {
+		t.Errorf("video file_data.mime_type = %q, want video/mp4. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_InlineExplicitFormatNotOverriddenByFilename(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_audio", "data": "UklGRg==", "format": "wav", "filename": "download.bin"},
+					{"type": "input_video", "data": "AAAAIGZ0eXA=", "format": "mp4", "filename": "download.bin"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	if len(parts) < 2 {
+		t.Fatalf("expected 2 parts, got %d. Output: %s", len(parts), output)
+	}
+
+	if got := parts[0].Get("inline_data.mime_type").String(); got != "audio/wav" {
+		t.Errorf("audio inline_data.mime_type = %q, want audio/wav. Output: %s", got, output)
+	}
+	if got := parts[1].Get("inline_data.mime_type").String(); got != "video/mp4" {
+		t.Errorf("video inline_data.mime_type = %q, want video/mp4. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_RemoteNestedFormatNotOverriddenByFilename(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_video", "video_url": "https://example.com/download.bin", "input_video": {"format": "mp4"}},
+					{"type": "input_audio", "audio_url": "https://example.com/download.bin", "input_audio": {"mime_type": "audio/wav"}},
+					{"type": "input_file", "file_url": "https://example.com/download.bin", "file": {"format": "pdf"}},
+					{"type": "input_file", "file_url": "https://example.com/download.bin", "file": {"format": "jpeg"}},
+					{"type": "input_image", "image_url": "https://example.com/download.bin", "image": {"format": "jpeg"}}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	if len(parts) < 5 {
+		t.Fatalf("expected 5 parts, got %d. Output: %s", len(parts), output)
+	}
+
+	if got := parts[0].Get("file_data.mime_type").String(); got != "video/mp4" {
+		t.Errorf("video file_data.mime_type = %q, want video/mp4. Output: %s", got, output)
+	}
+	if got := parts[1].Get("file_data.mime_type").String(); got != "audio/wav" {
+		t.Errorf("audio file_data.mime_type = %q, want audio/wav. Output: %s", got, output)
+	}
+	if got := parts[2].Get("file_data.mime_type").String(); got != "application/pdf" {
+		t.Errorf("file file_data.mime_type = %q, want application/pdf. Output: %s", got, output)
+	}
+	if got := parts[3].Get("file_data.mime_type").String(); got != "image/jpeg" {
+		t.Errorf("jpeg file file_data.mime_type = %q, want image/jpeg. Output: %s", got, output)
+	}
+	if got := parts[4].Get("file_data.mime_type").String(); got != "image/jpeg" {
+		t.Errorf("image.format jpeg file_data.mime_type = %q, want image/jpeg. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_GenericMIMEWithNestedFormatNotOverriddenByFilename(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_video", "video_url": "https://example.com/download.bin", "mime_type": "application/octet-stream", "input_video": {"format": "mp4"}},
+					{"type": "input_audio", "audio_url": "https://example.com/download.bin", "mime_type": "binary/octet-stream", "input_audio": {"format": "wav"}},
+					{"type": "input_file", "file_url": "https://example.com/download.bin", "mime_type": "application/octet-stream", "file": {"format": "pdf"}}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	if len(parts) < 3 {
+		t.Fatalf("expected 3 parts, got %d. Output: %s", len(parts), output)
+	}
+
+	if got := parts[0].Get("file_data.mime_type").String(); got != "video/mp4" {
+		t.Errorf("video file_data.mime_type = %q, want video/mp4. Output: %s", got, output)
+	}
+	if got := parts[1].Get("file_data.mime_type").String(); got != "audio/wav" {
+		t.Errorf("audio file_data.mime_type = %q, want audio/wav. Output: %s", got, output)
+	}
+	if got := parts[2].Get("file_data.mime_type").String(); got != "application/pdf" {
+		t.Errorf("file file_data.mime_type = %q, want application/pdf. Output: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_RemoteMedia(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-2.5-flash",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [
+					{"type": "input_video", "video_url": "https://example.com/stream.mp4"},
+					{"type": "input_audio", "audio_url": "https://example.com/recording.wav"},
+					{"type": "input_image", "image_url": "https://example.com/photo.jpeg"},
+					{"type": "input_image", "image_url": "https://example.com/legacy.bin", "format": "jpg"},
+					{"type": "input_video", "video_url": "https://example.com/clip.webm", "format": "binary/octet-stream"},
+					{"type": "input_audio", "audio_url": "https://example.com/recording.mp3", "mime_type": "application/octet-stream"}
+				]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) == 0 {
+		t.Fatalf("expected at least 1 content, got 0. Output: %s", output)
+	}
+
+	parts := contents[0].Get("parts").Array()
+	if len(parts) < 6 {
+		t.Fatalf("expected at least 6 parts, got %d. Output: %s", len(parts), output)
+	}
+
+	var foundRemoteVideo, foundRemoteAudio, foundRemoteImage, foundRemoteImageWithFormat, foundRemoteWebm, foundRemoteMp3 bool
+	for _, part := range parts {
+		fileData := part.Get("file_data")
+		if !fileData.Exists() {
+			continue
+		}
+		mime := fileData.Get("mime_type").String()
+		uri := fileData.Get("file_uri").String()
+		if mime == "video/mp4" && uri == "https://example.com/stream.mp4" {
+			foundRemoteVideo = true
+		}
+		if mime == "audio/wav" && uri == "https://example.com/recording.wav" {
+			foundRemoteAudio = true
+		}
+		if mime == "image/jpeg" && uri == "https://example.com/photo.jpeg" {
+			foundRemoteImage = true
+		}
+		if mime == "image/jpeg" && uri == "https://example.com/legacy.bin" {
+			foundRemoteImageWithFormat = true
+		}
+		if mime == "video/webm" && uri == "https://example.com/clip.webm" {
+			foundRemoteWebm = true
+		}
+		if mime == "audio/mpeg" && uri == "https://example.com/recording.mp3" {
+			foundRemoteMp3 = true
+		}
+	}
+
+	if !foundRemoteVideo {
+		t.Errorf("expected remote video part not found in output: %s", output)
+	}
+	if !foundRemoteAudio {
+		t.Errorf("expected remote audio part not found in output: %s", output)
+	}
+	if !foundRemoteImage {
+		t.Errorf("expected remote image (photo.jpeg) part not found in output: %s", output)
+	}
+	if !foundRemoteImageWithFormat {
+		t.Errorf("expected remote image (legacy.bin with format jpg) part not found in output: %s", output)
+	}
+	if !foundRemoteWebm {
+		t.Errorf("expected remote video (clip.webm with generic format fallback) part not found in output: %s", output)
+	}
+	if !foundRemoteMp3 {
+		t.Errorf("expected remote audio (recording.mp3 with generic format fallback) part not found in output: %s", output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_InvalidDataURLsRejected(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputJSON string
+	}{
+		{
+			name: "empty base64 audio payload",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_audio", "data": "data:audio/wav;base64,"}
+						]
+					}
+				]
+			}`,
+		},
+		{
+			name: "non-base64 data URL",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_video", "video_url": "data:text/plain,hello"}
+						]
+					}
+				]
+			}`,
+		},
+		{
+			name: "corrupted base64 payload",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_audio", "data": "data:audio/wav;base64,!!!"}
+						]
+					}
+				]
+			}`,
+		},
+		{
+			name: "uppercase DATA scheme with invalid payload",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_audio", "data": "DATA:audio/wav,hello"}
+						]
+					}
+				]
+			}`,
+		},
+		{
+			name: "leading whitespace on data URL with corrupted base64",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_audio", "data": " DATA:audio/wav;base64,!!!"}
+						]
+					}
+				]
+			}`,
+		},
+		{
+			name: "source base64 with invalid data URL",
+			inputJSON: `{
+				"model": "gemini-2.5-flash",
+				"input": [
+					{
+						"type": "message",
+						"role": "user",
+						"content": [
+							{"type": "input_image", "source": {"type": "base64", "data": " DATA:image/png;base64,!!!"}}
+						]
+					}
+				]
+			}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-flash", []byte(tc.inputJSON), false)
+			// No inline_data should be created for invalid data URLs
+			contents := gjson.GetBytes(output, "contents").Array()
+			for _, content := range contents {
+				for _, part := range content.Get("parts").Array() {
+					if part.Get("inline_data").Exists() {
+						t.Fatalf("expected no inline_data for invalid data URL, got: %s", part.Raw)
+					}
+				}
+			}
+		})
+	}
+}

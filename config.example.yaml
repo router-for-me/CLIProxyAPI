@@ -202,6 +202,12 @@ transient-error-cooldown-seconds: 0
 # "auto" behavior (cloak only non-Claude-Code clients).
 disable-claude-cloak-mode: false
 
+# Provider-wide Claude settings.
+claude:
+  # When true, scope quota cooldowns to the requested model rather than cooling down
+  # the entire credential across all sibling models. Default is false.
+  model-level-cooling: false
+
 # Claude Code compatibility settings.
 claude-code:
   # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
@@ -259,6 +265,10 @@ routing:
 
 # Codex provider behavior.
 codex:
+  # Experimental full-duplex Codex Responses WebSocket steering (default: false).
+  # Keeps one upstream account/model per socket; accepted input is never replayed.
+  # See STEERING.md for limitations.
+  response-steering: false
   # When true, and routing.strategy is fill-first or routing.session-affinity is true,
   # remap Codex prompt_cache_key and installation identity per selected auth.
   # Some superstitious users believe request tracking identifiers can be used
@@ -768,6 +778,7 @@ nonstream-keepalive-interval: 0
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
+#         use-max-completion-tokens: false # optional: default false (uses max_tokens); set true to use max_completion_tokens
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]. Exceeding levels (e.g. "max", "xhigh") are clamped to "high"; explicitly declare levels here if the upstream supports them
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.

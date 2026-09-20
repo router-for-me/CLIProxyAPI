@@ -132,38 +132,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		arr := messages.Array()
 		systemParts := make([][]byte, 0, 2)
 		contentItems := make([][]byte, 0, len(arr))
-		// First pass: assistant tool_calls id->name map
-		tcID2Name := map[string]string{}
-		for i := 0; i < len(arr); i++ {
-			m := arr[i]
-			if m.Get("role").String() == "assistant" {
-				tcs := m.Get("tool_calls")
-				if tcs.IsArray() {
-					for _, tc := range tcs.Array() {
-						if tc.Get("type").String() == "function" {
-							id := tc.Get("id").String()
-							name := tc.Get("function.name").String()
-							if id != "" && name != "" {
-								tcID2Name[id] = name
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Second pass build systemInstruction/tool responses cache
-		toolResponses := map[string]string{} // tool_call_id -> response text
-		for i := 0; i < len(arr); i++ {
-			m := arr[i]
-			role := m.Get("role").String()
-			if role == "tool" {
-				toolCallID := m.Get("tool_call_id").String()
-				if toolCallID != "" {
-					toolResponses[toolCallID] = m.Get("content").String()
-				}
-			}
-		}
 
 		hasEncounteredConversation := false
 		for i := 0; i < len(arr); i++ {
@@ -269,7 +237,11 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 				tcs := m.Get("tool_calls")
 				if tcs.IsArray() {
-					functionIDs := make([]string, 0)
+					type assistantToolCall struct {
+						id   string
+						name string
+					}
+					toolCalls := make([]assistantToolCall, 0)
 					for _, tc := range tcs.Array() {
 						if tc.Get("type").String() != "function" {
 							continue
@@ -290,29 +262,43 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						}
 						part, _ = sjson.SetBytes(part, "thoughtSignature", antigravityFunctionThoughtSignature)
 						partItems = append(partItems, part)
-						if functionID != "" {
-							functionIDs = append(functionIDs, functionID)
-						}
+						toolCalls = append(toolCalls, assistantToolCall{
+							id:   functionID,
+							name: functionName,
+						})
 					}
 					if len(partItems) > 0 {
 						contentItems = append(contentItems, antigravityOpenAIContent("model", partItems))
 					}
 
-					responseParts := make([][]byte, 0, len(functionIDs))
-					for _, functionID := range functionIDs {
-						if name, ok := tcID2Name[functionID]; ok {
-							part := []byte(`{"functionResponse":{"id":"","name":""}}`)
-							part, _ = sjson.SetBytes(part, "functionResponse.id", functionID)
-							part, _ = sjson.SetBytes(part, "functionResponse.name", util.MapSanitizedFunctionName(functionNameMap, name))
-							response := toolResponses[functionID]
-							if response == "" {
-								response = "{}"
-							}
-							// Keep it as a string instead of parsing it into JSON.
-							// Parsing it as JSON, similar to reading a JSON file with readFile, may trigger an upstream 400 error.
-							part, _ = sjson.SetBytes(part, "functionResponse.response.result", response)
-							responseParts = append(responseParts, part)
+					// Collect tool responses scoped to this assistant turn.
+					turnToolResponses := map[string]string{}
+					for j := i + 1; j < len(arr); j++ {
+						nextRole := arr[j].Get("role").String()
+						if nextRole == "assistant" {
+							break
 						}
+						if nextRole == "tool" {
+							callID := arr[j].Get("tool_call_id").String()
+							if callID != "" {
+								turnToolResponses[callID] = arr[j].Get("content").String()
+							}
+						}
+					}
+
+					responseParts := make([][]byte, 0, len(toolCalls))
+					for _, call := range toolCalls {
+						part := []byte(`{"functionResponse":{"id":"","name":""}}`)
+						part, _ = sjson.SetBytes(part, "functionResponse.id", call.id)
+						part, _ = sjson.SetBytes(part, "functionResponse.name", call.name)
+						response := turnToolResponses[call.id]
+						if response == "" {
+							response = "{}"
+						}
+						// Keep it as a string instead of parsing it into JSON.
+						// Parsing it as JSON, similar to reading a JSON file with readFile, may trigger an upstream 400 error.
+						part, _ = sjson.SetBytes(part, "functionResponse.response.result", response)
+						responseParts = append(responseParts, part)
 					}
 					if len(responseParts) > 0 {
 						contentItems = append(contentItems, antigravityOpenAIContent("user", responseParts))

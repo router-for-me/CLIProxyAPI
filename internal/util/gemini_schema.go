@@ -37,6 +37,8 @@ type jsonSchemaCleanOptions struct {
 	dropAllEnums                      bool
 	dropBooleanEnums                  bool
 	preserveAdditionalPropertiesFalse bool
+	preserveAllAdditionalProperties   bool
+	preserveStandardConstraints       bool
 }
 
 // CleanJSONSchemaForAntigravity transforms a tool schema to be compatible with Antigravity API.
@@ -93,6 +95,21 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 	})
 }
 
+// CleanJSONSchemaForGeminiJSONSchema transforms a JSON schema for Gemini tool calling
+// when using the parametersJsonSchema carrier. It preserves standard JSON Schema constraints
+// (such as pattern, minLength, maxLength) and additionalProperties (both boolean and schema-valued),
+// while removing Gemini-incompatible metadata fields and cleaning required properties.
+func CleanJSONSchemaForGeminiJSONSchema(jsonStr string) string {
+	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{
+		addMissingArrayItems:            true,
+		removeGeminiMetadata:            true,
+		flattenUnions:                   true,
+		forceEnumStringType:             true,
+		preserveAllAdditionalProperties: true,
+		preserveStandardConstraints:     true,
+	})
+}
+
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
 func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	// Phase 0: Normalize malformed schemas (e.g. bare property maps and boolean required from MCP tools)
@@ -107,7 +124,7 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
 	jsonStr = addEnumHints(jsonStr)
 	jsonStr = dropIgnoredEnumsToHints(jsonStr, options)
-	if !options.preserveAdditionalPropertiesFalse {
+	if !options.preserveAdditionalPropertiesFalse && !options.preserveAllAdditionalProperties {
 		jsonStr = addAdditionalPropertiesHints(jsonStr)
 	}
 	jsonStr = moveConstraintsToDescription(jsonStr, options)
@@ -246,6 +263,10 @@ func normalizeMalformedSchemaObjects(jsonStr string, addMissingArrayItems bool) 
 		return jsonStr
 	}
 
+	if rootBool, ok := root.(bool); ok && rootBool {
+		return "{}"
+	}
+
 	rootMap, ok := root.(map[string]any)
 	if !ok || isAPIRequestDocument(rootMap) {
 		return jsonStr
@@ -259,6 +280,12 @@ func normalizeMalformedSchemaObjects(jsonStr string, addMissingArrayItems bool) 
 				return jsonStr
 			}
 			out, err := marshalJSONNoHTMLEscape(map[string]any{"schema": repairedInner})
+			if err != nil {
+				return jsonStr
+			}
+			return string(out)
+		} else if innerBool, ok := rootMap["schema"].(bool); ok && innerBool {
+			out, err := marshalJSONNoHTMLEscape(map[string]any{"schema": map[string]any{}})
 			if err != nil {
 				return jsonStr
 			}
@@ -453,6 +480,9 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 			clone["items"] = repairedList
 			modified = true
 		}
+	} else if itemsBool, ok := clone["items"].(bool); ok && itemsBool {
+		clone["items"] = map[string]any{}
+		modified = true
 	}
 
 	if addProps, ok := clone["additionalProperties"].(map[string]any); ok {
@@ -478,6 +508,9 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 				clone[key] = repairedSub
 				modified = true
 			}
+		} else if subBool, ok := clone[key].(bool); ok && subBool {
+			clone[key] = map[string]any{}
+			modified = true
 		}
 	}
 
@@ -491,7 +524,7 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 		}
 	}
 
-	for _, key := range []string{"$defs", "definitions", "dependentSchemas"} {
+	for _, key := range []string{"$defs", "definitions", "dependentSchemas", "dependencies"} {
 		if defsVal, ok := clone[key].(map[string]any); ok {
 			repairedDefs := make(map[string]any, len(defsVal))
 			defsModified := false
@@ -503,6 +536,10 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 						defsModified = true
 						modified = true
 					}
+				} else if defBool, ok := dv.(bool); ok && defBool {
+					repairedDefs[dk] = map[string]any{}
+					defsModified = true
+					modified = true
 				} else {
 					repairedDefs[dk] = dv
 				}
@@ -526,6 +563,9 @@ func repairSchemaList(list []any, addMissingArrayItems bool) ([]any, bool) {
 			if itemMod {
 				listModified = true
 			}
+		} else if itemBool, ok := item.(bool); ok && itemBool {
+			repairedList = append(repairedList, map[string]any{})
+			listModified = true
 		} else {
 			repairedList = append(repairedList, item)
 		}
@@ -539,6 +579,12 @@ func repairPropertyMap(props map[string]any, addMissingArrayItems bool) (map[str
 	modified := false
 
 	for k, v := range props {
+		if b, ok := v.(bool); ok && b {
+			out[k] = map[string]any{}
+			modified = true
+			continue
+		}
+
 		childMap, isMap := v.(map[string]any)
 		if !isMap {
 			out[k] = v
@@ -859,6 +905,9 @@ var unsupportedConstraints = []string{
 }
 
 func constraintKeywords(options jsonSchemaCleanOptions) []string {
+	if options.preserveStandardConstraints {
+		return nil
+	}
 	keywords := append([]string(nil), unsupportedConstraints...)
 	if options.antigravitySemantics {
 		keywords = append(keywords, "minimum", "maximum", "multipleOf")
@@ -868,6 +917,9 @@ func constraintKeywords(options jsonSchemaCleanOptions) []string {
 
 func moveConstraintsToDescription(jsonStr string, options jsonSchemaCleanOptions) string {
 	constraints := constraintKeywords(options)
+	if len(constraints) == 0 {
+		return jsonStr
+	}
 	pathsByField := findPathsByFields(jsonStr, constraints)
 	for _, key := range constraints {
 		for _, p := range pathsByField[key] {
@@ -1196,6 +1248,7 @@ func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) s
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
 		"if", "then", "else",
 		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", "encrypted", // Schema metadata fields unsupported by Gemini
+		"additionalItems", "unevaluatedProperties", "unevaluatedItems", "contentSchema",
 	)
 	if options.antigravitySemantics {
 		keywords = append(keywords, "not")
@@ -1208,8 +1261,11 @@ func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) s
 			if isPropertyDefinition(trimSuffix(p, "."+key)) {
 				continue
 			}
-			if options.preserveAdditionalPropertiesFalse && key == "additionalProperties" {
-				if gjson.Get(jsonStr, p).Type == gjson.False {
+			if key == "additionalProperties" {
+				if options.preserveAllAdditionalProperties {
+					continue
+				}
+				if options.preserveAdditionalPropertiesFalse && gjson.Get(jsonStr, p).Type == gjson.False {
 					continue
 				}
 			}
