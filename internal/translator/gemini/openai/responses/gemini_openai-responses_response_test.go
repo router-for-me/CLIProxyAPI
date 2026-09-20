@@ -26,6 +26,37 @@ func parseSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
 	return event, gjson.Parse(dataLine)
 }
 
+func TestConvertGeminiResponseToOpenAIResponsesOutputTokensIncludeThoughts(t *testing.T) {
+	var param any
+	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63},"modelVersion":"gemini-3.6-flash","responseId":"resp_usage"}`)
+
+	result := ConvertGeminiResponseToOpenAIResponses(context.Background(), "model", nil, nil, chunk, &param)
+	var completed gjson.Result
+	for _, event := range result {
+		name, data := parseSSEEvent(t, event)
+		if name == "response.completed" {
+			completed = data
+		}
+	}
+	if !completed.Exists() {
+		t.Fatalf("missing response.completed event")
+	}
+	outputTokens := completed.Get("response.usage.output_tokens")
+	if !outputTokens.Exists() || outputTokens.Int() != 47 {
+		t.Fatalf("output_tokens = %s, want present with value 47. Output: %s", outputTokens.Raw, completed.Raw)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesNonStreamOutputTokensIncludeThoughts(t *testing.T) {
+	response := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58},"modelVersion":"gemini-3.6-flash","responseId":"resp_usage"}`)
+
+	result := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "model", nil, nil, response, nil)
+	outputTokens := gjson.GetBytes(result, "usage.output_tokens")
+	if !outputTokens.Exists() || outputTokens.Int() != 42 {
+		t.Fatalf("output_tokens = %s, want present with value 42. Output: %s", outputTokens.Raw, result)
+	}
+}
+
 func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testing.T) {
 	// Vertex-style Gemini stream wraps the actual response payload under "response".
 	// This test ensures we unwrap and that output_text.done contains the full text.

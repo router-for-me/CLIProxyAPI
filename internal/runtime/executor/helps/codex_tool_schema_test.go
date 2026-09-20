@@ -491,3 +491,286 @@ func TestNormalizeCodexToolSchemas_NamespaceToolSimplified(t *testing.T) {
 		t.Fatalf("expected action.enum with 8 items")
 	}
 }
+
+func TestNormalizeCodexToolSchemas_StripsUnsupportedUnicodePropertyEscapePatterns(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.6",
+		"tools": [{
+			"type": "function",
+			"name": "Artifact",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"field": {
+						"type": "string",
+						"description": "field to edit",
+						"pattern": "^(?!__.*__$)[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\"\\\\./[\\]]{1,200}$"
+					},
+					"asset_id": {
+						"type": "string",
+						"pattern": "^[0-9a-f]{32}$"
+					}
+				},
+				"required": ["field"]
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+
+	tool := gjson.GetBytes(out, "tools.0")
+	params := tool.Get("parameters")
+
+	// Unsupported pattern must be removed
+	if params.Get("properties.field.pattern").Exists() {
+		t.Errorf("expected properties.field.pattern to be removed, got: %s", params.Get("properties.field.pattern").Raw)
+	}
+	if got := params.Get("properties.field.type").String(); got != "string" {
+		t.Errorf("expected properties.field.type == 'string', got %q", got)
+	}
+
+	// Valid pattern must be preserved
+	if got := params.Get("properties.asset_id.pattern").String(); got != "^[0-9a-f]{32}$" {
+		t.Errorf("expected properties.asset_id.pattern preserved, got %q", got)
+	}
+
+	// Idempotence test
+	outAgain := NormalizeCodexToolSchemas(out)
+	if string(outAgain) != string(out) {
+		t.Errorf("expected NormalizeCodexToolSchemas to be idempotent")
+	}
+}
+
+func TestNormalizeCodexToolSchemas_PreservesNonSchemaPatternKeys(t *testing.T) {
+	// A property whose default, enum, or description metadata contains a nested object
+	// with a 'pattern' key must NOT be mutated, because it is user data, not a schema.
+	input := []byte(`{
+		"model": "gpt-5.6",
+		"tools": [{
+			"type": "function",
+			"name": "config_tool",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"regex_config": {
+						"type": "object",
+						"default": {
+							"pattern": "\\p{L}+"
+						},
+						"enum": [
+							{"pattern": "\\p{N}+"}
+						]
+					},
+					"real_schema": {
+						"type": "string",
+						"pattern": "\\p{L}+"
+					}
+				}
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+
+	tool := gjson.GetBytes(out, "tools.0")
+	params := tool.Get("parameters")
+
+	// Real schema pattern must be removed
+	if params.Get("properties.real_schema.pattern").Exists() {
+		t.Errorf("expected real_schema.pattern to be removed, got: %s", params.Get("properties.real_schema").Raw)
+	}
+
+	// User data under default and enum must be PRESERVED
+	if got := params.Get("properties.regex_config.default.pattern").String(); got != `\p{L}+` {
+		t.Errorf("expected default.pattern preserved, got %q", got)
+	}
+	if got := params.Get("properties.regex_config.enum.0.pattern").String(); got != `\p{N}+` {
+		t.Errorf("expected enum.0.pattern preserved, got %q", got)
+	}
+}
+
+func TestNormalizeCodexToolSchemas_CoversAllSchemaKeywordLocations(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.6",
+		"tools": [{
+			"type": "function",
+			"name": "deep_tool",
+			"parameters": {
+				"type": "object",
+				"$defs": {
+					"custom_type": {
+						"type": "string",
+						"pattern": "\\p{L}+"
+					}
+				},
+				"additionalProperties": {
+					"type": "string",
+					"pattern": "\\p{N}+"
+				},
+				"patternProperties": {
+					"^s_": {
+						"type": "string",
+						"pattern": "\\p{M}+"
+					}
+				},
+				"if": {
+					"properties": {
+						"flag": {
+							"type": "string",
+							"pattern": "\\p{P}+"
+						}
+					}
+				},
+				"then": {
+					"properties": {
+						"val": {
+							"type": "string",
+							"pattern": "\\p{S}+"
+						}
+					}
+				},
+				"else": {
+					"properties": {
+						"other": {
+							"type": "string",
+							"pattern": "\\p{Z}+"
+						}
+					}
+				}
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+
+	tool := gjson.GetBytes(out, "tools.0")
+	params := tool.Get("parameters")
+
+	// All subschemas in schema-aware locations must have their incompatible patterns stripped
+	if params.Get("$defs.custom_type.pattern").Exists() {
+		t.Errorf("expected $defs.custom_type.pattern to be removed")
+	}
+	if params.Get("additionalProperties.pattern").Exists() {
+		t.Errorf("expected additionalProperties.pattern to be removed")
+	}
+	if params.Get("patternProperties.^s_.pattern").Exists() {
+		t.Errorf("expected patternProperties.^s_.pattern to be removed")
+	}
+	if params.Get("if.properties.flag.pattern").Exists() {
+		t.Errorf("expected if.properties.flag.pattern to be removed")
+	}
+	if params.Get("then.properties.val.pattern").Exists() {
+		t.Errorf("expected then.properties.val.pattern to be removed")
+	}
+	if params.Get("else.properties.other.pattern").Exists() {
+		t.Errorf("expected else.properties.other.pattern to be removed")
+	}
+
+	// Subschema types must be preserved
+	if got := params.Get("$defs.custom_type.type").String(); got != "string" {
+		t.Errorf("expected $defs.custom_type.type == 'string', got %q", got)
+	}
+}
+
+func TestNormalizeCodexToolSchemas_MalformedOrEmptyParametersFallback(t *testing.T) {
+	// Malformed JSON, non-object parameters, null, and empty payloads must not panic
+	cases := [][]byte{
+		[]byte(`{"model":"gpt-5.6","tools":[{"type":"function","name":"t","parameters":null}]}`),
+		[]byte(`{"model":"gpt-5.6","tools":[{"type":"function","name":"t","parameters":"not_an_object"}]}`),
+		[]byte(`{"model":"gpt-5.6","tools":[{"type":"function","name":"t","parameters":{"type":"object"}}]}`),
+		[]byte(`{"model":"gpt-5.6","tools":[]}`),
+		[]byte(`{"model":"gpt-5.6"}`),
+	}
+
+	for i, c := range cases {
+		out := NormalizeCodexToolSchemas(c)
+		if len(out) == 0 {
+			t.Errorf("case %d: unexpected empty output", i)
+		}
+	}
+}
+
+func TestNormalizeCodexToolSchemas_JSONUnicodeEscapeBypassPrevention(t *testing.T) {
+	// Patterns encoded using JSON Unicode escapes (e.g. \u005c for '\' or \u0070 for 'p')
+	// decode to \p{...} / \P{...} and must not be skipped by the fast-path check.
+	input := []byte(`{
+		"model": "gpt-5.6",
+		"tools": [{
+			"type": "function",
+			"name": "escape_bypass_tool",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"p1": {
+						"type": "string",
+						"pattern": "\u005c\u0070{L}+"
+					},
+					"p2": {
+						"type": "string",
+						"pattern": "\u005cp{Cc}"
+					},
+					"p3": {
+						"type": "string",
+						"pattern": "\u005c\u0050{N}+"
+					},
+					"valid": {
+						"type": "string",
+						"pattern": "^[0-9a-f]{32}$"
+					}
+				}
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+	tool := gjson.GetBytes(out, "tools.0")
+	params := tool.Get("parameters")
+
+	if params.Get("properties.p1.pattern").Exists() {
+		t.Errorf("expected properties.p1.pattern (\\u0070) to be removed, got: %s", params.Get("properties.p1.pattern").Raw)
+	}
+	if params.Get("properties.p2.pattern").Exists() {
+		t.Errorf("expected properties.p2.pattern (\\u005c) to be removed, got: %s", params.Get("properties.p2.pattern").Raw)
+	}
+	if params.Get("properties.p3.pattern").Exists() {
+		t.Errorf("expected properties.p3.pattern (\\u0050) to be removed, got: %s", params.Get("properties.p3.pattern").Raw)
+	}
+	if got := params.Get("properties.valid.pattern").String(); got != "^[0-9a-f]{32}$" {
+		t.Errorf("expected valid.pattern to be preserved, got %q", got)
+	}
+}
+
+func TestNormalizeCodexToolSchemas_PatternPropertiesKeySanitization(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.6",
+		"tools": [{
+			"type": "function",
+			"name": "pattern_props_tool",
+			"parameters": {
+				"type": "object",
+				"patternProperties": {
+					"^\\\\p{L}+$": {
+						"type": "string"
+					},
+					"^[a-z]+$": {
+						"type": "number"
+					}
+				}
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+	tool := gjson.GetBytes(out, "tools.0")
+	params := tool.Get("parameters")
+
+	// Key with \p{L}+ must be removed
+	patternProps := params.Get("patternProperties").Map()
+	if _, exists := patternProps[`^\p{L}+$`]; exists {
+		t.Errorf("expected patternProperties key '^\\\\p{L}+$' to be removed, got: %s", params.Get("patternProperties").Raw)
+	}
+	// Safe key must be preserved
+	if _, exists := patternProps[`^[a-z]+$`]; !exists {
+		t.Errorf("expected patternProperties key '^[a-z]+$' to be preserved, got: %s", params.Get("patternProperties").Raw)
+	}
+}

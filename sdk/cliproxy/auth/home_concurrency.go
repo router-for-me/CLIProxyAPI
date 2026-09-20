@@ -305,6 +305,10 @@ func SafeResponseHeaders(err error) http.Header {
 	if errors.As(err, &modelCooldown) && modelCooldown != nil {
 		return modelCooldown.Headers()
 	}
+	var unavailable *authUnavailableError
+	if errors.As(err, &unavailable) && unavailable != nil {
+		return unavailable.Headers()
+	}
 	return nil
 }
 

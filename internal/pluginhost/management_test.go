@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -119,6 +120,144 @@ func TestServeManagementHTMLEscapesJSONResponseStrings(t *testing.T) {
 	}
 	if body["count"] != float64(1) {
 		t.Fatalf("count = %#v, want unchanged number", body["count"])
+	}
+}
+
+func TestServeManagementPreservesRawJSONOnSchemaVersion6(t *testing.T) {
+	rawJSON := `{"prompt":"You are a security auditor. Analyze <input> for vulnerabilities & \"threats\"."}`
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "raw-json",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionRawManagementResponse,
+				Capabilities: pluginapi.Capabilities{
+					ManagementAPI: &managementPluginDouble{routes: []pluginapi.ManagementRoute{{
+						Method: http.MethodGet,
+						Path:   "/plugins/raw-json/config",
+						Handler: managementHandlerFunc(func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+							return pluginapi.ManagementResponse{
+								Headers: http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+								Body:    []byte(rawJSON),
+							}, nil
+						}),
+					}}},
+				},
+			},
+		},
+		capabilityRecord{
+			id: "legacy-json",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitHistory, // schema_version 5 (legacy)
+				Capabilities: pluginapi.Capabilities{
+					ManagementAPI: &managementPluginDouble{routes: []pluginapi.ManagementRoute{{
+						Method: http.MethodGet,
+						Path:   "/plugins/legacy-json/config",
+						Handler: managementHandlerFunc(func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+							return pluginapi.ManagementResponse{
+								Headers: http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+								Body:    []byte(rawJSON),
+							}, nil
+						}),
+					}}},
+				},
+			},
+		},
+	)
+	host.RegisterManagementRoutes(context.Background(), nil)
+
+	// Schema version 6: raw JSON is preserved
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/plugins/raw-json/config", nil)
+	rec := httptest.NewRecorder()
+	if !host.ServeManagementHTTP(rec, req) {
+		t.Fatal("ServeManagementHTTP() = false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != rawJSON {
+		t.Fatalf("body = %q, want raw %q", rec.Body.String(), rawJSON)
+	}
+
+	// Schema version 5 (legacy): HTML escaping still applies for compatibility
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/plugins/legacy-json/config", nil)
+	rec = httptest.NewRecorder()
+	if !host.ServeManagementHTTP(rec, req) {
+		t.Fatal("ServeManagementHTTP() legacy = false, want true")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	wantLegacy := `{"prompt":"You are a security auditor. Analyze &lt;input&gt; for vulnerabilities &amp; &#34;threats&#34;."}`
+	if rec.Body.String() != wantLegacy {
+		t.Fatalf("legacy body = %q, want escaped %q", rec.Body.String(), wantLegacy)
+	}
+}
+
+func TestServeManagementGetPutRoundTripPreservesImmutableField(t *testing.T) {
+	const defaultPrompt = "Analyze <input> for vulnerabilities & \"threats\"."
+	var storedPrompt = defaultPrompt
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "roundtrip-plugin",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionRawManagementResponse,
+			Capabilities: pluginapi.Capabilities{
+				ManagementAPI: &managementPluginDouble{routes: []pluginapi.ManagementRoute{
+					{
+						Method: http.MethodGet,
+						Path:   "/plugins/roundtrip-plugin/config",
+						Handler: managementHandlerFunc(func(context.Context, pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+							payload, _ := json.Marshal(map[string]string{"system_prompt": storedPrompt})
+							return pluginapi.ManagementResponse{
+								Headers: http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+								Body:    payload,
+							}, nil
+						}),
+					},
+					{
+						Method: http.MethodPut,
+						Path:   "/plugins/roundtrip-plugin/config",
+						Handler: managementHandlerFunc(func(_ context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+							var body map[string]string
+							if errUnmarshal := json.Unmarshal(req.Body, &body); errUnmarshal != nil {
+								return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Body: []byte(`{"error":"invalid json"}`)}, nil
+							}
+							if body["system_prompt"] != defaultPrompt {
+								return pluginapi.ManagementResponse{StatusCode: http.StatusBadRequest, Body: []byte(`{"error":"system_prompts default prompt is immutable"}`)}, nil
+							}
+							storedPrompt = body["system_prompt"]
+							return pluginapi.ManagementResponse{
+								StatusCode: http.StatusOK,
+								Headers:    http.Header{"Content-Type": []string{"application/json"}},
+								Body:       []byte(`{"status":"ok"}`),
+							}, nil
+						}),
+					},
+				}},
+			},
+		},
+	})
+	host.RegisterManagementRoutes(context.Background(), nil)
+
+	// Step 1: GET the configuration
+	reqGet := httptest.NewRequest(http.MethodGet, "/v0/management/plugins/roundtrip-plugin/config", nil)
+	recGet := httptest.NewRecorder()
+	if !host.ServeManagementHTTP(recGet, reqGet) {
+		t.Fatal("ServeManagementHTTP() GET = false, want true")
+	}
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("GET code = %d, want 200", recGet.Code)
+	}
+
+	// Step 2: PUT the unmodified configuration back
+	reqPut := httptest.NewRequest(http.MethodPut, "/v0/management/plugins/roundtrip-plugin/config", recGet.Body)
+	reqPut.Header.Set("Content-Type", "application/json")
+	recPut := httptest.NewRecorder()
+	if !host.ServeManagementHTTP(recPut, reqPut) {
+		t.Fatal("ServeManagementHTTP() PUT = false, want true")
+	}
+	if recPut.Code != http.StatusOK {
+		t.Fatalf("PUT code = %d, want 200; body=%s", recPut.Code, recPut.Body.String())
 	}
 }
 

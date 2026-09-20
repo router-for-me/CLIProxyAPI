@@ -268,6 +268,8 @@ func prepareAntigravityGeminiReasoningReplayPayload(ctx context.Context, modelNa
 				// the pairing diagnosis below with an untyped error.
 				logAntigravityReasoningReplayDegraded(scope, "invalidate", errDelete)
 			}
+			log.Warnf("antigravity executor: reasoning replay broke Gemini function call pairing (%v); degrading to original payload", errPairing)
+			return payload, scope, nil
 		}
 		return payload, scope, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("antigravity executor: invalid Gemini function call history: %v", errPairing)}
 	}

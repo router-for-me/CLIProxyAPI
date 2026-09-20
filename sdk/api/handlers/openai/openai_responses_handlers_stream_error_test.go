@@ -521,8 +521,11 @@ func TestForwardResponsesStreamExposesTerminalErrors(t *testing.T) {
 			if exposed != tc.wantExposed {
 				t.Fatalf("error exposed = %t, want %t: %q", exposed, tc.wantExposed, body)
 			}
-			if exposed && strings.Contains(body, `"error":{`) {
+			if exposed && !strings.Contains(body, "event: error\ndata: ") {
 				t.Fatalf("expected streaming error chunk, got HTTP error body: %q", body)
+			}
+			if exposed && !strings.Contains(body, `"error":{`) {
+				t.Fatalf("expected nested error in streaming error chunk, got: %q", body)
 			}
 		})
 	}

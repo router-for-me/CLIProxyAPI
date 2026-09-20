@@ -42,6 +42,27 @@ func (m *Manager) hasPluginScheduler() bool {
 	return true
 }
 
+func (m *Manager) pluginSchedulerWantsAcrossPrioritiesLocked() bool {
+	if m == nil || m.pluginScheduler == nil {
+		return false
+	}
+	if opt, ok := m.pluginScheduler.(PluginSchedulerAcrossPriorities); ok && opt != nil {
+		return opt.SchedulerWantsAcrossPriorities()
+	}
+	return false
+}
+
+// PluginSchedulerWantsAcrossPriorities reports whether the configured plugin scheduler
+// opted into receiving candidates across all priority tiers.
+func (m *Manager) PluginSchedulerWantsAcrossPriorities() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.pluginSchedulerWantsAcrossPrioritiesLocked()
+}
+
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
 	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector:
@@ -105,11 +126,22 @@ func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {
 	m.scheduler.rebuild(auths)
 }
 
+func (m *Manager) currentVersion() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.structuralEpoch.Load() + registry.GetGlobalRegistry().RegistrationEpoch()
+}
+
 func (m *Manager) syncScheduler() {
 	if m == nil || m.scheduler == nil {
 		return
 	}
-	m.syncSchedulerFromSnapshot(m.snapshotAuths())
+	currentVer := m.currentVersion()
+	if currentVer == m.syncedVersion.Load() {
+		return
+	}
+	m.checkAndSyncScheduler()
 }
 
 func (m *Manager) snapshotAuths() []*Auth {
@@ -139,6 +171,7 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 	}
 	snapshot := auth.Clone()
 	m.mu.RUnlock()
+	m.structuralEpoch.Add(1)
 	m.scheduler.upsertAuth(snapshot)
 }
 
@@ -419,6 +452,71 @@ func (m *Manager) Selector() Selector {
 	return m.selector
 }
 
+// LookupSessionAffinity observes the current session affinity binding without side effects.
+// It returns (auth, status) where status can be "bound", "unbound", "ambiguous", or "unsupported".
+func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Auth, string) {
+	if m == nil {
+		return nil, "unsupported"
+	}
+	m.mu.RLock()
+	if m.pluginScheduler != nil {
+		m.mu.RUnlock()
+		return nil, "unsupported"
+	}
+	sel := m.selector
+	authProviderMap := make(map[string]string, len(m.auths))
+	for id, a := range m.auths {
+		if a != nil {
+			authProviderMap[id] = a.Provider
+		}
+	}
+	m.mu.RUnlock()
+
+	if sel == nil {
+		return nil, "unsupported"
+	}
+
+	authFilter := func(authID string) bool {
+		if provider == "mixed" {
+			return true
+		}
+		p, ok := authProviderMap[authID]
+		return ok && p == provider
+	}
+
+	var authID, status string
+	if observerWithFilter, ok := sel.(interface {
+		LookupAffinity(provider, model, sessionID string, authFilters ...func(authID string) bool) (string, string)
+	}); ok && observerWithFilter != nil {
+		authID, status = observerWithFilter.LookupAffinity(provider, model, sessionID, authFilter)
+	} else if observer, ok := sel.(interface {
+		LookupAffinity(provider, model, sessionID string) (string, string)
+	}); ok && observer != nil {
+		authID, status = observer.LookupAffinity(provider, model, sessionID)
+	} else {
+		return nil, "unsupported"
+	}
+
+	if status != "bound" || authID == "" {
+		return nil, status
+	}
+
+	m.mu.RLock()
+	auth, okAuth := m.auths[authID]
+	if !okAuth || auth == nil {
+		m.mu.RUnlock()
+		return nil, "unbound"
+	}
+	snapshot := auth.Clone()
+	m.mu.RUnlock()
+
+	if provider != "mixed" && snapshot.Provider != provider {
+		return nil, "unbound"
+	}
+	snapshot.EnsureIndex()
+	return snapshot, "bound"
+}
+
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()
@@ -460,6 +558,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 
 	availableByPriority := make(map[int][]*Auth)
 	cooldownCount := 0
+	unauthorizedCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
@@ -471,9 +570,12 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		}
 		if reason == blockReasonCooldown {
 			cooldownCount++
-			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
-				earliest = next
-			}
+		}
+		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
+			earliest = next
+		}
+		if hasUnauthorizedAuthFailure(candidate) {
+			unauthorizedCount++
 		}
 	}
 
@@ -493,7 +595,19 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 			}
 			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
 		}
-		return nil, WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
+		if unauthorizedCount == len(auths) && len(auths) > 0 {
+			terminalCause := latestUnauthorizedCandidateError(auths)
+			if terminalCause == nil {
+				terminalCause = lastCandidateErr
+			}
+			return nil, NewTerminalAuthError(&Error{
+				Code:       "auth_unavailable",
+				Message:    "no auth available",
+				Retryable:  false,
+				HTTPStatus: http.StatusServiceUnavailable,
+			}, terminalCause)
+		}
+		return nil, newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 	}
 
 	return availableAuthsFromPriorityBuckets(availableByPriority, allPriorities), nil
@@ -501,11 +615,13 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 
 // availableAuthsForSelector reports the candidates handed to priority-scoped consumers such as
 // the plugin scheduler, plus the candidates handed to the configured selector. Both are equal
-// unless session affinity is active, in which case the selector additionally receives lower
-// priority tiers so an established binding can be validated instead of being preempted by a
-// recovered higher-priority credential.
+// unless session affinity or an across-priorities scheduler is active, in which case the selector
+// or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
-	if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
+	_, sessionAffinity := selector.(*SessionAffinitySelector)
+	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()
+
+	if !sessionAffinity && !schedulerAcross {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
 		if err != nil {
 			return nil, nil, err
@@ -516,12 +632,24 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 
 	// One availability pass and one clone pass serve both lists: the highest priority tier is a
 	// subset of the across-priority candidates, so it is narrowed from the same cloned auths.
-	selectorAuths, err = m.availableAuthsForRouteModelAcrossPriorities(auths, provider, routeModel, now)
-	if err != nil {
-		return nil, nil, err
+	allAuths, errAcross := m.availableAuthsForRouteModelAcrossPriorities(auths, provider, routeModel, now)
+	if errAcross != nil {
+		return nil, nil, errAcross
 	}
-	selectorAuths = cloneAuthSlice(selectorAuths)
-	return highestPriorityAuths(selectorAuths), selectorAuths, nil
+	allAuths = cloneAuthSlice(allAuths)
+
+	if schedulerAcross {
+		priorityAuths = allAuths
+	} else {
+		priorityAuths = highestPriorityAuths(allAuths)
+	}
+
+	if sessionAffinity {
+		selectorAuths = allAuths
+	} else {
+		selectorAuths = highestPriorityAuths(allAuths)
+	}
+	return priorityAuths, selectorAuths, nil
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
@@ -553,6 +681,27 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 		return err
 	}
 	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
+}
+
+func latestUnauthorizedCandidateError(auths []*Auth) error {
+	var latestTime time.Time
+	var latestAuthID string
+	var latestErr error
+
+	for _, candidate := range auths {
+		if candidate == nil || !hasUnauthorizedAuthFailure(candidate) {
+			continue
+		}
+		curTime := candidate.UpdatedAt
+		if candidate.LastError != nil {
+			if latestErr == nil || curTime.After(latestTime) || (curTime.Equal(latestTime) && candidate.ID > latestAuthID) {
+				latestTime = curTime
+				latestAuthID = candidate.ID
+				latestErr = candidate.LastError
+			}
+		}
+	}
+	return latestErr
 }
 
 func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) string) error {
@@ -603,25 +752,25 @@ func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) 
 				latestModelAuthID = candidate.ID
 				latestModelErr = modelErr
 			}
-		} else {
-			var authErr error
-			var authTime time.Time
-			if candidate.LastError != nil {
-				authErr = candidate.LastError
-				authTime = candidate.UpdatedAt
-			} else if strings.TrimSpace(candidate.StatusMessage) != "" {
-				authErr = errors.New(candidate.StatusMessage)
+		}
+
+		var authErr error
+		var authTime time.Time
+		if candidate.LastError != nil {
+			authErr = candidate.LastError
+			authTime = candidate.UpdatedAt
+		} else if strings.TrimSpace(candidate.StatusMessage) != "" {
+			authErr = errors.New(candidate.StatusMessage)
+			authTime = candidate.UpdatedAt
+		}
+		if authErr != nil {
+			if authTime.IsZero() {
 				authTime = candidate.UpdatedAt
 			}
-			if authErr != nil {
-				if authTime.IsZero() {
-					authTime = candidate.UpdatedAt
-				}
-				if latestAuthErr == nil || authTime.After(latestAuthTime) || (authTime.Equal(latestAuthTime) && candidate.ID > latestAuthID) {
-					latestAuthTime = authTime
-					latestAuthID = candidate.ID
-					latestAuthErr = authErr
-				}
+			if latestAuthErr == nil || authTime.After(latestAuthTime) || (authTime.Equal(latestAuthTime) && candidate.ID > latestAuthID) {
+				latestAuthTime = authTime
+				latestAuthID = candidate.ID
+				latestAuthErr = authErr
 			}
 		}
 	}
@@ -777,16 +926,15 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	var selected *Auth
 	var errPick error
+	beforeVer := m.syncedVersion.Load()
 	if providerKey == "mixed" {
 		selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
-		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-			m.syncScheduler()
+		if errPick != nil && model != "" && m.shouldRetrySchedulerPick(errPick, beforeVer) {
 			selected, _, errPick = m.scheduler.pickMixedWithStrategy(ctx, providers, model, opts, tried, strategy)
 		}
 	} else {
 		selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
-		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-			m.syncScheduler()
+		if errPick != nil && model != "" && m.shouldRetrySchedulerPick(errPick, beforeVer) {
 			selected, errPick = m.scheduler.pickSingleWithStrategy(ctx, providerKey, model, opts, tried, strategy)
 		}
 	}
@@ -1199,7 +1347,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	}
 	var exhausted *homeRetryRoundExhaustedError
 	if m.HomeEnabled() && errors.As(err, &exhausted) && exhausted != nil {
-		if !isCredentialRetryRoundStatus(status) || !m.homeRetryAllowed(attempt, homeRetryLimit) {
+		if !isRequestRetryRoundError(err) || !m.homeRetryAllowed(attempt, homeRetryLimit) {
 			return 0, false
 		}
 		if exhausted.retryNow {
@@ -1227,7 +1375,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	if !isCredentialRetryRoundStatus(status) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry) {
+	if !isRequestRetryRoundError(err) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry) {
 		return 0, false
 	}
 	wait, found := m.closestCooldownWaitWithAttempted(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted)
@@ -1304,6 +1452,13 @@ func isCredentialRetryRoundStatus(status int) bool {
 	default:
 		return false
 	}
+}
+
+func isRequestRetryRoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isCredentialRetryRoundStatus(statusCodeFromError(err)) || isTransientTransportError(err)
 }
 
 // cooldownWaitJitterCap bounds the random jitter added to cooldown waits so a
@@ -1459,15 +1614,71 @@ func shouldRetrySchedulerPick(err error) bool {
 	if err == nil {
 		return false
 	}
-	var cooldownErr *modelCooldownError
-	if errors.As(err, &cooldownErr) {
-		return true
-	}
 	var authErr *Error
 	if !errors.As(err, &authErr) || authErr == nil {
 		return false
 	}
 	return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable"
+}
+
+func (m *Manager) shouldRetrySchedulerPick(err error, beforeVersion uint64) bool {
+	if m == nil || m.scheduler == nil || err == nil {
+		return false
+	}
+	syncedVer := m.syncedVersion.Load()
+	if syncedVer > beforeVersion {
+		// A concurrent sync completed while this pick was in-flight; allow one bounded retry.
+		return true
+	}
+	currentVer := m.currentVersion()
+	if currentVer == syncedVer {
+		return false
+	}
+	var cooldownErr *modelCooldownError
+	if errors.As(err, &cooldownErr) {
+		return m.checkAndSyncScheduler()
+	}
+	if !shouldRetrySchedulerPick(err) {
+		return false
+	}
+	return m.checkAndSyncScheduler()
+}
+
+func (m *Manager) checkAndSyncScheduler() bool {
+	m.syncSchedulerMu.Lock()
+	defer m.syncSchedulerMu.Unlock()
+	currentVer := m.currentVersion()
+	if currentVer == m.syncedVersion.Load() {
+		// Another goroutine already completed sync for this version; allow retry.
+		return true
+	}
+	if !m.schedulerNeedsSync() {
+		m.advanceSyncedVersion(currentVer)
+		return true
+	}
+	m.syncSchedulerFromSnapshot(m.snapshotAuths())
+	if !m.schedulerNeedsSync() {
+		m.advanceSyncedVersion(currentVer)
+	}
+	return true
+}
+
+func (m *Manager) schedulerNeedsSync() bool {
+	if m == nil || m.scheduler == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.scheduler.needsSyncFromMap(m.auths)
+}
+
+func (m *Manager) advanceSyncedVersion(version uint64) {
+	for {
+		cur := m.syncedVersion.Load()
+		if cur >= version || m.syncedVersion.CompareAndSwap(cur, version) {
+			break
+		}
+	}
 }
 
 func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) bool {
@@ -1770,9 +1981,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if !okExecutor {
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
+	beforeVer := m.syncedVersion.Load()
 	selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
-	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-		m.syncScheduler()
+	if errPick != nil && model != "" && m.shouldRetrySchedulerPick(errPick, beforeVer) {
 		selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
 	}
 	if errPick != nil {
@@ -1966,9 +2177,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		m.mu.RUnlock()
 	}
 
+	beforeVer := m.syncedVersion.Load()
 	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
-	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-		m.syncScheduler()
+	if errPick != nil && model != "" && m.shouldRetrySchedulerPick(errPick, beforeVer) {
 		selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
 	}
 	if errPick != nil {

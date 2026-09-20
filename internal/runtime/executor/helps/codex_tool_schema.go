@@ -1,6 +1,9 @@
 package helps
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"math/big"
 	"strconv"
 	"strings"
@@ -8,6 +11,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 )
 
 const (
@@ -89,13 +94,19 @@ func normalizeCodexTool(tool gjson.Result) ([]byte, bool) {
 		return nil, false
 	}
 
-	log.Debugf("codex: simplified complex schema unions for tool %s to avoid upstream abort", tool.Get("name").String())
+	log.Debugf("codex: normalized schema for tool %s to avoid upstream abort", tool.Get("name").String())
 	return updatedTool, true
 }
 
 func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 	rawParams := []byte(params.Raw)
 	changed := false
+
+	if sanitizedParams, patternChanged := stripIncompatiblePatternsFromJSON(rawParams); patternChanged {
+		rawParams = sanitizedParams
+		changed = true
+		params = gjson.ParseBytes(rawParams)
+	}
 
 	properties := params.Get("properties")
 	if properties.Exists() && properties.IsObject() {
@@ -113,6 +124,98 @@ func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 	}
 
 	return rawParams, changed
+}
+
+// stripIncompatiblePatternsFromJSON recursively removes pattern attributes containing
+// unsupported Unicode property escapes (\p{...} / \P{...}) from parameter schemas.
+// It is schema-aware: only subschemas under known JSON Schema keyword locations are visited,
+// preventing accidental deletion of 'pattern' keys inside user data (e.g. description, default, enum).
+func stripIncompatiblePatternsFromJSON(raw []byte) ([]byte, bool) {
+	rawStr := string(raw)
+	if !strings.Contains(rawStr, `\p{`) && !strings.Contains(rawStr, `\P{`) && !strings.Contains(rawStr, `\u`) {
+		return raw, false
+	}
+	var root any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&root); err != nil || root == nil {
+		return raw, false
+	}
+	// Verify no trailing garbage
+	var dummy any
+	if err := dec.Decode(&dummy); err != io.EOF {
+		return raw, false
+	}
+	if !stripIncompatiblePatterns(root) {
+		return raw, false
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(root); err != nil {
+		return raw, false
+	}
+	return bytes.TrimSpace(buf.Bytes()), true
+}
+
+func stripIncompatiblePatterns(v any) bool {
+	changed := false
+	switch schema := v.(type) {
+	case map[string]any:
+		if patternVal, ok := schema["pattern"].(string); ok && util.HasUnsupportedUnicodePropertyEscape(patternVal) {
+			delete(schema, "pattern")
+			changed = true
+		}
+
+		// Inspect regex keys under patternProperties
+		if patternProps, ok := schema["patternProperties"].(map[string]any); ok {
+			for patternKey, subSchema := range patternProps {
+				if util.HasUnsupportedUnicodePropertyEscape(patternKey) {
+					delete(patternProps, patternKey)
+					changed = true
+				} else if stripIncompatiblePatterns(subSchema) {
+					changed = true
+				}
+			}
+		}
+
+		for _, mapKey := range util.SchemaMapKeywords {
+			if mapKey == "patternProperties" {
+				continue
+			}
+			if subMap, ok := schema[mapKey].(map[string]any); ok {
+				for _, subSchema := range subMap {
+					if stripIncompatiblePatterns(subSchema) {
+						changed = true
+					}
+				}
+			}
+		}
+
+		for _, valKey := range util.SchemaValueKeywords {
+			if val, exists := schema[valKey]; exists {
+				switch sub := val.(type) {
+				case map[string]any:
+					if stripIncompatiblePatterns(sub) {
+						changed = true
+					}
+				case []any:
+					for _, item := range sub {
+						if stripIncompatiblePatterns(item) {
+							changed = true
+						}
+					}
+				}
+			}
+		}
+	case []any:
+		for _, item := range schema {
+			if stripIncompatiblePatterns(item) {
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func normalizeCodexPropertySchema(prop gjson.Result) ([]byte, bool) {

@@ -60,6 +60,14 @@ const (
 	ParentSessionIDMetadataKey = "parent_session_id"
 	// IsForkMetadataKey indicates whether the request represents a conversational branch or fork.
 	IsForkMetadataKey = "is_fork"
+	// IsCompactionMetadataKey indicates whether the request represents a context compaction continuation.
+	IsCompactionMetadataKey = "is_compaction"
+	// NodeKindMetadataKey indicates the session DAG topology kind ("compaction", "fork", or "trunk").
+	NodeKindMetadataKey = "node_kind"
+	// LCPTailFingerprintsMetadataKey stores the actual trailing turn fingerprints for context compaction matching.
+	LCPTailFingerprintsMetadataKey = "lcp_tail_fingerprints"
+	// LCPEnvironmentDigestMetadataKey stores the environment digest across all system and developer instructions.
+	LCPEnvironmentDigestMetadataKey = "lcp_environment_digest"
 	// LCPAccessGenerationMetadataKey stores the monotonic access generation when an LCP entry was touched or bound.
 	LCPAccessGenerationMetadataKey = "lcp_access_generation"
 	// LCPFingerprintMetadataKey stores bounded request-scoped turn fingerprints so

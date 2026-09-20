@@ -84,6 +84,18 @@ type AuthUpdate struct {
 	revision uint64 // Watcher-local ordering, independent of runtime auth generations.
 }
 
+// Revision returns the monotonic watcher revision assigned to this update.
+func (u AuthUpdate) Revision() uint64 {
+	return u.revision
+}
+
+// SetRevision updates the revision counter for this update.
+func (u *AuthUpdate) SetRevision(rev uint64) {
+	if u != nil {
+		u.revision = rev
+	}
+}
+
 const (
 	// replaceCheckDelay is a short delay to allow atomic replace (rename) to settle
 	// before deciding whether a Remove event indicates a real deletion.
@@ -168,6 +180,12 @@ func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 // Returns true if the update was enqueued; false if no queue is configured.
 func (w *Watcher) DispatchPersistedAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchPersistedAuthUpdate(update)
+}
+
+// DispatchPersistedAuthUpdateWithRevision pushes already-persisted file auth updates through the watcher queue
+// and returns the stamped monotonic revision.
+func (w *Watcher) DispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (bool, uint64) {
+	return w.dispatchPersistedAuthUpdateWithRevision(update)
 }
 
 // SnapshotCoreAuths converts current clients snapshot into core auth entries.

@@ -80,11 +80,33 @@ func TestConvertOpenAIResponseToInteractionsNonStreamDirectToolCall(t *testing.T
 	if got := gjson.GetBytes(out, "steps.0.type").String(); got != "function_call" {
 		t.Fatalf("step type = %q, want function_call. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "steps.0.call_id").String(); got != "call_1" {
-		t.Fatalf("call_id = %q, want call_1. Output: %s", got, string(out))
+	if got := gjson.GetBytes(out, "steps.0.id").String(); got != "call_1" {
+		t.Fatalf("id = %q, want call_1. Output: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "steps.0.call_id").Exists() {
+		t.Fatalf("steps.0 should not have call_id parameter. Output: %s", string(out))
 	}
 	if got := gjson.GetBytes(out, "steps.0.arguments.q").String(); got != "x" {
 		t.Fatalf("arguments.q = %q, want x. Output: %s", got, string(out))
+	}
+}
+
+func TestConvertOpenAIResponseToInteractionsStreamToolCall(t *testing.T) {
+	var param any
+	raw := []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":null}]}`)
+	out := ConvertOpenAIResponseToInteractions(context.Background(), "gpt-test", nil, nil, raw, &param)
+	payload := findInteractionsEventPayload(out, "step.start")
+	if got := gjson.GetBytes(payload, "step.type").String(); got != "function_call" {
+		t.Fatalf("step.type = %q, want function_call. Payload: %s", got, string(payload))
+	}
+	if got := gjson.GetBytes(payload, "step.id").String(); got != "call_1" {
+		t.Fatalf("step.id = %q, want call_1. Payload: %s", got, string(payload))
+	}
+	if gjson.GetBytes(payload, "step.call_id").Exists() {
+		t.Fatalf("step.call_id must be omitted in stream. Payload: %s", string(payload))
+	}
+	if got := gjson.GetBytes(payload, "step.name").String(); got != "lookup" {
+		t.Fatalf("step.name = %q, want lookup. Payload: %s", got, string(payload))
 	}
 }
 
@@ -281,4 +303,110 @@ func findOpenAIChatChunkValue(chunks [][]byte, path, want string) []byte {
 		}
 	}
 	return nil
+}
+
+func TestConvertInteractionsResponseToOpenAIStreamToolCall_ContiguousZeroBasedIndex(t *testing.T) {
+	var param any
+	chunks := [][]byte{
+		[]byte(`data: {"event_type":"interaction.created","interaction":{"id":"i1","model":"devin/swe-2"}}`),
+		// Step 0: thought
+		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"thought"}}`),
+		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","text":"planning..."}}`),
+		[]byte(`data: {"event_type":"step.stop","index":0}`),
+		// Step 1: model_output
+		[]byte(`data: {"event_type":"step.start","index":1,"step":{"type":"model_output"}}`),
+		[]byte(`data: {"event_type":"step.delta","index":1,"delta":{"type":"text","text":"I will call tool."}}`),
+		[]byte(`data: {"event_type":"step.stop","index":1}`),
+		// Step 2: function_call 1 (step index = 2, tool call index should be 0)
+		[]byte(`data: {"event_type":"step.start","index":2,"step":{"type":"function_call","id":"call_first","name":"write_file","arguments":{}}}`),
+		[]byte(`data: {"event_type":"step.delta","index":2,"delta":{"type":"arguments_delta","arguments":"{\"path\":\"a\"}"}}`),
+		[]byte(`data: {"event_type":"step.stop","index":2}`),
+		// Step 3: function_call 2 (step index = 3, tool call index should be 1)
+		[]byte(`data: {"event_type":"step.start","index":3,"step":{"type":"function_call","id":"call_second","name":"read_file","arguments":{}}}`),
+		[]byte(`data: {"event_type":"step.delta","index":3,"delta":{"type":"arguments_delta","arguments":"{\"path\":\"b\"}"}}`),
+		[]byte(`data: {"event_type":"step.stop","index":3}`),
+		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"completed"}}`),
+		[]byte(`data: [DONE]`),
+	}
+
+	var out [][]byte
+	for _, chunk := range chunks {
+		out = append(out, ConvertInteractionsResponseToOpenAI(context.Background(), "devin/swe-2", nil, nil, chunk, &param)...)
+	}
+
+	// Find the start chunk for call_first
+	var firstToolStart []byte
+	var secondToolStart []byte
+	for _, chunk := range out {
+		if gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.id").String() == "call_first" {
+			firstToolStart = chunk
+		}
+		if gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.id").String() == "call_second" {
+			secondToolStart = chunk
+		}
+	}
+
+	if firstToolStart == nil {
+		t.Fatalf("call_first chunk not found")
+	}
+	if got := gjson.GetBytes(firstToolStart, "choices.0.delta.tool_calls.0.index").Int(); got != 0 {
+		t.Fatalf("first tool call index = %d, want 0 (0-based contiguous index). Payload: %s", got, string(firstToolStart))
+	}
+
+	if secondToolStart == nil {
+		t.Fatalf("call_second chunk not found")
+	}
+	if got := gjson.GetBytes(secondToolStart, "choices.0.delta.tool_calls.0.index").Int(); got != 1 {
+		t.Fatalf("second tool call index = %d, want 1 (0-based contiguous index). Payload: %s", got, string(secondToolStart))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAIStream_IncompleteFinishReasonLength(t *testing.T) {
+	var param any
+	chunks := [][]byte{
+		[]byte(`data: {"event_type":"interaction.created","interaction":{"id":"i1","model":"devin/swe-2"}}`),
+		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","name":"write_file"}}`),
+		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"path\":\"a\""}}`),
+		[]byte(`data: {"event_type":"step.stop","index":0}`),
+		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"incomplete","finish_reason":"length"}}`),
+		[]byte(`data: [DONE]`),
+	}
+
+	var out [][]byte
+	for _, chunk := range chunks {
+		out = append(out, ConvertInteractionsResponseToOpenAI(context.Background(), "devin/swe-2", nil, nil, chunk, &param)...)
+	}
+
+	finishChunk := findOpenAIChatChunkValue(out, "choices.0.finish_reason", "length")
+	if finishChunk == nil {
+		t.Fatalf("expected finish_reason 'length' for truncated stream, got chunks: %s", string(bytes.Join(out, []byte("\n"))))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAI_ContentFilterFinishReason(t *testing.T) {
+	// 1. Stream
+	var param any
+	chunks := [][]byte{
+		[]byte(`data: {"event_type":"interaction.created","interaction":{"id":"i1","model":"devin/swe-2"}}`),
+		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"model_output"}}`),
+		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"text","text":"blocked"}}`),
+		[]byte(`data: {"event_type":"step.stop","index":0}`),
+		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"incomplete","finish_reason":"content_filter"}}`),
+		[]byte(`data: [DONE]`),
+	}
+	var out [][]byte
+	for _, chunk := range chunks {
+		out = append(out, ConvertInteractionsResponseToOpenAI(context.Background(), "devin/swe-2", nil, nil, chunk, &param)...)
+	}
+	finishChunk := findOpenAIChatChunkValue(out, "choices.0.finish_reason", "content_filter")
+	if finishChunk == nil {
+		t.Fatalf("expected finish_reason 'content_filter' for stream, got: %s", string(bytes.Join(out, []byte("\n"))))
+	}
+
+	// 2. Non-stream
+	raw := []byte(`{"id":"i1","model":"devin/swe-2","status":"incomplete","finish_reason":"content_filter","steps":[{"type":"model_output","content":[{"type":"text","text":"blocked"}]}]}`)
+	outNonStream := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "devin/swe-2", nil, nil, raw, nil)
+	if got := gjson.GetBytes(outNonStream, "choices.0.finish_reason").String(); got != "content_filter" {
+		t.Fatalf("finish_reason = %q, want content_filter. Output: %s", got, string(outNonStream))
+	}
 }

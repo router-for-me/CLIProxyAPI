@@ -77,6 +77,12 @@ type PluginScheduler interface {
 	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
 }
 
+// PluginSchedulerAcrossPriorities is an optional interface implemented by schedulers
+// that opt into receiving candidates across all priority tiers.
+type PluginSchedulerAcrossPriorities interface {
+	SchedulerWantsAcrossPriorities() bool
+}
+
 type pluginSchedulerState interface {
 	HasScheduler() bool
 }
@@ -110,6 +116,25 @@ func (NoopHook) OnAuthUpdated(context.Context, *Auth) {}
 // OnResult implements Hook.
 func (NoopHook) OnResult(context.Context, Result) {}
 
+// ResultPolicy allows inspecting and mutating an execution result before in-memory quota mutations,
+// cooldown persistence, and scheduler/registry publishing.
+// Implementations of ResultPolicy must be safe for concurrent use by multiple goroutines.
+type ResultPolicy interface {
+	ApplyResultPolicy(ctx context.Context, result Result) Result
+}
+
+// ResultPolicyFunc enables using a plain function as a ResultPolicy.
+type ResultPolicyFunc func(ctx context.Context, result Result) Result
+
+// ApplyResultPolicy calls f(ctx, result).
+func (f ResultPolicyFunc) ApplyResultPolicy(ctx context.Context, result Result) Result {
+	return f(ctx, result)
+}
+
+type resultPolicyHolder struct {
+	policy ResultPolicy
+}
+
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
 	store                     Store
@@ -118,9 +143,13 @@ type Manager struct {
 	executors                 map[string]ProviderExecutor
 	selector                  Selector
 	hook                      Hook
+	resultPolicy              atomic.Pointer[resultPolicyHolder]
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex
 	configCooldownMu          sync.Mutex
+	syncSchedulerMu           sync.Mutex
+	structuralEpoch           atomic.Uint64
+	syncedVersion             atomic.Uint64
 	auths                     map[string]*Auth
 	authEpochs                map[string]uint64
 	scheduler                 *authScheduler
@@ -202,4 +231,28 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+// SetResultPolicy sets an execution result policy invoked before in-memory quota mutations and persistence.
+func (m *Manager) SetResultPolicy(policy ResultPolicy) {
+	if m == nil {
+		return
+	}
+	if policy == nil {
+		m.resultPolicy.Store(nil)
+		return
+	}
+	m.resultPolicy.Store(&resultPolicyHolder{policy: policy})
+}
+
+// ResultPolicy returns the current execution result policy, or nil if none is configured.
+func (m *Manager) ResultPolicy() ResultPolicy {
+	if m == nil {
+		return nil
+	}
+	holder := m.resultPolicy.Load()
+	if holder == nil {
+		return nil
+	}
+	return holder.policy
 }

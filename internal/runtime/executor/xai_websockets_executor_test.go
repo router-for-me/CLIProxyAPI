@@ -485,6 +485,204 @@ func TestXAIWebsocketsExecuteStreamRestoresNamespaceToolCalls(t *testing.T) {
 	}
 }
 
+func TestXAIWebsocketsExecuteStreamRestoresAliasedWebSearch(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		capturedPayload <- bytes.Clone(payload)
+
+		events := [][]byte{
+			[]byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"clientfn_web_search","call_id":"call_1","arguments":"{}"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"function_call","name":"clientfn_web_search","call_id":"call_1"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`),
+		}
+		for _, event := range events {
+			if errWrite := conn.WriteMessage(websocket.TextMessage, event); errWrite != nil {
+				t.Errorf("write websocket event: %v", errWrite)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":[{"role":"user","content":"search query"}],
+			"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}]
+		}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	select {
+	case payload := <-capturedPayload:
+		tool := gjson.GetBytes(payload, "tools.0")
+		if got := tool.Get("name").String(); got != "clientfn_web_search" {
+			t.Fatalf("upstream tool name = %q, want clientfn_web_search; payload=%s", got, payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+
+	var outputItemDone, completed gjson.Result
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		payload := gjson.ParseBytes(bytes.TrimSpace(chunk.Payload))
+		switch payload.Get("type").String() {
+		case "response.output_item.done":
+			outputItemDone = payload
+		case "response.completed":
+			completed = payload
+		}
+	}
+
+	for label, item := range map[string]gjson.Result{
+		"output_item.done": outputItemDone.Get("item"),
+		"completed":        completed.Get("response.output.0"),
+	} {
+		if got := item.Get("name").String(); got != "web_search" {
+			t.Fatalf("%s name = %q, want web_search; item=%s", label, got, item.Raw)
+		}
+	}
+}
+
+func TestXAIWebsocketsExecuteStreamDoesNotRestoreNamespacedClientfnWebSearch(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, _, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+
+		events := [][]byte{
+			[]byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"acme__clientfn_web_search","call_id":"call_1","arguments":"{}"}}`),
+			[]byte(`{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","name":"clientfn_web_search","call_id":"call_2","arguments":"{}"}}`),
+			[]byte(`{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"function_call","name":"acme__clientfn_web_search","call_id":"call_1"},{"type":"function_call","name":"clientfn_web_search","call_id":"call_2"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`),
+		}
+		for _, event := range events {
+			if errWrite := conn.WriteMessage(websocket.TextMessage, event); errWrite != nil {
+				t.Errorf("write websocket event: %v", errWrite)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	req := cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":[{"role":"user","content":"search query"}],
+			"tools":[
+				{"type":"function","name":"web_search","parameters":{"type":"object"}},
+				{"type":"namespace","name":"acme","tools":[{"type":"function","name":"clientfn_web_search","parameters":{"type":"object"}}]}
+			]
+		}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var outputItemsDone []gjson.Result
+	var completed gjson.Result
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		payload := gjson.ParseBytes(bytes.TrimSpace(chunk.Payload))
+		switch payload.Get("type").String() {
+		case "response.output_item.done":
+			outputItemsDone = append(outputItemsDone, payload)
+		case "response.completed":
+			completed = payload
+		}
+	}
+
+	if len(outputItemsDone) != 2 {
+		t.Fatalf("outputItemsDone length = %d, want 2", len(outputItemsDone))
+	}
+	// Namespaced tool preserved
+	if got := outputItemsDone[0].Get("item.name").String(); got != "clientfn_web_search" {
+		t.Fatalf("namespaced item name = %q, want clientfn_web_search", got)
+	}
+	if got := outputItemsDone[0].Get("item.namespace").String(); got != "acme" {
+		t.Fatalf("namespaced item namespace = %q, want acme", got)
+	}
+	// Unnamespaced tool restored
+	if got := outputItemsDone[1].Get("item.name").String(); got != "web_search" {
+		t.Fatalf("unnamespaced item name = %q, want web_search", got)
+	}
+
+	// Completed output
+	if got := completed.Get("response.output.0.name").String(); got != "clientfn_web_search" {
+		t.Fatalf("completed 0 name = %q, want clientfn_web_search", got)
+	}
+	if got := completed.Get("response.output.0.namespace").String(); got != "acme" {
+		t.Fatalf("completed 0 namespace = %q, want acme", got)
+	}
+	if got := completed.Get("response.output.1.name").String(); got != "web_search" {
+		t.Fatalf("completed 1 name = %q, want web_search", got)
+	}
+}
+
 func TestXAIWebsocketsExecuteStreamPreservesClientSameNameToolsWithXSearch(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1917,5 +2115,261 @@ func TestXAIWebsocketsCompactionTriggerFreshSessionFallback(t *testing.T) {
 	statusError, okStatus := errEmpty.(interface{ StatusCode() int })
 	if !okStatus || statusError.StatusCode() != http.StatusBadRequest {
 		t.Fatalf("error status = %v, want %d", errEmpty, http.StatusBadRequest)
+	}
+}
+
+func TestXAIWebsockets_PingHandlerDoesNotBlockOnWriteMu(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	serverConnCh := make(chan *websocket.Conn, 1)
+	pongReceived := make(chan string, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		conn.SetPongHandler(func(appData string) error {
+			pongReceived <- appData
+			return nil
+		})
+		serverConnCh <- conn
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	clientConn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket failed: %v", errDial)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	serverConn := <-serverConnCh
+	defer func() { _ = serverConn.Close() }()
+
+	sess := &codexWebsocketSession{sessionID: "test-xai-keepalive"}
+	configureXAIWebsocketConn(sess, clientConn)
+
+	// Start client read loop so it processes control frames.
+	go func() {
+		for {
+			if _, _, errRead := clientConn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}()
+
+	// Simulate an active application message write holding writeMu.
+	sess.writeMu.Lock()
+	defer sess.writeMu.Unlock()
+
+	// Upstream sends a keepalive ping while writeMu is held.
+	errPing := serverConn.WriteControl(websocket.PingMessage, []byte("xai-keepalive-ping"), time.Now().Add(time.Second))
+	if errPing != nil {
+		t.Fatalf("failed to send ping: %v", errPing)
+	}
+
+	// Pong must be received promptly without being starved by writeMu.
+	select {
+	case got := <-pongReceived:
+		if got != "xai-keepalive-ping" {
+			t.Fatalf("unexpected pong payload: got %q, want xai-keepalive-ping", got)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("pong response was blocked/starved while writeMu was held")
+	}
+}
+
+func TestXAIWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	serverPongCh := make(chan string, 1)
+	inWriteHook := make(chan struct{})
+	pongDeliveredDuringWrite := make(chan struct{})
+
+	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
+		close(inWriteHook)
+		select {
+		case <-pongDeliveredDuringWrite:
+		case <-time.After(2 * time.Second):
+			t.Error("timed out waiting for pong delivery while xai payload write was held in hook")
+		}
+	}
+	defer func() { testWebsocketWritePayloadHook = nil }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		conn.SetPongHandler(func(appData string) error {
+			serverPongCh <- appData
+			return nil
+		})
+
+		go func() {
+			for {
+				if _, _, errReadLoop := conn.ReadMessage(); errReadLoop != nil {
+					return
+				}
+			}
+		}()
+
+		select {
+		case <-inWriteHook:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for client write hook")
+			return
+		}
+
+		_ = conn.WriteControl(websocket.PingMessage, []byte("xai-session-ping"), time.Now().Add(time.Second))
+
+		select {
+		case got := <-serverPongCh:
+			if got != "xai-session-ping" {
+				t.Errorf("unexpected pong payload: got %q, want xai-session-ping", got)
+			}
+			close(pongDeliveredDuringWrite)
+		case <-time.After(2 * time.Second):
+			t.Errorf("pong was not received while payload write was in progress")
+			return
+		}
+
+		respPayload := []byte(`{"type":"response.done","response":{"id":"resp-1","status":"completed","output":[]}}`)
+		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-xai-session-ping",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"api_key":  "xai-test-key",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "grok-4",
+		Payload: []byte(`{"model":"grok-4","input":[{"type":"message","role":"user","content":"ping test"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "xai-session-ping-test",
+		},
+	}
+
+	result, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() failed: %v", errStream)
+	}
+
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("chunk error: %v", chunk.Err)
+		}
+	}
+}
+
+func TestXAIWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	serverPongCh := make(chan string, 1)
+	inWriteHook := make(chan struct{})
+	pongDeliveredDuringWrite := make(chan struct{})
+
+	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
+		close(inWriteHook)
+		select {
+		case <-pongDeliveredDuringWrite:
+		case <-time.After(2 * time.Second):
+			t.Error("timed out waiting for pong delivery while xai sessionless payload write was held in hook")
+		}
+	}
+	defer func() { testWebsocketWritePayloadHook = nil }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		conn.SetPongHandler(func(appData string) error {
+			serverPongCh <- appData
+			return nil
+		})
+
+		go func() {
+			for {
+				if _, _, errReadLoop := conn.ReadMessage(); errReadLoop != nil {
+					return
+				}
+			}
+		}()
+
+		select {
+		case <-inWriteHook:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for client write hook")
+			return
+		}
+
+		_ = conn.WriteControl(websocket.PingMessage, []byte("xai-sessionless-ping"), time.Now().Add(time.Second))
+
+		select {
+		case got := <-serverPongCh:
+			if got != "xai-sessionless-ping" {
+				t.Errorf("unexpected pong payload: got %q, want xai-sessionless-ping", got)
+			}
+			close(pongDeliveredDuringWrite)
+		case <-time.After(2 * time.Second):
+			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
+			return
+		}
+
+		respPayload := []byte(`{"type":"response.done","response":{"id":"resp-1","status":"completed","output":[]}}`)
+		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-xai-sessionless-ping",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"api_key":  "xai-test-key",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "grok-4",
+		Payload: []byte(`{"model":"grok-4","input":[{"type":"message","role":"user","content":"ping test sessionless"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	}
+
+	result, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() failed: %v", errStream)
+	}
+
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("chunk error: %v", chunk.Err)
+		}
 	}
 }

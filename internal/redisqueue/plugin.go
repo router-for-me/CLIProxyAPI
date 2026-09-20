@@ -8,6 +8,7 @@ import (
 	"time"
 
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -64,6 +65,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		serviceTier = coreusage.ServiceTierFromContext(ctx)
 	}
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
+	responseModel := strings.TrimSpace(record.ResponseModel)
 	clientRequestMetadata := internallogging.GetClientRequestMetadata(ctx)
 	sessionID := strings.TrimSpace(record.SessionID)
 	parentSessionID := strings.TrimSpace(record.ParentSessionID)
@@ -73,6 +75,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	} else if parentSessionID == "" && sessionID == strings.TrimSpace(clientRequestMetadata.SessionID) {
 		parentSessionID = strings.TrimSpace(clientRequestMetadata.ParentSessionID)
 	}
+	sessionID = coresession.NormalizeToCanonicalUUID(sessionID)
+	parentSessionID = coresession.NormalizeToCanonicalUUID(parentSessionID)
 	if sessionID == "" || sessionID == parentSessionID {
 		parentSessionID = ""
 	}
@@ -132,9 +136,13 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		RequestID:           requestID,
 		SessionID:           sessionID,
 		ParentSessionID:     parentSessionID,
+		NodeKind:            strings.TrimSpace(clientRequestMetadata.NodeKind),
+		IsFork:              clientRequestMetadata.IsFork,
+		IsCompaction:        clientRequestMetadata.IsCompaction,
 		ReasoningEffort:     reasoningEffort,
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
+		ResponseModel:       responseModel,
 	})
 	if err != nil {
 		return
@@ -156,9 +164,13 @@ type queuedUsageDetail struct {
 	RequestID           string                   `json:"request_id"`
 	SessionID           string                   `json:"session_id,omitempty"`
 	ParentSessionID     string                   `json:"parent_session_id,omitempty"`
+	NodeKind            string                   `json:"node_kind,omitempty"`
+	IsFork              bool                     `json:"is_fork,omitempty"`
+	IsCompaction        bool                     `json:"is_compaction,omitempty"`
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+	ResponseModel       string                   `json:"response_model,omitempty"`
 }
 
 type requestDetail struct {

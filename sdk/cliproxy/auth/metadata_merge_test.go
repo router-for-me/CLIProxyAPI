@@ -5,6 +5,33 @@ import (
 	"testing"
 )
 
+func TestMergeExistingAuthMetadataPreservesDisabledState(t *testing.T) {
+	target := &Auth{Metadata: map[string]any{"type": "claude"}}
+	MergeExistingAuthMetadata(target, map[string]any{"disabled": true, "prefix": "team"})
+
+	if !target.Disabled {
+		t.Fatal("Disabled = false, want true")
+	}
+	if disabled, _ := target.Metadata["disabled"].(bool); !disabled {
+		t.Fatalf("metadata disabled = %v, want true", target.Metadata["disabled"])
+	}
+	if target.Metadata["prefix"] != "team" {
+		t.Fatalf("prefix = %v, want team", target.Metadata["prefix"])
+	}
+}
+
+func TestMergeExistingAuthMetadataKeepsExplicitDisabledState(t *testing.T) {
+	target := &Auth{Metadata: map[string]any{"disabled": false}}
+	MergeExistingAuthMetadata(target, map[string]any{"disabled": true})
+
+	if target.Disabled {
+		t.Fatal("Disabled = true, want explicit false state")
+	}
+	if disabled, _ := target.Metadata["disabled"].(bool); disabled {
+		t.Fatalf("metadata disabled = %v, want false", target.Metadata["disabled"])
+	}
+}
+
 type dummyMetadataStorage struct {
 	meta map[string]any
 }
@@ -403,4 +430,19 @@ func TestMergeRefreshedAuth(t *testing.T) {
 			t.Fatalf("project_id = %q, want discovered-project", got)
 		}
 	})
+}
+
+func TestMergeExistingAuthMetadataMetaDoesNotRestoreOldKey(t *testing.T) {
+	// A new device login can succeed while API key minting fails.
+	// Its DCA credential must not inherit the previous login's API key.
+	auth := &Auth{Provider: "meta", Metadata: map[string]any{"access_token": "dca:new", "dca_token": "dca:new"}}
+	MergeExistingAuthMetadata(auth, map[string]any{"api_key": "LLM|old", "dca_expired": "old expiry", "dca_expires_at": 42, "priority": 3})
+	for _, key := range []string{"api_key", "dca_expired", "dca_expires_at"} {
+		if _, exists := auth.Metadata[key]; exists {
+			t.Fatalf("restored old Meta credential field %s", key)
+		}
+	}
+	if auth.Metadata["priority"] != 3 || auth.Metadata["dca_token"] != "dca:new" {
+		t.Fatalf("incorrect merged metadata: %#v", auth.Metadata)
+	}
 }

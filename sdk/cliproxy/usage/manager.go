@@ -21,6 +21,8 @@ const AutoServiceTier = "auto"
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	Provider string
+	// BaseURL stores the configured upstream base URL when available.
+	BaseURL string
 	// ExecutorType stores the concrete executor type that handled the request.
 	ExecutorType    string
 	Model           string
@@ -43,6 +45,8 @@ type Record struct {
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
+	// ResponseModel stores the model name reported by the upstream response, empty when unknown.
+	ResponseModel string
 	// Generate reports whether the client requested actual generation.
 	// nil or true means generation is enabled; only an explicit false disables generation.
 	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.

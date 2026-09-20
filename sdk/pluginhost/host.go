@@ -161,11 +161,11 @@ func (h *Host) HasAuthProvider(provider string) bool {
 }
 
 // StartLogin starts a provider login flow through an active auth-provider plugin.
-func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string) (pluginapi.AuthLoginStartResponse, bool, error) {
+func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string, metadata ...map[string]any) (pluginapi.AuthLoginStartResponse, bool, error) {
 	if h == nil || h.inner == nil {
 		return pluginapi.AuthLoginStartResponse{}, false, nil
 	}
-	return h.inner.StartLogin(ctx, provider, baseURL)
+	return h.inner.StartLogin(ctx, provider, baseURL, metadata...)
 }
 
 // PollLogin polls a provider login flow through an active auth-provider plugin.
@@ -195,6 +195,12 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 // HasScheduler reports whether any active plugin provides a scheduler.
 func (h *Host) HasScheduler() bool {
 	return h != nil && h.inner != nil && h.inner.HasScheduler()
+}
+
+// SchedulerWantsAcrossPriorities reports whether the active scheduler opted into receiving
+// candidates across all priority tiers.
+func (h *Host) SchedulerWantsAcrossPriorities() bool {
+	return h != nil && h.inner != nil && h.inner.SchedulerWantsAcrossPriorities()
 }
 
 // RegisteredPlugins returns active plugin metadata from the current runtime snapshot.

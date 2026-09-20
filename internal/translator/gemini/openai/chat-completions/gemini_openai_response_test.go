@@ -7,27 +7,27 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestConvertGeminiResponseToOpenAIIncludesZeroCompletionTokensWhenMissing(t *testing.T) {
+func TestConvertGeminiResponseToOpenAICompletionTokensIncludeThoughts(t *testing.T) {
 	var param any
-	chunk := []byte(`{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}`)
+	chunk := []byte(`{"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63}}`)
 
 	result := ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, chunk, &param)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(result))
 	}
 	completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
-	if !completionTokens.Exists() || completionTokens.Int() != 0 {
-		t.Fatalf("completion_tokens = %s, want present with value 0. Output: %s", completionTokens.Raw, result[0])
+	if !completionTokens.Exists() || completionTokens.Int() != 47 {
+		t.Fatalf("completion_tokens = %s, want present with value 47. Output: %s", completionTokens.Raw, result[0])
 	}
 }
 
-func TestConvertGeminiResponseToOpenAINonStreamIncludesZeroCompletionTokensWhenMissing(t *testing.T) {
+func TestConvertGeminiResponseToOpenAINonStreamCompletionTokensIncludeThoughts(t *testing.T) {
 	response := []byte(`{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}`)
 
 	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
 	completionTokens := gjson.GetBytes(result, "usage.completion_tokens")
-	if !completionTokens.Exists() || completionTokens.Int() != 0 {
-		t.Fatalf("completion_tokens = %s, want present with value 0. Output: %s", completionTokens.Raw, result)
+	if !completionTokens.Exists() || completionTokens.Int() != 42 {
+		t.Fatalf("completion_tokens = %s, want present with value 42. Output: %s", completionTokens.Raw, result)
 	}
 }
 
@@ -75,5 +75,54 @@ func TestConvertGeminiResponseToOpenAINonStream_EmptyTextProducesEmptyString(t *
 	reasoning := gjson.GetBytes(result, "choices.0.message.reasoning_content")
 	if !reasoning.Exists() || reasoning.String() != "" || reasoning.Type == gjson.Null {
 		t.Fatalf("expected reasoning_content to be empty string \"\", got %v (type %v)", reasoning.Value(), reasoning.Type)
+	}
+}
+
+// Gemini 3.5 Transcribe returns its transcript in an audioTranscription part instead
+// of the regular text part. Without handling it, the transcript is silently dropped
+// and the OpenAI client sees an empty assistant message.
+func TestConvertGeminiResponseToOpenAINonStream_AudioTranscriptionPartProducesContent(t *testing.T) {
+	response := []byte(`{"candidates":[{"content":{"parts":[{"text":""},{"audioTranscription":{"text":"Hello world"}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":185,"totalTokenCount":185}}`)
+	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
+
+	content := gjson.GetBytes(result, "choices.0.message.content")
+	if !content.Exists() || content.String() != "Hello world" {
+		t.Fatalf("expected content to carry the transcript, got %v. Output: %s", content.Raw, result)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAINonStream_SingleAudioTranscriptionPart(t *testing.T) {
+	response := []byte(`{"candidates":[{"content":{"parts":[{"audioTranscription":{"text":"Single transcription part"}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":185,"totalTokenCount":185}}`)
+	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
+
+	content := gjson.GetBytes(result, "choices.0.message.content")
+	if !content.Exists() || content.String() != "Single transcription part" {
+		t.Fatalf("expected content to carry the transcript, got %v. Output: %s", content.Raw, result)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAI_AudioTranscriptionPartStreamsContent(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	chunk := []byte(`{"candidates":[{"content":{"parts":[{"text":""},{"audioTranscription":{"text":"Testing one two three."}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":185,"candidatesTokenCount":8,"totalTokenCount":193}}`)
+	result := ConvertGeminiResponseToOpenAI(ctx, "model", nil, nil, chunk, &param)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result))
+	}
+
+	content := gjson.GetBytes(result[0], "choices.0.delta.content")
+	if !content.Exists() || content.String() != "Testing one two three." {
+		t.Fatalf("expected delta.content to carry the transcript, got %v. Output: %s", content.Raw, result[0])
+	}
+}
+
+func TestConvertGeminiResponseToOpenAINonStream_TextPrecedenceOverAudioTranscription(t *testing.T) {
+	response := []byte(`{"candidates":[{"content":{"parts":[{"text":"explicit text","audioTranscription":{"text":"ignored transcription"}}]},"finishReason":"STOP"}]}`)
+	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
+
+	content := gjson.GetBytes(result, "choices.0.message.content")
+	if !content.Exists() || content.String() != "explicit text" {
+		t.Fatalf("expected content to prioritize explicit text, got %v. Output: %s", content.Raw, result)
 	}
 }

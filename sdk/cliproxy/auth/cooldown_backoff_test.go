@@ -167,7 +167,7 @@ func TestRecoverableUnknownFailuresHaveFiniteCooldown(t *testing.T) {
 		resultErr *Error
 	}{
 		{name: "model failure without error details", model: "gpt-5"},
-		{name: "auth transport failure without status", resultErr: &Error{Message: "connection reset"}},
+		{name: "auth failure without status or transport signature", resultErr: &Error{Message: "upstream exploded"}},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

@@ -6,8 +6,10 @@
 package claude
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -44,7 +46,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream b
 }
 
 // ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
-// empty signatures for configured compatibility endpoints.
+// empty or unknown-format signatures for configured compatibility endpoints.
 func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
 	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true)
 }
@@ -163,6 +165,11 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 
 				rawSignature := part.Get("signature").String()
 				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
+				if !ok && preserveEmptyThinkingBlocks && part.Get("signature").Type == gjson.String && strings.TrimSpace(rawSignature) != "" &&
+					sigcompat.DetectSignatureProviderForBlock(rawSignature, sigcompat.SignatureBlockKindClaudeThinking) == sigcompat.SignatureProviderUnknown {
+					signature = rawSignature
+					ok = true
+				}
 				if !ok {
 					if preserveEmptyThinkingBlocks && strings.TrimSpace(rawSignature) == "" {
 						signature = rawSignature
@@ -663,55 +670,114 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 	return m
 }
 
-// normalizeToolParameters ensures object schemas contain at least an empty properties map.
+// normalizeToolParameters ensures object schemas contain at least an empty properties map,
+// strips dialect keywords ($schema, $id), and drops regex patterns containing unsupported
+// Unicode property escapes (\p{...} / \P{...}) that cause upstream schema validation failures.
 func normalizeToolParameters(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" || !gjson.Valid(raw) {
 		return `{"type":"object","properties":{}}`
 	}
-	result := gjson.Parse(raw)
-	schema := []byte(raw)
-	schemaType := result.Get("type").String()
-	if schemaType == "" {
-		schema, _ = sjson.SetBytes(schema, "type", "object")
-		schemaType = "object"
+	var root map[string]any
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if errDecode := decoder.Decode(&root); errDecode != nil || root == nil {
+		return `{"type":"object","properties":{}}`
 	}
-	if schemaType == "object" && !result.Get("properties").Exists() {
-		schema, _ = sjson.SetRawBytes(schema, "properties", []byte(`{}`))
+
+	stripDialectKeywordsFromSchema(root)
+
+	typeVal, typeExists := root["type"]
+	isObject := false
+	if !typeExists || typeVal == nil || typeVal == "" {
+		root["type"] = "object"
+		isObject = true
+	} else {
+		switch t := typeVal.(type) {
+		case string:
+			if t == "object" {
+				isObject = true
+			}
+		case []any:
+			for _, elem := range t {
+				if elemStr, ok := elem.(string); ok && elemStr == "object" {
+					isObject = true
+					break
+				}
+			}
+		}
 	}
-	return string(schema)
+	if isObject {
+		if props, ok := root["properties"]; !ok || props == nil {
+			root["properties"] = map[string]any{}
+		}
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if errEncode := enc.Encode(root); errEncode != nil {
+		return `{"type":"object","properties":{}}`
+	}
+	return strings.TrimSpace(buf.String())
 }
 
-// codexSchemaMapKeywords holds JSON Schema keywords whose values are maps of
-// subschemas; codexSchemaValueKeywords holds keywords with a single nested
-// schema or a list of schemas.
-var codexSchemaMapKeywords = [...]string{
-	"properties",
-	"$defs",
-	"definitions",
-	"patternProperties",
-	"dependentSchemas",
-	"dependencies",
+func stripDialectKeywordsFromSchema(v any) {
+	switch schema := v.(type) {
+	case map[string]any:
+		delete(schema, "$schema")
+		delete(schema, "$id")
+		if patternVal, ok := schema["pattern"].(string); ok && util.HasUnsupportedUnicodePropertyEscape(patternVal) {
+			delete(schema, "pattern")
+		}
+
+		// Inspect regex keys under patternProperties
+		if patternProps, ok := schema["patternProperties"].(map[string]any); ok {
+			for patternKey, subSchema := range patternProps {
+				if util.HasUnsupportedUnicodePropertyEscape(patternKey) {
+					delete(patternProps, patternKey)
+				} else {
+					stripDialectKeywordsFromSchema(subSchema)
+				}
+			}
+		}
+
+		for _, mapKey := range codexSchemaMapKeywords {
+			if mapKey == "patternProperties" {
+				continue
+			}
+			if subMap, ok := schema[mapKey].(map[string]any); ok {
+				for _, subSchema := range subMap {
+					stripDialectKeywordsFromSchema(subSchema)
+				}
+			}
+		}
+
+		for _, valKey := range codexSchemaValueKeywords {
+			if val, exists := schema[valKey]; exists {
+				switch sub := val.(type) {
+				case map[string]any:
+					stripDialectKeywordsFromSchema(sub)
+				case []any:
+					for _, item := range sub {
+						stripDialectKeywordsFromSchema(item)
+					}
+				}
+			}
+		}
+	case []any:
+		for _, item := range schema {
+			stripDialectKeywordsFromSchema(item)
+		}
+	}
 }
 
-var codexSchemaValueKeywords = [...]string{
-	"items",
-	"prefixItems",
-	"contains",
-	"additionalProperties",
-	"propertyNames",
-	"unevaluatedProperties",
-	"unevaluatedItems",
-	"additionalItems",
-	"contentSchema",
-	"anyOf",
-	"oneOf",
-	"allOf",
-	"not",
-	"if",
-	"then",
-	"else",
-}
+// codexSchemaMapKeywords and codexSchemaValueKeywords reference the unified JSON Schema keywords
+// declared in internal/util.
+var (
+	codexSchemaMapKeywords   = util.SchemaMapKeywords
+	codexSchemaValueKeywords = util.SchemaValueKeywords
+)
 
 // codexSchemaMissesRequired reports whether a JSON Schema has any declared
 // property missing from its sibling required list (recursively). OpenAI

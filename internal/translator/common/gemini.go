@@ -43,6 +43,7 @@ func MergeAdjacentGeminiContents(contents [][]byte) [][]byte {
 				for _, p := range partsResult.Array() {
 					combinedParts = append(combinedParts, []byte(p.Raw))
 				}
+				combinedParts = ReorderGeminiUserParts(combinedParts)
 				updated, err := sjson.SetRawBytes(lastJSON, "parts", JoinRawArray(combinedParts))
 				if err == nil {
 					merged[lastIndex] = updated
@@ -66,6 +67,39 @@ func ContentHasGeminiFunctionResponse(content []byte) bool {
 		return true
 	})
 	return hasFR
+}
+
+// ReorderGeminiUserParts reorders parts within a Gemini user turn so that
+// text parts (such as prompt text and system reminders) precede functionResponse
+// parts. This resolves upstream provider validation failures (such as Google Cloud
+// Vertex AI returning 400 "Requests ending with a model turn are not supported" when
+// functionResponse is followed by text in the same turn).
+func ReorderGeminiUserParts(parts [][]byte) [][]byte {
+	hasFR := false
+	hasTrailingText := false
+	for _, p := range parts {
+		isFR := gjson.GetBytes(p, "functionResponse").Exists() || gjson.GetBytes(p, "function_response").Exists()
+		if isFR {
+			hasFR = true
+		} else if hasFR && gjson.GetBytes(p, "text").Exists() {
+			hasTrailingText = true
+			break
+		}
+	}
+	if !hasFR || !hasTrailingText {
+		return parts
+	}
+
+	promptParts := make([][]byte, 0, len(parts))
+	toolParts := make([][]byte, 0, len(parts))
+	for _, p := range parts {
+		if gjson.GetBytes(p, "text").Exists() {
+			promptParts = append(promptParts, p)
+		} else {
+			toolParts = append(toolParts, p)
+		}
+	}
+	return append(promptParts, toolParts...)
 }
 
 // MergeAdjacentGeminiUserContents merges consecutive user Content turns,

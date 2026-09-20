@@ -81,10 +81,12 @@
 // bytes. The payload is an opaque upstream-issued blob and rejecting it drops
 // the whole thinking block, so only the fields that actually identify the format
 // are required: the 0x08 marker, the nested container/channel block, the
-// signature bytes, and the "claude-" model text. Observed-but-incidental values
-// such as channel_id 16 or the "thinking" block kind are recorded for debugging
-// and checked only for wire type, so an upstream field bump cannot silently
-// erase conversation history.
+// signature bytes, and (for EnvelopeVersion < 4) the "claude-" model text. Observed-but-incidental values
+// such as channel_id 16/17 are recorded for debugging.
+//
+// In EnvelopeVersion >= 4 (CAQS, e.g. claude-fable-5-1 / claude-fable-5-1-max),
+// signature bytes are located in Container Field 5 (Field 2.5), plaintext model_text
+// is omitted, and block kind supports both "thinking" and "narration".
 //
 // # Which provider emits which envelope
 //
@@ -637,6 +639,7 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 	info := &ClaudeCAISSignatureInfo{FirstByte: decoded[0]}
 
 	var container []byte
+	var containerSignatureBytes []byte
 	err = walkClaudeProtobufFields(decoded, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		switch num {
 		case 1:
@@ -667,14 +670,20 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 
 	var channelBlock []byte
 	err = walkClaudeProtobufFields(container, func(num protowire.Number, typ protowire.Type, raw []byte) error {
-		if num != 1 {
-			return nil
+		switch num {
+		case 1:
+			value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 1 channel block")
+			if errField != nil {
+				return errField
+			}
+			channelBlock = value
+		case 5:
+			value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 5 signature bytes")
+			if errField != nil {
+				return errField
+			}
+			containerSignatureBytes = value
 		}
-		value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 1 channel block")
-		if errField != nil {
-			return errField
-		}
-		channelBlock = value
 		return nil
 	})
 	if err != nil {
@@ -743,13 +752,19 @@ func InspectClaudeCAISSignature(rawSignature string) (*ClaudeCAISSignatureInfo, 
 	if err != nil {
 		return nil, err
 	}
+	if !haveSignatureBytes && info.EnvelopeVersion >= 4 && len(containerSignatureBytes) > 0 {
+		info.SignatureLen = len(containerSignatureBytes)
+		haveSignatureBytes = true
+	}
 	switch {
 	case !haveChannelID:
 		return nil, fmt.Errorf("invalid Claude CAIS signature: missing channel field 1 channel_id")
 	case !haveSignatureBytes:
-		return nil, fmt.Errorf("invalid Claude CAIS signature: missing channel field 5 signature bytes")
-	case !haveModelText:
+		return nil, fmt.Errorf("invalid Claude CAIS signature: missing signature bytes")
+	case !haveModelText && info.EnvelopeVersion < 4:
 		return nil, fmt.Errorf("invalid Claude CAIS signature: missing channel field 6 model_text")
+	case info.EnvelopeVersion >= 4 && info.BlockKind != "thinking" && info.BlockKind != "narration":
+		return nil, fmt.Errorf("invalid Claude CAQS signature: expected block kind \"thinking\" or \"narration\", got %q", info.BlockKind)
 	}
 
 	return info, nil

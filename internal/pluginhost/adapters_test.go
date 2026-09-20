@@ -2337,6 +2337,32 @@ func TestUsageAdapterNormalizesOmittedGenerateToTrue(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterPropagatesBaseURL(t *testing.T) {
+	var gotBaseURL string
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotBaseURL = record.BaseURL
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-base-url",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-base-url",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+		BaseURL:  "https://custom-proxy.example.com/v1",
+	})
+	if gotBaseURL != "https://custom-proxy.example.com/v1" {
+		t.Fatalf("plugin BaseURL = %q, want https://custom-proxy.example.com/v1", gotBaseURL)
+	}
+}
+
 func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	var gotGenerate bool
 	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
@@ -3288,7 +3314,7 @@ func setHostSnapshotForTest(host *Host, enabled bool, records ...capabilityRecor
 	sortRecords(records)
 	host.mu.Lock()
 	host.rebuildActivePluginMapsLocked(records)
-	host.snapshot.Store(&Snapshot{enabled: enabled, records: records})
+	host.snapshot.Store(&Snapshot{enabled: enabled, records: records, quotaSupportedProviders: make(map[string][]string)})
 	host.mu.Unlock()
 }
 

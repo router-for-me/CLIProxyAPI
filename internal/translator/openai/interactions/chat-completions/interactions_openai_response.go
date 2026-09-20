@@ -162,9 +162,8 @@ func appendOpenAIToolCallDelta(out [][]byte, st *openAIToInteractionsStreamState
 	stepName := st.ToolCallNames[index]
 	if st.CurrentStepType != "function_call" || st.CurrentStepID != stepID {
 		out = appendInteractionsStepStop(out, st)
-		step := []byte(`{"type":"function_call","id":"","call_id":"","name":"","arguments":{}}`)
+		step := []byte(`{"type":"function_call","id":"","name":"","arguments":{}}`)
 		step, _ = sjson.SetBytes(step, "id", stepID)
-		step, _ = sjson.SetBytes(step, "call_id", stepID)
 		step, _ = sjson.SetBytes(step, "name", stepName)
 		out = appendInteractionsCreated(out, st, modelName, root)
 		out = appendInteractionsStepStart(out, st, "function_call", gjson.ParseBytes(step))
@@ -218,11 +217,10 @@ func appendInteractionsStepStart(out [][]byte, st *openAIToInteractionsStreamSta
 	payload, _ = sjson.SetBytes(payload, "index", index)
 	payload, _ = sjson.SetBytes(payload, "step.type", stepType)
 	if stepType == "function_call" {
-		id := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), st.CurrentStepID)
+		id := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String(), st.CurrentStepID)
 		st.CurrentStepID = id
 		if id != "" {
 			payload, _ = sjson.SetBytes(payload, "step.id", id)
-			payload, _ = sjson.SetBytes(payload, "step.call_id", id)
 		}
 		payload, _ = sjson.SetBytes(payload, "step.name", step.Get("name").String())
 		payload, _ = sjson.SetRawBytes(payload, "step.arguments", []byte(`{}`))
@@ -340,7 +338,6 @@ func openAIToolCallToInteractionsStep(toolCall gjson.Result, forAntigravity bool
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
 	if id := toolCall.Get("id").String(); id != "" {
 		step, _ = sjson.SetBytes(step, "id", id)
-		step, _ = sjson.SetBytes(step, "call_id", id)
 	}
 	name := function.Get("name").String()
 	if forAntigravity {

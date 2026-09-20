@@ -46,7 +46,7 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 	}
 
 	message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String()
-	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
+	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + gptImage25FlareModel + ", " + gptImage25SunburstModel + ", " + gptImage25Model + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
 	if message != expectedMessage {
 		t.Fatalf("error message = %q, want %q", message, expectedMessage)
 	}
@@ -56,7 +56,24 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 }
 
 func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
-	for _, model := range []string{"gpt-image-1.5", "codex/gpt-image-1.5", "gpt-image-2", "codex/gpt-image-2", "grok-imagine-image", "xai/grok-imagine-image", "grok-imagine-image-quality", "xai/grok-imagine-image-quality", "grok-imagine-image-2.0", "xai/grok-imagine-image-2.0"} {
+	for _, model := range []string{
+		"gpt-image-1.5",
+		"codex/gpt-image-1.5",
+		"gpt-image-2",
+		"codex/gpt-image-2",
+		"gpt-image-2.5-flare",
+		"codex/gpt-image-2.5-flare",
+		"gpt-image-2.5-sunburst",
+		"codex/gpt-image-2.5-sunburst",
+		"gpt-image-2.5",
+		"codex/gpt-image-2.5",
+		"grok-imagine-image",
+		"xai/grok-imagine-image",
+		"grok-imagine-image-quality",
+		"xai/grok-imagine-image-quality",
+		"grok-imagine-image-2.0",
+		"xai/grok-imagine-image-2.0",
+	} {
 		if !isSupportedImagesModel(model) {
 			t.Fatalf("expected %s to be supported", model)
 		}
@@ -118,6 +135,76 @@ func TestBuildXAIImagesGenerationsRequest(t *testing.T) {
 	}
 	if got := gjson.GetBytes(req, "n").Int(); got != 2 {
 		t.Fatalf("n = %d, want 2", got)
+	}
+}
+
+func TestBuildXAIImagesGenerationsRequestNineByTwenty(t *testing.T) {
+	rawJSON := []byte(`{"model":"grok-imagine-image-quality","prompt":"kitten","aspect_ratio":"9:20","resolution":"2k","n":1,"response_format":"b64_json"}`)
+
+	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
+
+	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "9:20" {
+		t.Fatalf("aspect_ratio = %q, want 9:20", got)
+	}
+	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k", got)
+	}
+}
+
+func TestBuildXAIImagesGenerationsRequestNineByTwentyFromSize(t *testing.T) {
+	rawJSON := []byte(`{"model":"grok-imagine-image-quality","prompt":"kitten","size":"9:20","resolution":"2k"}`)
+
+	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
+
+	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "9:20" {
+		t.Fatalf("aspect_ratio from size = %q, want 9:20", got)
+	}
+	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k", got)
+	}
+}
+
+func TestBuildXAIImagesGenerationsRequestTwentyByNine(t *testing.T) {
+	rawJSON := []byte(`{"model":"grok-imagine-image-quality","prompt":"kitten","aspect_ratio":"20:9","resolution":"2k","n":1,"response_format":"b64_json"}`)
+
+	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
+
+	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "20:9" {
+		t.Fatalf("aspect_ratio = %q, want 20:9", got)
+	}
+	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k", got)
+	}
+}
+
+func TestBuildXAIImagesGenerationsRequestTwentyByNineFromSize(t *testing.T) {
+	rawJSON := []byte(`{"model":"grok-imagine-image-quality","prompt":"kitten","size":"20:9","resolution":"2k"}`)
+
+	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
+
+	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "20:9" {
+		t.Fatalf("aspect_ratio from size = %q, want 20:9", got)
+	}
+	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+		t.Fatalf("resolution = %q, want 2k", got)
+	}
+}
+
+func TestXAIImagesAspectRatioNineByTwenty(t *testing.T) {
+	if got := xaiImagesAspectRatio("9:20", "1:1"); got != "9:20" {
+		t.Fatalf("xaiImagesAspectRatio(9:20) = %q, want 9:20", got)
+	}
+	if got := xaiImagesAspectRatio("20:9", "1:1"); got != "20:9" {
+		t.Fatalf("xaiImagesAspectRatio(20:9) = %q, want 20:9", got)
+	}
+	if got := xaiImagesAspectRatio("9:21", "1:1"); got != "1:1" {
+		t.Fatalf("unknown ratio should keep fallback, got %q", got)
+	}
+	if got := xaiImagesAspectRatioFromSize("9:20", ""); got != "9:20" {
+		t.Fatalf("xaiImagesAspectRatioFromSize(9:20) = %q, want 9:20", got)
+	}
+	if got := xaiImagesAspectRatioFromSize("20:9", ""); got != "20:9" {
+		t.Fatalf("xaiImagesAspectRatioFromSize(20:9) = %q, want 20:9", got)
 	}
 }
 
