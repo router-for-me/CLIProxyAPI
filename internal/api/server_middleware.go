@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/billing"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
@@ -170,6 +171,14 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
+					userID := strings.TrimSpace(result.Metadata["user_id"])
+					tokenID := strings.TrimSpace(result.Metadata["token_id"])
+					if userID != "" || tokenID != "" {
+						if userID == "" {
+							userID = strings.TrimSpace(result.Principal)
+						}
+						billing.SetGinPrincipal(c, billing.Principal{UserID: userID, TokenID: tokenID, TeamID: strings.TrimSpace(result.Metadata["team_id"]), Provider: result.Provider})
+					}
 				}
 			}
 			c.Next()
