@@ -61,13 +61,16 @@ export async function fetchLiveStatus() {
   }
 }
 
-// coerceLiveStatusResponse returns an empty map when the response is
-// missing/null/malformed so the table + health page degrade identically.
-// Used by both surfaces to handle the "endpoint not yet shipped" case.
+// coerceLiveStatusResponse returns the id → entry rows map from the
+// /live-status payload ({ rows: {...}, as_of }) so callers can index
+// liveStatus[String(providerId)] directly. Returns an empty map when the
+// response is missing/null/malformed so the table + health page degrade
+// identically. Used by both surfaces to handle the "endpoint not yet
+// shipped" case.
 export function coerceLiveStatusResponse(json) {
   if (!json || typeof json !== 'object') return {};
   if (!json.rows || typeof json.rows !== 'object') return {};
-  return json;
+  return json.rows;
 }
 
 // fetchLiveProviderKeys queries the auth manager's runtime registry for

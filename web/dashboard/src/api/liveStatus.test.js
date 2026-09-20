@@ -1,6 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isProviderRowLive } from './liveStatus.js';
+import { coerceLiveStatusResponse, isProviderRowLive } from './liveStatus.js';
+
+test('coerceLiveStatusResponse: unwraps the rows envelope so consumers can index by provider id', () => {
+  // The Go handler returns { rows: { [id]: entry }, as_of } — consumers do
+  // liveStatus[String(row.id)], so the coerced value must BE the rows map.
+  const entry = { is_live: true, breaker_open: false };
+  const coerced = coerceLiveStatusResponse({ rows: { '49': entry }, as_of: '2026-09-20T00:00:00Z' });
+  assert.deepEqual(coerced, { '49': entry });
+  assert.equal(coerced['49'].is_live, true);
+});
+
+test('coerceLiveStatusResponse: degrades to empty map on malformed payloads', () => {
+  assert.deepEqual(coerceLiveStatusResponse(null), {});
+  assert.deepEqual(coerceLiveStatusResponse(undefined), {});
+  assert.deepEqual(coerceLiveStatusResponse('nope'), {});
+  assert.deepEqual(coerceLiveStatusResponse({}), {});
+  assert.deepEqual(coerceLiveStatusResponse({ rows: null }), {});
+  assert.deepEqual(coerceLiveStatusResponse({ rows: 'nope' }), {});
+});
 
 test('isProviderRowLive: empty row', () => {
   assert.equal(isProviderRowLive('', ['claude']), false);
