@@ -66,12 +66,12 @@ function OpenCodeGoModelListEditor({ rows, onChange }) {
           displayName: 'display name (optional)',
         }} />
       {safe.length > 0 && (
-        <div style={{ marginTop: 4, fontSize: 11 }} className="dim">
+        <div style={{ marginTop: 8, fontSize: 11 }} className="dim">
           Wire format per model (rows align top-to-bottom with the list above):
         </div>
       )}
       {safe.map((row, idx) => (
-        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
+        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
           <span className="dim" style={{ minWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {row?.name || '(unnamed)'}
           </span>
@@ -278,7 +278,7 @@ export function ModelsTab() {
           {providerType === 'opencode-go' && (
             <button
               type="button"
-              className="btn btn--primary"
+              className="primary"
               onClick={handleSaveAndSeed}
               disabled={saving || seedRunning}
               data-testid="models-save-and-seed"

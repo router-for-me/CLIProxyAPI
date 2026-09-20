@@ -211,7 +211,7 @@ function StatusDotColumn({ status, entryId, disabled }) {
   if (!status) {
     return (
       <span
-        className="inline-flex items-center text-xs text-zinc-500"
+        className="dim mono"
         title={label}
         aria-label={label}
         data-testid={`api-key-entry-status-${entryId}`}

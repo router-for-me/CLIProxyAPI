@@ -86,7 +86,7 @@ function EditorShell() {
   const title = state?.name || state?.label || state?.email || state?.file_name || 'Untitled';
 
   return (
-    <div className="main">
+    <div className="main upstream-editor">
       <header className="upstream-editor__header">
         <button
           type="button"
@@ -113,7 +113,7 @@ function EditorShell() {
           type="button"
           onClick={save}
           disabled={saving}
-          className="btn btn-primary"
+          className="primary"
         >
           {saving ? 'Saving…' : 'Save'}
         </button>

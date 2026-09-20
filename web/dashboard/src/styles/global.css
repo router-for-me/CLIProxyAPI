@@ -2189,7 +2189,7 @@ ul.list-bare li { padding: 4px 0; }
   flex-wrap: wrap;
   font-size: 11px;
 }
-.models-tab__footer .btn {
+.models-tab__footer .primary {
   font-size: 12px;
 }
 @media (max-width: 800px) {
@@ -2305,6 +2305,21 @@ select.has-error:focus {
 .list-editor__row--chip .chip-input {
   flex: 0 0 auto;
   min-width: 140px;
+}
+/* Entry row groups (provider Entries tab + create-mode entries editor): each
+   entry gets breathing room and a hairline separator so stacked entries don't
+   read as one dense block. Row + hint + inline errors stack with a small gap. */
+.list-editor__rowgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 2px;
+}
+.list-editor__rowgroup + .list-editor__rowgroup {
+  border-top: 1px solid var(--border);
+}
+.list-editor__rowhint {
+  line-height: 1.45;
 }
 .list-editor__remove {
   background: transparent;
@@ -3521,6 +3536,60 @@ button.ghost:hover:not(:disabled) {
 }
 .upstream-editor__title {
   margin: 2px 0 0;
+}
+
+/* Tab strip — segmented pill row between the sticky header and the tab body.
+   The six section links (TabBar.jsx) previously had no rules at all and
+   rendered as a run-on line of teal anchors with no active indicator. */
+.upstream-editor__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  margin: 0 0 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.upstream-editor__tab {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-decoration: none;
+  border-radius: calc(var(--radius) - 3px);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.upstream-editor__tab:hover {
+  color: var(--text);
+  background: var(--bg-card);
+}
+.upstream-editor__tab--active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.upstream-editor__tab--active:hover {
+  color: var(--accent-hover);
+}
+.upstream-editor__tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Editor-scoped section density. .form-section is shared with Manage-CPA and
+   other modals, so these tweaks are scoped to the editor column only: the
+   section title needed air below it (4px glued it to the first field when a
+   section has no hint), and multi-line hints read cramped at default leading. */
+.upstream-editor .form-section__title {
+  margin: 0 0 8px;
+}
+.upstream-editor .form-section__hint {
+  line-height: 1.5;
+}
+/* Inline code inside an 11px hint inherits the hint size instead of jumping
+   to .mono's fixed 12px. */
+.upstream-editor .form-section__hint .mono {
+  font-size: inherit;
 }
 
 /* Create-mode step 0: grouped card grid of provider types. Cards are

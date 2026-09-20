@@ -52,7 +52,7 @@ export function TestTab() {
           data-testid="test-tab-live-status"
           style={{ display: 'flex', alignItems: 'center', gap: 8 }}
         >
-          <div className="form-section__title" style={{ marginRight: 4 }}>Live status</div>
+          <div className="form-section__title" style={{ margin: 0, marginRight: 4 }}>Live status</div>
           {status ? (
             <StatusDot status={status} reason={liveEntry?.reason} />
           ) : (
