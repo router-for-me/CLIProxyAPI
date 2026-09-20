@@ -7,6 +7,9 @@
 
 set -euo pipefail
 
+# Local runs need the loopback OAuth callback ports from the local override.
+export COMPOSE_FILE="docker-compose.yml:local.yml"
+
 if [[ "${1:-}" != "" ]]; then
   echo "Error: unknown option '${1}'."
   echo "Usage: ./docker-build.sh"

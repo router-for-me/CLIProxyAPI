@@ -6,6 +6,9 @@
 # Stop script execution on any error
 $ErrorActionPreference = "Stop"
 
+# Local runs need the loopback OAuth callback ports from the local override.
+$env:COMPOSE_FILE = "docker-compose.yml;local.yml"
+
 # --- Step 1: Choose Environment ---
 Write-Host "Please select an option:"
 Write-Host "1) Run using Pre-built Image (Recommended)"

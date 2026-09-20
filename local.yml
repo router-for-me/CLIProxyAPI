@@ -1,0 +1,15 @@
+# Local override for running the container on the same machine as the browser.
+#
+#   docker compose -f docker-compose.yml -f local.yml up -d
+#
+# The web-UI login flows redirect the browser to a loopback callback
+# (http://127.0.0.1:<port>, see internal/api/handlers/management/auth_files_oauth_callback.go),
+# so those ports only need publishing when the browser and the server share a host.
+# On a remote server this adds public surface without making the login work:
+# use an SSH tunnel or copy the auth file instead.
+services:
+  cli-proxy-api:
+    ports:
+      - "1455:1455"     # Codex OAuth callback
+      - "54545:54545"   # Claude OAuth callback
+      - "51121:51121"   # Antigravity OAuth callback
