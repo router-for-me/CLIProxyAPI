@@ -29,7 +29,6 @@ import UpstreamProvidersPage from './pages/UpstreamProvidersPage.jsx';
 import HealthPage from './pages/upstream-providers/HealthPage.jsx';
 import ProxyPoolsPage from './pages/ProxyPoolsPage.jsx';
 import UpstreamProviderEditorPage from './pages/upstream-provider-editor/index.jsx';
-import { UpstreamDetailRedirect } from './pages/upstream-provider-editor/index.jsx';
 import UpstreamProviderEditorCreatePage from './pages/upstream-provider-editor/CreateMode.jsx';
 import UpstreamProviderOverviewTab from './pages/upstream-provider-editor/OverviewTab.jsx';
 import UpstreamProviderModelsTab from './pages/upstream-provider-editor/ModelsTab.jsx';
@@ -58,6 +57,52 @@ import { ToastProvider } from './components/Toast.jsx';
 import AlertsDropdown from './components/AlertsDropdown.jsx';
 
 const SIDEBAR_COLLAPSED_KEY = 'nixllm.sidebar.collapsed';
+
+// UPSTREAM_ROUTES is the /upstream-providers route subtree, kept at module
+// level (it closes over no component state) and rendered inside <Routes>.
+// It is exported so route-shape tests can exercise the REAL table used at
+// runtime with React Router's own conversion + matcher
+// (createRoutesFromChildren + matchRoutes), instead of a copy that could
+// drift from what ships.
+//
+// Shape contract (React Router 6): the tab segment must NOT live in the
+// parent path. Child paths are RELATIVE to the parent path, so a parent of
+// /upstream-providers/:id/:tab makes a static child 'models' only match the
+// unreachable URL /upstream-providers/:id/:tab/models. Real tab URLs then
+// match the parent's index route, whose <Navigate to="overview" replace />
+// bounced every tab click back to /overview. The parent therefore ends at
+// :id and each child declares its own tab segment — the same shape the
+// /manage-cpa layout uses.
+export const UPSTREAM_ROUTES = (
+  <>
+    <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
+    {/* /upstream-providers/new keeps the legacy single-form create flow
+        (type picker + form body) until OverviewTab lands in Task 3. The
+        /new route MUST be declared before the :id route so it wins on
+        route matching — React Router 6 matches in declaration order. */}
+    <Route path="/upstream-providers/new" element={<UpstreamProviderEditorCreatePage />} />
+    <Route path="/upstream-providers/health" element={<HealthPage />} />
+    {/* Bare /upstream-providers/:id (no tab segment) is handled by the
+        index child below, which redirects to the Overview tab. Do NOT add a
+        sibling <Route path="/upstream-providers/:id"> for a redirect: with
+        this tabbed route present, the matcher always prefers the branch
+        with children, so the sibling redirect is never reached — and a
+        static <Navigate to="/:id/..."> would interpolate nothing anyway. */}
+    <Route path="/upstream-providers/:id" element={<UpstreamProviderEditorPage />}>
+      <Route index element={<Navigate to="overview" replace />} />
+      <Route path="overview" element={<UpstreamProviderOverviewTab />} />
+      <Route path="models" element={<UpstreamProviderModelsTab />} />
+      <Route path="entries" element={<UpstreamProviderEntriesTab />} />
+      <Route path="quota" element={<UpstreamProviderQuotaTab />} />
+      <Route path="test" element={<UpstreamProviderTestTab />} />
+      <Route path="logs" element={<UpstreamProviderLogsTab />} />
+      {/* Catch-all for unknown tab segments: fall back to the Overview
+          tab. Keeps a stale bookmark from blowing up into a 404, and
+          matches the design doc's behaviour. */}
+      <Route path="*" element={<Navigate to="overview" replace />} />
+    </Route>
+  </>
+);
 
 // App is the root component and owns the auth session.
 //
@@ -303,32 +348,7 @@ export default function App() {
             <Route path="/api-tokens" element={<ApiTokensPage />} />
             <Route path="/api-tokens/:id" element={<ApiTokenDetailPage />} />
             <Route path="/developer" element={<DeveloperPage />} />
-            <Route path="/upstream-providers" element={<UpstreamProvidersPage />} />
-            {/* /upstream-providers/new keeps the legacy single-form create
-                flow (type picker + form body) until OverviewTab lands in
-                Task 3. The /new route MUST be declared before the :id
-                redirect so it wins on route matching — React Router 6
-                matches in declaration order. */}
-            <Route path="/upstream-providers/new" element={<UpstreamProviderEditorCreatePage />} />
-            <Route path="/upstream-providers/health" element={<HealthPage />} />
-            {/* The :id redirect must interpolate the real id — a static
-                <Navigate to="/:id/..."> does NOT interpolate params and
-                would match the tabbed route with the literal id ":id"
-                (server 400: "id must be a positive integer"). */}
-            <Route path="/upstream-providers/:id" element={<UpstreamDetailRedirect />} />
-            <Route path="/upstream-providers/:id/:tab" element={<UpstreamProviderEditorPage />}>
-              <Route index element={<Navigate to="overview" replace />} />
-              <Route path="overview" element={<UpstreamProviderOverviewTab />} />
-              <Route path="models" element={<UpstreamProviderModelsTab />} />
-              <Route path="entries" element={<UpstreamProviderEntriesTab />} />
-              <Route path="quota" element={<UpstreamProviderQuotaTab />} />
-              <Route path="test" element={<UpstreamProviderTestTab />} />
-              <Route path="logs" element={<UpstreamProviderLogsTab />} />
-              {/* Catch-all for unknown :tab segments: fall back to the
-                  Overview tab. Keeps a stale bookmark from blowing up into
-                  a 404, and matches the design doc's behaviour. */}
-              <Route path="*" element={<Navigate to="overview" replace />} />
-            </Route>
+            {UPSTREAM_ROUTES}
             <Route path="/proxy-pools" element={<ProxyPoolsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
             <Route path="/settings" element={<SettingsPage />} />

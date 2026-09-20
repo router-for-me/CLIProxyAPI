@@ -9,9 +9,12 @@
 // `/upstream-providers/:id/:tab`); the Overview tab is the default when
 // the parent route resolves to no segment.
 //
-// Each NavLink is `relative="path"` so a parent-route-relative link resolves
-// to `/upstream-providers/:id/<tab>` regardless of which :tab segment is
-// currently active (the parent route URL is `/upstream-providers/:id`).
+// Each NavLink targets an ABSOLUTE path built from the matched :id, not a
+// relative one. `to="../models" relative="path"` stripped the id segment and
+// emitted /upstream-providers/models: "path" relativity resolves against the
+// ROUTE that matched — here `/upstream-providers/:id` — so ".." consumed :id
+// instead of the tab segment. The absolute form keeps the link correct no
+// matter which tab is active.
 
 import React from 'react';
 import { NavLink, useParams } from 'react-router-dom';
@@ -27,7 +30,7 @@ const ALL_TABS = [
 ];
 
 export function TabBar({ providerType, isEntryBearing }) {
-  const { tab } = useParams();
+  const { id } = useParams();
   const isOpencodeGo = providerType === 'opencode-go';
   // OAuth providers are excluded by definition: the server's
   // /upstream-providers/:id/test endpoint expects a real entry credential,
@@ -47,10 +50,8 @@ export function TabBar({ providerType, isEntryBearing }) {
       {visibleTabs.map((t) => (
         <NavLink
           key={t.key}
-          to={`../${t.key}`}
-          relative="path"
+          to={`/upstream-providers/${id}/${t.key}`}
           className={({ isActive }) => `upstream-editor__tab ${isActive ? 'upstream-editor__tab--active' : ''}`}
-          aria-current={tab === t.key ? 'page' : undefined}
         >
           {t.label}
         </NavLink>
