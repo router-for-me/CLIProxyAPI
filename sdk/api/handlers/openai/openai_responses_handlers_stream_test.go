@@ -325,13 +325,14 @@ func TestForwardResponsesStreamErrorEventPreservesNestedError(t *testing.T) {
 	go func() {
 		data <- []byte("event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0}\n\n")
 		data <- []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"sequence_number\":1}\n\n")
-		close(data)
-
 		errText := `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber","param":null}}`
+		// Enqueue the terminal error before closing data, the ordering real producers guarantee:
+		// ForwardStream looks it up non-blockingly, so a later send races CloseError's fallback.
 		errs <- &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
 			Error:      errors.New(errText),
 		}
+		close(data)
 		close(errs)
 	}()
 
