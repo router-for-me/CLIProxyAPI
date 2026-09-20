@@ -146,13 +146,23 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		bootstrapStart = nowCodexBootstrap()
 	}
 
-	// The loop ends before the `go` statement and the goroutine is the sole writer after it,
-	// exactly as outputItemsByIndex below, so no lock is needed.
-	var incomplete codexIncompleteStreamDiagnostics
+	var diag codexIncompleteStreamDiagnostics
 	streamNow := codexStreamNowFunc()
-	// Seeded with the moment the response headers arrived, so an attempt whose upstream never
-	// sends anything reports the silence since then instead of a zero interval.
-	lastActivity := streamNow()
+	lastActivity := streamNow() // headers are in; an upstream that never speaks is silent from here
+
+	// observeLine feeds the incomplete-stream diagnostics. It runs before the grok keepalive
+	// transform so the counters describe what the upstream sent, not who was reading it; it is
+	// called by the loop below and then only by the goroutine, like outputItemsByIndex.
+	observeLine := func(line []byte) (data []byte, eventType string, isData bool) {
+		lastActivity = streamNow()
+		if !bytes.HasPrefix(line, dataTag) {
+			return nil, "", false
+		}
+		data = helps.RestoreCodexMultiAgentV2Response(bytes.TrimSpace(line[5:]), optimizeMultiAgentV2)
+		eventType = gjson.GetBytes(data, "type").String()
+		diag.observeDataFrame(eventType)
+		return data, eventType, true
+	}
 
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(nil, 52_428_800) // 50MB
@@ -193,26 +203,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if buffering {
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
-			// Every line read is a sign of life, including the event:/blank lines that frame an SSE
-			// event, so the interval is silence as the reader saw it and not an absence of frames. Time
-			// the goroutine spends blocked on downstream backpressure counts as silence too.
-			lastActivity = streamNow()
+			data, eventType, isDataFrame := observeLine(line)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
 			isHandshake := false
 			terminalSuccess := false
-
-			// Every data: frame is observed here, ahead of the grok keepalive transform below,
-			// because that transform is selected by the downstream user agent: the diagnostics
-			// must describe what the upstream sent, not who was reading it.
-			isDataFrame := bytes.HasPrefix(line, dataTag)
-			var data []byte
-			var eventType string
-			if isDataFrame {
-				data = helps.RestoreCodexMultiAgentV2Response(bytes.TrimSpace(line[5:]), optimizeMultiAgentV2)
-				eventType = gjson.GetBytes(data, "type").String()
-				incomplete.observeDataFrame(eventType)
-			}
 
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(translatedLine, isGrokClient); ok {
 				translatedLine = transformed
@@ -338,7 +333,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			streamErr := newCodexIncompleteStreamError(incomplete.withIdle(streamNow().Sub(lastActivity)))
+			streamErr := newCodexIncompleteStreamError(diag.withIdle(streamNow().Sub(lastActivity)))
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx, streamErr)
 			return nil, streamErr
@@ -378,22 +373,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}()
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
-			// Same as the buffering loop above: every line read refreshes the interval.
-			lastActivity = streamNow()
+			data, eventType, isDataFrame := observeLine(line)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
 			terminalSuccess := false
-
-			// Observed before the grok keepalive transform for the same reason as the buffering
-			// loop above: the counters must not depend on the downstream user agent.
-			isDataFrame := bytes.HasPrefix(line, dataTag)
-			var data []byte
-			var eventType string
-			if isDataFrame {
-				data = helps.RestoreCodexMultiAgentV2Response(bytes.TrimSpace(line[5:]), optimizeMultiAgentV2)
-				eventType = gjson.GetBytes(data, "type").String()
-				incomplete.observeDataFrame(eventType)
-			}
 
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(translatedLine, isGrokClient); ok {
 				translatedLine = transformed
@@ -472,7 +455,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 		}
-		streamErr := newCodexIncompleteStreamError(incomplete.withIdle(streamNow().Sub(lastActivity)))
+		streamErr := newCodexIncompleteStreamError(diag.withIdle(streamNow().Sub(lastActivity)))
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
 		select {

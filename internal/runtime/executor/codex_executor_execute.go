@@ -134,9 +134,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	sawOutputDelta := false
-	// Incomplete-stream diagnostics, tracked alongside the aggregation below. This path reads the
-	// whole body before parsing, so it has no per-frame arrival times and omits the idle interval.
-	var incomplete codexIncompleteStreamDiagnostics
+	// Incomplete-stream diagnostics; this path has no per-frame arrival times, so no idle interval.
+	var diag codexIncompleteStreamDiagnostics
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
@@ -146,7 +145,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventData = helps.RestoreCodexMultiAgentV2Response(eventData, optimizeMultiAgentV2)
 		reporter.ObserveCodexResponseModel(eventData)
 		eventType := gjson.GetBytes(eventData, "type").String()
-		incomplete.observeDataFrame(eventType)
+		diag.observeDataFrame(eventType)
 
 		if helps.HasMeaningfulCodexOutputDelta(eventData) {
 			sawOutputDelta = true
@@ -210,7 +209,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 	}
-	err = newCodexIncompleteStreamError(incomplete)
+	err = newCodexIncompleteStreamError(diag)
 	return resp, err
 }
 

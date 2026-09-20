@@ -15,22 +15,19 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// codexIncompleteStreamMessage is the invariant prefix of every incomplete-stream error;
-// shouldReleaseResponsesWebsocketPinnedAuth matches a substring of it, so diagnostics only append.
+// codexIncompleteStreamMessage is the invariant prefix; a downstream Contains match lives inside it, so diagnostics only append.
 const codexIncompleteStreamMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
 
-// codexIncompleteStreamDiagnostics records what an attempt observed before the upstream stream
-// ended. It holds no prompt or response content: an event type, a frame count and an interval.
+// codexIncompleteStreamDiagnostics records what an attempt saw before the stream ended: metadata, never content.
 type codexIncompleteStreamDiagnostics struct {
-	// lastEventType is the "type" of the last upstream event that carried one, or empty if no
-	// event carried a type. A frame whose JSON has no "type" counts but keeps the previous value.
+	// lastEventType is the "type" of the last upstream event that carried one, else empty.
 	lastEventType string
-	// dataFrames counts "data:" frames only, keepalives included. The event:/id:/blank lines that
-	// frame an SSE event refresh idle without counting as frames.
+	// dataFrames counts "data:" frames only, keepalives included; the event:/blank lines do not.
 	dataFrames int
-	// idle is how long the executor went without reading a line before the stream ended. It is nil
-	// on the non-stream path, which buffers the whole body and so has no per-frame arrival times.
-	idle *time.Duration
+	// idle is how long the executor went without reading a line before the stream ended.
+	idle time.Duration
+	// hasIdle is false on the non-stream path, which has no per-frame arrival times to measure.
+	hasIdle bool
 }
 
 // observeDataFrame counts one upstream "data:" frame and remembers its type when it carries one.
@@ -43,7 +40,8 @@ func (d *codexIncompleteStreamDiagnostics) observeDataFrame(eventType string) {
 
 // withIdle returns a copy that also reports how long the upstream was silent before it ended.
 func (d codexIncompleteStreamDiagnostics) withIdle(idle time.Duration) codexIncompleteStreamDiagnostics {
-	d.idle = &idle
+	d.idle = idle
+	d.hasIdle = true
 	return d
 }
 
@@ -53,17 +51,14 @@ func (d codexIncompleteStreamDiagnostics) message() string {
 	if lastEvent == "" {
 		lastEvent = "none"
 	}
-	if d.idle == nil {
-		return fmt.Sprintf("%s (last event: %s, data frames: %d)",
-			codexIncompleteStreamMessage, lastEvent, d.dataFrames)
+	suffix := fmt.Sprintf("last event: %s, data frames: %d", lastEvent, d.dataFrames)
+	if d.hasIdle {
+		suffix += ", silent for " + codexIncompleteStreamIdle(d.idle)
 	}
-	return fmt.Sprintf("%s (last event: %s, data frames: %d, silent for %s)",
-		codexIncompleteStreamMessage, lastEvent, d.dataFrames, codexIncompleteStreamIdle(*d.idle))
+	return codexIncompleteStreamMessage + " (" + suffix + ")"
 }
 
-// codexIncompleteStreamIdle renders an idle interval rounded to whole seconds, which bounds this
-// field's cardinality; the frame count is unbounded, so aggregate on the unchanged prefix.
-// Shorter or negative intervals render as "<1s", not an ambiguous "0s".
+// codexIncompleteStreamIdle rounds an idle interval to whole seconds; under a second renders "<1s".
 func codexIncompleteStreamIdle(idle time.Duration) string {
 	if idle < time.Second {
 		return "<1s"
@@ -527,17 +522,13 @@ func setCodexBootstrapNowForTest(fn func() time.Time) func() {
 	}
 }
 
-// codexStreamNowMu protects codexStreamNow across concurrent tests and goroutines. It is a second
-// hook rather than a reuse of codexBootstrapNow for two reasons: nowCodexBootstrap takes the
-// RLock on every call, so reading it per SSE line would move a lock into the read loop, and a
-// shared hook would let the bootstrap tests that install a mock clock move the idle interval too.
+// Second clock hook, separate from the bootstrap one: per-line callers resolve it once via
+// codexStreamNowFunc, and bootstrap tests that install a mock clock must not move this interval.
 var (
 	codexStreamNowMu sync.RWMutex
 	codexStreamNow   = time.Now
 )
 
-// codexStreamNowFunc reads the installed hook once, so a caller that reads the clock per SSE line
-// takes the guarding RWMutex once before its loop instead of on every frame.
 func codexStreamNowFunc() func() time.Time {
 	codexStreamNowMu.RLock()
 	fn := codexStreamNow
