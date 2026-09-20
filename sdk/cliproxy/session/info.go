@@ -55,18 +55,27 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 	}
 
-	var root gjson.Result
-	var reqRoot gjson.Result
+	var root sessionFieldIndex
+	var reqRoot sessionFieldIndex
 	var hasNestedReq bool
 	var parentCandidate string
+	var claudeSID, claudeParentSID, claudeAgentID string
+	var claudeParsed bool
+	claudeIdentities := func() (string, string, string) {
+		if !claudeParsed {
+			claudeSID, claudeParentSID, claudeAgentID = claudeMetadataIdentitiesFromFields(root, reqRoot, hasNestedReq)
+			claudeParsed = true
+		}
+		return claudeSID, claudeParentSID, claudeAgentID
+	}
 
 	if len(payload) > 0 {
-		root = util.ParseGJSONBytesNoCopy(payload)
+		root = indexSessionFields(util.ParseGJSONBytesNoCopy(payload))
 		reqRoot = root
 		req := root.Get("request")
 		hasNestedReq = req.Exists() && !root.Get("contents").Exists()
 		if hasNestedReq {
-			reqRoot = req
+			reqRoot = indexSessionFields(req)
 		}
 		for _, p := range []string{
 			// Standard session / thread parent keys
@@ -120,7 +129,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 		}
 		if parentCandidate == "" {
-			parentCandidate = ClaudeMetadataParentSessionID(payload)
+			_, parentCandidate, _ = claudeIdentities()
 		}
 	}
 
@@ -141,7 +150,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 		}
 		if agentID == "" {
-			_, _, agentID = ClaudeMetadataIdentities(payload)
+			_, _, agentID = claudeIdentities()
 		}
 		parentAgentID := sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id")
 		if parentAgentID == "" && root.Exists() {
@@ -178,7 +187,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 
 	// 2. Claude Code metadata.user_id in payload (outranks generic headers)
 	if len(payload) > 0 {
-		if sid, parentSID, agentID := ClaudeMetadataIdentities(payload); sid != "" {
+		if sid, parentSID, agentID := claudeIdentities(); sid != "" {
 			info.ClientType = "claude"
 			if agentID == "" {
 				agentID = sessionHeaderValue(headers, "X-Claude-Code-Agent-Id")
@@ -853,7 +862,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	return SessionInfo{}, false
 }
 
-func isBodyForkCandidate(root, reqRoot gjson.Result, hasNestedReq bool) bool {
+func isBodyForkCandidate(root, reqRoot sessionFieldIndex, hasNestedReq bool) bool {
 	if !root.Exists() {
 		return false
 	}

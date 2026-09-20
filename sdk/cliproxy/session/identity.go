@@ -156,6 +156,18 @@ func ClaudeMetadataIdentities(payload []byte) (sessionID, parentSessionID, agent
 			userID = strings.TrimSpace(req.Get("metadata.user_id").String())
 		}
 	}
+	return parseClaudeMetadataIdentities(userID, root.Get)
+}
+
+func claudeMetadataIdentitiesFromFields(root, reqRoot sessionFieldIndex, hasNestedReq bool) (sessionID, parentSessionID, agentID string) {
+	userID := strings.TrimSpace(root.Get("metadata.user_id").String())
+	if userID == "" && hasNestedReq {
+		userID = strings.TrimSpace(reqRoot.Get("metadata.user_id").String())
+	}
+	return parseClaudeMetadataIdentities(userID, root.Get)
+}
+
+func parseClaudeMetadataIdentities(userID string, lookup func(string) gjson.Result) (sessionID, parentSessionID, agentID string) {
 	if userID == "" {
 		return "", "", ""
 	}
@@ -177,16 +189,16 @@ func ClaudeMetadataIdentities(payload []byte) (sessionID, parentSessionID, agent
 	}
 	if matches := legacyClaudeSessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
 		sid := NormalizeExplicitID(matches[1])
-		pAgent := NormalizeExplicitID(root.Get("metadata.parent_agent_id").String())
+		pAgent := NormalizeExplicitID(lookup("metadata.parent_agent_id").String())
 		if pAgent == "" {
-			pAgent = NormalizeExplicitID(root.Get("metadata.parent_session_id").String())
+			pAgent = NormalizeExplicitID(lookup("metadata.parent_session_id").String())
 		}
 		if pAgent == "" {
-			pAgent = NormalizeExplicitID(root.Get("metadata.parent_id").String())
+			pAgent = NormalizeExplicitID(lookup("metadata.parent_id").String())
 		}
-		ag := NormalizeExplicitID(root.Get("metadata.agent_id").String())
+		ag := NormalizeExplicitID(lookup("metadata.agent_id").String())
 		if ag == "" {
-			ag = NormalizeExplicitID(root.Get("metadata.subagent_id").String())
+			ag = NormalizeExplicitID(lookup("metadata.subagent_id").String())
 		}
 		return sid, pAgent, ag
 	}
