@@ -272,7 +272,7 @@ func TestResolveClaudeDeviceProfileRequiredHomeNormalizesUnmeasuredCachedProfile
 	auth := &cliproxyauth.Auth{ID: "auth-1"}
 	key := claudeDeviceProfileKVKey(auth, "api-key", ClaudeDeviceProfile{})
 	client.values[key] = mustClaudeDeviceProfileJSON(t, claudeDeviceProfileKVValue{
-		UserAgent:      "claude-cli/2.4.0 (external, cli)",
+		UserAgent:      "claude-cli/2.1.100 (external, cli)",
 		PackageVersion: "0.90.0",
 		RuntimeVersion: "v24.5.0",
 		OS:             "Windows",
@@ -280,7 +280,9 @@ func TestResolveClaudeDeviceProfileRequiredHomeNormalizesUnmeasuredCachedProfile
 	})
 	useFakeClaudeDeviceProfileKVClient(t, client, true, nil)
 
-	profile, errProfile := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", claudeDeviceHeaders("claude-cli/2.3.0 (external, cli)"), nil)
+	// Both the cached profile and the incoming candidate sit BELOW the configured
+	// floor, so neither may replace the baseline.
+	profile, errProfile := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", claudeDeviceHeaders("claude-cli/2.1.99 (external, cli)"), nil)
 	if errProfile != nil {
 		t.Fatalf("ResolveClaudeDeviceProfileRequired() error = %v", errProfile)
 	}
