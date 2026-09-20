@@ -2,6 +2,8 @@ package helps
 
 import (
 	"bytes"
+	"strconv"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -80,29 +82,52 @@ func ensureUsageDetailsAt(jsonBody []byte, path string) []byte {
 		return jsonBody
 	}
 
-	outputDetails := usageNode.Get("output_tokens_details")
-	if !outputDetails.Exists() {
-		jsonBody, _ = sjson.SetBytes(jsonBody, path+".output_tokens_details.reasoning_tokens", 0)
-	} else if outputDetails.Type == gjson.Null || !outputDetails.IsObject() {
-		jsonBody, _ = sjson.SetRawBytes(jsonBody, path+".output_tokens_details", []byte(`{"reasoning_tokens":0}`))
-	} else {
-		reasoning := outputDetails.Get("reasoning_tokens")
-		if !reasoning.Exists() || reasoning.Type == gjson.Null {
-			jsonBody, _ = sjson.SetBytes(jsonBody, path+".output_tokens_details.reasoning_tokens", 0)
-		}
-	}
-
-	inputDetails := usageNode.Get("input_tokens_details")
-	if !inputDetails.Exists() {
-		jsonBody, _ = sjson.SetBytes(jsonBody, path+".input_tokens_details.cached_tokens", 0)
-	} else if inputDetails.Type == gjson.Null || !inputDetails.IsObject() {
-		jsonBody, _ = sjson.SetRawBytes(jsonBody, path+".input_tokens_details", []byte(`{"cached_tokens":0}`))
-	} else {
-		cached := inputDetails.Get("cached_tokens")
-		if !cached.Exists() || cached.Type == gjson.Null {
-			jsonBody, _ = sjson.SetBytes(jsonBody, path+".input_tokens_details.cached_tokens", 0)
-		}
-	}
-
+	jsonBody = ensureUsageCounter(jsonBody, usageNode, path, "output_tokens_details", "reasoning_tokens", "completion_tokens_details.reasoning_tokens")
+	jsonBody = ensureUsageCounter(jsonBody, usageNode, path, "input_tokens_details", "cached_tokens", "prompt_tokens_details.cached_tokens")
 	return jsonBody
+}
+
+func ensureUsageCounter(jsonBody []byte, usageNode gjson.Result, usagePath, detailsField, counterField, fallbackPath string) []byte {
+	details := usageNode.Get(detailsField)
+	if !details.Exists() || details.Type == gjson.Null || !details.IsObject() {
+		jsonBody, _ = sjson.SetBytes(jsonBody, usagePath+"."+detailsField+"."+counterField, usageCounterValue(gjson.Result{}, usageNode.Get(fallbackPath)))
+		return jsonBody
+	}
+	counter := details.Get(counterField)
+	if counter.Type == gjson.Number {
+		return jsonBody
+	}
+	jsonBody, _ = sjson.SetBytes(jsonBody, usagePath+"."+detailsField+"."+counterField, usageCounterValue(counter, usageNode.Get(fallbackPath)))
+	return jsonBody
+}
+
+func usageCounterValue(primary, fallback gjson.Result) int64 {
+	if n, ok := parseUsageCounter(primary); ok {
+		return n
+	}
+	if n, ok := parseUsageCounter(fallback); ok {
+		return n
+	}
+	return 0
+}
+
+func parseUsageCounter(node gjson.Result) (int64, bool) {
+	switch node.Type {
+	case gjson.Number:
+		return node.Int(), true
+	case gjson.String:
+		s := strings.TrimSpace(node.String())
+		if s == "" {
+			return 0, false
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n, true
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return int64(f), true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
 }
