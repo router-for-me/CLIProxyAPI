@@ -35,6 +35,7 @@ type staticModelsJSON struct {
 	XAI         []*ModelInfo `json:"xai"`
 	Devin       []*ModelInfo `json:"devin"`
 	Meta        []*ModelInfo `json:"meta"`
+	Mistral     []*ModelInfo `json:"mistral"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -504,6 +505,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetDevinModels()
 	case "meta", "muse":
 		return GetMetaModels()
+	case "mistral":
+		return GetMistralModels()
 	default:
 		return nil
 	}
@@ -522,6 +525,14 @@ func LookupStaticModelInfoByChannel(modelID, channel string) *ModelInfo {
 		}
 	}
 	return nil
+}
+
+// GetMistralModels returns the model definitions served for Mistral credentials
+// saved by the mistral-import command. Mistral is served through the
+// OpenAI-compatibility executor, so an openai-compatibility entry named
+// "mistral" in config.yaml overrides these definitions.
+func GetMistralModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Mistral)
 }
 
 // GetMetaModels returns the standard Meta Muse model definitions.
@@ -549,6 +560,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Devin,
 		staticDevinModels,
 		data.Meta,
+		data.Mistral,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

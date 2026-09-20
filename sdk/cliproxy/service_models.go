@@ -9,8 +9,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
@@ -272,10 +274,22 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 			if isCompatAuth {
 				models = s.appendPluginModels(providerKey, nil)
+				if len(models) == 0 && strings.EqualFold(compatName, util.MistralProvider) {
+					// Mistral auth files carry the API key directly, so they stay
+					// usable without an openai-compatibility entry in config.yaml.
+					// Declaring one named "mistral" overrides this default list.
+					models = defaultMistralCompatModels()
+				}
 				if len(models) > 0 {
 					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
 				} else {
 					// No matching provider found or models removed entirely; drop any prior registration.
+					if isMistralAuthFile(a) {
+						// Say why the credential serves nothing instead of dropping it
+						// silently: only compat_name "mistral" reads the catalog, and
+						// that catalog section can itself be missing or empty.
+						log.Warnf("mistral auth %s serves no models: no catalog models for compat_name %q and no same-named openai-compatibility entry in config.yaml", a.ID, compatName)
+					}
 					GlobalModelRegistry().UnregisterClient(a.ID)
 				}
 				return
@@ -785,7 +799,7 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		}
 		thinkingSupport := model.Thinking
 		if thinkingSupport == nil && !model.Image {
-			thinkingSupport = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+			thinkingSupport = defaultCompatThinkingSupport()
 		}
 		if model.Thinking != nil {
 			info.ExplicitThinking = true
@@ -931,6 +945,58 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		if displayName, ok := configuredDisplayNames[strings.ToLower(model.ID)]; ok {
 			model.DisplayName = displayName
 		}
+	}
+	return models
+}
+
+// isMistralAuthFile reports whether a was loaded from an auth file saved by the
+// mistral-import command.
+func isMistralAuthFile(a *coreauth.Auth) bool {
+	if a == nil || a.Metadata == nil {
+		return false
+	}
+	authType, _ := a.Metadata["type"].(string)
+	return strings.EqualFold(strings.TrimSpace(authType), util.MistralProvider)
+}
+
+// defaultCompatThinkingSupport is the thinking capability assumed for an
+// OpenAI-compatibility model that does not declare its own.
+func defaultCompatThinkingSupport() *registry.ThinkingSupport {
+	return &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+}
+
+// defaultMistralCompatModels returns the models served for a Mistral auth file
+// that has no matching openai-compatibility entry in config.yaml. Catalog
+// entries are registered as-is, like other catalog-backed providers, so any
+// metadata the catalog carries (description, context length, completion limit,
+// override headers) is kept. Only the defaults a hand-declared
+// openai-compatibility entry would get are filled in where the catalog is
+// silent. The catalog IDs are the upstream Mistral names, so no alias
+// resolution is required.
+func defaultMistralCompatModels() []*ModelInfo {
+	catalog := registry.GetMistralModels()
+	models := make([]*ModelInfo, 0, len(catalog))
+	for _, model := range catalog {
+		if model == nil || strings.TrimSpace(model.ID) == "" {
+			continue
+		}
+		if model.MetadataModelID == "" {
+			model.MetadataModelID = model.ID
+		}
+		if strings.TrimSpace(model.Type) == "" {
+			model.Type = "openai-compatibility"
+		}
+		if strings.TrimSpace(model.OwnedBy) == "" {
+			model.OwnedBy = util.MistralProvider
+		}
+		if model.Thinking == nil {
+			model.Thinking = defaultCompatThinkingSupport()
+		}
+		model.Thinking = modelconfig.NormalizeThinkingSupport(model.Thinking)
+		models = append(models, model)
+	}
+	if len(models) == 0 {
+		return nil
 	}
 	return models
 }

@@ -319,6 +319,41 @@ func modelRegistrationMaxWorkersForCategory(category string) int {
 	return modelRegistrationMaxWorkersPerCategory
 }
 
+// modelRefreshAffectsAuth reports whether a catalog change for one of the
+// changed providers affects auth's model registration.
+//
+// Catalog sections are named by provider (for example "mistral"), while an
+// OpenAI-compatibility auth is keyed by its internal provider key
+// ("openai-compatible-mistral"), so its compat name is matched as well. Only
+// non-config compat auths are matched that way: config-declared entries take
+// their models from config.yaml, never from the catalog, and re-registering
+// them would needlessly reset their registry state.
+func modelRefreshAffectsAuth(auth *coreauth.Auth, changedProviders map[string]bool) bool {
+	if auth == nil || len(changedProviders) == 0 {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if changedProviders[provider] {
+		return true
+	}
+	if auth.AuthSourceKind() == coreauth.AuthSourceConfig {
+		return false
+	}
+	compatName := ""
+	if auth.Attributes != nil {
+		compatName = auth.Attributes["compat_name"]
+	}
+	if strings.TrimSpace(compatName) == "" {
+		if strings.HasPrefix(provider, "openai-compatible-") {
+			compatName = strings.TrimPrefix(provider, "openai-compatible-")
+		} else if strings.HasPrefix(provider, "openai-compatibility:") {
+			compatName = strings.TrimPrefix(provider, "openai-compatibility:")
+		}
+	}
+	compatName = strings.ToLower(strings.TrimSpace(compatName))
+	return compatName != "" && changedProviders[compatName]
+}
+
 func (s *Service) registerModelRefreshCallback() {
 	// Register callback for startup and periodic model catalog refresh.
 	// When remote model definitions change, re-register models for affected providers.
@@ -346,8 +381,7 @@ func (s *Service) registerModelRefreshCallback() {
 			if !ok || auth == nil || auth.Disabled {
 				continue
 			}
-			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-			if !providerSet[provider] {
+			if !modelRefreshAffectsAuth(auth, providerSet) {
 				continue
 			}
 			authForRefresh := auth

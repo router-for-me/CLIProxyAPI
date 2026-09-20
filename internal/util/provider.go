@@ -14,6 +14,17 @@ import (
 
 const openAICompatibleProviderPrefix = "openai-compatible-"
 
+// Mistral credentials saved by the -mistral-import command are served through
+// the OpenAI-compatibility executor instead of a dedicated provider, so the
+// importer, the file synthesizer and the model registry share these values.
+const (
+	// MistralProvider is the auth file type, and the OpenAI-compatibility name
+	// a user can declare in config.yaml to override the imported model list.
+	MistralProvider = "mistral"
+	// MistralDefaultBaseURL is Mistral's OpenAI-compatible API endpoint.
+	MistralDefaultBaseURL = "https://api.mistral.ai/v1"
+)
+
 // OpenAICompatibleProviderKey returns the internal provider key for an OpenAI-compatible provider.
 func OpenAICompatibleProviderKey(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))

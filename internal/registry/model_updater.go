@@ -126,6 +126,12 @@ func tryRefreshModels(ctx context.Context, label string) {
 		parsed.Meta = oldData.Meta
 	}
 
+	// The remote catalog does not publish a mistral section yet; keep the
+	// embedded definitions instead of dropping the provider on refresh.
+	if len(parsed.Mistral) == 0 && oldData != nil && len(oldData.Mistral) > 0 {
+		parsed.Mistral = oldData.Mistral
+	}
+
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
 
@@ -223,6 +229,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"xai", oldData.XAI, newData.XAI},
 		{"devin", oldData.Devin, newData.Devin},
 		{"meta", oldData.Meta, newData.Meta},
+		{"mistral", oldData.Mistral, newData.Mistral},
 	}
 
 	seen := make(map[string]bool, len(sections))
@@ -350,6 +357,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
 		{name: "meta", models: data.Meta},
+		{name: "mistral", models: data.Mistral},
 	}
 
 	for _, section := range requiredSections {

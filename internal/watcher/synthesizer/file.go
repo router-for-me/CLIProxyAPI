@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -243,6 +244,30 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				}
 			}
 		}
+	}
+	// Mistral auth files hold a permanent API key written by the mistral-import
+	// command. They carry no OAuth material, so route them through the existing
+	// OpenAI-compatibility executor: resolve the same internal provider key a
+	// config-declared entry gets, and populate the attributes the executor's
+	// credential resolver reads.
+	if provider == util.MistralProvider {
+		if apiKey, _ := metadata["api_key"].(string); strings.TrimSpace(apiKey) != "" {
+			a.Attributes["api_key"] = strings.TrimSpace(apiKey)
+		}
+		baseURL, _ := metadata["base_url"].(string)
+		if strings.TrimSpace(baseURL) == "" {
+			baseURL = util.MistralDefaultBaseURL
+		}
+		a.Attributes["base_url"] = strings.TrimSpace(baseURL)
+		compatName, _ := metadata["compat_name"].(string)
+		if strings.TrimSpace(compatName) == "" {
+			compatName = util.MistralProvider
+		}
+		compatName = strings.TrimSpace(compatName)
+		a.Attributes["compat_name"] = compatName
+		providerKey := util.OpenAICompatibleProviderKey(compatName)
+		a.Attributes["provider_key"] = providerKey
+		a.Provider = providerKey
 	}
 	return []*coreauth.Auth{a}, nil
 }
