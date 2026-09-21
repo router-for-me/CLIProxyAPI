@@ -13,10 +13,46 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// ProxySource describes where the effective proxy for one execution came from.
+type ProxySource string
+
+const (
+	// ProxySourceRequest means a request-level override was used (plugin driven execution).
+	ProxySourceRequest ProxySource = "request"
+	// ProxySourceAuth means the credential specific proxy was used.
+	ProxySourceAuth ProxySource = "auth"
+	// ProxySourceGlobal means the global proxy configuration was used.
+	ProxySourceGlobal ProxySource = "global"
+	// ProxySourceNone means no proxy is configured for this execution.
+	ProxySourceNone ProxySource = "none"
+)
+
+// ResolveProxyURL returns the effective proxy URL for one execution:
+// 1. request-level override carried on ctx (highest priority)
+// 2. auth.ProxyURL
+// 3. cfg.ProxyURL
+func ResolveProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) (string, ProxySource) {
+	if override := proxyutil.Override(ctx); override != "" {
+		return override, ProxySourceRequest
+	}
+	if auth != nil {
+		if value := strings.TrimSpace(auth.ProxyURL); value != "" {
+			return value, ProxySourceAuth
+		}
+	}
+	if cfg != nil {
+		if value := strings.TrimSpace(cfg.ProxyURL); value != "" {
+			return value, ProxySourceGlobal
+		}
+	}
+	return "", ProxySourceNone
+}
+
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
-// 1. Use auth.ProxyURL if configured (highest priority)
-// 2. Use cfg.ProxyURL if auth proxy is not configured
-// 3. Use RoundTripper from context if neither are configured
+// 1. Use the request-level override from ctx if configured (highest priority)
+// 2. Use auth.ProxyURL if configured
+// 3. Use cfg.ProxyURL if auth proxy is not configured
+// 4. Use RoundTripper from context if none of the above are configured
 //
 // Parameters:
 //   - ctx: The context containing optional RoundTripper
@@ -32,15 +68,9 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
-	// Priority 1: Use auth.ProxyURL if configured
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-
-	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	proxyURL, source := ResolveProxyURL(ctx, cfg, auth)
+	if source == ProxySourceRequest {
+		log.Debugf("using request-level proxy override: %s", proxyutil.Redact(proxyURL))
 	}
 
 	// If we have a proxy URL configured, set up the transport
@@ -54,7 +84,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
 	}
 
-	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
+	// Priority 4: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
 	}
@@ -68,7 +98,8 @@ var devinTransportCache = NewTransportCache[string](DefaultTransportCacheCapacit
 // Suppresses automatic Accept-Encoding: gzip while preserving connection reuse across requests.
 func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	// Respect explicitly injected context RoundTripper (e.g. from Conductor, Home, or integration test fixtures)
-	if ctx != nil {
+	// unless a request-level proxy override is present.
+	if ctx != nil && proxyutil.Override(ctx) == "" {
 		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 			if tr, ok := rt.(*http.Transport); ok {
 				key := fmt.Sprintf("rt:%p", tr)
@@ -91,12 +122,7 @@ func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxya
 		}
 	}
 
-	proxyURL := ""
-	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	} else if cfg != nil && strings.TrimSpace(cfg.ProxyURL) != "" {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+	proxyURL, _ := ResolveProxyURL(ctx, cfg, auth)
 
 	tr, err := devinTransportCache.Get(proxyURL, func() (*http.Transport, error) {
 		var base *http.Transport

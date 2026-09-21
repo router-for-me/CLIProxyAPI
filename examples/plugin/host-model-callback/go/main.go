@@ -135,6 +135,7 @@ type managementBodyOptions struct {
 	Headers       http.Header     `json:"headers"`
 	Query         url.Values      `json:"query"`
 	Alt           string          `json:"alt"`
+	ProxyURL      string          `json:"proxy_url"`
 	ImplicitClose *bool           `json:"implicit_close"`
 }
 
@@ -154,6 +155,7 @@ type runOptions struct {
 	Headers        http.Header
 	Query          url.Values
 	Alt            string
+	ProxyURL       string
 	ImplicitClose  bool
 	HostCallbackID string
 }
@@ -355,6 +357,9 @@ func applyBodyOptions(opts *runOptions, raw []byte) error {
 	if bodyOpts.Alt != "" {
 		opts.Alt = bodyOpts.Alt
 	}
+	if proxyURL := strings.TrimSpace(bodyOpts.ProxyURL); proxyURL != "" {
+		opts.ProxyURL = proxyURL
+	}
 	if bodyOpts.ImplicitClose != nil {
 		opts.ImplicitClose = *bodyOpts.ImplicitClose
 	}
@@ -389,6 +394,9 @@ func applyQueryOptions(opts *runOptions, query url.Values) error {
 	}
 	if raw := strings.TrimSpace(query.Get("alt")); raw != "" {
 		opts.Alt = raw
+	}
+	if raw := strings.TrimSpace(query.Get("proxy_url")); raw != "" {
+		opts.ProxyURL = raw
 	}
 	if errStream := applyBoolQuery(query, "stream", &opts.Stream); errStream != nil {
 		return errStream
@@ -440,6 +448,7 @@ func executeOnce(opts runOptions) (pluginapi.HostModelExecutionResponse, error) 
 			Headers:       cloneHeader(opts.Headers),
 			Query:         cloneValues(opts.Query),
 			Alt:           opts.Alt,
+			ProxyURL:      opts.ProxyURL,
 		},
 		HostCallbackID: opts.HostCallbackID,
 	})
@@ -472,6 +481,7 @@ func executeStream(opts runOptions) (data streamPageData) {
 			Headers:       cloneHeader(opts.Headers),
 			Query:         cloneValues(opts.Query),
 			Alt:           opts.Alt,
+			ProxyURL:      opts.ProxyURL,
 		},
 		HostCallbackID: opts.HostCallbackID,
 	})
@@ -624,6 +634,7 @@ func renderPage(opts runOptions, status int, headers http.Header, body []byte, c
 	writeDefinition(&out, "entry_protocol", opts.EntryProtocol)
 	writeDefinition(&out, "exit_protocol", opts.ExitProtocol)
 	writeDefinition(&out, "stream", strconv.FormatBool(opts.Stream))
+	writeDefinition(&out, "proxy_url", opts.ProxyURL)
 	writeDefinition(&out, "implicit_close", strconv.FormatBool(opts.ImplicitClose))
 	if closeMode != "" {
 		writeDefinition(&out, "close", closeMode)

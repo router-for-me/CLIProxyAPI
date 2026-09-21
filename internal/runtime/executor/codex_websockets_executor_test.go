@@ -22,6 +22,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -2056,17 +2057,31 @@ func contextWithGinHeaders(headers map[string]string) context.Context {
 	return context.WithValue(context.Background(), "gin", ginCtx)
 }
 
-func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
+func TestNewProxyAwareWebsocketDialerProxyPriority(t *testing.T) {
 	t.Parallel()
 
-	dialer := newProxyAwareWebsocketDialer(
-		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
-		&cliproxyauth.Auth{ProxyURL: "direct"},
-	)
+	t.Run("auth direct overrides global proxy", func(t *testing.T) {
+		dialer := newProxyAwareWebsocketDialer(
+			context.Background(),
+			&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
+			&cliproxyauth.Auth{ProxyURL: "direct"},
+		)
+		if dialer.Proxy != nil {
+			t.Fatal("expected websocket proxy function to be nil for direct mode")
+		}
+	})
 
-	if dialer.Proxy != nil {
-		t.Fatal("expected websocket proxy function to be nil for direct mode")
-	}
+	t.Run("request override overrides auth proxy", func(t *testing.T) {
+		ctx := proxyutil.WithOverride(context.Background(), "http://request-proxy.example.com:8080")
+		dialer := newProxyAwareWebsocketDialer(
+			ctx,
+			&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
+			&cliproxyauth.Auth{ProxyURL: "direct"},
+		)
+		if dialer.Proxy == nil {
+			t.Fatal("expected websocket proxy function to use the request override")
+		}
+	})
 }
 
 func TestCodexWebsocketUpgradeRequiredDoesNotFallbackToHTTPWithLifecycle(t *testing.T) {

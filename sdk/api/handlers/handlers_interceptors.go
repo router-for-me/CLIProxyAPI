@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -284,6 +285,22 @@ func finalInterceptorHeaders(current, intercepted http.Header) http.Header {
 		return nil
 	}
 	return cloneHeader(intercepted)
+}
+
+// passthroughResponseHeaders reports whether upstream response headers should be
+// forwarded to the caller of an execution.
+//
+// The passthrough-headers setting is a client-facing option: API clients only
+// need the headers they ask for. A plugin host model callback is not an API
+// client. It runs inside the proxy and inspects upstream headers (turn-state,
+// quota, safety signals) to decide what to do next, so those executions always
+// receive the raw headers regardless of the client-facing setting.
+func passthroughResponseHeaders(cfg *config.SDKConfig, meta map[string]any) bool {
+	if PassthroughHeadersEnabled(cfg) {
+		return true
+	}
+	source, _ := meta[modelExecutionMetadataSourceKey].(string)
+	return source == modelExecutionInternalSource
 }
 
 func downstreamHeadersFromExecutor(headers http.Header, passthrough bool) http.Header {
@@ -594,7 +611,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 		StatusCode:      statusCode,
 		Metadata:        opts.Metadata,
 	}, skipPluginID)
-	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), PassthroughHeadersEnabled(h.Cfg))
+	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), passthroughResponseHeaders(h.Cfg, opts.Metadata))
 	if len(resp.Body) > 0 {
 		body = cloneBytes(resp.Body)
 	}

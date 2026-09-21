@@ -258,6 +258,7 @@ func TestHostModelExecuteCallback(t *testing.T) {
 			Headers:       http.Header{"X-Request": []string{"yes"}},
 			Query:         url.Values{"alt": []string{"sse"}},
 			Alt:           "raw",
+			ProxyURL:      "http://127.0.0.1:7902",
 		},
 	})
 	if errMarshal != nil {
@@ -292,6 +293,9 @@ func TestHostModelExecuteCallback(t *testing.T) {
 	}
 	if got.Alt != "raw" {
 		t.Fatalf("alt = %q, want raw", got.Alt)
+	}
+	if got.ProxyURL != "http://127.0.0.1:7902" {
+		t.Fatalf("proxy URL = %q, want callback proxy", got.ProxyURL)
 	}
 }
 

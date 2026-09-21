@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
@@ -179,6 +180,29 @@ func TestAntigravityPoolLimitsGuardsDefaultAndGFECutoff(t *testing.T) {
 	}
 
 	applyAntigravityPoolLimits(nil) // must not panic
+}
+
+func TestNewAntigravityHTTPClientUsesRequestProxyOverride(t *testing.T) {
+	ctx := proxyutil.WithOverride(context.Background(), "http://request-proxy.example.com:8080")
+	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}}
+	auth := antigravityAuthWithIDAndProxy("request-override", "http://auth-proxy.example.com:8080")
+
+	client := newAntigravityHTTPClient(ctx, cfg, auth, 0)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatalf("expected a usable *http.Transport, got %#v", client.Transport)
+	}
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest() error = %v", errRequest)
+	}
+	proxyURL, errProxy := transport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("transport.Proxy() error = %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://request-proxy.example.com:8080" {
+		t.Fatalf("transport.Proxy() = %v, want request override", proxyURL)
+	}
 }
 
 // TestNewAntigravityHTTPClientRejectsTypedNilContextTransport guards the fingerprint:

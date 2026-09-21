@@ -86,6 +86,7 @@ The default model ID is `gpt-5.5` to match the current nearby Codex example docu
 - `prompt`: text used to build the default OpenAI-compatible request body.
 - `body`: optional JSON string in the URL query used as the raw model request body. When `body` is provided, it replaces the generated body.
 - `alt`: optional alternate route or mode suffix passed through the host model request.
+- `proxy_url`: optional outbound proxy for the model request. Only `http`, `https`, `socks5`, and `socks5h` URLs are accepted. Credential refresh and token exchange requests continue to use the account or global proxy settings.
 - `implicit_close`: streaming-only boolean flag. The default is `false`.
 
 The generated default body is OpenAI-compatible:

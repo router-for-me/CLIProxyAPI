@@ -186,13 +186,14 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		Alt:            "chat",
 		ForcedProvider: "gemini",
 		AuthID:         "exact-auth-123",
+		ProxyURL:       "http://127.0.0.1:7902",
 	}
 	rawRequest, errMarshalRequest := json.Marshal(request)
 	if errMarshalRequest != nil {
 		t.Fatalf("marshal HostModelExecutionRequest: %v", errMarshalRequest)
 	}
 	requestJSON := string(rawRequest)
-	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt", "forced_provider", "auth_id"} {
+	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt", "forced_provider", "auth_id", "proxy_url"} {
 		if !strings.Contains(requestJSON, `"`+field+`"`) {
 			t.Fatalf("HostModelExecutionRequest JSON missing field %q: %s", field, requestJSON)
 		}
@@ -210,7 +211,8 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		decodedRequest.Query.Get("alt") != "beta" ||
 		decodedRequest.Alt != request.Alt ||
 		decodedRequest.ForcedProvider != request.ForcedProvider ||
-		decodedRequest.AuthID != request.AuthID {
+		decodedRequest.AuthID != request.AuthID ||
+		decodedRequest.ProxyURL != request.ProxyURL {
 		t.Fatalf("HostModelExecutionRequest round trip = %#v", decodedRequest)
 	}
 	if got := decodedRequest.Headers.Values("X-Test"); len(got) != 2 || got[1] != "two" {

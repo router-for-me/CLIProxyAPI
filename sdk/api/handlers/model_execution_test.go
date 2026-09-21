@@ -253,6 +253,71 @@ func TestExecuteModelCarriesEntryAndExitProtocols(t *testing.T) {
 	}
 }
 
+func TestExecuteModelRejectsUnsupportedProxyURL(t *testing.T) {
+	model := "model-execution-invalid-proxy-model"
+	tests := []struct {
+		name   string
+		stream bool
+	}{
+		{name: "non-stream"},
+		{name: "stream", stream: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := newModelExecutionHandler(t, model, &modelExecutionCaptureExecutor{}, &sdkconfig.SDKConfig{})
+			request := ModelExecutionRequest{
+				EntryProtocol: "openai",
+				ExitProtocol:  "openai",
+				Model:         model,
+				Stream:        tc.stream,
+				Body:          []byte(fmt.Sprintf(`{"model":%q}`, model)),
+				ProxyURL:      "direct",
+			}
+			if tc.stream {
+				_, errMsg := handler.ExecuteModelStream(context.Background(), request)
+				if errMsg == nil || errMsg.StatusCode != http.StatusBadRequest {
+					t.Fatalf("ExecuteModelStream() error = %+v, want status %d", errMsg, http.StatusBadRequest)
+				}
+				return
+			}
+			_, errMsg := handler.ExecuteModel(context.Background(), request)
+			if errMsg == nil || errMsg.StatusCode != http.StatusBadRequest {
+				t.Fatalf("ExecuteModel() error = %+v, want status %d", errMsg, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestExecuteModelKeepsUpstreamHeadersWithoutClientPassthrough(t *testing.T) {
+	model := "model-execution-internal-headers-model"
+	executor := &modelExecutionCaptureExecutor{
+		execute: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{
+				Payload: []byte("{\"ok\":true}"),
+				Headers: http.Header{
+					"X-Codex-Turn-State": []string{"internal-state"},
+					"X-Upstream":         []string{"nonstream"},
+				},
+			}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: false})
+
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol: "openai-response",
+		ExitProtocol:  "codex",
+		Model:         model,
+		Body:          []byte(fmt.Sprintf("{\"model\":%q}", model)),
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if resp.Headers.Get("X-Codex-Turn-State") != "internal-state" {
+		t.Fatalf("headers = %#v, want upstream turn-state for a host callback", resp.Headers)
+	}
+}
+
 func TestExecuteModelSkipsOriginatingPluginInterceptors(t *testing.T) {
 	model := "model-execution-skip-origin-model"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
@@ -436,7 +501,10 @@ func TestExecuteModelStreamStartupError(t *testing.T) {
 func TestExecuteModelStreamTerminalError(t *testing.T) {
 	model := "model-execution-stream-terminal-error-model"
 	requestBody := []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, model))
-	errorHeaders := http.Header{"X-Stream-Error": []string{"terminal"}}
+	errorHeaders := http.Header{
+		"X-Stream-Error": []string{"terminal"},
+		"Set-Cookie":     []string{"secret=1"},
+	}
 	executor := &modelExecutionCaptureExecutor{
 		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 			chunks := make(chan coreexecutor.StreamChunk, 2)
@@ -495,6 +563,9 @@ func TestExecuteModelStreamTerminalError(t *testing.T) {
 	}
 	if chunk.Err.Headers.Get("X-Stream-Error") != "terminal" {
 		t.Fatalf("terminal headers = %#v, want stream error header", chunk.Err.Headers)
+	}
+	if chunk.Err.Headers.Get("Set-Cookie") != "" {
+		t.Fatalf("terminal headers = %#v, want Set-Cookie filtered", chunk.Err.Headers)
 	}
 	if chunk, ok = <-stream.Chunks; ok {
 		t.Fatalf("unexpected extra stream chunk: %+v", chunk)

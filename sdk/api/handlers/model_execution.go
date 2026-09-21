@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	"golang.org/x/net/context"
 )
 
@@ -52,6 +55,8 @@ type ModelExecutionRequest struct {
 	SkipRouterPluginID      string
 	ForcedProvider          string
 	AuthID                  string
+	// ProxyURL optionally overrides the outbound proxy for this execution only.
+	ProxyURL string
 }
 
 // ModelExecutionResponse describes a non-streaming internal model execution response.
@@ -101,8 +106,15 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 	if req.Stream {
 		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteModel requires Stream=false")
 	}
+	proxyURL, proxyErr := resolveModelExecutionProxyURL(req.ProxyURL)
+	if proxyErr != nil {
+		return ModelExecutionResponse{}, proxyErr
+	}
 	if req.AuthID != "" {
 		ctx = WithPinnedAuthID(ctx, req.AuthID)
+	}
+	if proxyURL != "" {
+		ctx = proxyutil.WithOverride(ctx, proxyURL)
 	}
 	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
 		Headers:                 req.Headers,
@@ -131,8 +143,15 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteModelStream requires Stream=true")
 	}
+	proxyURL, proxyErr := resolveModelExecutionProxyURL(req.ProxyURL)
+	if proxyErr != nil {
+		return ModelExecutionStream{}, proxyErr
+	}
 	if req.AuthID != "" {
 		ctx = WithPinnedAuthID(ctx, req.AuthID)
+	}
+	if proxyURL != "" {
+		ctx = proxyutil.WithOverride(ctx, proxyURL)
 	}
 	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
 		Headers:                 req.Headers,
@@ -319,6 +338,21 @@ func wrapModelExecutionChunks(ctx context.Context, dataChan <-chan []byte, errCh
 	return chunks
 }
 
+func resolveModelExecutionProxyURL(raw string) (string, *interfaces.ErrorMessage) {
+	proxyURL := strings.TrimSpace(raw)
+	if proxyURL == "" {
+		return "", nil
+	}
+	setting, errParse := proxyutil.Parse(proxyURL)
+	if errParse != nil || setting.Mode != proxyutil.ModeProxy {
+		return "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("unsupported proxy_url: %s", proxyutil.Redact(proxyURL)),
+		}
+	}
+	return proxyURL, nil
+}
+
 func modelExecutionStreamErrorFromMessage(errMsg *interfaces.ErrorMessage) *ModelExecutionStreamError {
 	if errMsg == nil {
 		return nil
@@ -330,7 +364,7 @@ func modelExecutionStreamErrorFromMessage(errMsg *interfaces.ErrorMessage) *Mode
 	return &ModelExecutionStreamError{
 		StatusCode: errMsg.StatusCode,
 		Message:    message,
-		Headers:    cloneHeader(errMsg.Addon),
+		Headers:    FilterUpstreamHeaders(errMsg.Addon),
 	}
 }
 

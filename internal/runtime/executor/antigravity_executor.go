@@ -439,7 +439,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	// Native Antigravity reuses one transport across requests. Opt into a
 	// credential-scoped proxy transport only here so other providers keep their
 	// existing lifecycle and different OAuth identities remain isolated.
-	if proxyURL := antigravityProxyURL(cfg, auth); proxyURL != "" {
+	if proxyURL, _ := helps.ResolveProxyURL(ctx, cfg, auth); proxyURL != "" {
 		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL, cfg); transport != nil {
 			return &http.Client{Transport: transport, Timeout: timeout}
 		}
@@ -470,18 +470,6 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	}
 	client.Transport = antigravityHTTP11Transport(auth, transport, cfg)
 	return client
-}
-
-func antigravityProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
-	if auth != nil {
-		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
-			return proxyURL
-		}
-	}
-	if cfg != nil {
-		return strings.TrimSpace(cfg.ProxyURL)
-	}
-	return ""
 }
 
 func sanitizeAntigravityGeminiRequestSignatures(modelName string, rawJSON []byte) []byte {

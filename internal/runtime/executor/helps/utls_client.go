@@ -367,12 +367,9 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
 // fallback for other hosts.
 func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	proxyURL, source := ResolveProxyURL(ctx, cfg, auth)
+	if source == ProxySourceRequest {
+		log.Debugf("using request-level proxy override: %s", proxyutil.Redact(proxyURL))
 	}
 
 	var ctxRoundTripper http.RoundTripper

@@ -629,6 +629,12 @@ type HostModelExecutionRequest struct {
 	ForcedProvider string `json:"forced_provider,omitempty"`
 	// AuthID optionally locks execution to an exact credential ID.
 	AuthID string `json:"auth_id,omitempty"`
+	// ProxyURL optionally overrides the outbound proxy for this model request.
+	//
+	// Priority is request > auth proxy > global proxy. Only http, https, socks5
+	// and socks5h are accepted; anything else is rejected by the host. The
+	// override does not apply to credential refresh or token exchange requests.
+	ProxyURL string `json:"proxy_url,omitempty"`
 }
 
 // HostModelExecutionResponse describes a non-streaming host model execution response.
