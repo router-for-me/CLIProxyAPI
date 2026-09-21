@@ -42,6 +42,12 @@ type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
 }
 
+// AuthExecutionSessionCloser allows executors to release only the sessions owned by
+// a removed auth without interrupting other auths sharing the provider executor.
+type AuthExecutionSessionCloser interface {
+	CloseExecutionSessionsForAuth(authID string)
+}
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.

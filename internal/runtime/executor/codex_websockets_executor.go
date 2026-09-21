@@ -104,6 +104,13 @@ func (e *CodexAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	return e.httpExec.CountTokens(ctx, auth, req, opts)
 }
 
+// CloseExecutionSessionsForAuth releases sessions belonging to a removed auth.
+func (e *CodexAutoExecutor) CloseExecutionSessionsForAuth(authID string) {
+	if e != nil && e.wsExec != nil {
+		e.wsExec.CloseExecutionSessionsForAuth(authID)
+	}
+}
+
 func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
 	if e == nil || e.wsExec == nil {
 		return

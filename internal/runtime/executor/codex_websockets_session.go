@@ -770,6 +770,13 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	}
 }
 
+// CloseExecutionSessionsForAuth releases sessions belonging to a removed auth.
+func (e *CodexWebsocketsExecutor) CloseExecutionSessionsForAuth(authID string) {
+	if e != nil {
+		CloseCodexWebsocketSessionsForAuthID(authID, "auth_removed")
+	}
+}
+
 func (e *CodexWebsocketsExecutor) CloseExecutionSession(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if e == nil {
