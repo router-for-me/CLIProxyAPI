@@ -61,6 +61,21 @@
       ]
     },
     {
+      "id": "swe-1-6-slow",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "cognition",
+      "display_name": "SWE-1.6 Slow",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "glm-5-2",
       "object": "model",
       "type": "devin",

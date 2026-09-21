@@ -24,6 +24,7 @@ func TestResolveResponsesWebSearchCapability(t *testing.T) {
 		{name: "supported codex", routes: []NativeCapabilityRoute{{Provider: "codex", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
 		{name: "supported xai", routes: []NativeCapabilityRoute{{Provider: "xai", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
 		{name: "supported claude", routes: []NativeCapabilityRoute{{Provider: "claude", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
+		{name: "supported antigravity", routes: []NativeCapabilityRoute{{Provider: "antigravity", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: true, present: true},
 		{name: "explicit unsupported model", routes: []NativeCapabilityRoute{{Provider: "codex", NativeCapabilities: testNativeCapabilities(&falseValue)}}, want: false, present: true},
 		{name: "unsupported provider path", routes: []NativeCapabilityRoute{{Provider: "gemini", NativeCapabilities: testNativeCapabilities(&trueValue)}}, want: false, present: true},
 		{name: "unknown metadata", routes: []NativeCapabilityRoute{{Provider: "codex"}}, present: false},

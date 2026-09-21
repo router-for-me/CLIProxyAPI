@@ -325,13 +325,13 @@ func TestForwardResponsesStreamErrorEventPreservesNestedError(t *testing.T) {
 	go func() {
 		data <- []byte("event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0}\n\n")
 		data <- []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"sequence_number\":1}\n\n")
-		close(data)
 
 		errText := `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber","param":null}}`
 		errs <- &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
 			Error:      errors.New(errText),
 		}
+		close(data)
 		close(errs)
 	}()
 
@@ -426,12 +426,12 @@ func TestForwardResponsesStreamErrorEventPreservesExplicitSequenceNumber(t *test
 	errs := make(chan *interfaces.ErrorMessage, 1)
 
 	go func() {
-		close(data)
 		errText := `{"error":{"type":"invalid_request","code":"custom"},"sequence_number":9}`
 		errs <- &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
 			Error:      errors.New(errText),
 		}
+		close(data)
 		close(errs)
 	}()
 

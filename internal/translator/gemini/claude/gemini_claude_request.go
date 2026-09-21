@@ -239,12 +239,16 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 	}
 
 	// tools
+	var toolItems [][]byte
+	hasStrictTool := false
 	if toolsResult := gjson.GetBytes(rawJSON, "tools"); toolsResult.IsArray() {
-		var toolItems [][]byte
 		toolsResult.ForEach(func(_, toolResult gjson.Result) bool {
+			if toolResult.Get("strict").Type == gjson.True {
+				hasStrictTool = true
+			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
-				inputSchema := util.CleanJSONSchemaForGemini(inputSchemaResult.Raw)
+				inputSchema := util.CleanJSONSchemaForGeminiJSONSchema(inputSchemaResult.Raw)
 				tool := []byte(toolResult.Raw)
 				var err error
 				tool, err = sjson.DeleteBytes(tool, "input_schema")
@@ -281,7 +285,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 
 	// tool_choice
 	toolChoiceResult := gjson.GetBytes(rawJSON, "tool_choice")
-	if toolChoiceResult.Exists() {
+	if toolChoiceResult.Exists() && toolChoiceResult.Type != gjson.Null {
 		toolChoiceType := ""
 		toolChoiceName := ""
 		if toolChoiceResult.IsObject() {
@@ -293,7 +297,11 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 
 		switch toolChoiceType {
 		case "auto":
-			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "AUTO")
+			if hasStrictTool {
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "VALIDATED")
+			} else {
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "AUTO")
+			}
 		case "none":
 			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "NONE")
 		case "any":
@@ -304,6 +312,8 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)})
 			}
 		}
+	} else if hasStrictTool && len(toolItems) > 0 {
+		out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "VALIDATED")
 	}
 
 	// Map Anthropic thinking -> Gemini thinking config when enabled

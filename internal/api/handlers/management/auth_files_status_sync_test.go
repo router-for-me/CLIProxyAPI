@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -87,6 +89,118 @@ func TestPatchAuthFileStatusInvokesPostAuthPersistHook(t *testing.T) {
 	}
 	if hookCalls[1].Disabled {
 		t.Fatalf("expected second hook call auth to be enabled, got %+v", hookCalls[1])
+	}
+}
+
+func TestPatchAuthFileStatusDoesNotHoldLockAcrossPersistHook(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, fileName := range []string{"codex-status-a.json", "codex-status-b.json"} {
+		filePath := filepath.Join(authDir, fileName)
+		if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","disabled":false}`), 0o600); errWrite != nil {
+			t.Fatalf("write auth file %s: %v", fileName, errWrite)
+		}
+		auth := &coreauth.Auth{
+			ID:       fileName,
+			FileName: fileName,
+			Provider: "codex",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"path": filePath,
+			},
+		}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", fileName, errRegister)
+		}
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	hookStarted := make(chan struct{})
+	unblock := make(chan struct{})
+	var hookMu sync.Mutex
+	hookCalls := 0
+	h.SetPostAuthPersistHook(func(_ context.Context, _ *coreauth.Auth) error {
+		hookMu.Lock()
+		hookCalls++
+		n := hookCalls
+		hookMu.Unlock()
+		if n == 1 {
+			close(hookStarted)
+			<-unblock
+		}
+		return nil
+	})
+
+	var codeA int
+	finishedA := make(chan struct{})
+	go func() {
+		defer close(finishedA)
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(`{"name":"codex-status-a.json","disabled":true}`))
+		req.Header.Set("Content-Type", "application/json")
+		ctx.Request = req
+		h.PatchAuthFileStatus(ctx)
+		codeA = rec.Code
+	}()
+
+	var releaseOnce sync.Once
+	releaseHook := func() {
+		releaseOnce.Do(func() {
+			close(unblock)
+		})
+	}
+	t.Cleanup(func() {
+		releaseHook()
+		select {
+		case <-finishedA:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	select {
+	case <-hookStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first persist hook did not start")
+	}
+
+	doneB := make(chan struct {
+		code int
+		body string
+	}, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(`{"name":"codex-status-b.json","disabled":true}`))
+		req.Header.Set("Content-Type", "application/json")
+		ctx.Request = req
+		h.PatchAuthFileStatus(ctx)
+		doneB <- struct {
+			code int
+			body string
+		}{code: rec.Code, body: rec.Body.String()}
+	}()
+
+	select {
+	case got := <-doneB:
+		if got.code != http.StatusOK {
+			t.Fatalf("second PATCH status = %d, want %d body=%s", got.code, http.StatusOK, got.body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second PATCH blocked by authStatusMu held across persist hook")
+	}
+
+	releaseHook()
+	select {
+	case <-finishedA:
+		if codeA != http.StatusOK {
+			t.Fatalf("first PATCH status = %d, want %d", codeA, http.StatusOK)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first PATCH did not finish after hook was unblocked")
 	}
 }
 

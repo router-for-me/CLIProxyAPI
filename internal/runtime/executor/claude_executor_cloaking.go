@@ -694,7 +694,7 @@ func claudeCallerSystemReminder(text string) string {
 }
 
 // claudeHistoryHasAdvisorCallOrResult reports whether messages contains an advisor
-// tool invocation (server_tool_use / tool_use) or advisor result (advisor_tool_result /
+// tool invocation (server_tool_use) or advisor result (advisor_tool_result /
 // advisor_redacted_result). Anthropic cryptographically binds the encrypted
 // advisor result to the conversation layout; any mid-conversation system splice
 // shifts message indices and causes upstream 400 errors.
@@ -711,7 +711,7 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 				switch blockType {
 				case "advisor_tool_result", "advisor_redacted_result":
 					return true
-				case "server_tool_use", "tool_use":
+				case "server_tool_use":
 					if block.Get("name").String() == "advisor" {
 						return true
 					}

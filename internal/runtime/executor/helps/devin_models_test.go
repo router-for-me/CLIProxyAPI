@@ -392,6 +392,30 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:          "swe-1-6-fast",
 		},
 		{
+			name:          "swe-1-6-slow default maps to swe-1-6-slow",
+			rawModel:      "devin/swe-1-6-slow",
+			thinkingLevel: "",
+			want:          "swe-1-6-slow",
+		},
+		{
+			name:          "swe-1-6-slow without prefix maps to swe-1-6-slow",
+			rawModel:      "swe-1-6-slow",
+			thinkingLevel: "",
+			want:          "swe-1-6-slow",
+		},
+		{
+			name:          "swe-1-6-slow with low maps to swe-1-6-slow",
+			rawModel:      "devin/swe-1-6-slow:low",
+			thinkingLevel: "",
+			want:          "swe-1-6-slow",
+		},
+		{
+			name:          "swe-1-6-slow with high maps to swe-1-6-slow",
+			rawModel:      "devin/swe-1-6-slow:high",
+			thinkingLevel: "",
+			want:          "swe-1-6-slow",
+		},
+		{
 			name:          "kimi-k2-6 default maps to kimi-k2-6",
 			rawModel:      "devin/kimi-k2-6",
 			thinkingLevel: "",
@@ -443,7 +467,7 @@ func TestResolveDevinChatModelUID_AllCatalogModels(t *testing.T) {
 			}
 			// If model defines thinking levels, resolved UID must have an effort suffix
 			if m.Thinking != nil && len(m.Thinking.Levels) > 0 {
-				if !HasDevinEffortSuffix(resolved) && baseID != "swe-1-7" && baseID != "glm-5-2" {
+				if !HasDevinEffortSuffix(resolved) && baseID != "swe-1-7" && baseID != "glm-5-2" && baseID != "swe-1-6-slow" {
 					t.Errorf("thinking model %q with effort %q resolved to bare UID %q without effort suffix", baseID, eff, resolved)
 				}
 			}

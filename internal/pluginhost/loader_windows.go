@@ -11,12 +11,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"golang.org/x/sys/windows"
 )
 
@@ -290,6 +292,8 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 		uintptr(len(request)),
 		responseMem,
 	)
+	runtime.KeepAlive(methodBytes)
+	runtime.KeepAlive(request)
 	var out []byte
 	if response.ptr != 0 && response.len > 0 {
 		out = unsafe.Slice((*byte)(unsafe.Pointer(response.ptr)), response.len)
@@ -366,7 +370,7 @@ func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, req
 	ctx := withHostCallbackPluginID(context.Background(), entry.pluginID)
 	resp, errCall := entry.host.callFromPlugin(ctx, windowsString(methodPtr), request)
 	if errCall != nil {
-		resp = marshalRPCError("host_call_failed", errCall.Error())
+		resp = marshalRPCError("host_call_failed", errCall.Error(), clienterror.HTTPStatusFromError(errCall))
 	}
 	if len(resp) == 0 || responsePtr == 0 {
 		return 0

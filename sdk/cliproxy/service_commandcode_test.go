@@ -27,6 +27,9 @@ func TestCommandCode_ExecutorAndModelRegistration(t *testing.T) {
 	}
 
 	ctx := context.Background()
+	if _, err := svc.coreManager.Register(ctx, auth); err != nil {
+		t.Fatalf("failed to register auth in coreManager: %v", err)
+	}
 
 	// 1. Check executor registration
 	svc.ensureExecutorsForAuthWithContext(ctx, auth, false)

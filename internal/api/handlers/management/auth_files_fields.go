@@ -53,7 +53,12 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	h.authStatusMu.Lock()
-	defer h.authStatusMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			h.authStatusMu.Unlock()
+		}
+	}()
 
 	ctx := c.Request.Context()
 
@@ -69,12 +74,20 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
 			return
 		}
-		if errPatch := h.patchPluginVirtualSourceStatus(ctx, targetAuth, *req.Disabled); errPatch != nil {
+		hookAuths, errPatch := h.patchPluginVirtualSourceStatus(ctx, targetAuth, *req.Disabled)
+		if errPatch != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(errPatch, errAuthFileNotFound) || os.IsNotExist(errPatch) {
 				status = http.StatusNotFound
 			}
 			c.JSON(status, gin.H{"error": errPatch.Error()})
+			return
+		}
+		locked = false
+		h.authStatusMu.Unlock()
+		if errHook := h.invokePostAuthPersistHooks(ctx, hookAuths); errHook != nil {
+			log.Errorf("post-auth persist hook failed for plugin virtual source status update on %s: %v", targetAuth.ID, errHook)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to synchronize plugin virtual auth: %v", errHook)})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
@@ -118,16 +131,16 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
-	if h.postAuthPersistHook != nil {
-		hookAuth := updatedAuth
-		if hookAuth == nil {
-			hookAuth = targetAuth
-		}
-		if errHook := h.postAuthPersistHook(ctx, hookAuth); errHook != nil {
-			log.Errorf("post-auth persist hook failed for status update on %s: %v", targetAuth.ID, errHook)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to synchronize auth runtime: %v", errHook)})
-			return
-		}
+	hookAuth := updatedAuth
+	if hookAuth == nil {
+		hookAuth = targetAuth
+	}
+	locked = false
+	h.authStatusMu.Unlock()
+	if errHook := h.invokePostAuthPersistHooks(ctx, []*coreauth.Auth{hookAuth}); errHook != nil {
+		log.Errorf("post-auth persist hook failed for status update on %s: %v", targetAuth.ID, errHook)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to synchronize auth runtime: %v", errHook)})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
@@ -135,24 +148,25 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 
 // patchPluginVirtualSourceStatus toggles disabled on a plugin multi-auth source file and all
 // runtime auths expanded from it. Virtual project children cannot be toggled independently.
-func (h *Handler) patchPluginVirtualSourceStatus(ctx context.Context, targetAuth *coreauth.Auth, disabled bool) error {
+func (h *Handler) patchPluginVirtualSourceStatus(ctx context.Context, targetAuth *coreauth.Auth, disabled bool) ([]*coreauth.Auth, error) {
 	if h == nil || h.authManager == nil || targetAuth == nil {
-		return fmt.Errorf("core auth manager unavailable")
+		return nil, fmt.Errorf("core auth manager unavailable")
 	}
 	sourcePath := strings.TrimSpace(authAttribute(targetAuth, coreauth.AttributeVirtualSource))
 	if sourcePath == "" {
 		sourcePath = strings.TrimSpace(authAttribute(targetAuth, "path"))
 	}
 	if sourcePath == "" {
-		return errPluginVirtualAuth
+		return nil, errPluginVirtualAuth
 	}
 	if errWrite := setSourceAuthFileDisabled(sourcePath, disabled); errWrite != nil {
 		if os.IsNotExist(errWrite) {
-			return errAuthFileNotFound
+			return nil, errAuthFileNotFound
 		}
-		return fmt.Errorf("failed to update source auth file: %w", errWrite)
+		return nil, fmt.Errorf("failed to update source auth file: %w", errWrite)
 	}
 	now := time.Now()
+	hookAuths := make([]*coreauth.Auth, 0)
 	for _, auth := range h.authManager.List() {
 		if auth == nil {
 			continue
@@ -165,17 +179,27 @@ func (h *Handler) patchPluginVirtualSourceStatus(ctx context.Context, targetAuth
 		auth.UpdatedAt = now
 		updated, errUpdate := h.authManager.Update(ctx, auth)
 		if errUpdate != nil {
-			return fmt.Errorf("failed to update auth %s: %w", auth.ID, errUpdate)
+			return nil, fmt.Errorf("failed to update auth %s: %w", auth.ID, errUpdate)
 		}
-		if h.postAuthPersistHook != nil {
-			hookAuth := updated
-			if hookAuth == nil {
-				hookAuth = auth
-			}
-			if errHook := h.postAuthPersistHook(ctx, hookAuth); errHook != nil {
-				log.Errorf("post-auth persist hook failed for plugin virtual auth %s: %v", auth.ID, errHook)
-				return fmt.Errorf("failed to synchronize plugin virtual auth %s: %w", auth.ID, errHook)
-			}
+		hookAuth := updated
+		if hookAuth == nil {
+			hookAuth = auth
+		}
+		hookAuths = append(hookAuths, hookAuth)
+	}
+	return hookAuths, nil
+}
+
+func (h *Handler) invokePostAuthPersistHooks(ctx context.Context, auths []*coreauth.Auth) error {
+	if h == nil || h.postAuthPersistHook == nil {
+		return nil
+	}
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if errHook := h.postAuthPersistHook(ctx, auth); errHook != nil {
+			return errHook
 		}
 	}
 	return nil

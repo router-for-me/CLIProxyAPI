@@ -81,14 +81,20 @@ func responsesToolName(tool gjson.Result) string {
 	return strings.TrimSpace(tool.Get("function.name").String())
 }
 
-func responsesToolDescription(tool gjson.Result) string {
+// ResponsesToolDescription extracts the description from a tool or function object.
+func ResponsesToolDescription(tool gjson.Result) string {
 	if description := tool.Get("description").String(); description != "" {
 		return description
 	}
 	return tool.Get("function.description").String()
 }
 
-func responsesToolParameters(tool gjson.Result) gjson.Result {
+func responsesToolDescription(tool gjson.Result) string {
+	return ResponsesToolDescription(tool)
+}
+
+// ResponsesToolParameters extracts the schema/parameters from a tool or function object.
+func ResponsesToolParameters(tool gjson.Result) gjson.Result {
 	for _, path := range []string{
 		"parameters",
 		"parametersJsonSchema",
@@ -101,6 +107,10 @@ func responsesToolParameters(tool gjson.Result) gjson.Result {
 		}
 	}
 	return gjson.Result{}
+}
+
+func responsesToolParameters(tool gjson.Result) gjson.Result {
+	return ResponsesToolParameters(tool)
 }
 
 // CollectResponsesToolDescriptors extracts all tool descriptors from a Responses request root.
@@ -124,6 +134,9 @@ func CollectResponsesToolDescriptors(root gjson.Result) []ResponsesToolDescripto
 	appendNamespaceChildren := func(namespaceTool gjson.Result, sourcePriority int) {
 		namespaceName := strings.TrimSpace(namespaceTool.Get("name").String())
 		children := namespaceTool.Get("tools")
+		if !children.Exists() || !children.IsArray() {
+			children = namespaceTool.Get("children")
+		}
 		if !children.Exists() || !children.IsArray() {
 			return
 		}
@@ -305,7 +318,7 @@ func BuildGeminiFunctionDeclarations(root gjson.Result) ([][]byte, map[string]st
 		} else {
 			params := responsesToolParameters(desc.Tool)
 			if params.Exists() {
-				funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(CleanJSONSchemaForGemini(params.Raw)))
+				funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(CleanJSONSchemaForGeminiJSONSchema(params.Raw)))
 			}
 		}
 		declarations = append(declarations, funcDecl)

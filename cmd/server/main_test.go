@@ -6,6 +6,31 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
+func TestArgvEnablesBoolFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		flag string
+		want bool
+	}{
+		{name: "bare long flag", args: []string{"--discover-json"}, flag: "discover-json", want: true},
+		{name: "assigned true", args: []string{"--discover-json=true"}, flag: "discover-json", want: true},
+		{name: "assigned false", args: []string{"--discover-json=false"}, flag: "discover-json", want: false},
+		{name: "does not match timeout", args: []string{"--discover-timeout", "3"}, flag: "discover", want: false},
+		{name: "bare discover", args: []string{"--discover"}, flag: "discover", want: true},
+		{name: "stops at terminator", args: []string{"--", "--discover-json"}, flag: "discover-json", want: false},
+		{name: "stops at non-flag", args: []string{"foo", "--discover-json"}, flag: "discover-json", want: false},
+		{name: "skips config value", args: []string{"--config", "config.yaml", "--discover-json"}, flag: "discover-json", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := argvEnablesBoolFlag(tt.args, tt.flag); got != tt.want {
+				t.Fatalf("argvEnablesBoolFlag(%v, %q) = %t, want %t", tt.args, tt.flag, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	cfgWithExampleKey := &config.Config{
 		SDKConfig: config.SDKConfig{

@@ -356,14 +356,15 @@ type homeAuthDispatchResponse struct {
 }
 
 type homeDispatchModelInfo struct {
-	ID                  string                    `json:"id"`
-	Type                string                    `json:"type,omitempty"`
-	InputTokenLimit     int                       `json:"inputTokenLimit,omitempty"`
-	OutputTokenLimit    int                       `json:"outputTokenLimit,omitempty"`
-	ContextLength       int                       `json:"context_length,omitempty"`
-	MaxCompletionTokens int                       `json:"max_completion_tokens,omitempty"`
-	Thinking            *registry.ThinkingSupport `json:"thinking,omitempty"`
-	UserDefined         bool                      `json:"user_defined"`
+	ID                  string                       `json:"id"`
+	Type                string                       `json:"type,omitempty"`
+	InputTokenLimit     int                          `json:"inputTokenLimit,omitempty"`
+	OutputTokenLimit    int                          `json:"outputTokenLimit,omitempty"`
+	ContextLength       int                          `json:"context_length,omitempty"`
+	MaxCompletionTokens int                          `json:"max_completion_tokens,omitempty"`
+	Thinking            *registry.ThinkingSupport    `json:"thinking,omitempty"`
+	NativeCapabilities  *registry.NativeCapabilities `json:"native_capabilities,omitempty"`
+	UserDefined         bool                         `json:"user_defined"`
 }
 
 func (m *homeDispatchModelInfo) registryModelInfo() *registry.ModelInfo {
@@ -378,6 +379,7 @@ func (m *homeDispatchModelInfo) registryModelInfo() *registry.ModelInfo {
 		ContextLength:       m.ContextLength,
 		MaxCompletionTokens: m.MaxCompletionTokens,
 		Thinking:            m.Thinking,
+		NativeCapabilities:  m.NativeCapabilities,
 		UserDefined:         m.UserDefined,
 	}
 }
@@ -997,6 +999,11 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 
+	if opts.Metadata != nil {
+		if opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] == nil && requestedModel != "" {
+			opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = requestedModel
+		}
+	}
 	sessionID, parentSessionID := m.homeDispatchSessionIDs(opts)
 	if sessionID != "" && opts.Metadata != nil {
 		opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = sessionID
@@ -1007,6 +1014,14 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		}
 	}
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
+	if opts.Metadata != nil {
+		if nodeKind, ok := opts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); ok && strings.TrimSpace(nodeKind) != "" {
+			if dispatchHeaders == nil {
+				dispatchHeaders = make(http.Header)
+			}
+			dispatchHeaders.Set("X-Node-Kind", strings.TrimSpace(nodeKind))
+		}
+	}
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
@@ -1277,7 +1292,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 			continue
 		}
 		providerKey := executorKeyFromAuth(auth)
-		executor, ok := m.executors[providerKey]
+		executor, ok := m.executorLocked(providerKey)
 		if !ok {
 			continue
 		}

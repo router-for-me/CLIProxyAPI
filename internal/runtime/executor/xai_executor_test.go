@@ -302,11 +302,13 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	if got := gjson.GetBytes(gotBody, "tool_choice.tools.1.name").String(); got != "lookup" {
 		t.Fatalf("tool_choice.tools.1.name = %q, want lookup; body=%s", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "tool_choice.tools.2.type").String(); got != "web_search" {
-		t.Fatalf("tool_choice.tools.2.type = %q, want web_search; body=%s", got, string(gotBody))
+	if got := gjson.GetBytes(gotBody, "tool_choice.tools.2.type").String(); got != "x_search" {
+		t.Fatalf("tool_choice.tools.2.type = %q, want x_search; body=%s", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "tool_choice.tools.3.type").String(); got != "x_search" {
-		t.Fatalf("tool_choice.tools.3.type = %q, want x_search; body=%s", got, string(gotBody))
+	for _, tool := range gjson.GetBytes(gotBody, "tool_choice.tools").Array() {
+		if tool.Get("type").String() == "web_search" {
+			t.Fatalf("web_search must not remain in allowed_tools: %s", string(gotBody))
+		}
 	}
 	xSearchAllowedCount := 0
 	for _, tool := range gjson.GetBytes(gotBody, "tool_choice.tools").Array() {
@@ -966,8 +968,8 @@ func TestXAIExecutorPrepareHonorsInjectXSearchConfig(t *testing.T) {
 			if len(tools) != 1+wantXSearchCount {
 				t.Fatalf("tools length = %d, want %d; body=%s", len(tools), 1+wantXSearchCount, prepared.body)
 			}
-			if got := tools[0].Get("name").String(); got != "web_search" {
-				t.Fatalf("client web_search tool missing; body=%s", prepared.body)
+			if got := tools[0].Get("name").String(); got != "clientfn_web_search" {
+				t.Fatalf("client web_search tool missing or not aliased; body=%s", prepared.body)
 			}
 			xSearchTools := 0
 			for _, tool := range tools {
@@ -1096,18 +1098,55 @@ func TestXAIExecutorPrepareNormalizesClaudeWebSearchToolChoice(t *testing.T) {
 	}
 
 	choice := gjson.GetBytes(prepared.body, "tool_choice")
-	if got := choice.Get("type").String(); got != "allowed_tools" {
-		t.Fatalf("tool_choice.type = %q, want allowed_tools; body=%s", got, prepared.body)
+	if choice.Type != gjson.String || choice.String() != "required" {
+		t.Fatalf("tool_choice = %s, want string required; body=%s", choice.Raw, prepared.body)
 	}
-	if got := choice.Get("mode").String(); got != "required" {
-		t.Fatalf("tool_choice.mode = %q, want required; body=%s", got, prepared.body)
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), prepared.body)
 	}
-	allowed := choice.Get("tools").Array()
-	if len(allowed) != 1 {
-		t.Fatalf("tool_choice.tools length = %d, want 1; body=%s", len(allowed), prepared.body)
+	if got := tools[0].Get("type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search; body=%s", got, prepared.body)
 	}
-	if got := allowed[0].Get("type").String(); got != "web_search" {
-		t.Fatalf("tool_choice.tools.0.type = %q, want web_search; body=%s", got, prepared.body)
+}
+
+func TestXAIExecutorPrepareNormalizesClaudeWebSearchToolChoice_Grok46(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"max_tokens":64000,
+			"stream":true,
+			"output_config":{"effort":"high"},
+			"thinking":{"type":"disabled"},
+			"messages":[{"role":"user","content":[{"type":"text","text":"Perform a web search"}]}],
+			"tool_choice":{"type":"tool","name":"web_search"},
+			"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8,"allowed_domains":["github.com"]}]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+	}, true)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	choice := gjson.GetBytes(prepared.body, "tool_choice")
+	if choice.Type != gjson.String || choice.String() != "required" {
+		t.Fatalf("tool_choice = %s, want string required; body=%s", choice.Raw, prepared.body)
+	}
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), prepared.body)
+	}
+	if got := tools[0].Get("type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search; body=%s", got, prepared.body)
+	}
+	if got := tools[0].Get("filters.allowed_domains.0").String(); got != "github.com" {
+		t.Fatalf("tools.0.filters.allowed_domains.0 = %q, want github.com; body=%s", got, prepared.body)
 	}
 }
 
@@ -1421,6 +1460,146 @@ func TestXAIExecutorPrepareStripsImageGenerationFromMixedAllowedTools(t *testing
 	for _, tool := range allowed {
 		if tool.Get("type").String() == "image_generation" {
 			t.Fatalf("image_generation must not remain in allowed_tools: %s", prepared.body)
+		}
+	}
+}
+
+func TestXAIExecutorPrepareRewritesWebSearchAllowedToolsToRequired(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":"search the web",
+			"tools":[{"type":"web_search"},{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+			"tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"web_search"}]}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	choice := gjson.GetBytes(prepared.body, "tool_choice")
+	if choice.Type != gjson.String || choice.String() != "required" {
+		t.Fatalf("tool_choice = %s, want string required; body=%s", choice.Raw, prepared.body)
+	}
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), prepared.body)
+	}
+	if got := tools[0].Get("type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search; body=%s", got, prepared.body)
+	}
+}
+
+func TestXAIExecutorPrepareForcedWebSearchDropsOtherToolsAndSkipsXSearchInject(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{InjectXSearch: true}})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":"search the web",
+			"tools":[{"type":"web_search"},{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+			"tool_choice":{"type":"web_search"}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	choice := gjson.GetBytes(prepared.body, "tool_choice")
+	if choice.Type != gjson.String || choice.String() != "required" {
+		t.Fatalf("tool_choice = %s, want string required; body=%s", choice.Raw, prepared.body)
+	}
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), prepared.body)
+	}
+	if got := tools[0].Get("type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search; body=%s", got, prepared.body)
+	}
+}
+
+func TestXAIExecutorPrepareRewritesWebSearchOnlyAllowedToolsAutoToAuto(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":"search the web",
+			"tools":[{"type":"web_search"},{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+			"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"web_search"}]}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	choice := gjson.GetBytes(prepared.body, "tool_choice")
+	if choice.Type != gjson.String || choice.String() != "auto" {
+		t.Fatalf("tool_choice = %s, want string auto; body=%s", choice.Raw, prepared.body)
+	}
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), prepared.body)
+	}
+	if got := tools[0].Get("type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search; body=%s", got, prepared.body)
+	}
+}
+
+func TestXAIExecutorPrepareStripsWebSearchFromMixedAllowedTools(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, err := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":"draw or search",
+			"tools":[{"type":"web_search"},{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+			"tool_choice":{"type":"allowed_tools","mode":"required","tools":[
+				{"type":"web_search"},
+				{"type":"function","name":"lookup"}
+			]}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", err)
+	}
+
+	choice := gjson.GetBytes(prepared.body, "tool_choice")
+	if got := choice.Get("type").String(); got != "allowed_tools" {
+		t.Fatalf("tool_choice.type = %q, want allowed_tools; body=%s", got, prepared.body)
+	}
+	allowed := choice.Get("tools").Array()
+	if len(allowed) != 1 {
+		t.Fatalf("tool_choice.tools length = %d, want 1; body=%s", len(allowed), prepared.body)
+	}
+	if got := allowed[0].Get("name").String(); got != "lookup" {
+		t.Fatalf("tool_choice.tools.0.name = %q, want lookup; body=%s", got, prepared.body)
+	}
+	for _, tool := range allowed {
+		if tool.Get("type").String() == "web_search" {
+			t.Fatalf("web_search must not remain in allowed_tools: %s", prepared.body)
 		}
 	}
 }
@@ -6314,5 +6493,481 @@ func TestXAIExecutorExecuteVideosOAuthBaseURLResolution(t *testing.T) {
 				t.Fatalf("recorded URL = %q, want %q", recordedURL, tt.wantURL)
 			}
 		})
+	}
+}
+
+func TestXAIExecutorAliasesClientWebSearchFunctionInRequest(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":[
+				{"type":"message","role":"user","content":[{"type":"input_text","text":"search ranking"}]},
+				{"type":"function_call","name":"web_search","call_id":"call_1","arguments":"{\"query\":\"ranking\"}"}
+			],
+			"tools":[
+				{"type":"function","name":"web_search","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}},
+				{"type":"function","name":"read","parameters":{"type":"object"}}
+			],
+			"tool_choice":{"type":"function","name":"web_search"}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	}, true)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), prepared.body)
+	}
+	if got := tools[0].Get("name").String(); got != "clientfn_web_search" {
+		t.Fatalf("tools.0.name = %q, want clientfn_web_search; body=%s", got, prepared.body)
+	}
+	if got := tools[1].Get("name").String(); got != "read" {
+		t.Fatalf("tools.1.name = %q, want read; body=%s", got, prepared.body)
+	}
+	if got := gjson.GetBytes(prepared.body, "tool_choice.name").String(); got != "clientfn_web_search" {
+		t.Fatalf("tool_choice.name = %q, want clientfn_web_search; body=%s", got, prepared.body)
+	}
+	if got := gjson.GetBytes(prepared.body, "input.1.name").String(); got != "clientfn_web_search" {
+		t.Fatalf("input.1.name = %q, want clientfn_web_search; body=%s", got, prepared.body)
+	}
+
+	// Also verify allowed_tools mode
+	preparedAllowed, errAllowed := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}],
+			"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"web_search"}]}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	}, true)
+	if errAllowed != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errAllowed)
+	}
+	if got := gjson.GetBytes(preparedAllowed.body, "tool_choice.tools.0.name").String(); got != "clientfn_web_search" {
+		t.Fatalf("tool_choice.tools.0.name = %q, want clientfn_web_search; body=%s", got, preparedAllowed.body)
+	}
+}
+
+func TestXAIExecutorPreservesHostedWebSearchToolType(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"input":"search ranking",
+			"tools":[
+				{"type":"web_search"}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	}, true)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1; body=%s", len(tools), prepared.body)
+	}
+	if got := tools[0].Get("type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search; body=%s", got, prepared.body)
+	}
+	if tools[0].Get("name").Exists() {
+		t.Fatalf("tools.0.name should not exist for hosted tool; body=%s", prepared.body)
+	}
+}
+
+func TestXAIExecutorRestoresAliasedWebSearchInStreamAndExecute(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"call_1\",\"type\":\"function_call\",\"name\":\"clientfn_web_search\",\"arguments\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"call_1\",\"type\":\"function_call\",\"name\":\"clientfn_web_search\",\"arguments\":\"{\\\"query\\\":\\\"golang\\\"}\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"id\":\"call_1\",\"type\":\"function_call\",\"name\":\"clientfn_web_search\",\"arguments\":\"{\\\"query\\\":\\\"golang\\\"}\"}]}}\n\n")
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	// 1. Verify streaming restoration
+	streamRes, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}],
+			"input":"search query"
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+
+	var streamOutput bytes.Buffer
+	for chunk := range streamRes.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamOutput.Write(chunk.Payload)
+		streamOutput.WriteByte('\n')
+	}
+	streamText := streamOutput.String()
+	if strings.Contains(streamText, "clientfn_web_search") {
+		t.Fatalf("clientfn_web_search leaked into client stream: %s", streamText)
+	}
+	if !strings.Contains(streamText, `"name":"web_search"`) {
+		t.Fatalf("restored web_search missing from client stream: %s", streamText)
+	}
+
+	// 2. Verify non-streaming restoration
+	execRes, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}],
+			"input":"search query"
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	})
+	if errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+	if strings.Contains(string(execRes.Payload), "clientfn_web_search") {
+		t.Fatalf("clientfn_web_search leaked into non-stream response: %s", execRes.Payload)
+	}
+	if got := gjson.GetBytes(execRes.Payload, "output.0.name").String(); got != "web_search" {
+		t.Fatalf("non-stream output.0.name = %q, want web_search; payload=%s", got, execRes.Payload)
+	}
+}
+
+func TestXAIExecutorAliasesClientWebSearchWithExistingAliasCollision(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"tools":[
+				{"type":"function","name":"clientfn_web_search","parameters":{"type":"object"}},
+				{"type":"function","name":"web_search","parameters":{"type":"object"}}
+			],
+			"input":[
+				{"type":"function_call","name":"clientfn_web_search","call_id":"call_1","arguments":"{}"},
+				{"type":"function_call","name":"web_search","call_id":"call_2","arguments":"{}"}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	}, true)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	if prepared.webSearchAlias != "clientfn_web_search_1" {
+		t.Fatalf("prepared.webSearchAlias = %q, want clientfn_web_search_1", prepared.webSearchAlias)
+	}
+	tools := gjson.GetBytes(prepared.body, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2; body=%s", len(tools), prepared.body)
+	}
+	if got := tools[0].Get("name").String(); got != "clientfn_web_search" {
+		t.Fatalf("tools.0.name = %q, want original clientfn_web_search; body=%s", got, prepared.body)
+	}
+	if got := tools[1].Get("name").String(); got != "clientfn_web_search_1" {
+		t.Fatalf("tools.1.name = %q, want clientfn_web_search_1; body=%s", got, prepared.body)
+	}
+	if got := gjson.GetBytes(prepared.body, "input.0.name").String(); got != "clientfn_web_search" {
+		t.Fatalf("input.0.name = %q, want original clientfn_web_search; body=%s", got, prepared.body)
+	}
+	if got := gjson.GetBytes(prepared.body, "input.1.name").String(); got != "clientfn_web_search_1" {
+		t.Fatalf("input.1.name = %q, want clientfn_web_search_1; body=%s", got, prepared.body)
+	}
+
+	// Verify restoration only targets clientfn_web_search_1
+	event := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"clientfn_web_search","call_id":"call_1"}}`)
+	restoredOriginal := restoreXAIClientWebSearchName(event, prepared.webSearchAlias)
+	if got := gjson.GetBytes(restoredOriginal, "item.name").String(); got != "clientfn_web_search" {
+		t.Fatalf("original clientfn_web_search must not be overwritten: %s", restoredOriginal)
+	}
+
+	eventAliased := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"clientfn_web_search_1","call_id":"call_2"}}`)
+	restoredAliased := restoreXAIClientWebSearchName(eventAliased, prepared.webSearchAlias)
+	if got := gjson.GetBytes(restoredAliased, "item.name").String(); got != "web_search" {
+		t.Fatalf("aliased clientfn_web_search_1 must be restored to web_search: %s", restoredAliased)
+	}
+}
+
+func TestXAIExecutorDoesNotAliasNamespacedWebSearchToolChoice(t *testing.T) {
+	t.Parallel()
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"tools":[
+				{"type":"function","name":"web_search","parameters":{"type":"object"}},
+				{"type":"namespace","name":"acme","tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}]}
+			],
+			"tool_choice":{"type":"allowed_tools","tools":[
+				{"type":"function","name":"web_search","namespace":"acme"},
+				{"type":"function","name":"web_search"}
+			]}
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	}, true)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	allowedTools := gjson.GetBytes(prepared.body, "tool_choice.tools").Array()
+	if len(allowedTools) != 2 {
+		t.Fatalf("tool_choice.tools length = %d, want 2; body=%s", len(allowedTools), prepared.body)
+	}
+	// The namespaced tool should be flattened to acme__web_search, NOT clientfn_web_search
+	if got := allowedTools[0].Get("name").String(); got != "acme__web_search" {
+		t.Fatalf("tool_choice.tools.0.name = %q, want acme__web_search; body=%s", got, prepared.body)
+	}
+	// The top-level tool should be aliased to clientfn_web_search
+	if got := allowedTools[1].Get("name").String(); got != "clientfn_web_search" {
+		t.Fatalf("tool_choice.tools.1.name = %q, want clientfn_web_search; body=%s", got, prepared.body)
+	}
+}
+
+func TestXAIExecutorAliasesClientWebSearchBeyond100Collisions(t *testing.T) {
+	t.Parallel()
+
+	// Construct body with clientfn_web_search and clientfn_web_search_1 .. _100
+	tools := []string{
+		`{"type":"function","name":"web_search","parameters":{"type":"object"}}`,
+		`{"type":"function","name":"clientfn_web_search","parameters":{"type":"object"}}`,
+	}
+	for i := 1; i <= 100; i++ {
+		tools = append(tools, fmt.Sprintf(`{"type":"function","name":"clientfn_web_search_%d","parameters":{"type":"object"}}`, i))
+	}
+	payload := fmt.Sprintf(`{"model":"grok-4.6","tools":[%s]}`, strings.Join(tools, ","))
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: []byte(payload),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	}, true)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	if prepared.webSearchAlias != "clientfn_web_search_101" {
+		t.Fatalf("prepared.webSearchAlias = %q, want clientfn_web_search_101", prepared.webSearchAlias)
+	}
+}
+
+func TestXAIExecutorDoesNotRestoreNamespacedClientfnWebSearch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Event 1: namespaced tool call with name matching alias: acme__clientfn_web_search
+		_, _ = fmt.Fprint(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"call_1\",\"type\":\"function_call\",\"name\":\"acme__clientfn_web_search\",\"arguments\":\"{}\"}}\n\n")
+		// Event 2: unnamespaced tool call with name matching alias: clientfn_web_search
+		_, _ = fmt.Fprint(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"call_2\",\"type\":\"function_call\",\"name\":\"clientfn_web_search\",\"arguments\":\"{}\"}}\n\n")
+		// Completed event containing both
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"id\":\"call_1\",\"type\":\"function_call\",\"name\":\"acme__clientfn_web_search\"},{\"id\":\"call_2\",\"type\":\"function_call\",\"name\":\"clientfn_web_search\"}]}}\n\n")
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	result, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"tools":[
+				{"type":"function","name":"web_search","parameters":{"type":"object"}},
+				{"type":"namespace","name":"acme","tools":[{"type":"function","name":"clientfn_web_search","parameters":{"type":"object"}}]}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+
+	var streamOutput bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamOutput.Write(chunk.Payload)
+		streamOutput.WriteByte('\n')
+	}
+	streamText := streamOutput.String()
+
+	// Verify namespaced tool kept name clientfn_web_search and namespace acme
+	if !strings.Contains(streamText, `"name":"clientfn_web_search"`) {
+		t.Fatalf("namespaced clientfn_web_search should be preserved: %s", streamText)
+	}
+	if !strings.Contains(streamText, `"namespace":"acme"`) {
+		t.Fatalf("namespace acme should be preserved: %s", streamText)
+	}
+	// Verify unnamespaced tool was restored to web_search
+	if !strings.Contains(streamText, `"name":"web_search"`) {
+		t.Fatalf("unnamespaced tool should be restored to web_search: %s", streamText)
+	}
+}
+
+func TestXAIExecutorAliasesReplayedReasoningCacheWebSearchCall(t *testing.T) {
+	t.Parallel()
+
+	executionSessionID := "test-session-replay-websearch-" + t.Name()
+	cacheXAIReasoningReplayFromCompleted(context.Background(), xaiReasoningReplayScope{
+		modelName:  "grok-4.6",
+		sessionKey: "execution:" + executionSessionID,
+	}, []byte(`{"response":{"output":[{"type":"function_call","call_id":"call_search_1","name":"web_search","arguments":"{\"query\":\"artificial analysis ranking\"}"}]}}`))
+
+	exec := NewXAIExecutor(&config.Config{})
+	prepared, errPrepare := exec.prepareResponsesRequest(context.Background(), cliproxyexecutor.Request{
+		Model: "grok-4.6",
+		Payload: []byte(`{
+			"model":"grok-4.6",
+			"tools":[{"type":"function","name":"web_search","parameters":{"type":"object"}}],
+			"input":[
+				{"type":"message","role":"user","content":[{"type":"input_text","text":"download ranking"}]},
+				{"type":"function_call_output","call_id":"call_search_1","output":"rankings text"}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: executionSessionID,
+		},
+		Stream: true,
+	}, true)
+	if errPrepare != nil {
+		t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
+	}
+
+	// In the prepared body, the replayed function_call must have been aliased to clientfn_web_search
+	input := gjson.GetBytes(prepared.body, "input").Array()
+	foundReplayedCall := false
+	for _, item := range input {
+		if item.Get("type").String() == "function_call" && item.Get("call_id").String() == "call_search_1" {
+			foundReplayedCall = true
+			if got := item.Get("name").String(); got != "clientfn_web_search" {
+				t.Fatalf("replayed function_call name = %q, want clientfn_web_search; body=%s", got, prepared.body)
+			}
+		}
+	}
+	if !foundReplayedCall {
+		t.Fatalf("replayed function_call missing from input; body=%s", prepared.body)
+	}
+}
+
+func TestXAIExecutorFoldsNamespaceNamedWebSearchWithoutAliasing(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"web_search\",\"call_id\":\"call_1\",\"arguments\":\"{\\\"name\\\":\\\"query_web\\\",\\\"arguments\\\":{\\\"q\\\":\\\"golang\\\"}}\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4.6\",\"output\":[{\"type\":\"function_call\",\"name\":\"web_search\",\"call_id\":\"call_1\",\"arguments\":\"{\\\"name\\\":\\\"query_web\\\",\\\"arguments\\\":{\\\"q\\\":\\\"golang\\\"}}\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	var nsList []string
+	// 46 apps + 1 namespace named web_search = 47 namespaces (>200 tools, triggers folding)
+	for i := 0; i < 46; i++ {
+		var childTools []string
+		for j := 0; j < 10; j++ {
+			childTools = append(childTools, fmt.Sprintf(`{"type":"function","name":"tool_%d","description":"child tool %d","parameters":{"type":"object"}}`, j, j))
+		}
+		nsList = append(nsList, fmt.Sprintf(`{"type":"namespace","name":"mcp__app_%d","tools":[%s]}`, i, strings.Join(childTools, ",")))
+	}
+	// Namespace named web_search
+	nsList = append(nsList, `{"type":"namespace","name":"web_search","tools":[{"type":"function","name":"query_web","parameters":{"type":"object"}}]}`)
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+
+	turnPayload := fmt.Sprintf(`{
+		"model":"grok-4.6",
+		"tools":[%s],
+		"input":[{"role":"user","content":"search query"}]
+	}`, strings.Join(nsList, ","))
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.6",
+		Payload: []byte(turnPayload),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	// Verify upstream tools contains the dispatcher named "web_search" (not clientfn_web_search)
+	foundDispatcher := false
+	for _, tool := range gjson.GetBytes(gotBody, "tools").Array() {
+		if tool.Get("name").String() == "web_search" {
+			foundDispatcher = true
+		}
+		if tool.Get("name").String() == "clientfn_web_search" {
+			t.Fatalf("namespace dispatcher web_search must not be aliased to clientfn_web_search; body=%s", gotBody)
+		}
+	}
+	if !foundDispatcher {
+		t.Fatalf("dispatcher web_search tool missing from upstream tools; body=%s", gotBody)
+	}
+
+	// Verify response unwrapped into child tool call
+	output := gjson.GetBytes(resp.Payload, "output.0")
+	if got := output.Get("name").String(); got != "query_web" {
+		t.Fatalf("output.0.name = %q, want query_web; payload=%s", got, resp.Payload)
+	}
+	if got := output.Get("namespace").String(); got != "web_search" {
+		t.Fatalf("output.0.namespace = %q, want web_search; payload=%s", got, resp.Payload)
 	}
 }

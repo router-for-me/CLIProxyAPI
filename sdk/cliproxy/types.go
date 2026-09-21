@@ -71,6 +71,9 @@ type APIKeyClientResult struct {
 	// CommandCodeKeyCount is the number of Command Code API keys loaded
 	CommandCodeKeyCount int
 
+	// MetaKeyCount is the number of Meta API keys loaded
+	MetaKeyCount int
+
 	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
 	OpenAICompatCount int
 }

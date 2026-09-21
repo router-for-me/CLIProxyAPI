@@ -150,6 +150,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		var pendingToolUseIDs []string
 		var pendingSystemReminders [][]byte
+		toolNameByID := make(map[string]string)
 
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
@@ -211,12 +212,16 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
 						if role == "assistant" {
 							toolUseID := part.Get("id").String()
+							toolName := part.Get("name").String()
 							if toolUseID != "" {
 								pendingToolUseIDs = append(pendingToolUseIDs, toolUseID)
+								if toolName != "" {
+									toolNameByID[toolUseID] = toolName
+								}
 							}
 							toolCallJSON := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", toolUseID)
-							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.name", part.Get("name").String())
+							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.name", toolName)
 
 							// Convert input to arguments JSON string
 							if input := part.Get("input"); input.Exists() {
@@ -230,8 +235,12 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 					case "tool_result":
 						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
+						toolUseID := part.Get("tool_use_id").String()
 						toolResultJSON := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
+						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "tool_call_id", toolUseID)
+						if toolName := toolNameByID[toolUseID]; toolName != "" {
+							toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "name", toolName)
+						}
 						toolResultContent, toolResultImages := convertClaudeToolResultContent(part.Get("content"))
 						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "content", toolResultContent)
 						relayedToolImages = append(relayedToolImages, toolResultImages...)
@@ -343,6 +352,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Set messages.
 	if len(messageItems) > 0 {
+		messageItems = translatorcommon.AlignOpenAIToolCallMessages(messageItems)
 		out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	}
 
@@ -371,21 +381,35 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Tool choice mapping - convert Anthropic tool_choice to OpenAI format
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		switch toolChoice.Get("type").String() {
+	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() && toolChoice.Type != gjson.Null {
+		choiceType := toolChoice.Get("type").String()
+		if choiceType == "" && toolChoice.Type == gjson.String {
+			choiceType = toolChoice.String()
+		}
+		switch choiceType {
 		case "auto":
 			out, _ = sjson.SetBytes(out, "tool_choice", "auto")
 		case "any":
 			out, _ = sjson.SetBytes(out, "tool_choice", "required")
+		case "none":
+			out, _ = sjson.SetBytes(out, "tool_choice", "none")
 		case "tool":
 			// Specific tool choice
 			toolName := toolChoice.Get("name").String()
-			toolChoiceJSON := []byte(`{"type":"function","function":{"name":""}}`)
-			toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "function.name", toolName)
-			out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+			if toolName != "" {
+				toolChoiceJSON := []byte(`{"type":"function","function":{"name":""}}`)
+				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "function.name", toolName)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+			} else {
+				out, _ = sjson.SetBytes(out, "tool_choice", "none")
+			}
 		default:
-			// Default to auto if not specified
-			out, _ = sjson.SetBytes(out, "tool_choice", "auto")
+			// Fail closed: unrecognized tool_choice values must not turn into permission
+			out, _ = sjson.SetBytes(out, "tool_choice", "none")
+		}
+
+		if disableParallel := toolChoice.Get("disable_parallel_tool_use"); disableParallel.Type == gjson.True {
+			out, _ = sjson.SetBytes(out, "parallel_tool_calls", false)
 		}
 	}
 

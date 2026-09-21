@@ -1317,3 +1317,312 @@ func TestConvertClaudeRequestToOpenAI_StripsPatternPropertiesIncompatibleKeys(t 
 		t.Errorf("expected patternProperties key '^[a-z]+$' to be preserved, got: %s", params.Get("patternProperties").Raw)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_ToolResultPreservesFunctionName(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash",
+		"max_tokens": 64,
+		"tools": [
+			{
+				"name": "get_weather",
+				"description": "Get weather",
+				"input_schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"]
+				}
+			},
+			{
+				"name": "get_time",
+				"description": "Get time",
+				"input_schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"]
+				}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "What's the weather and time in Jakarta?"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_01ABC", "name": "get_weather", "input": {"city": "Jakarta"}},
+					{"type": "tool_use", "id": "toolu_02DEF", "name": "get_time", "input": {"city": "Jakarta"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_01ABC", "content": "32C, humid"},
+					{"type": "tool_result", "tool_use_id": "toolu_02DEF", "content": "12:00 PM"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("gemini-3.8-flash", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	var toolMessages []gjson.Result
+	for _, msg := range messages {
+		if msg.Get("role").String() == "tool" {
+			toolMessages = append(toolMessages, msg)
+		}
+	}
+
+	if len(toolMessages) != 2 {
+		t.Fatalf("expected 2 tool messages, got %d. Output: %s", len(toolMessages), result)
+	}
+
+	if got := toolMessages[0].Get("tool_call_id").String(); got != "toolu_01ABC" {
+		t.Errorf("toolMessages[0].tool_call_id = %q, want %q", got, "toolu_01ABC")
+	}
+	if got := toolMessages[0].Get("name").String(); got != "get_weather" {
+		t.Errorf("toolMessages[0].name = %q, want %q", got, "get_weather")
+	}
+	if got := toolMessages[0].Get("content").String(); got != "32C, humid" {
+		t.Errorf("toolMessages[0].content = %q, want %q", got, "32C, humid")
+	}
+
+	if got := toolMessages[1].Get("tool_call_id").String(); got != "toolu_02DEF" {
+		t.Errorf("toolMessages[1].tool_call_id = %q, want %q", got, "toolu_02DEF")
+	}
+	if got := toolMessages[1].Get("name").String(); got != "get_time" {
+		t.Errorf("toolMessages[1].name = %q, want %q", got, "get_time")
+	}
+	if got := toolMessages[1].Get("content").String(); got != "12:00 PM" {
+		t.Errorf("toolMessages[1].content = %q, want %q", got, "12:00 PM")
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultUnknownIDNoName(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "orphan_call_1", "content": "result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("gemini-3.8-flash", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	toolMsg := resultJSON.Get("messages.0")
+
+	if got := toolMsg.Get("role").String(); got != "tool" {
+		t.Fatalf("expected tool role, got %q", got)
+	}
+	if got := toolMsg.Get("tool_call_id").String(); got != "orphan_call_1" {
+		t.Errorf("tool_call_id = %q, want %q", got, "orphan_call_1")
+	}
+	if toolMsg.Get("name").Exists() {
+		t.Errorf("expected no name for unknown tool_use_id, got %q", toolMsg.Get("name").String())
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolCallPairingByID(t *testing.T) {
+	inputJSON := `{
+		"model": "deepseek-v4.1-flash",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Run analysis"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "fetch_data", "input": {"id": 123}},
+					{"type": "tool_use", "id": "call_2", "name": "calc_metric", "input": {"scale": 1.5}}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "Waiting for results to continue"},
+					{"type": "thinking", "thinking": "Thinking about next steps", "signature": "sig_abc"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Reminder: keep timeout short"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_2", "content": "metric_ok"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "data_ok"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("deepseek-v4.1-flash", []byte(inputJSON), false)
+	messages := gjson.GetBytes(result, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Tool results must be paired immediately following the assistant tool_calls message.
+	// Expected:
+	// messages[0]: user ("Run analysis")
+	// messages[1]: assistant (tool_calls [call_1, call_2])
+	// messages[2]: tool (tool_call_id: call_2 or call_1)
+	// messages[3]: tool (tool_call_id: call_1 or call_2)
+	// messages[4]: assistant (content: "Waiting for results to continue", reasoning_content: ...)
+	// messages[5]: user ("Reminder: keep timeout short")
+	if len(messages) != 6 {
+		t.Fatalf("expected 6 messages, got %d: %s", len(messages), result)
+	}
+	if roles[1] != "assistant" || !messages[1].Get("tool_calls").Exists() {
+		t.Fatalf("messages[1] must be assistant with tool_calls, got %s", roles[1])
+	}
+	if roles[2] != "tool" || roles[3] != "tool" {
+		t.Fatalf("messages[2] and messages[3] must be tool messages immediately following assistant tool_calls, got roles: %v", roles)
+	}
+	toolIDs := []string{messages[2].Get("tool_call_id").String(), messages[3].Get("tool_call_id").String()}
+	if toolIDs[0] != "call_2" || toolIDs[1] != "call_1" {
+		t.Fatalf("expected tool messages to strictly preserve input relative order [call_2, call_1], got: %v", toolIDs)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolCallPairing_OrphanAndIncompletePreserved(t *testing.T) {
+	// Orphan tool results and incomplete histories must not be rearranged or guessed
+	inputJSON := `{
+		"model": "deepseek-v4.1-flash",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Start"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_alpha", "name": "do_a", "input": {}},
+					{"type": "tool_use", "id": "call_beta", "name": "do_b", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Waiting on results"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_unmatched", "content": "orphan_result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("deepseek-v4.1-flash", []byte(inputJSON), false)
+	messages := gjson.GetBytes(result, "messages").Array()
+
+	// Incomplete history (call_alpha and call_beta are unanswered) and orphan result
+	// (call_unmatched has no matching assistant tool_calls) must remain untouched.
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+	// messages[0]: user
+	// messages[1]: assistant (tool_calls [call_alpha, call_beta])
+	// messages[2]: user ("Waiting on results")
+	// messages[3]: tool (tool_call_id: call_unmatched)
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %s", len(messages), result)
+	}
+	if roles[1] != "assistant" || roles[2] != "user" || roles[3] != "tool" {
+		t.Fatalf("expected untouched order [user, assistant, user, tool], got: %v", roles)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolChoice(t *testing.T) {
+	t.Run("none does not become auto", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "Answer without calling tools."}],
+			"tool_choice": {"type": "none"},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+				{"name": "tool_b", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		gotToolChoice := gjson.GetBytes(result, "tool_choice").String()
+		if gotToolChoice != "none" {
+			t.Fatalf("expected tool_choice to be 'none', got %q. Output: %s", gotToolChoice, result)
+		}
+	})
+
+	t.Run("disable_parallel_tool_use maps to parallel_tool_calls false", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		parallel := gjson.GetBytes(result, "parallel_tool_calls")
+		if !parallel.Exists() || parallel.Bool() {
+			t.Fatalf("expected parallel_tool_calls to be false, got %v. Output: %s", parallel.Value(), result)
+		}
+	})
+
+	t.Run("unknown tool_choice type fails closed to none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "unknown_future_restriction"},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		gotToolChoice := gjson.GetBytes(result, "tool_choice").String()
+		if gotToolChoice != "none" {
+			t.Fatalf("expected tool_choice to fail closed to 'none', got %q. Output: %s", gotToolChoice, result)
+		}
+	})
+
+	t.Run("tool choice with empty name fails closed to none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "tool", "name": ""},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		gotToolChoice := gjson.GetBytes(result, "tool_choice").String()
+		if gotToolChoice != "none" {
+			t.Fatalf("expected tool_choice to fail closed to 'none', got %q. Output: %s", gotToolChoice, result)
+		}
+	})
+
+	t.Run("tool_choice null does not set tool_choice", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": null,
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		if gjson.GetBytes(result, "tool_choice").Exists() {
+			t.Fatalf("expected tool_choice not to be set when tool_choice is null, got: %s", result)
+		}
+	})
+}

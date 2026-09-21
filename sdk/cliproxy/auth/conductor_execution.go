@@ -410,8 +410,10 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		return sdktranslator.FormatClaude
 	case "gemini", "vertex", "aistudio":
 		return sdktranslator.FormatGemini
-	case "kimi":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		return sdktranslator.FormatOpenAI
+	case "meta":
+		return sdktranslator.FormatCodex
 	case "antigravity":
 		return sdktranslator.FormatAntigravity
 	case "commandcode":
@@ -1505,7 +1507,17 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 		return auth, nil
 	}
 	preparer, ok := executor.(RequestAuthPreparer)
-	if !ok || preparer == nil || !preparer.ShouldPrepareRequestAuth(auth) {
+	if !ok {
+		return auth, nil
+	}
+
+	return m.PrepareRequestAuth(ctx, preparer, auth)
+}
+
+// PrepareRequestAuth prepares a registered credential using the same serialization
+// and lifecycle checks as normal request execution. Management tools use this path too.
+func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPreparer, auth *Auth) (*Auth, error) {
+	if m == nil || preparer == nil || auth == nil || !preparer.ShouldPrepareRequestAuth(auth) {
 		return auth, nil
 	}
 
@@ -1514,21 +1526,28 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 		return preparer.PrepareRequestAuth(ctx, auth.Clone())
 	}
 
-	lockValue, _ := m.requestPrepareLocks.LoadOrStore(id, &requestAuthPrepareLock{})
-	lock, ok := lockValue.(*requestAuthPrepareLock)
-	if !ok || lock == nil {
-		return preparer.PrepareRequestAuth(ctx, auth.Clone())
+	var prepareMu *sync.Mutex
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
+		// Meta also mints on 401 recovery. Serialize both paths per credential.
+		lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
+		prepareMu = &lockValue.(*authRefreshLock).mu
+	} else {
+		lockValue, _ := m.requestPrepareLocks.LoadOrStore(id, &requestAuthPrepareLock{})
+		prepareMu = &lockValue.(*requestAuthPrepareLock).mu
 	}
-
-	lock.mu.Lock()
-	defer lock.mu.Unlock()
+	prepareMu.Lock()
+	defer prepareMu.Unlock()
 
 	target := auth.Clone()
 	m.mu.RLock()
-	if current := m.auths[id]; current != nil {
+	current := m.auths[id]
+	if current != nil {
 		target = current.Clone()
 	}
 	m.mu.RUnlock()
+	if current == nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
+		return nil, fmt.Errorf("prepare meta auth: credential no longer registered")
+	}
 
 	if !preparer.ShouldPrepareRequestAuth(target) {
 		return target, nil
@@ -1549,6 +1568,9 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 	}
 	if saved != nil {
 		return saved, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
+		return nil, fmt.Errorf("prepare meta auth: credential removed during mint")
 	}
 	return target, nil
 }
@@ -1723,7 +1745,8 @@ func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 func (m *Manager) executorFor(provider string) ProviderExecutor {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.executors[provider]
+	exec, _ := m.executorLocked(provider)
+	return exec
 }
 
 // roundTripperContextKey is an unexported context key type to avoid collisions.
@@ -1772,7 +1795,15 @@ func executorKeyFromAuth(auth *Auth) string {
 		}
 		return util.OpenAICompatibleProviderKey(providerKey)
 	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider))
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch provider {
+	case "kimi.com":
+		return "kimi"
+	case "kimi.ai":
+		return "kimi-ai"
+	default:
+		return provider
+	}
 }
 
 // logEntryWithRequestID returns a logrus entry with request_id field if available in context.
@@ -1940,7 +1971,7 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	a := m.auths[authID]
 	var exec ProviderExecutor
 	if a != nil {
-		exec = m.executors[executorKeyFromAuth(a)]
+		exec, _ = m.executorLocked(executorKeyFromAuth(a))
 	}
 	m.mu.RUnlock()
 	if a == nil || exec == nil {
@@ -2081,9 +2112,12 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 	canonicalID = strings.TrimSpace(canonicalID)
 	if canonicalID == "" {
 		clientMeta := logging.GetClientRequestMetadata(ctx)
-		if clientMeta.SessionID != "" || clientMeta.ParentSessionID != "" {
+		if clientMeta.SessionID != "" || clientMeta.ParentSessionID != "" || clientMeta.NodeKind != "" || clientMeta.IsFork || clientMeta.IsCompaction {
 			clientMeta.SessionID = ""
 			clientMeta.ParentSessionID = ""
+			clientMeta.NodeKind = ""
+			clientMeta.IsFork = false
+			clientMeta.IsCompaction = false
 			ctx = logging.WithClientRequestMetadata(ctx, clientMeta)
 		}
 		return util.WithSessionID(ctx, "")
@@ -2097,6 +2131,21 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 	}
 	if clientMeta.SessionID == clientMeta.ParentSessionID {
 		clientMeta.ParentSessionID = ""
+	}
+	if nodeKind, ok := metadata[cliproxyexecutor.NodeKindMetadataKey].(string); ok && strings.TrimSpace(nodeKind) != "" {
+		clientMeta.NodeKind = strings.TrimSpace(nodeKind)
+	} else {
+		clientMeta.NodeKind = ""
+	}
+	if isFork, ok := metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok {
+		clientMeta.IsFork = isFork
+	} else {
+		clientMeta.IsFork = false
+	}
+	if isCompaction, ok := metadata[cliproxyexecutor.IsCompactionMetadataKey].(bool); ok {
+		clientMeta.IsCompaction = isCompaction
+	} else {
+		clientMeta.IsCompaction = false
 	}
 	ctx = logging.WithClientRequestMetadata(ctx, clientMeta)
 	return util.WithSessionID(ctx, clientMeta.SessionID)

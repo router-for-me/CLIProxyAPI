@@ -12,6 +12,13 @@ const (
 	claudeSystemReminderEnd   = "</system-reminder>"
 )
 
+// SystemReminderText wraps text in the <system-reminder> envelope so non-Claude
+// upstream formats treat demoted mid-session system or developer instructions
+// as system directives rather than user speech.
+func SystemReminderText(text string) string {
+	return claudeSystemReminderStart + "\n" + text + "\n" + claudeSystemReminderEnd
+}
+
 // ClaudeMessageSystemReminderText converts a Claude message-level system value
 // into ordinary user-visible reminder text for non-Claude upstream formats.
 func ClaudeMessageSystemReminderText(content gjson.Result) (string, bool) {
@@ -23,7 +30,7 @@ func ClaudeMessageSystemReminderText(content gjson.Result) (string, bool) {
 	if strings.TrimSpace(text) == "" {
 		return "", false
 	}
-	return claudeSystemReminderStart + "\n" + text + "\n" + claudeSystemReminderEnd, true
+	return SystemReminderText(text), true
 }
 
 func claudeSystemTextParts(content gjson.Result) []string {

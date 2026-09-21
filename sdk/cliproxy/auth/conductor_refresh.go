@@ -362,7 +362,12 @@ func authHasRefreshCredential(auth *Auth) bool {
 	if authMetadataString(auth, "refresh_token") != "" {
 		return true
 	}
-	return authMetadataString(auth, "refreshToken") != ""
+	if authMetadataString(auth, "refreshToken") != "" {
+		return true
+	}
+	// Meta exchanges its device token for a replacement API key after a 401.
+	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") &&
+		(authMetadataString(auth, "dca_token") != "" || strings.TrimSpace(auth.Attributes["dca_token"]) != "")
 }
 
 // CredentialsChanged reports whether authentication credentials (tokens or API keys)
@@ -520,7 +525,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if auth != nil {
 		// Use the same effective provider key as request execution so OpenAI-compat
 		// auths registered under namespaced keys still resolve for refresh.
-		exec = m.executors[executorKeyFromAuth(auth)]
+		exec, _ = m.executorLocked(executorKeyFromAuth(auth))
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {

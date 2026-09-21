@@ -73,6 +73,9 @@ func TestBuildAuthorizationURL(t *testing.T) {
 	if q.Get("redirect_uri") != "http://127.0.0.1:1234/callback" {
 		t.Errorf("redirect_uri = %q", q.Get("redirect_uri"))
 	}
+	if q.Get("cli_pkce_marker") != "" {
+		t.Errorf("cli_pkce_marker should be empty when redirect_uri is provided, got %q", q.Get("cli_pkce_marker"))
+	}
 	if q.Get("code_challenge") != "test-challenge" {
 		t.Errorf("code_challenge = %q", q.Get("code_challenge"))
 	}
@@ -81,6 +84,68 @@ func TestBuildAuthorizationURL(t *testing.T) {
 	}
 	if q.Get("state") != "state-abc" {
 		t.Errorf("state = %q", q.Get("state"))
+	}
+
+	expectedQuery := "redirect_uri=http%3A%2F%2F127.0.0.1%3A1234%2Fcallback&state=state-abc&prompt=select_account&code_challenge=test-challenge&code_challenge_method=S256"
+	if parsed.RawQuery != expectedQuery {
+		t.Errorf("raw query = %q, want %q", parsed.RawQuery, expectedQuery)
+	}
+}
+
+func TestBuildAuthorizationURLHeadlessCodeFlow(t *testing.T) {
+	svc := NewDevinAuthService(nil)
+	u := svc.BuildAuthorizationURL("", "test-challenge-headless", "state-xyz")
+
+	if !strings.HasPrefix(u, "https://app.devin.ai/auth/cli/continue?") {
+		t.Fatalf("unexpected url prefix: %s", u)
+	}
+
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatalf("failed to parse auth url: %v", err)
+	}
+	q := parsed.Query()
+	if q.Get("redirect_uri") != "" {
+		t.Errorf("redirect_uri should be omitted in headless flow, got %q", q.Get("redirect_uri"))
+	}
+	if q.Get("cli_pkce_marker") != "1" {
+		t.Errorf("cli_pkce_marker = %q, want '1'", q.Get("cli_pkce_marker"))
+	}
+	if q.Get("code_challenge") != "test-challenge-headless" {
+		t.Errorf("code_challenge = %q", q.Get("code_challenge"))
+	}
+	if q.Get("code_challenge_method") != "S256" {
+		t.Errorf("code_challenge_method = %q", q.Get("code_challenge_method"))
+	}
+	if q.Get("prompt") != "select_account" {
+		t.Errorf("prompt = %q", q.Get("prompt"))
+	}
+	if q.Get("state") != "state-xyz" {
+		t.Errorf("state = %q", q.Get("state"))
+	}
+
+	expectedQuery := "state=state-xyz&prompt=select_account&code_challenge=test-challenge-headless&code_challenge_method=S256&cli_pkce_marker=1"
+	if parsed.RawQuery != expectedQuery {
+		t.Errorf("raw query = %q, want %q", parsed.RawQuery, expectedQuery)
+	}
+}
+
+func TestBuildAuthorizationURLWhitespaceRedirectIsHeadless(t *testing.T) {
+	svc := NewDevinAuthService(nil)
+	u := svc.BuildAuthorizationURL("  \t", "challenge", "state-ws")
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatalf("failed to parse auth url: %v", err)
+	}
+	if parsed.Query().Get("redirect_uri") != "" {
+		t.Errorf("redirect_uri = %q, want empty", parsed.Query().Get("redirect_uri"))
+	}
+	if parsed.Query().Get("cli_pkce_marker") != "1" {
+		t.Errorf("cli_pkce_marker = %q, want 1", parsed.Query().Get("cli_pkce_marker"))
+	}
+	want := "state=state-ws&prompt=select_account&code_challenge=challenge&code_challenge_method=S256&cli_pkce_marker=1"
+	if parsed.RawQuery != want {
+		t.Errorf("raw query = %q, want %q", parsed.RawQuery, want)
 	}
 }
 
