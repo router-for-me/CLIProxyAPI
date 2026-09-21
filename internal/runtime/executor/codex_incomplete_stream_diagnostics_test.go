@@ -210,6 +210,34 @@ func TestCodexIncompleteStreamDiagnosticsMessage(t *testing.T) {
 			want: codexIncompleteStreamMessage + " (last event: keepalive, data frames: 5, silent for <1s)",
 		},
 		{
+			// A JSON string escape ("a\nb") or a bare \r mid-line puts control characters in the type.
+			name: "control characters dropped",
+			diag: codexIncompleteStreamDiagnostics{lastEventType: "{\n  \"status\": \"failed\"\r}", dataFrames: 4}.withIdle(2 * time.Second),
+			want: codexIncompleteStreamMessage + " (last event: { \"status\": \"failed\"}, data frames: 4, silent for 2s)",
+		},
+		{
+			// Bidi overrides and Unicode line separators are not control characters but must not reach a log line.
+			name: "unprintable characters dropped",
+			diag: codexIncompleteStreamDiagnostics{lastEventType: "response.\u202ecreated\u2028", dataFrames: 2}.withIdle(2 * time.Second),
+			want: codexIncompleteStreamMessage + " (last event: response.created, data frames: 2, silent for 2s)",
+		},
+		{
+			name: "whitespace runs collapsed",
+			diag: codexIncompleteStreamDiagnostics{lastEventType: "keepalive" + strings.Repeat(" ", 200) + "x", dataFrames: 1}.withIdle(time.Second),
+			want: codexIncompleteStreamMessage + " (last event: keepalive x, data frames: 1, silent for 1s)",
+		},
+		{
+			name: "over-long event type cut with a marker",
+			diag: codexIncompleteStreamDiagnostics{lastEventType: strings.Repeat("a", codexIncompleteStreamEventTypeRuneLimit+50), dataFrames: 7}.withIdle(3 * time.Second),
+			want: codexIncompleteStreamMessage + " (last event: " + strings.Repeat("a", codexIncompleteStreamEventTypeRuneLimit) + "..., data frames: 7, silent for 3s)",
+		},
+		{
+			// The limit is in runes, so a multi-byte type is cut between characters, never inside one.
+			name: "over-long multi-byte event type cut between runes",
+			diag: codexIncompleteStreamDiagnostics{lastEventType: strings.Repeat("日", codexIncompleteStreamEventTypeRuneLimit+2), dataFrames: 2}.withIdle(time.Second),
+			want: codexIncompleteStreamMessage + " (last event: " + strings.Repeat("日", codexIncompleteStreamEventTypeRuneLimit) + "..., data frames: 2, silent for 1s)",
+		},
+		{
 			name: "non-stream omits interval",
 			diag: codexIncompleteStreamDiagnostics{lastEventType: "response.created", dataFrames: 1},
 			want: codexIncompleteStreamMessage + " (last event: response.created, data frames: 1)",
@@ -221,6 +249,10 @@ func TestCodexIncompleteStreamDiagnosticsMessage(t *testing.T) {
 			got := tc.diag.message()
 			if got != tc.want {
 				t.Fatalf("message() = %q, want %q", got, tc.want)
+			}
+			// Guards the table itself: no future row may expect a message that spans log records.
+			if strings.ContainsAny(got, "\r\n") {
+				t.Fatalf("message() must stay on one line, got %q", got)
 			}
 			// The constant is a prefix downstream matches on, so it must survive verbatim.
 			if !strings.HasPrefix(got, codexIncompleteStreamMessage) {
@@ -326,9 +358,12 @@ func TestCodexExecutorExecuteStreamIncompleteStreamReportsDiagnosticsWhileBuffer
 }
 
 // The counters must survive the handover to the streaming goroutine: the delta frame releases the
-// stream, and the count must still cover the response.created frame the bootstrap loop consumed.
+// stream, the count must still cover the response.created frame the bootstrap loop consumed, and
+// the goroutine must keep counting the frames that arrive after the release.
 func TestCodexExecutorExecuteStreamIncompleteStreamCountsAcrossBootstrapHandover(t *testing.T) {
-	released, streamErr := codexIncompleteStreamAttempt(t, true, nil, codexCreatedEvent, codexOutputDeltaEvent)
+	// created and delta are both consumed by the buffering loop, the delta releasing the stream, so
+	// only a third frame can show that the goroutine keeps counting and keeps updating the type.
+	released, streamErr := codexIncompleteStreamAttempt(t, true, nil, codexCreatedEvent, codexOutputDeltaEvent, codexOutputAddedEvent)
 	if !released {
 		t.Fatal("expected the delta frame to release the stream")
 	}
@@ -336,7 +371,7 @@ func TestCodexExecutorExecuteStreamIncompleteStreamCountsAcrossBootstrapHandover
 		t.Fatal("expected an incomplete-stream error, got nil")
 	}
 
-	want := codexIncompleteStreamWant("response.output_text.delta", 2)
+	want := codexIncompleteStreamWant("response.output_item.added", 3)
 	if got := streamErr.Error(); got != want {
 		t.Fatalf("stream error = %q, want %q", got, want)
 	}

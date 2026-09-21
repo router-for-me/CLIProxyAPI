@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
@@ -24,7 +25,8 @@ type codexIncompleteStreamDiagnostics struct {
 	lastEventType string
 	// dataFrames counts "data:" frames only, keepalives included; the event:/blank lines do not.
 	dataFrames int
-	// idle is how long the executor went without reading a line before the stream ended.
+	// idle is the interval since the executor last read a line, so time blocked on the downstream
+	// send counts: an observation window, not proof of wire silence.
 	idle time.Duration
 	// hasIdle is false on the non-stream path, which has no per-frame arrival times to measure.
 	hasIdle bool
@@ -45,13 +47,33 @@ func (d codexIncompleteStreamDiagnostics) withIdle(idle time.Duration) codexInco
 	return d
 }
 
+// codexIncompleteStreamEventTypeRuneLimit bounds the upstream "type" copied into the error text, in
+// runes: gjson renders a non-string "type" as raw JSON, so its length is not bounded upstream.
+const codexIncompleteStreamEventTypeRuneLimit = 128
+
+// codexIncompleteStreamEventType renders the last observed event type: unprintable runes dropped
+// and whitespace collapsed so one failure stays one log line, cut at the limit, "none" if empty.
+func codexIncompleteStreamEventType(eventType string) string {
+	printable := strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, eventType)
+	cleaned := strings.Join(strings.Fields(printable), " ")
+	if runes := []rune(cleaned); len(runes) > codexIncompleteStreamEventTypeRuneLimit {
+		cleaned = string(runes[:codexIncompleteStreamEventTypeRuneLimit]) + "..."
+	}
+	if cleaned == "" {
+		return "none"
+	}
+	return cleaned
+}
+
 // message renders the diagnostics as a suffix of codexIncompleteStreamMessage.
 func (d codexIncompleteStreamDiagnostics) message() string {
-	lastEvent := strings.TrimSpace(d.lastEventType)
-	if lastEvent == "" {
-		lastEvent = "none"
-	}
-	suffix := fmt.Sprintf("last event: %s, data frames: %d", lastEvent, d.dataFrames)
+	suffix := fmt.Sprintf("last event: %s, data frames: %d",
+		codexIncompleteStreamEventType(d.lastEventType), d.dataFrames)
 	if d.hasIdle {
 		suffix += ", silent for " + codexIncompleteStreamIdle(d.idle)
 	}

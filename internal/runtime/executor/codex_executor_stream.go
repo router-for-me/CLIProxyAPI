@@ -150,9 +150,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	streamNow := codexStreamNowFunc()
 	lastActivity := streamNow() // headers are in; an upstream that never speaks is silent from here
 
-	// observeLine feeds the incomplete-stream diagnostics. It runs before the grok keepalive
-	// transform so the counters describe what the upstream sent, not who was reading it; it is
-	// called by the loop below and then only by the goroutine, like outputItemsByIndex.
+	// observeLine feeds the diagnostics ahead of the grok keepalive transform, so the counters
+	// follow what the upstream sent, not who read it. Loop below first, then only the goroutine.
 	observeLine := func(line []byte) (data []byte, eventType string, isData bool) {
 		lastActivity = streamNow()
 		if !bytes.HasPrefix(line, dataTag) {
