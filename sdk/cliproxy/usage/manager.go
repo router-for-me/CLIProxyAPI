@@ -72,6 +72,9 @@ type Detail struct {
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
+	// Credits holds the provider-metered cost in credits for upstreams that bill
+	// per credit instead of per token (currently Kiro). Zero means not reported.
+	Credits float64
 }
 
 type requestedModelAliasContextKey struct{}

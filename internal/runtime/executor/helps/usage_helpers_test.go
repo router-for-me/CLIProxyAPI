@@ -671,3 +671,65 @@ type TestUsageExecutor struct{}
 func (TestUsageExecutor) Identifier() string {
 	return "test-provider"
 }
+
+func TestParseKiroUsage(t *testing.T) {
+	detail := ParseKiroUsage(120, 45, 0.25)
+	if detail.Credits != 0.25 {
+		t.Fatalf("credits = %v, want %v", detail.Credits, 0.25)
+	}
+	if detail.InputTokens != 120 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 120)
+	}
+	if detail.OutputTokens != 45 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 45)
+	}
+	if detail.TotalTokens != 165 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 165)
+	}
+	if !detail.TokenBreakdown.Valid() {
+		t.Fatalf("token breakdown invalid: %+v", detail.TokenBreakdown)
+	}
+	if detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete {
+		t.Fatalf("token breakdown quality = %q", detail.TokenBreakdown.Quality)
+	}
+	if detail.TokenBreakdown.Input.UncachedTokens != 120 {
+		t.Fatalf("uncached input tokens = %d, want %d", detail.TokenBreakdown.Input.UncachedTokens, 120)
+	}
+	if detail.TokenBreakdown.Output.NonReasoningTokens != 45 {
+		t.Fatalf("non-reasoning output tokens = %d, want %d", detail.TokenBreakdown.Output.NonReasoningTokens, 45)
+	}
+}
+
+func TestParseKiroUsageNegativeCountsClamped(t *testing.T) {
+	detail := ParseKiroUsage(-5, -1, -0.5)
+	if detail.InputTokens != 0 || detail.OutputTokens != 0 || detail.TotalTokens != 0 {
+		t.Fatalf("detail = %+v, want zero token counts", detail)
+	}
+	if detail.Credits != 0 {
+		t.Fatalf("credits = %v, want 0", detail.Credits)
+	}
+	if !detail.TokenBreakdown.Valid() {
+		t.Fatalf("token breakdown invalid: %+v", detail.TokenBreakdown)
+	}
+}
+
+func TestParseKiroUsageZeroIsNotReportedAsUsage(t *testing.T) {
+	if hasNonZeroTokenUsage(ParseKiroUsage(0, 0, 0)) {
+		t.Fatal("zero kiro usage should not count as token usage")
+	}
+}
+
+// Kiro almost always omits token counters and reports credits only, so the
+// credits-only shape must survive the reporter pipeline.
+func TestParseKiroUsageCreditsOnly(t *testing.T) {
+	detail := ParseKiroUsage(0, 0, 0.02589595925373134)
+	if detail.Credits != 0.02589595925373134 {
+		t.Fatalf("credits = %v", detail.Credits)
+	}
+	if detail.TotalTokens != 0 {
+		t.Fatalf("total tokens = %d, want 0", detail.TotalTokens)
+	}
+	if !detail.TokenBreakdown.Valid() {
+		t.Fatalf("token breakdown invalid: %+v", detail.TokenBreakdown)
+	}
+}

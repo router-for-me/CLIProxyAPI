@@ -1022,25 +1022,23 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		now := time.Now()
-		metadata := map[string]any{
-			"type":          "kiro",
-			"access_token":  creds.AccessToken,
-			"refresh_token": creds.RefreshToken,
-			"profile_arn":   creds.ProfileArn,
-			"auth_method":   "builder-id",
-			"client_id":     creds.ClientID,
-			"client_secret": creds.ClientSecret,
-			"expires_at":    creds.ExpiresAt,
-			"timestamp":     now.UnixMilli(),
+		if strings.TrimSpace(creds.ProfileArn) == "" {
+			if profileArn, errProfile := authSvc.ResolveProfileArn(ctx, creds); errProfile == nil && profileArn != "" {
+				creds.ProfileArn = profileArn
+			}
 		}
-		fileName := fmt.Sprintf("kiro-%d.json", now.Unix())
+		email, userID, _ := authSvc.GetUserInfo(ctx, creds.AccessToken, creds.ProfileArn, creds.Region)
+		fileName := kiro.CredentialFileName(email, userID)
+		label := strings.TrimSpace(email)
+		if label == "" {
+			label = "Kiro AI (SSO Token)"
+		}
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "kiro",
 			FileName: fileName,
-			Label:    "Kiro AI (SSO Token)",
-			Metadata: metadata,
+			Label:    label,
+			Metadata: kiro.NormalizeKiroMetadata(creds, email, userID),
 		}
 		savedPath, errSave := h.saveTokenRecord(c.Request.Context(), record)
 		if errSave != nil {
@@ -1195,26 +1193,37 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 			}
 
 			now := time.Now()
-			metadata := map[string]any{
-				"type":          "kiro",
-				"access_token":  tokenResp.AccessToken,
-				"refresh_token": tokenResp.RefreshToken,
-				"profile_arn":   tokenResp.ProfileArn,
-				"auth_method":   "builder-id",
-				"client_id":     reg.ClientID,
-				"client_secret": reg.ClientSecret,
-				"region":        region,
-				"expires_at":    now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Unix(),
-				"timestamp":     now.UnixMilli(),
+			creds := &kiro.KiroCredentials{
+				AccessToken:   tokenResp.AccessToken,
+				RefreshToken:  tokenResp.RefreshToken,
+				ProfileArn:    tokenResp.ProfileArn,
+				AuthMethod:    "builder-id",
+				ClientID:      reg.ClientID,
+				ClientSecret:  reg.ClientSecret,
+				Region:        region,
+				ExpiresAt:     now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Unix(),
+				LastRefreshed: now.Unix(),
 			}
 
-			fileName := fmt.Sprintf("kiro-%d.json", now.Unix())
+			if strings.TrimSpace(creds.ProfileArn) == "" {
+				if profileArn, errProfile := authSvc.ResolveProfileArn(ctx, creds); errProfile == nil && profileArn != "" {
+					creds.ProfileArn = profileArn
+				}
+			}
+
+			email, userID, _ := authSvc.GetUserInfo(ctx, creds.AccessToken, creds.ProfileArn, creds.Region)
+			fileName := kiro.CredentialFileName(email, userID)
+			label := strings.TrimSpace(email)
+			if label == "" {
+				label = "Kiro AI (AWS Builder ID)"
+			}
+
 			record := &coreauth.Auth{
 				ID:       fileName,
 				Provider: "kiro",
 				FileName: fileName,
-				Label:    "Kiro AI (AWS Builder ID)",
-				Metadata: metadata,
+				Label:    label,
+				Metadata: kiro.NormalizeKiroMetadata(creds, email, userID),
 			}
 			if errGuard := guardOAuthSessionPendingForSave(state, "kiro"); errGuard != nil {
 				return
@@ -1239,22 +1248,36 @@ func (h *Handler) saveKiroSocialCredential(ctx context.Context, authMethod strin
 		return "", "", fmt.Errorf("invalid social callback state")
 	}
 	now := time.Now()
-	metadata := map[string]any{
-		"type":          "kiro",
-		"access_token":  res.AccessToken,
-		"refresh_token": res.RefreshToken,
-		"profile_arn":   res.ProfileArn,
-		"auth_method":   authMethod,
-		"expires_at":    res.ExpiresAt,
-		"timestamp":     now.UnixMilli(),
+	creds := &kiro.KiroCredentials{
+		AccessToken:   res.AccessToken,
+		RefreshToken:  res.RefreshToken,
+		ProfileArn:    res.ProfileArn,
+		AuthMethod:    authMethod,
+		ExpiresAt:     res.ExpiresAt,
+		LastRefreshed: now.Unix(),
+		Region:        kiro.DefaultAwsRegion,
 	}
-	fileName := fmt.Sprintf("kiro-%d.json", now.UnixNano())
+
+	authSvc := kiro.NewKiroAuth(h.cfg, nil)
+	if strings.TrimSpace(creds.ProfileArn) == "" {
+		if profileArn, errProfile := authSvc.ResolveProfileArn(ctx, creds); errProfile == nil && profileArn != "" {
+			creds.ProfileArn = profileArn
+		}
+	}
+
+	email, userID, _ := authSvc.GetUserInfo(ctx, creds.AccessToken, creds.ProfileArn, creds.Region)
+	fileName := kiro.CredentialFileName(email, userID)
+	label := strings.TrimSpace(email)
+	if label == "" {
+		label = fmt.Sprintf("Kiro AI (%s)", strings.ToUpper(authMethod))
+	}
+
 	record := &coreauth.Auth{
 		ID:       fileName,
 		Provider: "kiro",
 		FileName: fileName,
-		Label:    fmt.Sprintf("Kiro AI (%s)", authMethod),
-		Metadata: metadata,
+		Label:    label,
+		Metadata: kiro.NormalizeKiroMetadata(creds, email, userID),
 	}
 	savedPath, errSave := h.saveTokenRecord(ctx, record)
 	if errSave != nil {
@@ -1312,8 +1335,13 @@ func (h *Handler) HandleKiroSocialLoopbackCallback(c *gin.Context) {
 	if state != "" {
 		CompleteOAuthSession(state)
 	}
+	writeKiroSocialLoopbackSuccess(c)
+}
+
+func writeKiroSocialLoopbackSuccess(c *gin.Context) {
+	redirectURI := kiro.SocialRedirectURI
 	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, `<html><head><meta charset="utf-8"><title>Kiro authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Kiro authentication successful!</h1><p>You can close this window and return to CPA Manager Plus.</p></body></html>`)
+	c.String(http.StatusOK, `<html><head><meta charset="utf-8"><title>Kiro authentication successful</title><script>window.location.assign(%q);</script></head><body><h1>Kiro authentication successful!</h1><p>Kiro should open automatically. If it does not, <a href="%s">Open Kiro IDE</a>.</p></body></html>`, redirectURI, html.EscapeString(redirectURI))
 }
 
 func (h *Handler) SubmitKiroCallback(c *gin.Context) {
@@ -1345,26 +1373,23 @@ func (h *Handler) SubmitKiroCallback(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		now := time.Now()
-		metadata := map[string]any{
-			"type":          "kiro",
-			"access_token":  creds.AccessToken,
-			"refresh_token": creds.RefreshToken,
-			"profile_arn":   creds.ProfileArn,
-			"auth_method":   "idc",
-			"client_id":     creds.ClientID,
-			"client_secret": creds.ClientSecret,
-			"region":        creds.Region,
-			"expires_at":    creds.ExpiresAt,
-			"timestamp":     now.UnixMilli(),
+		if strings.TrimSpace(creds.ProfileArn) == "" {
+			if profileArn, errProfile := authSvc.ResolveProfileArn(ctx, creds); errProfile == nil && profileArn != "" {
+				creds.ProfileArn = profileArn
+			}
 		}
-		fileName := fmt.Sprintf("kiro-%d.json", now.Unix())
+		email, userID, _ := authSvc.GetUserInfo(ctx, creds.AccessToken, creds.ProfileArn, creds.Region)
+		fileName := kiro.CredentialFileName(email, userID)
+		label := strings.TrimSpace(email)
+		if label == "" {
+			label = "Kiro AI (AWS IAM SSO)"
+		}
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "kiro",
 			FileName: fileName,
-			Label:    "Kiro AI (AWS IAM SSO)",
-			Metadata: metadata,
+			Label:    label,
+			Metadata: kiro.NormalizeKiroMetadata(creds, email, userID),
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
@@ -1386,27 +1411,40 @@ func (h *Handler) SubmitKiroCallback(c *gin.Context) {
 		if progress.Result != nil {
 			now := time.Now()
 			res := progress.Result
-			metadata := map[string]any{
-				"type":           "kiro",
-				"access_token":   res.AccessToken,
-				"refresh_token":  res.RefreshToken,
-				"auth_method":    "external_idp",
-				"client_id":      res.ClientID,
-				"token_endpoint": res.TokenEndpoint,
-				"issuer_url":     res.IssuerURL,
-				"scopes":         res.Scopes,
-				"email":          res.Email,
-				"user_id":        res.UserID,
-				"expires_at":     res.ExpiresAt,
-				"timestamp":      now.UnixMilli(),
+			creds := &kiro.KiroCredentials{
+				AccessToken:   res.AccessToken,
+				RefreshToken:  res.RefreshToken,
+				ProfileArn:    res.ProfileArn,
+				AuthMethod:    "external_idp",
+				ClientID:      res.ClientID,
+				TokenEndpoint: res.TokenEndpoint,
+				IssuerURL:     res.IssuerURL,
+				Scopes:        res.Scopes,
+				ExpiresAt:     res.ExpiresAt,
+				LastRefreshed: now.Unix(),
+				Region:        kiro.DefaultAwsRegion,
 			}
-			fileName := fmt.Sprintf("kiro-%d.json", now.Unix())
+			if strings.TrimSpace(creds.ProfileArn) == "" {
+				if profileArn, errProfile := authSvc.ResolveProfileArn(ctx, creds); errProfile == nil && profileArn != "" {
+					creds.ProfileArn = profileArn
+				}
+			}
+			email := res.Email
+			userID := res.UserID
+			if email == "" {
+				email, userID, _ = authSvc.GetUserInfo(ctx, creds.AccessToken, creds.ProfileArn, creds.Region)
+			}
+			fileName := kiro.CredentialFileName(email, userID)
+			label := strings.TrimSpace(email)
+			if label == "" {
+				label = "Kiro AI (Microsoft Enterprise SSO)"
+			}
 			record := &coreauth.Auth{
 				ID:       fileName,
 				Provider: "kiro",
 				FileName: fileName,
-				Label:    "Kiro AI (Microsoft Enterprise SSO)",
-				Metadata: metadata,
+				Label:    label,
+				Metadata: kiro.NormalizeKiroMetadata(creds, email, userID),
 			}
 			savedPath, errSave := h.saveTokenRecord(ctx, record)
 			if errSave != nil {

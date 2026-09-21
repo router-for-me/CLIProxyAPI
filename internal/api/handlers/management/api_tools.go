@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -239,8 +240,61 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		return token, errToken
 	}
 
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "kiro") {
+		token, errToken := h.refreshKiroOAuthAccessToken(ctx, auth)
+		if errToken == nil && token != "" {
+			return token, nil
+		}
+		if v := tokenValueForAuth(auth); v != "" {
+			return v, nil
+		}
+		return token, errToken
+	}
+
 	return tokenValueForAuth(auth), nil
 }
+
+func (h *Handler) refreshKiroOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+	creds := kiro.CredentialsFromAuth(auth)
+	if creds == nil {
+		return tokenValueForAuth(auth), nil
+	}
+	if strings.EqualFold(strings.TrimSpace(creds.AuthMethod), "api_key") {
+		return tokenValueForAuth(auth), nil
+	}
+	if creds.ExpiresAt > 0 && time.Now().Unix() < creds.ExpiresAt-120 && creds.AccessToken != "" {
+		return creds.AccessToken, nil
+	}
+	if creds.RefreshToken == "" {
+		return tokenValueForAuth(auth), nil
+	}
+	var cfg *config.Config
+	if h != nil {
+		cfg = h.cfg
+	}
+	authSvc := kiro.NewKiroAuth(cfg, nil)
+	refreshed, err := authSvc.RefreshToken(ctx, creds)
+	if err != nil {
+		return "", err
+	}
+	if refreshed == nil || refreshed.AccessToken == "" {
+		return tokenValueForAuth(auth), nil
+	}
+	kiro.ApplyCredentialsToAuth(auth, refreshed)
+	if h != nil && h.authManager != nil {
+		auth.LastRefreshedAt = time.Now()
+		auth.UpdatedAt = time.Now()
+		_, _ = h.authManager.Update(ctx, auth)
+	}
+	return refreshed.AccessToken, nil
+}
+
 
 func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
 	if ctx == nil {

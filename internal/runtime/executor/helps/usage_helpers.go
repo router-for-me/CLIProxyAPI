@@ -688,6 +688,32 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	return detail, true
 }
 
+// ParseKiroUsage builds a usage detail from the counters reported by the Kiro
+// event stream. Kiro bills per credit and its metering event is the only usage
+// signal it always reports; token counters are usually absent, so cache and
+// reasoning buckets stay empty and the totals use subset semantics.
+func ParseKiroUsage(inputTokens, outputTokens int, credits float64) usage.Detail {
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	if outputTokens < 0 {
+		outputTokens = 0
+	}
+	if credits < 0 {
+		credits = 0
+	}
+	in := int64(inputTokens)
+	out := int64(outputTokens)
+	detail := usage.Detail{
+		InputTokens:  in,
+		OutputTokens: out,
+		TotalTokens:  in + out,
+		Credits:      credits,
+	}
+	detail.TokenBreakdown = usage.NewSubsetTokenBreakdown(in, 0, 0, out, 0, detail.TotalTokens)
+	return detail
+}
+
 func ParseClaudeUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data).Get("usage")
 	if !usageNode.Exists() {

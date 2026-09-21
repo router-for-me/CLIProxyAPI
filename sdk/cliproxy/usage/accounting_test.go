@@ -109,6 +109,14 @@ func TestEnsureTokenBreakdownForProviderUsesKnownSemantics(t *testing.T) {
 			wantInput:  150,
 			wantOutput: 42,
 		},
+		{
+			name:       "Kiro reports aggregate input and output totals",
+			provider:   "kiro",
+			detail:     Detail{InputTokens: 100, OutputTokens: 30},
+			wantTotal:  130,
+			wantInput:  100,
+			wantOutput: 30,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

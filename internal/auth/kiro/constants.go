@@ -1,7 +1,10 @@
 // Package kiro provides OAuth2 authentication and token management for the Kiro AI provider.
 package kiro
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 const (
 	// DefaultAwsRegion is the default AWS region for Kiro endpoints.
@@ -19,7 +22,24 @@ const (
 
 	// RedirectURI used for Kiro Social Login.
 	SocialRedirectURI = "kiro://kiro.kiroAgent/authenticate-success"
+
+	// DefaultBuilderIDProfileArn is the shared fallback profile ARN for AWS Builder ID.
+	DefaultBuilderIDProfileArn = "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX"
+
+	// DefaultSocialProfileArn is the shared fallback profile ARN for Kiro social auth (Google/GitHub).
+	DefaultSocialProfileArn = "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK"
 )
+
+// DefaultProfileArnForMethod returns the fallback profile ARN for a given auth method.
+func DefaultProfileArnForMethod(authMethod string) string {
+	switch strings.ToLower(strings.TrimSpace(authMethod)) {
+	case "google", "github", "social":
+		return DefaultSocialProfileArn
+	default:
+		return DefaultBuilderIDProfileArn
+	}
+}
+
 
 var (
 	// DefaultScopes for CodeWhisperer/Kiro OIDC requests.

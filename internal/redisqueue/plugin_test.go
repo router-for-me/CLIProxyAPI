@@ -559,3 +559,58 @@ func requireHeaderField(t *testing.T, payload map[string]json.RawMessage, field,
 		}
 	}
 }
+
+func TestUsageQueuePluginForwardsKiroCredits(t *testing.T) {
+	withEnabledQueue(t, func() {
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:     "kiro",
+			ExecutorType: "KiroExecutor",
+			Model:        "claude-sonnet-4.5",
+			RequestedAt:  time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				Credits: 0.02589595925373134,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "provider", "kiro")
+		requireFloatField(t, payload, "credits", 0.02589595925373134)
+	})
+}
+
+func TestUsageQueuePluginOmitsCreditsWhenAbsent(t *testing.T) {
+	withEnabledQueue(t, func() {
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:     "openai",
+			ExecutorType: "KimiExecutor",
+			Model:        "gpt-5.4",
+			RequestedAt:  time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens:  10,
+				OutputTokens: 20,
+				TotalTokens:  30,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		requireMissingField(t, payload, "credits")
+	})
+}
+
+func requireFloatField(t *testing.T, payload map[string]json.RawMessage, key string, want float64) {
+	t.Helper()
+
+	raw, ok := payload[key]
+	if !ok {
+		t.Fatalf("payload missing %q", key)
+	}
+	var got float64
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", key, err)
+	}
+	if got != want {
+		t.Fatalf("%s = %v, want %v", key, got, want)
+	}
+}

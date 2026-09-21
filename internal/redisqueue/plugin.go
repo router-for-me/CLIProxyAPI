@@ -105,6 +105,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		requestDetail:       detail,
 		AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
 		TokenBreakdown:      usageDetail.TokenBreakdown,
+		Credits:             usageDetail.Credits,
 		Provider:            provider,
 		ExecutorType:        executorType,
 		Model:               modelName,
@@ -125,19 +126,22 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	AccountingVersion   int                      `json:"accounting_version"`
-	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown"`
-	Provider            string                   `json:"provider"`
-	ExecutorType        string                   `json:"executor_type"`
-	Model               string                   `json:"model"`
-	Alias               string                   `json:"alias"`
-	Endpoint            string                   `json:"endpoint"`
-	AuthType            string                   `json:"auth_type"`
-	APIKey              string                   `json:"api_key"`
-	RequestID           string                   `json:"request_id"`
-	ReasoningEffort     string                   `json:"reasoning_effort"`
-	ServiceTier         string                   `json:"service_tier"`
-	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+	AccountingVersion int                      `json:"accounting_version"`
+	TokenBreakdown    coreusage.TokenBreakdown `json:"token_breakdown"`
+	// Credits carries the provider-reported billing units for providers that
+	// meter per credit instead of per token (currently Kiro).
+	Credits             float64 `json:"credits,omitempty"`
+	Provider            string  `json:"provider"`
+	ExecutorType        string  `json:"executor_type"`
+	Model               string  `json:"model"`
+	Alias               string  `json:"alias"`
+	Endpoint            string  `json:"endpoint"`
+	AuthType            string  `json:"auth_type"`
+	APIKey              string  `json:"api_key"`
+	RequestID           string  `json:"request_id"`
+	ReasoningEffort     string  `json:"reasoning_effort"`
+	ServiceTier         string  `json:"service_tier"`
+	ResponseServiceTier string  `json:"response_service_tier,omitempty"`
 }
 
 type requestDetail struct {

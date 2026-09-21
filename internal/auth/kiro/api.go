@@ -124,13 +124,19 @@ func (ka *KiroAuth) GetUsageLimits(ctx context.Context, accessToken, profileArn,
 	return body, nil
 }
 
-// ResolveProfileArn returns the profile ARN for a credential, refreshing if needed.
+// ResolveProfileArn returns the profile ARN for a credential, querying AWS or refreshing if needed.
 func (ka *KiroAuth) ResolveProfileArn(ctx context.Context, creds *KiroCredentials) (string, error) {
 	if creds == nil {
 		return "", fmt.Errorf("credentials are nil")
 	}
 	if profileArn := strings.TrimSpace(creds.ProfileArn); profileArn != "" {
 		return profileArn, nil
+	}
+	if creds.AccessToken != "" {
+		if profileArn, err := ka.ListAvailableProfiles(creds.AccessToken, creds.Region); err == nil && strings.TrimSpace(profileArn) != "" {
+			creds.ProfileArn = strings.TrimSpace(profileArn)
+			return creds.ProfileArn, nil
+		}
 	}
 	if refreshed, err := ka.RefreshToken(ctx, creds); err == nil && refreshed != nil {
 		if profileArn := strings.TrimSpace(refreshed.ProfileArn); profileArn != "" {
@@ -147,8 +153,22 @@ func (ka *KiroAuth) ResolveProfileArn(ctx context.Context, creds *KiroCredential
 			creds.LastRefreshed = refreshed.LastRefreshed
 			return profileArn, nil
 		}
+		if refreshed.AccessToken != "" {
+			if profileArn, err := ka.ListAvailableProfiles(refreshed.AccessToken, creds.Region); err == nil && strings.TrimSpace(profileArn) != "" {
+				creds.ProfileArn = strings.TrimSpace(profileArn)
+				return creds.ProfileArn, nil
+			}
+		}
 	}
-	return "", fmt.Errorf("profile arn unavailable")
+	// For IDC accounts, do not return the builder-id fallback if AWS didn't return a profile.
+	authMethod := strings.ToLower(strings.TrimSpace(creds.AuthMethod))
+	if authMethod == "idc" || authMethod == "iam-sso" || authMethod == "api_key" {
+		return "", nil
+	}
+	// Fallback to default profile ARN for the auth method if AWS did not return one.
+	fallback := DefaultProfileArnForMethod(creds.AuthMethod)
+	creds.ProfileArn = fallback
+	return fallback, nil
 }
 
 func profileArnQuery(profileArn string) string {
