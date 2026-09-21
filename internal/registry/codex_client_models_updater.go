@@ -65,7 +65,23 @@ func tryRefreshCodexClientModels(ctx context.Context, label string) {
 
 func fetchCodexClientModelsFromRemote(ctx context.Context) ([]byte, string) {
 	client := &http.Client{Timeout: modelsFetchTimeout}
-	for _, sourceURL := range codexClientModelsURLs {
+	for _, sourceURL := range resolveRemoteURLs("CPA_REMOTE_CODEX_CLIENT_MODELS_URL", codexClientModelsURLs) {
+		if !isHTTPSource(sourceURL) {
+			localData, lerr := readLocalCatalog(sourceURL)
+			if lerr != nil {
+				log.Debugf("Codex client models local catalog read failed for %s: %v", sourceURL, lerr)
+				continue
+			}
+			if int64(len(localData)) > maxCodexClientModelsSize {
+				log.Warnf("Codex client models catalog at %s exceeds the size limit", sourceURL)
+				continue
+			}
+			if verr := ValidateCodexClientModelsJSON(localData); verr != nil {
+				log.Warnf("Codex client models validate failed for %s: %v", sourceURL, verr)
+				continue
+			}
+			return localData, sourceURL
+		}
 		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, sourceURL, nil)
 		if err != nil {
