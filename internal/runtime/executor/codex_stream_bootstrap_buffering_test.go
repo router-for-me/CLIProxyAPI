@@ -22,6 +22,8 @@ import (
 
 const (
 	codexOverloadEvent      = `{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2}`
+	codexBareOverloadEvent  = `{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","headers":{"x-retry-metadata":"NO_MORE_RETRY"},"message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2}`
+	codexBareInvalidEvent   = `{"error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid input."},"sequence_number":2}`
 	codexCapacityEvent      = `{"type":"error","error":{"message":"Selected model is at capacity. Please try a different model."},"sequence_number":2}`
 	codexInvalidEvent       = `{"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","message":"Invalid input."},"sequence_number":2}`
 	codexCreatedEvent       = `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-terra"}}`
@@ -136,6 +138,32 @@ func TestCodexExecutor_BootstrapBuffering_OverloadFailsAttemptWithoutLeakingHand
 	}
 }
 
+func TestCodexExecutor_BootstrapBuffering_BareOverloadFailsAttemptWithoutLeakingHandshake(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+		_, _ = w.Write([]byte("data: " + codexCreatedEvent + "\n\n"))
+		_, _ = w.Write([]byte("event: response.in_progress\n"))
+		_, _ = w.Write([]byte("data: " + codexInProgressEvent + "\n\n"))
+		_, _ = w.Write([]byte("event: error\n"))
+		_, _ = w.Write([]byte("data: " + codexBareOverloadEvent + "\n\n"))
+	}))
+	defer server.Close()
+
+	req, opts := codexTestRequest()
+	result, err := NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+
+	if err == nil {
+		t.Fatal("expected ExecuteStream to fail the attempt on a bare overload rejection")
+	}
+	if result != nil {
+		t.Fatal("expected nil result so no buffered handshake chunk can reach the client")
+	}
+	if got := statusCodeFromTestError(t, err); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want %d (upstream hides 503 behind HTTP 200)", got, http.StatusServiceUnavailable)
+	}
+}
+
 func TestCodexExecutor_BootstrapBuffering_CapacityFailsAttemptWithoutLeakingHandshake(t *testing.T) {
 	server := codexSSEServer(codexCreatedEvent, codexInProgressEvent, codexCapacityEvent)
 	defer server.Close()
@@ -166,6 +194,37 @@ func TestCodexExecutor_BootstrapBuffering_NonOverloadStaysInStream(t *testing.T)
 
 	if err != nil {
 		t.Fatalf("non-overload failure must not fail the attempt synchronously: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected a stream result for in-stream error delivery")
+	}
+	combined, streamErr := drainChunks(result)
+	if streamErr == nil {
+		t.Fatal("expected the invalid-request failure to arrive as an in-stream chunk error")
+	}
+	if !strings.Contains(combined, `"type":"response.created"`) {
+		t.Fatalf("buffered handshake must be flushed before the in-stream error: %s", combined)
+	}
+	if got := statusCodeFromTestError(t, streamErr); got != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	}
+}
+
+func TestCodexExecutor_BootstrapBuffering_BareNonOverloadStaysInStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+		_, _ = w.Write([]byte("data: " + codexCreatedEvent + "\n\n"))
+		_, _ = w.Write([]byte("event: error\n"))
+		_, _ = w.Write([]byte("data: " + codexBareInvalidEvent + "\n\n"))
+	}))
+	defer server.Close()
+
+	req, opts := codexTestRequest()
+	result, err := NewCodexExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+
+	if err != nil {
+		t.Fatalf("bare non-overload failure must not fail the attempt synchronously: %v", err)
 	}
 	if result == nil {
 		t.Fatal("expected a stream result for in-stream error delivery")
