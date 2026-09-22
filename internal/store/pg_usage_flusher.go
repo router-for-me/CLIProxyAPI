@@ -278,6 +278,19 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 	if model == "" {
 		model = "unknown"
 	}
+	// A silent substitution is the provider serving a different model than
+	// NixLLM resolved. Log it here, at the single point where both values are
+	// known, so the operator sees it in the same stream as the request rather
+	// than only in the alerts feed.
+	if report := coreusage.DetectSubstitution(record.ServedModel, model); report.Substituted {
+		log.WithFields(log.Fields{
+			"requested_model": report.Requested,
+			"served_model":    report.Served,
+			"provider":        record.Provider,
+			"auth_id":         record.AuthID,
+			"request_id":      record.RequestID,
+		}).Warn("upstream served a different model than requested")
+	}
 	now := record.RequestedAt
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -337,6 +350,7 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		Provider:            record.Provider,
 		ExecutorType:        record.ExecutorType,
 		Model:               model,
+		ServedModel:         record.ServedModel,
 		Alias:               record.Alias,
 		Endpoint:            "",
 		ClientIP:            record.ClientIP,
@@ -439,6 +453,7 @@ func (f *UsageFlusher) toError(ctx context.Context, record coreusage.Record) (Us
 		Provider:            record.Provider,
 		ExecutorType:        record.ExecutorType,
 		Model:               model,
+		ServedModel:         record.ServedModel,
 		Alias:               record.Alias,
 		RouteModel:          record.RouteModel,
 		Endpoint:            record.Endpoint,

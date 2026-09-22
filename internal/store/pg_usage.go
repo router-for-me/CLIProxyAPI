@@ -24,14 +24,18 @@ const (
 // api_key_id and computed cost_usd that the hot path does not know at publish
 // time.
 type UsageEvent struct {
-	ID                  int64  `json:"id,omitempty"`
-	RequestID           string `json:"request_id,omitempty"`
-	APIKeyID            string `json:"api_key_id,omitempty"`
-	APIKeyPrincipal     string `json:"api_key_principal,omitempty"`
-	UserID              string `json:"user_id,omitempty"`
-	Provider            string `json:"provider"`
-	ExecutorType        string `json:"executor_type,omitempty"`
-	Model               string `json:"model"`
+	ID              int64  `json:"id,omitempty"`
+	RequestID       string `json:"request_id,omitempty"`
+	APIKeyID        string `json:"api_key_id,omitempty"`
+	APIKeyPrincipal string `json:"api_key_principal,omitempty"`
+	UserID          string `json:"user_id,omitempty"`
+	Provider        string `json:"provider"`
+	ExecutorType    string `json:"executor_type,omitempty"`
+	Model           string `json:"model"`
+	// ServedModel is the model the upstream response reported serving. It
+	// differs from Model when the provider silently substituted a different
+	// model; empty when the upstream did not report one.
+	ServedModel         string `json:"served_model,omitempty"`
 	Alias               string `json:"alias,omitempty"`
 	Endpoint            string `json:"endpoint,omitempty"`
 	ClientIP            string `json:"client_ip,omitempty"`
@@ -484,14 +488,14 @@ func (s *UsageStore) PricingTable() string {
 }
 
 const usageEventColumnList = `
-	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model,
+	request_id, api_key_id, api_key_principal, user_id, provider, executor_type, model, served_model,
 	alias, endpoint, client_ip, forwarded_for, auth_type, source, reasoning_effort, service_tier,
 	response_service_tier, tier, router_id, scored_tier, effective_tier, mapping_tier, decision_cause,
 	profile_version, profile_hash, auto_router_decision, input_tokens, output_tokens, reasoning_tokens,
 	cached_tokens, cache_creation_tokens, total_tokens, cost_usd, discount_pct, original_cost_usd, latency_ms,
 	ttft_ms, failed, fail_status_code, generate, requested_at
 `
-const usageEventColumnCount = 40
+const usageEventColumnCount = 41
 
 // InsertEvent records a single usage event. The api_key_principal field is
 // sealed at rest via the configured Sealer before being bound. When the
@@ -513,11 +517,11 @@ func (s *UsageStore) InsertEvent(ctx context.Context, e UsageEvent) error {
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (%s) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)
+			$26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41)
 	`, s.eventsTable, usageEventColumnList),
 		e.RequestID, nullableString(e.APIKeyID), nullableString(principal),
 		nullableString(e.UserID),
-		e.Provider, e.ExecutorType, e.Model, e.Alias, e.Endpoint,
+		e.Provider, e.ExecutorType, e.Model, e.ServedModel, e.Alias, e.Endpoint,
 		nullableString(e.ClientIP), nullableString(e.ForwardedFor),
 		e.AuthType,
 		e.Source, e.ReasoningEffort, e.ServiceTier, e.ResponseServiceTier,
@@ -576,11 +580,13 @@ func (s *UsageStore) BatchInsertEvents(ctx context.Context, events []UsageEvent)
 		}
 		args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
 			nullableString(ev.UserID),
-			ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, ev.Endpoint,
+			ev.Provider, ev.ExecutorType, ev.Model, ev.ServedModel, ev.Alias, ev.Endpoint,
 			nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
 			ev.AuthType,
 			ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,
 			nullableString(ev.Tier), nullableString(ev.RouterID),
+			nullableString(ev.ScoredTier), nullableString(ev.EffectiveTier), nullableString(ev.MappingTier), nullableString(ev.DecisionCause),
+			nullableInt64(ev.ProfileVersion), nullableString(ev.ProfileHash), nullableJSONB(ev.AutoRouterDecision),
 			ev.InputTokens, ev.OutputTokens, ev.ReasoningTokens, ev.CachedTokens,
 			ev.CacheCreationTokens, ev.TotalTokens, ev.CostUSD, ev.DiscountPct, ev.OriginalCostUSD, ev.LatencyMs, ev.TTFTMs,
 			ev.Failed, ev.FailStatusCode, ev.Generate, ev.RequestedAt)
@@ -645,7 +651,7 @@ func (s *UsageStore) ImportLiteLLMSpendLogs(ctx context.Context, events []UsageE
 			}
 			args = append(args, ev.RequestID, nullableString(ev.APIKeyID), nullableString(principal),
 				nullableString(ev.UserID),
-				ev.Provider, ev.ExecutorType, ev.Model, ev.Alias, ev.Endpoint,
+				ev.Provider, ev.ExecutorType, ev.Model, ev.ServedModel, ev.Alias, ev.Endpoint,
 				nullableString(ev.ClientIP), nullableString(ev.ForwardedFor),
 				ev.AuthType,
 				ev.Source, ev.ReasoningEffort, ev.ServiceTier, ev.ResponseServiceTier,

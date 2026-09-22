@@ -1107,6 +1107,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			model                   TEXT NOT NULL,
 			alias                   TEXT,
 			route_model             TEXT,
+			served_model            TEXT,
 			endpoint                TEXT,
 			auth_type               TEXT,
 			source                  TEXT,
@@ -1298,6 +1299,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			model                   TEXT NOT NULL,
 			alias                   TEXT,
 			route_model             TEXT,
+			served_model            TEXT,
 			endpoint                TEXT,
 			auth_type               TEXT,
 			source                  TEXT,
@@ -1355,6 +1357,19 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS route_model TEXT`, usageEventsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: add usage_events.route_model column: %w", err)
+	}
+	// served_model records the model the upstream response reported serving so
+	// a silent provider-side substitution is auditable after the fact.
+	// Idempotent ALTER; mirrored on both usage tables.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS served_model TEXT`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add served_model: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS served_model TEXT`, usageErrorsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_errors add served_model: %w", err)
 	}
 	// client_ip / forwarded_for record the requesting client's address for both
 	// usage_events and usage_errors so failed requests can be attributed to a
