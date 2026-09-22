@@ -51,6 +51,29 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
+func TestWithXAIBuiltinsIncludesGrok47BuildFast(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	for _, model := range models {
+		if model == nil || model.ID != xaiBuiltinGrok47BuildFastModelID {
+			continue
+		}
+		if model.Thinking == nil {
+			t.Fatal("thinking is nil")
+		}
+		var hasXHigh bool
+		for _, level := range model.Thinking.Levels {
+			if level == "xhigh" {
+				hasXHigh = true
+			}
+		}
+		if !hasXHigh {
+			t.Fatalf("thinking levels = %#v, want xhigh", model.Thinking.Levels)
+		}
+		return
+	}
+	t.Fatalf("expected xAI builtin model %s", xaiBuiltinGrok47BuildFastModelID)
+}
+
 func TestWithXAIBuiltinsIncludesImage20(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	for _, model := range models {
