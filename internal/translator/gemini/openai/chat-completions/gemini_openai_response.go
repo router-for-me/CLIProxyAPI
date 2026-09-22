@@ -110,7 +110,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	// Extract and set usage metadata (token counts).
 	// Usage is applied to the base template so it appears in the chunks.
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
-		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
+		// Keep upstream tier evidence and usage details for diagnostic clients.
+		baseTemplate, _ = sjson.SetRawBytes(baseTemplate, "usageMetadata", []byte(usageResult.Raw))
+		cachedTokenCount := usageResult.Get("cachedContentTokenCount")
 		baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int())
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.total_tokens", totalTokenCountResult.Int())
@@ -121,10 +123,10 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		if thoughtsTokenCount > 0 {
 			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}
-		// Include cached token count if present (indicates prompt caching is working)
-		if cachedTokenCount > 0 {
+		// Preserve an explicit zero; absent cache usage remains unknown.
+		if cachedTokenCount.Type == gjson.Number {
 			var err error
-			baseTemplate, err = sjson.SetBytes(baseTemplate, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
+			baseTemplate, err = sjson.SetBytes(baseTemplate, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount.Int())
 			if err != nil {
 				log.Warnf("gemini openai response: failed to set cached_tokens in streaming: %v", err)
 			}
@@ -311,21 +313,23 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 	}
 
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
+		// Keep upstream tier evidence and usage details for diagnostic clients.
+		template, _ = sjson.SetRawBytes(template, "usageMetadata", []byte(usageResult.Raw))
 		template, _ = sjson.SetBytes(template, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int())
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
 		}
 		promptTokenCount := usageResult.Get("promptTokenCount").Int()
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
+		cachedTokenCount := usageResult.Get("cachedContentTokenCount")
 		template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokenCount)
 		if thoughtsTokenCount > 0 {
 			template, _ = sjson.SetBytes(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}
-		// Include cached token count if present (indicates prompt caching is working)
-		if cachedTokenCount > 0 {
+		// Preserve an explicit zero; absent cache usage remains unknown.
+		if cachedTokenCount.Type == gjson.Number {
 			var err error
-			template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
+			template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount.Int())
 			if err != nil {
 				log.Warnf("gemini openai response: failed to set cached_tokens in non-streaming: %v", err)
 			}
