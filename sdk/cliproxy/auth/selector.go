@@ -659,6 +659,238 @@ func (s *RoundRobinSelector) ensureRotationKey(key string, limit int) {
 	}
 }
 
+// QuotaAwareSelector prefers credentials with the highest observed weekly remaining quota.
+// Credentials below WeeklyRemainingMinPercent are skipped when at least one healthy
+// candidate with known quota is above the threshold. Unknown quota candidates remain
+// eligible as a fallback after known healthy quota candidates.
+type QuotaAwareSelector struct {
+	WeeklyRemainingMinPercent int
+}
+
+type quotaAwareCandidate struct {
+	auth      *Auth
+	known     bool
+	remaining float64
+}
+
+// Pick selects the available credential with the highest observed remaining weekly quota.
+func (s *QuotaAwareSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	candidates := quotaAwareCandidates(available)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	threshold := s.WeeklyRemainingMinPercent
+	if threshold < 0 {
+		threshold = 0
+	}
+	if threshold > 100 {
+		threshold = 100
+	}
+	if threshold > 0 {
+		filtered := candidates[:0]
+		for _, candidate := range candidates {
+			if !candidate.known || candidate.remaining >= float64(threshold) {
+				filtered = append(filtered, candidate)
+			}
+		}
+		if len(filtered) > 0 {
+			candidates = filtered
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		leftScore := quotaAwareCandidateScore(left)
+		rightScore := quotaAwareCandidateScore(right)
+		if leftScore != rightScore {
+			return leftScore > rightScore
+		}
+		if left.known != right.known {
+			return left.known
+		}
+		return left.auth.ID < right.auth.ID
+	})
+	return candidates[0].auth, nil
+}
+
+func quotaAwareCandidates(auths []*Auth) []quotaAwareCandidate {
+	candidates := make([]quotaAwareCandidate, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		remaining, known := weeklyRemainingPercentForAuth(auth)
+		candidates = append(candidates, quotaAwareCandidate{auth: auth, known: known, remaining: remaining})
+	}
+	return candidates
+}
+
+func quotaAwareCandidateScore(candidate quotaAwareCandidate) float64 {
+	if candidate.known {
+		return candidate.remaining
+	}
+	switch quotaAwarePlanRank(candidate.auth) {
+	case 4:
+		return 90
+	case 3:
+		return 75
+	case 2:
+		return 50
+	case 1:
+		return 10
+	default:
+		return -1
+	}
+}
+
+func quotaAwarePlanRank(auth *Auth) int {
+	if auth == nil {
+		return 0
+	}
+	plan := ""
+	if value, ok := signalValueCaseInsensitive(auth.Quota.Signals, "X-Codex-Plan-Type"); ok {
+		plan = value
+	} else if value, ok := signalValueCaseInsensitive(auth.Quota.Signals, "plan"); ok {
+		plan = value
+	}
+	if plan == "" {
+		plan = auth.ID + " " + auth.Label
+	}
+	plan = strings.ToLower(strings.TrimSpace(plan))
+	switch {
+	case strings.Contains(plan, "enterprise") || strings.Contains(plan, "team") || strings.Contains(plan, "business"):
+		return 4
+	case strings.Contains(plan, "pro"):
+		return 3
+	case strings.Contains(plan, "plus") || strings.Contains(plan, "premium"):
+		return 2
+	case strings.Contains(plan, "free"):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func weeklyRemainingPercentForAuth(auth *Auth) (float64, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if remaining, ok := weeklyRemainingPercentFromSignals(auth.Quota.Signals); ok {
+		return remaining, true
+	}
+	var newest time.Time
+	var newestRemaining float64
+	found := false
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		remaining, ok := weeklyRemainingPercentFromSignals(state.Quota.Signals)
+		if !ok {
+			continue
+		}
+		observed := state.Quota.ObservedAt
+		if !found || observed.After(newest) {
+			newest = observed
+			newestRemaining = remaining
+			found = true
+		}
+	}
+	return newestRemaining, found
+}
+
+func weeklyRemainingPercentFromSignals(signals map[string]string) (float64, bool) {
+	if len(signals) == 0 {
+		return 0, false
+	}
+	if value, ok := signalValueCaseInsensitive(signals, "weekly_quota_remaining_percent"); ok {
+		if remaining, okParse := parsePercentSignal(value); okParse {
+			return clampPercent(remaining), true
+		}
+	}
+	if value, ok := signalValueCaseInsensitive(signals, "X-Codex-Primary-Used-Percent"); ok {
+		if used, okParse := parsePercentSignal(value); okParse {
+			return clampPercent(100 - used), true
+		}
+	}
+	if value, ok := signalValueCaseInsensitive(signals, "Anthropic-Ratelimit-Unified-7d-Utilization"); ok {
+		if utilization, okParse := parsePercentSignal(value); okParse {
+			if utilization <= 1 {
+				utilization *= 100
+			}
+			return clampPercent(100 - utilization), true
+		}
+	}
+	return 0, false
+}
+
+func signalValueCaseInsensitive(signals map[string]string, key string) (string, bool) {
+	for signalKey, value := range signals {
+		if strings.EqualFold(strings.TrimSpace(signalKey), key) {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func parsePercentSignal(value string) (float64, bool) {
+	value = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "%"))
+	if value == "" {
+		return 0, false
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func clampPercent(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func quotaAwareCachedAuthAllowed(selector Selector, auth *Auth, available []*Auth) bool {
+	quotaAware, ok := selector.(*QuotaAwareSelector)
+	if !ok || auth == nil {
+		return true
+	}
+	threshold := quotaAware.WeeklyRemainingMinPercent
+	if threshold <= 0 {
+		return true
+	}
+	if threshold > 100 {
+		threshold = 100
+	}
+	remaining, known := weeklyRemainingPercentForAuth(auth)
+	if !known || remaining >= float64(threshold) {
+		return true
+	}
+	for _, candidate := range available {
+		if candidate == nil || candidate.ID == auth.ID {
+			continue
+		}
+		candidateRemaining, candidateKnown := weeklyRemainingPercentForAuth(candidate)
+		if candidateKnown && candidateRemaining >= float64(threshold) {
+			return false
+		}
+		if !candidateKnown && quotaAwareCandidateScore(quotaAwareCandidate{auth: candidate}) >= float64(threshold) {
+			return false
+		}
+	}
+	return true
+}
+
 func positiveWeightAuths(auths []*Auth) []*Auth {
 	weightedCandidates := make([]*Auth, 0, len(auths))
 	for _, auth := range auths {
@@ -1059,12 +1291,16 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				if !quotaAwareCachedAuthAllowed(s.fallback, auth, available) {
+					entry.Infof("session-affinity: cache hit but auth below quota-aware threshold, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+					break
+				}
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
 			}
 		}
-		// Cached auth not available, reselect via fallback selector for even distribution
+		// Cached auth not available or no longer quota-eligible, reselect via fallback selector
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 		if err != nil {
 			return nil, err

@@ -349,11 +349,23 @@ type QuotaExceeded struct {
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
 }
 
+// QuotaAwareRoutingConfig configures quota-aware credential selection.
+type QuotaAwareRoutingConfig struct {
+	// WeeklyRemainingMinPercent is the minimum weekly remaining quota percentage required
+	// before a credential is preferred. Candidates below the threshold are skipped when
+	// at least one candidate with known quota remains above the threshold.
+	// Default: 20. Set to 0 to only sort by highest remaining quota.
+	WeeklyRemainingMinPercent *int `yaml:"weekly-remaining-min-percent,omitempty" json:"weekly-remaining-min-percent,omitempty"`
+}
+
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "quota-aware".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// QuotaAware configures the quota-aware credential selector.
+	QuotaAware QuotaAwareRoutingConfig `yaml:"quota-aware,omitempty" json:"quota-aware,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,

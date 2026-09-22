@@ -149,7 +149,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 				files = append(files, entry)
 			}
 		}
-		c.JSON(200, authFilesListResponse(observedAt, files, pagination, total, end))
+		accountVisibleJSON(c, 200, authFilesListResponse(observedAt, files, pagination, total, end))
 		return
 	}
 	files := make([]gin.H, 0, len(auths))
@@ -170,7 +170,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		nameJ, _ := files[j]["name"].(string)
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
-	c.JSON(200, gin.H{"observed_at": observedAt, "files": files})
+	accountVisibleJSON(c, 200, gin.H{"observed_at": observedAt, "files": files})
 }
 
 func parseAuthFilesPagination(c *gin.Context) (authFilesPagination, error) {
@@ -388,7 +388,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 		return
 	}
 	if authIndexFilter != "" {
-		c.JSON(200, authFilesListResponse(observedAt, []gin.H{}, pagination, 0, 0))
+		accountVisibleJSON(c, 200, authFilesListResponse(observedAt, []gin.H{}, pagination, 0, 0))
 		return
 	}
 	matching := make([]diskAuthFileCandidate, 0, len(entries))
@@ -475,7 +475,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 
 		files = append(files, fileData)
 	}
-	c.JSON(200, authFilesListResponse(observedAt, files, pagination, total, end))
+	accountVisibleJSON(c, 200, authFilesListResponse(observedAt, files, pagination, total, end))
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, quotaSupported ...map[string]struct{}) gin.H {

@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementauth"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -38,6 +40,7 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
+	accounts                *managementauth.Store
 	cfg                     *config.Config
 	configFilePath          string
 	mu                      sync.Mutex
@@ -56,6 +59,7 @@ type Handler struct {
 	postAuthHook            coreauth.PostAuthHook
 	postAuthPersistHook     coreauth.PostAuthHook
 	pluginHost              *pluginhost.Host
+	billingService          *billing.Service
 	configReloadHook        func(context.Context, *config.Config)
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
@@ -81,6 +85,14 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+	}
+	if strings.TrimSpace(configFilePath) != "" {
+		store, err := managementauth.Open(filepath.Join(filepath.Dir(configFilePath), ".management-auth", "management-accounts.json"))
+		if err != nil {
+			log.Error("management account store unavailable; account login disabled")
+		} else {
+			h.accounts = store
+		}
 	}
 	h.startAttemptCleanup()
 	return h
@@ -148,6 +160,16 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	}
 	h.mu.Lock()
 	h.pluginHost = host
+	h.mu.Unlock()
+}
+
+// SetBillingService updates the billing service used by billing management endpoints.
+func (h *Handler) SetBillingService(service *billing.Service) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.billingService = service
 	h.mu.Unlock()
 }
 
@@ -287,11 +309,29 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			provided = c.GetHeader("X-Management-Key")
 		}
 
+		if h.accounts != nil {
+			if account, ok := h.accounts.Authenticate(provided); ok {
+				if !h.managementAccountRemoteAllowed(c) {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management disabled"})
+					return
+				}
+				c.Set("management_account", account)
+				c.Header("Cache-Control", "no-store")
+				if !h.authorizeAccountRequest(c) {
+					return
+				}
+				c.Next()
+				return
+			}
+		}
 		allowed, statusCode, errMsg := h.AuthenticateManagementKey(clientIP, localClient, provided)
 		if !allowed {
 			c.AbortWithStatusJSON(statusCode, gin.H{"error": errMsg})
 			return
 		}
+		// Legacy management secrets are administrator credentials, never user credentials.
+		c.Set("management_account", managementauth.User{Username: "admin", Role: "admin"})
+		c.Header("Cache-Control", "no-store")
 		c.Next()
 	}
 }

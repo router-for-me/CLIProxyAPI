@@ -187,6 +187,11 @@ func (h *Handler) GetPluginConfig(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_config_encode_failed", "message": errBody.Error()})
 			return
 		}
+		if isUserAccount(c) {
+			if sanitized, ok := accountSanitizePluginConfigJSON(body).(map[string]any); ok {
+				body = sanitized
+			}
+		}
 		c.JSON(http.StatusOK, body)
 		return
 	}
@@ -230,6 +235,11 @@ func (h *Handler) PatchPluginEnabled(c *gin.Context) {
 	h.mu.Lock()
 	ensurePluginConfigMap(h.cfg)
 	item := h.cfg.Plugins.Configs[id]
+	if isUserAccount(c) && accountPluginConfigContainsProtectedFields(pluginConfigNode(item)) {
+		h.mu.Unlock()
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin permission required for protected plugin config"})
+		return
+	}
 	node := pluginConfigNode(item)
 	setYAMLMappingValue(node, "enabled", boolYAMLNode(*body.Enabled))
 	updated, errConfig := pluginInstanceConfigFromNode(node)
@@ -264,15 +274,22 @@ func (h *Handler) PutPluginConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body", "message": errNode.Error()})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ensurePluginConfigMap(h.cfg)
+	if isUserAccount(c) {
+		merged, errMerge := mergeAccountPluginPUTConfigWithProtectedOriginal(pluginConfigNode(h.cfg.Plugins.Configs[id]), node)
+		if errMerge != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "admin permission required for protected plugin config"})
+			return
+		}
+		node = merged
+	}
 	updated, errConfig := pluginInstanceConfigFromNode(node)
 	if errConfig != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errConfig.Error()})
 		return
 	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	ensurePluginConfigMap(h.cfg)
 	h.cfg.Plugins.Configs[id] = updated
 	h.persistLocked(c)
 }
@@ -291,7 +308,8 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	ensurePluginConfigMap(h.cfg)
-	node := pluginConfigNode(h.cfg.Plugins.Configs[id])
+	originalNode := pluginConfigNode(h.cfg.Plugins.Configs[id])
+	node := cloneYAMLNode(originalNode)
 	keys := make([]string, 0, len(body))
 	for key := range body {
 		keys = append(keys, key)
@@ -309,6 +327,12 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 			return
 		}
 		setYAMLMappingValue(node, key, valueNode)
+	}
+	if isUserAccount(c) {
+		if errProtected := rejectChangedAccountPluginProtectedYAML(node, originalNode); errProtected != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "admin permission required for protected plugin config"})
+			return
+		}
 	}
 	updated, errConfig := pluginInstanceConfigFromNode(node)
 	if errConfig != nil {
@@ -338,6 +362,11 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	}
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
 	item, configured := h.cfg.Plugins.Configs[id]
+	if isUserAccount(c) && configured && accountPluginConfigContainsProtectedFields(pluginConfigNode(item)) {
+		h.mu.Unlock()
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin permission required for protected plugin config"})
+		return
+	}
 	host := h.pluginHost
 	h.mu.Unlock()
 

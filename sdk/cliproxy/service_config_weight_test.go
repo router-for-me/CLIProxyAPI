@@ -21,6 +21,28 @@ func TestWeightedRoundRobinRoutingSelector(t *testing.T) {
 	}
 }
 
+func TestQuotaAwareRoutingSelector(t *testing.T) {
+	threshold := 35
+	state := normalizedRoutingRuntimeState(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			Strategy: "quota-aware",
+			QuotaAware: internalconfig.QuotaAwareRoutingConfig{
+				WeeklyRemainingMinPercent: &threshold,
+			},
+		},
+	})
+	if state.strategy != "quota-aware" {
+		t.Fatalf("strategy = %q, want quota-aware", state.strategy)
+	}
+	selector, ok := newRoutingSelector(state).(*coreauth.QuotaAwareSelector)
+	if !ok {
+		t.Fatalf("selector type = %T, want *auth.QuotaAwareSelector", newRoutingSelector(state))
+	}
+	if selector.WeeklyRemainingMinPercent != threshold {
+		t.Fatalf("weekly threshold = %d, want %d", selector.WeeklyRemainingMinPercent, threshold)
+	}
+}
+
 func TestServiceRejectsInvalidCredentialWeightConfigCommit(t *testing.T) {
 	originalCfg := &internalconfig.Config{}
 	service := &Service{cfg: originalCfg}

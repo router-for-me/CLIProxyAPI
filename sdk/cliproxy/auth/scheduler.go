@@ -22,6 +22,7 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategyQuotaAware         schedulerStrategy = 4
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -170,6 +171,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 		return schedulerStrategyFillFirst
 	case *WeightedRoundRobinSelector:
 		return schedulerStrategyWeightedRoundRobin
+	case *QuotaAwareSelector:
+		return schedulerStrategyQuotaAware
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
@@ -532,7 +535,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	}
 
 	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
-	if strategy == schedulerStrategyWeightedRoundRobin {
+	if strategy == schedulerStrategyWeightedRoundRobin || strategy == schedulerStrategyQuotaAware {
 		entries := make([]*scheduledAuth, 0)
 		for _, shard := range candidateShards {
 			if shard == nil {
@@ -552,6 +555,13 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			}
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
+		if strategy == schedulerStrategyQuotaAware {
+			picked := pickQuotaAwareScheduled(entries, 20, predicate)
+			if picked != nil && picked.meta != nil {
+				return picked.auth, picked.meta.providerKey, nil
+			}
+			return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		}
 		if s.mixedWeightedStates == nil {
 			s.mixedWeightedStates = make(map[string]*smoothWeightedState)
 		}
@@ -1378,6 +1388,8 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		picked = view.pickFirst(predicate)
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
+	case schedulerStrategyQuotaAware:
+		picked = pickQuotaAwareScheduled(view.flat, 20, predicate)
 	default:
 		picked = view.pickRoundRobin(predicate)
 	}
@@ -1686,6 +1698,30 @@ func (v *readyView) pickWeighted(predicate func(*scheduledAuth) bool) *scheduled
 	}
 	v.weightedState.prepare(scheduledWeightVectorMatching(v.flat, predicate))
 	return pickSmoothWeightedScheduled(v.flat, v.weightedState.current, predicate)
+}
+
+func pickQuotaAwareScheduled(entries []*scheduledAuth, threshold int, predicate func(*scheduledAuth) bool) *scheduledAuth {
+	if len(entries) == 0 {
+		return nil
+	}
+	auths := make([]*Auth, 0, len(entries))
+	byID := make(map[string]*scheduledAuth, len(entries))
+	for _, entry := range entries {
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		auths = append(auths, entry.auth)
+		byID[entry.auth.ID] = entry
+	}
+	selector := &QuotaAwareSelector{WeeklyRemainingMinPercent: threshold}
+	picked, err := selector.Pick(context.Background(), "", "", cliproxyexecutor.Options{}, auths)
+	if err != nil || picked == nil {
+		return nil
+	}
+	return byID[picked.ID]
 }
 
 func scheduledWeightVector(entries []*scheduledAuth) map[string]int64 {

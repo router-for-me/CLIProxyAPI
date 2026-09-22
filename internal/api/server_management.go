@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	log "github.com/sirupsen/logrus"
 )
@@ -24,9 +27,17 @@ func (s *Server) registerManagementRoutes() {
 	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
 	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
 
+	s.engine.POST("/v0/management/accounts/login", s.managementAvailabilityMiddleware(), s.mgmt.AccountLogin)
+
 	mgmt := s.engine.Group("/v0/management")
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
+		mgmt.GET("/accounts/me", s.mgmt.AccountMe)
+		mgmt.POST("/accounts/logout", s.mgmt.AccountLogout)
+		mgmt.PUT("/accounts/password", s.mgmt.AccountPassword)
+		mgmt.GET("/accounts/users", s.mgmt.AccountUsers)
+		mgmt.POST("/accounts/users", s.mgmt.AccountCreateUser)
+		mgmt.PATCH("/accounts/users/:username", s.mgmt.AccountUpdateUser)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
@@ -90,6 +101,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+		if s.billingService != nil && s.billingService.Enabled() {
+			billing.NewManagementHandler(s.billingService).Register(mgmt)
+			mgmt.GET("/billing/api-tokens", s.mgmt.GetBillingAPITokens)
+			mgmt.PATCH("/billing/api-tokens/:token_id", s.mgmt.PatchBillingAPITokenQuota)
+		}
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -130,6 +146,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
 		mgmt.PATCH("/routing/strategy", s.mgmt.PutRoutingStrategy)
+		mgmt.GET("/routing/quota-aware", s.mgmt.GetRoutingQuotaAware)
+		mgmt.PUT("/routing/quota-aware", s.mgmt.PutRoutingQuotaAware)
+		mgmt.PATCH("/routing/quota-aware", s.mgmt.PutRoutingQuotaAware)
 
 		mgmt.GET("/claude-api-key", s.mgmt.GetClaudeKeys)
 		mgmt.PUT("/claude-api-key", s.mgmt.PutClaudeKeys)
@@ -317,21 +336,46 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-
-	if _, err := os.Stat(filePath); err != nil {
-		if os.IsNotExist(err) {
-			// Synchronously ensure management.html is available with a detached context.
-			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
-		} else {
-			log.WithError(err).Error("failed to stat management control panel asset")
-			c.AbortWithStatus(http.StatusInternalServerError)
+	if _, err := os.Stat(filePath); err != nil && errors.Is(err, os.ErrNotExist) {
+		// Synchronously ensure management.html is available with a detached context.
+		// Control panel bootstrap should not be canceled by client disconnects.
+		if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
+			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
 	}
+	s.serveCachedUIAsset(c, filePath, "text/html; charset=utf-8", injectManagementBillingNav)
+}
 
-	c.File(filePath)
+func injectManagementBillingNav(payload []byte) []byte {
+	html := injectManagementReadRetry(string(payload))
+	const billingNav = `<style id="cpa-billing-nav-style">
+  .cpa-billing-nav-link{position:fixed;left:16px;bottom:16px;z-index:2147483647;display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:999px;border:1px solid rgba(148,163,184,.45);background:linear-gradient(135deg,#0f172a,#1d4ed8);color:#fff!important;text-decoration:none!important;font:700 13px Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 12px 30px rgba(15,23,42,.32)}
+  .cpa-billing-nav-link:hover{filter:brightness(1.08);transform:translateY(-1px)}
+</style><a class="cpa-billing-nav-link" href="/billing.html" title="API Token Billing / Quota">💳 Token Billing</a>`
+	if !strings.Contains(html, "cpa-billing-nav-link") {
+		if idx := strings.LastIndex(strings.ToLower(html), "</body>"); idx >= 0 {
+			html = html[:idx] + billingNav + "\n" + html[idx:]
+		} else {
+			html += "\n" + billingNav + "\n"
+		}
+	}
+	if !strings.Contains(html, `id="cpa-account-bridge"`) {
+		const accountScript = `<script id="cpa-account-bridge" src="/account-bridge.js"></script>`
+		if idx := strings.Index(strings.ToLower(html), "<head>"); idx >= 0 {
+			idx += len("<head>")
+			html = html[:idx] + accountScript + html[idx:]
+		} else {
+			html = accountScript + html
+		}
+	}
+	return []byte(html)
+}
+
+func (s *Server) serveBillingTokenPage(c *gin.Context) {
+	s.serveCachedUIAsset(c, filepath.Join(managementasset.StaticDir(s.configFilePath), "billing-token-page.html"), "text/html; charset=utf-8", nil)
+}
+
+func (s *Server) serveBillingTokenPanelScript(c *gin.Context) {
+	s.serveCachedUIAsset(c, filepath.Join(managementasset.StaticDir(s.configFilePath), "billing-token-panel.js"), "application/javascript; charset=utf-8", nil)
 }

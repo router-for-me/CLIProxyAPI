@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -36,6 +37,10 @@ type UsageReporter struct {
 	accessTokenHash     string
 	authType            string
 	apiKey              string
+	userID              string
+	tokenID             string
+	teamID              string
+	requestID           string
 	sessionID           string
 	parentSessionID     string
 	source              string
@@ -81,6 +86,13 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
+	principal := billing.PrincipalFromContext(ctx)
+	if principal.UserID == "" {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok {
+			principal = billing.PrincipalFromGin(ginCtx)
+		}
+	}
+	requestID := internallogging.GetRequestID(ctx)
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
@@ -113,6 +125,10 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		alias:           strings.TrimSpace(alias),
 		requestedAt:     time.Now(),
 		apiKey:          apiKey,
+		userID:          strings.TrimSpace(principal.UserID),
+		tokenID:         strings.TrimSpace(principal.TokenID),
+		teamID:          strings.TrimSpace(principal.TeamID),
+		requestID:       strings.TrimSpace(requestID),
 		sessionID:       sessionID,
 		parentSessionID: parentSessionID,
 		source:          resolveUsageSource(auth, apiKey),
@@ -613,6 +629,10 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Model:               model,
 		Alias:               r.alias,
 		Source:              r.source,
+		UserID:              r.userID,
+		TokenID:             r.tokenID,
+		TeamID:              r.teamID,
+		RequestID:           r.requestID,
 		APIKey:              r.apiKey,
 		SessionID:           r.sessionID,
 		ParentSessionID:     r.parentSessionID,

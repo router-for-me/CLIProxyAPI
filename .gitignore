@@ -22,6 +22,14 @@ objectstore/*
 
 # Static assets
 static/*
+!static/billing-token-page.html
+!static/billing-token-panel.js
+!static/accounts.html
+
+# Local management identity database and one-time admin bootstrap secret
+.management-auth/
+management-accounts.json
+management-admin-initial-password.txt
 
 # Authentication data
 auths/*
@@ -66,3 +74,13 @@ docker-compose.override.yml
 
 # Local LLM Wiki vault
 .llm-wiki
+
+# Local build artifacts
+/cliproxyapi
+/cliproxyapi.*
+/cpa-trace-agent
+
+# Local billing/trace runtime data
+/billing-ledger.jsonl
+/internal/billing/*.jsonl
+/trace-billing/

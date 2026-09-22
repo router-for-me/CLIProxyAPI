@@ -24,9 +24,15 @@ type Record struct {
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
 	// ExecutorType stores the concrete executor type that handled the request.
-	ExecutorType    string
-	Model           string
-	Alias           string
+	ExecutorType string
+	Model        string
+	Alias        string
+	// UserID/TokenID/TeamID identify the authenticated billing principal without exposing raw tokens.
+	UserID  string
+	TokenID string
+	TeamID  string
+	// RequestID correlates usage/billing events with request trace logs.
+	RequestID       string
 	APIKey          string
 	SessionID       string
 	ParentSessionID string
