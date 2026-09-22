@@ -27,6 +27,11 @@ if os.path.exists(rules_file):
         except Exception as e:
             print(f"[Warning] Failed to load triage_rules.json: {e}")
 
+try:
+    HIGH_PRIORITY_THRESHOLD = float(user_rules.get("rules", {}).get("high_priority_threshold", 2.5))
+except (ValueError, TypeError):
+    HIGH_PRIORITY_THRESHOLD = 2.5
+
 
 def run_gh(args, check=False):
     """Execute a GitHub CLI command and return the result, printing stderr on failure."""
@@ -169,7 +174,15 @@ def handle_pr(pr_number):
     action_ans = answers.get("action") or {}
 
     score_raw = score_ans.get("score")
-    score = float(score_raw) if score_raw is not None else 0.0
+    if score_raw is None:
+        print(f"[Warning] PR #{pr_number}: Jev returned no score in answers. Skipping triage actions.")
+        return
+    try:
+        score = float(score_raw)
+    except (ValueError, TypeError):
+        print(f"[Warning] PR #{pr_number}: Invalid score value '{score_raw}'. Skipping triage actions.")
+        return
+
     score_conf = float(score_ans.get("confidence") or 0.0)
     action = str(action_ans.get("choice") or "needs_review")
     print(f"PR #{pr_number} Result: Score={score:.2f} (conf={score_conf:.2f}), Action={action}")
@@ -200,8 +213,8 @@ def handle_pr(pr_number):
                     f"- **Note**: This PR matches automated ignore rules (e.g. docs typo, untracked massive port, or out-of-scope change). Marked as low priority."
                 )
                 run_gh(["pr", "comment", str(pr_number), "--repo", REPO, "--body", comment_body])
-    elif score >= 2.5:
-        print(f"[Decision] PR #{pr_number} -> MERGE PRIORITY (Score: {score:.2f})")
+    elif score >= HIGH_PRIORITY_THRESHOLD:
+        print(f"[Decision] PR #{pr_number} -> MERGE PRIORITY (Score: {score:.2f} >= {HIGH_PRIORITY_THRESHOLD:.2f})")
         ensure_label("priority-merge", "High-priority PR recommended for review/merge", "0e8a16")
         if DRY_RUN:
             print(f"[Dry-Run] Would add label 'priority-merge' and post priority comment to PR #{pr_number}")
@@ -235,9 +248,18 @@ def handle_pr(pr_number):
 def handle_issue_batch(min_batch=10, max_issues=50):
     """Batch-evaluate issues in chunks using Jev System One API."""
     print(f"--> [Issue Batch Mode] Checking open issues on {REPO} (min_batch={min_batch}, max_issues={max_issues})...")
+    known_triage_labels = [
+        "triaged", "bug", "invalid", "enhancement", "wontfix",
+        "lampoon", "Fixed", "pending", "question", "priority-merge"
+    ]
+    neg_labels = " ".join(f"-label:{lbl}" for lbl in known_triage_labels)
+    search_query = f"is:open is:issue {neg_labels}"
+    fetch_limit = max(max_issues * 2, 100)
+
     res = run_gh([
         "issue", "list", "--repo", REPO,
-        "--state", "open", "--limit", "100",
+        "--search", search_query,
+        "--limit", str(fetch_limit),
         "--json", "number,title,body,labels"
     ])
     if res.returncode != 0:
@@ -250,14 +272,11 @@ def handle_issue_batch(min_batch=10, max_issues=50):
         print(f"Failed to parse issues JSON: {e}")
         return
 
-    known_triage_labels = {
-        "triaged", "bug", "invalid", "enhancement", "wontfix",
-        "lampoon", "Fixed", "pending", "question", "priority-merge"
-    }
+    known_labels_set = set(known_triage_labels)
     pending = [
         it for it in all_issues
         if not any(
-            l.get("name") in known_triage_labels
+            l.get("name") in known_labels_set
             for l in (it.get("labels") or [])
             if isinstance(l, dict)
         )
@@ -316,9 +335,20 @@ def handle_issue_batch(min_batch=10, max_issues=50):
 
         for it in batch:
             num = str(it["number"])
-            score_ans = answers.get(f"score_{num}") or {}
+            score_ans = answers.get(f"score_{num}")
+            if not score_ans:
+                print(f"[Warning] Issue #{num}: Jev returned no answer for score_{num}. Skipping.")
+                continue
             score_raw = score_ans.get("score")
-            sc = float(score_raw) if score_raw is not None else 0.0
+            if score_raw is None:
+                print(f"[Warning] Issue #{num}: Jev returned no score value. Skipping.")
+                continue
+            try:
+                sc = float(score_raw)
+            except (ValueError, TypeError):
+                print(f"[Warning] Issue #{num}: Invalid score '{score_raw}'. Skipping.")
+                continue
+
             conf = float(score_ans.get("confidence") or 0.0)
             print(f"Issue #{num}: Score={sc:.2f} (conf={conf:.2f})")
 
@@ -335,8 +365,8 @@ def handle_issue_batch(min_batch=10, max_issues=50):
                         f"Marked as `invalid`. If this is a valid bug or feature request, please update the description with reproduction steps, configurations, or curl commands."
                     )
                     run_gh(["issue", "comment", num, "--repo", REPO, "--body", triage_comment])
-            elif sc >= 2.5:
-                print(f"[Decision] Issue #{num} -> CRITICAL BUG (Score: {sc:.2f})")
+            elif sc >= HIGH_PRIORITY_THRESHOLD:
+                print(f"[Decision] Issue #{num} -> CRITICAL BUG (Score: {sc:.2f} >= {HIGH_PRIORITY_THRESHOLD:.2f})")
                 if DRY_RUN:
                     print(f"[Dry-Run] Would add labels 'bug', 'triaged' to Issue #{num}")
                 else:
@@ -352,24 +382,29 @@ def handle_issue_batch(min_batch=10, max_issues=50):
 
 
 def parse_args():
-    parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=os.environ.get("DRY_RUN") == "1",
-        help="Perform a dry run without modifying GitHub state."
-    )
-
     parser = argparse.ArgumentParser(
-        description="TypeSafe Jev automated triage for CLIProxyAPI.",
-        parents=[parent_parser]
+        description="TypeSafe Jev automated triage for CLIProxyAPI."
+    )
+    parser.add_argument(
+        "--dry-run",
+        dest="global_dry_run",
+        action="store_true",
+        default=None,
+        help="Perform a dry run without modifying GitHub state."
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    pr_parser = subparsers.add_parser("pr", parents=[parent_parser], help="Triage a single PR.")
+    pr_parser = subparsers.add_parser("pr", help="Triage a single PR.")
     pr_parser.add_argument("pr_number", type=int, help="PR number to evaluate.")
+    pr_parser.add_argument(
+        "--dry-run",
+        dest="sub_dry_run",
+        action="store_true",
+        default=None,
+        help="Perform a dry run without modifying GitHub state."
+    )
 
-    issue_parser = subparsers.add_parser("issue-batch", parents=[parent_parser], help="Batch triage untriaged open issues.")
+    issue_parser = subparsers.add_parser("issue-batch", help="Batch triage untriaged open issues.")
     issue_parser.add_argument(
         "--min-batch",
         type=int,
@@ -382,7 +417,21 @@ def parse_args():
         default=50,
         help="Maximum issues to process in one run (default: 50)."
     )
-    return parser.parse_args()
+    issue_parser.add_argument(
+        "--dry-run",
+        dest="sub_dry_run",
+        action="store_true",
+        default=None,
+        help="Perform a dry run without modifying GitHub state."
+    )
+
+    args = parser.parse_args()
+    args.dry_run = bool(
+        args.global_dry_run
+        or getattr(args, "sub_dry_run", None)
+        or os.environ.get("DRY_RUN") == "1"
+    )
+    return args
 
 
 if __name__ == "__main__":

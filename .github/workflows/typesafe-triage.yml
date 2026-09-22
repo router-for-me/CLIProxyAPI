@@ -12,10 +12,6 @@ on:
         required: false
         default: '1'
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
   issues: write
@@ -26,6 +22,9 @@ jobs:
     if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: typesafe-triage-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,6 +42,9 @@ jobs:
     if: github.event_name == 'issues' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: typesafe-triage-issues
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
