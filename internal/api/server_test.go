@@ -607,6 +607,16 @@ func newTestServer(t *testing.T) *Server {
 
 func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 	t.Helper()
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+	}
+	return newTestServerWithConfig(t, cfg, opts...)
+}
+
+func newTestServerWithConfig(t *testing.T, cfg *proxyconfig.Config, opts ...ServerOption) *Server {
+	t.Helper()
 
 	gin.SetMode(gin.TestMode)
 
@@ -616,22 +626,60 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 		t.Fatalf("failed to create auth dir: %v", err)
 	}
 
-	cfg := &proxyconfig.Config{
-		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
-		},
-		Port:                   0,
-		AuthDir:                authDir,
-		Debug:                  true,
-		LoggingToFile:          false,
-		UsageStatisticsEnabled: false,
-	}
+	cfg.Port = 0
+	cfg.AuthDir = authDir
+	cfg.Debug = true
+	cfg.LoggingToFile = false
+	cfg.UsageStatisticsEnabled = false
 
 	authManager := auth.NewManager(nil, nil, nil)
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath, opts...)
+}
+
+func TestNewServerAppliesTrustedProxyConfiguration(t *testing.T) {
+	server := newTestServerWithConfig(t, &proxyconfig.Config{
+		TrustedProxies: []string{"192.0.2.0/24"},
+	})
+	server.engine.GET("/test-client-ip", func(c *gin.Context) {
+		c.String(http.StatusOK, c.ClientIP())
+	})
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		wantIP     string
+	}{
+		{name: "trusted proxy", remoteAddr: "192.0.2.10:43123", wantIP: "203.0.113.5"},
+		{name: "untrusted peer", remoteAddr: "198.51.100.20:43123", wantIP: "198.51.100.20"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test-client-ip", nil)
+			req.RemoteAddr = test.remoteAddr
+			req.Header.Set("X-Forwarded-For", "203.0.113.5")
+			recorder := httptest.NewRecorder()
+			server.engine.ServeHTTP(recorder, req)
+			if got := recorder.Body.String(); got != test.wantIP {
+				t.Fatalf("client IP = %q, want %q", got, test.wantIP)
+			}
+		})
+	}
+
+	defaultServer := newTestServer(t)
+	defaultServer.engine.GET("/test-client-ip", func(c *gin.Context) {
+		c.String(http.StatusOK, c.ClientIP())
+	})
+	request := httptest.NewRequest(http.MethodGet, "/test-client-ip", nil)
+	request.RemoteAddr = "198.51.100.20:43123"
+	request.Header.Set("X-Forwarded-For", "203.0.113.5")
+	recorder := httptest.NewRecorder()
+	defaultServer.engine.ServeHTTP(recorder, request)
+	if got := recorder.Body.String(); got != "198.51.100.20" {
+		t.Fatalf("default client IP = %q, want direct peer IP", got)
+	}
 }
 
 func TestHealthz(t *testing.T) {

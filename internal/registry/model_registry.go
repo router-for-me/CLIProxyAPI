@@ -1299,17 +1299,23 @@ func modelRegistrationAvailability(registration *ModelRegistration, now time.Tim
 
 	cooldownSuspended := 0
 	otherSuspended := 0
+	quotaAndOtherSuspended := 0
 	if registration.SuspendedClients != nil {
-		for _, reason := range registration.SuspendedClients {
+		for clientID, reason := range registration.SuspendedClients {
 			if strings.EqualFold(reason, "quota") {
 				cooldownSuspended++
 				continue
 			}
 			otherSuspended++
+			if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
+				quotaAndOtherSuspended++
+			}
 		}
 	}
 
-	effectiveClients := availableClients - expiredClients - otherSuspended
+	// A credential-wide quota can mark the same client both quota-exceeded and
+	// suspended. Count that unavailable client only once.
+	effectiveClients := availableClients - expiredClients - otherSuspended + quotaAndOtherSuspended
 	if effectiveClients < 0 {
 		effectiveClients = 0
 	}
@@ -1470,6 +1476,7 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		expiredClients := 0
 		cooldownSuspended := 0
 		otherSuspended := 0
+		quotaAndOtherSuspended := 0
 		if ok && registration != nil {
 			if registration.QuotaExceededClients != nil {
 				for clientID, quotaTime := range registration.QuotaExceededClients {
@@ -1497,12 +1504,15 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 						continue
 					}
 					otherSuspended++
+					if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
+						quotaAndOtherSuspended++
+					}
 				}
 			}
 		}
 
 		availableClients := entry.count
-		effectiveClients := availableClients - expiredClients - otherSuspended
+		effectiveClients := availableClients - expiredClients - otherSuspended + quotaAndOtherSuspended
 		if effectiveClients < 0 {
 			effectiveClients = 0
 		}
@@ -1542,8 +1552,11 @@ func (r *ModelRegistry) GetModelCount(modelID string) int {
 			}
 		}
 		suspendedClients := 0
-		if registration.SuspendedClients != nil {
-			suspendedClients = len(registration.SuspendedClients)
+		for clientID := range registration.SuspendedClients {
+			if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
+				continue
+			}
+			suspendedClients++
 		}
 		result := registration.Count - expiredClients - suspendedClients
 		if result < 0 {

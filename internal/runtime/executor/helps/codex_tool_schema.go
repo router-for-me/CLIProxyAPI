@@ -133,13 +133,18 @@ func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 	return rawParams, changed
 }
 
-// stripIncompatiblePatternsFromJSON recursively removes pattern attributes containing
-// unsupported Unicode property escapes (\p{...} / \P{...}) from parameter schemas.
+// stripIncompatiblePatternsFromJSON recursively removes pattern attributes that strict
+// upstream validators reject: unsupported Unicode property escapes (\p{...} / \P{...})
+// and the octal NUL escape (\0). See util.HasUnsupportedUnicodePropertyEscape for the
+// predicate and the upstream errors behind each one.
 // It is schema-aware: only subschemas under known JSON Schema keyword locations are visited,
 // preventing accidental deletion of 'pattern' keys inside user data (e.g. description, default, enum).
 func stripIncompatiblePatternsFromJSON(raw []byte) ([]byte, bool) {
 	rawStr := string(raw)
-	if !strings.Contains(rawStr, `\p{`) && !strings.Contains(rawStr, `\P{`) && !strings.Contains(rawStr, `\u`) {
+	// The fast path avoids parsing when no candidate escape is present. Patterns
+	// arrive JSON-escaped, so a literal backslash before '0' is `\\0` in the raw bytes.
+	if !strings.Contains(rawStr, `\p{`) && !strings.Contains(rawStr, `\P{`) && !strings.Contains(rawStr, `\u`) &&
+		!strings.Contains(rawStr, `\\0`) {
 		return raw, false
 	}
 	var root any

@@ -199,7 +199,7 @@ func TestApplyCodexCloakingHeadersPreservesNativeIdentity(t *testing.T) {
 			headers := http.Header{}
 			headers.Set("User-Agent", tc.userAgent)
 			headers.Set("Originator", tc.originator)
-			applyCodexCloakingHeaders(headers, tc.cfg)
+			applyCodexCloakingHeaders(headers, tc.cfg, nil)
 			if got := headers.Get("User-Agent"); got != tc.wantUserAgent {
 				t.Errorf("User-Agent = %q, want %q", got, tc.wantUserAgent)
 			}
