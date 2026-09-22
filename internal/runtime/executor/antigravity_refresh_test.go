@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -197,5 +198,85 @@ func TestAntigravityRefresh_DeduplicatesConcurrentRefresh(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&tokenCalls); got != 1 {
 		t.Fatalf("expected both refresh callers to share a single upstream token call, got %d", got)
+	}
+}
+
+func TestAntigravityRefreshRetriesTransientTransportErrors(t *testing.T) {
+	resetAntigravityRefreshGroupForTest()
+	t.Cleanup(resetAntigravityRefreshGroupForTest)
+
+	var calls int32
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return nil, io.EOF
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"access_token":"new-access","expires_in":3600,"token_type":"Bearer"}`)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+
+	token, errRefresh := (&AntigravityExecutor{}).refreshTokenSingleFlight(ctx, &cliproxyauth.Auth{
+		Provider: "antigravity",
+		Metadata: map[string]any{"refresh_token": "refresh-token"},
+	}, "refresh-token")
+	if errRefresh != nil {
+		t.Fatalf("refreshTokenSingleFlight() error = %v", errRefresh)
+	}
+	if token == nil || token.AccessToken != "new-access" {
+		t.Fatalf("refreshTokenSingleFlight() token = %#v, want access token new-access", token)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("transport calls = %d, want 2", got)
+	}
+}
+
+func TestAntigravityRefreshBoundsTransportRetries(t *testing.T) {
+	resetAntigravityRefreshGroupForTest()
+	t.Cleanup(resetAntigravityRefreshGroupForTest)
+
+	var calls int32
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, io.EOF
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+
+	_, errRefresh := (&AntigravityExecutor{}).refreshTokenSingleFlight(ctx, &cliproxyauth.Auth{
+		Provider: "antigravity",
+		Metadata: map[string]any{"refresh_token": "refresh-token"},
+	}, "refresh-token")
+	if !errors.Is(errRefresh, io.EOF) {
+		t.Fatalf("refreshTokenSingleFlight() error = %v, want io.EOF", errRefresh)
+	}
+	if got := atomic.LoadInt32(&calls); got != antigravityTokenRefreshMaxAttempts {
+		t.Fatalf("transport calls = %d, want %d", got, antigravityTokenRefreshMaxAttempts)
+	}
+}
+
+func TestAntigravityRefreshDoesNotRetryPermanentTransportError(t *testing.T) {
+	resetAntigravityRefreshGroupForTest()
+	t.Cleanup(resetAntigravityRefreshGroupForTest)
+
+	permanent := errors.New("permanent transport error")
+	var calls int32
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, permanent
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+
+	_, errRefresh := (&AntigravityExecutor{}).refreshTokenSingleFlight(ctx, &cliproxyauth.Auth{
+		Provider: "antigravity",
+		Metadata: map[string]any{"refresh_token": "refresh-token"},
+	}, "refresh-token")
+	if !errors.Is(errRefresh, permanent) {
+		t.Fatalf("refreshTokenSingleFlight() error = %v, want permanent error", errRefresh)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("transport calls = %d, want 1", got)
 	}
 }

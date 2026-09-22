@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,6 +17,32 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
+
+const antigravityTokenRefreshMaxAttempts = 3
+
+// isAntigravityRefreshTransportRetryable reports whether a failed token refresh
+// is safe to retry on a fresh connection. It excludes context cancellation and
+// permanent application errors.
+func isAntigravityRefreshTransportRetryable(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return isAntigravityRefreshTransportRetryable(ctx, urlErr.Err)
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
 
 // Refresh refreshes the authentication credentials using the refresh token.
 func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -152,19 +179,34 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
-	if errReq != nil {
-		return nil, errReq
-	}
-	httpReq.Header.Set("Host", "oauth2.googleapis.com")
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
-	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
-
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		return nil, errDo
+
+	var httpResp *http.Response
+	for attempt := 1; attempt <= antigravityTokenRefreshMaxAttempts; attempt++ {
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
+		if errReq != nil {
+			return nil, errReq
+		}
+		httpReq.Header.Set("Host", "oauth2.googleapis.com")
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		// Real Antigravity uses Go's default User-Agent for OAuth token refresh
+		httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
+
+		var errDo error
+		httpResp, errDo = httpClient.Do(httpReq)
+		if errDo == nil {
+			break
+		}
+		if httpResp != nil && httpResp.Body != nil {
+			_ = httpResp.Body.Close()
+		}
+		if attempt >= antigravityTokenRefreshMaxAttempts || !isAntigravityRefreshTransportRetryable(ctx, errDo) {
+			return nil, errDo
+		}
+		log.Warnf("antigravity executor: token refresh transport error (attempt %d/%d): %v", attempt, antigravityTokenRefreshMaxAttempts, errDo)
+	}
+	if httpResp == nil {
+		return nil, fmt.Errorf("antigravity token refresh failed: empty response")
 	}
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
