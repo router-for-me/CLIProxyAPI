@@ -215,3 +215,20 @@ func TestHasStrictValidatorIncompatiblePattern(t *testing.T) {
 		})
 	}
 }
+
+func TestHasUnsupportedUnicodePropertyEscapeKeepsWidenedBehaviour(t *testing.T) {
+	// The historical name is still used by internal/translator/, which outside
+	// contributors may not touch. It must keep answering exactly like the widened
+	// predicate, or those call sites silently lose the octal NUL fix.
+	for _, pattern := range []string{
+		`^[^\0]*$`,
+		`^\p{Cc}$`,
+		`^\\0$`,
+		`^[^\x00]*$`,
+		`^[0-9a-f]{32}$`,
+	} {
+		if got, want := HasUnsupportedUnicodePropertyEscape(pattern), HasStrictValidatorIncompatiblePattern(pattern); got != want {
+			t.Errorf("HasUnsupportedUnicodePropertyEscape(%q) = %v, want %v", pattern, got, want)
+		}
+	}
+}

@@ -159,6 +159,14 @@ func HasStrictValidatorIncompatiblePattern(pattern string) bool {
 	return false
 }
 
+// HasUnsupportedUnicodePropertyEscape is the historical name of the predicate above.
+// It kept its name because internal/translator/ may not be modified by outside
+// contributors (see .github/workflows), so its call sites there cannot be renamed;
+// delegating is what gives them the widened behaviour.
+func HasUnsupportedUnicodePropertyEscape(pattern string) bool {
+	return HasStrictValidatorIncompatiblePattern(pattern)
+}
+
 // SchemaMapKeywords lists JSON Schema keywords whose values are maps of subschemas.
 var SchemaMapKeywords = [...]string{
 	"properties",
