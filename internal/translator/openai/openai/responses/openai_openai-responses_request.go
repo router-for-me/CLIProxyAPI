@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -312,6 +313,20 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if isUsableResponsesReasoning(rc) {
 					latestReasoningContent = rc
 				}
+				// A malformed upstream response can leave a function_call without a
+				// name in the conversation history. Replaying it as
+				// tool_calls[].function.name == "" makes strict upstreams reject the
+				// whole request (e.g. "missing a function name"), which permanently
+				// poisons the session. Drop the malformed call instead: its
+				// function_call_output then finds no matching assistant tool_call and
+				// is replayed as plain user text by the function_call_output branch.
+				if strings.TrimSpace(item.Get("name").String()) == "" {
+					log.WithFields(log.Fields{
+						"call_id": translatorcommon.ExtractResponsesCallID(item),
+						"model":   modelName,
+					}).Warn("dropping historical function_call without a function name")
+					continue
+				}
 				// Buffer consecutive function calls and emit them as one assistant message.
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 
@@ -366,6 +381,15 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				pendingReasoningContent = combineOpenAIResponsesReasoning(pendingReasoningContent, rc)
 				if isUsableResponsesReasoning(rc) {
 					latestReasoningContent = rc
+				}
+				// Same guard as function_call above: a custom_tool_call without a
+				// name cannot be replayed upstream.
+				if strings.TrimSpace(item.Get("name").String()) == "" {
+					log.WithFields(log.Fields{
+						"call_id": translatorcommon.ExtractResponsesCallID(item),
+						"model":   modelName,
+					}).Warn("dropping historical custom_tool_call without a function name")
+					continue
 				}
 				// Codex freeform tool call replay: wrap the raw input so it
 				// matches the {"input": string} function shape used when
