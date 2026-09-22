@@ -23,11 +23,15 @@ import (
 )
 
 type UsageReporter struct {
-	provider        string
-	executorType    string
-	model           string
-	alias           string
-	routeModel      string
+	provider     string
+	executorType string
+	model        string
+	alias        string
+	routeModel   string
+	// servedModel is mutated by the response-reading goroutine after the
+	// reporter has escaped into it. Race-free only while the setter and the
+	// publisher run on that same goroutine (unlike routeModel, which is set
+	// before any goroutine spawn).
 	servedModel     string
 	endpoint        string
 	clientIP        string
@@ -128,10 +132,11 @@ func (r *UsageReporter) SetRouteModel(routeModel string) {
 }
 
 // SetServedModel records the model identifier the upstream response reported
-// serving, captured from the raw response body before any alias rewrite.
-// Persisted so a silent upstream substitution can be detected at flush time.
-// Callers must not overwrite a value already set: the first reported model is
-// the authoritative one (streaming responses repeat it on later events).
+// serving, captured from the raw response body before any alias rewrite. It
+// will be persisted so a silent upstream substitution can be detected at flush
+// time. The first non-empty value wins; subsequent calls are ignored, because
+// streaming responses repeat the same model on many SSE events and the first
+// report is the authoritative one.
 func (r *UsageReporter) SetServedModel(servedModel string) {
 	if r == nil {
 		return
@@ -139,7 +144,14 @@ func (r *UsageReporter) SetServedModel(servedModel string) {
 	if r.servedModel != "" {
 		return
 	}
-	r.servedModel = strings.TrimSpace(servedModel)
+	trimmed := strings.TrimSpace(servedModel)
+	if trimmed == "" {
+		return
+	}
+	// Clone: callers may pass a substring that aliases a reused read buffer
+	// (e.g. a gjson result over a scanner bytes slice); the cheap guard above
+	// keeps this to at most one clone per reporter.
+	r.servedModel = strings.Clone(trimmed)
 }
 
 // SetEndpoint records the upstream URL the executor actually hit. Persisted on
@@ -290,7 +302,13 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(model, detail, false, usage.Failure{}), true
+	record := r.buildRecordForModel(model, detail, false, usage.Failure{})
+	// The served-model capture belongs to the primary model only: it was read
+	// from the response that served r.model. Secondary records describe a
+	// different model (e.g. tool image generation), so inheriting it would
+	// make every downstream substitution comparison a false positive.
+	record.ServedModel = ""
+	return record, true
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
