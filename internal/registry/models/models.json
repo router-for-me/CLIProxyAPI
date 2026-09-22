@@ -194,6 +194,36 @@
       ]
     },
     {
+      "id": "claude-opus-5-5",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 5.5",
+      "description": "Claude Opus 5.5 performs at the level of Claude Fable 5.1 on most work and costs 40% less to run than Claude Opus 5, with a 1M context window, 128K max output, and always-on adaptive thinking.",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "claude-sonnet-5",
       "object": "model",
       "created": 1782777600,
