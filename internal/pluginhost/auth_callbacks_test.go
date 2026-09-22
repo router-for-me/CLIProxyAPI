@@ -400,3 +400,116 @@ func TestHostAuthSaveCallbackWritesPhysicalFile(t *testing.T) {
 		t.Fatalf("auths = %#v, want one registered auth", auths)
 	}
 }
+
+// savePluginCredential drives one host.auth.save call from a plugin that only knows
+// its own credential fields, and returns the saved file plus the live record.
+func savePluginCredential(t *testing.T, authDir, seed, payload string) (map[string]any, *coreauth.Auth) {
+	t.Helper()
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+	if seed != "" {
+		if errWrite := os.WriteFile(filepath.Join(authDir, "saved.json"), []byte(seed), 0o600); errWrite != nil {
+			t.Fatalf("seed auth file: %v", errWrite)
+		}
+	}
+	req, errMarshal := json.Marshal(pluginapi.HostAuthSaveRequest{Name: "saved.json", JSON: json.RawMessage(payload)})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthSave, req)
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostAuthSaveResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	data, errRead := os.ReadFile(resp.Path)
+	if errRead != nil {
+		t.Fatalf("read saved file: %v", errRead)
+	}
+	saved := map[string]any{}
+	if errUnmarshal := json.Unmarshal(data, &saved); errUnmarshal != nil {
+		t.Fatalf("saved file is not JSON: %v (%s)", errUnmarshal, data)
+	}
+	auths := host.currentAuthManager().List()
+	if len(auths) != 1 {
+		t.Fatalf("auths = %#v, want one registered auth", auths)
+	}
+	return saved, auths[0]
+}
+
+func TestHostAuthSaveKeepsOperatorRoutingKeysAfterPluginRefresh(t *testing.T) {
+	saved, auth := savePluginCredential(t, t.TempDir(),
+		`{"type":"demo","api_key":"old","priority":10,"note":"primary lane","disabled":false,"weight":3}`,
+		`{"type":"demo","api_key":"refreshed"}`)
+	if saved["priority"] != float64(10) {
+		t.Fatalf("priority was dropped from the auth file: %v", saved["priority"])
+	}
+	if saved["note"] != "primary lane" {
+		t.Fatalf("note was dropped from the auth file: %v", saved["note"])
+	}
+	if saved["weight"] != float64(3) {
+		t.Fatalf("weight was dropped from the auth file: %v", saved["weight"])
+	}
+	if saved["api_key"] != "refreshed" {
+		t.Fatalf("the plugin's own refresh was not stored: %v", saved["api_key"])
+	}
+	if got := auth.Attributes["priority"]; got != "10" {
+		t.Fatalf("live record priority = %q, want 10 (selection order would be lost)", got)
+	}
+	if got := auth.Attributes["note"]; got != "primary lane" {
+		t.Fatalf("live record note = %q, want primary lane", got)
+	}
+}
+
+func TestHostAuthSaveLetsThePluginOverrideRoutingKeys(t *testing.T) {
+	saved, auth := savePluginCredential(t, t.TempDir(),
+		`{"type":"demo","priority":10,"note":"old"}`,
+		`{"type":"demo","api_key":"k","priority":3,"note":"new"}`)
+	if saved["priority"] != float64(3) {
+		t.Fatalf("plugin-written priority was overwritten: %v", saved["priority"])
+	}
+	if saved["note"] != "new" {
+		t.Fatalf("plugin-written note was overwritten: %v", saved["note"])
+	}
+	if auth.Attributes["priority"] != "3" {
+		t.Fatalf("live record priority = %q, want 3", auth.Attributes["priority"])
+	}
+}
+
+func TestHostAuthSaveKeepsDisabledCredentialDisabled(t *testing.T) {
+	saved, auth := savePluginCredential(t, t.TempDir(),
+		`{"type":"demo","api_key":"k","disabled":true}`,
+		`{"type":"demo","api_key":"k"}`)
+	if saved["disabled"] != true {
+		t.Fatalf("disabled flag was dropped from the auth file: %v", saved["disabled"])
+	}
+	if !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+		t.Fatalf("a disabled account was re-enabled by the plugin save: disabled=%v status=%v", auth.Disabled, auth.Status)
+	}
+}
+
+func TestHostAuthSaveNormalisesLegacyKeySpelling(t *testing.T) {
+	saved, _ := savePluginCredential(t, t.TempDir(),
+		`{"type":"demo","api_key":"k","proxy-url":"socks5://127.0.0.1:1080"}`,
+		`{"type":"demo","api_key":"k"}`)
+	// CPA normalises the legacy spelling onto the canonical key while preserving it.
+	value, isString := saved["proxy_url"].(string)
+	if !isString || value != "socks5://127.0.0.1:1080" {
+		t.Fatalf("legacy proxy-url spelling was not carried over canonically: %v (all keys %v)", saved["proxy_url"], saved["proxy-url"])
+	}
+}
+
+func TestHostAuthSaveOnFirstWriteKeepsPluginBytes(t *testing.T) {
+	authDir := t.TempDir()
+	payload := `{"type":"demo","email":"saved@example.com","api_key":"saved-key"}`
+	saved, _ := savePluginCredential(t, authDir, "", payload)
+	if _, exists := saved["priority"]; exists {
+		t.Fatalf("a first save must not invent routing keys: %v", saved["priority"])
+	}
+	if saved["api_key"] != "saved-key" {
+		t.Fatalf("payload was altered: %v", saved)
+	}
+}

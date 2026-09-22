@@ -281,6 +281,78 @@ func validateHostAuthSaveRequest(req pluginapi.HostAuthSaveRequest) (string, []b
 	return filepath.Base(name), rawJSON, nil
 }
 
+// hostOwnedAuthMetadataKeys are the auth-file keys CPA maintains for routing and
+// bookkeeping, all read back by the file synthesizer when CPA loads a credential.
+// A plugin rewrites its own credential after a token refresh and only carries its own
+// fields, so without preserving these the account silently loses the order an operator
+// chose, its note, and any per-account tuning the management API had stored.
+var hostOwnedAuthMetadataKeys = []string{
+	"priority", "weight", "note", "disabled", "prefix", "proxy_url", "headers",
+	"model_aliases", "excluded_models", "disable_cooling", "request_retry",
+	"request_scoped_errors", "fingerprint_profile",
+}
+
+// preserveHostOwnedAuthKeys keeps the CPA-owned keys already on disk that the plugin's
+// document does not mention. Anything the plugin does write wins, so a plugin can
+// still change or clear its own fields and an operator's settings survive the rewrite.
+func preserveHostOwnedAuthKeys(path string, data []byte) []byte {
+	onDisk, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return data
+	}
+	existing, incoming := map[string]any{}, map[string]any{}
+	if errUnmarshal := json.Unmarshal(onDisk, &existing); errUnmarshal != nil {
+		return data
+	}
+	if errUnmarshal := json.Unmarshal(data, &incoming); errUnmarshal != nil {
+		return data
+	}
+	// Compare canonical names: a plugin may write either spelling of an aliased key.
+	coreauth.NormalizeCredentialMetadata(existing)
+	declared := make(map[string]any, len(incoming))
+	for key, value := range incoming {
+		declared[key] = value
+	}
+	coreauth.NormalizeCredentialMetadata(declared)
+	carried := false
+	for _, key := range hostOwnedAuthMetadataKeys {
+		if _, written := declared[key]; written {
+			continue
+		}
+		value, present := existing[key]
+		if !present {
+			continue
+		}
+		incoming[key] = value
+		carried = true
+	}
+	if !carried {
+		return data
+	}
+	merged, errMarshal := json.MarshalIndent(incoming, "", "  ")
+	if errMarshal != nil {
+		return data
+	}
+	return merged
+}
+
+// credentialPriorityAttribute renders an auth file's priority value the way the
+// synthesizer does: a decimal string, empty when the value is not a usable priority.
+func credentialPriorityAttribute(raw any) string {
+	switch value := raw.(type) {
+	case float64:
+		return strconv.Itoa(int(value))
+	case int:
+		return strconv.Itoa(value)
+	case string:
+		priority := strings.TrimSpace(value)
+		if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
+			return priority
+		}
+	}
+	return ""
+}
+
 func (h *Host) saveAuthFile(ctx context.Context, name string, data []byte) (string, error) {
 	authDir := h.resolvedAuthDir()
 	if authDir == "" {
@@ -292,6 +364,7 @@ func (h *Host) saveAuthFile(ctx context.Context, name string, data []byte) (stri
 			dst = abs
 		}
 	}
+	data = preserveHostOwnedAuthKeys(dst, data)
 	auth, errBuild := h.buildAuthFromFileData(dst, data)
 	if errBuild != nil {
 		return "", errBuild
@@ -354,6 +427,26 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 			auth.NextRetryAfter = existing.NextRetryAfter
 			auth.Runtime = existing.Runtime
 		}
+	}
+	// Mirror the file synthesizer for the routing keys it reads out of an auth file,
+	// so a plugin save does not leave the live record disagreeing with the disk copy
+	// until the next resync: priority drives selection order, note is operator
+	// labelling, and a disabled account must stay disabled.
+	if rawPriority, hasPriority := metadata["priority"]; hasPriority {
+		if priority := credentialPriorityAttribute(rawPriority); priority != "" {
+			auth.Attributes["priority"] = priority
+		}
+	}
+	if rawNote, hasNote := metadata["note"]; hasNote {
+		if note, isString := rawNote.(string); isString {
+			if trimmed := strings.TrimSpace(note); trimmed != "" {
+				auth.Attributes["note"] = trimmed
+			}
+		}
+	}
+	if disabled, _ := metadata["disabled"].(bool); disabled {
+		auth.Status = coreauth.StatusDisabled
+		auth.Disabled = true
 	}
 	if errWeight := coreauth.ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("invalid auth weight: %w", errWeight)
