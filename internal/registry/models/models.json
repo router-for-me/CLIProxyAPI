@@ -200,13 +200,12 @@
       "owned_by": "anthropic",
       "type": "claude",
       "display_name": "Claude Opus 5.5",
-      "description": "Claude Opus 5.5 performs at the level of Claude Fable 5.1 on most work and costs 40% less to run than Claude Opus 5, with a 1M context window, 128K max output, and always-on adaptive thinking.",
+      "description": "Claude Opus 5.5 for long-running agentic coding and knowledge work. Adaptive thinking only: the API rejects disabled thinking and manual thinking budgets.",
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
-        "zero_allowed": true,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
