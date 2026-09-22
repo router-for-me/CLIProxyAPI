@@ -291,12 +291,14 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				line := scanner.Bytes()
 				observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				// SetServedModel before Publish: Publish is once-guarded and
+				// snapshots the reporter at call time, so on an upstream that
+				// puts model + top-level usage in one event (Claude-compatible
+				// gateways) publishing first would lock an empty served model.
+				reporter.SetServedModel(helps.ParseClaudeServedModel(line))
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
 				}
-				// SetServedModel keeps the first non-empty value, so calling it
-				// per line is safe; line is still the raw pre-restore payload.
-				reporter.SetServedModel(helps.ParseClaudeServedModel(line))
 				restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 				if errRestore != nil {
 					emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
@@ -343,12 +345,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			line := scanner.Bytes()
 			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			// SetServedModel before Publish (see the direct-forward loop above):
+			// Publish snapshots the reporter once, so the capture must lead.
+			reporter.SetServedModel(helps.ParseClaudeServedModel(line))
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
-			// SetServedModel keeps the first non-empty value, so calling it
-			// per line is safe; line is still the raw pre-restore payload.
-			reporter.SetServedModel(helps.ParseClaudeServedModel(line))
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
 				emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))

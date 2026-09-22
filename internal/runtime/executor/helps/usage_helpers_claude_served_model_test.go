@@ -36,6 +36,16 @@ func TestParseClaudeServedModel(t *testing.T) {
 			want:    "claude-haiku-4-5",
 		},
 		{
+			name:    "data prefix without space",
+			payload: `data:{"model":"claude-opus-5"}`,
+			want:    "claude-opus-5",
+		},
+		{
+			name:    "whitespace-only nested model falls through to top-level",
+			payload: `{"message":{"model":"   "},"model":"claude-opus-5"}`,
+			want:    "claude-opus-5",
+		},
+		{
 			name:    "model absent",
 			payload: `{"usage":{"input_tokens":10}}`,
 			want:    "",

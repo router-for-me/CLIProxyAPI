@@ -257,6 +257,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		commitClaudeDiagnostics(diagnosticsState, claudeMessageIDFromSSE(data))
 		lines := bytes.Split(data, []byte("\n"))
 		for i, line := range lines {
+			// Capture on the truly pre-restore line, before any per-line
+			// rewrite below and before the usage publish loop: Publish is
+			// once-guarded and snapshots the reporter, so the served model must
+			// already be set when the first usage line publishes. Running this
+			// first also means a later per-line restore failure (early return,
+			// deferred TrackFailure publish) still carries the served model.
+			reporter.SetServedModel(helps.ParseClaudeServedModel(line))
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
 				errRestore = fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore)
@@ -273,9 +280,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
-			// First non-empty served model wins; the raw (pre-restore) lines
-			// still carry the model upstream actually served.
-			reporter.SetServedModel(helps.ParseClaudeServedModel(line))
 		}
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
@@ -290,8 +294,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// Publish usage only after the restore succeeded, so a failed restore
 		// returns before the success-publish can lock the record (the deferred
 		// TrackFailure in Execute then correctly records it as an error).
-		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
+		// Capture the served model BEFORE publishing: Publish is once-guarded
+		// and buildRecord snapshots r.servedModel at call time, so the standard
+		// Anthropic body (top-level model + usage in one object) would lock an
+		// empty served model if SetServedModel came after.
 		reporter.SetServedModel(helps.ParseClaudeServedModel(data))
+		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
 	data = e.restoreResponseModel(data, req.Model)
 	cacheClaudeThinkingReplayResponse(ctx, replayScope, data)
