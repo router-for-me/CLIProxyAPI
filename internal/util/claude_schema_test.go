@@ -113,7 +113,7 @@ func TestNormalizeClaudeToolInputSchema(t *testing.T) {
 	}
 }
 
-func TestHasUnsupportedUnicodePropertyEscape(t *testing.T) {
+func TestHasStrictValidatorIncompatiblePattern(t *testing.T) {
 	tests := []struct {
 		name    string
 		pattern string
@@ -160,6 +160,31 @@ func TestHasUnsupportedUnicodePropertyEscape(t *testing.T) {
 			want:    false,
 		},
 		{
+			name:    "Octal NUL escape as emitted by Artifact file_paths",
+			pattern: `^[^\0]*$`,
+			want:    true,
+		},
+		{
+			name:    "Hex NUL escape is the accepted spelling",
+			pattern: `^[^\x00]*$`,
+			want:    false,
+		},
+		{
+			name:    "Escaped backslash before zero is literal and safe",
+			pattern: `^\\0$`,
+			want:    false,
+		},
+		{
+			name:    "Octal escape with leading zeros",
+			pattern: `^\000$`,
+			want:    true,
+		},
+		{
+			name:    "Zero inside a character class range",
+			pattern: `^[a-\07]$`,
+			want:    true,
+		},
+		{
 			name:    "Trailing single backslash",
 			pattern: `abc\`,
 			want:    false,
@@ -183,9 +208,9 @@ func TestHasUnsupportedUnicodePropertyEscape(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := HasUnsupportedUnicodePropertyEscape(tt.pattern)
+			got := HasStrictValidatorIncompatiblePattern(tt.pattern)
 			if got != tt.want {
-				t.Errorf("HasUnsupportedUnicodePropertyEscape(%q) = %v, want %v", tt.pattern, got, tt.want)
+				t.Errorf("HasStrictValidatorIncompatiblePattern(%q) = %v, want %v", tt.pattern, got, tt.want)
 			}
 		})
 	}

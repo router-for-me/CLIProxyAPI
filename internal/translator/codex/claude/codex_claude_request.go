@@ -727,14 +727,14 @@ func stripDialectKeywordsFromSchema(v any) {
 	case map[string]any:
 		delete(schema, "$schema")
 		delete(schema, "$id")
-		if patternVal, ok := schema["pattern"].(string); ok && util.HasUnsupportedUnicodePropertyEscape(patternVal) {
+		if patternVal, ok := schema["pattern"].(string); ok && util.HasStrictValidatorIncompatiblePattern(patternVal) {
 			delete(schema, "pattern")
 		}
 
 		// Inspect regex keys under patternProperties
 		if patternProps, ok := schema["patternProperties"].(map[string]any); ok {
 			for patternKey, subSchema := range patternProps {
-				if util.HasUnsupportedUnicodePropertyEscape(patternKey) {
+				if util.HasStrictValidatorIncompatiblePattern(patternKey) {
 					delete(patternProps, patternKey)
 				} else {
 					stripDialectKeywordsFromSchema(subSchema)

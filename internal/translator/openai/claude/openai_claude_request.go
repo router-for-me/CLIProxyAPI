@@ -429,14 +429,14 @@ func normalizeObjectSchemaProperties(schema any) any {
 				value["properties"] = map[string]any{}
 			}
 		}
-		if patternVal, ok := value["pattern"].(string); ok && util.HasUnsupportedUnicodePropertyEscape(patternVal) {
+		if patternVal, ok := value["pattern"].(string); ok && util.HasStrictValidatorIncompatiblePattern(patternVal) {
 			delete(value, "pattern")
 		}
 
 		// Inspect regex keys under patternProperties
 		if patternProps, ok := value["patternProperties"].(map[string]any); ok {
 			for patternKey, subSchema := range patternProps {
-				if util.HasUnsupportedUnicodePropertyEscape(patternKey) {
+				if util.HasStrictValidatorIncompatiblePattern(patternKey) {
 					delete(patternProps, patternKey)
 				} else {
 					patternProps[patternKey] = normalizeObjectSchemaProperties(subSchema)
