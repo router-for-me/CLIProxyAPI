@@ -62,7 +62,8 @@ func (h *Handler) authorizeAccountRequest(c *gin.Context) bool {
 	forbidden := strings.Contains(p, "billing") || strings.Contains(p, "quota") ||
 		p == "/accounts/users" || strings.HasPrefix(p, "/accounts/users/") ||
 		p == "/usage" || strings.HasPrefix(p, "/usage/") ||
-		p == "/usage-queue" || p == "/api-call"
+		p == "/usage-queue" || p == "/api-call" ||
+		(p == "/auth-files" && c.Request.Method == http.MethodDelete)
 	// Installing over an existing protected plugin also re-enables its config.
 	if strings.HasPrefix(p, "/plugin-store/") && strings.HasSuffix(p, "/install") {
 		h.mu.Lock()
@@ -91,7 +92,7 @@ func (h *Handler) authorizeAccountRequest(c *gin.Context) bool {
 		}
 	}
 	if forbidden {
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "admin permission required for billing, quota or account administration"})
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "admin permission required for billing, quota, credential deletion or account administration"})
 		return false
 	}
 	return true

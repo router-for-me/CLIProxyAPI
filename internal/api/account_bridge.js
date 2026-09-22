@@ -61,6 +61,18 @@
         link.style.setProperty('display', 'none', 'important');
       }
     });
+    // Credential deletion is admin-only. Match the upstream credential controls
+    // narrowly so unrelated provider/config actions remain available to operators.
+    if (/^#\/auth-files(?:[/?]|$)/i.test(location.hash)) {
+      document.querySelectorAll('button').forEach(function (button) {
+        var label = (button.getAttribute('aria-label') || button.title || button.textContent || '').trim();
+        if (/^(delete|delete all|删除|全部删除|删除全部)$/i.test(label)) {
+          button.hidden = true;
+          button.disabled = true;
+          button.style.setProperty('display', 'none', 'important');
+        }
+      });
+    }
     if (/billing|quota/i.test(location.hash) || /\/billing\.html$/i.test(location.pathname)) {
       location.replace('/accounts.html');
     }

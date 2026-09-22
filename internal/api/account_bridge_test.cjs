@@ -84,3 +84,19 @@ test('late account lookup cannot resurrect a logged-out session',async()=>{
 test('late unauthorized response cannot clear a replacement session',async()=>{
  const {storage,resolve}=activeSandbox();storage.set('cpa-account-session',JSON.stringify({token:'new',user:{role:'user'}}));resolve({status:401});await new Promise(r=>setImmediate(r));assert.equal(JSON.parse(storage.get('cpa-account-session')).token,'new');
 });
+
+test('user credential page hides only credential deletion controls',()=>{
+ const storage=new Map([['cpa-account-session',JSON.stringify({token:'user-token',user:{role:'user'}})],['isLoggedIn','true']]);
+ const button=(label,source='title')=>({hidden:false,disabled:false,title:source==='title'?label:'',textContent:source==='text'?label:'',getAttribute:k=>source==='aria'&&k==='aria-label'?label:null,style:{setProperty(k,v){this[k]=v}}});
+ const removeOne=button('Delete'),removeAll=button('Delete All','text'),removeChinese=button('删除','aria'),providerDelete=button('Delete Provider','text'),edit=button('Edit','text');
+ const buttons=[removeOne,removeAll,removeChinese,providerDelete,edit],body={appendChild(){}};
+ const sandbox={
+  document:{body,readyState:'complete',documentElement:{style:{}},querySelector:()=>null,querySelectorAll:s=>s==='button'?buttons:[],getElementById:()=>null,createElement:()=>({style:{},setAttribute(){}})},
+  location:{pathname:'/management.html',hash:'#/auth-files',replace(p){this.redirect=p}},
+  localStorage:{getItem:k=>storage.get(k)||null,removeItem:k=>storage.delete(k),setItem:(k,v)=>storage.set(k,v)},
+  window:{addEventListener(){}},MutationObserver:class{observe(){}},requestAnimationFrame:fn=>fn(),fetch:()=>new Promise(()=>{})
+ };
+ vm.runInNewContext(code,sandbox);
+ for(const control of [removeOne,removeAll,removeChinese]){assert.equal(control.hidden,true);assert.equal(control.disabled,true);assert.equal(control.style.display,'none')}
+ for(const control of [providerDelete,edit]){assert.equal(control.hidden,false);assert.equal(control.disabled,false)}
+});
