@@ -541,6 +541,95 @@ func TestNormalizeCodexToolSchemas_StripsUnsupportedUnicodePropertyEscapePattern
 	}
 }
 
+func TestNormalizeCodexToolSchemas_StripsOctalNULPatternEscapes(t *testing.T) {
+	// Claude Code's built-in Artifact tool guards file paths with the octal NUL
+	// escape, e.g. "^[^\0]*$" on the upload_asset file_paths item. Strict upstream
+	// validators reject that spelling ("is not a 'regex'") while accepting the
+	// equivalent \x00, so the pattern has to come off before the request goes out.
+	input := []byte(`{
+		"model": "gpt-5.6",
+		"tools": [{
+			"type": "function",
+			"name": "Artifact",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"file_paths": {
+						"type": "array",
+						"minItems": 1,
+						"items": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 1024,
+							"pattern": "^[^\\0]*$"
+						}
+					},
+					"asset_id": {
+						"type": "string",
+						"pattern": "^[0-9a-f]{32}$"
+					}
+				},
+				"required": ["file_paths"]
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+
+	params := gjson.GetBytes(out, "tools.0.parameters")
+
+	// The octal NUL pattern must be removed, while the rest of the item schema stays.
+	if params.Get("properties.file_paths.items.pattern").Exists() {
+		t.Errorf("expected properties.file_paths.items.pattern to be removed, got: %s",
+			params.Get("properties.file_paths.items.pattern").Raw)
+	}
+	for path, want := range map[string]string{
+		"properties.file_paths.items.type":      "string",
+		"properties.file_paths.items.maxLength": "1024",
+		"properties.file_paths.type":            "array",
+	} {
+		if got := params.Get(path).String(); got != want {
+			t.Errorf("expected %s == %q, got %q", path, want, got)
+		}
+	}
+
+	// A plain pattern is valid and must survive.
+	if got := params.Get("properties.asset_id.pattern").String(); got != "^[0-9a-f]{32}$" {
+		t.Errorf("expected properties.asset_id.pattern preserved, got %q", got)
+	}
+
+	// Idempotence test
+	outAgain := NormalizeCodexToolSchemas(out)
+	if string(outAgain) != string(out) {
+		t.Errorf("expected NormalizeCodexToolSchemas to be idempotent")
+	}
+}
+
+func TestNormalizeCodexToolSchemas_HexNULPatternEscapesArePreserved(t *testing.T) {
+	// The \x00 spelling is the one strict validators accept, so it must NOT be touched.
+	input := []byte(`{
+		"model": "gpt-5.6",
+		"tools": [{
+			"type": "function",
+			"name": "Artifact",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"field": {
+						"type": "string",
+						"pattern": "^[^\\x00]*$"
+					}
+				}
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+	if got := gjson.GetBytes(out, "tools.0.parameters.properties.field.pattern").String(); got != "^[^\\x00]*$" {
+		t.Errorf("expected the hex NUL pattern to be preserved, got %q", got)
+	}
+}
+
 func TestNormalizeCodexToolSchemas_PreservesNonSchemaPatternKeys(t *testing.T) {
 	// A property whose default, enum, or description metadata contains a nested object
 	// with a 'pattern' key must NOT be mutated, because it is user data, not a schema.
