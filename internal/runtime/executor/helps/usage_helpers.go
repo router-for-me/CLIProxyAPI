@@ -913,6 +913,24 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	return parseClaudeUsageNode(usageNode), true
 }
 
+// ParseClaudeServedModel extracts the model identifier a Claude (Anthropic
+// Messages API) response reported serving. It accepts both a full response
+// body and a single SSE line (with or without the "data:" prefix), mirroring
+// how ParseClaudeUsage and ParseClaudeStreamUsage are fed by the executors.
+// The nested message.model is preferred because the streaming message_start
+// event carries the model there. Returns "" when the payload has no model
+// field, which callers treat as "upstream did not say".
+func ParseClaudeServedModel(payload []byte) string {
+	jsonBytes := jsonPayload(payload)
+	if len(jsonBytes) == 0 || !gjson.ValidBytes(jsonBytes) {
+		return ""
+	}
+	if model := strings.TrimSpace(gjson.GetBytes(jsonBytes, "message.model").String()); model != "" {
+		return model
+	}
+	return strings.TrimSpace(gjson.GetBytes(jsonBytes, "model").String())
+}
+
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
 	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()

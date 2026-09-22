@@ -273,6 +273,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
+			// First non-empty served model wins; the raw (pre-restore) lines
+			// still carry the model upstream actually served.
+			reporter.SetServedModel(helps.ParseClaudeServedModel(line))
 		}
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
@@ -288,6 +291,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// returns before the success-publish can lock the record (the deferred
 		// TrackFailure in Execute then correctly records it as an error).
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
+		reporter.SetServedModel(helps.ParseClaudeServedModel(data))
 	}
 	data = e.restoreResponseModel(data, req.Model)
 	cacheClaudeThinkingReplayResponse(ctx, replayScope, data)
