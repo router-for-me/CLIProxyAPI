@@ -1,0 +1,775 @@
+// Package openai provides utilities to translate OpenAI Chat Completions
+// request JSON into OpenAI Responses API request JSON using gjson/sjson.
+// It supports tools, multimodal text/image inputs, and Structured Outputs.
+// The package handles the conversion of OpenAI API requests into the format
+// expected by the OpenAI Responses API, including proper mapping of messages,
+// tools, and generation parameters.
+package chat_completions
+
+import (
+	"strconv"
+	"strings"
+
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+)
+
+// ConvertOpenAIRequestToCodex converts an OpenAI Chat Completions request JSON
+// into an OpenAI Responses API request JSON. The transformation follows the
+// examples defined in docs/2.md exactly, including tools, multi-turn dialog,
+// multimodal text/image handling, and Structured Outputs mapping.
+//
+// Parameters:
+//   - modelName: The name of the model to use for the request
+//   - rawJSON: The raw JSON request data from the OpenAI Chat Completions API
+//   - stream: A boolean indicating if the request is for a streaming response
+//
+// Returns:
+//   - []byte: The transformed request data in OpenAI Responses API format
+func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+	rawJSON := inputRawJSON
+	root := gjson.ParseBytes(rawJSON)
+	tools := root.Get("tools")
+	toolResults := tools.Array()
+	// Start with empty JSON object
+	out := []byte(`{"instructions":""}`)
+
+	// Stream must be set to true
+	out, _ = sjson.SetBytes(out, "stream", stream)
+
+	// Codex not support temperature, top_p, top_k, max_output_tokens, so comment them
+	// if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() {
+	// 	out, _ = sjson.SetBytes(out, "temperature", v.Value())
+	// }
+	// if v := gjson.GetBytes(rawJSON, "top_p"); v.Exists() {
+	// 	out, _ = sjson.SetBytes(out, "top_p", v.Value())
+	// }
+	// if v := gjson.GetBytes(rawJSON, "top_k"); v.Exists() {
+	// 	out, _ = sjson.SetBytes(out, "top_k", v.Value())
+	// }
+
+	// Map token limits
+	// if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() {
+	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
+	// }
+	// if v := gjson.GetBytes(rawJSON, "max_completion_tokens"); v.Exists() {
+	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
+	// }
+
+	// Map reasoning effort
+	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "reasoning.effort", v.Value())
+	} else {
+		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
+	}
+	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
+	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
+	// reasoning.summary to the source request's canonical summary intent instead
+	// of coupling it to reasoning effort.
+	out, _ = sjson.SetBytes(out, "include", []string{"reasoning.encrypted_content"})
+
+	// Model
+	out, _ = sjson.SetBytes(out, "model", modelName)
+
+	// Build request-local tool metadata and name shortening map.
+	originalToolNameMap := map[string]string{}
+	customToolNames := map[string]struct{}{}
+	functionToolNames := map[string]struct{}{}
+	{
+		if tools.IsArray() && len(toolResults) > 0 {
+			for _, tool := range toolResults {
+				switch tool.Get("type").String() {
+				case "function":
+					functionToolNames[tool.Get("function.name").String()] = struct{}{}
+				case "custom":
+					customToolNames[tool.Get("name").String()] = struct{}{}
+				}
+			}
+			// A normalized function envelope cannot disambiguate declarations that share a name.
+			// Preserve function behavior for such ambiguous names.
+			for name := range functionToolNames {
+				delete(customToolNames, name)
+			}
+		}
+		allNames := collectRequestToolNames(rawJSON)
+		if len(allNames) > 0 {
+			originalToolNameMap = buildShortNameMap(allNames)
+		}
+	}
+
+	resolveToolCall := func(toolCall gjson.Result) (callType, name, input string, valid bool) {
+		switch toolCall.Get("type").String() {
+		case "custom":
+			return "custom", toolCall.Get("custom.name").String(), toolCall.Get("custom.input").String(), true
+		case "function":
+			name = toolCall.Get("function.name").String()
+			callType = "function"
+			if _, custom := customToolNames[name]; custom {
+				callType = "custom"
+			}
+			return callType, name, toolCall.Get("function.arguments").String(), true
+		default:
+			return "", "", "", false
+		}
+	}
+
+	// Extract system instructions from first system message (string or text object)
+	messages := gjson.GetBytes(rawJSON, "messages")
+	type pendingToolCall struct {
+		callID       string
+		sourceCallID string
+		callType     string
+		consumed     bool
+	}
+	var pendingToolCalls []pendingToolCall
+	ambiguousToolCallIDs := map[string]struct{}{}
+	// if messages.IsArray() {
+	// 	arr := messages.Array()
+	// 	for i := 0; i < len(arr); i++ {
+	// 		m := arr[i]
+	// 		if m.Get("role").String() == "system" {
+	// 			c := m.Get("content")
+	// 			if c.Type == gjson.String {
+	// 				out, _ = sjson.SetBytes(out, "instructions", c.String())
+	// 			} else if c.IsObject() && c.Get("type").String() == "text" {
+	// 				out, _ = sjson.SetBytes(out, "instructions", c.Get("text").String())
+	// 			}
+	// 			break
+	// 		}
+	// 	}
+	// }
+
+	// Build input from messages, handling all message types including tool calls
+	out, _ = sjson.SetRawBytes(out, "input", []byte(`[]`))
+	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
+	if messages.IsArray() {
+		arr := messages.Array()
+		for i := 0; i < len(arr); i++ {
+			m := arr[i]
+			role := m.Get("role").String()
+
+			switch role {
+			case "tool":
+				// Handle tool response messages as top-level tool call output objects.
+				toolCallID := m.Get("tool_call_id").String()
+				if _, ambiguous := ambiguousToolCallIDs[toolCallID]; toolCallID != "" && ambiguous {
+					continue
+				}
+
+				pendingIndex := -1
+				for index := range pendingToolCalls {
+					pendingCall := &pendingToolCalls[index]
+					if pendingCall.consumed {
+						continue
+					}
+					if toolCallID == "" || pendingCall.sourceCallID == toolCallID || pendingCall.callID == toolCallID {
+						pendingIndex = index
+						break
+					}
+				}
+
+				if pendingIndex < 0 {
+					continue
+				}
+				pendingCall := &pendingToolCalls[pendingIndex]
+				pendingCall.consumed = true
+				toolCallID = pendingCall.callID
+				outputType := "function_call_output"
+				if pendingCall.callType == "custom" {
+					outputType = "custom_tool_call_output"
+				}
+
+				toolOutput := []byte(`{}`)
+				toolOutput, _ = sjson.SetBytes(toolOutput, "type", outputType)
+				toolOutput, _ = sjson.SetBytes(toolOutput, "call_id", toolCallID)
+				toolOutput = setToolCallOutputContent(toolOutput, m.Get("content"))
+				inputItems = append(inputItems, toolOutput)
+
+			default:
+				// A new conversational message starts a new tool-call batch.
+				pendingToolCalls = nil
+				ambiguousToolCallIDs = map[string]struct{}{}
+
+				// Handle regular messages
+				msg := []byte(`{}`)
+				msg, _ = sjson.SetBytes(msg, "type", "message")
+				if role == "system" {
+					msg, _ = sjson.SetBytes(msg, "role", "developer")
+				} else {
+					msg, _ = sjson.SetBytes(msg, "role", role)
+				}
+
+				contentItems := make([][]byte, 0, 4)
+
+				// Handle regular content
+				c := m.Get("content")
+				if c.Exists() && c.Type == gjson.String && c.String() != "" {
+					// Single string content
+					partType := "input_text"
+					if role == "assistant" {
+						partType = "output_text"
+					}
+					part := []byte(`{}`)
+					part, _ = sjson.SetBytes(part, "type", partType)
+					part, _ = sjson.SetBytes(part, "text", c.String())
+					contentItems = append(contentItems, part)
+				} else if c.Exists() && c.IsArray() {
+					items := c.Array()
+					for j := 0; j < len(items); j++ {
+						it := items[j]
+						t := it.Get("type").String()
+						switch t {
+						case "text":
+							partType := "input_text"
+							if role == "assistant" {
+								partType = "output_text"
+							}
+							part := []byte(`{}`)
+							part, _ = sjson.SetBytes(part, "type", partType)
+							part, _ = sjson.SetBytes(part, "text", it.Get("text").String())
+							contentItems = append(contentItems, part)
+						case "image_url":
+							// Map image inputs to input_image for Responses API
+							if role == "user" {
+								part := []byte(`{}`)
+								part, _ = sjson.SetBytes(part, "type", "input_image")
+								if u := it.Get("image_url.url"); u.Exists() {
+									part, _ = sjson.SetBytes(part, "image_url", u.String())
+								}
+								contentItems = append(contentItems, part)
+							}
+						case "file":
+							if role == "user" {
+								fileData := it.Get("file.file_data").String()
+								filename := it.Get("file.filename").String()
+								if fileData != "" {
+									part := []byte(`{}`)
+									part, _ = sjson.SetBytes(part, "type", "input_file")
+									part, _ = sjson.SetBytes(part, "file_data", fileData)
+									if filename != "" {
+										part, _ = sjson.SetBytes(part, "filename", filename)
+									}
+									contentItems = append(contentItems, part)
+								}
+							}
+						case "input_audio":
+							if role == "user" {
+								audioData := it.Get("input_audio.data").String()
+								audioFormat := it.Get("input_audio.format").String()
+								if audioData != "" {
+									part := []byte(`{}`)
+									part, _ = sjson.SetBytes(part, "type", "input_audio")
+									part, _ = sjson.SetBytes(part, "data", audioData)
+									if audioFormat != "" {
+										part, _ = sjson.SetBytes(part, "format", audioFormat)
+									}
+									contentItems = append(contentItems, part)
+								}
+							}
+						}
+					}
+				}
+
+				// Don't emit empty assistant messages when only tool_calls
+				// are present — Responses API needs function_call items
+				// directly, otherwise call_id matching fails (#2132).
+				if role != "assistant" || len(contentItems) > 0 {
+					msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
+					inputItems = append(inputItems, msg)
+				}
+
+				// Handle tool calls for assistant messages as separate top-level objects
+				if role == "assistant" {
+					toolCalls := m.Get("tool_calls")
+					if toolCalls.Exists() && toolCalls.IsArray() {
+						toolCallsArr := toolCalls.Array()
+						callIDCounts := map[string]int{}
+						usedCallIDs := map[string]struct{}{}
+						for _, tc := range toolCallsArr {
+							_, _, _, valid := resolveToolCall(tc)
+							callID := tc.Get("id").String()
+							if valid && callID != "" {
+								callIDCounts[callID]++
+								usedCallIDs[callID] = struct{}{}
+							}
+						}
+						for callID, count := range callIDCounts {
+							if count > 1 {
+								ambiguousToolCallIDs[callID] = struct{}{}
+							}
+						}
+
+						for j := 0; j < len(toolCallsArr); j++ {
+							tc := toolCallsArr[j]
+							toolCallType, toolCallName, toolCallInput, valid := resolveToolCall(tc)
+							if !valid {
+								continue
+							}
+							sourceCallID := tc.Get("id").String()
+							if _, ambiguous := ambiguousToolCallIDs[sourceCallID]; sourceCallID != "" && ambiguous {
+								continue
+							}
+							callID := sourceCallID
+							if callID == "" {
+								baseCallID := "call_missing_" + strconv.Itoa(i) + "_" + strconv.Itoa(j)
+								callID = baseCallID
+								for suffix := 1; ; suffix++ {
+									if _, used := usedCallIDs[callID]; !used {
+										break
+									}
+									callID = baseCallID + "_" + strconv.Itoa(suffix)
+								}
+								usedCallIDs[callID] = struct{}{}
+							}
+							pendingToolCalls = append(pendingToolCalls, pendingToolCall{
+								callID:       callID,
+								sourceCallID: sourceCallID,
+								callType:     toolCallType,
+							})
+
+							switch toolCallType {
+							case "function":
+								// Create function_call as top-level object
+								funcCall := []byte(`{}`)
+								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
+								funcCall, _ = sjson.SetBytes(funcCall, "call_id", callID)
+								if short, ok := originalToolNameMap[toolCallName]; ok {
+									toolCallName = short
+								} else {
+									toolCallName = shortenNameIfNeeded(toolCallName)
+								}
+								funcCall, _ = sjson.SetBytes(funcCall, "name", toolCallName)
+								funcCall, _ = sjson.SetBytes(funcCall, "arguments", toolCallInput)
+								inputItems = append(inputItems, funcCall)
+							case "custom":
+								customCall := []byte(`{}`)
+								customCall, _ = sjson.SetBytes(customCall, "type", "custom_tool_call")
+								customCall, _ = sjson.SetBytes(customCall, "call_id", callID)
+								if short, ok := originalToolNameMap[toolCallName]; ok {
+									toolCallName = short
+								} else {
+									toolCallName = shortenNameIfNeeded(toolCallName)
+								}
+								customCall, _ = sjson.SetBytes(customCall, "name", toolCallName)
+								customCall, _ = sjson.SetBytes(customCall, "input", toolCallInput)
+								inputItems = append(inputItems, customCall)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
+
+	// Map response_format and text settings to Responses API text.format
+	rf := gjson.GetBytes(rawJSON, "response_format")
+	text := gjson.GetBytes(rawJSON, "text")
+	if rf.Exists() {
+		// Always create text object when response_format provided
+		if !gjson.GetBytes(out, "text").Exists() {
+			out, _ = sjson.SetRawBytes(out, "text", []byte(`{}`))
+		}
+
+		rft := rf.Get("type").String()
+		switch rft {
+		case "text":
+			out, _ = sjson.SetBytes(out, "text.format.type", "text")
+		case "json_schema":
+			js := rf.Get("json_schema")
+			if js.Exists() {
+				out, _ = sjson.SetBytes(out, "text.format.type", "json_schema")
+				if v := js.Get("name"); v.Exists() {
+					out, _ = sjson.SetBytes(out, "text.format.name", v.Value())
+				}
+				if v := js.Get("strict"); v.Exists() {
+					out, _ = sjson.SetBytes(out, "text.format.strict", v.Value())
+				}
+				if v := js.Get("schema"); v.Exists() {
+					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(v.Raw))
+				}
+			}
+		}
+
+		// Map verbosity if provided
+		if text.Exists() {
+			if v := text.Get("verbosity"); v.Exists() {
+				out, _ = sjson.SetBytes(out, "text.verbosity", v.Value())
+			}
+		}
+	} else if text.Exists() {
+		// If only text.verbosity present (no response_format), map verbosity
+		if v := text.Get("verbosity"); v.Exists() {
+			if !gjson.GetBytes(out, "text").Exists() {
+				out, _ = sjson.SetRawBytes(out, "text", []byte(`{}`))
+			}
+			out, _ = sjson.SetBytes(out, "text.verbosity", v.Value())
+		}
+	}
+
+	// Map tools (flatten function fields)
+	if tools.IsArray() && len(toolResults) > 0 {
+		toolItems := make([][]byte, 0, len(toolResults))
+		arr := toolResults
+		for i := 0; i < len(arr); i++ {
+			t := arr[i]
+			toolType := t.Get("type").String()
+			if toolType == "custom" {
+				item := []byte(t.Raw)
+				name := t.Get("name").String()
+				if short, ok := originalToolNameMap[name]; ok {
+					name = short
+				} else {
+					name = shortenNameIfNeeded(name)
+				}
+				item, _ = sjson.SetBytes(item, "name", name)
+				toolItems = append(toolItems, item)
+				continue
+			}
+
+			// Pass through built-in tools (e.g. {"type":"web_search"}) directly for the Responses API.
+			// Only function and custom tools need structural conversion.
+			if toolType != "" && toolType != "function" && t.IsObject() {
+				toolItems = append(toolItems, []byte(t.Raw))
+				continue
+			}
+
+			if toolType == "function" {
+				item := []byte(`{}`)
+				item, _ = sjson.SetBytes(item, "type", "function")
+				fn := t.Get("function")
+				if fn.Exists() {
+					if v := fn.Get("name"); v.Exists() {
+						name := v.String()
+						if short, ok := originalToolNameMap[name]; ok {
+							name = short
+						} else {
+							name = shortenNameIfNeeded(name)
+						}
+						item, _ = sjson.SetBytes(item, "name", name)
+					}
+					if v := fn.Get("description"); v.Exists() {
+						item, _ = sjson.SetBytes(item, "description", v.Value())
+					}
+					if v := fn.Get("parameters"); v.Exists() {
+						item, _ = sjson.SetRawBytes(item, "parameters", []byte(v.Raw))
+					}
+					if v := fn.Get("strict"); v.Exists() {
+						item, _ = sjson.SetBytes(item, "strict", v.Value())
+					} else {
+						// Chat Completions defaults strict to false while the Responses API
+						// defaults it to true, so an omitted value must be forwarded explicitly.
+						item, _ = sjson.SetBytes(item, "strict", false)
+					}
+				}
+				toolItems = append(toolItems, item)
+			}
+		}
+		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
+	}
+
+	// Map tool_choice when present.
+	// Chat Completions: "tool_choice" can be a string ("auto"/"none") or an object (e.g. {"type":"function","function":{"name":"..."}}).
+	// Responses API: keep built-in tool choices as-is and flatten named choices to {"type":"...","name":"..."}.
+	if tc := gjson.GetBytes(rawJSON, "tool_choice"); tc.Exists() {
+		switch {
+		case tc.Type == gjson.String:
+			out, _ = sjson.SetBytes(out, "tool_choice", tc.String())
+		case tc.IsObject():
+			tcType := tc.Get("type").String()
+			if tcType == "function" || tcType == "custom" {
+				name := tc.Get("name").String()
+				if tcType == "function" {
+					name = tc.Get("function.name").String()
+					if _, custom := customToolNames[name]; custom {
+						tcType = "custom"
+					}
+				}
+				if name != "" {
+					if short, ok := originalToolNameMap[name]; ok {
+						name = short
+					} else {
+						name = shortenNameIfNeeded(name)
+					}
+				}
+				choice := []byte(`{}`)
+				choice, _ = sjson.SetBytes(choice, "type", tcType)
+				if name != "" {
+					choice, _ = sjson.SetBytes(choice, "name", name)
+				}
+				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
+			} else if tcType != "" {
+				// Built-in tool choices (e.g. {"type":"web_search"}) are already Responses-compatible.
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(tc.Raw))
+			}
+		}
+	}
+
+	out, _ = sjson.SetBytes(out, "store", false)
+	return out
+}
+
+func setToolCallOutputContent(funcOutput []byte, content gjson.Result) []byte {
+	switch {
+	case content.Type == gjson.String:
+		structuredContent := gjson.Parse(content.String())
+		if hasToolOutputImagePart(structuredContent) {
+			return setToolCallOutputContent(funcOutput, structuredContent)
+		}
+		funcOutput, _ = sjson.SetBytes(funcOutput, "output", content.String())
+	case content.IsArray():
+		outputItems := make([][]byte, 0, 4)
+		for _, item := range content.Array() {
+			outputItems = append(outputItems, toolOutputContentPart(item))
+		}
+		funcOutput, _ = sjson.SetRawBytes(funcOutput, "output", translatorcommon.JoinRawArray(outputItems))
+	default:
+		fallbackOutput := content.Raw
+		if fallbackOutput == "" {
+			fallbackOutput = content.String()
+		}
+		funcOutput, _ = sjson.SetBytes(funcOutput, "output", fallbackOutput)
+	}
+	return funcOutput
+}
+
+func toolOutputContentPart(item gjson.Result) []byte {
+	itemType := item.Get("type").String()
+	switch itemType {
+	case "text", "input_text", "output_text":
+		part := []byte(`{}`)
+		part, _ = sjson.SetBytes(part, "type", "input_text")
+		part, _ = sjson.SetBytes(part, "text", item.Get("text").String())
+		return part
+	case "image_url", "input_image":
+		imageURL := item.Get("image_url.url").String()
+		fileID := item.Get("image_url.file_id").String()
+		if itemType == "input_image" {
+			imageURL = item.Get("image_url").String()
+			fileID = item.Get("file_id").String()
+		}
+		if imageURL == "" && fileID == "" {
+			return toolOutputFallbackPart(item)
+		}
+		part := []byte(`{}`)
+		part, _ = sjson.SetBytes(part, "type", "input_image")
+		if imageURL != "" {
+			part, _ = sjson.SetBytes(part, "image_url", imageURL)
+		}
+		if fileID != "" {
+			part, _ = sjson.SetBytes(part, "file_id", fileID)
+		}
+		detail := item.Get("image_url.detail").String()
+		if itemType == "input_image" {
+			detail = item.Get("detail").String()
+		}
+		if detail != "" {
+			part, _ = sjson.SetBytes(part, "detail", detail)
+		}
+		return part
+	case "file":
+		fileID := item.Get("file.file_id").String()
+		fileData := item.Get("file.file_data").String()
+		fileURL := item.Get("file.file_url").String()
+		if fileID == "" && fileData == "" && fileURL == "" {
+			return toolOutputFallbackPart(item)
+		}
+		part := []byte(`{}`)
+		part, _ = sjson.SetBytes(part, "type", "input_file")
+		if fileID != "" {
+			part, _ = sjson.SetBytes(part, "file_id", fileID)
+		}
+		if fileData != "" {
+			part, _ = sjson.SetBytes(part, "file_data", fileData)
+		}
+		if fileURL != "" {
+			part, _ = sjson.SetBytes(part, "file_url", fileURL)
+		}
+		if filename := item.Get("file.filename").String(); filename != "" {
+			part, _ = sjson.SetBytes(part, "filename", filename)
+		}
+		return part
+	default:
+		return toolOutputFallbackPart(item)
+	}
+}
+
+func hasToolOutputImagePart(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	for _, item := range content.Array() {
+		switch item.Get("type").String() {
+		case "image_url":
+			if item.Get("image_url.url").String() != "" || item.Get("image_url.file_id").String() != "" {
+				return true
+			}
+		case "input_image":
+			if item.Get("image_url").String() != "" || item.Get("file_id").String() != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toolOutputFallbackPart(item gjson.Result) []byte {
+	text := item.Raw
+	if text == "" {
+		text = item.String()
+	}
+	part := []byte(`{}`)
+	part, _ = sjson.SetBytes(part, "type", "input_text")
+	part, _ = sjson.SetBytes(part, "text", text)
+	return part
+}
+
+// sanitizeToolName normalizes a tool name by replacing any character outside
+// [a-zA-Z0-9_-] with an underscore so it conforms to Codex upstream requirements.
+func sanitizeToolName(name string) string {
+	if name == "" {
+		return ""
+	}
+	var sb strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteByte('_')
+		}
+	}
+	return sb.String()
+}
+
+// shortenNameIfNeeded normalizes invalid characters and applies the shortening rule for a single name.
+// If the name length exceeds 64, it will try to preserve the "mcp__" prefix and last segment.
+// Otherwise it truncates to 64 characters.
+func shortenNameIfNeeded(name string) string {
+	const limit = 64
+	sanitized := sanitizeToolName(name)
+	if len(sanitized) <= limit {
+		return sanitized
+	}
+	if strings.HasPrefix(sanitized, "mcp__") {
+		// Keep prefix and last segment after '__'
+		idx := strings.LastIndex(sanitized, "__")
+		if idx > 0 {
+			candidate := "mcp__" + sanitized[idx+2:]
+			if len(candidate) > limit {
+				return candidate[:limit]
+			}
+			return candidate
+		}
+	}
+	return sanitized[:limit]
+}
+
+// collectRequestToolNames extracts unique tool names across tools declarations,
+// tool_choice, and historical assistant tool_calls in a deterministic order.
+func collectRequestToolNames(rawJSON []byte) []string {
+	var names []string
+	seen := map[string]struct{}{}
+	addName := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; !ok {
+			names = append(names, name)
+			seen[name] = struct{}{}
+		}
+	}
+
+	// 1. tools declarations
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if tools.IsArray() {
+		for _, tool := range tools.Array() {
+			switch tool.Get("type").String() {
+			case "function":
+				addName(tool.Get("function.name").String())
+			case "custom":
+				addName(tool.Get("name").String())
+			}
+		}
+	}
+
+	// 2. tool_choice
+	tc := gjson.GetBytes(rawJSON, "tool_choice")
+	if tc.IsObject() {
+		switch tc.Get("type").String() {
+		case "function":
+			fnName := tc.Get("function.name").String()
+			if fnName == "" {
+				fnName = tc.Get("name").String()
+			}
+			addName(fnName)
+		case "custom":
+			addName(tc.Get("name").String())
+		}
+	}
+
+	// 3. assistant tool_calls in messages
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if messages.IsArray() {
+		for _, msg := range messages.Array() {
+			if msg.Get("role").String() == "assistant" {
+				toolCalls := msg.Get("tool_calls")
+				if toolCalls.IsArray() {
+					for _, tc := range toolCalls.Array() {
+						fnName := tc.Get("function.name").String()
+						if fnName != "" {
+							addName(fnName)
+						} else {
+							addName(tc.Get("custom.name").String())
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return names
+}
+
+// buildShortNameMap generates unique short names (<=64) for the given list of names.
+// It preserves the "mcp__" prefix with the last segment when possible and ensures uniqueness
+// by appending suffixes like "_1", "_2" if needed.
+func buildShortNameMap(names []string) map[string]string {
+	const limit = 64
+	used := map[string]struct{}{}
+	m := map[string]string{}
+
+	baseCandidate := func(n string) string {
+		return shortenNameIfNeeded(n)
+	}
+
+	makeUnique := func(cand string) string {
+		if _, ok := used[cand]; !ok {
+			return cand
+		}
+		base := cand
+		for i := 1; ; i++ {
+			suffix := "_" + strconv.Itoa(i)
+			allowed := limit - len(suffix)
+			if allowed < 0 {
+				allowed = 0
+			}
+			tmp := base
+			if len(tmp) > allowed {
+				tmp = tmp[:allowed]
+			}
+			tmp = tmp + suffix
+			if _, ok := used[tmp]; !ok {
+				return tmp
+			}
+		}
+	}
+
+	for _, n := range names {
+		cand := baseCandidate(n)
+		uniq := makeUnique(cand)
+		used[uniq] = struct{}{}
+		m[n] = uniq
+	}
+	return m
+}

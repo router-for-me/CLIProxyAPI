@@ -1,0 +1,610 @@
+// Gemini thought signature validation notes.
+//
+// The Antigravity Gemini request translator can preserve provider-compatible
+// Gemini thought signatures and uses the skip sentinel only for synthetic or
+// incompatible model parts.
+//
+// Gemini 3 and later models can return thoughtSignature on model content parts.
+// Function-call parts are the strict case: when a model functionCall is replayed
+// with a following functionResponse, Gemini validates that the original
+// functionCall part still carries its provider-issued thoughtSignature. Text or
+// other non-functionCall parts may also carry a signature; those should be
+// preserved when replaying native Gemini history, but they are not the primary
+// validation gate.
+//
+// Synthetic history and migration from other model families are different. If a
+// functionCall part was not produced by Gemini API, there is no real signature
+// to preserve. Gemini documents two bypass sentinels for that case:
+//
+//   - "skip_thought_signature_validator"
+//   - "context_engineering_is_the_way_to_go"
+//
+// This repo emits "skip_thought_signature_validator" only when the first
+// functionCall in a synthetic model turn lacks a compatible provider signature.
+// Later parallel calls and ordinary text/thought parts preserve their native
+// unsigned shape.
+//
+// This validator is intentionally more conservative than a decrypting verifier.
+// Claude has a known E/R base64 envelope and a protobuf tree in this package.
+// Gemini thought signatures are opaque provider state here, so local validation
+// checks only the transport-level protobuf envelope and leaves the wrapped
+// provider payload uninterpreted.
+//
+// Validation tiers:
+//
+//   - Sentinel tier: accept the documented bypass sentinels only on the first
+//     model functionCall when it is synthetic, migrated, or otherwise not
+//     traceable to a prior Gemini model response in the same conversation.
+//   - Opaque-shape tier: for real Gemini signatures, require a non-empty string,
+//     bounded length, successful standard base64 decoding, and a known protobuf
+//     envelope when the caller needs provider compatibility. The known
+//     envelope is the Gemini 3.x field-2 -> field-1 payload, whose body holds
+//     versioned opaque Tink state, a provider UUID, or a nested protobuf structure
+//     wrapping Tink ciphertext for server-side tool invocations (toolCall/toolResponse).
+//     Gemini 2.5 emitted a repeated field-1 form; those models are out of scope and
+//     their signatures are no longer a known envelope. Bare base64 UUID payloads are
+//     classified separately and should be replaced with the bypass sentinel rather than
+//     replayed.
+//   - Replay tier: real validation means preserving the exact model part that
+//     came from Gemini, including its thoughtSignature, id/name/function args,
+//     part index, and ordering relative to sibling parallel function calls.
+//   - Tool pairing tier: functionResponse parts must match the preceding
+//     functionCall id/name and must not be interleaved between parallel calls.
+//     The valid shape is all model functionCalls first, then their responses.
+//   - Compatibility tier: GPT-compatible Gemini traffic stores the same state
+//     under tool_calls[].extra_content.google.thought_signature. If that path is
+//     translated back to native Gemini, the value must stay attached to the same
+//     assistant tool call.
+//
+// Important non-goals:
+//
+//   - Do not treat a Gemini thoughtSignature as a Claude signature. Similar
+//     base64 prefixes are not provenance.
+//   - Do not attach a signature to user functionResponse/tool-result parts.
+//   - Do not log complete signatures during validation failures; log only field
+//     paths, lengths, and redacted prefixes.
+//   - Do not preserve client-provided signatures across model/provider/session
+//     boundaries unless the request pipeline can prove they came from the same
+//     Gemini conversation state.
+package signature
+
+import (
+	"encoding/base64"
+	"fmt"
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
+)
+
+const (
+	MaxGeminiThoughtSignatureLen = 32 * 1024 * 1024
+
+	GeminiSkipThoughtSignatureValidator = "skip_thought_signature_validator"
+	GeminiContextEngineeringBypass      = "context_engineering_is_the_way_to_go"
+)
+
+// GeminiThoughtSignatureValidationOptions controls how much local validation is
+// applied to Gemini thought signatures. This validation checks only the opaque
+// transport envelope; it does not prove that a signature came from Gemini or can
+// be decrypted by Gemini.
+type GeminiThoughtSignatureValidationOptions struct {
+	// AllowBypassSentinel accepts Gemini's documented synthetic-history bypass
+	// sentinels. Keep this false when validating provider-issued signatures.
+	AllowBypassSentinel bool
+	// RequireKnownEnvelope requires the decoded payload to match one of the
+	// protobuf envelopes observed in Gemini samples. This rejects opaque base64
+	// values such as base64 UUIDs.
+	RequireKnownEnvelope bool
+	// RequireObservedMarker requires the decoded payload to start with 0x12. Every
+	// observed Gemini 3.x sample carries this marker, but it is only the outer
+	// protobuf tag, so RequireKnownEnvelope is the stronger check and should be
+	// preferred. This option exists for narrow experiments that want the marker
+	// without the full envelope walk.
+	RequireObservedMarker bool
+}
+
+type GeminiThoughtSignatureEnvelope string
+
+const (
+	GeminiThoughtSignatureEnvelopeUnknown GeminiThoughtSignatureEnvelope = "unknown"
+	// GeminiThoughtSignatureEnvelopeProtobufField2 is the only replay-safe Gemini
+	// envelope. The repeated field-1 form emitted by Gemini 2.5 is no longer
+	// recognized: those models are out of scope, and their signatures now fall
+	// through to the bypass sentinel like any other unknown envelope.
+	GeminiThoughtSignatureEnvelopeProtobufField2 GeminiThoughtSignatureEnvelope = "protobuf_field_2"
+	GeminiThoughtSignatureEnvelopeASCIIUUID      GeminiThoughtSignatureEnvelope = "ascii_uuid"
+)
+
+// GeminiThoughtSignatureInfo describes the locally inspectable properties of an
+// opaque Gemini thought signature.
+type GeminiThoughtSignatureInfo struct {
+	IsBypassSentinel  bool
+	BypassSentinel    string
+	DecodedLen        int
+	FirstByte         byte
+	HasObservedMarker bool
+	KnownEnvelope     bool
+	Envelope          GeminiThoughtSignatureEnvelope
+	RecordCount       int
+	OpaquePayloadLen  int
+}
+
+type geminiFunctionCallRef struct {
+	id   string
+	name string
+	path string
+}
+
+type geminiFunctionResponseRef struct {
+	part gjson.Result
+	path string
+}
+
+func geminiThoughtSignatureValidationOptions(opts []GeminiThoughtSignatureValidationOptions) GeminiThoughtSignatureValidationOptions {
+	if len(opts) == 0 {
+		return GeminiThoughtSignatureValidationOptions{}
+	}
+	return opts[0]
+}
+
+// IsGeminiThoughtSignatureBypass reports whether rawSignature is one of
+// Gemini's documented bypass sentinels for synthetic or migrated function-call
+// history.
+func IsGeminiThoughtSignatureBypass(rawSignature string) bool {
+	switch strings.TrimSpace(rawSignature) {
+	case GeminiSkipThoughtSignatureValidator, GeminiContextEngineeringBypass:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsValidGeminiThoughtSignature returns whether rawSignature has a valid local
+// Gemini thought-signature shape under opts.
+func IsValidGeminiThoughtSignature(rawSignature string, opts ...GeminiThoughtSignatureValidationOptions) bool {
+	_, err := InspectGeminiThoughtSignature(rawSignature, opts...)
+	return err == nil
+}
+
+// InspectGeminiThoughtSignature validates and inspects the local transport
+// shape of a Gemini thought signature. It intentionally treats provider-issued
+// signatures as opaque base64 payloads.
+func InspectGeminiThoughtSignature(rawSignature string, opts ...GeminiThoughtSignatureValidationOptions) (*GeminiThoughtSignatureInfo, error) {
+	opt := geminiThoughtSignatureValidationOptions(opts)
+	sig := strings.TrimSpace(rawSignature)
+	if sig == "" {
+		return nil, fmt.Errorf("empty Gemini thought signature")
+	}
+
+	if IsValidClaudeCAISSignature(sig) {
+		return nil, fmt.Errorf("invalid Gemini thought signature: detected Claude CAIS signature")
+	}
+
+	if IsGeminiThoughtSignatureBypass(sig) {
+		if !opt.AllowBypassSentinel {
+			return nil, fmt.Errorf("Gemini thought signature bypass sentinel is not allowed")
+		}
+		return &GeminiThoughtSignatureInfo{
+			IsBypassSentinel: true,
+			BypassSentinel:   sig,
+		}, nil
+	}
+
+	decoded, err := decodeGeminiThoughtSignature(sig)
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded) == 0 {
+		return nil, fmt.Errorf("invalid Gemini thought signature: empty decoded payload")
+	}
+
+	info := &GeminiThoughtSignatureInfo{
+		DecodedLen:        len(decoded),
+		FirstByte:         decoded[0],
+		HasObservedMarker: decoded[0] == 0x12,
+	}
+	info.Envelope, info.KnownEnvelope = classifyGeminiThoughtSignatureEnvelope(decoded)
+	info.RecordCount, info.OpaquePayloadLen = inspectGeminiEnvelope(decoded, info.Envelope)
+	if opt.RequireKnownEnvelope && !info.KnownEnvelope {
+		return nil, fmt.Errorf("invalid Gemini thought signature: unknown envelope %q", info.Envelope)
+	}
+	if opt.RequireObservedMarker && !info.HasObservedMarker {
+		return nil, fmt.Errorf("invalid Gemini thought signature: expected observed marker 0x12, got 0x%02x", info.FirstByte)
+	}
+
+	return info, nil
+}
+
+// ValidateGeminiThoughtSignatures validates thoughtSignature fields in a Gemini
+// native payload. The first functionCall in each model Content must have a valid
+// provider signature or allowed synthetic sentinel. Later parallel sibling calls
+// may be unsigned, but any signature they do carry must still be valid.
+func ValidateGeminiThoughtSignatures(inputRawJSON []byte, opts ...GeminiThoughtSignatureValidationOptions) error {
+	contents, contentsPath := geminiContents(inputRawJSON)
+	if !contents.IsArray() {
+		return nil
+	}
+
+	contentResults := contents.Array()
+	for i := 0; i < len(contentResults); i++ {
+		content := contentResults[i]
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+
+		isModelTurn := strings.EqualFold(strings.TrimSpace(content.Get("role").String()), "model")
+		firstFunctionCallSeen := false
+		partResults := parts.Array()
+		for j := 0; j < len(partResults); j++ {
+			part := partResults[j]
+			hasFunctionCall := part.Get("functionCall").Exists()
+			isFirstFunctionCall := isModelTurn && hasFunctionCall && !firstFunctionCallSeen
+			if isModelTurn && hasFunctionCall {
+				firstFunctionCallSeen = true
+			}
+			rawSignature, hasSignature := geminiPartThoughtSignature(part)
+			if !hasFunctionCall && !hasSignature {
+				continue
+			}
+
+			partPath := fmt.Sprintf("%s[%d].parts[%d]", contentsPath, i, j)
+			rawSignature = strings.TrimSpace(rawSignature)
+			if part.Get("functionResponse").Exists() && hasSignature {
+				return fmt.Errorf("%s: functionResponse must not carry thoughtSignature", partPath)
+			}
+			if rawSignature == "" {
+				if isFirstFunctionCall {
+					return fmt.Errorf("%s: missing thoughtSignature on first functionCall", partPath)
+				}
+				if hasSignature {
+					return fmt.Errorf("%s: empty thoughtSignature", partPath)
+				}
+				continue
+			}
+			if IsGeminiThoughtSignatureBypass(rawSignature) && !isFirstFunctionCall {
+				return fmt.Errorf("%s: Gemini bypass sentinel is allowed only on the first model functionCall", partPath)
+			}
+			if !hasNormalizedGeminiPartThoughtSignature(part, rawSignature) {
+				return fmt.Errorf("%s: thoughtSignature must use one canonical top-level field", partPath)
+			}
+			if _, err := InspectGeminiThoughtSignature(rawSignature, opts...); err != nil {
+				return fmt.Errorf("%s: %w", partPath, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// ValidateGeminiFunctionCallPairing validates the replay shape around Gemini
+// functionCall and functionResponse parts. It checks id/name pairing and
+// prevents response parts from being interleaved inside the same content as
+// function calls. It allows a final pending functionCall group because callers
+// may validate a freshly returned model step before tool outputs exist.
+func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
+	contents, contentsPath := geminiContents(inputRawJSON)
+	if !contents.IsArray() {
+		return nil
+	}
+
+	var pending []geminiFunctionCallRef
+	var validationErr error
+	contents.ForEach(func(contentIndex, content gjson.Result) bool {
+		i := int(contentIndex.Int())
+		parts := content.Get("parts")
+		if !parts.IsArray() || parts.Raw == "[]" || !parts.Get("0").Exists() {
+			if len(pending) > 0 {
+				validationErr = fmt.Errorf(
+					"%s[%d]: content appears before %d pending functionResponse part(s)",
+					contentsPath,
+					i,
+					len(pending),
+				)
+			}
+			return validationErr == nil
+		}
+
+		var calls []geminiFunctionCallRef
+		var responses []geminiFunctionResponseRef
+		parts.ForEach(func(partIndex, part gjson.Result) bool {
+			j := int(partIndex.Int())
+			partPath := fmt.Sprintf("%s[%d].parts[%d]", contentsPath, i, j)
+			if call := part.Get("functionCall"); call.Exists() {
+				if call.Get("name").String() == "" {
+					validationErr = fmt.Errorf("%s: missing functionCall.name", partPath)
+					return false
+				}
+				calls = append(calls, geminiFunctionCallRef{
+					id:   call.Get("id").String(),
+					name: call.Get("name").String(),
+					path: partPath,
+				})
+			}
+			if response := part.Get("functionResponse"); response.Exists() {
+				responses = append(responses, geminiFunctionResponseRef{
+					part: part,
+					path: partPath,
+				})
+			}
+			return true
+		})
+		if validationErr != nil {
+			return false
+		}
+
+		switch {
+		case len(calls) > 0 && len(responses) > 0:
+			validationErr = fmt.Errorf(
+				"%s[%d]: functionCall and functionResponse parts must not be interleaved in the same content",
+				contentsPath,
+				i,
+			)
+		case len(calls) > 0 && len(pending) > 0:
+			validationErr = fmt.Errorf(
+				"%s[%d]: functionCall appears before %d pending functionResponse part(s)",
+				contentsPath,
+				i,
+				len(pending),
+			)
+		case len(calls) > 0:
+			pending = calls
+			return true
+		case len(responses) == 0 && len(pending) > 0:
+			// Allow intervening user content (such as system reminders, mid-session developer notices, or user turns)
+			// to appear before the pending functionResponse turn. Upstream Antigravity accepts this natively.
+			// Reject only if it is a model turn without responses, which breaks turn ownership.
+			role := strings.ToLower(strings.TrimSpace(content.Get("role").String()))
+			if role == "model" {
+				validationErr = fmt.Errorf(
+					"%s[%d]: model content appears before %d pending functionResponse part(s)",
+					contentsPath,
+					i,
+					len(pending),
+				)
+			}
+			return validationErr == nil
+		case len(responses) == 0:
+			return true
+		case len(pending) == 0:
+			validationErr = fmt.Errorf("%s[%d]: functionResponse without preceding functionCall", contentsPath, i)
+		case len(responses) != len(pending):
+			validationErr = fmt.Errorf(
+				"%s[%d]: functionResponse count %d does not match pending functionCall count %d",
+				contentsPath,
+				i,
+				len(responses),
+				len(pending),
+			)
+		}
+		if validationErr != nil {
+			return false
+		}
+
+		for responseIndex, responseRef := range responses {
+			partPath := responseRef.path
+			response := responseRef.part.Get("functionResponse")
+			call := pending[responseIndex]
+			responseID := response.Get("id").String()
+			responseName := response.Get("name").String()
+
+			switch {
+			case call.id != "" && responseID == "":
+				validationErr = fmt.Errorf("%s: missing functionResponse.id for %s", partPath, call.path)
+			case call.id != "" && responseID != call.id:
+				validationErr = fmt.Errorf(
+					"%s: functionResponse.id %q does not match functionCall.id %q at %s",
+					partPath,
+					responseID,
+					call.id,
+					call.path,
+				)
+			case responseName == "":
+				validationErr = fmt.Errorf("%s: missing functionResponse.name", partPath)
+			case call.name != "" && responseName != call.name:
+				validationErr = fmt.Errorf(
+					"%s: functionResponse.name %q does not match functionCall.name %q at %s",
+					partPath,
+					responseName,
+					call.name,
+					call.path,
+				)
+			}
+			if validationErr != nil {
+				return false
+			}
+		}
+
+		pending = nil
+		return true
+	})
+	return validationErr
+}
+
+func decodeGeminiThoughtSignature(sig string) ([]byte, error) {
+	if len(sig) > MaxGeminiThoughtSignatureLen {
+		return nil, fmt.Errorf("Gemini thought signature exceeds maximum length (%d bytes)", MaxGeminiThoughtSignatureLen)
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(sig)
+	if err == nil {
+		return decoded, nil
+	}
+	if decoded, rawErr := base64.RawStdEncoding.DecodeString(sig); rawErr == nil {
+		return decoded, nil
+	}
+
+	return nil, fmt.Errorf("invalid Gemini thought signature: base64 decode failed: %w", err)
+}
+
+func classifyGeminiThoughtSignatureEnvelope(decoded []byte) (GeminiThoughtSignatureEnvelope, bool) {
+	if len(decoded) == 0 {
+		return GeminiThoughtSignatureEnvelopeUnknown, false
+	}
+	if isASCIIUUIDBytes(decoded) {
+		return GeminiThoughtSignatureEnvelopeASCIIUUID, false
+	}
+	if isGeminiField2Envelope(decoded) {
+		return GeminiThoughtSignatureEnvelopeProtobufField2, true
+	}
+	return GeminiThoughtSignatureEnvelopeUnknown, false
+}
+
+func isGeminiField2Envelope(decoded []byte) bool {
+	info, ok := inspectGeminiField2Envelope(decoded)
+	return ok && info.RecordCount == 1 && info.OpaquePayloadLen > 0
+}
+
+func inspectGeminiEnvelope(decoded []byte, envelope GeminiThoughtSignatureEnvelope) (recordCount int, opaquePayloadLen int) {
+	if envelope == GeminiThoughtSignatureEnvelopeProtobufField2 {
+		if info, ok := inspectGeminiField2Envelope(decoded); ok {
+			return info.RecordCount, info.OpaquePayloadLen
+		}
+	}
+	return 0, 0
+}
+
+type geminiEnvelopeInfo struct {
+	RecordCount      int
+	OpaquePayloadLen int
+}
+
+func inspectGeminiField2Envelope(decoded []byte) (geminiEnvelopeInfo, bool) {
+	value, ok := consumeGeminiField2Field1Value(decoded)
+	if !ok || (!isLikelyGeminiOpaquePayload(value) && !isASCIIUUIDBytes(value) && !isLikelyGeminiToolInvocationPayload(value)) {
+		return geminiEnvelopeInfo{}, false
+	}
+	return geminiEnvelopeInfo{
+		RecordCount:      1,
+		OpaquePayloadLen: len(value),
+	}, true
+}
+
+func consumeGeminiField2Field1Value(decoded []byte) ([]byte, bool) {
+	num, typ, n := protowire.ConsumeTag(decoded)
+	if n < 0 || num != 2 || typ != protowire.BytesType {
+		return nil, false
+	}
+	offset := n
+	container, n := protowire.ConsumeBytes(decoded[offset:])
+	if n < 0 {
+		return nil, false
+	}
+	offset += n
+	if offset != len(decoded) {
+		return nil, false
+	}
+
+	num, typ, n = protowire.ConsumeTag(container)
+	if n < 0 || num != 1 || typ != protowire.BytesType {
+		return nil, false
+	}
+	containerOffset := n
+	value, n := protowire.ConsumeBytes(container[containerOffset:])
+	if n < 0 {
+		return nil, false
+	}
+	containerOffset += n
+	if containerOffset != len(container) {
+		return nil, false
+	}
+	return value, true
+}
+
+func isLikelyGeminiOpaquePayload(value []byte) bool {
+	// The envelope body is a Google Tink primitive output: one prefix-type byte
+	// (0x01 selects the TINK prefix) followed by a four-byte big-endian key id and
+	// then the ciphertext. Only the prefix-type byte is checked here, because it is
+	// a format constant while the key id is key material that Google rotates.
+	// Pinning the key id would reduce false positives to nothing but would reject
+	// every signature the moment a rotation happens, which is the worse failure.
+	// That rotation is observed, not hypothetical: gemini-3.1-flash-lite carries key
+	// id 0x0c39d6c7 in the archived corpus and 0x114d320f in the 2026-07-27 capture,
+	// and the newer id is shared by every Gemini 3.x variant captured that day. The
+	// bytes after the prefix are high-entropy provider state and stay opaque, so this
+	// one format byte is the only anchor available. It leaves a 1/256 false-positive
+	// rate against a caller that reproduces the protobuf envelope but not the key
+	// material; provenance or target scoping, not more byte checks, closes that gap.
+	return len(value) > 0 && value[0] == 0x01
+}
+
+func isLikelyGeminiToolInvocationPayload(value []byte) bool {
+	// In Gemini 3 Tool Combination / Context Circulation, server-side tool blocks
+	// (toolCall and toolResponse) wrap the Tink ciphertext in a protobuf message
+	// containing a length-delimited bytes field whose content is a valid Tink payload
+	// starting with 0x01 (commonly preceded by a status/type varint field).
+	// Validate that value is a valid protobuf structure containing at least one
+	// length-delimited bytes field whose content is a valid Gemini Tink payload.
+	if len(value) == 0 {
+		return false
+	}
+	offset := 0
+	hasTinkField := false
+	for offset < len(value) {
+		_, typ, n := protowire.ConsumeTag(value[offset:])
+		if n < 0 {
+			return false
+		}
+		offset += n
+		switch typ {
+		case protowire.VarintType:
+			_, n = protowire.ConsumeVarint(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+		case protowire.BytesType:
+			bytesVal, n := protowire.ConsumeBytes(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+			if isLikelyGeminiOpaquePayload(bytesVal) {
+				hasTinkField = true
+			}
+		case protowire.Fixed32Type:
+			_, n = protowire.ConsumeFixed32(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+		case protowire.Fixed64Type:
+			_, n = protowire.ConsumeFixed64(value[offset:])
+			if n < 0 {
+				return false
+			}
+			offset += n
+		default:
+			return false
+		}
+	}
+	return hasTinkField && offset == len(value)
+}
+
+func isASCIIUUIDBytes(decoded []byte) bool {
+	if len(decoded) != 36 {
+		return false
+	}
+	for i, b := range decoded {
+		switch i {
+		case 8, 13, 18, 23:
+			if b != '-' {
+				return false
+			}
+		default:
+			if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func geminiContents(inputRawJSON []byte) (gjson.Result, string) {
+	if contents := util.GetGJSONBytesNoCopy(inputRawJSON, "contents"); contents.Exists() {
+		return contents, "contents"
+	}
+	return util.GetGJSONBytesNoCopy(inputRawJSON, "request.contents"), "request.contents"
+}
