@@ -92,6 +92,13 @@ type Record struct {
 	// be diagnosed by comparing RouteModel against Model (the resolved
 	// upstream id sent to the provider).
 	RouteModel string
+	// ServedModel stores the model identifier the upstream response itself
+	// reported serving, captured from the raw response body before any
+	// alias/ForceMapping rewrite. Empty when the upstream did not report one.
+	// Compared against Model at flush time so a silent upstream substitution
+	// (the provider serving a different model than requested) is recorded
+	// rather than hidden.
+	ServedModel string
 	// Endpoint stores the upstream URL the executor actually hit. Persisted
 	// on usage_errors so a 4xx/5xx can be traced to the concrete provider
 	// path (e.g. openai-compat "/chat/completions" vs an Anthropic-style
@@ -126,6 +133,32 @@ type Detail struct {
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
+}
+
+// SubstitutionReport describes whether the upstream served a model different
+// from the one NixLLM asked for.
+type SubstitutionReport struct {
+	// Served is the trimmed model the upstream reported serving.
+	Served string
+	// Requested is the trimmed model NixLLM resolved and sent upstream.
+	Requested string
+	// Substituted is true only when both values are known and differ.
+	Substituted bool
+}
+
+// DetectSubstitution compares the model the upstream reported serving against
+// the model NixLLM sent. The comparison is case-insensitive and ignores
+// surrounding whitespace, because providers vary the casing of the same id.
+// An empty value on either side means "unknown" and is never reported as a
+// substitution — a missing field must not raise a false alarm.
+func DetectSubstitution(served, requested string) SubstitutionReport {
+	trimmedServed := strings.TrimSpace(served)
+	trimmedRequested := strings.TrimSpace(requested)
+	return SubstitutionReport{
+		Served:      trimmedServed,
+		Requested:   trimmedRequested,
+		Substituted: trimmedServed != "" && trimmedRequested != "" && !strings.EqualFold(trimmedServed, trimmedRequested),
+	}
 }
 
 type requestedModelAliasContextKey struct{}

@@ -28,6 +28,7 @@ type UsageReporter struct {
 	model           string
 	alias           string
 	routeModel      string
+	servedModel     string
 	endpoint        string
 	clientIP        string
 	forwardedFor    string
@@ -124,6 +125,21 @@ func (r *UsageReporter) SetRouteModel(routeModel string) {
 		return
 	}
 	r.routeModel = strings.TrimSpace(routeModel)
+}
+
+// SetServedModel records the model identifier the upstream response reported
+// serving, captured from the raw response body before any alias rewrite.
+// Persisted so a silent upstream substitution can be detected at flush time.
+// Callers must not overwrite a value already set: the first reported model is
+// the authoritative one (streaming responses repeat it on later events).
+func (r *UsageReporter) SetServedModel(servedModel string) {
+	if r == nil {
+		return
+	}
+	if r.servedModel != "" {
+		return
+	}
+	r.servedModel = strings.TrimSpace(servedModel)
 }
 
 // SetEndpoint records the upstream URL the executor actually hit. Persisted on
@@ -417,6 +433,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Model:                    model,
 		Alias:                    r.alias,
 		RouteModel:               r.routeModel,
+		ServedModel:              r.servedModel,
 		Endpoint:                 r.endpoint,
 		ClientIP:                 r.clientIP,
 		ForwardedFor:             r.forwardedFor,
