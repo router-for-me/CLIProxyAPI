@@ -64,6 +64,121 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	}
 }
 
+func TestQuotaAwareSelectorPick_PrefersHighestWeeklyRemaining(t *testing.T) {
+	t.Parallel()
+
+	selector := &QuotaAwareSelector{WeeklyRemainingMinPercent: 20}
+	auths := []*Auth{
+		{ID: "plus-low", Quota: QuotaState{Signals: map[string]string{"X-Codex-Primary-Used-Percent": "80"}}},
+		{ID: "pro-high", Quota: QuotaState{Signals: map[string]string{"X-Codex-Primary-Used-Percent": "25"}}},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "pro-high" {
+		t.Fatalf("Pick() auth = %#v, want pro-high", got)
+	}
+}
+
+func TestQuotaAwareSelectorPick_UnknownQuotaUsesPlanRankForColdStart(t *testing.T) {
+	t.Parallel()
+
+	selector := &QuotaAwareSelector{WeeklyRemainingMinPercent: 20}
+	auths := []*Auth{
+		{ID: "codex-a-user-plus.json"},
+		{ID: "codex-b-user-pro.json"},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "codex-b-user-pro.json" {
+		t.Fatalf("Pick() auth = %#v, want codex-b-user-pro.json", got)
+	}
+}
+
+func TestQuotaAwareSelectorPick_SkipsBelowThresholdWhenHealthyKnownExists(t *testing.T) {
+	t.Parallel()
+
+	selector := &QuotaAwareSelector{WeeklyRemainingMinPercent: 30}
+	auths := []*Auth{
+		{ID: "almost-empty", Quota: QuotaState{Signals: map[string]string{"X-Codex-Primary-Used-Percent": "90"}}},
+		{ID: "healthy", Quota: QuotaState{Signals: map[string]string{"X-Codex-Primary-Used-Percent": "60"}}},
+		{ID: "unknown"},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "healthy" {
+		t.Fatalf("Pick() auth = %#v, want healthy", got)
+	}
+}
+
+func TestQuotaAwareSelectorPick_AllBelowThresholdFallsBackToHighestRemaining(t *testing.T) {
+	t.Parallel()
+
+	selector := &QuotaAwareSelector{WeeklyRemainingMinPercent: 50}
+	auths := []*Auth{
+		{ID: "lower", Quota: QuotaState{Signals: map[string]string{"X-Codex-Primary-Used-Percent": "90"}}},
+		{ID: "higher", Quota: QuotaState{Signals: map[string]string{"X-Codex-Primary-Used-Percent": "70"}}},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "higher" {
+		t.Fatalf("Pick() auth = %#v, want higher", got)
+	}
+}
+
+func TestQuotaAwareSelectorPick_SkipsQuotaExceeded(t *testing.T) {
+	t.Parallel()
+
+	selector := &QuotaAwareSelector{WeeklyRemainingMinPercent: 20}
+	auths := []*Auth{
+		{ID: "blocked-high", Quota: QuotaState{Exceeded: true, NextRecoverAt: time.Now().Add(time.Hour), Signals: map[string]string{"X-Codex-Primary-Used-Percent": "1"}}},
+		{ID: "available-low", Quota: QuotaState{Signals: map[string]string{"X-Codex-Primary-Used-Percent": "70"}}},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "available-low" {
+		t.Fatalf("Pick() auth = %#v, want available-low", got)
+	}
+}
+
+func TestSessionAffinitySelector_QuotaAwareThresholdRebindsCachedLowRemaining(t *testing.T) {
+	t.Parallel()
+
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &QuotaAwareSelector{WeeklyRemainingMinPercent: 20},
+		TTL:      time.Minute,
+	})
+	affinity.cache.Set("codex::sticky-quota-session::gpt-5.5", "low")
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "sticky-quota-session")
+	auths := []*Auth{
+		{ID: "low", Quota: QuotaState{Signals: map[string]string{"X-Codex-Primary-Used-Percent": "90"}}},
+		{ID: "high", Quota: QuotaState{Signals: map[string]string{"X-Codex-Primary-Used-Percent": "25"}}},
+	}
+
+	got, err := affinity.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{Headers: headers}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "high" {
+		t.Fatalf("Pick() auth = %#v, want high", got)
+	}
+}
+
 func TestWeightedRoundRobinSelectorPick_DistributesAndSkipsNonPositiveWeights(t *testing.T) {
 	t.Parallel()
 

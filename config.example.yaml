@@ -261,6 +261,11 @@ routing:
   # for maximum parallel concurrency.
   # Ignored when routing.session-affinity is false.
   session-affinity-subagents: true
+  # Quota-aware routing prefers credentials with the highest observed weekly remaining quota.
+  # Use with routing.strategy: "quota-aware". Candidates below this remaining percentage are
+  # skipped when at least one known healthy candidate remains above the threshold.
+  quota-aware:
+    weekly-remaining-min-percent: 20
 
 # Codex provider behavior.
 codex:

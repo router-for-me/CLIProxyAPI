@@ -59,27 +59,64 @@ type limiterState struct {
 }
 
 type Service struct {
-	mu            sync.Mutex
-	cfg           Config
-	pepper        string
-	users         map[string]*userRuntime
-	tokensByID    map[string]*tokenRuntime
-	tokensByPlain map[string]*tokenRuntime
-	legacyKeys    map[string]*tokenRuntime
-	priceRules    []PriceRule
-	events        []Event
-	seen          map[string]struct{}
-	limiters      map[string]*limiterState
-	spendDay      map[string]int64
-	spendMonth    map[string]int64
-	ledgerPath    string
-	pg            *pgxpool.Pool
-	pgSchema      string
+	mu              sync.Mutex
+	cfg             Config
+	pepper          string
+	users           map[string]*userRuntime
+	tokensByID      map[string]*tokenRuntime
+	tokensByPlain   map[string]*tokenRuntime
+	legacyKeys      map[string]*tokenRuntime
+	priceRules      []PriceRule
+	events          []Event
+	seen            map[string]struct{}
+	limiters        map[string]*limiterState
+	spendDay        map[string]int64
+	spendMonth      map[string]int64
+	spendDayToken   map[string]int64
+	spendMonthToken map[string]int64
+	ledgerPath      string
+	pg              *pgxpool.Pool
+	pgSchema        string
 }
 
 func NewService(cfg Config, legacyAPIKeys []string) *Service {
 	normalizeConfig(&cfg)
-	s := &Service{cfg: cfg, pepper: os.Getenv(strings.TrimSpace(cfg.Token.PepperEnv)), users: map[string]*userRuntime{}, tokensByID: map[string]*tokenRuntime{}, tokensByPlain: map[string]*tokenRuntime{}, legacyKeys: map[string]*tokenRuntime{}, priceRules: defaultPriceRules(cfg.PriceBook), seen: map[string]struct{}{}, limiters: map[string]*limiterState{}, spendDay: map[string]int64{}, spendMonth: map[string]int64{}, ledgerPath: strings.TrimSpace(cfg.LedgerPath)}
+	s := &Service{seen: map[string]struct{}{}, limiters: map[string]*limiterState{}, spendDay: map[string]int64{}, spendMonth: map[string]int64{}, spendDayToken: map[string]int64{}, spendMonthToken: map[string]int64{}, ledgerPath: strings.TrimSpace(cfg.LedgerPath)}
+	s.applyConfigLocked(cfg, legacyAPIKeys)
+	s.connectPostgres()
+	if s.pg != nil {
+		s.loadPostgresLedger()
+	}
+	if s.ledgerPath != "" {
+		_ = os.MkdirAll(filepath.Dir(s.ledgerPath), 0o755)
+		s.loadLedger()
+	}
+	return s
+}
+
+// ApplyConfig refreshes billing identity, quota, rate, and price-book runtime
+// state after a management or filesystem config reload. It deliberately keeps
+// recorded events, dedupe state, loaded spend counters, and the existing
+// storage connection intact.
+func (s *Service) ApplyConfig(cfg Config, legacyAPIKeys []string) {
+	if s == nil {
+		return
+	}
+	normalizeConfig(&cfg)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyConfigLocked(cfg, legacyAPIKeys)
+}
+
+func (s *Service) applyConfigLocked(cfg Config, legacyAPIKeys []string) {
+	s.cfg = cfg
+	s.pepper = os.Getenv(strings.TrimSpace(cfg.Token.PepperEnv))
+	s.users = map[string]*userRuntime{}
+	s.tokensByID = map[string]*tokenRuntime{}
+	s.tokensByPlain = map[string]*tokenRuntime{}
+	s.legacyKeys = map[string]*tokenRuntime{}
+	s.priceRules = defaultPriceRules(cfg.PriceBook)
+	s.ledgerPath = strings.TrimSpace(cfg.LedgerPath)
 	for _, u := range cfg.Users {
 		uid := strings.TrimSpace(u.ID)
 		if uid == "" {
@@ -93,14 +130,6 @@ func NewService(cfg Config, legacyAPIKeys []string) *Service {
 		for _, tc := range u.Tokens {
 			s.addTokenLocked(uid, tc, s.users[uid].quota, s.users[uid].rate)
 		}
-	}
-	s.connectPostgres()
-	if s.pg != nil {
-		s.loadPostgresLedger()
-	}
-	if s.ledgerPath != "" {
-		_ = os.MkdirAll(filepath.Dir(s.ledgerPath), 0o755)
-		s.loadLedger()
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.Token.LegacyAPIKeys), "observe") || strings.EqualFold(strings.TrimSpace(cfg.Token.LegacyAPIKeys), "allow") {
 		legacyUser := "legacy"
@@ -116,7 +145,6 @@ func NewService(cfg Config, legacyAPIKeys []string) *Service {
 			s.legacyKeys[key] = tok
 		}
 	}
-	return s
 }
 
 func (s *Service) connectPostgres() {
@@ -279,9 +307,11 @@ func (s *Service) recordLoadedEventLocked(event Event) {
 		completed := event.CompletedAt.UTC()
 		if completed.Format("2006-01-02") == now.Format("2006-01-02") {
 			s.spendDay[event.UserID] += *event.CustomerCostNanos
+			s.spendDayToken[tokenSpendKey(event.UserID, event.TokenID)] += *event.CustomerCostNanos
 		}
 		if completed.Format("2006-01") == now.Format("2006-01") {
 			s.spendMonth[event.UserID] += *event.CustomerCostNanos
+			s.spendMonthToken[tokenSpendKey(event.UserID, event.TokenID)] += *event.CustomerCostNanos
 		}
 	}
 }
@@ -383,6 +413,9 @@ func normalizeConfig(cfg *Config) {
 	if strings.TrimSpace(cfg.Postgres.Schema) == "" {
 		cfg.Postgres.Schema = "billing"
 	}
+	if strings.TrimSpace(cfg.PriceBook.Version) == "" {
+		cfg.PriceBook.Version = defaultPriceBookVersion
+	}
 }
 
 func (s *Service) addTokenLocked(userID string, tc TokenConfigEntry, defaultQuota QuotaConfig, defaultRate RateLimitConfig) {
@@ -477,6 +510,12 @@ func (s *Service) GuardMiddleware() gin.HandlerFunc {
 		}
 		p := PrincipalFromGin(c)
 		if p.UserID == "" {
+			if parsed, ok := s.AuthenticateToken(extractToken(c.Request)); ok {
+				p = parsed
+				SetGinPrincipal(c, p)
+			}
+		}
+		if p.UserID == "" {
 			c.Next()
 			return
 		}
@@ -505,17 +544,22 @@ func (s *Service) acquire(p Principal) (lease, error) {
 	tok := s.tokensByID[p.TokenID]
 	rate := s.cfg.RateLimit
 	quota := s.cfg.Quota
+	spendDay := s.spendDay[p.UserID]
+	spendMonth := s.spendMonth[p.UserID]
 	if tok != nil {
 		rate = mergeRate(rate, tok.rate)
 		quota = mergeQuota(quota, tok.quota)
+		key := tokenSpendKey(p.UserID, p.TokenID)
+		spendDay = s.spendDayToken[key]
+		spendMonth = s.spendMonthToken[key]
 	} else if user := s.users[p.UserID]; user != nil {
 		rate = mergeRate(rate, user.rate)
 		quota = mergeQuota(quota, user.quota)
 	}
-	if quota.DailyNanos > 0 && s.spendDay[p.UserID] >= quota.DailyNanos {
+	if quota.DailyNanos > 0 && spendDay >= quota.DailyNanos {
 		return lease{}, fmt.Errorf("billing daily quota exceeded")
 	}
-	if quota.MonthlyNanos > 0 && s.spendMonth[p.UserID] >= quota.MonthlyNanos {
+	if quota.MonthlyNanos > 0 && spendMonth >= quota.MonthlyNanos {
 		return lease{}, fmt.Errorf("billing monthly quota exceeded")
 	}
 	key := p.UserID + ":" + p.TokenID
@@ -634,7 +678,14 @@ func (s *Service) priceAndRecord(e *Event) {
 	if e.CustomerCostNanos != nil {
 		s.spendDay[e.UserID] += *e.CustomerCostNanos
 		s.spendMonth[e.UserID] += *e.CustomerCostNanos
+		key := tokenSpendKey(e.UserID, e.TokenID)
+		s.spendDayToken[key] += *e.CustomerCostNanos
+		s.spendMonthToken[key] += *e.CustomerCostNanos
 	}
+}
+
+func tokenSpendKey(userID, tokenID string) string {
+	return strings.TrimSpace(userID) + ":" + strings.TrimSpace(tokenID)
 }
 
 func (s *Service) resolvePriceLocked(provider, model string) (PriceRule, bool) {
@@ -737,14 +788,4 @@ func mergeRate(base, override RateLimitConfig) RateLimitConfig {
 		base.Concurrent = override.Concurrent
 	}
 	return base
-}
-
-func defaultPriceRules(pb PriceBookConfig) []PriceRule {
-	if pb.Version == "" {
-		pb.Version = "2026-09-18.1"
-	}
-	if len(pb.Rules) > 0 {
-		return pb.Rules
-	}
-	return []PriceRule{{ID: "openai-gpt-5.5-standard-20260918", BillingProvider: "openai", Model: "gpt-5.5", ServiceTier: "standard", InputUncachedNanosPerToken: 5000, InputCacheReadNanosPerToken: 500, OutputTextNanosPerToken: 30000, OutputReasoningNanosPerToken: 30000}, {ID: "claude-sonnet-4.5-standard-20260918", BillingProvider: "claude", Model: "claude-sonnet-4.5", ServiceTier: "standard", InputUncachedNanosPerToken: 3000, InputCacheReadNanosPerToken: 300, InputCacheWrite5mNanosPerToken: 3750, InputCacheWrite1hNanosPerToken: 6000, OutputTextNanosPerToken: 15000, OutputReasoningNanosPerToken: 15000}, {ID: "gemini-2.5-flash-standard-20260918", BillingProvider: "gemini", Model: "gemini-2.5-flash", ServiceTier: "standard", InputUncachedNanosPerToken: 300, InputCacheReadNanosPerToken: 30, OutputTextNanosPerToken: 2500, OutputReasoningNanosPerToken: 2500}}
 }

@@ -163,6 +163,9 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	if exampleAPIKeySafeModeRequired {
 		s.exampleAPIKeySafeModeActive.Store(true)
 	}
+	if s.billingService != nil {
+		s.billingService.ApplyConfig(cfg.Billing, cfg.APIKeys)
+	}
 	accessConfigApplied := s.applyAccessConfig(oldCfg, cfg)
 	if accessConfigApplied || exampleAPIKeySafeModeRequired {
 		s.exampleAPIKeySafeModeActive.Store(exampleAPIKeySafeModeRequired)

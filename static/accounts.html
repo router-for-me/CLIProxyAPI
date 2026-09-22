@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'">
+<title>账号门户 - CLI Proxy API</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7fb;--card:#fff;--text:#18202f;--muted:#667085;--line:#d9deea;--brand:#2854c5;--brand2:#edf3ff;--danger:#b42318;--ok:#067647;--warn:#b54708;--shadow:0 8px 30px rgba(16,24,40,.08)}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#151b23;--text:#e6edf3;--muted:#9aa4b2;--line:#303946;--brand:#7aa2ff;--brand2:#18243c;--danger:#ff8a80;--ok:#69db9c;--warn:#ffd166;--shadow:none}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:var(--brand);text-decoration:none}a:focus,button:focus,input:focus{outline:3px solid color-mix(in srgb,var(--brand) 38%,transparent);outline-offset:2px}header{position:sticky;top:0;z-index:2;background:color-mix(in srgb,var(--card) 90%,transparent);border-bottom:1px solid var(--line);backdrop-filter:blur(10px)}.bar{max-width:1080px;margin:0 auto;padding:12px 16px;display:flex;gap:12px;align-items:center;justify-content:space-between}.brand{font-weight:750;font-size:17px}.top-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.wrap{max-width:1080px;margin:0 auto;padding:16px;display:grid;grid-template-columns:1fr;gap:14px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:16px}.title{font-size:16px;font-weight:700;margin:0 0 4px}.sub{color:var(--muted);font-size:12px;margin:0 0 12px}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.field{display:grid;gap:6px;margin:10px 0}.field label{font-weight:650}.field input{width:100%;border:1px solid var(--line);background:transparent;color:var(--text);border-radius:10px;padding:10px 11px}.btn{border:1px solid var(--line);background:transparent;color:var(--text);border-radius:10px;padding:9px 12px;cursor:pointer;font-weight:650}.btn:hover{background:var(--brand2)}.btn.primary{border-color:var(--brand);background:var(--brand);color:white}.btn.danger{border-color:color-mix(in srgb,var(--danger) 40%,var(--line));color:var(--danger)}.btn:disabled{opacity:.55;cursor:not-allowed}.status{min-height:22px;border-radius:10px;padding:9px 10px;background:var(--brand2);color:var(--text);margin:0 0 12px}.status.err{background:color-mix(in srgb,var(--danger) 14%,transparent);color:var(--danger)}.status.ok{background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok)}.pill{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px 8px;font-size:12px;color:var(--muted);gap:4px}.hide{display:none!important}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px}table{border-collapse:collapse;width:100%;min-width:620px}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:12px;color:var(--muted);font-weight:700;background:color-mix(in srgb,var(--card) 88%,var(--line))}tr:last-child td{border-bottom:0}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.hint{font-size:12px;color:var(--muted)}.danger-text{color:var(--danger)}.ok-text{color:var(--ok)}.footer{color:var(--muted);font-size:12px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media (max-width:760px){.grid{grid-template-columns:1fr}.bar{align-items:flex-start}.top-actions{justify-content:flex-start}.card{padding:14px}table{min-width:560px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div><div class="brand">账号门户</div><div class="hint">用户名/密码登录 · 非共享管理密钥</div></div>
+    <div class="top-actions">
+      <span id="sessionBadge" class="pill">未登录</span>
+      <a class="btn" href="/management.html" rel="noreferrer">主控制台</a>
+      <button id="logoutBtn" class="btn danger hide" type="button">退出</button>
+    </div>
+  </div>
+</header>
+<main class="wrap">
+  <section id="loginCard" class="card" aria-labelledby="loginTitle">
+    <h1 id="loginTitle" class="title">登录</h1>
+    <p class="sub">使用个人账号登录。成功后只保存会话令牌，不保存密码或主控密钥。</p>
+    <div id="loginStatus" class="status" role="status" aria-live="polite">请输入账号密码。</div>
+    <form id="loginForm" autocomplete="on">
+      <div class="field"><label for="username">用户名</label><input id="username" name="username" autocomplete="username" required maxlength="128"></div>
+      <div class="field"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="512"></div>
+      <button class="btn primary" type="submit">登录</button>
+    </form>
+  </section>
+
+  <section id="appCards" class="hide" aria-label="账户功能">
+    <div class="grid">
+      <section class="card" aria-labelledby="meTitle">
+        <h2 id="meTitle" class="title">我的资料</h2>
+        <p class="sub">当前登录用户与角色。</p>
+        <div id="meStatus" class="status" role="status" aria-live="polite">正在加载…</div>
+        <div id="profile"></div>
+      </section>
+      <section class="card" aria-labelledby="passwordTitle">
+        <h2 id="passwordTitle" class="title">修改密码</h2>
+        <p class="sub">修改成功后后端会撤销当前会话，请重新登录。</p>
+        <div id="passwordStatus" class="status" role="status" aria-live="polite">请输入当前密码与新密码。</div>
+        <form id="passwordForm" autocomplete="off">
+          <div class="field"><label for="currentPassword">当前密码</label><input id="currentPassword" name="current_password" type="password" autocomplete="current-password" required maxlength="512"></div>
+          <div class="field"><label for="newPassword">新密码</label><input id="newPassword" name="new_password" type="password" autocomplete="new-password" required minlength="12" maxlength="72"></div>
+          <button class="btn primary" type="submit">更新密码</button>
+        </form>
+      </section>
+    </div>
+
+    <section id="adminPanel" class="card hide" aria-labelledby="adminTitle">
+      <div class="row" style="justify-content:space-between">
+        <div><h2 id="adminTitle" class="title">管理员：用户管理</h2><p class="sub">创建、查看、禁用/启用用户，或重置密码。</p></div>
+        <button id="refreshUsers" class="btn" type="button">刷新列表</button>
+      </div>
+      <div id="adminStatus" class="status" role="status" aria-live="polite">仅管理员可见。</div>
+      <form id="createUserForm" class="grid" autocomplete="off">
+        <div class="field"><label for="newUsername">新用户名</label><input id="newUsername" name="username" required maxlength="128"></div>
+        <div class="field"><label for="newUserPassword">初始密码</label><input id="newUserPassword" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="72"></div>
+        <div class="field"><span class="sr-only">创建</span><button class="btn primary" type="submit">创建用户</button></div>
+      </form>
+      <div class="table-wrap" style="margin-top:12px"><table aria-describedby="adminStatus"><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>操作</th></tr></thead><tbody id="usersBody"><tr><td colspan="4">暂无数据</td></tr></tbody></table></div>
+    </section>
+
+    <section class="card" aria-labelledby="contractTitle">
+      <h2 id="contractTitle" class="title">前端存储与接口约定</h2>
+      <p class="footer">登录成功后将会话令牌写入 <span class="mono">cpa-account-session</span>，并桥接到现有 WebUI 的 <span class="mono">cli-proxy-auth</span> / <span class="mono">managementKey</span> 字段和 <span class="mono">isLoggedIn=true</span>，便于 <span class="mono">/management.html</span> 与 <span class="mono">billing-token-page.html</span> 继续用 <span class="mono">Authorization: Bearer &lt;token&gt;</span> 调接口。这里的 <span class="mono">managementKey</span> 只保存账号会话 token，绝不保存用户密码或主控 master key；token 不进入 URL。</p>
+    </section>
+  </section>
+</main>
+<script>
+/* CPA Account Portal v1
+Storage contract:
+- cpa-account-session: plaintext JSON {token,expires_at,user:{username,role,disabled},apiBase,saved_at}; stable bridge key for parent/runtime injection.
+- cli-proxy-auth: same obfuscated JSON format used by management.html, with state.managementKey set to the account session token, rememberPassword=true, apiBase=<origin>. This is intentionally global auth sharing for existing management.html and billing-token-page.html compatibility.
+- isLoggedIn: "true" while a session is present. Passwords are never persisted and tokens are never placed in query strings.
+Backend JSON assumptions:
+- POST /v0/management/accounts/login accepts {username,password} and returns {token,expires_at,user:{username,role,disabled}}.
+- Authenticated calls use Authorization: Bearer <session-token>; legacy shared management keys may still be accepted by parent backend for admin.
+- GET /v0/management/accounts/me returns {user}; POST /v0/management/accounts/logout may return any JSON/empty 2xx.
+- PUT /v0/management/accounts/password accepts {current_password,new_password}; success revokes the current session.
+- GET /v0/management/accounts/users returns {users:[...]}; POST /users accepts {username,password}; PATCH /users/:username accepts {disabled?,password?}.
+*/
+(function(){
+'use strict';
+const ACCOUNT_STORE='cpa-account-session', AUTH_STORE='cli-proxy-auth', ENC_PREFIX='enc::v1::', SECURE_KEY='cli-proxy-api-webui::secure-storage', API_PREFIX='/v0/management/accounts', TIMEOUT_MS=15000;
+const $=id=>document.getElementById(id);
+const els={loginCard:$('loginCard'),appCards:$('appCards'),adminPanel:$('adminPanel'),sessionBadge:$('sessionBadge'),logoutBtn:$('logoutBtn'),loginStatus:$('loginStatus'),meStatus:$('meStatus'),passwordStatus:$('passwordStatus'),adminStatus:$('adminStatus'),profile:$('profile'),usersBody:$('usersBody'),loginForm:$('loginForm'),passwordForm:$('passwordForm'),createUserForm:$('createUserForm'),refreshUsers:$('refreshUsers')};
+let session=readSession();
+function text(v){return v==null?'':String(v)}
+function setStatus(el,msg,kind){el.className='status '+(kind||''); el.textContent=msg}
+function setBusy(form,busy){Array.from(form.querySelectorAll('button,input')).forEach(el=>{el.disabled=!!busy})}
+function normBase(v){let b=String(v||'').trim()||location.origin; b=b.replace(/\/?v0\/management\/?$/i,'').replace(/\/+$/,''); if(!/^https?:\/\//i.test(b)) b='http://'+b; return b}
+function keyBytes(){try{return new TextEncoder().encode(`${SECURE_KEY}|${location.host}|${navigator.userAgent}`)}catch{return new TextEncoder().encode(SECURE_KEY)}}
+function encBytes(bytes){let s=''; for(let i=0;i<bytes.length;i++) s+=String.fromCharCode(bytes[i]); return btoa(s)}
+function decBytes(s){return new TextDecoder().decode(s)}
+function strBytes(s){return new TextEncoder().encode(s)}
+function xor(bytes,key){const out=new Uint8Array(bytes.length); for(let i=0;i<bytes.length;i++) out[i]=bytes[i]^key[i%key.length]; return out}
+function b64ToBytes(v){const raw=atob(v); const out=new Uint8Array(raw.length); for(let i=0;i<raw.length;i++) out[i]=raw.charCodeAt(i); return out}
+function obf(v){return ENC_PREFIX+encBytes(xor(strBytes(String(v)),keyBytes()))}
+function readSession(){try{const raw=localStorage.getItem(ACCOUNT_STORE); if(!raw) return null; const parsed=JSON.parse(raw); if(!parsed||typeof parsed.token!=='string'||!parsed.token.trim()) return null; return parsed}catch{return null}}
+function isCurrentSession(token){const saved=readSession(); return !!session&&session.token===token&&!!saved&&saved.token===token}
+function clearPortalData(){els.profile.replaceChildren(); els.usersBody.replaceChildren(); const tr=document.createElement('tr'); const td=document.createElement('td'); td.colSpan=4; td.textContent='暂无数据'; tr.append(td); els.usersBody.append(tr)}
+function persistSession(data){const saved={token:String(data.token||''),expires_at:data.expires_at||null,user:safeUser(data.user),apiBase:normBase(location.origin),saved_at:new Date().toISOString()}; localStorage.setItem(ACCOUNT_STORE,JSON.stringify(saved)); bridgeManagementAuth(saved); session=saved; return saved}
+function clearSession(expectedToken){if(expectedToken&&!isCurrentSession(expectedToken)) return; try{if(session&&session.token) api('/logout',{method:'POST',keepalive:true},true).catch(()=>{})}catch{} localStorage.removeItem(ACCOUNT_STORE); localStorage.removeItem('isLoggedIn'); localStorage.removeItem(AUTH_STORE); localStorage.removeItem('managementKey'); session=null; clearPortalData(); renderAuth()}
+function bridgeManagementAuth(s){const state={state:{apiBase:normBase(s.apiBase||location.origin),managementKey:s.token,rememberPassword:true,serverVersion:null,serverBuildDate:null},version:0}; localStorage.setItem(AUTH_STORE,obf(JSON.stringify(state))); localStorage.setItem('managementKey',obf(JSON.stringify(s.token))); localStorage.setItem('isLoggedIn','true')}
+function safeUser(u){const x=(u&&typeof u==='object')?u:{}; return {username:text(x.username),role:text(x.role||'user'),disabled:!!x.disabled}}
+function isAdmin(){return !!session&&safeUser(session.user).role==='admin'&&!safeUser(session.user).disabled}
+function api(path,opts={},allowNoSession){const token=session&&session.token; if(!allowNoSession&&!token){const err=new Error('未登录或会话已过期'); err.status=0; return Promise.reject(err)}
+  const ctrl=new AbortController(); const timer=setTimeout(()=>ctrl.abort(),TIMEOUT_MS); const base=(session&&session.apiBase)||location.origin; const url=normBase(base)+API_PREFIX+path;
+  const headers=Object.assign({'Accept':'application/json'},opts.headers||{}); if(opts.body!==undefined) headers['Content-Type']='application/json'; if(token) headers.Authorization='Bearer '+token;
+  return fetch(url,Object.assign({},opts,{headers,signal:ctrl.signal,credentials:'same-origin'})).then(async res=>{clearTimeout(timer); const raw=await res.text(); let data=null; if(raw){try{data=JSON.parse(raw)}catch{data={message:raw}}} if(!res.ok){const msg=(data&&(data.error||data.message))||('HTTP '+res.status); const err=new Error(String(msg)); err.status=res.status||0; throw err} return data||{}},err=>{clearTimeout(timer); if(err&&err.name==='AbortError'){const e=new Error('请求超时'); e.status=0; throw e} throw err});
+}
+function renderAuth(){const logged=!!session&&!!session.token; els.loginCard.classList.toggle('hide',logged); els.appCards.classList.toggle('hide',!logged); els.logoutBtn.classList.toggle('hide',!logged); if(logged){const u=safeUser(session.user); els.sessionBadge.textContent=u.username?`${u.username} · ${u.role||'user'}`:'已登录'; els.adminPanel.classList.toggle('hide',!isAdmin())}else{els.sessionBadge.textContent='未登录'; els.adminPanel.classList.add('hide')} }
+function renderProfile(user){const u=safeUser(user); els.profile.replaceChildren(); const dl=document.createElement('dl'); [['用户名',u.username],['角色',u.role||'user'],['状态',u.disabled?'已禁用':'正常'],['过期时间',session&&session.expires_at?session.expires_at:'未提供']].forEach(([k,v])=>{const dt=document.createElement('dt'); dt.className='hint'; dt.textContent=k; const dd=document.createElement('dd'); dd.textContent=v; dl.append(dt,dd)}); els.profile.append(dl)}
+async function loadMe(){if(!session) return; const token=session.token; setStatus(els.meStatus,'正在加载…'); try{const data=await api('/me'); if(!isCurrentSession(token)) return; session.user=safeUser(data.user||session.user); localStorage.setItem(ACCOUNT_STORE,JSON.stringify(session)); bridgeManagementAuth(session); renderAuth(); renderProfile(session.user); setStatus(els.meStatus,'资料已更新。','ok'); if(isAdmin()) await loadUsers()}catch(e){if(!isCurrentSession(token)) return; setStatus(els.meStatus,'加载失败：'+e.message,'err'); if(e&&(e.status===401||e.status===403)) clearSession(token)}}
+function userRow(u){const user=safeUser(u); const tr=document.createElement('tr'); const c1=document.createElement('td'); c1.className='mono'; c1.textContent=user.username; const c2=document.createElement('td'); c2.textContent=user.role||'user'; const c3=document.createElement('td'); c3.textContent=user.disabled?'已禁用':'正常'; c3.className=user.disabled?'danger-text':'ok-text'; const c4=document.createElement('td'); const wrap=document.createElement('div'); wrap.className='row'; const toggle=document.createElement('button'); toggle.type='button'; toggle.className='btn'; toggle.textContent=user.disabled?'启用':'禁用'; toggle.addEventListener('click',()=>patchUser(user.username,{disabled:!user.disabled})); const reset=document.createElement('button'); reset.type='button'; reset.className='btn danger'; reset.textContent='重置密码'; reset.addEventListener('click',()=>{const pwd=prompt('请输入新密码（不会保存到本页）'); if(pwd) patchUser(user.username,{password:pwd})}); wrap.append(toggle,reset); c4.append(wrap); tr.append(c1,c2,c3,c4); return tr}
+async function loadUsers(){if(!isAdmin()) return; const token=session.token; setStatus(els.adminStatus,'正在加载用户…'); try{const data=await api('/users'); if(!isCurrentSession(token)||!isAdmin()) return; const users=Array.isArray(data.users)?data.users:[]; els.usersBody.replaceChildren(); if(!users.length){const tr=document.createElement('tr'); const td=document.createElement('td'); td.colSpan=4; td.textContent='暂无用户'; tr.append(td); els.usersBody.append(tr)} else users.forEach(u=>els.usersBody.append(userRow(u))); setStatus(els.adminStatus,'用户列表已更新。','ok')}catch(e){if(isCurrentSession(token)) setStatus(els.adminStatus,'加载用户失败：'+e.message,'err')}}
+async function patchUser(username,patch){if(!isAdmin()||!username) return; setStatus(els.adminStatus,'正在提交…'); try{await api('/users/'+encodeURIComponent(username),{method:'PATCH',body:JSON.stringify(patch)}); setStatus(els.adminStatus,'已更新用户。','ok'); await loadUsers()}catch(e){setStatus(els.adminStatus,'更新失败：'+e.message,'err')}}
+els.loginForm.addEventListener('submit',async ev=>{ev.preventDefault(); setBusy(els.loginForm,true); setStatus(els.loginStatus,'正在登录…'); const username=$('username').value.trim(), password=$('password').value; try{const data=await api('/login',{method:'POST',body:JSON.stringify({username,password})},true); if(!data.token) throw new Error('响应缺少 token'); persistSession(data); $('password').value=''; setStatus(els.loginStatus,'登录成功，正在进入主控制台…','ok'); location.replace('/management.html')}catch(e){setStatus(els.loginStatus,'登录失败：'+e.message,'err')}finally{setBusy(els.loginForm,false); $('password').value=''}});
+els.passwordForm.addEventListener('submit',async ev=>{ev.preventDefault(); setBusy(els.passwordForm,true); setStatus(els.passwordStatus,'正在更新密码…'); const current_password=$('currentPassword').value, new_password=$('newPassword').value; try{await api('/password',{method:'PUT',body:JSON.stringify({current_password,new_password})}); $('currentPassword').value=''; $('newPassword').value=''; clearSession(); setStatus(els.loginStatus,'密码已更新，请重新登录。','ok')}catch(e){setStatus(els.passwordStatus,'更新失败：'+e.message,'err')}finally{setBusy(els.passwordForm,false); $('currentPassword').value=''; $('newPassword').value=''}});
+els.createUserForm.addEventListener('submit',async ev=>{ev.preventDefault(); if(!isAdmin()) return; setBusy(els.createUserForm,true); setStatus(els.adminStatus,'正在创建用户…'); const username=$('newUsername').value.trim(), password=$('newUserPassword').value; try{await api('/users',{method:'POST',body:JSON.stringify({username,password})}); $('newUsername').value=''; $('newUserPassword').value=''; setStatus(els.adminStatus,'用户已创建。','ok'); await loadUsers()}catch(e){setStatus(els.adminStatus,'创建失败：'+e.message,'err')}finally{setBusy(els.createUserForm,false); $('newUserPassword').value=''}});
+els.refreshUsers.addEventListener('click',loadUsers); els.logoutBtn.addEventListener('click',()=>{clearSession(); setStatus(els.loginStatus,'已退出。','ok')});
+window.addEventListener('storage',ev=>{if(ev.key!==null&&ev.key!==ACCOUNT_STORE) return; const oldToken=session&&session.token; const next=readSession(); if(next&&next.token===oldToken) return; session=next; clearPortalData(); renderAuth(); if(session){renderProfile(session.user); if(session.token!==oldToken) loadMe()}else setStatus(els.loginStatus,'已退出。','ok')});
+renderAuth(); if(session) loadMe();
+})();
+</script>
+</body>
+</html>

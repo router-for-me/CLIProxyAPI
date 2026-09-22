@@ -22,6 +22,14 @@ objectstore/*
 
 # Static assets
 static/*
+!static/billing-token-page.html
+!static/billing-token-panel.js
+!static/accounts.html
+
+# Local management identity database and one-time admin bootstrap secret
+.management-auth/
+management-accounts.json
+management-admin-initial-password.txt
 
 # Authentication data
 auths/*

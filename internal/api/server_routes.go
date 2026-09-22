@@ -51,7 +51,11 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
 
+	s.engine.GET("/accounts.html", s.serveAccountPortal)
+	s.engine.GET("/account-bridge.js", s.serveAccountBridge)
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/billing.html", s.serveBillingTokenPage)
+	s.engine.GET("/billing-token-panel.js", s.serveBillingTokenPanelScript)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)

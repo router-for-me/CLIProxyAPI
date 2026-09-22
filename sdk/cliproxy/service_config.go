@@ -25,17 +25,19 @@ type configCommit struct {
 }
 
 type routingRuntimeState struct {
-	strategy                 string
-	sessionAffinity          bool
-	sessionAffinityTTL       time.Duration
-	sessionAffinitySubagents bool
+	strategy                        string
+	sessionAffinity                 bool
+	sessionAffinityTTL              time.Duration
+	sessionAffinitySubagents        bool
+	quotaAwareWeeklyRemainingMinPct int
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	state := routingRuntimeState{
-		strategy:                 "round-robin",
-		sessionAffinityTTL:       time.Hour,
-		sessionAffinitySubagents: true,
+		strategy:                        "round-robin",
+		sessionAffinityTTL:              time.Hour,
+		sessionAffinitySubagents:        true,
+		quotaAwareWeeklyRemainingMinPct: 20,
 	}
 	if cfg == nil {
 		return state
@@ -46,6 +48,11 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "quota-aware", "quotaaware", "qa":
+		state.strategy = "quota-aware"
+	}
+	if cfg.Routing.QuotaAware.WeeklyRemainingMinPercent != nil {
+		state.quotaAwareWeeklyRemainingMinPct = *cfg.Routing.QuotaAware.WeeklyRemainingMinPercent
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -69,6 +76,8 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "quota-aware":
+		selector = &coreauth.QuotaAwareSelector{WeeklyRemainingMinPercent: state.quotaAwareWeeklyRemainingMinPct}
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}

@@ -95,6 +95,10 @@ type Server struct {
 	// managementRoutesEnabled controls whether management endpoints serve real handlers.
 	managementRoutesEnabled atomic.Bool
 
+	// uiAssetCache stores the small set of transformed management UI assets per server.
+	uiAssetCache     *uiAssetCache
+	uiAssetCacheOnce sync.Once
+
 	// envManagementSecret indicates whether MANAGEMENT_PASSWORD is configured.
 	envManagementSecret bool
 
@@ -193,6 +197,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		wsRoutes:            make(map[string]struct{}),
 		pluginHost:          optionState.pluginHost,
 		billingService:      billingService,
+		uiAssetCache:        newUIAssetCache(3),
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
@@ -219,6 +224,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
+	s.mgmt.SetBillingService(billingService)
 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
