@@ -240,3 +240,160 @@ func TestConvertInteractionsRequestToAntigravityToolChoiceNoneOmitsTools(t *test
 		})
 	}
 }
+
+func TestConvertInteractionsRequestToAntigravityBuiltinTools(t *testing.T) {
+	t.Run("url_context only", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.8-flash-high",
+			"input":"read url",
+			"tools":[{"type":"url_context"}]
+		}`)
+		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		tools := gjson.GetBytes(out, "request.tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
+		}
+		if !tools[0].Get("urlContext").Exists() {
+			t.Fatalf("expected urlContext tool, got %s", tools[0].Raw)
+		}
+		if tools[0].Get("type").Exists() {
+			t.Fatalf("expected type field to be omitted from upstream tool, got %s", tools[0].Raw)
+		}
+	})
+
+	t.Run("code_execution only", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.8-flash-high",
+			"input":"execute code",
+			"tools":[{"type":"code_execution"}]
+		}`)
+		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		tools := gjson.GetBytes(out, "request.tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
+		}
+		if !tools[0].Get("codeExecution").Exists() {
+			t.Fatalf("expected codeExecution tool, got %s", tools[0].Raw)
+		}
+		if tools[0].Get("type").Exists() {
+			t.Fatalf("expected type field to be omitted from upstream tool, got %s", tools[0].Raw)
+		}
+	})
+
+	t.Run("google_search only", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.8-flash-high",
+			"input":"search web",
+			"tools":[{"type":"google_search"}]
+		}`)
+		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		tools := gjson.GetBytes(out, "request.tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
+		}
+		if !tools[0].Get("googleSearch").Exists() {
+			t.Fatalf("expected googleSearch tool, got %s", tools[0].Raw)
+		}
+		if tools[0].Get("type").Exists() {
+			t.Fatalf("expected type field to be omitted from upstream tool, got %s", tools[0].Raw)
+		}
+	})
+
+	t.Run("mixed function and builtin tools", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.8-flash-high",
+			"input":"mixed tools",
+			"tools":[
+				{"type":"function","name":"lookup","parameters":{"type":"object"}},
+				{"type":"url_context"},
+				{"type":"code_execution"}
+			]
+		}`)
+		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		tools := gjson.GetBytes(out, "request.tools").Array()
+		if len(tools) != 3 {
+			t.Fatalf("expected 3 tools, got %d. Output: %s", len(tools), string(out))
+		}
+		hasFunc := false
+		hasURL := false
+		hasCode := false
+		for _, tool := range tools {
+			if tool.Get("type").Exists() {
+				t.Fatalf("expected type field to be omitted from all upstream tools, got %s", tool.Raw)
+			}
+			if tool.Get("functionDeclarations").Exists() {
+				hasFunc = true
+			}
+			if tool.Get("urlContext").Exists() {
+				hasURL = true
+			}
+			if tool.Get("codeExecution").Exists() {
+				hasCode = true
+			}
+		}
+		if !hasFunc || !hasURL || !hasCode {
+			t.Fatalf("expected functionDeclarations, urlContext, and codeExecution; got func=%v, url=%v, code=%v. Output: %s", hasFunc, hasURL, hasCode, string(out))
+		}
+	})
+
+	t.Run("nested parameters and aliases preserved", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.8-flash-high",
+			"input":"test options",
+			"tools":[
+				{"type":"url_context","url_context":{"max_urls":3}},
+				{"code_execution":{"environment":"sandbox"}},
+				{"type":"web_search","google_search":{"mode":"search"}}
+			]
+		}`)
+		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		tools := gjson.GetBytes(out, "request.tools").Array()
+		if len(tools) != 3 {
+			t.Fatalf("expected 3 tools, got %d. Output: %s", len(tools), string(out))
+		}
+		if got := tools[0].Get("urlContext.max_urls").Int(); got != 3 {
+			t.Fatalf("expected urlContext.max_urls=3, got %d. Tool: %s", got, tools[0].Raw)
+		}
+		if got := tools[1].Get("codeExecution.environment").String(); got != "sandbox" {
+			t.Fatalf("expected codeExecution.environment=sandbox, got %s. Tool: %s", got, tools[1].Raw)
+		}
+		if got := tools[2].Get("googleSearch.mode").String(); got != "search" {
+			t.Fatalf("expected googleSearch.mode=search, got %s. Tool: %s", got, tools[2].Raw)
+		}
+	})
+
+	t.Run("native composite tools preserved without truncation", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.8-flash-high",
+			"input":"native composite tools",
+			"tools":[{"googleSearch":{},"urlContext":{}}]
+		}`)
+		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		tools := gjson.GetBytes(out, "request.tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool node, got %d. Output: %s", len(tools), string(out))
+		}
+		if !tools[0].Get("googleSearch").Exists() {
+			t.Fatalf("expected googleSearch preserved in composite tool, got %s", tools[0].Raw)
+		}
+		if !tools[0].Get("urlContext").Exists() {
+			t.Fatalf("expected urlContext preserved in composite tool, got %s", tools[0].Raw)
+		}
+	})
+
+	t.Run("unrecognized tool retained and not silently dropped", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.8-flash-high",
+			"input":"unrecognized tool",
+			"tools":[{"type":"file_search","file_search":{"max_results":5}}]
+		}`)
+		out := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
+		tools := gjson.GetBytes(out, "request.tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool retained, got %d. Output: %s", len(tools), string(out))
+		}
+		if got := tools[0].Get("type").String(); got != "file_search" {
+			t.Fatalf("expected tool type file_search retained, got %s", tools[0].Raw)
+		}
+	})
+}

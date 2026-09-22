@@ -529,6 +529,153 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_KeepsReasoningBefo
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesReasoningOnFollowUpToolTurns(t *testing.T) {
+	raw := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"reasoning": {"effort": "high"},
+		"input": [
+			{"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "first plan"}]},
+			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "starting"}]},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+			{"type": "function_call", "call_id": "call_2", "name": "write_stdin", "arguments": "{\"data\":\"x\"}"},
+			{"type": "function_call_output", "call_id": "call_2", "output": "ok"},
+			{"type": "reasoning", "id": "rs_2", "summary": [{"type": "summary_text", "text": "second plan"}]},
+			{"type": "function_call", "call_id": "call_3", "name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"},
+			{"type": "function_call_output", "call_id": "call_3", "output": "ok"},
+			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "apply_patch is available"}]},
+			{"type": "function_call", "call_id": "call_4", "name": "exec_command", "arguments": "{\"cmd\":\"cat\"}"},
+			{"type": "function_call_output", "call_id": "call_4", "output": "ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", raw, true)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 8 {
+		t.Fatalf("messages count = %d, want 8; output=%s", len(messages), out)
+	}
+
+	for i, msg := range messages {
+		if msg.Get("role").String() == "assistant" && msg.Get("tool_calls").Exists() && len(msg.Get("tool_calls").Array()) > 0 {
+			rc := msg.Get("reasoning_content").String()
+			if rc == "" {
+				t.Fatalf("messages[%d] with tool_calls is missing reasoning_content; message=%s", i, msg.Raw)
+			}
+		}
+	}
+
+	if got := messages[2].Get("tool_calls.0.id").String(); got != "call_2" {
+		t.Fatalf("messages.2 tool call id = %q, want call_2; output=%s", got, out)
+	}
+	if got := messages[2].Get("reasoning_content").String(); got != "first plan" {
+		t.Fatalf("messages.2 reasoning_content = %q, want %q; output=%s", got, "first plan", out)
+	}
+	if got := messages[6].Get("tool_calls.0.id").String(); got != "call_4" {
+		t.Fatalf("messages.6 tool call id = %q, want call_4; output=%s", got, out)
+	}
+	if got := messages[6].Get("reasoning_content").String(); got != "second plan" {
+		t.Fatalf("messages.6 reasoning_content = %q, want %q; output=%s", got, "second plan", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FallsBackToPlaceholderWhenNoPriorReasoning(t *testing.T) {
+	raw := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"reasoning": {"effort": "high"},
+		"input": [
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", raw, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages count = %d, want 2; output=%s", len(messages), out)
+	}
+	if got := messages[0].Get("reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("messages.0 reasoning_content = %q, want %q; output=%s", got, "[reasoning unavailable]", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_EffortNoneDoesNotInjectReasoning(t *testing.T) {
+	raw := []byte(`{
+		"model": "gpt-4o",
+		"reasoning": {"effort": "none"},
+		"input": [
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4o", raw, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages count = %d, want 2; output=%s", len(messages), out)
+	}
+	if messages[0].Get("reasoning_content").Exists() {
+		t.Fatalf("messages.0 should not have reasoning_content when effort is none; output=%s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesReasoningOnCustomToolCallTurns(t *testing.T) {
+	raw := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"reasoning": {"effort": "high"},
+		"input": [
+			{"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "custom plan"}]},
+			{"type": "custom_tool_call", "call_id": "cust_1", "name": "do_work", "input": "step1"},
+			{"type": "custom_tool_call_output", "call_id": "cust_1", "output": "done"},
+			{"type": "custom_tool_call", "call_id": "cust_2", "name": "do_work", "input": "step2"},
+			{"type": "custom_tool_call_output", "call_id": "cust_2", "output": "done"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", raw, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 4 {
+		t.Fatalf("messages count = %d, want 4; output=%s", len(messages), out)
+	}
+	if got := messages[0].Get("reasoning_content").String(); got != "custom plan" {
+		t.Fatalf("messages.0 reasoning_content = %q, want %q; output=%s", got, "custom plan", out)
+	}
+	if got := messages[2].Get("reasoning_content").String(); got != "custom plan" {
+		t.Fatalf("messages.2 reasoning_content = %q, want %q; output=%s", got, "custom plan", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ResetsReasoningAcrossUserMessageBoundary(t *testing.T) {
+	raw := []byte(`{
+		"model": "deepseek-v4.1-flash",
+		"reasoning": {"effort": "high"},
+		"input": [
+			{"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "turn 1 plan"}]},
+			{"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+			{"type": "message", "role": "user", "content": "now do step 2"},
+			{"type": "function_call", "call_id": "call_2", "name": "exec_command", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_2", "output": "ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4.1-flash", raw, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 5 {
+		t.Fatalf("messages count = %d, want 5; output=%s", len(messages), out)
+	}
+	if got := messages[0].Get("reasoning_content").String(); got != "turn 1 plan" {
+		t.Fatalf("messages.0 reasoning_content = %q, want %q; output=%s", got, "turn 1 plan", out)
+	}
+	if got := messages[3].Get("reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("messages.3 reasoning_content = %q, want %q; output=%s", got, "[reasoning unavailable]", out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceTools(t *testing.T) {
 	raw := []byte(`{
 		"input": [

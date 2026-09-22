@@ -19,6 +19,9 @@ type ClientRequestMetadata struct {
 	UserAgent       string
 	SessionID       string
 	ParentSessionID string
+	NodeKind        string
+	IsFork          bool
+	IsCompaction    bool
 }
 
 type responseStatusHolder struct {

@@ -235,6 +235,90 @@ func TestHostStreamCallbacksEmitAndClose(t *testing.T) {
 	}
 }
 
+func TestHostModelExecuteRejectsInvalidProxyURL(t *testing.T) {
+	host := New()
+	called := false
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			called = true
+			return handlers.ModelExecutionResponse{StatusCode: http.StatusOK}, nil
+		},
+		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			called = true
+			chunks := make(chan handlers.ModelExecutionChunk)
+			close(chunks)
+			return handlers.ModelExecutionStream{StatusCode: http.StatusOK, Chunks: chunks}, nil
+		},
+	})
+	for _, proxyURL := range []string{"direct", "socks4://127.0.0.1:1080", "http://", "http://:8080", "http://proxy.example:99999", "not a url"} {
+		for _, method := range []string{pluginabi.MethodHostModelExecute, pluginabi.MethodHostModelExecuteStream} {
+			stream := method == pluginabi.MethodHostModelExecuteStream
+			rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+				HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+					EntryProtocol: "openai",
+					ExitProtocol:  "openai",
+					Model:         "model-1",
+					Stream:        stream,
+					ProxyURL:      proxyURL,
+					Body:          []byte(`{"request":true}`),
+				},
+			})
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+			_, errCall := host.callFromPlugin(context.Background(), method, rawReq)
+			if errCall == nil {
+				t.Fatalf("%s proxy %q error = nil, want HTTP 400", method, proxyURL)
+			}
+			if clienterror.HTTPStatusFromError(errCall) != http.StatusBadRequest {
+				t.Fatalf("%s proxy %q status = %d, want 400: %v", method, proxyURL, clienterror.HTTPStatusFromError(errCall), errCall)
+			}
+		}
+	}
+	if called {
+		t.Fatal("model executor ran for an invalid proxy_url")
+	}
+}
+
+func TestHostModelExecuteForwardsProxyURL(t *testing.T) {
+	host := New()
+	var got handlers.ModelExecutionRequest
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			got = req
+			return handlers.ModelExecutionResponse{StatusCode: http.StatusOK, Body: []byte(`{"ok":true}`)}, nil
+		},
+		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			got = req
+			chunks := make(chan handlers.ModelExecutionChunk)
+			close(chunks)
+			return handlers.ModelExecutionStream{StatusCode: http.StatusOK, Chunks: chunks}, nil
+		},
+	})
+	for _, method := range []string{pluginabi.MethodHostModelExecute, pluginabi.MethodHostModelExecuteStream} {
+		stream := method == pluginabi.MethodHostModelExecuteStream
+		rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+				EntryProtocol: "openai",
+				ExitProtocol:  "openai",
+				Model:         "model-1",
+				Stream:        stream,
+				ProxyURL:      "socks5h://user:pass@127.0.0.1:1080",
+				Body:          []byte(`{"request":true}`),
+			},
+		})
+		if errMarshal != nil {
+			t.Fatalf("marshal request: %v", errMarshal)
+		}
+		if _, errCall := host.callFromPlugin(context.Background(), method, rawReq); errCall != nil {
+			t.Fatalf("%s error = %v", method, errCall)
+		}
+		if got.ProxyURL != "socks5h://user:pass@127.0.0.1:1080" {
+			t.Fatalf("%s proxy_url = %q", method, got.ProxyURL)
+		}
+	}
+}
+
 func TestHostModelExecuteCallback(t *testing.T) {
 	host := New()
 	var got handlers.ModelExecutionRequest

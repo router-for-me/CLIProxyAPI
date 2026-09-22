@@ -575,7 +575,7 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 	}
 }
 
-func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string) ([]byte, http.Header) {
+func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string, passthrough bool) ([]byte, http.Header) {
 	host := h.interceptorHost()
 	if host == nil {
 		return body, responseHeaders
@@ -594,7 +594,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 		StatusCode:      statusCode,
 		Metadata:        opts.Metadata,
 	}, skipPluginID)
-	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), PassthroughHeadersEnabled(h.Cfg))
+	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), passthrough)
 	if len(resp.Body) > 0 {
 		body = cloneBytes(resp.Body)
 	}

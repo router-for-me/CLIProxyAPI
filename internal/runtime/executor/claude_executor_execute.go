@@ -76,8 +76,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		ctx = helps.WithClaudeSessionID(ctx, claudeSessionID)
 	}
 
-	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, upstreamStream, helps.APIKeyModelIsCompat(req))
-	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, upstreamStream, helps.APIKeyModelIsCompat(req))
+	isCompat := helps.APIKeyModelIsCompat(req)
+	originalTranslated, body := helps.TranslateRequestPairWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, upstreamStream, isCompat)
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())

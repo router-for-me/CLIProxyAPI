@@ -999,6 +999,11 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 
+	if opts.Metadata != nil {
+		if opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] == nil && requestedModel != "" {
+			opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = requestedModel
+		}
+	}
 	sessionID, parentSessionID := m.homeDispatchSessionIDs(opts)
 	if sessionID != "" && opts.Metadata != nil {
 		opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = sessionID
@@ -1009,6 +1014,14 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		}
 	}
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
+	if opts.Metadata != nil {
+		if nodeKind, ok := opts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); ok && strings.TrimSpace(nodeKind) != "" {
+			if dispatchHeaders == nil {
+				dispatchHeaders = make(http.Header)
+			}
+			dispatchHeaders.Set("X-Node-Kind", strings.TrimSpace(nodeKind))
+		}
+	}
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
@@ -1279,7 +1292,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 			continue
 		}
 		providerKey := executorKeyFromAuth(auth)
-		executor, ok := m.executors[providerKey]
+		executor, ok := m.executorLocked(providerKey)
 		if !ok {
 			continue
 		}

@@ -2363,6 +2363,66 @@ func TestUsageAdapterPropagatesBaseURL(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterPropagatesResponseModelServiceTierAndStream(t *testing.T) {
+	var gotRecord pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotRecord = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-response-fields",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-response-fields",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:            "provider",
+		Model:               "gpt-5.4",
+		ResponseModel:       "gpt-5.6-luna",
+		ServiceTier:         "default",
+		ResponseServiceTier: "priority",
+		Stream:              true,
+	})
+	if gotRecord.Model != "gpt-5.4" {
+		t.Fatalf("plugin Model = %q, want gpt-5.4", gotRecord.Model)
+	}
+	if gotRecord.ResponseModel != "gpt-5.6-luna" {
+		t.Fatalf("plugin ResponseModel = %q, want gpt-5.6-luna", gotRecord.ResponseModel)
+	}
+	if gotRecord.ServiceTier != "default" {
+		t.Fatalf("plugin ServiceTier = %q, want default", gotRecord.ServiceTier)
+	}
+	if gotRecord.ResponseServiceTier != "priority" {
+		t.Fatalf("plugin ResponseServiceTier = %q, want priority", gotRecord.ResponseServiceTier)
+	}
+	if !gotRecord.Stream {
+		t.Fatalf("plugin Stream = %v, want true", gotRecord.Stream)
+	}
+
+	// Verify empty fields and Stream=false propagate cleanly without corruption.
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+		Stream:   false,
+	})
+	if gotRecord.Model != "gpt-5.4" {
+		t.Fatalf("plugin Model = %q, want gpt-5.4", gotRecord.Model)
+	}
+	if gotRecord.ResponseModel != "" {
+		t.Fatalf("plugin ResponseModel = %q, want empty", gotRecord.ResponseModel)
+	}
+	if gotRecord.ResponseServiceTier != "" {
+		t.Fatalf("plugin ResponseServiceTier = %q, want empty", gotRecord.ResponseServiceTier)
+	}
+	if gotRecord.Stream {
+		t.Fatalf("plugin Stream = %v, want false", gotRecord.Stream)
+	}
+}
+
 func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	var gotGenerate bool
 	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {

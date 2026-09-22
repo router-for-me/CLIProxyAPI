@@ -1129,7 +1129,10 @@ func vertexBaseURL(location string) string {
 }
 
 func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, saJSON []byte) (string, error) {
-	if httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
+	// Token exchange stays on the credential or global proxy. The execution proxy
+	// applies only to the model request that follows.
+	tokenCtx := cliproxyexecutor.WithoutRequestProxyURL(ctx)
+	if httpClient := helps.NewProxyAwareHTTPClient(tokenCtx, cfg, auth, 0); httpClient != nil {
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 	}
 	// Use cloud-platform scope for Vertex AI.

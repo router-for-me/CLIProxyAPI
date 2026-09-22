@@ -174,6 +174,114 @@ func TestFileSynthesizer_Synthesize_LegacyKimiFingerprintProfile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_KimiAI(t *testing.T) {
+	tempDir := t.TempDir()
+	authDataAI := map[string]any{
+		"type":          "kimi-ai",
+		"access_token":  "kimi-ai-token",
+		"refresh_token": "kimi-ai-refresh",
+	}
+	dataAI, errMarshal := json.Marshal(authDataAI)
+	if errMarshal != nil {
+		t.Fatalf("marshal kimi-ai auth: %v", errMarshal)
+	}
+	if errWriteFile := os.WriteFile(filepath.Join(tempDir, "kimi-ai-auth.json"), dataAI, 0644); errWriteFile != nil {
+		t.Fatalf("failed to write kimi-ai auth file: %v", errWriteFile)
+	}
+
+	auths, err := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Provider != "kimi-ai" {
+		t.Fatalf("provider = %q, want kimi-ai", auths[0].Provider)
+	}
+	if got := auths[0].Attributes["base_url"]; got != "https://api.kimi.ai/coding" {
+		t.Fatalf("base_url = %q, want https://api.kimi.ai/coding", got)
+	}
+	if got := auths[0].Attributes["domain"]; got != "kimi.ai" {
+		t.Fatalf("domain = %q, want kimi.ai", got)
+	}
+}
+
+func TestFileSynthesizer_Synthesize_KimiDomainExplicitOverrides(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. type: kimi, domain: ai -> should normalize to kimi.ai and api.kimi.ai
+	f1 := filepath.Join(tempDir, "kimi-type-ai-domain.json")
+	d1, errMarshal1 := json.Marshal(map[string]any{
+		"type":          "kimi",
+		"domain":        "ai",
+		"access_token":  "token-1",
+		"refresh_token": "refresh-1",
+	})
+	if errMarshal1 != nil {
+		t.Fatalf("marshal error: %v", errMarshal1)
+	}
+	if errWrite := os.WriteFile(f1, d1, 0644); errWrite != nil {
+		t.Fatalf("write error: %v", errWrite)
+	}
+
+	// 2. type: kimi-ai, domain: kimi.com -> should preserve kimi.com and api.kimi.com
+	f2 := filepath.Join(tempDir, "kimi-ai-type-com-domain.json")
+	d2, errMarshal2 := json.Marshal(map[string]any{
+		"type":          "kimi-ai",
+		"domain":        "kimi.com",
+		"access_token":  "token-2",
+		"refresh_token": "refresh-2",
+	})
+	if errMarshal2 != nil {
+		t.Fatalf("marshal error: %v", errMarshal2)
+	}
+	if errWrite := os.WriteFile(f2, d2, 0644); errWrite != nil {
+		t.Fatalf("write error: %v", errWrite)
+	}
+
+	auths, errSynthesize := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+	})
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	authMap := make(map[string]*coreauth.Auth)
+	for _, a := range auths {
+		authMap[filepath.Base(a.FileName)] = a
+	}
+
+	a1 := authMap["kimi-type-ai-domain.json"]
+	if a1 == nil {
+		t.Fatal("missing a1")
+	}
+	if a1.Attributes["domain"] != "kimi.ai" {
+		t.Errorf("a1 domain = %q, want kimi.ai", a1.Attributes["domain"])
+	}
+	if a1.Attributes["base_url"] != "https://api.kimi.ai/coding" {
+		t.Errorf("a1 base_url = %q, want https://api.kimi.ai/coding", a1.Attributes["base_url"])
+	}
+
+	a2 := authMap["kimi-ai-type-com-domain.json"]
+	if a2 == nil {
+		t.Fatal("missing a2")
+	}
+	if a2.Attributes["domain"] != "kimi.com" {
+		t.Errorf("a2 domain = %q, want kimi.com", a2.Attributes["domain"])
+	}
+	if a2.Attributes["base_url"] != "https://api.kimi.com/coding" {
+		t.Errorf("a2 base_url = %q, want https://api.kimi.com/coding", a2.Attributes["base_url"])
+	}
+}
+
 func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	tempDir := t.TempDir()
 

@@ -577,11 +577,23 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var updatedLastRequest []byte
 		var errMsg *interfaces.ErrorMessage
 		previousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
+		isPrewarm := !useUpstreamWebsocketPassthrough && shouldHandleResponsesWebsocketPrewarmLocally(payload, false)
 		if pendingPrewarmID != "" && previousResponseID != "" {
 			if previousResponseID != pendingPrewarmID {
 				errMsg = responsesWebsocketPreviousResponseNotFoundError()
 			} else {
 				requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketPrewarmFollowup(payload, lastRequest)
+			}
+		} else if isPrewarm && previousResponseID == "" {
+			input := gjson.GetBytes(payload, "input")
+			if input.Exists() && !input.IsArray() {
+				errMsg = &interfaces.ErrorMessage{
+					StatusCode: http.StatusBadRequest,
+					Error:      fmt.Errorf("websocket request requires array field: input"),
+				}
+			} else {
+				// Mid-connection self-contained prewarm without previous_response_id is a new transcript root.
+				requestJSON, updatedLastRequest, errMsg = normalizeResponseCreateRequest(normalizeResponseTranscriptReplacement(payload, lastRequest))
 			}
 		} else if pendingPrewarmID != "" && gjson.GetBytes(payload, "type").String() == wsRequestTypeCreate {
 			input := gjson.GetBytes(payload, "input")
@@ -635,7 +647,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
 		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
 
-		if !useUpstreamWebsocketPassthrough && shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, false) {
+		if isPrewarm {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated
 			}

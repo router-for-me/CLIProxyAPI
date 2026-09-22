@@ -135,7 +135,7 @@ func isManagedClaudeBeta(beta string) bool {
 //	11 advanced-tool-use-2025-11-20       requests using tool search or another advanced tool-use feature
 //	12 effort-2025-11-24                  effort-supporting models with active thinking
 //	13 server-side-fallback-2026-06-01    requests with fallbacks or requested
-//	14 fallback-credit-2026-06-01         OAuth credentials
+//	14 fallback-credit-2026-06-01         requests with fallback tokens, fallbacks, or requested
 //	15 structured-outputs-2025-12-15      structured output requests
 //	16 thinking-display-updates-2026-08-18 requests with thinking.display=updates
 //	17 fast-mode-2026-02-01               speed:fast requests only
@@ -177,7 +177,10 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if !isProbeOrHelper && (requested[claudeServerSideFallbackBeta] || gjson.GetBytes(body, "fallbacks").Exists()) {
 		betas = append(betas, claudeServerSideFallbackBeta)
 	}
-	if requested[claudeFallbackCreditBeta] || oauthToken {
+	shouldIncludeFallbackCredit := requested[claudeFallbackCreditBeta] ||
+		gjson.GetBytes(body, "fallback_credit_token").Exists() ||
+		(oauthToken && gjson.GetBytes(body, "fallbacks").Exists())
+	if shouldIncludeFallbackCredit {
 		betas = append(betas, claudeFallbackCreditBeta)
 	}
 	for _, beta := range claudeCodeTrailingBetas {

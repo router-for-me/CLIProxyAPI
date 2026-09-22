@@ -2729,38 +2729,6 @@
   ],
   "codex-plus": [
     {
-      "id": "gpt-5.3-codex-spark",
-      "object": "model",
-      "created": 1770912000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex Spark",
-      "version": "gpt-5.3",
-      "description": "Ultra-fast coding model.",
-      "context_length": 128000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ],
-      "native_capabilities": {
-        "web_search": true
-      }
-    },
-    {
       "id": "gpt-5.5",
       "object": "model",
       "created": 1776902400,
@@ -2970,38 +2938,6 @@
     }
   ],
   "codex-pro": [
-    {
-      "id": "gpt-5.3-codex-spark",
-      "object": "model",
-      "created": 1770912000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex Spark",
-      "version": "gpt-5.3",
-      "description": "Ultra-fast coding model.",
-      "context_length": 128000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ],
-      "native_capabilities": {
-        "web_search": true
-      }
-    },
     {
       "id": "gpt-5.5",
       "object": "model",
@@ -3804,6 +3740,37 @@
     }
   ],
   "xai": [
+    {
+      "id": "grok-4.7",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1790000000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.7",
+      "name": "grok-4.7",
+      "description": "SpaceXAI's frontier model for coding, agentic tasks, and knowledge work.",
+      "context_length": 500000,
+      "max_completion_tokens": 500000,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
     {
       "id": "grok-4.6",
       "native_capabilities": {

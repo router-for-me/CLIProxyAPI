@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -1432,5 +1433,119 @@ func TestKimiExecutor_WarnsWhenUpstreamServesUnexpectedModel(t *testing.T) {
 	}
 	if !foundWarning {
 		t.Fatalf("expected substitution warning in logs for unexpected-model-v2")
+	}
+}
+
+func TestKimiExecutor_KimiAI_TargetURL(t *testing.T) {
+	var requestedURL string
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		requestedURL = req.URL.String()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]}`)),
+			Header:     make(http.Header),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "kimi-ai-test",
+		Provider: "kimi-ai",
+		Metadata: map[string]any{"access_token": "ai-access-token"},
+	}
+
+	payload := []byte(`{"model":"kimi-k3","messages":[{"role":"user","content":"hello"}]}`)
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if requestedURL != "https://api.kimi.ai/coding/v1/chat/completions" {
+		t.Fatalf("requestedURL = %q, want https://api.kimi.ai/coding/v1/chat/completions", requestedURL)
+	}
+
+	// Also test streaming
+	requestedURL = ""
+	streamRes, errStream := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	if streamRes == nil {
+		t.Fatal("expected stream result")
+	}
+	if requestedURL != "https://api.kimi.ai/coding/v1/chat/completions" {
+		t.Fatalf("stream requestedURL = %q, want https://api.kimi.ai/coding/v1/chat/completions", requestedURL)
+	}
+}
+
+func TestKimiExecutor_KimiAI_Refresh(t *testing.T) {
+	var refreshURL string
+	transport := kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		refreshURL = req.URL.String()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"access_token":"new-ai-token",
+				"refresh_token":"new-ai-refresh",
+				"token_type":"Bearer",
+				"expires_in":3600
+			}`)),
+			Header: make(http.Header),
+		}, nil
+	})
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "kimi-ai-refresh-test",
+		Provider: "kimi-ai",
+		Metadata: map[string]any{
+			"type":          "kimi-ai",
+			"access_token":  "old-token",
+			"refresh_token": "old-refresh",
+		},
+		Storage: &kimiauth.KimiTokenStorage{
+			AccessToken:  "old-token",
+			RefreshToken: "old-refresh",
+			Type:         "kimi-ai",
+			Domain:       "kimi.ai",
+		},
+	}
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
+	refreshed, err := executor.Refresh(ctx, auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if refreshed == nil {
+		t.Fatal("expected refreshed auth")
+	}
+	if refreshURL != "https://auth.kimi.ai/api/oauth/token" {
+		t.Fatalf("refreshURL = %q, want https://auth.kimi.ai/api/oauth/token", refreshURL)
+	}
+	if refreshed.Metadata["access_token"] != "new-ai-token" {
+		t.Fatalf("Metadata[access_token] = %v, want new-ai-token", refreshed.Metadata["access_token"])
+	}
+	if refreshed.Metadata["type"] != "kimi-ai" {
+		t.Fatalf("Metadata[type] = %v, want kimi-ai", refreshed.Metadata["type"])
+	}
+	if storage, ok := refreshed.Storage.(*kimiauth.KimiTokenStorage); ok {
+		if storage.AccessToken != "new-ai-token" {
+			t.Fatalf("storage.AccessToken = %q, want new-ai-token", storage.AccessToken)
+		}
+		if storage.Type != "kimi-ai" {
+			t.Fatalf("storage.Type = %q, want kimi-ai", storage.Type)
+		}
+		if storage.Domain != "kimi.ai" {
+			t.Fatalf("storage.Domain = %q, want kimi.ai", storage.Domain)
+		}
 	}
 }

@@ -119,6 +119,7 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -178,6 +179,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
@@ -230,6 +232,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
@@ -410,7 +413,7 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		return sdktranslator.FormatClaude
 	case "gemini", "vertex", "aistudio":
 		return sdktranslator.FormatGemini
-	case "kimi":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		return sdktranslator.FormatOpenAI
 	case "meta":
 		return sdktranslator.FormatCodex
@@ -1743,7 +1746,8 @@ func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 func (m *Manager) executorFor(provider string) ProviderExecutor {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.executors[provider]
+	exec, _ := m.executorLocked(provider)
+	return exec
 }
 
 // roundTripperContextKey is an unexported context key type to avoid collisions.
@@ -1792,7 +1796,15 @@ func executorKeyFromAuth(auth *Auth) string {
 		}
 		return util.OpenAICompatibleProviderKey(providerKey)
 	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider))
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch provider {
+	case "kimi.com":
+		return "kimi"
+	case "kimi.ai":
+		return "kimi-ai"
+	default:
+		return provider
+	}
 }
 
 // logEntryWithRequestID returns a logrus entry with request_id field if available in context.
@@ -1960,7 +1972,7 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	a := m.auths[authID]
 	var exec ProviderExecutor
 	if a != nil {
-		exec = m.executors[executorKeyFromAuth(a)]
+		exec, _ = m.executorLocked(executorKeyFromAuth(a))
 	}
 	m.mu.RUnlock()
 	if a == nil || exec == nil {
@@ -2101,9 +2113,12 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 	canonicalID = strings.TrimSpace(canonicalID)
 	if canonicalID == "" {
 		clientMeta := logging.GetClientRequestMetadata(ctx)
-		if clientMeta.SessionID != "" || clientMeta.ParentSessionID != "" {
+		if clientMeta.SessionID != "" || clientMeta.ParentSessionID != "" || clientMeta.NodeKind != "" || clientMeta.IsFork || clientMeta.IsCompaction {
 			clientMeta.SessionID = ""
 			clientMeta.ParentSessionID = ""
+			clientMeta.NodeKind = ""
+			clientMeta.IsFork = false
+			clientMeta.IsCompaction = false
 			ctx = logging.WithClientRequestMetadata(ctx, clientMeta)
 		}
 		return util.WithSessionID(ctx, "")
@@ -2117,6 +2132,21 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 	}
 	if clientMeta.SessionID == clientMeta.ParentSessionID {
 		clientMeta.ParentSessionID = ""
+	}
+	if nodeKind, ok := metadata[cliproxyexecutor.NodeKindMetadataKey].(string); ok && strings.TrimSpace(nodeKind) != "" {
+		clientMeta.NodeKind = strings.TrimSpace(nodeKind)
+	} else {
+		clientMeta.NodeKind = ""
+	}
+	if isFork, ok := metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok {
+		clientMeta.IsFork = isFork
+	} else {
+		clientMeta.IsFork = false
+	}
+	if isCompaction, ok := metadata[cliproxyexecutor.IsCompactionMetadataKey].(bool); ok {
+		clientMeta.IsCompaction = isCompaction
+	} else {
+		clientMeta.IsCompaction = false
 	}
 	ctx = logging.WithClientRequestMetadata(ctx, clientMeta)
 	return util.WithSessionID(ctx, clientMeta.SessionID)

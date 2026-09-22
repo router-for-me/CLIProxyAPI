@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	misc "github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -191,6 +192,8 @@ type ModelRegistry struct {
 	availableModelsCache map[string]availableModelsCacheEntry
 	// generation tracks changes to model registrations and availability.
 	generation uint64
+	// registrationEpoch tracks monotonic client registration and deregistration structural changes.
+	registrationEpoch atomic.Uint64
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
 }
@@ -234,6 +237,15 @@ func (r *ModelRegistry) GetGeneration() uint64 {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 	return r.generation
+}
+
+// RegistrationEpoch returns a monotonically increasing epoch that increments whenever
+// client model registrations or deregistrations occur.
+func (r *ModelRegistry) RegistrationEpoch() uint64 {
+	if r == nil {
+		return 0
+	}
+	return r.registrationEpoch.Load()
 }
 
 // LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
@@ -296,7 +308,7 @@ func responsesWebSearchProviderPathSupport(provider string) *bool {
 	switch provider {
 	case "codex", "xai", "claude", "antigravity":
 		return boolPointer(true)
-	case "openai", "openai-compatibility", "gemini", "aistudio", "vertex", "kimi", "interactions", "gemini-interactions":
+	case "openai", "openai-compatibility", "gemini", "aistudio", "vertex", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "interactions", "gemini-interactions":
 		return boolPointer(false)
 	default:
 		if strings.HasPrefix(provider, "openai-compatible-") {
@@ -458,6 +470,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	// Monotonically increment client registration epoch and reset generation to 0.
 	r.clientEpochs[clientID]++
 	r.clientGenerations[clientID] = uint64(0)
+	r.registrationEpoch.Add(1)
 
 	now := time.Now()
 
@@ -821,6 +834,7 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 	}
 	r.clientEpochs[clientID]++
 	r.clientGenerations[clientID]++
+	r.registrationEpoch.Add(1)
 
 	models, exists := r.clientModels[clientID]
 	provider, hasProvider := r.clientProviders[clientID]

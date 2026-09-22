@@ -3471,9 +3471,7 @@ func TestXAIExecutorExecuteImagesUsesImagesEndpointAndPublishesUsage(t *testing.
 	if record.Detail != (usage.Detail{}) {
 		t.Fatalf("detail = %+v, want zero token usage", record.Detail)
 	}
-	if record.TTFT <= 0 {
-		t.Fatalf("ttft = %v, want positive duration", record.TTFT)
-	}
+	assertXAIUsageRecordTTFT(t, record.TTFT)
 	assertNoAdditionalXAIUsageRecord(t, plugin.records)
 }
 
@@ -3597,6 +3595,23 @@ func assertNoAdditionalXAIUsageRecord(t *testing.T, records <-chan usage.Record)
 		t.Fatalf("received additional xAI usage record: %+v", record)
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+func assertXAIUsageRecordTTFT(t *testing.T, ttft time.Duration) {
+	t.Helper()
+	if ttft < 0 {
+		t.Fatalf("ttft = %v, want non-negative duration", ttft)
+	}
+}
+
+func TestXAIUsageRecord_ZeroTTFTValidation(t *testing.T) {
+	// A sub-tick loopback response can yield TTFT == 0s.
+	// The test assertion must accept non-negative TTFT (>= 0).
+	record := usage.Record{
+		Model: "grok-imagine-image-quality",
+		TTFT:  0,
+	}
+	assertXAIUsageRecordTTFT(t, record.TTFT)
 }
 
 func TestXAIExecutorExecuteImagesUsesEditsEndpoint(t *testing.T) {
@@ -3839,9 +3854,7 @@ func TestXAIExecutorExecuteVideosCreate(t *testing.T) {
 	if record.Detail != (usage.Detail{}) {
 		t.Fatalf("detail = %+v, want zero token usage", record.Detail)
 	}
-	if record.TTFT <= 0 {
-		t.Fatalf("ttft = %v, want positive duration", record.TTFT)
-	}
+	assertXAIUsageRecordTTFT(t, record.TTFT)
 	assertNoAdditionalXAIUsageRecord(t, plugin.records)
 }
 

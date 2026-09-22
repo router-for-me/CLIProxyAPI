@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"strings"
 
+	"net/http"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -298,6 +301,9 @@ func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte
 	if req.Stream {
 		return nil, fmt.Errorf("host.model.execute requires stream=false")
 	}
+	if errProxy := validateHostModelProxy(req.ProxyURL); errProxy != nil {
+		return nil, errProxy
+	}
 	executor := h.currentModelExecutor()
 	if executor == nil {
 		return nil, fmt.Errorf("host model executor is unavailable")
@@ -329,7 +335,22 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 		SkipRouterPluginID:      skipPluginID,
 		ForcedProvider:          req.ForcedProvider,
 		AuthID:                  req.AuthID,
+		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 	}
+}
+
+func validateHostModelProxy(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if !proxyutil.ValidRequestProxy(raw) {
+		return &modelExecutionStatusError{
+			err:        fmt.Errorf("invalid proxy_url"),
+			statusCode: http.StatusBadRequest,
+		}
+	}
+	return nil
 }
 
 type modelExecutionStatusError struct {
