@@ -355,7 +355,8 @@ func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Reque
 	if !xaiRequiresIsolatedConversation(baseModel) {
 		return "", nil
 	}
-	cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, baseModel, req.Payload, opts.Headers)
+	// Also sent as x-grok-conv-id, a server-side Composer conversation, so it must stay agent-scoped.
+	cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, baseModel, req.Payload, opts.Headers, false)
 	if errCache != nil {
 		return "", errCache
 	}

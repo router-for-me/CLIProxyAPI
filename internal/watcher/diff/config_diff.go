@@ -155,6 +155,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Codex.OrphanDelegationCompatibility != newCfg.Codex.OrphanDelegationCompatibility {
 		changes = append(changes, fmt.Sprintf("codex.orphan-delegation-compatibility: %t -> %t", oldCfg.Codex.OrphanDelegationCompatibility, newCfg.Codex.OrphanDelegationCompatibility))
 	}
+	if oldCfg.Codex.ClaudeCodeSharedPromptCache != newCfg.Codex.ClaudeCodeSharedPromptCache {
+		changes = append(changes, fmt.Sprintf("codex.claude-code-shared-prompt-cache: %t -> %t", oldCfg.Codex.ClaudeCodeSharedPromptCache, newCfg.Codex.ClaudeCodeSharedPromptCache))
+	}
 	if oldCfg.XAI.InjectXSearch != newCfg.XAI.InjectXSearch {
 		changes = append(changes, fmt.Sprintf("xai.inject-x-search: %t -> %t", oldCfg.XAI.InjectXSearch, newCfg.XAI.InjectXSearch))
 	}

@@ -353,6 +353,13 @@ codex:
   # than cooling down the entire credential across all sibling models.
   # Default: false
   model-level-cooling: false
+  # When true, the prompt_cache_key derived for Claude Code requests is shared by every agent of
+  # one session instead of partitioned per subagent. Subagents send the same system prompt and
+  # tools, so a fan-out can reuse the prefix its siblings warmed. The key is only a routing hint:
+  # a prefix that differs just misses. It helps only when siblings reach the same credential,
+  # so pair it with routing.session-affinity. Reasoning replay stays per agent either way.
+  # Default: false
+  claude-code-shared-prompt-cache: false
   # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
   # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
   live-media-relay:
