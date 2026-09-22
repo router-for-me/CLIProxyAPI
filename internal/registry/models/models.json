@@ -194,6 +194,35 @@
       ]
     },
     {
+      "id": "claude-opus-5-5",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 5.5",
+      "description": "Anthropic's leading model for agentic coding and knowledge work, priced below Claude Opus 5 with cache reads at a fifth of the prior cost. Supports adaptive thinking and does not accept disabled thinking.",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "claude-sonnet-5",
       "object": "model",
       "created": 1782777600,
