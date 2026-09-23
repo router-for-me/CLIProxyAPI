@@ -247,19 +247,53 @@ func TestSession_Dispatch_TerminalDeliveredWhenBufferFullAndSessionClosing(t *te
 		})
 	}
 
-	// Dispatch terminal message
-	s.dispatch(Message{
-		ID:   reqID,
-		Type: MessageTypeStreamEnd,
+	blocked := make(chan struct{})
+	req.setOnBlocked(func() {
+		close(blocked)
 	})
+
+	doneDispatch := make(chan struct{})
+	go func() {
+		s.dispatch(Message{
+			ID:   reqID,
+			Type: MessageTypeStreamEnd,
+		})
+		close(doneDispatch)
+	}()
+
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch did not enter backpressure wait")
+	}
 
 	var msgs []Message
 	for msg := range req.ch {
 		msgs = append(msgs, msg)
 	}
 
-	if len(msgs) == 0 {
-		t.Fatalf("expected messages, got 0")
+	select {
+	case <-doneDispatch:
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch remained blocked after draining")
+	}
+
+	if len(msgs) != pendingChannelBuffer+1 {
+		firstSeq := any(nil)
+		if len(msgs) > 0 {
+			firstSeq = msgs[0].Payload["seq"]
+		}
+		lastType := ""
+		if len(msgs) > 0 {
+			lastType = string(msgs[len(msgs)-1].Type)
+		}
+		t.Fatalf("frame loss: expected %d frames, got %d (first chunk seq=%v, last type=%s)",
+			pendingChannelBuffer+1, len(msgs), firstSeq, lastType)
+	}
+	for i := 0; i < pendingChannelBuffer; i++ {
+		if msgs[i].Payload["seq"] != i {
+			t.Fatalf("expected chunk %d to have seq %d, got %v", i, i, msgs[i].Payload["seq"])
+		}
 	}
 	lastMsg := msgs[len(msgs)-1]
 	if lastMsg.Type != MessageTypeStreamEnd {
@@ -281,17 +315,22 @@ func TestSession_SlowConsumer_UnblocksOnContextCancel(t *testing.T) {
 		sess.dispatch(Message{ID: reqID, Type: MessageTypeStreamChunk})
 	}
 
-	enteredDispatch := make(chan struct{})
+	blocked := make(chan struct{})
+	req.setOnBlocked(func() {
+		close(blocked)
+	})
+
 	doneDispatch := make(chan struct{})
 	go func() {
-		close(enteredDispatch)
 		sess.dispatch(Message{ID: reqID, Type: MessageTypeStreamChunk})
 		close(doneDispatch)
 	}()
 
-	<-enteredDispatch
-	// Small yield to ensure the goroutine is in deliver's select
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch did not enter backpressure wait")
+	}
 
 	// Cancel context to unblock saturated dispatch
 	cancel()
@@ -299,7 +338,7 @@ func TestSession_SlowConsumer_UnblocksOnContextCancel(t *testing.T) {
 	select {
 	case <-doneDispatch:
 		// Succeeded in unblocking
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Fatalf("dispatch remained blocked after context cancellation")
 	}
 }
@@ -317,25 +356,252 @@ func TestSession_SlowConsumer_UnblocksOnSessionClose(t *testing.T) {
 		sess.dispatch(Message{ID: reqID, Type: MessageTypeStreamChunk})
 	}
 
-	enteredDispatch := make(chan struct{})
+	blocked := make(chan struct{})
+	req.setOnBlocked(func() {
+		close(blocked)
+	})
+
 	doneDispatch := make(chan struct{})
 	go func() {
-		close(enteredDispatch)
 		sess.dispatch(Message{ID: reqID, Type: MessageTypeStreamChunk})
 		close(doneDispatch)
 	}()
 
-	<-enteredDispatch
-	// Small yield to ensure the goroutine is in deliver's select
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch did not enter backpressure wait")
+	}
 
 	// Close session to unblock saturated dispatch
-	sess.cleanup(errClosed)
+	cleanupDone := make(chan struct{})
+	go func() {
+		sess.cleanup(errClosed)
+		close(cleanupDone)
+	}()
+
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatalf("session cleanup remained blocked")
+	}
 
 	select {
 	case <-doneDispatch:
 		// Succeeded in unblocking
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(time.Second):
 		t.Fatalf("dispatch remained blocked after session cleanup")
+	}
+}
+
+func TestSession_SlowConsumer_Terminal_UnblocksOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sess := &session{
+		closed: make(chan struct{}),
+	}
+	reqID := "req-terminal-ctx-cancel"
+	req := newPendingRequest(ctx)
+	sess.pending.Store(reqID, req)
+
+	// Fill channel to buffer capacity
+	for i := 0; i < pendingChannelBuffer; i++ {
+		sess.dispatch(Message{
+			ID:   reqID,
+			Type: MessageTypeStreamChunk,
+			Payload: map[string]any{
+				"seq": i,
+			},
+		})
+	}
+
+	blocked := make(chan struct{})
+	req.setOnBlocked(func() {
+		close(blocked)
+	})
+
+	doneDispatch := make(chan struct{})
+	go func() {
+		sess.dispatch(Message{ID: reqID, Type: MessageTypeStreamEnd})
+		close(doneDispatch)
+	}()
+
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch did not enter backpressure wait")
+	}
+
+	// Cancel context to unblock saturated dispatch
+	cancel()
+
+	select {
+	case <-doneDispatch:
+		// Succeeded in unblocking
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch remained blocked after context cancellation")
+	}
+
+	var msgs []Message
+	for msg := range req.ch {
+		msgs = append(msgs, msg)
+	}
+
+	if len(msgs) == 0 {
+		t.Fatalf("expected queued messages, got 0")
+	}
+	lastMsg := msgs[len(msgs)-1]
+	if lastMsg.Type != MessageTypeError {
+		t.Fatalf("expected last message to be MessageTypeError on cancellation, got %s", lastMsg.Type)
+	}
+	if lastMsg.Payload["error"] != context.Canceled.Error() {
+		t.Fatalf("expected error payload %q, got %v", context.Canceled.Error(), lastMsg.Payload["error"])
+	}
+}
+
+func TestSession_SlowConsumer_Terminal_UnblocksOnSessionClose(t *testing.T) {
+	sess := &session{
+		closed: make(chan struct{}),
+	}
+	reqID := "req-terminal-sess-close"
+	req := newPendingRequest(context.Background())
+	sess.pending.Store(reqID, req)
+
+	// Fill channel to buffer capacity
+	for i := 0; i < pendingChannelBuffer; i++ {
+		sess.dispatch(Message{
+			ID:   reqID,
+			Type: MessageTypeStreamChunk,
+			Payload: map[string]any{
+				"seq": i,
+			},
+		})
+	}
+
+	blocked := make(chan struct{})
+	req.setOnBlocked(func() {
+		close(blocked)
+	})
+
+	doneDispatch := make(chan struct{})
+	go func() {
+		sess.dispatch(Message{ID: reqID, Type: MessageTypeStreamEnd})
+		close(doneDispatch)
+	}()
+
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch did not enter backpressure wait")
+	}
+
+	// Close session to unblock saturated dispatch
+	cleanupDone := make(chan struct{})
+	go func() {
+		sess.cleanup(errClosed)
+		close(cleanupDone)
+	}()
+
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatalf("session cleanup remained blocked")
+	}
+
+	select {
+	case <-doneDispatch:
+		// Succeeded in unblocking
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch remained blocked after session cleanup")
+	}
+
+	var msgs []Message
+	for msg := range req.ch {
+		msgs = append(msgs, msg)
+	}
+
+	if len(msgs) == 0 {
+		t.Fatalf("expected queued messages, got 0")
+	}
+	lastMsg := msgs[len(msgs)-1]
+	if lastMsg.Type != MessageTypeError {
+		t.Fatalf("expected last message to be MessageTypeError on session close, got %s", lastMsg.Type)
+	}
+	if lastMsg.Payload["error"] != errClosed.Error() {
+		t.Fatalf("expected error payload %q, got %v", errClosed.Error(), lastMsg.Payload["error"])
+	}
+}
+
+func TestSession_SlowConsumer_TerminalError_SessionClose(t *testing.T) {
+	sess := &session{
+		closed: make(chan struct{}),
+	}
+	reqID := "req-terminal-err-sess-close"
+	req := newPendingRequest(context.Background())
+	sess.pending.Store(reqID, req)
+
+	// Fill channel to buffer capacity
+	for i := 0; i < pendingChannelBuffer; i++ {
+		sess.dispatch(Message{
+			ID:   reqID,
+			Type: MessageTypeStreamChunk,
+			Payload: map[string]any{
+				"seq": i,
+			},
+		})
+	}
+
+	blocked := make(chan struct{})
+	req.setOnBlocked(func() {
+		close(blocked)
+	})
+
+	doneDispatch := make(chan struct{})
+	go func() {
+		sess.dispatch(Message{
+			ID:   reqID,
+			Type: MessageTypeError,
+			Payload: map[string]any{
+				"error": "upstream model timeout",
+			},
+		})
+		close(doneDispatch)
+	}()
+
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch did not enter backpressure wait")
+	}
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		sess.cleanup(errClosed)
+		close(cleanupDone)
+	}()
+
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatalf("session cleanup remained blocked")
+	}
+
+	select {
+	case <-doneDispatch:
+		// Succeeded in unblocking
+	case <-time.After(time.Second):
+		t.Fatalf("dispatch remained blocked after session cleanup")
+	}
+
+	var msgs []Message
+	for msg := range req.ch {
+		msgs = append(msgs, msg)
+	}
+
+	if len(msgs) == 0 {
+		t.Fatalf("expected queued messages, got 0")
+	}
+	lastMsg := msgs[len(msgs)-1]
+	if lastMsg.Type != MessageTypeError {
+		t.Fatalf("expected last message to be MessageTypeError, got %s", lastMsg.Type)
 	}
 }

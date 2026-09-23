@@ -786,3 +786,410 @@ func TestProvidersForExecutionForcedGeminiUsesGeminiProvider(t *testing.T) {
 		t.Fatalf("model = %q, want agents/test-agent", model)
 	}
 }
+
+func TestExecuteModelPropagatesForcedProviderAndAuthID(t *testing.T) {
+	model := "model-execution-pinned-model"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	executor := &modelExecutionCaptureExecutor{
+		provider: "custom-provider",
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{
+				Payload: []byte(`{"ok":true}`),
+			}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	authID := "model-execution-" + model
+
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "custom-provider",
+		AuthID:         authID,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	_, gotOpts := executor.captured()
+	if gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey] != authID {
+		t.Fatalf("pinned auth metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey], authID)
+	}
+}
+
+func TestExecuteModelStreamPropagatesForcedProviderAndAuthID(t *testing.T) {
+	model := "model-execution-stream-pinned-model"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	executor := &modelExecutionCaptureExecutor{
+		provider: "custom-provider",
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("chunk")}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{},
+				Chunks:  chunks,
+			}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	authID := "model-execution-" + model
+
+	stream, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Stream:         true,
+		Body:           requestBody,
+		ForcedProvider: "custom-provider",
+		AuthID:         authID,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModelStream() error = %+v", errMsg)
+	}
+	_, gotOpts := executor.captured()
+	if gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey] != authID {
+		t.Fatalf("pinned auth metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.PinnedAuthMetadataKey], authID)
+	}
+	for range stream.Chunks {
+	}
+}
+
+func TestExecuteModelPinsExactAuthAcrossPrioritiesWithoutFallback(t *testing.T) {
+	model := "multi-tier-model"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+
+	var executedAuthID string
+	var mu sync.Mutex
+	executor := &modelExecutionCaptureExecutor{
+		provider: "pinned-provider",
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			mu.Lock()
+			executedAuthID = auth.ID
+			mu.Unlock()
+			return coreexecutor.Response{
+				Payload: []byte(`{"ok":true}`),
+			}, nil
+		},
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	highAuth := &coreauth.Auth{
+		ID:         "auth-high-priority",
+		Provider:   "pinned-provider",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"priority": "100"},
+	}
+	lowAuth := &coreauth.Auth{
+		ID:         "auth-low-priority",
+		Provider:   "pinned-provider",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"priority": "0"},
+	}
+	disabledAuth := &coreauth.Auth{
+		ID:         "auth-disabled",
+		Provider:   "pinned-provider",
+		Status:     coreauth.StatusActive,
+		Disabled:   true,
+		Attributes: map[string]string{"priority": "50"},
+	}
+
+	for _, a := range []*coreauth.Auth{highAuth, lowAuth, disabledAuth} {
+		if _, errRegister := manager.Register(context.Background(), a); errRegister != nil {
+			t.Fatalf("manager.Register(): %v", errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(a.ID)
+		})
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	// 1. Without AuthID pin, normal selection picks high priority auth
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "pinned-provider",
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() without pin error = %+v", errMsg)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	mu.Lock()
+	if executedAuthID != "auth-high-priority" {
+		t.Fatalf("default routing executed %q, want auth-high-priority", executedAuthID)
+	}
+	mu.Unlock()
+
+	// 2. With AuthID pin to low priority auth, exact low priority auth is executed
+	resp, errMsg = handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "pinned-provider",
+		AuthID:         "auth-low-priority",
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() with low pin error = %+v", errMsg)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	mu.Lock()
+	if executedAuthID != "auth-low-priority" {
+		t.Fatalf("pinned routing executed %q, want auth-low-priority", executedAuthID)
+	}
+	mu.Unlock()
+
+	// 3. Pinning to non-existent auth fails without falling back to high priority auth
+	_, errMsg = handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "pinned-provider",
+		AuthID:         "auth-non-existent",
+	})
+	if errMsg == nil {
+		t.Fatal("ExecuteModel() with non-existent AuthID error = nil, want auth_not_found")
+	}
+
+	// 4. Pinning to disabled auth fails without falling back
+	_, errMsg = handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Model:          model,
+		Body:           requestBody,
+		ForcedProvider: "pinned-provider",
+		AuthID:         "auth-disabled",
+	})
+	if errMsg == nil {
+		t.Fatal("ExecuteModel() with disabled AuthID error = nil, want auth_not_found")
+	}
+}
+
+func TestExecuteModelRequestProxyOverridesCredentialProxy(t *testing.T) {
+	model := "model-execution-request-proxy"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	const (
+		authProxy    = "http://auth-proxy.example:8080"
+		requestProxy = "http://request-proxy.example:8081"
+	)
+	var seenAuthProxy string
+	var seenRequestProxy string
+	var seenContextProxy string
+	executor := &modelExecutionCaptureExecutor{
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			if auth != nil {
+				seenAuthProxy = auth.ProxyURL
+			}
+			seenRequestProxy = opts.ProxyURL
+			seenContextProxy = coreexecutor.RequestProxyURL(ctx)
+			return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example:8082"})
+	if _, errUpdate := handler.AuthManager.Update(context.Background(), &coreauth.Auth{
+		ID:       "model-execution-" + model,
+		Provider: executor.Identifier(),
+		Status:   coreauth.StatusActive,
+		ProxyURL: authProxy,
+		Metadata: map[string]any{"email": model + "@example.com"},
+	}); errUpdate != nil {
+		t.Fatalf("update auth proxy: %v", errUpdate)
+	}
+
+	_, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         model,
+		Body:          requestBody,
+		ProxyURL:      requestProxy,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if seenRequestProxy != requestProxy {
+		t.Fatalf("options proxy = %q, want %q", seenRequestProxy, requestProxy)
+	}
+	if seenContextProxy != requestProxy {
+		t.Fatalf("context proxy = %q, want %q", seenContextProxy, requestProxy)
+	}
+	if seenAuthProxy != authProxy {
+		t.Fatalf("auth proxy = %q, want credential proxy %q", seenAuthProxy, authProxy)
+	}
+}
+
+func TestExecuteModelRejectsInvalidProxyURL(t *testing.T) {
+	model := "model-execution-invalid-proxy"
+	executor := &modelExecutionCaptureExecutor{}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	for _, proxyURL := range []string{"direct", "http://:8080", "http://proxy.example:99999"} {
+		_, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         model,
+			Body:          []byte(`{}`),
+			ProxyURL:      proxyURL,
+		})
+		if errMsg == nil || errMsg.StatusCode != http.StatusBadRequest {
+			t.Fatalf("ExecuteModel proxy %q error = %+v, want HTTP 400", proxyURL, errMsg)
+		}
+		_, errStream := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         model,
+			Stream:        true,
+			Body:          []byte(`{}`),
+			ProxyURL:      proxyURL,
+		})
+		if errStream == nil || errStream.StatusCode != http.StatusBadRequest {
+			t.Fatalf("ExecuteModelStream proxy %q error = %+v, want HTTP 400", proxyURL, errStream)
+		}
+	}
+}
+
+func TestExecuteModelOmittedProxyDoesNotInheritAmbientProxy(t *testing.T) {
+	model := "model-execution-ambient-proxy"
+	const ambientProxy = "http://ambient-proxy.example:8081"
+	var seenContextProxy string
+	var seenRequestProxy string
+	record := func(ctx context.Context, opts coreexecutor.Options) {
+		seenContextProxy = coreexecutor.RequestProxyURL(ctx)
+		seenRequestProxy = opts.ProxyURL
+	}
+	executor := &modelExecutionCaptureExecutor{
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			record(ctx, opts)
+			return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+		},
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			record(ctx, opts)
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"ok":true}`)}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example:8082"})
+	ctx := coreexecutor.WithRequestProxyURL(context.Background(), ambientProxy)
+	body := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	_, errMsg := handler.ExecuteModel(ctx, ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         model,
+		Body:          body,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if seenRequestProxy != "" || seenContextProxy != "" {
+		t.Fatalf("omitted proxy inherited options=%q context=%q", seenRequestProxy, seenContextProxy)
+	}
+	seenContextProxy = ambientProxy
+	stream, errStream := handler.ExecuteModelStream(ctx, ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         model,
+		Stream:        true,
+		Body:          body,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteModelStream() error = %+v", errStream)
+	}
+	for range stream.Chunks {
+	}
+	if seenRequestProxy != "" || seenContextProxy != "" {
+		t.Fatalf("omitted stream proxy inherited options=%q context=%q", seenRequestProxy, seenContextProxy)
+	}
+}
+
+func TestExecuteModelReturnsFilteredHeadersWhenPassthroughDisabled(t *testing.T) {
+	model := "model-execution-internal-headers"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q}`, model))
+	executor := &modelExecutionCaptureExecutor{
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{
+				Payload: []byte(`{"ok":true}`),
+				Headers: http.Header{
+					"X-Ratelimit-Remaining": []string{"7"},
+					"Set-Cookie":            []string{"secret=1"},
+				},
+			}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: false})
+
+	resp, errMsg := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         model,
+		Body:          requestBody,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() error = %+v", errMsg)
+	}
+	if resp.Headers.Get("X-Ratelimit-Remaining") != "7" {
+		t.Fatalf("headers = %#v, want filtered upstream quota header", resp.Headers)
+	}
+	if resp.Headers.Get("Set-Cookie") != "" {
+		t.Fatalf("Set-Cookie = %q, want filtered", resp.Headers.Get("Set-Cookie"))
+	}
+
+	_, clientHeaders, clientErr := handler.ExecuteWithAuthManager(context.Background(), "openai", model, requestBody, "")
+	if clientErr != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", clientErr)
+	}
+	if clientHeaders.Get("X-Ratelimit-Remaining") != "" {
+		t.Fatalf("client headers = %#v, want passthrough disabled", clientHeaders)
+	}
+}
+
+func TestExecuteModelStreamReturnsFilteredHeadersWhenPassthroughDisabled(t *testing.T) {
+	model := "model-execution-internal-stream-headers"
+	requestBody := []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, model))
+	executor := &modelExecutionCaptureExecutor{
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: ok\n\n")}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Headers: http.Header{
+					"X-Ratelimit-Remaining": []string{"3"},
+					"Set-Cookie":            []string{"secret=1"},
+				},
+				Chunks: chunks,
+			}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{PassthroughHeaders: false})
+
+	stream, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         model,
+		Stream:        true,
+		Body:          requestBody,
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModelStream() error = %+v", errMsg)
+	}
+	if stream.Headers.Get("X-Ratelimit-Remaining") != "3" {
+		t.Fatalf("headers = %#v, want filtered upstream quota header", stream.Headers)
+	}
+	if stream.Headers.Get("Set-Cookie") != "" {
+		t.Fatalf("Set-Cookie = %q, want filtered", stream.Headers.Get("Set-Cookie"))
+	}
+}

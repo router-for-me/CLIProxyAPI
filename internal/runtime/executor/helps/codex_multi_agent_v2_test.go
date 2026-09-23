@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -16,11 +17,15 @@ import (
 )
 
 type pairRequestPluginHooks struct {
-	calls int64
+	calls       int64
+	onNormalize func(body []byte)
 }
 
 func (h *pairRequestPluginHooks) NormalizeRequest(_ context.Context, _, _ sdktranslator.Format, _ string, body []byte, _ bool) []byte {
 	h.calls++
+	if h.onNormalize != nil {
+		h.onNormalize(body)
+	}
 	updated, _ := sjson.SetBytes(body, "plugin_call", h.calls)
 	return updated
 }
@@ -178,5 +183,117 @@ func TestSameByteSlice(t *testing.T) {
 				t.Fatalf("sameByteSlice() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTranslateRequestEnvelopePairWithCodexMultiAgentV2UsesModelInfo(t *testing.T) {
+	trueVal := true
+	falseVal := false
+	const model = "gemini-3.8-flash-high"
+
+	input := []byte(`{
+		"model": "` + model + `",
+		"input": "Search weather",
+		"tools": [{"type": "web_search"}]
+	}`)
+
+	enabled := &registry.ModelInfo{
+		ID:                 model,
+		NativeCapabilities: &registry.NativeCapabilities{WebSearch: &trueVal},
+	}
+	envelope := sdktranslator.RequestEnvelope{Format: sdktranslator.FormatOpenAIResponse, Model: model, ModelInfo: enabled}
+	base, work := TranslateRequestEnvelopePairWithCodexMultiAgentV2(context.Background(), http.Header{}, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, envelope, input, input)
+	if gjson.GetBytes(base, "requestType").String() != "web_search" {
+		t.Fatalf("expected baseline requestType web_search, got: %s", base)
+	}
+	if gjson.GetBytes(work, "requestType").String() != "web_search" {
+		t.Fatalf("expected working requestType web_search, got: %s", work)
+	}
+
+	disabled := &registry.ModelInfo{
+		ID:                 model,
+		NativeCapabilities: &registry.NativeCapabilities{WebSearch: &falseVal},
+	}
+	envelope.ModelInfo = disabled
+	_, workDisabled := TranslateRequestEnvelopePairWithCodexMultiAgentV2(context.Background(), http.Header{}, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, envelope, input, input)
+	if gjson.GetBytes(workDisabled, "requestType").String() == "web_search" {
+		t.Fatalf("expected non-web_search when capability disabled, got: %s", workDisabled)
+	}
+}
+
+func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t *testing.T) {
+	var summaryDisplayInHook string
+	hooks := &pairRequestPluginHooks{
+		onNormalize: func(body []byte) {
+			summaryDisplayInHook = gjson.GetBytes(body, "thinking.display").String()
+		},
+	}
+	sdktranslator.SetPluginHooks(hooks)
+	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
+
+	cfg := &config.Config{}
+	payload := []byte(`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high"}`)
+
+	out := TranslateRequestWithAPIKeyModelCompatibility(
+		context.Background(),
+		http.Header{},
+		cfg,
+		sdktranslator.FormatOpenAI,
+		sdktranslator.FormatClaude,
+		"claude-3-5-sonnet",
+		payload,
+		false,
+		true, // isCompat
+	)
+
+	if hooks.calls != 1 {
+		t.Fatalf("plugin hook calls = %d, want 1", hooks.calls)
+	}
+	if got := gjson.GetBytes(out, "plugin_call").Int(); got != 1 {
+		t.Fatalf("plugin_call = %d, want 1; output was %s", got, out)
+	}
+	// Assert summary config was applied to the body before invoking the normalizer hook
+	if summaryDisplayInHook != "summarized" {
+		t.Fatalf("expected thinking.display = summarized in body delivered to normalizer, got: %q", summaryDisplayInHook)
+	}
+
+	// Also verify that non-compat path invokes normalizers exactly once
+	hooks.calls = 0
+	outNonCompat := TranslateRequestWithAPIKeyModelCompatibility(
+		context.Background(),
+		http.Header{},
+		cfg,
+		sdktranslator.FormatClaude,
+		sdktranslator.FormatOpenAI,
+		"claude-3-5-sonnet",
+		payload,
+		false,
+		false, // non-compat
+	)
+	if hooks.calls != 1 {
+		t.Fatalf("non-compat plugin hook calls = %d, want 1", hooks.calls)
+	}
+	if got := gjson.GetBytes(outNonCompat, "plugin_call").Int(); got != 1 {
+		t.Fatalf("non-compat plugin_call = %d, want 1; output was %s", got, outNonCompat)
+	}
+
+	// Also verify stream = true path
+	hooks.calls = 0
+	outStream := TranslateRequestWithAPIKeyModelCompatibility(
+		context.Background(),
+		http.Header{},
+		cfg,
+		sdktranslator.FormatClaude,
+		sdktranslator.FormatOpenAI,
+		"claude-3-5-sonnet",
+		payload,
+		true, // stream
+		true, // isCompat
+	)
+	if hooks.calls != 1 {
+		t.Fatalf("stream compat plugin hook calls = %d, want 1", hooks.calls)
+	}
+	if got := gjson.GetBytes(outStream, "plugin_call").Int(); got != 1 {
+		t.Fatalf("stream compat plugin_call = %d, want 1; output was %s", got, outStream)
 	}
 }

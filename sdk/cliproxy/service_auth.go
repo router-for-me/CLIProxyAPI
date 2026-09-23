@@ -21,7 +21,13 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.GetTokenStore(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
+		sdkAuth.NewAntigravityAuthenticator(),
+		sdkAuth.NewKimiAuthenticator(),
+		sdkAuth.NewKimiAIAuthenticator(),
+		sdkAuth.NewKimiAIDotAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
+		sdkAuth.NewDevinAuthenticator(),
+		sdkAuth.NewMetaAuthenticator(),
 	)
 }
 
@@ -94,17 +100,72 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 	if s == nil {
 		return
 	}
-	updates = coalesceAuthUpdates(updates)
+	// Keep this path limited to the targeted auths. Global plugin rebuilds and
+	// in-flight Antigravity probes can hold authUpdateMu for minutes and stall
+	// Management API PATCH responses.
+	s.authUpdateMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.authUpdateMu.Unlock()
+		}
+	}()
+
+	if s.authRevisions == nil {
+		s.authRevisions = make(map[string]uint64)
+	}
+
+	filtered := make([]watcher.AuthUpdate, 0, len(updates))
+	skippedWaits := make([]chan struct{}, 0)
+	startedRegs := make([]authRegistrationWait, 0)
+	startedWaitByID := make(map[string]authRegistrationWait)
+	for _, update := range updates {
+		id := authUpdateID(update)
+		if id == "" {
+			filtered = append(filtered, update)
+			continue
+		}
+		rev := update.Revision()
+		if rev > 0 {
+			if prevRev, exists := s.authRevisions[id]; exists && rev <= prevRev {
+				log.Debugf("skipping stale auth update for %s: rev %d <= processed %d", id, rev, prevRev)
+				if ch := s.authRegistrationWaitCh(id); ch != nil {
+					skippedWaits = append(skippedWaits, ch)
+				}
+				continue
+			}
+			s.authRevisions[id] = rev
+		}
+		wait := s.beginAuthRegistration(id)
+		startedRegs = append(startedRegs, wait)
+		startedWaitByID[id] = wait
+		filtered = append(filtered, update)
+	}
+	registrationsFinished := false
+	defer func() {
+		if !registrationsFinished {
+			finishAuthRegistrations(s, startedRegs)
+		}
+	}()
+	if len(filtered) == 0 {
+		locked = false
+		s.authUpdateMu.Unlock()
+		waitAuthRegistrations(skippedWaits)
+		return
+	}
+	updates = coalesceAuthUpdates(filtered)
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
 	if cfg == nil || s.coreManager == nil {
+		locked = false
+		s.authUpdateMu.Unlock()
+		waitAuthRegistrations(skippedWaits)
 		return
 	}
 
 	registrationCtx := coreauth.WithDeferredAPIKeyModelAliasRebuild(ctx)
 	tasks := make([]modelRegistrationTask, 0, len(updates))
-	needsPluginSync := false
 	needsAliasRebuild := false
 	for _, update := range updates {
 		switch update.Action {
@@ -118,14 +179,25 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 			}
 			needsAliasRebuild = true
 			authForRegistration := auth
+			expectedGeneration := authForRegistration.Generation
+			expectedDisabled := authForRegistration.Disabled
+			authID := authForRegistration.ID
+			wait := startedWaitByID[authID]
 			tasks = append(tasks, modelRegistrationTask{
 				phase:    modelRegistrationPhase(authForRegistration),
 				category: modelRegistrationCategory(authForRegistration),
 				run: func(compatCache *openAICompatibilityRegistrationCache) {
+					if s.shouldSkipModelRegistration(authID, expectedGeneration, expectedDisabled) {
+						return
+					}
 					s.completeModelRegistrationForAuthWithCache(registrationCtx, authForRegistration, compatCache)
 				},
+				done: func() {
+					if wait.ch != nil {
+						finishAuthRegistrations(s, []authRegistrationWait{wait})
+					}
+				},
 			})
-			needsPluginSync = true
 		case watcher.AuthUpdateActionDelete:
 			id := update.ID
 			if id == "" && update.Auth != nil {
@@ -133,6 +205,12 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 			}
 			if id == "" {
 				continue
+			}
+			if existing, ok := s.coreManager.GetByID(id); ok && existing != nil && update.Auth != nil {
+				if isStaleCoreAuth(existing, update.Auth) {
+					log.Debugf("skipping stale auth delete for %s: incoming gen=%d, existing gen=%d", id, update.Auth.Generation, existing.Generation)
+					continue
+				}
 			}
 			s.applyCoreAuthRemoval(registrationCtx, id)
 			needsAliasRebuild = true
@@ -144,10 +222,12 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 	if needsAliasRebuild {
 		s.coreManager.RefreshAPIKeyModelAlias()
 	}
+	locked = false
+	s.authUpdateMu.Unlock()
 	s.runModelRegistrationTasks(registrationCtx, tasks)
-	if needsPluginSync {
-		s.syncPluginRuntime(registrationCtx)
-	}
+	finishAuthRegistrations(s, startedRegs)
+	registrationsFinished = true
+	waitAuthRegistrations(skippedWaits)
 }
 
 func coalesceAuthUpdates(updates []watcher.AuthUpdate) []watcher.AuthUpdate {
@@ -266,7 +346,6 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		return
 	}
 	s.completeModelRegistrationForAuth(ctx, auth)
-	s.syncPluginRuntime(ctx)
 }
 
 func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth *coreauth.Auth) *coreauth.Auth {
@@ -282,6 +361,10 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 	op := "register"
 	var err error
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
+		if isStaleCoreAuth(existing, auth) {
+			log.Debugf("skipping stale auth update for %s: incoming gen=%d, existing gen=%d", auth.ID, auth.Generation, existing.Generation)
+			return existing
+		}
 		auth.CreatedAt = existing.CreatedAt
 		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
@@ -305,6 +388,107 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		auth = current
 	}
 	return auth
+}
+
+type authRegistrationWait struct {
+	id string
+	ch chan struct{}
+}
+
+func (s *Service) authRegistrationWaitCh(id string) chan struct{} {
+	if s == nil {
+		return nil
+	}
+	s.authRegWaitMu.Lock()
+	defer s.authRegWaitMu.Unlock()
+	if s.authRegWaiters == nil {
+		return nil
+	}
+	return s.authRegWaiters[id]
+}
+
+func (s *Service) beginAuthRegistration(id string) authRegistrationWait {
+	ch := make(chan struct{})
+	if s == nil || id == "" {
+		close(ch)
+		return authRegistrationWait{id: id, ch: ch}
+	}
+	s.authRegWaitMu.Lock()
+	if s.authRegWaiters == nil {
+		s.authRegWaiters = make(map[string]chan struct{})
+	}
+	s.authRegWaiters[id] = ch
+	s.authRegWaitMu.Unlock()
+	return authRegistrationWait{id: id, ch: ch}
+}
+
+func finishAuthRegistrations(s *Service, waits []authRegistrationWait) {
+	if len(waits) == 0 {
+		return
+	}
+	if s != nil {
+		s.authRegWaitMu.Lock()
+		for _, wait := range waits {
+			if wait.ch == nil {
+				continue
+			}
+			if s.authRegWaiters != nil && s.authRegWaiters[wait.id] == wait.ch {
+				delete(s.authRegWaiters, wait.id)
+			}
+		}
+		s.authRegWaitMu.Unlock()
+	}
+	for _, wait := range waits {
+		if wait.ch == nil {
+			continue
+		}
+		select {
+		case <-wait.ch:
+		default:
+			close(wait.ch)
+		}
+	}
+}
+
+func waitAuthRegistrations(waits []chan struct{}) {
+	for _, ch := range waits {
+		if ch == nil {
+			continue
+		}
+		<-ch
+	}
+}
+
+func (s *Service) shouldSkipModelRegistration(authID string, expectedGeneration uint64, expectedDisabled bool) bool {
+	if s == nil || s.coreManager == nil || strings.TrimSpace(authID) == "" {
+		return true
+	}
+	current, ok := s.coreManager.GetByID(authID)
+	if !ok || current == nil {
+		return !expectedDisabled
+	}
+	if expectedGeneration > 0 && current.Generation > expectedGeneration {
+		return true
+	}
+	return current.Disabled != expectedDisabled
+}
+
+// isStaleCoreAuth reports whether an incoming auth update is older than the current
+// state in coreManager, based on registration epoch and generation.
+func isStaleCoreAuth(existing, incoming *coreauth.Auth) bool {
+	if existing == nil || incoming == nil {
+		return false
+	}
+	// If incoming has an explicit registration epoch that is older than existing, it's stale.
+	if incoming.RegistrationEpoch > 0 && incoming.RegistrationEpoch < existing.RegistrationEpoch {
+		return true
+	}
+	// Versioned snapshots with an older generation must not overwrite a newer persist.
+	// Generation 0 is left unversioned (file-watcher synthesizer snapshots).
+	if incoming.Generation > 0 && incoming.Generation < existing.Generation {
+		return true
+	}
+	return false
 }
 
 func (s *Service) completeModelRegistrationForAuth(ctx context.Context, auth *coreauth.Auth) {
@@ -351,7 +535,6 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if strings.EqualFold(provider, "xai") {
 		executor.CloseXAIWebsocketSessionsForAuthID(id, "auth_removed")
 	}
-	s.syncPluginRuntime(ctx)
 }
 
 func (s *Service) applyRetryConfig(cfg *config.Config) {

@@ -82,3 +82,88 @@ func TestPendingStreamErrorIgnoresUnavailableErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitCRLFRepro(t *testing.T) {
+	state := &sseJSONValidationState{}
+	chunks := []string{
+		"data: {\"type\":\"response.completed\",\r",
+		"\ndata: \"response\":{\"status\":\"completed\"}}\r\n\r\n",
+	}
+	var output []byte
+	for _, chunk := range chunks {
+		out, errAdd := state.AddChunk([]byte(chunk))
+		if errAdd != nil {
+			t.Fatal(errAdd)
+		}
+		output = append(output, out...)
+	}
+	if errFinish := state.Finish(); errFinish != nil {
+		t.Fatal(errFinish)
+	}
+
+	singleState := &sseJSONValidationState{}
+	unsplitChunk := "data: {\"type\":\"response.completed\",\r\ndata: \"response\":{\"status\":\"completed\"}}\r\n\r\n"
+	singleOutput, errSingle := singleState.AddChunk([]byte(unsplitChunk))
+	if errSingle != nil {
+		t.Fatal(errSingle)
+	}
+	if errFinish := singleState.Finish(); errFinish != nil {
+		t.Fatal(errFinish)
+	}
+	if string(output) != string(singleOutput) {
+		t.Fatalf("output mismatch: got %q, want %q", string(output), string(singleOutput))
+	}
+}
+
+func TestSSEJSONValidationStateSplitCRLFVariants(t *testing.T) {
+	wantOutput := "data: {\"type\":\"response.completed\",\ndata: \"response\":{\"status\":\"completed\"}}\n\n"
+	tests := []struct {
+		name   string
+		chunks []string
+	}{
+		{
+			name: "intervening empty chunks",
+			chunks: []string{
+				"data: {\"type\":\"response.completed\",\r",
+				"",
+				"",
+				"\ndata: \"response\":{\"status\":\"completed\"}}\r\n\r\n",
+			},
+		},
+		{
+			name: "standalone LF chunk",
+			chunks: []string{
+				"data: {\"type\":\"response.completed\",\r",
+				"\n",
+				"data: \"response\":{\"status\":\"completed\"}}\r\n\r\n",
+			},
+		},
+		{
+			name: "bare CR chunk followed by regular content",
+			chunks: []string{
+				"data: {\"type\":\"response.completed\",\r",
+				"data: \"response\":{\"status\":\"completed\"}}\r\n\r\n",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &sseJSONValidationState{}
+			var output []byte
+			for _, chunk := range tc.chunks {
+				out, errAdd := state.AddChunk([]byte(chunk))
+				if errAdd != nil {
+					t.Fatalf("AddChunk failed: %v", errAdd)
+				}
+				output = append(output, out...)
+			}
+			if errFinish := state.Finish(); errFinish != nil {
+				t.Fatalf("Finish failed: %v", errFinish)
+			}
+			if string(output) != wantOutput {
+				t.Fatalf("output mismatch: got %q, want %q", string(output), wantOutput)
+			}
+		})
+	}
+}

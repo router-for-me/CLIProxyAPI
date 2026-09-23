@@ -239,17 +239,25 @@ func TestAntigravityBuildRequest_PreservesIndependentWebSearchRequestType(t *tes
 
 func TestShouldResolveAntigravityWebSearchGroundingURLsRequiresTypedWebSearchAndSearchRequest(t *testing.T) {
 	original := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
+	originalResponses := []byte(`{"tools":[{"type":"web_search"}]}`)
+	originalResponsesPreview := []byte(`{"tools":[{"type":"web_search_preview_2025_03_11"}]}`)
 	translatedWithGoogleSearch := []byte(`{"requestType":"web_search","request":{"tools":[{"googleSearch":{}}]}}`)
 	translatedWithoutGoogleSearch := []byte(`{"request":{"contents":[]}}`)
 
 	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatClaude, original, translatedWithGoogleSearch) {
 		t.Fatal("expected typed Claude web search translated to web_search request to resolve grounding URLs")
 	}
+	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAIResponse, originalResponses, translatedWithGoogleSearch) {
+		t.Fatal("expected typed OpenAI Responses web search translated to web_search request to resolve grounding URLs")
+	}
+	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAIResponse, originalResponsesPreview, translatedWithGoogleSearch) {
+		t.Fatal("expected web_search_preview_2025_03_11 translated to web_search request to resolve grounding URLs")
+	}
 	if shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatClaude, original, translatedWithoutGoogleSearch) {
 		t.Fatal("expected request without googleSearch to skip grounding URL resolution")
 	}
 	if shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAI, original, translatedWithGoogleSearch) {
-		t.Fatal("expected non-Claude source format to skip grounding URL resolution")
+		t.Fatal("expected non-Claude/non-Responses source format to skip grounding URL resolution")
 	}
 }
 

@@ -448,6 +448,73 @@ func TestAntigravityStreamPrependsLeadingUserForIssue4959ResponsesHistory(t *tes
 	assertIssue4959LeadingUserContents(t, gjson.GetBytes(<-captured, "request.contents").Array())
 }
 
+func issue5358ResponsesTrailingReasoningPayload() []byte {
+	carrier := "cpa-gemini-responses-carrier-v1:previous:text:" + base64.RawStdEncoding.EncodeToString([]byte(issue4959GeminiThoughtSignature()))
+	return []byte(`{"model":"gemini-3.7-flash-high","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"world"}]},` +
+		`{"type":"reasoning","id":"rs_resp_test_detached_after_1","summary":[],"encrypted_content":"` + carrier + `","internal_chat_message_metadata_passthrough":{"turn_id":"uuid-1"}}` +
+		`]}`)
+}
+
+func TestAntigravityStreamAppendsTrailingUserForGeminiTrailingModelTurn(t *testing.T) {
+	captured := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		captured <- body
+
+		contents := gjson.GetBytes(body, "request.contents").Array()
+		if len(contents) > 0 {
+			lastRole := contents[len(contents)-1].Get("role").String()
+			if lastRole == "model" || lastRole == "assistant" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"code":400,"message":"Requests ending with a model turn are not supported."}}`))
+				return
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	auth := testAntigravityAuth(server.URL)
+	auth.Metadata["project_id"] = "project-1"
+	result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3.7-flash-high",
+		Payload: issue5358ResponsesTrailingReasoningPayload(),
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+	body := <-captured
+	contents := gjson.GetBytes(body, "request.contents").Array()
+	if len(contents) == 0 {
+		t.Fatalf("request.contents empty; body=%s", body)
+	}
+	lastContent := contents[len(contents)-1]
+	if got := lastContent.Get("role").String(); got != "user" {
+		t.Fatalf("trailing turn role = %q, want user; body=%s", got, body)
+	}
+	if got := lastContent.Get("parts.0.text").String(); got != "" {
+		t.Fatalf("trailing turn text = %q, want empty string; body=%s", got, body)
+	}
+}
+
 func TestAntigravityStreamPrependsLeadingUserAfterReplayInsertsFunctionCall(t *testing.T) {
 	cache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(cache.ClearAntigravityReasoningReplayCache)

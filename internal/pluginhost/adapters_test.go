@@ -1770,6 +1770,86 @@ func TestStreamChunkRequestBodyPolicyBySchemaVersion(t *testing.T) {
 	}
 }
 
+func TestStreamChunkHistoryPolicyBySchemaVersion(t *testing.T) {
+	var legacyGot, modernGot pluginapi.StreamChunkInterceptRequest
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "legacy",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: 4,
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							legacyGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+				},
+			},
+		},
+		capabilityRecord{
+			id: "modern",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitHistory,
+				Capabilities: pluginapi.Capabilities{
+					StreamChunkInterceptor: responseInterceptorFunc{
+						interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+							modernGot = req
+							return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+						},
+					},
+				},
+			},
+		},
+	)
+	if !host.StreamChunkPayloadIncludesHistory() {
+		t.Fatal("StreamChunkPayloadIncludesHistory() = false, want true when legacy stream interceptor is active")
+	}
+
+	_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		HistoryChunks: [][]byte{[]byte("first")},
+		Body:          []byte("chunk"),
+		ChunkIndex:    0,
+	})
+	if len(legacyGot.HistoryChunks) != 1 || string(legacyGot.HistoryChunks[0]) != "first" {
+		t.Fatalf("legacy payload history = %#v, want preserved", legacyGot.HistoryChunks)
+	}
+	if len(modernGot.HistoryChunks) != 0 {
+		t.Fatalf("modern payload history = %#v, want omitted", modernGot.HistoryChunks)
+	}
+
+	legacyGot = pluginapi.StreamChunkInterceptRequest{}
+	modernGot = pluginapi.StreamChunkInterceptRequest{}
+	_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+		HistoryChunks: [][]byte{[]byte("first")},
+		Body:          []byte("chunk"),
+		ChunkIndex:    pluginapi.StreamChunkHeaderInitIndex,
+	})
+	if len(legacyGot.HistoryChunks) != 1 || string(legacyGot.HistoryChunks[0]) != "first" {
+		t.Fatalf("legacy init history = %#v, want preserved", legacyGot.HistoryChunks)
+	}
+	if len(modernGot.HistoryChunks) != 1 || string(modernGot.HistoryChunks[0]) != "first" {
+		t.Fatalf("modern init history = %#v, want preserved", modernGot.HistoryChunks)
+	}
+
+	modernOnly := newHostWithRecords(capabilityRecord{
+		id: "modern-only",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitHistory,
+			Capabilities: pluginapi.Capabilities{
+				StreamChunkInterceptor: responseInterceptorFunc{
+					interceptStreamChunk: func(ctx context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+						return pluginapi.StreamChunkInterceptResponse{}, nil
+					},
+				},
+			},
+		},
+	})
+	if modernOnly.StreamChunkPayloadIncludesHistory() {
+		t.Fatal("StreamChunkPayloadIncludesHistory() = true, want false for schema v5+ only")
+	}
+}
+
 func TestHasRequestInterceptorsReflectsActiveRequestInterceptors(t *testing.T) {
 	responseOnly := newHostWithRecords(capabilityRecord{
 		id: "response",
@@ -2254,6 +2334,121 @@ func TestUsageAdapterNormalizesOmittedGenerateToTrue(t *testing.T) {
 	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "provider", Model: "gpt-5.4"})
 	if !gotGenerate {
 		t.Fatalf("plugin Generate = %v, want true for omitted field", gotGenerate)
+	}
+}
+
+func TestUsageAdapterPropagatesBaseURL(t *testing.T) {
+	var gotBaseURL string
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotBaseURL = record.BaseURL
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-base-url",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-base-url",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+		BaseURL:  "https://custom-proxy.example.com/v1",
+	})
+	if gotBaseURL != "https://custom-proxy.example.com/v1" {
+		t.Fatalf("plugin BaseURL = %q, want https://custom-proxy.example.com/v1", gotBaseURL)
+	}
+}
+
+func TestUsageAdapterPropagatesResponseModelServiceTierAndStream(t *testing.T) {
+	var gotRecord pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotRecord = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-response-fields",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-response-fields",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:            "provider",
+		Model:               "gpt-5.4",
+		ResponseModel:       "gpt-5.6-luna",
+		ServiceTier:         "default",
+		ResponseServiceTier: "priority",
+		Stream:              true,
+	})
+	if gotRecord.Model != "gpt-5.4" {
+		t.Fatalf("plugin Model = %q, want gpt-5.4", gotRecord.Model)
+	}
+	if gotRecord.ResponseModel != "gpt-5.6-luna" {
+		t.Fatalf("plugin ResponseModel = %q, want gpt-5.6-luna", gotRecord.ResponseModel)
+	}
+	if gotRecord.ServiceTier != "default" {
+		t.Fatalf("plugin ServiceTier = %q, want default", gotRecord.ServiceTier)
+	}
+	if gotRecord.ResponseServiceTier != "priority" {
+		t.Fatalf("plugin ResponseServiceTier = %q, want priority", gotRecord.ResponseServiceTier)
+	}
+	if !gotRecord.Stream {
+		t.Fatalf("plugin Stream = %v, want true", gotRecord.Stream)
+	}
+
+	// Verify empty fields and Stream=false propagate cleanly without corruption.
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "provider",
+		Model:    "gpt-5.4",
+		Stream:   false,
+	})
+	if gotRecord.Model != "gpt-5.4" {
+		t.Fatalf("plugin Model = %q, want gpt-5.4", gotRecord.Model)
+	}
+	if gotRecord.ResponseModel != "" {
+		t.Fatalf("plugin ResponseModel = %q, want empty", gotRecord.ResponseModel)
+	}
+	if gotRecord.ResponseServiceTier != "" {
+		t.Fatalf("plugin ResponseServiceTier = %q, want empty", gotRecord.ResponseServiceTier)
+	}
+	if gotRecord.Stream {
+		t.Fatalf("plugin Stream = %v, want false", gotRecord.Stream)
+	}
+}
+
+func TestUsageAdapterPropagatesRequestIDAndTraceID(t *testing.T) {
+	var gotRecord pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotRecord = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-request-trace-id",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	host.RegisterUsagePlugins()
+
+	adapter := &usageAdapter{host: host, pluginID: "usage-request-trace-id", plugin: plugin}
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		RequestID: "b5db448b-3d6d-495c-9c71-f925b68926cb",
+		TraceID:   "00000001",
+		Provider:  "codex",
+		Model:     "gpt-5.6-luna",
+	})
+
+	if gotRecord.RequestID != "b5db448b-3d6d-495c-9c71-f925b68926cb" {
+		t.Fatalf("plugin RequestID = %q, want b5db448b-3d6d-495c-9c71-f925b68926cb", gotRecord.RequestID)
+	}
+	if gotRecord.TraceID != "00000001" {
+		t.Fatalf("plugin TraceID = %q, want 00000001", gotRecord.TraceID)
 	}
 }
 
@@ -3208,7 +3403,7 @@ func setHostSnapshotForTest(host *Host, enabled bool, records ...capabilityRecor
 	sortRecords(records)
 	host.mu.Lock()
 	host.rebuildActivePluginMapsLocked(records)
-	host.snapshot.Store(&Snapshot{enabled: enabled, records: records})
+	host.snapshot.Store(&Snapshot{enabled: enabled, records: records, quotaSupportedProviders: make(map[string][]string)})
 	host.mu.Unlock()
 }
 

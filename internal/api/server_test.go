@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,11 +19,15 @@ import (
 	gin "github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	runtimehelps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
@@ -30,6 +35,9 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
+	"gopkg.in/yaml.v3"
 )
 
 type codexSearchCaptureExecutor struct {
@@ -599,6 +607,16 @@ func newTestServer(t *testing.T) *Server {
 
 func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 	t.Helper()
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+	}
+	return newTestServerWithConfig(t, cfg, opts...)
+}
+
+func newTestServerWithConfig(t *testing.T, cfg *proxyconfig.Config, opts ...ServerOption) *Server {
+	t.Helper()
 
 	gin.SetMode(gin.TestMode)
 
@@ -608,22 +626,60 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 		t.Fatalf("failed to create auth dir: %v", err)
 	}
 
-	cfg := &proxyconfig.Config{
-		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
-		},
-		Port:                   0,
-		AuthDir:                authDir,
-		Debug:                  true,
-		LoggingToFile:          false,
-		UsageStatisticsEnabled: false,
-	}
+	cfg.Port = 0
+	cfg.AuthDir = authDir
+	cfg.Debug = true
+	cfg.LoggingToFile = false
+	cfg.UsageStatisticsEnabled = false
 
 	authManager := auth.NewManager(nil, nil, nil)
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath, opts...)
+}
+
+func TestNewServerAppliesTrustedProxyConfiguration(t *testing.T) {
+	server := newTestServerWithConfig(t, &proxyconfig.Config{
+		TrustedProxies: []string{"192.0.2.0/24"},
+	})
+	server.engine.GET("/test-client-ip", func(c *gin.Context) {
+		c.String(http.StatusOK, c.ClientIP())
+	})
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		wantIP     string
+	}{
+		{name: "trusted proxy", remoteAddr: "192.0.2.10:43123", wantIP: "203.0.113.5"},
+		{name: "untrusted peer", remoteAddr: "198.51.100.20:43123", wantIP: "198.51.100.20"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test-client-ip", nil)
+			req.RemoteAddr = test.remoteAddr
+			req.Header.Set("X-Forwarded-For", "203.0.113.5")
+			recorder := httptest.NewRecorder()
+			server.engine.ServeHTTP(recorder, req)
+			if got := recorder.Body.String(); got != test.wantIP {
+				t.Fatalf("client IP = %q, want %q", got, test.wantIP)
+			}
+		})
+	}
+
+	defaultServer := newTestServer(t)
+	defaultServer.engine.GET("/test-client-ip", func(c *gin.Context) {
+		c.String(http.StatusOK, c.ClientIP())
+	})
+	request := httptest.NewRequest(http.MethodGet, "/test-client-ip", nil)
+	request.RemoteAddr = "198.51.100.20:43123"
+	request.Header.Set("X-Forwarded-For", "203.0.113.5")
+	recorder := httptest.NewRecorder()
+	defaultServer.engine.ServeHTTP(recorder, request)
+	if got := recorder.Body.String(); got != "198.51.100.20" {
+		t.Fatalf("default client IP = %q, want direct peer IP", got)
+	}
 }
 
 func TestHealthz(t *testing.T) {
@@ -661,6 +717,65 @@ func TestHealthz(t *testing.T) {
 			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
 		}
 	})
+}
+
+func TestHealthzAccessLogging(t *testing.T) {
+	server := newTestServer(t)
+	previousHome := home.Current()
+	home.ClearCurrent()
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.InfoLevel)
+	t.Cleanup(func() { logger.ReplaceHooks(previousHooks); logger.SetLevel(previousLevel) })
+	for _, tc := range []struct {
+		name        string
+		homeEnabled bool
+		status      int
+	}{
+		{"healthy", false, http.StatusOK},
+		{"home_unavailable", true, http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server.cfg.Home.Enabled = tc.homeEnabled
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				t.Run(method, func(t *testing.T) {
+					hook.Reset()
+					recorder := httptest.NewRecorder()
+					server.engine.ServeHTTP(recorder, httptest.NewRequest(method, "/healthz", nil))
+					if recorder.Code != tc.status {
+						t.Fatalf("status = %d, want %d", recorder.Code, tc.status)
+					}
+					count := 0
+					for _, entry := range hook.AllEntries() {
+						if _, ok := entry.Data["request_id"]; ok && strings.Contains(entry.Message, `"/healthz"`) {
+							count++
+							if tc.homeEnabled && entry.Level != log.ErrorLevel {
+								t.Errorf("failed probe log level = %v, want error", entry.Level)
+							}
+						}
+					}
+					wantCount := 0
+					if tc.homeEnabled {
+						wantCount = 1
+					}
+					if count != wantCount {
+						t.Errorf("probe access logs = %d, want %d", count, wantCount)
+					}
+					hook.Reset()
+					server.engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz-access-log-control", nil))
+					for _, entry := range hook.AllEntries() {
+						if _, ok := entry.Data["request_id"]; ok && strings.Contains(entry.Message, `"/healthz-access-log-control"`) {
+							return
+						}
+					}
+					t.Error("ordinary request did not emit an access log after health probe")
+				})
+			}
+		})
+	}
 }
 
 func TestCodexLiveRoutesRequireAuthAndAreRegistered(t *testing.T) {
@@ -2005,7 +2120,7 @@ func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"
-	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
 		{
 			ID:                  "gpt-5.5",
 			Object:              "model",
@@ -2030,6 +2145,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		},
 		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5-flare", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5-sunburst", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.5", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-image-2.0", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
@@ -2108,8 +2226,15 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		t.Fatalf("custom context_window = %v, want 123456", custom["context_window"])
 	}
 	assertCodexSupportedReasoningLevels(t, custom, []string{"none", "minimal", "low", "medium", "high", "xhigh"})
-	if custom["base_instructions"] != gpt55["base_instructions"] {
-		t.Fatal("expected custom model to use gpt-5.5 base_instructions fallback")
+	if custom["base_instructions"] == gpt55["base_instructions"] {
+		t.Fatal("expected custom model to use compact instructions instead of the full gpt-5.5 template")
+	}
+	if got, _ := custom["base_instructions"].(string); got == "" {
+		t.Fatal("expected custom model to include base_instructions")
+	}
+	customMessages, _ := custom["model_messages"].(map[string]any)
+	if customMessages["instructions_template"] != custom["base_instructions"] {
+		t.Fatalf("expected custom instructions_template to match base_instructions, got %#v", customMessages["instructions_template"])
 	}
 	if _, ok := custom["available_in_plans"].([]any); !ok {
 		t.Fatalf("expected custom model to use gpt-5.5 available_in_plans fallback, got %#v", custom["available_in_plans"])
@@ -2121,19 +2246,16 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if !ok || len(customServiceTiers) != 0 {
 		t.Fatalf("expected custom model service_tiers = [], got %#v", custom["service_tiers"])
 	}
-	if _, ok := custom["apply_patch_tool_type"]; ok {
-		t.Fatal("expected custom model to omit apply_patch_tool_type")
-	}
-	if _, ok := custom["upgrade"]; ok {
-		t.Fatal("expected custom model to omit upgrade")
-	}
-	if _, ok := custom["availability_nux"]; ok {
-		t.Fatal("expected custom model to omit availability_nux")
-	}
+	assertCodexNullableCatalogField(t, custom, "apply_patch_tool_type")
+	assertCodexNullableCatalogField(t, custom, "upgrade")
+	assertCodexNullableCatalogField(t, custom, "availability_nux")
 
 	hiddenModels := map[string]bool{
 		"grok-imagine-image-quality":     false,
 		"gpt-image-2":                    false,
+		"gpt-image-2.5-flare":            false,
+		"gpt-image-2.5-sunburst":         false,
+		"gpt-image-2.5":                  false,
 		"grok-imagine-image":             false,
 		"grok-imagine-image-2.0":         false,
 		"grok-imagine-video":             false,
@@ -2154,6 +2276,126 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
 		}
+	}
+}
+
+func TestModelsWithClientVersion_DevinDisplayName(t *testing.T) {
+	devinClientID := "test-devin-client-version-models"
+	openaiClientID := "test-openai-client-version-models"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(devinClientID, "devin", []*registry.ModelInfo{
+		{
+			ID:          "devin/swe-2",
+			Object:      "model",
+			OwnedBy:     "cognition",
+			Type:        "devin",
+			DisplayName: "SWE-2",
+		},
+		{
+			ID:          "devin/gpt-6-astra",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "devin",
+			DisplayName: "GPT-6 Astra",
+		},
+	})
+	modelRegistry.RegisterClient(openaiClientID, "openai", []*registry.ModelInfo{
+		{
+			ID:          "standard-openai-model",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "openai",
+			DisplayName: "Standard Model",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(devinClientID)
+		modelRegistry.UnregisterClient(openaiClientID)
+	})
+
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Models []map[string]any `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(rr.Body.Bytes(), &resp); errUnmarshal != nil {
+		t.Fatalf("failed to parse response JSON: %v", errUnmarshal)
+	}
+
+	bySlug := make(map[string]map[string]any, len(resp.Models))
+	for _, m := range resp.Models {
+		if slug, ok := m["slug"].(string); ok {
+			bySlug[slug] = m
+		}
+	}
+
+	swe2, ok := bySlug["devin/swe-2"]
+	if !ok {
+		t.Fatal("expected devin/swe-2 in models list")
+	}
+	if got, _ := swe2["display_name"].(string); got != "SWE-2 (Devin)" {
+		t.Fatalf("devin/swe-2 display_name = %q, want SWE-2 (Devin)", got)
+	}
+
+	astra, ok := bySlug["devin/gpt-6-astra"]
+	if !ok {
+		t.Fatal("expected devin/gpt-6-astra in models list")
+	}
+	if got, _ := astra["display_name"].(string); got != "GPT-6 Astra (Devin)" {
+		t.Fatalf("devin/gpt-6-astra display_name = %q, want GPT-6 Astra (Devin)", got)
+	}
+
+	std, ok := bySlug["standard-openai-model"]
+	if !ok {
+		t.Fatal("expected standard-openai-model in models list")
+	}
+	if got, _ := std["display_name"].(string); got != "Standard Model" {
+		t.Fatalf("standard-openai-model display_name = %q, want Standard Model", got)
+	}
+}
+
+func TestHomeCodexClientModels_DevinDisplayName(t *testing.T) {
+	entries := []homeModelEntry{
+		{
+			id:          "devin/swe-2",
+			displayName: "SWE-2",
+			providers:   []string{"devin"},
+		},
+		{
+			id:          "home-regular",
+			displayName: "Home Regular",
+			providers:   []string{"openai"},
+		},
+	}
+	models := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, formatHomeCodexModel(entry))
+	}
+	resp := codexmodels.BuildResponseForClient(models, nil, false, "0.153.4")
+	catalog, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected []map[string]any, got %T", resp["models"])
+	}
+	bySlug := make(map[string]map[string]any, len(catalog))
+	for _, m := range catalog {
+		slug, _ := m["slug"].(string)
+		bySlug[slug] = m
+	}
+	if got, _ := bySlug["devin/swe-2"]["display_name"].(string); got != "SWE-2 (Devin)" {
+		t.Fatalf("devin/swe-2 display_name = %q, want SWE-2 (Devin)", got)
+	}
+	if got, _ := bySlug["home-regular"]["display_name"].(string); got != "Home Regular" {
+		t.Fatalf("home-regular display_name = %q, want Home Regular", got)
 	}
 }
 
@@ -2312,6 +2554,17 @@ func codexClientTestMaxTemplatePriority(t *testing.T) int {
 		}
 	}
 	return maxPriority
+}
+
+func assertCodexNullableCatalogField(t *testing.T, model map[string]any, key string) {
+	t.Helper()
+	value, exists := model[key]
+	if !exists {
+		t.Fatalf("%s must be present and null so Codex can decode the catalog", key)
+	}
+	if value != nil {
+		t.Fatalf("%s = %#v, want null", key, value)
+	}
 }
 
 func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, want []string) {
@@ -2497,7 +2750,13 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 			{
 				"name": "models/gemini-3-pro",
 				"inputTokenLimit": 1048576,
-				"outputTokenLimit": 65536
+				"outputTokenLimit": 65536,
+				"thinking": {
+					"min": 128,
+					"max": 65535,
+					"dynamic_allowed": true,
+					"levels": ["low", "medium", "high"]
+				}
 			}
 		]
 	}`))
@@ -2522,6 +2781,17 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	}
 	if geminiEntry.contextLength != 1048576 || geminiEntry.maxCompletionTokens != 65536 {
 		t.Fatalf("gemini token metadata = %d/%d, want 1048576/65536", geminiEntry.contextLength, geminiEntry.maxCompletionTokens)
+	}
+	if geminiEntry.thinking == nil || !reflect.DeepEqual(geminiEntry.thinking.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("gemini thinking metadata = %#v, want low/medium/high", geminiEntry.thinking)
+	}
+
+	formatted := formatHomeCodexModel(geminiEntry)
+	if got := homeModelInt64Value(formatted, "context_length"); got != 1048576 {
+		t.Fatalf("formatted Gemini context_length = %d, want 1048576", got)
+	}
+	if got, ok := formatted["thinking"].(*registry.ThinkingSupport); !ok || !reflect.DeepEqual(got.Levels, []string{"low", "medium", "high"}) {
+		t.Fatalf("formatted Gemini thinking metadata = %#v, want low/medium/high", formatted["thinking"])
 	}
 }
 
@@ -2569,5 +2839,440 @@ func TestInteractionsRouteRegistered(t *testing.T) {
 	server.engine.ServeHTTP(rr, req)
 	if rr.Code == http.StatusNotFound {
 		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUpdateClientsContext_AntigravityConnectionPoolPurgesTransports(t *testing.T) {
+	server := newTestServer(t)
+
+	enabled := true
+	disabled := false
+
+	cfg1 := *server.cfg
+	cfg1.Antigravity.ConnectionPool.Enabled = &enabled
+	cfg1.Antigravity.ConnectionPool.IdleConnTimeout = "30s"
+	server.oldConfigYaml, _ = yaml.Marshal(&cfg1)
+
+	// Pre-populate the cache before reload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	testAuth := &auth.Auth{
+		ID:         "hot-reload-test-auth",
+		Provider:   "antigravity",
+		Attributes: map[string]string{"base_url": srv.URL},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "proj",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	exec := executor.NewAntigravityExecutor(&cfg1)
+	req := httptest.NewRequest(http.MethodGet, srv.URL, nil)
+	_, _ = exec.HttpRequest(context.Background(), testAuth, req)
+
+	if executor.AntigravityTransportsLen() == 0 {
+		t.Fatal("expected Antigravity transports to be cached before hot reload")
+	}
+
+	cfg2 := cfg1
+	cfg2.Antigravity.ConnectionPool.Enabled = &disabled
+	cfg2.Antigravity.ConnectionPool.IdleConnTimeout = "10s"
+
+	if ok := server.UpdateClientsContext(context.Background(), &cfg2); !ok {
+		t.Fatal("UpdateClientsContext returned false")
+	}
+
+	if got := executor.AntigravityTransportsLen(); got != 0 {
+		t.Fatalf("AntigravityTransportsLen() after reload = %d, want 0", got)
+	}
+}
+
+type mockServerStreamingCaptureExecutor struct {
+	cfg            *proxyconfig.Config
+	capturedCtx    context.Context
+	executionCalls int
+}
+
+func (e *mockServerStreamingCaptureExecutor) Identifier() string { return "codex-test" }
+
+func (e *mockServerStreamingCaptureExecutor) Execute(ctx context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	e.capturedCtx = ctx
+	return coreexecutor.Response{Payload: []byte(`{"id":"resp-1","status":"completed"}`)}, nil
+}
+
+func (e *mockServerStreamingCaptureExecutor) ExecuteStream(ctx context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.capturedCtx = ctx
+	e.executionCalls++
+
+	runtimehelps.RecordAPIRequest(ctx, e.cfg, runtimehelps.UpstreamRequestLog{
+		URL:     "https://api.example.com/v1/responses",
+		Method:  http.MethodPost,
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    []byte(`{"model":"gpt-5-codex","input":[]}`),
+	})
+
+	ch := make(chan coreexecutor.StreamChunk, 2)
+	chunkPayload := []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\"}\n\n")
+	runtimehelps.AppendAPIResponseChunk(ctx, e.cfg, chunkPayload)
+	ch <- coreexecutor.StreamChunk{Payload: chunkPayload}
+
+	terminalPayload := []byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n")
+	runtimehelps.AppendAPIResponseChunk(ctx, e.cfg, terminalPayload)
+	ch <- coreexecutor.StreamChunk{Payload: terminalPayload}
+	close(ch)
+
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *mockServerStreamingCaptureExecutor) Refresh(_ context.Context, auth *auth.Auth) (*auth.Auth, error) {
+	return auth, nil
+}
+
+func (e *mockServerStreamingCaptureExecutor) CountTokens(_ context.Context, _ *auth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *mockServerStreamingCaptureExecutor) HttpRequest(_ context.Context, _ *auth.Auth, _ *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestServerResponsesStreamingRequestLogCapturesUpstreamSections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	logsDir := filepath.Join(tmpDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+
+	mockLogger := internallogging.NewFileRequestLogger(true, logsDir, "", 10)
+	server := newTestServerWithOptions(t, WithRequestLoggerFactory(func(*proxyconfig.Config, string) internallogging.RequestLogger {
+		return mockLogger
+	}))
+	server.cfg.RequestLog = true
+	server.cfg.LoggingToFile = true
+
+	mockExec := &mockServerStreamingCaptureExecutor{cfg: server.cfg}
+	server.handlers.AuthManager.RegisterExecutor(mockExec)
+
+	credential := &auth.Auth{
+		ID:       "codex-stream-auth",
+		Provider: mockExec.Identifier(),
+		Status:   auth.StatusActive,
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5-codex"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	rr := httptest.NewRecorder()
+	body := `{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hi"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if mockExec.executionCalls != 1 {
+		t.Fatalf("executor calls = %d, want 1", mockExec.executionCalls)
+	}
+
+	entries, errReadDir := os.ReadDir(logsDir)
+	if errReadDir != nil {
+		t.Fatalf("read logs dir: %v", errReadDir)
+	}
+	var logPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "v1-responses-") && strings.HasSuffix(entry.Name(), ".log") {
+			logPath = filepath.Join(logsDir, entry.Name())
+			break
+		}
+	}
+	if logPath == "" {
+		t.Fatal("streaming request log was not created in logs dir")
+	}
+	content, errReadLog := os.ReadFile(logPath)
+	if errReadLog != nil {
+		t.Fatalf("read log file: %v", errReadLog)
+	}
+	logText := string(content)
+	apiRequestIdx := strings.Index(logText, "=== API REQUEST 1 ===")
+	if apiRequestIdx == -1 {
+		t.Fatalf("streaming log missing API REQUEST 1:\n%s", logText)
+	}
+	apiResponseIdx := strings.Index(logText, "=== API RESPONSE 1 ===")
+	if apiResponseIdx == -1 {
+		t.Fatalf("streaming log missing API RESPONSE 1:\n%s", logText)
+	}
+	downstreamResponseIdx := strings.Index(logText, "=== RESPONSE ===")
+	if downstreamResponseIdx == -1 {
+		t.Fatalf("streaming log missing downstream RESPONSE:\n%s", logText)
+	}
+	if apiRequestIdx >= apiResponseIdx || apiResponseIdx >= downstreamResponseIdx {
+		t.Fatalf("unexpected section order (req=%d, apiResp=%d, resp=%d):\n%s", apiRequestIdx, apiResponseIdx, downstreamResponseIdx, logText)
+	}
+	apiRequestSection := logText[apiRequestIdx:apiResponseIdx]
+	apiResponseSection := logText[apiResponseIdx:downstreamResponseIdx]
+	if !strings.Contains(apiRequestSection, "https://api.example.com/v1/responses") {
+		t.Fatalf("API REQUEST section missing upstream URL:\n%s", apiRequestSection)
+	}
+	if !strings.Contains(apiRequestSection, `"gpt-5-codex"`) {
+		t.Fatalf("API REQUEST section missing request body:\n%s", apiRequestSection)
+	}
+	if !strings.Contains(apiResponseSection, "response.output_item.added") {
+		t.Fatalf("API RESPONSE section missing response chunk data:\n%s", apiResponseSection)
+	}
+}
+
+func TestServerCodexAPIKeyResponsesStreamingRequestLog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamReceived := make(chan struct{}, 1)
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case upstreamReceived <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.added\"}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer mockUpstream.Close()
+
+	tmpDir := t.TempDir()
+	logsDir := filepath.Join(tmpDir, "logs")
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
+		t.Fatalf("failed to create logs dir: %v", err)
+	}
+
+	mockLogger := internallogging.NewFileRequestLogger(true, logsDir, "", 10)
+	server := newTestServerWithOptions(t, WithRequestLoggerFactory(func(*proxyconfig.Config, string) internallogging.RequestLogger {
+		return mockLogger
+	}))
+	server.cfg.RequestLog = true
+	server.cfg.LoggingToFile = true
+
+	codexExec := executor.NewCodexExecutor(server.cfg)
+	server.handlers.AuthManager.RegisterExecutor(codexExec)
+
+	credential := &auth.Auth{
+		ID:       "codex-api-key-test",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Attributes: map[string]string{
+			auth.AttributeAPIKey: "test-codex-key",
+			"base_url":           mockUpstream.URL,
+		},
+	}
+	if _, err := server.handlers.AuthManager.Register(context.Background(), credential); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(credential.ID, credential.Provider, []*registry.ModelInfo{{ID: "gpt-5-codex"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(credential.ID)
+	})
+
+	rr := httptest.NewRecorder()
+	body := `{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"hello"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	select {
+	case <-upstreamReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream request")
+	}
+
+	entries, errReadDir := os.ReadDir(logsDir)
+	if errReadDir != nil {
+		t.Fatalf("read logs dir: %v", errReadDir)
+	}
+	var logPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "v1-responses-") && strings.HasSuffix(entry.Name(), ".log") {
+			logPath = filepath.Join(logsDir, entry.Name())
+			break
+		}
+	}
+	if logPath == "" {
+		t.Fatal("streaming request log was not created in logs dir")
+	}
+	content, errReadLog := os.ReadFile(logPath)
+	if errReadLog != nil {
+		t.Fatalf("read log file: %v", errReadLog)
+	}
+	logText := string(content)
+	apiRequestIdx := strings.Index(logText, "=== API REQUEST 1 ===")
+	if apiRequestIdx == -1 {
+		t.Fatalf("streaming log missing API REQUEST 1:\n%s", logText)
+	}
+	apiResponseIdx := strings.Index(logText, "=== API RESPONSE 1 ===")
+	if apiResponseIdx == -1 {
+		t.Fatalf("streaming log missing API RESPONSE 1:\n%s", logText)
+	}
+	downstreamResponseIdx := strings.Index(logText, "=== RESPONSE ===")
+	if downstreamResponseIdx == -1 {
+		t.Fatalf("streaming log missing downstream RESPONSE:\n%s", logText)
+	}
+	if apiRequestIdx >= apiResponseIdx || apiResponseIdx >= downstreamResponseIdx {
+		t.Fatalf("unexpected section order (req=%d, apiResp=%d, resp=%d):\n%s", apiRequestIdx, apiResponseIdx, downstreamResponseIdx, logText)
+	}
+	apiRequestSection := logText[apiRequestIdx:apiResponseIdx]
+	apiResponseSection := logText[apiResponseIdx:downstreamResponseIdx]
+	if !strings.Contains(apiRequestSection, mockUpstream.URL) {
+		t.Fatalf("API REQUEST section missing upstream URL %s:\n%s", mockUpstream.URL, apiRequestSection)
+	}
+	if !strings.Contains(apiRequestSection, `"gpt-5-codex"`) {
+		t.Fatalf("API REQUEST section missing request body:\n%s", apiRequestSection)
+	}
+	if !strings.Contains(apiResponseSection, "response.output_item.added") {
+		t.Fatalf("API RESPONSE section missing response chunk data:\n%s", apiResponseSection)
+	}
+}
+
+func TestModelsForCPAClientSerializesWebSearchCapabilities(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	registrations := []struct {
+		clientID string
+		provider string
+		modelID  string
+	}{
+		{"cpa-web-search-codex", "codex", "cpa-search-codex-model"},
+		{"cpa-web-search-xai", "xai", "cpa-search-xai-model"},
+		{"cpa-web-search-claude", "claude", "cpa-search-claude-model"},
+		{"cpa-web-search-gemini", "gemini", "cpa-no-search-gemini-model"},
+		{"cpa-web-search-mixed-codex", "codex", "cpa-mixed-search-model"},
+		{"cpa-web-search-mixed-gemini", "gemini", "cpa-mixed-search-model"},
+		{"cpa-web-search-prefixed", "codex", "team/cpa-prefixed-search-model"},
+	}
+	webSearch := true
+	for _, registration := range registrations {
+		modelRegistry.RegisterClient(registration.clientID, registration.provider, []*registry.ModelInfo{{
+			ID: registration.modelID,
+			NativeCapabilities: &registry.NativeCapabilities{
+				WebSearch: &webSearch,
+			},
+		}})
+	}
+	t.Cleanup(func() {
+		for _, registration := range registrations {
+			modelRegistry.UnregisterClient(registration.clientID)
+		}
+	})
+
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=cpa", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response struct {
+		Models []map[string]any `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("decode response: %v; body=%s", errUnmarshal, recorder.Body.String())
+	}
+	entries := make(map[string]map[string]any, len(response.Models))
+	for _, model := range response.Models {
+		slug, _ := model["slug"].(string)
+		entries[slug] = model
+	}
+	for _, modelID := range []string{"cpa-search-codex-model", "cpa-search-xai-model", "cpa-search-claude-model", "team/cpa-prefixed-search-model"} {
+		assertSerializedCPAWebSearch(t, entries[modelID], true)
+	}
+	for _, modelID := range []string{"cpa-no-search-gemini-model", "cpa-mixed-search-model"} {
+		assertSerializedCPAWebSearch(t, entries[modelID], false)
+	}
+
+	legacyRequest := httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil)
+	legacyRequest.Header.Set("Authorization", "Bearer test-key")
+	legacyRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(legacyRecorder, legacyRequest)
+	if strings.Contains(legacyRecorder.Body.String(), "cpa_capabilities") {
+		t.Fatalf("non-CPA response exposed CPA capability: %s", legacyRecorder.Body.String())
+	}
+}
+
+func TestHomeModelsRequirePerEntryWebSearchCapabilityAndConservativeRoutes(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"codex":[
+			{"id":"home-codex","native_capabilities":{"web_search":true}},
+			{"id":"home-unknown"},
+			{"id":"home-duplicate","native_capabilities":{"web_search":true}},
+			{"id":"home-duplicate","native_capabilities":{"web_search":false}}
+		],
+		"xai":[{"id":"home-xai","native_capabilities":{"web_search":true}}],
+		"claude":[{"id":"gpt-5.5","native_capabilities":{"web_search":true}}],
+		"gemini":[{"id":"home-gemini","native_capabilities":{"web_search":true}}],
+		"custom":[{"id":"home-custom","native_capabilities":{"web_search":true}}]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decode Home models: %v", errDecode)
+	}
+
+	models := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, formatHomeCodexModel(entry))
+	}
+	response := codexmodels.BuildResponseForClientWithCPACapabilities(models, nil, homeWebSearchCapabilityForModel(entries), false, "cpa")
+	catalog, ok := response["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models = %#v, want []map[string]any", response["models"])
+	}
+	bySlug := make(map[string]map[string]any, len(catalog))
+	for _, model := range catalog {
+		slug, _ := model["slug"].(string)
+		bySlug[slug] = model
+	}
+	for _, modelID := range []string{"home-codex", "home-xai", "gpt-5.5"} {
+		assertSerializedCPAWebSearch(t, bySlug[modelID], true)
+	}
+	if supportsSearchTool, _ := bySlug["gpt-5.5"]["supports_search_tool"].(bool); !supportsSearchTool {
+		t.Fatal("CPA capability metadata changed legacy Home supports_search_tool")
+	}
+	for _, modelID := range []string{"home-gemini", "home-duplicate"} {
+		assertSerializedCPAWebSearch(t, bySlug[modelID], false)
+	}
+	for _, modelID := range []string{"home-unknown", "home-custom"} {
+		if _, exists := bySlug[modelID]["cpa_capabilities"]; exists {
+			t.Fatalf("%s cpa_capabilities = %#v, want omitted", modelID, bySlug[modelID]["cpa_capabilities"])
+		}
+	}
+}
+
+func assertSerializedCPAWebSearch(t *testing.T, model map[string]any, want bool) {
+	t.Helper()
+	if model == nil {
+		t.Fatal("model entry is missing")
+	}
+	capabilities, ok := model["cpa_capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("model %v cpa_capabilities = %#v, want object", model["slug"], model["cpa_capabilities"])
+	}
+	if got, ok := capabilities["web_search"].(bool); !ok || got != want {
+		t.Fatalf("model %v web_search = %#v, want %v", model["slug"], capabilities["web_search"], want)
 	}
 }

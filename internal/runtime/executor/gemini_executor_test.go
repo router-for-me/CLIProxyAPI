@@ -156,6 +156,44 @@ func TestGeminiExecutorExecutePrependsLeadingUserForIssue4959ResponsesHistory(t 
 	assertIssue4959LeadingUserContents(t, gjson.GetBytes(upstreamBody, "contents").Array())
 }
 
+func TestGeminiExecutorExecuteAppendsTrailingUserForTrailingModelTurn(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "test-key",
+		"base_url": server.URL,
+	}}
+	request := cliproxyexecutor.Request{
+		Model: "gemini-3.7-flash",
+		Payload: []byte(`{"contents":[` +
+			`{"role":"user","parts":[{"text":"hello"}]},` +
+			`{"role":"model","parts":[{"text":"answer"}]}` +
+			`]}`),
+	}
+
+	if _, errExecute := executor.Execute(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
+		t.Fatalf("upstream roles malformed: %s", upstreamBody)
+	}
+	if got := contents[2].Get("parts.0.text").String(); got != "" {
+		t.Fatalf("trailing user prompt = %q, want empty string; body=%s", got, upstreamBody)
+	}
+}
+
 func TestGeminiExecutorCountTokensPrependsLeadingUser(t *testing.T) {
 	var upstreamBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -784,6 +822,178 @@ func TestGeminiExecutorNativeInteractionsTranslatesClaudeRequest(t *testing.T) {
 	}
 	if got := gjson.GetBytes(resp.Payload, "usage.output_tokens").Int(); got != 1 {
 		t.Fatalf("response output tokens = %d, want 1. Payload: %s", got, string(resp.Payload))
+	}
+}
+
+func TestGeminiExecutorNativeInteractionsStripsClaudeToolIDsBeforeUpstream(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"interaction_1","object":"interaction","status":"completed","model":"gemini-3.6-flash","steps":[{"type":"model_output","content":[{"type":"text","text":"ok"}]}],"usage":{"total_input_tokens":1,"total_output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	exec := NewGeminiInteractionsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "gemini-interactions",
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model: "gemini-3.6-flash",
+		Payload: []byte(`{
+			"model":"gemini-3.6-flash",
+			"messages":[
+				{"role":"user","content":[{"type":"text","text":"weather?","id":"txt_user"}]},
+				{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"location":"北京"}}]},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"晴"}]}
+			]
+		}`),
+	}
+
+	if _, errExecute := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+	}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+
+	inputs := gjson.GetBytes(upstreamBody, "input").Array()
+	if len(inputs) == 0 {
+		t.Fatalf("upstream input missing: %s", upstreamBody)
+	}
+	foundCall := false
+	foundResult := false
+	for i, item := range inputs {
+		for j, part := range item.Get("content").Array() {
+			if part.Get("id").Exists() {
+				t.Fatalf("input[%d].content[%d].id = %q, want omitted. Body: %s", i, j, part.Get("id").String(), upstreamBody)
+			}
+		}
+		switch item.Get("type").String() {
+		case "function_call":
+			foundCall = true
+			if got := item.Get("id").String(); got != "toolu_1" {
+				t.Fatalf("function_call id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			}
+			if item.Get("call_id").Exists() {
+				t.Fatalf("function_call call_id must be omitted. Body: %s", upstreamBody)
+			}
+		case "function_result":
+			foundResult = true
+			if got := item.Get("call_id").String(); got != "toolu_1" {
+				t.Fatalf("function_result call_id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			}
+			if item.Get("id").Exists() {
+				t.Fatalf("function_result id must be omitted. Body: %s", upstreamBody)
+			}
+		default:
+			if item.Get("id").Exists() {
+				t.Fatalf("input[%d].id = %q, want omitted. Body: %s", i, item.Get("id").String(), upstreamBody)
+			}
+		}
+	}
+	if !foundCall || !foundResult {
+		t.Fatalf("missing function_call/function_result in upstream input: %s", upstreamBody)
+	}
+}
+
+func TestGeminiExecutorNativeInteractionsStripsPassthroughInputIDsBeforeUpstream(t *testing.T) {
+	payload := []byte(`{
+		"model":"gemini-3.6-flash",
+		"input":[
+			{"type":"user_input","id":"msg_1","content":[{"type":"text","id":"txt_1","text":"hi"}]},
+			{"type":"function_call","id":"toolu_1","call_id":"toolu_1","name":"lookup","arguments":{"q":"x"}},
+			{"type":"function_result","id":"toolu_1","call_id":"toolu_1","result":"ok"}
+		]
+	}`)
+	for _, stream := range []bool{false, true} {
+		name := "execute"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			var upstreamBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, errRead := io.ReadAll(r.Body)
+				if errRead != nil {
+					t.Fatalf("read request body: %v", errRead)
+				}
+				upstreamBody = append([]byte(nil), body...)
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte("event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"i1\",\"status\":\"completed\"}}\n\n"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"interaction_1","object":"interaction","status":"completed","model":"gemini-3.6-flash","steps":[],"usage":{"total_input_tokens":1,"total_output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			exec := NewGeminiInteractionsExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				Provider: "gemini-interactions",
+				Attributes: map[string]string{
+					"api_key":  "test-key",
+					"base_url": server.URL,
+				},
+			}
+			req := cliproxyexecutor.Request{Model: "gemini-3.6-flash", Payload: payload}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatInteractions,
+				ResponseFormat: sdktranslator.FormatInteractions,
+			}
+			if stream {
+				result, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts)
+				if errExecute != nil {
+					t.Fatalf("ExecuteStream() error = %v", errExecute)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error: %v", chunk.Err)
+					}
+				}
+			} else if _, errExecute := exec.Execute(context.Background(), auth, req, opts); errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			inputs := gjson.GetBytes(upstreamBody, "input").Array()
+			if len(inputs) != 3 {
+				t.Fatalf("upstream input count = %d, want 3. Body: %s", len(inputs), upstreamBody)
+			}
+			for i, item := range inputs {
+				if item.Get("type").String() != "function_call" && item.Get("id").Exists() {
+					t.Fatalf("input[%d].id = %q, want omitted. Body: %s", i, item.Get("id").String(), upstreamBody)
+				}
+				for j, part := range item.Get("content").Array() {
+					if part.Get("id").Exists() {
+						t.Fatalf("input[%d].content[%d].id = %q, want omitted. Body: %s", i, j, part.Get("id").String(), upstreamBody)
+					}
+				}
+			}
+			if got := gjson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "hi" {
+				t.Fatalf("user text = %q, want hi. Body: %s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "input.1.id").String(); got != "toolu_1" {
+				t.Fatalf("function_call id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			}
+			if gjson.GetBytes(upstreamBody, "input.1.call_id").Exists() {
+				t.Fatalf("function_call call_id must be omitted. Body: %s", upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "input.2.call_id").String(); got != "toolu_1" {
+				t.Fatalf("function_result call_id = %q, want toolu_1. Body: %s", got, upstreamBody)
+			}
+			if gjson.GetBytes(upstreamBody, "input.2.id").Exists() {
+				t.Fatalf("function_result id must be omitted. Body: %s", upstreamBody)
+			}
+		})
 	}
 }
 

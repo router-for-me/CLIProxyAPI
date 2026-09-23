@@ -64,12 +64,17 @@ func (schedulerTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 }
 
 type fakePluginScheduler struct {
-	resp     pluginapi.SchedulerPickResponse
-	handled  bool
-	err      error
-	calls    int
-	requests []pluginapi.SchedulerPickRequest
-	pick     func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
+	acrossPriorities bool
+	resp             pluginapi.SchedulerPickResponse
+	handled          bool
+	err              error
+	calls            int
+	requests         []pluginapi.SchedulerPickRequest
+	pick             func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
+}
+
+func (s *fakePluginScheduler) SchedulerWantsAcrossPriorities() bool {
+	return s.acrossPriorities
 }
 
 func (s *fakePluginScheduler) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
@@ -970,6 +975,250 @@ func TestManagerPluginSchedulerSelectsAuthID(t *testing.T) {
 	}
 	if !scheduler.requests[0].Stream {
 		t.Fatalf("scheduler request Stream = false, want true")
+	}
+}
+
+func TestManagerPluginSchedulerAcrossPriorities(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	authHigh := &Auth{ID: "auth-high", Provider: "gemini", Attributes: map[string]string{"priority": "10", "weight": "100"}}
+	authLow := &Auth{ID: "auth-low", Provider: "gemini", Attributes: map[string]string{"priority": "5", "weight": "50"}}
+	if _, errRegister := manager.Register(context.Background(), authHigh); errRegister != nil {
+		t.Fatalf("Register(authHigh) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), authLow); errRegister != nil {
+		t.Fatalf("Register(authLow) error = %v", errRegister)
+	}
+
+	scheduler := &fakePluginScheduler{
+		acrossPriorities: true,
+		resp:             pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-low"},
+		handled:          true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want 1", len(scheduler.requests))
+	}
+	if len(scheduler.requests[0].Candidates) != 2 {
+		t.Fatalf("Candidates count = %d, want 2", len(scheduler.requests[0].Candidates))
+	}
+	if got == nil || got.ID != "auth-low" {
+		t.Fatalf("picked auth = %v, want auth-low", got)
+	}
+}
+
+func TestManagerPluginSchedulerAcrossPrioritiesMixed(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+	authHigh := &Auth{ID: "auth-high", Provider: "gemini", Attributes: map[string]string{"priority": "10", "weight": "100"}}
+	authLow := &Auth{ID: "auth-low", Provider: "claude", Attributes: map[string]string{"priority": "5", "weight": "50"}}
+	if _, errRegister := manager.Register(context.Background(), authHigh); errRegister != nil {
+		t.Fatalf("Register(authHigh) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), authLow); errRegister != nil {
+		t.Fatalf("Register(authLow) error = %v", errRegister)
+	}
+
+	scheduler := &fakePluginScheduler{
+		acrossPriorities: true,
+		resp:             pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-low"},
+		handled:          true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want 1", len(scheduler.requests))
+	}
+	if len(scheduler.requests[0].Candidates) != 2 {
+		t.Fatalf("Candidates count = %d, want 2", len(scheduler.requests[0].Candidates))
+	}
+	if got == nil || got.ID != "auth-low" {
+		t.Fatalf("picked auth = %v, want auth-low", got)
+	}
+	if provider != "claude" {
+		t.Fatalf("provider = %q, want claude", provider)
+	}
+}
+
+func TestManagerPluginSchedulerDefaultHighestPriorityOnly(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	authHigh := &Auth{ID: "auth-high", Provider: "gemini", Attributes: map[string]string{"priority": "10", "weight": "100"}}
+	authLow := &Auth{ID: "auth-low", Provider: "gemini", Attributes: map[string]string{"priority": "5", "weight": "50"}}
+	if _, errRegister := manager.Register(context.Background(), authHigh); errRegister != nil {
+		t.Fatalf("Register(authHigh) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), authLow); errRegister != nil {
+		t.Fatalf("Register(authLow) error = %v", errRegister)
+	}
+
+	scheduler := &fakePluginScheduler{
+		acrossPriorities: false, // default opt-in false
+		resp:             pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-high"},
+		handled:          true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want 1", len(scheduler.requests))
+	}
+	if len(scheduler.requests[0].Candidates) != 1 {
+		t.Fatalf("Candidates count = %d, want 1", len(scheduler.requests[0].Candidates))
+	}
+	if got == nil || got.ID != "auth-high" {
+		t.Fatalf("picked auth = %v, want auth-high", got)
+	}
+}
+
+func TestManagerPluginSchedulerAcrossPrioritiesUnhandledFallsBackToHighestPriority(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	authHigh := &Auth{ID: "auth-high", Provider: "gemini", Attributes: map[string]string{"priority": "10", "weight": "100"}}
+	authLow := &Auth{ID: "auth-low", Provider: "gemini", Attributes: map[string]string{"priority": "5", "weight": "50"}}
+	if _, errRegister := manager.Register(context.Background(), authHigh); errRegister != nil {
+		t.Fatalf("Register(authHigh) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), authLow); errRegister != nil {
+		t.Fatalf("Register(authLow) error = %v", errRegister)
+	}
+
+	scheduler := &fakePluginScheduler{
+		acrossPriorities: true,
+		handled:          false,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want 1", len(scheduler.requests))
+	}
+	if len(scheduler.requests[0].Candidates) != 2 {
+		t.Fatalf("Candidates count = %d, want 2", len(scheduler.requests[0].Candidates))
+	}
+	// Fallback should pick auth-high because it has the highest priority tier
+	if got == nil || got.ID != "auth-high" {
+		t.Fatalf("picked auth = %v, want auth-high", got)
+	}
+}
+
+func TestManagerPluginSchedulerAcrossPrioritiesAttributesAndCooldownFilter(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+
+	authHighActive := &Auth{ID: "high-act", Provider: "gemini", Attributes: map[string]string{"priority": "10", "weight": "100"}}
+	authHighCooldown := &Auth{
+		ID:         "high-cool",
+		Provider:   "gemini",
+		Attributes: map[string]string{"priority": "10", "weight": "80"},
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "credential_quota",
+			NextRecoverAt: time.Now().Add(time.Hour),
+		},
+	}
+	authLowActive := &Auth{ID: "low-act", Provider: "gemini", Attributes: map[string]string{"priority": "5", "weight": "50"}}
+	authLowDisabled := &Auth{ID: "low-dis", Provider: "gemini", Disabled: true, Attributes: map[string]string{"priority": "5", "weight": "20"}}
+
+	for _, a := range []*Auth{authHighActive, authHighCooldown, authLowActive, authLowDisabled} {
+		if _, err := manager.Register(context.Background(), a); err != nil {
+			t.Fatalf("Register(%s) error = %v", a.ID, err)
+		}
+	}
+
+	scheduler := &fakePluginScheduler{
+		acrossPriorities: true,
+		resp:             pluginapi.SchedulerPickResponse{Handled: true, AuthID: "low-act"},
+		handled:          true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if got == nil || got.ID != "low-act" {
+		t.Fatalf("picked auth = %v, want low-act", got)
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want 1", len(scheduler.requests))
+	}
+	candidates := scheduler.requests[0].Candidates
+	if len(candidates) != 2 {
+		t.Fatalf("Candidates count = %d, want 2", len(candidates))
+	}
+
+	candidateMap := make(map[string]pluginapi.SchedulerAuthCandidate, len(candidates))
+	for _, c := range candidates {
+		candidateMap[c.ID] = c
+	}
+	cHigh, okHigh := candidateMap["high-act"]
+	if !okHigh {
+		t.Fatalf("missing high-act candidate")
+	}
+	if cHigh.Priority != 10 || cHigh.Attributes["weight"] != "100" {
+		t.Fatalf("high-act priority/weight mismatch: Priority=%d, weight=%s", cHigh.Priority, cHigh.Attributes["weight"])
+	}
+	cLow, okLow := candidateMap["low-act"]
+	if !okLow {
+		t.Fatalf("missing low-act candidate")
+	}
+	if cLow.Priority != 5 || cLow.Attributes["weight"] != "50" {
+		t.Fatalf("low-act priority/weight mismatch: Priority=%d, weight=%s", cLow.Priority, cLow.Attributes["weight"])
+	}
+}
+
+func TestManagerPluginSchedulerAcrossPrioritiesMixedUnhandledFallsBackToHighestPriority(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+
+	authHigh := &Auth{ID: "auth-high", Provider: "gemini", Attributes: map[string]string{"priority": "10"}}
+	authLow := &Auth{ID: "auth-low", Provider: "claude", Attributes: map[string]string{"priority": "5"}}
+
+	for _, a := range []*Auth{authHigh, authLow} {
+		if _, err := manager.Register(context.Background(), a); err != nil {
+			t.Fatalf("Register(%s) error = %v", a.ID, err)
+		}
+	}
+
+	scheduler := &fakePluginScheduler{
+		acrossPriorities: true,
+		handled:          false,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want 1", len(scheduler.requests))
+	}
+	if len(scheduler.requests[0].Candidates) != 2 {
+		t.Fatalf("Candidates count = %d, want 2", len(scheduler.requests[0].Candidates))
+	}
+	if got == nil || got.ID != "auth-high" {
+		t.Fatalf("picked auth = %v, want auth-high", got)
+	}
+	if provider != "gemini" {
+		t.Fatalf("provider = %q, want gemini", provider)
 	}
 }
 
@@ -1962,8 +2211,9 @@ func TestManager_SchedulerSharesThinkingSuffixCooldownAndRegistryState(t *testin
 	if len(auth.ModelStates) != 1 || auth.ModelStates[baseModel] == nil {
 		t.Fatalf("ModelStates = %+v, want only canonical key %q", auth.ModelStates, baseModel)
 	}
-	if count := reg.GetModelCount(baseModel); count != 0 {
-		t.Fatalf("registry model count during cooldown = %d, want 0", count)
+	// Only thinking-auth-a is cooling down; thinking-auth-b remains available.
+	if count := reg.GetModelCount(baseModel); count != 1 {
+		t.Fatalf("registry model count during cooldown = %d, want 1", count)
 	}
 	for _, model := range []string{baseModel, baseModel + "(medium)", baseModel + "(low)"} {
 		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)

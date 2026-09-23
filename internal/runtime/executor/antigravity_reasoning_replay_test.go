@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -1820,6 +1821,59 @@ func TestDegradeAntigravityClaudeToolProvenanceIDs_AllCallsSigned_OnlyFirstGetsB
 	}
 }
 
+func TestDegradeAntigravityClaudeToolProvenanceIDs_StrictMonotonicOffsets(t *testing.T) {
+	id := util.GeminiClaudeToolUseID("native-1", "Read", `{"file_path":"/tmp/a"}`)
+	payload := []byte(fmt.Sprintf(`{"request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"sig-1","functionCall":{"id":"%s","name":"Read","args":{"file_path":"/tmp/a"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"%s","name":"Read","response":{"result":"ok"}}}]}]}}`, id, id))
+
+	out, degraded := degradeAntigravityClaudeToolProvenanceIDs(payload)
+	if degraded != 2 {
+		t.Fatalf("degraded = %d, want 2", degraded)
+	}
+	if bytes.Equal(out, payload) {
+		t.Fatal("expected payload to be modified")
+	}
+	if strings.Contains(string(out), id) {
+		t.Fatalf("expected reserved ID %s to be replaced", id)
+	}
+
+	syntheticID := antigravitySyntheticToolCallID(id)
+	if !strings.Contains(string(out), syntheticID) {
+		t.Fatalf("expected synthetic ID %s in output, got: %s", syntheticID, string(out))
+	}
+}
+
+var antigravityDegradeBenchmarkOutput []byte
+
+func BenchmarkDegradeAntigravityClaudeToolProvenanceIDs(b *testing.B) {
+	const calls = 217
+	var payload strings.Builder
+	payload.Grow(1<<20 + calls*512)
+	payload.WriteString(`{"request":{"contents":[{"role":"user","parts":[{"text":"`)
+	payload.WriteString(strings.Repeat("x", 1<<20))
+	payload.WriteString(`"}]}`)
+	for i := range calls {
+		id := util.GeminiClaudeToolUseID(fmt.Sprintf("native-%d", i), "Read", `{"file_path":"/tmp/a"}`)
+		fmt.Fprintf(&payload, `,{"role":"model","parts":[{"thoughtSignature":"signature-%d","functionCall":{"id":"%s","name":"Read","args":{"file_path":"/tmp/a"}}}]}`, i, id)
+		fmt.Fprintf(&payload, `,{"role":"user","parts":[{"functionResponse":{"id":"%s","name":"Read","response":{"result":"ok"}}}]}`, id)
+	}
+	payload.WriteString(`]}}`)
+	input := []byte(payload.String())
+	if _, degraded := degradeAntigravityClaudeToolProvenanceIDs(input); degraded != calls*2 {
+		b.Fatalf("degraded = %d, want %d", degraded, calls*2)
+	}
+
+	b.SetBytes(int64(len(input)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		var degraded int
+		antigravityDegradeBenchmarkOutput, degraded = degradeAntigravityClaudeToolProvenanceIDs(input)
+		if degraded != calls*2 {
+			b.Fatalf("degraded = %d, want %d", degraded, calls*2)
+		}
+	}
+}
+
 func TestPrepareAntigravityGeminiReasoningReplay_ReordersPermutedParallelToolResponsesWithDegradedIDs(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
@@ -1887,5 +1941,33 @@ func TestPrepareAntigravityGeminiReasoningReplayStillRejectsBrokenPairing(t *tes
 	_, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload)
 	if errPrepare == nil || !strings.Contains(errPrepare.Error(), "invalid Gemini function call history") {
 		t.Fatalf("error = %v, want structural pairing rejection", errPrepare)
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.6-flash-high"
+	const args = `{"file_path":"/tmp/a"}`
+	payload := []byte(`{"sessionId":"sess-pairing-break","request":{"contents":[{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"Read","args":` + args + `}}]},{"role":"user","parts":[{"functionResponse":{"name":"Read","response":{"result":"ok"}}}]}]}}`)
+	payload = normalizeAntigravityGeminiFunctionResponseRoles(payload)
+	if err := internalsignature.ValidateGeminiFunctionCallPairing(payload); err != nil {
+		t.Fatalf("original payload pairing invalid: %v", err)
+	}
+
+	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Write","args":` + args + `,"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg"}`)
+	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
+		t.Fatal("failed to cache replay item")
+	}
+	opts := cliproxyexecutor.Options{}
+
+	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: payload}, opts, payload)
+	if errPrepare != nil {
+		t.Fatalf("prepareAntigravityGeminiReasoningReplayPayload error: %v, want graceful degradation to original payload", errPrepare)
+	}
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("out = %s, want original payload %s", out, payload)
 	}
 }

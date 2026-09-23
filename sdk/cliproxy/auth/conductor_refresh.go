@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -54,10 +56,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	}
 
 	ctx, cancelCtx := context.WithCancel(parent)
-	workers := refreshMaxConcurrency
-	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
-		workers = cfg.AuthAutoRefreshWorkers
-	}
+	workers := m.refreshWorkers()
 	loop := newAuthAutoRefreshLoop(m, interval, workers)
 
 	m.mu.Lock()
@@ -353,11 +352,71 @@ func authAccessToken(auth *Auth) string {
 	return authMetadataString(auth, "accessToken")
 }
 
+func authRefreshToken(auth *Auth) string {
+	if token := authMetadataString(auth, "refresh_token"); token != "" {
+		return token
+	}
+	return authMetadataString(auth, "refreshToken")
+}
+
 func authHasRefreshCredential(auth *Auth) bool {
 	if authMetadataString(auth, "refresh_token") != "" {
 		return true
 	}
-	return authMetadataString(auth, "refreshToken") != ""
+	if authMetadataString(auth, "refreshToken") != "" {
+		return true
+	}
+	// Meta exchanges its device token for a replacement API key after a 401.
+	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") &&
+		(authMetadataString(auth, "dca_token") != "" || strings.TrimSpace(auth.Attributes["dca_token"]) != "")
+}
+
+// CredentialsChanged reports whether authentication credentials (tokens or API keys)
+// differ between two Auth records.
+func CredentialsChanged(existing, incoming *Auth) bool {
+	if existing == nil || incoming == nil {
+		return false
+	}
+	if authAccessToken(existing) != authAccessToken(incoming) {
+		return true
+	}
+	if authRefreshToken(existing) != authRefreshToken(incoming) {
+		return true
+	}
+	existingIDToken := authMetadataString(existing, "id_token")
+	if existingIDToken == "" {
+		existingIDToken = authMetadataString(existing, "idToken")
+	}
+	incomingIDToken := authMetadataString(incoming, "id_token")
+	if incomingIDToken == "" {
+		incomingIDToken = authMetadataString(incoming, "idToken")
+	}
+	if existingIDToken != incomingIDToken {
+		return true
+	}
+	existingKey := ""
+	if existing.Attributes != nil {
+		existingKey = existing.Attributes[AttributeAPIKey]
+	}
+	if existingKey == "" {
+		existingKey = authMetadataString(existing, "api_key")
+	}
+	incomingKey := ""
+	if incoming.Attributes != nil {
+		incomingKey = incoming.Attributes[AttributeAPIKey]
+	}
+	if incomingKey == "" {
+		incomingKey = authMetadataString(incoming, "api_key")
+	}
+	if existingKey != incomingKey {
+		return true
+	}
+	return false
+}
+
+// ClearUnauthorizedModelStates resets model states whose last error was an unauthorized failure.
+func ClearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
+	return clearUnauthorizedModelStates(auth, now)
 }
 
 func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
@@ -366,10 +425,19 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 	}
 	var resumed []string
 	for model, state := range auth.ModelStates {
-		if state == nil || state.LastError == nil {
+		if state == nil {
 			continue
 		}
-		if state.LastError.StatusCode() != http.StatusUnauthorized && !strings.EqualFold(state.LastError.Code, "unauthorized") {
+		isUnauth := false
+		if state.LastError != nil {
+			if state.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(state.LastError.Code, "unauthorized") || isUnauthorizedError(state.LastError) {
+				isUnauth = true
+			}
+		}
+		if !isUnauth && strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") {
+			isUnauth = true
+		}
+		if !isUnauth {
 			continue
 		}
 		resetModelState(state, now)
@@ -435,6 +503,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
+	ctx = cliproxyexecutor.WithoutRequestProxyURL(ctx)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -458,7 +527,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if auth != nil {
 		// Use the same effective provider key as request execution so OpenAI-compat
 		// auths registered under namespaced keys still resolve for refresh.
-		exec = m.executors[executorKeyFromAuth(auth)]
+		exec, _ = m.executorLocked(executorKeyFromAuth(auth))
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
@@ -472,8 +541,8 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		}
 	}
 
-	cloned := auth.Clone()
-	updated, err := exec.Refresh(ctx, cloned)
+	base := auth.Clone()
+	updated, err := exec.Refresh(ctx, base.Clone())
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		return nil, err
@@ -485,6 +554,10 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
+			if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
+				m.mu.Unlock()
+				return nil, err
+			}
 			current.Generation++
 			current.UpdatedAt = now
 			current.LastError = refreshErrorFromError(err)
@@ -525,7 +598,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		return nil, err
 	}
 	if updated == nil {
-		updated = cloned
+		updated = base.Clone()
 	}
 	// Preserve runtime created by the executor during Refresh.
 	// If executor didn't set one, fall back to the previous runtime.
@@ -537,7 +610,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	updated.LastError = nil
 	updated.StatusMessage = ""
 	updated.Unavailable = false
-	if updated.Status == StatusError {
+	if updated.Status == StatusError || updated.Status == "" {
 		updated.Status = StatusActive
 	}
 	updated.UpdatedAt = now
@@ -545,11 +618,15 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	saved, errUpdate := m.Update(ctx, updated)
-	targetAuth := saved
-	if targetAuth == nil {
-		targetAuth = updated
+	saved, errUpdate := m.UpdateRefreshedAuth(ctx, base, updated)
+	if errUpdate != nil {
+		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		return nil, errUpdate
 	}
+	if saved == nil {
+		return nil, fmt.Errorf("auth %s not found", id)
+	}
+	targetAuth := saved
 	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
 	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))
 	for _, sm := range supportedModels {
@@ -561,11 +638,103 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	if targetAuth != nil && len(projections) > 0 {
 		registry.GetGlobalRegistry().ApplyClientModelProjections(id, regEpoch, targetAuth.Generation, projections)
 	}
-	if errUpdate != nil {
-		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+	return saved.Clone(), nil
+}
+
+// ForceRefreshAuth triggers an immediate synchronous refresh for the credential.
+func (m *Manager) ForceRefreshAuth(ctx context.Context, id string) (*Auth, error) {
+	if m == nil {
+		return nil, errors.New("auth manager is nil")
 	}
-	if saved != nil {
-		return saved, nil
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("auth id is empty")
 	}
-	return updated.Clone(), nil
+	return m.refreshAuthForRequest(ctx, id, "")
+}
+
+func (m *Manager) refreshWorkers() int {
+	workers := refreshMaxConcurrency
+	if m != nil {
+		if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
+			workers = cfg.AuthAutoRefreshWorkers
+		}
+	}
+	return workers
+}
+
+// ForceRefreshResult records the outcome of a forced refresh for one credential.
+type ForceRefreshResult struct {
+	ID      string `json:"id"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ForceRefreshAll triggers an immediate refresh for all credentials that have refresh tokens or custom refresh evaluators.
+func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.auths))
+	for id, auth := range m.auths {
+		if auth != nil && !auth.Disabled && (authHasRefreshCredential(auth) || auth.Runtime != nil) {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.RUnlock()
+
+	results := make([]ForceRefreshResult, len(ids))
+	if len(ids) == 0 {
+		return results
+	}
+
+	workers := m.refreshWorkers()
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > len(ids) {
+		workers = len(ids)
+	}
+
+	type refreshJob struct {
+		index  int
+		authID string
+	}
+
+	jobCh := make(chan refreshJob, len(ids))
+	for i, id := range ids {
+		jobCh <- refreshJob{index: i, authID: id}
+	}
+	close(jobCh)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobCh {
+				if errCtx := ctx.Err(); errCtx != nil {
+					results[job.index] = ForceRefreshResult{
+						ID:      job.authID,
+						Success: false,
+						Error:   errCtx.Error(),
+					}
+					continue
+				}
+
+				_, err := m.ForceRefreshAuth(ctx, job.authID)
+				res := ForceRefreshResult{ID: job.authID, Success: err == nil}
+				if err != nil {
+					res.Error = err.Error()
+				}
+				results[job.index] = res
+			}
+		}()
+	}
+	wg.Wait()
+	return results
 }

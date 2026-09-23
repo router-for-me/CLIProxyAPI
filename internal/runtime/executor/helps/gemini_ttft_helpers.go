@@ -75,6 +75,9 @@ func IsGeminiTokenEvent(payload []byte) bool {
 // if the frame represents the first meaningful token event. It records first-packet arrival time
 // as fallback and returns immediately with zero allocations once effective token TTFT is set.
 func ObserveGeminiTokenEvent(reporter *UsageReporter, payload []byte) {
+	if reporter != nil && len(payload) > 0 {
+		reporter.ObserveResponseModel(payload)
+	}
 	if reporter == nil || len(payload) == 0 {
 		return
 	}

@@ -82,6 +82,10 @@ type Capabilities struct {
 	FrontendAuthProviderExclusive bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
+	// SchedulerAcrossPriorities opts into receiving available candidates across all priority tiers
+	// in SchedulerPickRequest.Candidates. When false (default), Candidates only contains
+	// credentials from the highest available priority tier.
+	SchedulerAcrossPriorities bool
 	// ModelRouter routes matching requests to a plugin executor, the router's own executor,
 	// or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouter ModelRouter
@@ -122,6 +126,8 @@ type Capabilities struct {
 	CommandLinePlugin CommandLinePlugin
 	// ManagementAPI declares plugin-owned diagnostic Management API and resource routes.
 	ManagementAPI ManagementAPI
+	// QuotaProvider surfaces credential quota and billing information for management clients.
+	QuotaProvider QuotaProvider
 }
 
 // ExecutorModelScope declares which model-registration paths a plugin executor supports.
@@ -619,6 +625,13 @@ type HostModelExecutionRequest struct {
 	Query url.Values `json:"query"`
 	// Alt carries an alternate route or mode suffix when present.
 	Alt string `json:"alt"`
+	// ForcedProvider optionally restricts execution to a specific provider.
+	ForcedProvider string `json:"forced_provider,omitempty"`
+	// AuthID optionally locks execution to an exact credential ID.
+	AuthID string `json:"auth_id,omitempty"`
+	// ProxyURL optionally overrides the outbound proxy for this model execution only.
+	// Supported schemes are http, https, socks5, and socks5h.
+	ProxyURL string `json:"proxy_url,omitempty"`
 }
 
 // HostModelExecutionResponse describes a non-streaming host model execution response.
@@ -724,6 +737,8 @@ type HostAuthFileEntry struct {
 	Priority int `json:"priority,omitempty"`
 	// Note is the credential note when available.
 	Note string `json:"note,omitempty"`
+	// BaseURL is the upstream base URL configured for the credential when available.
+	BaseURL string `json:"base_url,omitempty"`
 	// Websockets reports whether websocket mode is enabled when available.
 	Websockets bool `json:"websockets,omitempty"`
 	// Success is the recent success count.
@@ -774,6 +789,48 @@ type HostAuthSaveResponse struct {
 	Path string `json:"path"`
 }
 
+// Host affinity lookup status outcomes.
+const (
+	HostAffinityStatusBound       = "bound"
+	HostAffinityStatusUnbound     = "unbound"
+	HostAffinityStatusAmbiguous   = "ambiguous"
+	HostAffinityStatusUnsupported = "unsupported"
+)
+
+// HostAffinityLookupRequest asks the host to observe the current affinity binding for a session.
+type HostAffinityLookupRequest struct {
+	// Provider identifies the model provider (e.g., "anthropic", "openai").
+	Provider string `json:"provider"`
+	// Model identifies the requested model.
+	Model string `json:"model"`
+	// SessionID identifies the client session.
+	SessionID string `json:"session_id"`
+}
+
+// HostAffinityLookupResponse describes the observed affinity binding state for a session.
+type HostAffinityLookupResponse struct {
+	// Status reports the observation outcome ("bound", "unbound", "ambiguous", "unsupported").
+	Status string `json:"status"`
+	// AuthIndex identifies the bound credential index usable with host.auth.get_runtime when Status is "bound".
+	AuthIndex string `json:"auth_index,omitempty"`
+	// ObservedAt reports the observation timestamp.
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+	// Disabled reports whether the bound credential is known to be disabled.
+	Disabled bool `json:"disabled,omitempty"`
+	// Unavailable reports whether the bound credential is currently unavailable.
+	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// HTTPWireProfile configures transport-level wire representation for plugin HTTP requests.
+type HTTPWireProfile struct {
+	// HTTP1Only forces the transport to use HTTP/1.1 and disables HTTP/2 negotiation.
+	HTTP1Only bool `json:"http1_only,omitempty"`
+	// DisableAutoCompression prevents transparent decompression and automatic Accept-Encoding injection.
+	DisableAutoCompression bool `json:"disable_auto_compression,omitempty"`
+	// HeaderProfile defines desired header-name order and exact casing on the wire.
+	HeaderProfile []string `json:"header_profile,omitempty"`
+}
+
 // HTTPRequest describes an upstream HTTP request issued through the host.
 type HTTPRequest struct {
 	// Method is the HTTP method.
@@ -784,6 +841,8 @@ type HTTPRequest struct {
 	Headers http.Header
 	// Body contains the raw request body.
 	Body []byte
+	// WireProfile specifies optional outbound HTTP wire profile settings.
+	WireProfile *HTTPWireProfile `json:"wire_profile,omitempty"`
 }
 
 // HTTPResponse describes a non-streaming host HTTP response.
@@ -1110,6 +1169,11 @@ type StreamChunkInterceptRequest struct {
 	Body        []byte
 	// HistoryChunks contains a bounded recent history of chunks already delivered downstream.
 	// The host currently retains at most 64 chunks and 1 MiB total history bytes.
+	// Always preserved on header-init (ChunkIndex == StreamChunkHeaderInitIndex) when non-empty.
+	// On payload chunks (ChunkIndex >= 0):
+	//   - schema_version >= 5: omitted (nil) to avoid per-chunk cloning and serialization
+	//   - schema_version < 5: populated as a fresh clone each call (legacy compatibility)
+	// Callers must treat these slices as read-only; hosts clone before delivery to keep snapshots isolated.
 	HistoryChunks [][]byte
 	// ChunkIndex starts at 0 for payload chunks. StreamChunkHeaderInitIndex marks the header-only initialization call.
 	ChunkIndex int
@@ -1334,13 +1398,21 @@ type ManagementResponse struct {
 	// Headers contains response headers.
 	Headers http.Header
 	// Body contains the raw response body.
+	// On schema_version >= 6, JSON bodies are returned without HTML entity escaping.
+	// On schema_version < 6, JSON response string values are HTML-escaped for legacy compatibility.
 	Body []byte
 }
 
 // UsageRecord describes request usage and billing metadata.
 type UsageRecord struct {
+	// RequestID uniquely identifies this specific model execution instance (UUID v4).
+	RequestID string
+	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
+	TraceID string
 	// Provider identifies the upstream provider.
 	Provider string
+	// BaseURL is the upstream base URL configured for the request/credential when available.
+	BaseURL string
 	// ExecutorType identifies the executor implementation.
 	ExecutorType string
 	// Model is the model used for the request.
@@ -1349,6 +1421,10 @@ type UsageRecord struct {
 	Alias string
 	// APIKey is the client API key identifier when available.
 	APIKey string
+	// SessionID identifies the session when present.
+	SessionID string
+	// ParentSessionID identifies the parent session in a hierarchy or fork.
+	ParentSessionID string
 	// AuthID identifies the selected credential.
 	AuthID string
 	// AuthIndex identifies the credential index when applicable.
@@ -1361,9 +1437,15 @@ type UsageRecord struct {
 	ReasoningEffort string
 	// ServiceTier records the requested or reported service tier.
 	ServiceTier string
+	// ResponseServiceTier stores the final tier reported by the upstream response.
+	ResponseServiceTier string
+	// ResponseModel stores the model name reported by the upstream response, empty when unknown.
+	ResponseModel string
 	// Generate reports whether the client requested actual generation.
 	// The host normalizes omitted usage.Record values to true before delivery.
 	Generate bool
+	// Stream reports whether the request was executed in streaming mode.
+	Stream bool
 	// RequestedAt is the time the request was received.
 	RequestedAt time.Time
 	// Latency is the total request latency.
@@ -1404,4 +1486,201 @@ type UsageDetail struct {
 	CacheCreationTokens int64
 	// TotalTokens is the total token count.
 	TotalTokens int64
+}
+
+// QuotaProvider surfaces credential quota, balance, and billing information for management clients.
+type QuotaProvider interface {
+	// Identifier returns the provider key handled by this quota provider.
+	Identifier() string
+	// DescribeQuota returns metadata and supported provider keys for this quota provider.
+	DescribeQuota(context.Context, QuotaDescribeRequest) (QuotaDescribeResponse, error)
+	// FetchQuota retrieves normalized quota information for a credential.
+	FetchQuota(context.Context, QuotaFetchRequest) (QuotaFetchResponse, error)
+	// ResetQuota resets quota or usage for a credential if supported.
+	ResetQuota(context.Context, QuotaResetRequest) (QuotaResetResponse, error)
+}
+
+// QuotaDescribeRequest carries host context for describing quota capabilities.
+type QuotaDescribeRequest struct {
+	// Plugin is the metadata of the plugin being queried.
+	Plugin Metadata `json:"plugin,omitempty"`
+}
+
+// QuotaDescribeResponse describes supported providers and capabilities of a quota provider.
+type QuotaDescribeResponse struct {
+	// SupportedProviders lists provider keys supported by this quota provider.
+	SupportedProviders []string `json:"supported_providers,omitempty"`
+	// DisplayName is a user-facing label for this quota provider.
+	DisplayName string `json:"display_name,omitempty"`
+	// SupportsReset reports whether this provider supports resetting quota.
+	SupportsReset bool `json:"supports_reset,omitempty"`
+}
+
+// QuotaFetchRequest carries credential context for querying quota.
+type QuotaFetchRequest struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// AuthID identifies the credential ID.
+	AuthID string `json:"auth_id"`
+	// Provider identifies the credential provider.
+	Provider string `json:"provider"`
+	// StorageJSON contains provider-owned persisted auth data.
+	StorageJSON []byte `json:"storage_json,omitempty"`
+	// Metadata contains mutable host-managed auth metadata.
+	Metadata map[string]any `json:"metadata,omitempty"`
+	// Attributes contains immutable routing and provider attributes.
+	Attributes map[string]string `json:"attributes,omitempty"`
+	// Host contains relevant host configuration.
+	Host HostConfigSummary `json:"host,omitempty"`
+	// HTTPClient executes upstream HTTP requests through host transport policy.
+	HTTPClient HostHTTPClient `json:"-"`
+}
+
+// QuotaSubscription describes plan and tier information in normalized quota.
+type QuotaSubscription struct {
+	Plan     string `json:"plan,omitempty"`
+	TierName string `json:"tierName,omitempty"`
+	TierID   string `json:"tierId,omitempty"`
+}
+
+// UnmarshalJSON supports both camelCase and snake_case field names.
+func (s *QuotaSubscription) UnmarshalJSON(data []byte) error {
+	type Alias QuotaSubscription
+	aux := struct {
+		*Alias
+		AltTierName string `json:"tier_name"`
+		AltTierID   string `json:"tier_id"`
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.TierName == "" && aux.AltTierName != "" {
+		s.TierName = aux.AltTierName
+	}
+	if s.TierID == "" && aux.AltTierID != "" {
+		s.TierID = aux.AltTierID
+	}
+	return nil
+}
+
+// QuotaGroup describes a group of quota buckets in normalized quota.
+type QuotaGroup struct {
+	DisplayName string        `json:"displayName,omitempty"`
+	Buckets     []QuotaBucket `json:"buckets,omitempty"`
+}
+
+// UnmarshalJSON supports both camelCase and snake_case field names.
+func (g *QuotaGroup) UnmarshalJSON(data []byte) error {
+	type Alias QuotaGroup
+	aux := struct {
+		*Alias
+		AltDisplayName string `json:"display_name"`
+	}{
+		Alias: (*Alias)(g),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if g.DisplayName == "" && aux.AltDisplayName != "" {
+		g.DisplayName = aux.AltDisplayName
+	}
+	return nil
+}
+
+// QuotaBucket describes a single quota window or limit bucket.
+type QuotaBucket struct {
+	Window            string  `json:"window,omitempty"`
+	RemainingFraction float64 `json:"remainingFraction"`
+	ResetTime         string  `json:"resetTime,omitempty"`
+	Description       string  `json:"description,omitempty"`
+}
+
+// UnmarshalJSON supports both camelCase and snake_case field names.
+func (b *QuotaBucket) UnmarshalJSON(data []byte) error {
+	type Alias QuotaBucket
+	aux := struct {
+		*Alias
+		RemainingFraction    *float64 `json:"remainingFraction"`
+		AltRemainingFraction *float64 `json:"remaining_fraction"`
+		AltResetTime         string   `json:"reset_time"`
+	}{
+		Alias: (*Alias)(b),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.RemainingFraction != nil {
+		b.RemainingFraction = *aux.RemainingFraction
+	} else if aux.AltRemainingFraction != nil {
+		b.RemainingFraction = *aux.AltRemainingFraction
+	}
+	if b.ResetTime == "" && aux.AltResetTime != "" {
+		b.ResetTime = aux.AltResetTime
+	}
+	return nil
+}
+
+// QuotaMetric is a provider-defined, bounded numeric account summary for management UI rendering.
+// Format is "number" or "currency"; Currency is an ISO 4217 code when Format is "currency".
+type QuotaMetric struct {
+	Key      string  `json:"key"`
+	Label    string  `json:"label"`
+	Value    float64 `json:"value"`
+	Unit     string  `json:"unit,omitempty"`
+	Format   string  `json:"format,omitempty"`
+	Currency string  `json:"currency,omitempty"`
+}
+
+// QuotaFetchResponse carries normalized quota information for management UI rendering.
+type QuotaFetchResponse struct {
+	Subscription       *QuotaSubscription `json:"subscription,omitempty"`
+	Summary            []QuotaMetric      `json:"summary,omitempty"`
+	ServerTimeOffsetMs int64              `json:"serverTimeOffsetMs,omitempty"`
+	Groups             []QuotaGroup       `json:"groups,omitempty"`
+}
+
+// UnmarshalJSON supports both camelCase and snake_case field names.
+func (r *QuotaFetchResponse) UnmarshalJSON(data []byte) error {
+	type Alias QuotaFetchResponse
+	aux := struct {
+		*Alias
+		AltServerTimeOffsetMs int64 `json:"server_time_offset_ms"`
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ServerTimeOffsetMs == 0 && aux.AltServerTimeOffsetMs != 0 {
+		r.ServerTimeOffsetMs = aux.AltServerTimeOffsetMs
+	}
+	return nil
+}
+
+// QuotaResetRequest carries credential context for resetting quota.
+type QuotaResetRequest struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// AuthID identifies the credential ID.
+	AuthID string `json:"auth_id"`
+	// Provider identifies the credential provider.
+	Provider string `json:"provider"`
+	// StorageJSON contains provider-owned persisted auth data.
+	StorageJSON []byte `json:"storage_json,omitempty"`
+	// Metadata contains mutable host-managed auth metadata.
+	Metadata map[string]any `json:"metadata,omitempty"`
+	// Attributes contains immutable routing and provider attributes.
+	Attributes map[string]string `json:"attributes,omitempty"`
+	// Host contains relevant host configuration.
+	Host HostConfigSummary `json:"host,omitempty"`
+	// HTTPClient executes upstream HTTP requests through host transport policy.
+	HTTPClient HostHTTPClient `json:"-"`
+}
+
+// QuotaResetResponse returns the result of a quota reset action.
+type QuotaResetResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
 }

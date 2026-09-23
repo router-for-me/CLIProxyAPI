@@ -1,6 +1,7 @@
 package chat_completions
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -843,4 +844,488 @@ func TestConvertOpenAIRequestToClaude_DeterministicWithoutSessionKey(t *testing.
 	if idFirst != idSecond {
 		t.Fatalf("turn growth changed derived user_id: %q vs %q", idFirst, idSecond)
 	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatJSONSchema(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Extract facts from: Yesterday it rained in Beijing."}],
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"name": "extracted_facts",
+				"strict": true,
+				"schema": {
+					"type": "object",
+					"properties": {
+						"facts": {
+							"type": "array",
+							"items": { "type": "string" }
+						}
+					},
+					"required": ["facts"]
+				}
+			}
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	system := gjson.GetBytes(out, "system")
+	if !system.Exists() || !system.IsArray() || len(system.Array()) == 0 {
+		t.Fatalf("system blocks missing or empty. Output: %s", string(out))
+	}
+
+	foundSchemaInstruction := false
+	for _, block := range system.Array() {
+		text := block.Get("text").String()
+		if strings.Contains(text, "JSON") && strings.Contains(text, "facts") {
+			foundSchemaInstruction = true
+			break
+		}
+	}
+	if !foundSchemaInstruction {
+		t.Fatalf("expected structured output instructions containing schema in system prompt. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatJSONObject(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Return a JSON object."}],
+		"response_format": {
+			"type": "json_object"
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	system := gjson.GetBytes(out, "system")
+	if !system.Exists() || !system.IsArray() || len(system.Array()) == 0 {
+		t.Fatalf("system blocks missing or empty. Output: %s", string(out))
+	}
+
+	foundJSONInstruction := false
+	for _, block := range system.Array() {
+		text := block.Get("text").String()
+		if strings.Contains(text, "JSON object") {
+			foundJSONInstruction = true
+			break
+		}
+	}
+	if !foundJSONInstruction {
+		t.Fatalf("expected JSON object instruction in system prompt. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatPreservesExistingSystem(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{"role": "system", "content": "Custom operator instruction."},
+			{"role": "user", "content": "Extract facts."}
+		],
+		"response_format": {
+			"type": "json_object"
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	system := gjson.GetBytes(out, "system")
+	if !system.Exists() || !system.IsArray() || len(system.Array()) < 2 {
+		t.Fatalf("expected at least 2 system blocks (original + response_format). Output: %s", string(out))
+	}
+
+	hasOriginal := false
+	hasResponseFormat := false
+	for _, block := range system.Array() {
+		text := block.Get("text").String()
+		if strings.Contains(text, "Custom operator instruction.") {
+			hasOriginal = true
+		}
+		if strings.Contains(text, "JSON object") {
+			hasResponseFormat = true
+		}
+	}
+	if !hasOriginal || !hasResponseFormat {
+		t.Fatalf("expected both original system and response_format instruction. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatAbsentOrTextNoOp(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "absent",
+			body: `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"plain text"}]}`,
+		},
+		{
+			name: "type text",
+			body: `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"plain text"}],"response_format":{"type":"text"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(tt.body), false)
+			if gjson.GetBytes(out, "system").Exists() {
+				t.Fatalf("system blocks should not be created when response_format is absent or text. Output: %s", string(out))
+			}
+		})
+	}
+}
+
+// Anthropic only accepts cache_control on the tool_result block itself, never
+// inside tool_result.content. A part-level marker on an OpenAI tool message
+// must be hoisted to the block, while ordinary message parts keep theirs.
+func TestConvertOpenAIRequestToClaude_ToolResultPartCacheControlHoisted(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"Use calc for 2+2.","cache_control":{"type":"ephemeral"}}]},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calc","arguments":"{\"expr\":\"2+2\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"4","cache_control":{"type":"ephemeral"}}]}
+		],
+		"tools":[{"type":"function","function":{"name":"calc","description":"calc","parameters":{"type":"object","properties":{"expr":{"type":"string"}},"required":["expr"]}}}]
+	}`)
+	out := ConvertOpenAIRequestToClaude("claude-test", inputJSON, false)
+
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("message count = %d, want 3. Output: %s", len(messages), string(out))
+	}
+
+	// Ordinary user content parts keep their part-level cache_control.
+	firstText := messages[0].Get("content.0")
+	if got := firstText.Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("user text part cache_control.type = %q, want ephemeral (must not be stripped). Output: %s", got, string(out))
+	}
+
+	// The tool_result block carries the hoisted marker.
+	toolResult := messages[2].Get("content.0")
+	if got := toolResult.Get("type").String(); got != "tool_result" {
+		t.Fatalf("messages[2].content[0].type = %q, want tool_result. Output: %s", got, string(out))
+	}
+	if got := toolResult.Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool_result block cache_control.type = %q, want ephemeral (hoisted from the part). Output: %s", got, string(out))
+	}
+
+	// ... and the inner content parts carry no cache_control.
+	innerParts := toolResult.Get("content").Array()
+	for i, part := range innerParts {
+		if part.Get("cache_control").Exists() {
+			t.Fatalf("tool_result.content[%d] must not carry cache_control. Output: %s", i, string(out))
+		}
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ToolChoice(t *testing.T) {
+	t.Run("none produces type none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "Answer without calling tools."}],
+			"tool_choice": "none",
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}},
+				{"type": "function", "function": {"name": "tool_b", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotType := gjson.GetBytes(result, "tool_choice.type").String()
+		if gotType != "none" {
+			t.Fatalf("expected tool_choice.type to be 'none', got %q. Output: %s", gotType, result)
+		}
+	})
+
+	t.Run("object none produces type none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "Answer without calling tools."}],
+			"tool_choice": {"type": "none"},
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotType := gjson.GetBytes(result, "tool_choice.type").String()
+		if gotType != "none" {
+			t.Fatalf("expected tool_choice.type to be 'none', got %q. Output: %s", gotType, result)
+		}
+	})
+
+	t.Run("allowed_tools filters tools and sets auto mode", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "Use tool_b"}],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"allowed_tools": {
+					"mode": "auto",
+					"tools": [{"type": "function", "function": {"name": "tool_b"}}]
+				}
+			},
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}},
+				{"type": "function", "function": {"name": "tool_b", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotType := gjson.GetBytes(result, "tool_choice.type").String()
+		tools := gjson.GetBytes(result, "tools").Array()
+		if gotType != "auto" {
+			t.Fatalf("expected tool_choice type='auto', got %q. Output: %s", gotType, result)
+		}
+		if len(tools) != 1 || tools[0].Get("name").String() != "tool_b" {
+			t.Fatalf("expected tools to contain only tool_b, got %v. Output: %s", tools, result)
+		}
+	})
+
+	t.Run("allowed_tools multi function filters tools and supports required mode", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "Use tools"}],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"allowed_tools": {
+					"mode": "required",
+					"tools": [
+						{"type": "function", "function": {"name": "tool_b"}},
+						{"type": "function", "function": {"name": "tool_c"}}
+					]
+				}
+			},
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}},
+				{"type": "function", "function": {"name": "tool_b", "parameters": {"type": "object", "properties": {}}}},
+				{"type": "function", "function": {"name": "tool_c", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotType := gjson.GetBytes(result, "tool_choice.type").String()
+		tools := gjson.GetBytes(result, "tools").Array()
+		if gotType != "any" {
+			t.Fatalf("expected tool_choice type='any', got %q. Output: %s", gotType, result)
+		}
+		if len(tools) != 2 {
+			t.Fatalf("expected 2 tools, got %d. Output: %s", len(tools), result)
+		}
+	})
+
+	t.Run("parallel_tool_calls false adds disable_parallel_tool_use", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": "required",
+			"parallel_tool_calls": false,
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotType := gjson.GetBytes(result, "tool_choice.type").String()
+		gotDisable := gjson.GetBytes(result, "tool_choice.disable_parallel_tool_use").Bool()
+		if gotType != "any" || !gotDisable {
+			t.Fatalf("expected type='any' with disable_parallel_tool_use=true, got type=%q disable=%v. Output: %s", gotType, gotDisable, result)
+		}
+	})
+
+	t.Run("parallel_tool_calls null does not add disable_parallel_tool_use", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": "required",
+			"parallel_tool_calls": null,
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotDisable := gjson.GetBytes(result, "tool_choice.disable_parallel_tool_use")
+		if gotDisable.Exists() && gotDisable.Bool() {
+			t.Fatalf("expected disable_parallel_tool_use to not be true for parallel_tool_calls=null. Output: %s", result)
+		}
+	})
+
+	t.Run("parallel_tool_calls true does not add disable_parallel_tool_use", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": "required",
+			"parallel_tool_calls": true,
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotDisable := gjson.GetBytes(result, "tool_choice.disable_parallel_tool_use")
+		if gotDisable.Exists() && gotDisable.Bool() {
+			t.Fatalf("expected disable_parallel_tool_use to not be true for parallel_tool_calls=true. Output: %s", result)
+		}
+	})
+
+	t.Run("omitted tool_choice with parallel_tool_calls false sets auto with disable_parallel_tool_use", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "test"}],
+			"parallel_tool_calls": false,
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotType := gjson.GetBytes(result, "tool_choice.type").String()
+		gotDisable := gjson.GetBytes(result, "tool_choice.disable_parallel_tool_use").Bool()
+		if gotType != "auto" || !gotDisable {
+			t.Fatalf("expected type='auto' with disable_parallel_tool_use=true, got type=%q disable=%v. Output: %s", gotType, gotDisable, result)
+		}
+	})
+
+	t.Run("empty allowed_tools fails closed to type none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {
+				"type": "allowed_tools",
+				"allowed_tools": {
+					"tools": []
+				}
+			},
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotType := gjson.GetBytes(result, "tool_choice.type").String()
+		if gotType != "none" {
+			t.Fatalf("expected tool_choice type='none', got %q. Output: %s", gotType, result)
+		}
+	})
+
+	t.Run("function choice with missing name fails closed to type none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "function", "function": {}},
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		gotType := gjson.GetBytes(result, "tool_choice.type").String()
+		if gotType != "none" {
+			t.Fatalf("expected tool_choice type='none', got %q. Output: %s", gotType, result)
+		}
+	})
+
+	t.Run("tool_choice null does not set tool_choice", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": null,
+			"tools": [
+				{"type": "function", "function": {"name": "tool_a", "parameters": {"type": "object", "properties": {}}}}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		if gjson.GetBytes(result, "tool_choice").Exists() {
+			t.Fatalf("expected tool_choice not to be set when tool_choice is null, got: %s", result)
+		}
+	})
+}
+
+func TestConvertOpenAIRequestToClaude_ToolStrict(t *testing.T) {
+	t.Run("preserves strict true on function tool", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "hi"}],
+			"tools": [
+				{
+					"type": "function",
+					"function": {
+						"name": "tool_a",
+						"description": "Controlled tool.",
+						"strict": true,
+						"parameters": {"type": "object", "properties": {}}
+					}
+				}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		toolStrict := gjson.GetBytes(result, "tools.0.strict")
+		if !toolStrict.Exists() {
+			t.Fatalf("expected tools.0.strict to exist in Claude output: %s", result)
+		}
+		if !toolStrict.Bool() {
+			t.Fatalf("expected tools.0.strict to be true, got %v", toolStrict.Value())
+		}
+	})
+
+	t.Run("preserves strict true when on top level tool", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "hi"}],
+			"tools": [
+				{
+					"type": "function",
+					"strict": true,
+					"function": {
+						"name": "tool_b",
+						"description": "Controlled tool.",
+						"parameters": {"type": "object", "properties": {}}
+					}
+				}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		toolStrict := gjson.GetBytes(result, "tools.0.strict")
+		if !toolStrict.Exists() || !toolStrict.Bool() {
+			t.Fatalf("expected tools.0.strict to be true, got %s", result)
+		}
+	})
+
+	t.Run("preserves strict false on function tool", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "hi"}],
+			"tools": [
+				{
+					"type": "function",
+					"function": {
+						"name": "tool_c",
+						"description": "Controlled tool.",
+						"strict": false,
+						"parameters": {"type": "object", "properties": {}}
+					}
+				}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		toolStrict := gjson.GetBytes(result, "tools.0.strict")
+		if !toolStrict.Exists() {
+			t.Fatalf("expected tools.0.strict to exist in Claude output: %s", result)
+		}
+		if toolStrict.Bool() {
+			t.Fatalf("expected tools.0.strict to be false, got %v", toolStrict.Value())
+		}
+	})
+
+	t.Run("omits strict when not provided", func(t *testing.T) {
+		inputJSON := `{
+			"model": "claude-sonnet-4-6",
+			"messages": [{"role": "user", "content": "hi"}],
+			"tools": [
+				{
+					"type": "function",
+					"function": {
+						"name": "tool_d",
+						"description": "Controlled tool.",
+						"parameters": {"type": "object", "properties": {}}
+					}
+				}
+			]
+		}`
+		result := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", []byte(inputJSON), false)
+		if gjson.GetBytes(result, "tools.0.strict").Exists() {
+			t.Fatalf("expected tools.0.strict to be omitted when not provided, got %s", result)
+		}
+	})
 }

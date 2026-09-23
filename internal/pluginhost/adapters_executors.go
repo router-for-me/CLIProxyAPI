@@ -1040,7 +1040,7 @@ func buildExecutorRequest(host *Host, provider string, auth *coreauth.Auth, req 
 		StorageJSON:     storageJSONFromAuth(auth),
 		AuthMetadata:    cloneAnyMap(authMetadata(auth)),
 		AuthAttributes:  authAttributes(auth),
-		HTTPClient:      host.newHTTPClient(auth, provider),
+		HTTPClient:      host.newHTTPClientWithProxy(auth, opts.ProxyURL, provider),
 	}
 }
 

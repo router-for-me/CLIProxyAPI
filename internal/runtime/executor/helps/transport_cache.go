@@ -63,41 +63,60 @@ func (c *TransportCache[K]) Get(key K, build func() (*http.Transport, error)) (*
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if element, ok := c.items[key]; ok {
 		c.order.MoveToFront(element)
-		return element.Value.(*transportCacheEntry[K]).transport, nil
+		transport := element.Value.(*transportCacheEntry[K]).transport
+		c.mu.Unlock()
+		return transport, nil
 	}
 
 	transport, errBuild := build()
 	if errBuild != nil {
+		c.mu.Unlock()
 		return nil, errBuild
 	}
 	if transport == nil {
+		c.mu.Unlock()
 		return nil, errors.New("transport cache: build returned no transport")
 	}
 
+	// Double check in case key was populated while build was running
+	if element, ok := c.items[key]; ok {
+		c.order.MoveToFront(element)
+		existing := element.Value.(*transportCacheEntry[K]).transport
+		c.mu.Unlock()
+		transport.CloseIdleConnections()
+		return existing, nil
+	}
+
 	c.items[key] = c.order.PushFront(&transportCacheEntry[K]{key: key, transport: transport})
-	c.evictLocked()
+	evicted := c.evictLocked()
+	c.mu.Unlock()
+
+	for _, t := range evicted {
+		t.CloseIdleConnections()
+	}
 	return transport, nil
 }
 
-// evictLocked drops least recently used entries until the cache fits its capacity.
+// evictLocked drops least recently used entries until the cache fits its capacity,
+// returning a slice of evicted transports to be closed outside the lock.
 // Closing idle connections is what actually releases the evicted pool; in-flight
 // requests still holding the transport are unaffected because CloseIdleConnections
 // only reaps connections that are currently idle.
-func (c *TransportCache[K]) evictLocked() {
+func (c *TransportCache[K]) evictLocked() []*http.Transport {
+	var evicted []*http.Transport
 	for c.order.Len() > c.capacity {
 		oldest := c.order.Back()
 		if oldest == nil {
-			return
+			break
 		}
 		c.order.Remove(oldest)
 		entry := oldest.Value.(*transportCacheEntry[K])
 		delete(c.items, entry.key)
-		entry.transport.CloseIdleConnections()
+		evicted = append(evicted, entry.transport)
 	}
+	return evicted
 }
 
 // Len reports how many transports the cache currently holds.
@@ -110,16 +129,79 @@ func (c *TransportCache[K]) Len() int {
 	return c.order.Len()
 }
 
+// Contains reports whether key exists in the cache.
+func (c *TransportCache[K]) Contains(key K) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.items[key]
+	return ok
+}
+
+// CloseKey removes the transport cached under key (if present) and closes its idle connections.
+// Returns true if the entry was found and closed.
+func (c *TransportCache[K]) CloseKey(key K) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	element, ok := c.items[key]
+	if !ok {
+		c.mu.Unlock()
+		return false
+	}
+	c.order.Remove(element)
+	delete(c.items, key)
+	transport := element.Value.(*transportCacheEntry[K]).transport
+	c.mu.Unlock()
+
+	transport.CloseIdleConnections()
+	return true
+}
+
+// CloseMatching removes and closes idle connections for every cached transport whose key
+// satisfies predicate. Returns the number of closed transports.
+func (c *TransportCache[K]) CloseMatching(predicate func(key K) bool) int {
+	if c == nil || predicate == nil {
+		return 0
+	}
+	c.mu.Lock()
+	var toClose []*http.Transport
+	var next *list.Element
+	for element := c.order.Front(); element != nil; element = next {
+		next = element.Next()
+		entry := element.Value.(*transportCacheEntry[K])
+		if predicate(entry.key) {
+			c.order.Remove(element)
+			delete(c.items, entry.key)
+			toClose = append(toClose, entry.transport)
+		}
+	}
+	c.mu.Unlock()
+
+	for _, t := range toClose {
+		t.CloseIdleConnections()
+	}
+	return len(toClose)
+}
+
 // Purge drops every entry and closes the idle connections it was holding.
 func (c *TransportCache[K]) Purge() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var toClose []*http.Transport
 	for element := c.order.Front(); element != nil; element = element.Next() {
-		element.Value.(*transportCacheEntry[K]).transport.CloseIdleConnections()
+		toClose = append(toClose, element.Value.(*transportCacheEntry[K]).transport)
 	}
 	c.order.Init()
 	c.items = make(map[K]*list.Element, c.capacity)
+	c.mu.Unlock()
+
+	for _, t := range toClose {
+		t.CloseIdleConnections()
+	}
 }

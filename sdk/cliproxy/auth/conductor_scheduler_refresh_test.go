@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,171 @@ func TestManager_RefreshAuthUnauthorizedFailureStopsAutoRefreshRetry(t *testing.
 	}
 	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
 		t.Fatal("expected unauthorized auth to be removed from the auto-refresh schedule")
+	}
+}
+
+func TestManager_TerminalOAuthFailure_ReturnsTerminalAuthError(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name     string
+		selector Selector
+	}{
+		{name: "fast_path_round_robin", selector: &RoundRobinSelector{}},
+		{name: "legacy_path_nil_selector", selector: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, tc.selector, nil)
+			manager.RegisterExecutor(unauthorizedRefreshTestExecutor{
+				schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "codex"},
+			})
+
+			authID := "unauthorized-terminal-" + tc.name
+			healthyID := "healthy-" + tc.name
+			auth := &Auth{
+				ID:       authID,
+				Provider: "codex",
+				Metadata: map[string]any{
+					"email": "x@example.com",
+				},
+			}
+			if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "any-model"}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(authID)
+				registry.GetGlobalRegistry().UnregisterClient(healthyID)
+			})
+
+			manager.refreshAuth(ctx, auth.ID)
+
+			_, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "any-model", cliproxyexecutor.Options{}, nil)
+			if errPick == nil {
+				t.Fatal("expected pick error for terminal unauthorized auth")
+			}
+			if !IsTerminalAuthError(errPick) {
+				t.Fatalf("expected IsTerminalAuthError to be true, got %T: %v", errPick, errPick)
+			}
+			var authErr *Error
+			if !errors.As(errPick, &authErr) || authErr == nil {
+				t.Fatalf("expected *Error, got %T: %v", errPick, errPick)
+			}
+			if authErr.Retryable {
+				t.Fatal("expected Retryable to be false for terminal unauthorized auth")
+			}
+			if authErr.StatusCode() != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", authErr.StatusCode(), http.StatusServiceUnavailable)
+			}
+
+			// Negative case: adding a healthy credential allows selection to succeed.
+			healthy := &Auth{ID: healthyID, Provider: "codex", Status: StatusActive}
+			if _, errRegisterHealthy := manager.Register(ctx, healthy); errRegisterHealthy != nil {
+				t.Fatalf("register healthy auth: %v", errRegisterHealthy)
+			}
+			registry.GetGlobalRegistry().RegisterClient(healthyID, "codex", []*registry.ModelInfo{{ID: "any-model"}})
+			picked, _, _, errPickHealthy := manager.pickNextMixed(ctx, []string{"codex"}, "any-model", cliproxyexecutor.Options{}, nil)
+			if errPickHealthy != nil {
+				t.Fatalf("expected healthy pick to succeed, got: %v", errPickHealthy)
+			}
+			if picked == nil || picked.ID != healthyID {
+				t.Fatalf("expected picked auth %q, got: %v", healthyID, picked)
+			}
+		})
+	}
+}
+
+func TestManager_QuotaCooldown_DoesNotClassifyAsTerminalAuth(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "codex"})
+
+	auth := &Auth{
+		ID:          "quota-cooldown-auth",
+		Provider:    "codex",
+		Unavailable: true,
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "credential_quota",
+			NextRecoverAt: time.Now().Add(time.Minute),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "model-cooldown"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	_, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "model-cooldown", cliproxyexecutor.Options{}, nil)
+	if errPick == nil {
+		t.Fatal("expected pick error for cooling auth")
+	}
+	if IsTerminalAuthError(errPick) {
+		t.Fatalf("expected IsTerminalAuthError to be false for quota cooldown, got true")
+	}
+}
+
+func TestManager_TerminalOAuthFailure_OverridesPreexistingModelStateError(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name     string
+		selector Selector
+	}{
+		{name: "fast_path_round_robin", selector: &RoundRobinSelector{}},
+		{name: "legacy_path_nil_selector", selector: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, tc.selector, nil)
+			manager.RegisterExecutor(unauthorizedRefreshTestExecutor{
+				schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "codex"},
+			})
+
+			authID := "unauthorized-stale-model-" + tc.name
+			auth := &Auth{
+				ID:       authID,
+				Provider: "codex",
+				ModelStates: map[string]*ModelState{
+					"any-model": {
+						LastError: &Error{Code: "rate_limit_exceeded", Message: "historical rate limit", HTTPStatus: http.StatusTooManyRequests},
+						UpdatedAt: time.Now().Add(-10 * time.Minute),
+					},
+				},
+				Metadata: map[string]any{
+					"email": "x@example.com",
+				},
+			}
+			if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "any-model"}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(authID)
+			})
+
+			// Trigger unauthorized refresh failure.
+			manager.refreshAuth(ctx, auth.ID)
+
+			_, _, _, errPick := manager.pickNextMixed(ctx, []string{"codex"}, "any-model", cliproxyexecutor.Options{}, nil)
+			if errPick == nil {
+				t.Fatal("expected pick error for terminal unauthorized auth")
+			}
+			if !IsTerminalAuthError(errPick) {
+				t.Fatalf("expected IsTerminalAuthError to be true, got %T: %v", errPick, errPick)
+			}
+			cause := errors.Unwrap(errPick)
+			if cause == nil {
+				t.Fatal("expected non-nil cause")
+			}
+			if !strings.Contains(cause.Error(), "unauthorized") {
+				t.Fatalf("expected cause to contain unauthorized OAuth error, got: %v", cause)
+			}
+			if strings.Contains(cause.Error(), "historical rate limit") {
+				t.Fatalf("expected cause NOT to be masked by historical model error, got: %v", cause)
+			}
+		})
 	}
 }
 
@@ -498,5 +664,692 @@ func TestScheduler_ReadyAuthDemotedWhenTokenExpires(t *testing.T) {
 	gotAfter, errPickAfter := manager.scheduler.pickSingle(ctx, "codex", "gpt-5-short-test", cliproxyexecutor.Options{}, nil)
 	if errPickAfter == nil && gotAfter != nil {
 		t.Fatalf("pickSingle() after expiry should fail, but got auth %v", gotAfter.ID)
+	}
+}
+
+type blockingSuccessRefreshExecutor struct {
+	schedulerProviderTestExecutor
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e *blockingSuccessRefreshExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	close(e.started)
+	<-e.release
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = "refreshed-access-token"
+	auth.Metadata["expired"] = time.Now().Add(time.Hour).Format(time.RFC3339)
+	return auth, nil
+}
+
+func TestManager_RefreshAuth_PreservesConcurrentProxyURLAndMetadata(t *testing.T) {
+	ctx := context.Background()
+	mockStore := newMemoryAuthTestStore()
+	manager := NewManager(mockStore, &RoundRobinSelector{}, nil)
+	executor := &blockingSuccessRefreshExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "antigravity"},
+		started:                       make(chan struct{}),
+		release:                       make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "test-antigravity",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "old-access-token",
+			"expired":      time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshDone := make(chan struct{})
+	go func() {
+		manager.refreshAuth(ctx, auth.ID)
+		close(refreshDone)
+	}()
+
+	// Wait for refresh to start
+	<-executor.started
+
+	// Concurrently simulate a PATCH /v0/management/auth-files/fields or file watcher update:
+	// injecting proxy_url and custom metadata while refresh is in flight.
+	currentAuth, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	currentAuth.ProxyURL = "http://127.0.0.1:7890"
+	currentAuth.Metadata["proxy_url"] = "http://127.0.0.1:7890"
+	currentAuth.Metadata["custom_field"] = "custom_value"
+	if _, errUpdate := manager.Update(ctx, currentAuth); errUpdate != nil {
+		t.Fatalf("concurrent update failed: %v", errUpdate)
+	}
+
+	// Release refresh to complete successfully
+	close(executor.release)
+	<-refreshDone
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+
+	// Verify refreshed token fields exist
+	if gotToken, _ := updated.Metadata["access_token"].(string); gotToken != "refreshed-access-token" {
+		t.Fatalf("access_token = %q, want refreshed-access-token", gotToken)
+	}
+
+	// Verify concurrent proxy_url and metadata were preserved
+	if updated.ProxyURL != "http://127.0.0.1:7890" {
+		t.Fatalf("ProxyURL = %q, want http://127.0.0.1:7890", updated.ProxyURL)
+	}
+	if gotProxy, _ := updated.Metadata["proxy_url"].(string); gotProxy != "http://127.0.0.1:7890" {
+		t.Fatalf("Metadata[proxy_url] = %q, want http://127.0.0.1:7890", gotProxy)
+	}
+	if gotCustom, _ := updated.Metadata["custom_field"].(string); gotCustom != "custom_value" {
+		t.Fatalf("Metadata[custom_field] = %q, want custom_value", gotCustom)
+	}
+
+	// Verify persisted store also has proxy_url preserved
+	mockStore.mu.Lock()
+	persisted := mockStore.auths[auth.ID]
+	mockStore.mu.Unlock()
+	if persisted == nil {
+		t.Fatalf("persisted auth not found in store")
+	}
+	if persisted.ProxyURL != "http://127.0.0.1:7890" {
+		t.Fatalf("persisted ProxyURL = %q, want http://127.0.0.1:7890", persisted.ProxyURL)
+	}
+	if gotProxy, _ := persisted.Metadata["proxy_url"].(string); gotProxy != "http://127.0.0.1:7890" {
+		t.Fatalf("persisted Metadata[proxy_url] = %q, want http://127.0.0.1:7890", gotProxy)
+	}
+}
+
+type inPlaceMutatingRefreshExecutor struct {
+	schedulerProviderTestExecutor
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e *inPlaceMutatingRefreshExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	close(e.started)
+	<-e.release
+	// In-place mutation of the passed Auth object (common behavior in executors)
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = "new-access-token"
+	auth.Metadata["expired"] = time.Now().Add(time.Hour).Format(time.RFC3339)
+	auth.Metadata["account_id"] = "acc-456"
+	auth.Metadata["project_id"] = "proj-789"
+	return auth, nil
+}
+
+func TestManager_RefreshAuth_InPlaceMutatingExecutorNonTokenMetadataAndConcurrentProxy(t *testing.T) {
+	ctx := context.Background()
+	mockStore := newMemoryAuthTestStore()
+	manager := NewManager(mockStore, &RoundRobinSelector{}, nil)
+	executor := &inPlaceMutatingRefreshExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "antigravity"},
+		started:                       make(chan struct{}),
+		release:                       make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "inplace-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "old-token",
+			"expired":      time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshDone := make(chan struct{})
+	go func() {
+		manager.refreshAuth(ctx, auth.ID)
+		close(refreshDone)
+	}()
+
+	<-executor.started
+
+	currentAuth, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	currentAuth.ProxyURL = "http://10.0.0.1:8888"
+	currentAuth.Metadata["proxy_url"] = "http://10.0.0.1:8888"
+	if _, errUpdate := manager.Update(ctx, currentAuth); errUpdate != nil {
+		t.Fatalf("concurrent update failed: %v", errUpdate)
+	}
+
+	close(executor.release)
+	<-refreshDone
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+
+	// Verify token updated
+	if gotToken, _ := updated.Metadata["access_token"].(string); gotToken != "new-access-token" {
+		t.Fatalf("access_token = %q, want new-access-token", gotToken)
+	}
+	// Verify non-token metadata added by executor is preserved
+	if gotAccount, _ := updated.Metadata["account_id"].(string); gotAccount != "acc-456" {
+		t.Fatalf("account_id = %q, want acc-456", gotAccount)
+	}
+	if gotProject, _ := updated.Metadata["project_id"].(string); gotProject != "proj-789" {
+		t.Fatalf("project_id = %q, want proj-789", gotProject)
+	}
+	// Verify concurrent proxy_url is preserved
+	if updated.ProxyURL != "http://10.0.0.1:8888" {
+		t.Fatalf("ProxyURL = %q, want http://10.0.0.1:8888", updated.ProxyURL)
+	}
+	if gotProxy, _ := updated.Metadata["proxy_url"].(string); gotProxy != "http://10.0.0.1:8888" {
+		t.Fatalf("Metadata[proxy_url] = %q, want http://10.0.0.1:8888", gotProxy)
+	}
+}
+
+func TestManager_RefreshAuth_ConcurrentlyClearedProxyNotResurrected(t *testing.T) {
+	ctx := context.Background()
+	mockStore := newMemoryAuthTestStore()
+	manager := NewManager(mockStore, &RoundRobinSelector{}, nil)
+	executor := &blockingSuccessRefreshExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "antigravity"},
+		started:                       make(chan struct{}),
+		release:                       make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "clear-proxy-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		ProxyURL: "http://initial-proxy.local:8080",
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "old-token",
+			"proxy_url":    "http://initial-proxy.local:8080",
+			"expired":      time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshDone := make(chan struct{})
+	go func() {
+		manager.refreshAuth(ctx, auth.ID)
+		close(refreshDone)
+	}()
+
+	<-executor.started
+
+	// Concurrently CLEAR proxy_url
+	currentAuth, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	currentAuth.ProxyURL = ""
+	delete(currentAuth.Metadata, "proxy_url")
+	if _, errUpdate := manager.Update(ctx, currentAuth); errUpdate != nil {
+		t.Fatalf("concurrent clear proxy failed: %v", errUpdate)
+	}
+
+	close(executor.release)
+	<-refreshDone
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+
+	// Verify proxy_url was NOT resurrected
+	if updated.ProxyURL != "" {
+		t.Fatalf("ProxyURL = %q, want empty string", updated.ProxyURL)
+	}
+	if _, exists := updated.Metadata["proxy_url"]; exists {
+		t.Fatalf("Metadata[proxy_url] should not exist, got %v", updated.Metadata["proxy_url"])
+	}
+	// Token should still be updated
+	if gotToken, _ := updated.Metadata["access_token"].(string); gotToken != "refreshed-access-token" {
+		t.Fatalf("access_token = %q, want refreshed-access-token", gotToken)
+	}
+}
+
+func TestManager_RefreshAuth_StaleRegistrationEpochDiscarded(t *testing.T) {
+	ctx := context.Background()
+	mockStore := newMemoryAuthTestStore()
+	manager := NewManager(mockStore, &RoundRobinSelector{}, nil)
+	executor := &blockingSuccessRefreshExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "antigravity"},
+		started:                       make(chan struct{}),
+		release:                       make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "re-register-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "original-token",
+			"expired":      time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshDone := make(chan struct{})
+	go func() {
+		manager.refreshAuth(ctx, auth.ID)
+		close(refreshDone)
+	}()
+
+	<-executor.started
+
+	// Unregister and re-register with same ID, new credentials
+	manager.Remove(ctx, auth.ID)
+	newAuth := &Auth{
+		ID:       "re-register-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "freshly-registered-different-token",
+			"expired":      time.Now().Add(48 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, newAuth); errRegister != nil {
+		t.Fatalf("re-register auth failed: %v", errRegister)
+	}
+
+	close(executor.release)
+	<-refreshDone
+
+	current, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	// The new registration token must remain intact and NOT overwritten by the old refresh
+	if gotToken, _ := current.Metadata["access_token"].(string); gotToken != "freshly-registered-different-token" {
+		t.Fatalf("access_token = %q, want freshly-registered-different-token (stale refresh should be discarded)", gotToken)
+	}
+}
+
+func TestManager_RefreshAuth_RestoresStatusFromErrorToActive(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &blockingSuccessRefreshExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "antigravity"},
+		started:                       make(chan struct{}),
+		release:                       make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+
+	// Auth is currently in StatusError and Unavailable due to a previous 401/failure
+	auth := &Auth{
+		ID:            "error-status-auth",
+		Provider:      "antigravity",
+		Status:        StatusError,
+		StatusMessage: "token expired",
+		Unavailable:   true,
+		LastError:     &Error{Message: "token expired"},
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "expired-token",
+			"expired":      time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshDone := make(chan struct{})
+	go func() {
+		manager.refreshAuth(ctx, auth.ID)
+		close(refreshDone)
+	}()
+
+	<-executor.started
+	close(executor.release)
+	<-refreshDone
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	if updated.Status != StatusActive {
+		t.Fatalf("Status = %v, want StatusActive", updated.Status)
+	}
+	if updated.Unavailable {
+		t.Fatal("Unavailable = true, want false after successful refresh")
+	}
+	if updated.StatusMessage != "" {
+		t.Fatalf("StatusMessage = %q, want empty string", updated.StatusMessage)
+	}
+	if updated.LastError != nil {
+		t.Fatalf("LastError = %v, want nil", updated.LastError)
+	}
+	if updated.LastRefreshedAt.IsZero() {
+		t.Fatal("LastRefreshedAt is zero, want non-zero")
+	}
+}
+
+type testPrepareExecutor struct {
+	schedulerProviderTestExecutor
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e *testPrepareExecutor) ShouldPrepareRequestAuth(auth *Auth) bool {
+	return auth.Metadata["project_id"] == nil
+}
+
+func (e *testPrepareExecutor) PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error) {
+	close(e.started)
+	<-e.release
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["project_id"] = "discovered-project-id"
+	return auth, nil
+}
+
+func TestManager_PrepareRequestAuth_DoesNotRollbackConcurrentlyRefreshedToken(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &testPrepareExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "antigravity"},
+		started:                       make(chan struct{}),
+		release:                       make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "prepare-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "original-token",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	prepareDone := make(chan struct{})
+	go func() {
+		_, _ = manager.prepareRequestAuth(ctx, executor, auth)
+		close(prepareDone)
+	}()
+
+	<-executor.started
+
+	// While prepare is in-flight, a background token refresh completes and sets a new token
+	current, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	current.Metadata["access_token"] = "brand-new-refreshed-token"
+	if _, errUpdate := manager.Update(ctx, current); errUpdate != nil {
+		t.Fatalf("update with new token failed: %v", errUpdate)
+	}
+
+	close(executor.release)
+	<-prepareDone
+
+	finalAuth, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	// The brand-new-refreshed-token must NOT be rolled back to original-token
+	if gotToken, _ := finalAuth.Metadata["access_token"].(string); gotToken != "brand-new-refreshed-token" {
+		t.Fatalf("access_token = %q, want brand-new-refreshed-token (prepare should not roll back token)", gotToken)
+	}
+	// Project ID should be added
+	if gotProj, _ := finalAuth.Metadata["project_id"].(string); gotProj != "discovered-project-id" {
+		t.Fatalf("project_id = %q, want discovered-project-id", gotProj)
+	}
+}
+
+func TestManager_Persist_SkipPersistAdvancesWatermarkAndBlocksOlderGeneration(t *testing.T) {
+	ctx := context.Background()
+	mockStore := newMemoryAuthTestStore()
+	manager := NewManager(mockStore, &RoundRobinSelector{}, nil)
+
+	auth := &Auth{
+		ID:       "watermark-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "gen1-token",
+			"proxy_url":    "http://initial.proxy",
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	// Capture generation 1 snapshot and inject a unique sentinel that would only appear if persisted
+	gen1Auth, _ := manager.GetByID(auth.ID)
+	gen1Auth.Metadata["stale_sentinel"] = "must_not_persist"
+
+	// Simulate file watcher updating auth from disk via WithSkipPersist (e.g. user edited JSON on disk)
+	watcherAuth := gen1Auth.Clone()
+	delete(watcherAuth.Metadata, "stale_sentinel")
+	watcherAuth.ProxyURL = "http://user-disk-edit.proxy"
+	watcherAuth.Metadata["proxy_url"] = "http://user-disk-edit.proxy"
+	skipCtx := WithSkipPersist(ctx)
+	if _, errUpdate := manager.Update(skipCtx, watcherAuth); errUpdate != nil {
+		t.Fatalf("watcher update failed: %v", errUpdate)
+	}
+
+	// Now simulate the older generation 1 snapshot trying to persist afterwards
+	if errPersist := manager.persist(ctx, gen1Auth); errPersist != nil {
+		t.Fatalf("persist error: %v", errPersist)
+	}
+
+	// Immediately verify store was NOT overwritten with gen1's stale sentinel
+	mockStore.mu.Lock()
+	savedImmediately := mockStore.auths[auth.ID]
+	mockStore.mu.Unlock()
+	if savedImmediately == nil {
+		t.Fatal("saved auth is nil")
+	}
+	if savedImmediately.Metadata["stale_sentinel"] != nil {
+		t.Fatalf("stale generation-1 snapshot was persisted to store! sentinel = %v", savedImmediately.Metadata["stale_sentinel"])
+	}
+	// Let's verify by updating a generation 3 that DOES persist:
+	gen3Auth := watcherAuth.Clone()
+	gen3Auth.Metadata["access_token"] = "gen3-token"
+	if _, errUpdate := manager.Update(ctx, gen3Auth); errUpdate != nil {
+		t.Fatalf("gen3 update failed: %v", errUpdate)
+	}
+
+	mockStore.mu.Lock()
+	savedFinal := mockStore.auths[auth.ID]
+	mockStore.mu.Unlock()
+	if savedFinal.Metadata["proxy_url"] != "http://user-disk-edit.proxy" {
+		t.Fatalf("proxy_url in store = %v, want http://user-disk-edit.proxy", savedFinal.Metadata["proxy_url"])
+	}
+}
+
+type proxyMutatingExecutor struct {
+	schedulerProviderTestExecutor
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e *proxyMutatingExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	close(e.started)
+	<-e.release
+	auth.ProxyURL = "http://executor-returned.proxy:8080"
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["proxy_url"] = "http://executor-returned.proxy:8080"
+	auth.Metadata["access_token"] = "refreshed-token"
+	auth.Metadata["expired"] = time.Now().Add(time.Hour).Format(time.RFC3339)
+	auth.Status = "" // Executor returns unset status
+	return auth, nil
+}
+
+func TestManager_RefreshAuth_BothModifyProxy_UserTakesPrecedenceAndConsistent(t *testing.T) {
+	ctx := context.Background()
+	mockStore := newMemoryAuthTestStore()
+	manager := NewManager(mockStore, &RoundRobinSelector{}, nil)
+	executor := &proxyMutatingExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "antigravity"},
+		started:                       make(chan struct{}),
+		release:                       make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "conflict-proxy-auth",
+		Provider: "antigravity",
+		Status:   StatusError, // Starts in error
+		ProxyURL: "http://base.proxy:8080",
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "old-token",
+			"proxy_url":    "http://base.proxy:8080",
+			"expired":      time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshDone := make(chan struct{})
+	go func() {
+		manager.refreshAuth(ctx, auth.ID)
+		close(refreshDone)
+	}()
+
+	<-executor.started
+
+	// Concurrently, user changes proxy to http://user-preferred.proxy:9090
+	current, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	current.ProxyURL = "http://user-preferred.proxy:9090"
+	current.Metadata["proxy_url"] = "http://user-preferred.proxy:9090"
+	if _, errUpdate := manager.Update(ctx, current); errUpdate != nil {
+		t.Fatalf("concurrent update failed: %v", errUpdate)
+	}
+
+	close(executor.release)
+	<-refreshDone
+
+	finalAuth, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("expected auth %q after refresh", auth.ID)
+	}
+
+	// User's proxy change MUST win over executor's proxy change
+	if finalAuth.ProxyURL != "http://user-preferred.proxy:9090" {
+		t.Fatalf("ProxyURL = %q, want user value http://user-preferred.proxy:9090", finalAuth.ProxyURL)
+	}
+	if gotProxy, _ := finalAuth.Metadata["proxy_url"].(string); gotProxy != "http://user-preferred.proxy:9090" {
+		t.Fatalf("Metadata[proxy_url] = %q, want user value http://user-preferred.proxy:9090", gotProxy)
+	}
+	// Token must still be updated
+	if gotToken, _ := finalAuth.Metadata["access_token"].(string); gotToken != "refreshed-token" {
+		t.Fatalf("access_token = %q, want refreshed-token", gotToken)
+	}
+	// Status should be restored to Active even if executor returned empty Status
+	if finalAuth.Status != StatusActive {
+		t.Fatalf("Status = %v, want StatusActive", finalAuth.Status)
+	}
+}
+
+func TestManager_RefreshAuth_PreservesConcurrentModelCooldown(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &blockingSuccessRefreshExecutor{
+		schedulerProviderTestExecutor: schedulerProviderTestExecutor{provider: "antigravity"},
+		started:                       make(chan struct{}),
+		release:                       make(chan struct{}),
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "model-cooldown-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":         "antigravity",
+			"access_token": "old-token",
+			"expired":      time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	refreshDone := make(chan struct{})
+	go func() {
+		manager.refreshAuth(ctx, auth.ID)
+		close(refreshDone)
+	}()
+
+	<-executor.started
+
+	// While refresh is running, model "gemini-pro" gets put in 429 quota cooldown
+	current, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	if current.ModelStates == nil {
+		current.ModelStates = make(map[string]*ModelState)
+	}
+	recoverTime := time.Now().Add(10 * time.Minute)
+	current.ModelStates["gemini-pro"] = &ModelState{
+		Status:         StatusError,
+		Unavailable:    true,
+		NextRetryAfter: recoverTime,
+		StatusMessage:  "quota exceeded",
+	}
+	if _, errUpdate := manager.Update(ctx, current); errUpdate != nil {
+		t.Fatalf("update with model cooldown failed: %v", errUpdate)
+	}
+
+	close(executor.release)
+	<-refreshDone
+
+	finalAuth, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatalf("auth not found: %s", auth.ID)
+	}
+	// The model cooldown on "gemini-pro" MUST be preserved
+	ms := finalAuth.ModelStates["gemini-pro"]
+	if ms == nil {
+		t.Fatal("ModelStates[gemini-pro] is nil, want preserved cooldown")
+	}
+	if !ms.Unavailable {
+		t.Fatal("ModelStates[gemini-pro].Unavailable = false, want true")
+	}
+	if ms.StatusMessage != "quota exceeded" {
+		t.Fatalf("ModelStates[gemini-pro].StatusMessage = %q, want quota exceeded", ms.StatusMessage)
 	}
 }

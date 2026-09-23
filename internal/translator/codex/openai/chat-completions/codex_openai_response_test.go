@@ -545,6 +545,7 @@ func assertUsageMapping(t *testing.T, payload []byte, wantCachedCreation int64, 
 	}
 
 	gotCachedCreation := gjson.GetBytes(payload, "usage.prompt_tokens_details.cached_creation_tokens")
+	gotCacheWrite := gjson.GetBytes(payload, "usage.prompt_tokens_details.cache_write_tokens")
 	if expectCachedCreation {
 		if !gotCachedCreation.Exists() {
 			t.Fatalf("expected cached_creation_tokens to exist, payload=%s", string(payload))
@@ -552,10 +553,19 @@ func assertUsageMapping(t *testing.T, payload []byte, wantCachedCreation int64, 
 		if gotCachedCreation.Int() != wantCachedCreation {
 			t.Fatalf("expected cached_creation_tokens=%d, got %d; payload=%s", wantCachedCreation, gotCachedCreation.Int(), string(payload))
 		}
+		if !gotCacheWrite.Exists() {
+			t.Fatalf("expected cache_write_tokens to exist, payload=%s", string(payload))
+		}
+		if gotCacheWrite.Int() != wantCachedCreation {
+			t.Fatalf("expected cache_write_tokens=%d, got %d; payload=%s", wantCachedCreation, gotCacheWrite.Int(), string(payload))
+		}
 		return
 	}
 	if gotCachedCreation.Exists() {
 		t.Fatalf("expected cached_creation_tokens to be omitted, payload=%s", string(payload))
+	}
+	if gotCacheWrite.Exists() {
+		t.Fatalf("expected cache_write_tokens to be omitted, payload=%s", string(payload))
 	}
 }
 
@@ -635,5 +645,241 @@ func TestConvertCodexResponseToOpenAI_NonStreamReasoningSummaryAndContent(t *tes
 	}
 	if got.String() != "Summary part and Content part" {
 		t.Fatalf("expected reasoning_content %q, got %q; payload=%s", "Summary part and Content part", got.String(), string(out))
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_Issue5543_CacheWriteTokensAndServiceTier(t *testing.T) {
+	ctx := context.Background()
+
+	rawTerminal := []byte(`{"type":"response.completed","response":{"id":"resp_example","model":"example-model","service_tier":"default","output":[],"usage":{"input_tokens":7378,"output_tokens":6,"total_tokens":7384,"input_tokens_details":{"cached_tokens":7168,"cache_write_tokens":128}}}}`)
+
+	t.Run("non-stream response retains cache_write_tokens and service_tier", func(t *testing.T) {
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "example-model", nil, nil, rawTerminal, nil)
+
+		if got := gjson.GetBytes(out, "service_tier").String(); got != "default" {
+			t.Fatalf("expected service_tier 'default', got %q; payload=%s", got, string(out))
+		}
+		if got := gjson.GetBytes(out, "usage.prompt_tokens").Int(); got != 7378 {
+			t.Fatalf("expected usage.prompt_tokens=7378, got %d; payload=%s", got, string(out))
+		}
+		if got := gjson.GetBytes(out, "usage.completion_tokens").Int(); got != 6 {
+			t.Fatalf("expected usage.completion_tokens=6, got %d; payload=%s", got, string(out))
+		}
+		if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != 7384 {
+			t.Fatalf("expected usage.total_tokens=7384, got %d; payload=%s", got, string(out))
+		}
+		if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cache_write_tokens").Int(); got != 128 {
+			t.Fatalf("expected usage.prompt_tokens_details.cache_write_tokens=128, got %d; payload=%s", got, string(out))
+		}
+		if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens").Int(); got != 128 {
+			t.Fatalf("expected usage.prompt_tokens_details.cached_creation_tokens=128, got %d; payload=%s", got, string(out))
+		}
+		if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_tokens").Int(); got != 7168 {
+			t.Fatalf("expected usage.prompt_tokens_details.cached_tokens=7168, got %d; payload=%s", got, string(out))
+		}
+	})
+
+	t.Run("streaming terminal chunk retains cache_write_tokens and service_tier", func(t *testing.T) {
+		var param any
+		chunk := append([]byte("data: "), rawTerminal...)
+		chunks := ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, chunk, &param)
+		if len(chunks) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(chunks))
+		}
+		if got := gjson.GetBytes(chunks[0], "service_tier").String(); got != "default" {
+			t.Fatalf("expected stream chunk service_tier 'default', got %q; payload=%s", got, string(chunks[0]))
+		}
+		if got := gjson.GetBytes(chunks[0], "usage.prompt_tokens").Int(); got != 7378 {
+			t.Fatalf("expected stream chunk prompt_tokens=7378, got %d; payload=%s", got, string(chunks[0]))
+		}
+		if got := gjson.GetBytes(chunks[0], "usage.completion_tokens").Int(); got != 6 {
+			t.Fatalf("expected stream chunk completion_tokens=6, got %d; payload=%s", got, string(chunks[0]))
+		}
+		if got := gjson.GetBytes(chunks[0], "usage.total_tokens").Int(); got != 7384 {
+			t.Fatalf("expected stream chunk total_tokens=7384, got %d; payload=%s", got, string(chunks[0]))
+		}
+		if got := gjson.GetBytes(chunks[0], "usage.prompt_tokens_details.cache_write_tokens").Int(); got != 128 {
+			t.Fatalf("expected stream chunk cache_write_tokens=128, got %d; payload=%s", got, string(chunks[0]))
+		}
+		if got := gjson.GetBytes(chunks[0], "usage.prompt_tokens_details.cached_creation_tokens").Int(); got != 128 {
+			t.Fatalf("expected stream chunk cached_creation_tokens=128, got %d; payload=%s", got, string(chunks[0]))
+		}
+	})
+
+	t.Run("streaming response.created carries over service_tier to deltas", func(t *testing.T) {
+		var param any
+		createdEvent := []byte(`data: {"type":"response.created","response":{"id":"resp_stream","created_at":1700000000,"model":"example-model","service_tier":"priority"}}`)
+		createdChunks := ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, createdEvent, &param)
+		if len(createdChunks) != 0 {
+			t.Fatalf("expected response.created to yield 0 chunks, got %d", len(createdChunks))
+		}
+
+		deltaEvent := []byte(`data: {"type":"response.output_text.delta","delta":"hello"}`)
+		deltaChunks := ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, deltaEvent, &param)
+		if len(deltaChunks) != 1 {
+			t.Fatalf("expected 1 delta chunk, got %d", len(deltaChunks))
+		}
+		if got := gjson.GetBytes(deltaChunks[0], "service_tier").String(); got != "priority" {
+			t.Fatalf("expected delta chunk service_tier 'priority', got %q; payload=%s", got, string(deltaChunks[0]))
+		}
+
+		// Terminal event omitting service_tier preserves prior actual tier
+		terminalWithoutTier := []byte(`data: {"type":"response.completed","response":{"id":"resp_stream","created_at":1700000000,"model":"example-model","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`)
+		termChunks := ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, terminalWithoutTier, &param)
+		if len(termChunks) != 1 {
+			t.Fatalf("expected 1 terminal chunk, got %d", len(termChunks))
+		}
+		if got := gjson.GetBytes(termChunks[0], "service_tier").String(); got != "priority" {
+			t.Fatalf("expected terminal chunk to retain prior service_tier 'priority', got %q; payload=%s", got, string(termChunks[0]))
+		}
+	})
+
+	t.Run("streaming in_progress updates tier and completed overrides tier", func(t *testing.T) {
+		var param any
+		_ = ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_seq","created_at":1700000000,"model":"example-model","service_tier":"default"}}`), &param)
+
+		// in_progress updates tier
+		_ = ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, []byte(`data: {"type":"response.in_progress","response":{"id":"resp_seq","service_tier":"priority"}}`), &param)
+
+		deltaChunks := ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":"hi"}`), &param)
+		if len(deltaChunks) != 1 {
+			t.Fatalf("expected 1 delta chunk, got %d", len(deltaChunks))
+		}
+		if got := gjson.GetBytes(deltaChunks[0], "service_tier").String(); got != "priority" {
+			t.Fatalf("expected in_progress tier 'priority', got %q; chunk=%s", got, string(deltaChunks[0]))
+		}
+
+		// completed overrides tier
+		completedEvent := []byte(`data: {"type":"response.completed","response":{"id":"resp_seq","service_tier":"scale","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+		completedChunks := ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, completedEvent, &param)
+		if len(completedChunks) != 1 {
+			t.Fatalf("expected 1 completed chunk, got %d", len(completedChunks))
+		}
+		if got := gjson.GetBytes(completedChunks[0], "service_tier").String(); got != "scale" {
+			t.Fatalf("expected completed tier 'scale', got %q; chunk=%s", got, string(completedChunks[0]))
+		}
+	})
+
+	t.Run("large integer cache_write_tokens beyond int64 preserved without precision loss", func(t *testing.T) {
+		beyondInt64Val := "999999999999999999999999999999" // > 2^63 - 1
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_large","model":"example-model","service_tier":"default","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cache_write_tokens":` + beyondInt64Val + `}}}}`)
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "example-model", nil, nil, raw, nil)
+		if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cache_write_tokens").Raw; got != beyondInt64Val {
+			t.Fatalf("expected exact raw large cache_write_tokens %s, got %s; payload=%s", beyondInt64Val, got, string(out))
+		}
+		if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens").Raw; got != beyondInt64Val {
+			t.Fatalf("expected exact raw large cached_creation_tokens %s, got %s; payload=%s", beyondInt64Val, got, string(out))
+		}
+
+		// Stream path
+		var param any
+		chunk := append([]byte("data: "), raw...)
+		chunks := ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, chunk, &param)
+		if len(chunks) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(chunks))
+		}
+		if got := gjson.GetBytes(chunks[0], "usage.prompt_tokens_details.cache_write_tokens").Raw; got != beyondInt64Val {
+			t.Fatalf("expected stream exact raw large cache_write_tokens %s, got %s; chunk=%s", beyondInt64Val, got, string(chunks[0]))
+		}
+		if got := gjson.GetBytes(chunks[0], "usage.prompt_tokens_details.cached_creation_tokens").Raw; got != beyondInt64Val {
+			t.Fatalf("expected stream exact raw large cached_creation_tokens %s, got %s; chunk=%s", beyondInt64Val, got, string(chunks[0]))
+		}
+	})
+
+	t.Run("large integer cache_write_tokens preserved without precision loss", func(t *testing.T) {
+		largeVal := "9007199254740993" // 2^53 + 1
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_large","model":"example-model","service_tier":"default","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cache_write_tokens":` + largeVal + `}}}}`)
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "example-model", nil, nil, raw, nil)
+		if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cache_write_tokens").Raw; got != largeVal {
+			t.Fatalf("expected exact raw large cache_write_tokens %s, got %s; payload=%s", largeVal, got, string(out))
+		}
+		if got := gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens").Raw; got != largeVal {
+			t.Fatalf("expected exact raw large cached_creation_tokens %s, got %s; payload=%s", largeVal, got, string(out))
+		}
+	})
+
+	t.Run("invalid cache_write_tokens formats are rejected", func(t *testing.T) {
+		invalidCases := []string{
+			`{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cache_write_tokens":-1}}`,
+			`{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cache_write_tokens":1.5}}`,
+			`{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cache_write_tokens":"128"}}`,
+			`{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cache_write_tokens":true}}`,
+		}
+		for _, usageJSON := range invalidCases {
+			raw := []byte(`{"type":"response.completed","response":{"id":"resp_inv","model":"example-model","usage":` + usageJSON + `}}`)
+			out := ConvertCodexResponseToOpenAINonStream(ctx, "example-model", nil, nil, raw, nil)
+			if gjson.GetBytes(out, "usage.prompt_tokens_details.cache_write_tokens").Exists() {
+				t.Fatalf("expected invalid cache_write_tokens to be omitted; payload=%s", string(out))
+			}
+			if gjson.GetBytes(out, "usage.prompt_tokens_details.cached_creation_tokens").Exists() {
+				t.Fatalf("expected invalid cached_creation_tokens to be omitted; payload=%s", string(out))
+			}
+
+			// Streaming path
+			var param any
+			chunk := append([]byte("data: "), raw...)
+			chunks := ConvertCodexResponseToOpenAI(ctx, "example-model", nil, nil, chunk, &param)
+			if len(chunks) == 1 {
+				if gjson.GetBytes(chunks[0], "usage.prompt_tokens_details.cache_write_tokens").Exists() {
+					t.Fatalf("expected stream invalid cache_write_tokens to be omitted; chunk=%s", string(chunks[0]))
+				}
+				if gjson.GetBytes(chunks[0], "usage.prompt_tokens_details.cached_creation_tokens").Exists() {
+					t.Fatalf("expected stream invalid cached_creation_tokens to be omitted; chunk=%s", string(chunks[0]))
+				}
+			}
+		}
+	})
+
+	t.Run("invalid or whitespace service_tier is ignored", func(t *testing.T) {
+		invalidTiers := []string{
+			`"   "`,
+			`""`,
+			`123`,
+			`true`,
+			`null`,
+		}
+		for _, tierVal := range invalidTiers {
+			raw := []byte(`{"type":"response.completed","response":{"id":"resp_tier","model":"example-model","service_tier":` + tierVal + `,"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)
+			out := ConvertCodexResponseToOpenAINonStream(ctx, "example-model", nil, nil, raw, nil)
+			if gjson.GetBytes(out, "service_tier").Exists() {
+				t.Fatalf("expected invalid service_tier %s to be omitted; payload=%s", tierVal, string(out))
+			}
+		}
+	})
+}
+
+func TestConvertCodexResponseToOpenAI_RestoresNormalizedToolNames(t *testing.T) {
+	ctx := context.Background()
+	originalName := "mcp.server:search tool"
+	normalizedName := "mcp_server_search_tool"
+	originalRequest := []byte(`{
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "` + originalName + `"
+				}
+			}
+		]
+	}`)
+
+	// Test non-stream response
+	rawNonStream := []byte(`{"type":"response.completed","response":{"id":"resp_1","created_at":1700000000,"model":"gpt-5.6-sol","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"function_call","call_id":"call_1","name":"` + normalizedName + `","arguments":"{}"}]}}`)
+	outNonStream := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.6-sol", originalRequest, nil, rawNonStream, nil)
+	gotNameNonStream := gjson.GetBytes(outNonStream, "choices.0.message.tool_calls.0.function.name").String()
+	if gotNameNonStream != originalName {
+		t.Fatalf("non-stream expected restored name %q, got %q", originalName, gotNameNonStream)
+	}
+
+	// Test stream response
+	var param any
+	rawStreamAdded := []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"` + normalizedName + `"}}`)
+	streamChunks := ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", originalRequest, nil, rawStreamAdded, &param)
+	if len(streamChunks) != 1 {
+		t.Fatalf("expected 1 stream chunk, got %d", len(streamChunks))
+	}
+	gotNameStream := gjson.GetBytes(streamChunks[0], "choices.0.delta.tool_calls.0.function.name").String()
+	if gotNameStream != originalName {
+		t.Fatalf("stream expected restored name %q, got %q", originalName, gotNameStream)
 	}
 }

@@ -111,6 +111,24 @@ func preparedModelRouteFromContext(ctx context.Context, skipRouterPluginID strin
 	return decision, ok
 }
 
+// PreparedStreamPluginExecutor returns the executor plugin ID if the prepared route targets a plugin executor.
+func PreparedStreamPluginExecutor(ctx context.Context) string {
+	decision, ok := preparedModelRouteFromContext(ctx, "")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(decision.ExecutorPluginID)
+}
+
+// PreparedStreamProviderRoute returns the provider and target model if the prepared route targets a provider route override.
+func PreparedStreamProviderRoute(ctx context.Context) (string, string) {
+	decision, ok := preparedModelRouteFromContext(ctx, "")
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(decision.Provider), strings.TrimSpace(decision.Model)
+}
+
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
 func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
 	sessionID = strings.TrimSpace(sessionID)

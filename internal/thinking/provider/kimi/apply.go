@@ -31,7 +31,11 @@ func NewApplier() *Applier {
 }
 
 func init() {
-	thinking.RegisterProvider("kimi", NewApplier())
+	applier := NewApplier()
+	thinking.RegisterProvider("kimi", applier)
+	thinking.RegisterProvider("kimi-ai", applier)
+	thinking.RegisterProvider("kimi.ai", applier)
+	thinking.RegisterProvider("kimi.com", applier)
 }
 
 // Apply applies thinking configuration to Kimi request body.

@@ -2,6 +2,7 @@
 package models
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -17,6 +18,10 @@ type codexClientModelsPayload struct {
 
 // ProvidersForModelFunc returns the providers registered for a model.
 type ProvidersForModelFunc func(string) []string
+
+// WebSearchCapabilityForModelFunc returns explicit conservative capability
+// metadata for an exact public model ID. nil means unknown.
+type WebSearchCapabilityForModelFunc func(string) *bool
 
 var (
 	codexClientModelTemplatesMu       sync.Mutex
@@ -55,12 +60,30 @@ func BuildResponse(availableModels []map[string]any, providersForModel Providers
 // BuildResponseForClient builds a Codex client model response from available models
 // tailored for a specific client version.
 func BuildResponseForClient(availableModels []map[string]any, providersForModel ProvidersForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) map[string]any {
+	return BuildResponseForClientWithCPACapabilities(availableModels, providersForModel, registry.GetGlobalRegistry().GetResponsesWebSearchCapability, optimizeMultiAgentV2, clientVersion)
+}
+
+// BuildResponseForClientWithCPACapabilities builds a client response while
+// allowing Home to supply capability metadata independent of the local registry.
+func BuildResponseForClientWithCPACapabilities(availableModels []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) map[string]any {
 	return map[string]any{
-		"models": buildCodexClientModels(availableModels, providersForModel, optimizeMultiAgentV2, clientVersion),
+		"models": buildCodexClientModels(availableModels, providersForModel, webSearchCapabilityForModel, optimizeMultiAgentV2, clientVersion),
 	}
 }
 
-func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
+// MarshalCompact serializes a Codex client catalog as a single JSON line.
+// HTML escaping is disabled so instruction text is not expanded into \u003c sequences.
+func MarshalCompact(payload any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if errEncode := encoder.Encode(payload); errEncode != nil {
+		return nil, errEncode
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
 	templates, defaultTemplate, err := loadCodexClientModelTemplates()
 	if err != nil || defaultTemplate == nil {
 		return nil
@@ -73,17 +96,29 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			continue
 		}
 
-		if template, ok := templates[id]; ok {
+		metadataID := codexClientMetadataModelID(id)
+
+		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
+			entry["slug"] = id
+			info := registry.LookupModelInfo(id)
+			applyCodexClientModelCapabilities(entry, id, metadataID, info, providersForModel, clientVersion)
 			applyCodexClientDisplayName(entry, model)
+			applyCodexClientDescription(entry, model)
+			applyCodexClientBaseInstructions(entry, model)
 			applyCodexClientMaxContextLengthOverride(entry, model)
 			applyCodexClientMaxTokens(entry, model)
-			applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
+			if thinkingSupport := codexClientThinkingSupport(model); thinkingSupport != nil {
+				applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
+			}
+			applyCodexClientProviderCapabilities(entry, id, true, providersForModel)
+			applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 			sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 			applyCodexClientVisibilityOverride(entry, id)
 			if optimizeMultiAgentV2 {
 				entry["multi_agent_version"] = "v2"
 			}
+			applyCodexClientDevinDisplayName(entry, id, model, providersForModel)
 			result = append(result, entry)
 			continue
 		}
@@ -91,9 +126,11 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2, clientVersion)
 		applyCodexClientMaxTokens(entry, model)
-		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
+		applyCodexClientProviderCapabilities(entry, id, false, providersForModel)
+		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 		applyCodexClientVisibilityOverride(entry, id)
+		applyCodexClientDevinDisplayName(entry, id, model, providersForModel)
 		result = append(result, entry)
 	}
 
@@ -132,7 +169,7 @@ func applyCodexClientNonTemplatePriorities(result []map[string]any, templates ma
 	pending := make([]nonTemplateEntry, 0)
 	for index, entry := range result {
 		slug := stringModelValue(entry, "slug")
-		if _, ok := templates[slug]; ok {
+		if _, ok := templates[codexClientMetadataModelID(slug)]; ok {
 			continue
 		}
 		displayName := stringModelValue(entry, "display_name")
@@ -198,10 +235,275 @@ func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[str
 	return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
 }
 
+func codexClientMetadataModelID(id string) string {
+	id = strings.TrimSpace(id)
+	if info := registry.LookupModelInfo(id); info != nil {
+		if metadataID := strings.TrimSpace(info.MetadataModelID); metadataID != "" {
+			return metadataID
+		}
+	}
+	if idx := strings.Index(id, "/"); idx != -1 {
+		base := strings.TrimSpace(id[idx+1:])
+		if info := registry.LookupModelInfo(base); info != nil && strings.TrimSpace(info.MetadataModelID) != "" {
+			return strings.TrimSpace(info.MetadataModelID)
+		}
+		return base
+	}
+	return id
+}
+
 func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	if displayName := stringModelValue(model, "display_name"); displayName != "" {
 		entry["display_name"] = displayName
 	}
+}
+
+func applyCodexClientDevinDisplayName(entry map[string]any, id string, model map[string]any, providersForModel ProvidersForModelFunc) {
+	if !isCodexClientDevinModel(id, model, entry, providersForModel) {
+		return
+	}
+	displayName := stringModelValue(entry, "display_name")
+	if displayName == "" {
+		displayName = id
+	}
+	trimmed := strings.TrimSpace(displayName)
+	if strings.HasSuffix(trimmed, " (Devin)") {
+		return
+	}
+	if strings.HasSuffix(strings.ToLower(trimmed), " (devin)") {
+		entry["display_name"] = trimmed[:len(trimmed)-len(" (devin)")] + " (Devin)"
+		return
+	}
+	if strings.HasSuffix(strings.ToLower(trimmed), "(devin)") {
+		entry["display_name"] = strings.TrimSpace(trimmed[:len(trimmed)-len("(devin)")]) + " (Devin)"
+		return
+	}
+	entry["display_name"] = trimmed + " (Devin)"
+}
+
+func isCodexClientDevinModel(id string, model map[string]any, entry map[string]any, providersForModel ProvidersForModelFunc) bool {
+	idLower := strings.ToLower(strings.TrimSpace(id))
+	if strings.HasPrefix(idLower, "devin/") {
+		return true
+	}
+	if idx := strings.Index(idLower, "/"); idx != -1 {
+		rest := idLower[idx+1:]
+		if strings.HasPrefix(rest, "devin/") {
+			return true
+		}
+	}
+	if entry != nil {
+		slugLower := strings.ToLower(strings.TrimSpace(stringModelValue(entry, "slug")))
+		if strings.HasPrefix(slugLower, "devin/") {
+			return true
+		}
+		if idx := strings.Index(slugLower, "/"); idx != -1 {
+			rest := slugLower[idx+1:]
+			if strings.HasPrefix(rest, "devin/") {
+				return true
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(entry, "type")), "devin") {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(entry, "owned_by")), "cognition") {
+			return true
+		}
+	}
+	if model != nil {
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(model, "type")), "devin") {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(model, "owned_by")), "cognition") {
+			return true
+		}
+	}
+	if info := registry.LookupModelInfo(id); info != nil {
+		if strings.EqualFold(info.Type, "devin") || strings.EqualFold(info.OwnedBy, "cognition") || strings.HasPrefix(strings.ToLower(info.ID), "devin/") {
+			return true
+		}
+	} else if idx := strings.Index(id, "/"); idx != -1 {
+		base := strings.TrimSpace(id[idx+1:])
+		if info := registry.LookupModelInfo(base); info != nil {
+			if strings.EqualFold(info.Type, "devin") || strings.EqualFold(info.OwnedBy, "cognition") || strings.HasPrefix(strings.ToLower(info.ID), "devin/") {
+				return true
+			}
+		}
+	}
+	if providersForModel != nil {
+		providers := providersForModel(id)
+		if len(providers) == 0 && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			base := strings.TrimSpace(id[idx+1:])
+			providers = providersForModel(base)
+		}
+		for _, p := range providers {
+			if strings.EqualFold(strings.TrimSpace(p), "devin") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func applyCodexClientDescription(entry map[string]any, model map[string]any) {
+	if description := stringModelValue(model, "description"); description != "" {
+		entry["description"] = description
+	}
+}
+
+func applyCodexClientBaseInstructions(entry map[string]any, model map[string]any) {
+	if baseInstructions := stringModelValue(model, "base_instructions"); baseInstructions != "" {
+		entry["base_instructions"] = baseInstructions
+	}
+}
+
+func applyCodexClientModelCapabilities(entry map[string]any, id, metadataID string, info *registry.ModelInfo, providersForModel ProvidersForModelFunc, clientVersion string) {
+	if info != nil && info.Type == registry.OpenAIImageModelType {
+		entry["visibility"] = "hide"
+		delete(entry, "input_modalities")
+		delete(entry, "supports_image_detail_original")
+		return
+	}
+
+	var providers []string
+	if providersForModel != nil {
+		providers = providersForModel(id)
+		if len(providers) == 0 && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			base := strings.TrimSpace(id[idx+1:])
+			providers = providersForModel(base)
+		}
+	}
+
+	isAlias := metadataID != "" && !strings.EqualFold(id, metadataID)
+
+	var constrainedModalities []string
+	hasModalitiesConstraint := false
+	for _, p := range providers {
+		pInfo := registry.LookupModelInfo(id, p)
+		if pInfo == nil && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			pInfo = registry.LookupModelInfo(strings.TrimSpace(id[idx+1:]), p)
+		}
+		if pInfo == nil {
+			continue
+		}
+		isCodex := strings.EqualFold(strings.TrimSpace(p), "codex")
+		if (!isCodex && isAlias) || pInfo.ExplicitInputModalities {
+			mods := pInfo.SupportedInputModalities
+			if mods == nil {
+				mods = []string{}
+			}
+			if !hasModalitiesConstraint {
+				constrainedModalities = append([]string(nil), mods...)
+				hasModalitiesConstraint = true
+			} else {
+				constrainedModalities = intersectStringSlices(constrainedModalities, mods)
+			}
+		}
+	}
+	if !hasModalitiesConstraint && info != nil && info.ExplicitInputModalities {
+		mods := info.SupportedInputModalities
+		if mods == nil {
+			mods = []string{}
+		}
+		constrainedModalities = append([]string(nil), mods...)
+		hasModalitiesConstraint = true
+	}
+	if hasModalitiesConstraint {
+		codexModalities := filterCodexInputModalities(constrainedModalities)
+		entry["input_modalities"] = codexModalities
+		if hasImageModality(codexModalities) {
+			entry["supports_image_detail_original"] = true
+		} else {
+			delete(entry, "supports_image_detail_original")
+		}
+	}
+
+	var constrainedThinking *registry.ThinkingSupport
+	hasThinkingConstraint := false
+	for _, p := range providers {
+		pInfo := registry.LookupModelInfo(id, p)
+		if pInfo == nil && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			pInfo = registry.LookupModelInfo(strings.TrimSpace(id[idx+1:]), p)
+		}
+		if pInfo == nil {
+			continue
+		}
+		isCodex := strings.EqualFold(strings.TrimSpace(p), "codex")
+		if (!isCodex && isAlias) || pInfo.ExplicitThinking {
+			hasThinkingConstraint = true
+			pThinking := pInfo.Thinking
+			if pThinking == nil {
+				pThinking = &registry.ThinkingSupport{Levels: []string{}}
+			}
+			if constrainedThinking == nil {
+				constrainedThinking = pThinking
+			} else {
+				constrainedThinking = intersectThinkingSupport(constrainedThinking, pThinking)
+			}
+		}
+	}
+	if !hasThinkingConstraint && info != nil && info.ExplicitThinking {
+		pThinking := info.Thinking
+		if pThinking == nil {
+			pThinking = &registry.ThinkingSupport{Levels: []string{}}
+		}
+		constrainedThinking = pThinking
+		hasThinkingConstraint = true
+	}
+	if hasThinkingConstraint && constrainedThinking != nil {
+		applyCodexClientThinkingMetadata(entry, constrainedThinking, clientVersion)
+	}
+}
+
+func intersectThinkingSupport(a, b *registry.ThinkingSupport) *registry.ThinkingSupport {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	levels := intersectStringSlices(a.Levels, b.Levels)
+	min := a.Min
+	if b.Min > min {
+		min = b.Min
+	}
+	max := a.Max
+	if b.Max > 0 && (max == 0 || b.Max < max) {
+		max = b.Max
+	}
+	return &registry.ThinkingSupport{
+		Min:            min,
+		Max:            max,
+		ZeroAllowed:    a.ZeroAllowed && b.ZeroAllowed,
+		DynamicAllowed: a.DynamicAllowed && b.DynamicAllowed,
+		Levels:         levels,
+	}
+}
+
+func intersectStringSlices(a, b []string) []string {
+	if len(a) == 0 || len(b) == 0 {
+		return []string{}
+	}
+	bMap := make(map[string]struct{}, len(b))
+	for _, item := range b {
+		bMap[strings.ToLower(strings.TrimSpace(item))] = struct{}{}
+	}
+	out := make([]string, 0, len(a))
+	seen := make(map[string]struct{}, len(a))
+	for _, item := range a {
+		key := strings.ToLower(strings.TrimSpace(item))
+		if _, inB := bMap[key]; inB {
+			if _, inSeen := seen[key]; !inSeen {
+				seen[key] = struct{}{}
+				out = append(out, item)
+			}
+		}
+	}
+	return out
 }
 
 func applyCodexClientMaxContextLengthOverride(entry map[string]any, model map[string]any) {
@@ -215,6 +517,78 @@ func applyCodexClientMaxTokens(entry map[string]any, model map[string]any) {
 	if maxCompletionTokens := intModelValue(model, "max_completion_tokens"); maxCompletionTokens > 0 {
 		entry["max_tokens"] = maxCompletionTokens
 	}
+}
+
+func applyCPAWebSearchCapability(entry map[string]any, id string, capabilityForModel WebSearchCapabilityForModelFunc, clientVersion string) {
+	// Templates must not supply runtime capability claims or leak CPA-only fields.
+	delete(entry, "cpa_capabilities")
+	if clientVersion != "cpa" || capabilityForModel == nil {
+		return
+	}
+	if supported := capabilityForModel(strings.TrimSpace(id)); supported != nil {
+		entry["cpa_capabilities"] = map[string]any{"web_search": *supported}
+	}
+}
+
+func applyCodexClientProviderCapabilities(entry map[string]any, id string, isTemplate bool, providersForModel ProvidersForModelFunc) {
+	if !isTemplate {
+		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
+		return
+	}
+	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
+		entry["supports_search_tool"] = false
+		entry["prefer_websockets"] = false
+		entry["service_tiers"] = []any{}
+		nullCodexClientRequiredOptions(entry)
+		return
+	}
+	applyCodexClientSearchToolSupport(entry, id, isTemplate, providersForModel)
+}
+
+// nullCodexClientRequiredOptions clears capabilities that non-Codex models must not advertise.
+// Codex requires these keys to be present; omitting them rejects the entire catalog.
+func nullCodexClientRequiredOptions(entry map[string]any) {
+	entry["apply_patch_tool_type"] = nil
+	entry["upgrade"] = nil
+	entry["availability_nux"] = nil
+}
+
+const codexClientFallbackInstructions = "You are Codex, a coding agent. You and the user share one workspace."
+
+// useCompactCodexClientInstructions replaces cloned template prompts with a short literal.
+// Both the legacy and canonical instruction fields must be present for catalog decoding.
+func useCompactCodexClientInstructions(entry map[string]any) {
+	entry["base_instructions"] = codexClientFallbackInstructions
+	entry["model_messages"] = map[string]any{
+		"instructions_template":  codexClientFallbackInstructions,
+		"instructions_variables": nil,
+		"approvals":              nil,
+		"collaboration_modes":    nil,
+		"auto_review":            nil,
+		"permissions":            nil,
+		"multi_agent":            nil,
+	}
+}
+
+func isPureCodexProvider(id string, providersForModel ProvidersForModelFunc) bool {
+	if providersForModel == nil {
+		return true
+	}
+	providers := providersForModel(id)
+	if len(providers) == 0 && strings.Contains(id, "/") {
+		idx := strings.Index(id, "/")
+		base := strings.TrimSpace(id[idx+1:])
+		providers = providersForModel(base)
+	}
+	if len(providers) == 0 {
+		return false
+	}
+	for _, provider := range providers {
+		if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+			return false
+		}
+	}
+	return true
 }
 
 func applyCodexClientSearchToolSupport(entry map[string]any, id string, templateModel bool, providersForModel ProvidersForModelFunc) {
@@ -233,6 +607,11 @@ func applyCodexClientSearchToolSupport(entry map[string]any, id string, template
 	}
 
 	providers := providersForModel(id)
+	if len(providers) == 0 && strings.Contains(id, "/") {
+		idx := strings.Index(id, "/")
+		base := strings.TrimSpace(id[idx+1:])
+		providers = providersForModel(base)
+	}
 	if len(providers) == 0 {
 		entry["supports_search_tool"] = false
 		return
@@ -251,6 +630,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	displayName := stringModelValue(model, "display_name")
 	description := stringModelValue(model, "description")
 	contextWindow := intModelValue(model, "context_length")
+	thinkingSupport := codexClientThinkingSupport(model)
 
 	if info != nil {
 		if info.DisplayName != "" {
@@ -259,7 +639,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		if info.Description != "" {
 			description = info.Description
 		}
-		if info.ContextLength > 0 {
+		if contextWindow <= 0 && info.ContextLength > 0 {
 			contextWindow = info.ContextLength
 		}
 		if info.Type == registry.OpenAIImageModelType {
@@ -269,8 +649,11 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		} else {
 			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
 		}
-		applyCodexClientThinkingMetadata(entry, info.Thinking, clientVersion)
+		if thinkingSupport == nil {
+			thinkingSupport = info.Thinking
+		}
 	}
+	applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
 
 	if maxContextWindow := intModelValue(model, "max_context_length"); maxContextWindow > 0 {
 		contextWindow = maxContextWindow
@@ -291,26 +674,51 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		entry["multi_agent_version"] = "v2"
 	}
 	entry["service_tiers"] = []any{}
-	delete(entry, "apply_patch_tool_type")
-	delete(entry, "upgrade")
-	delete(entry, "availability_nux")
+	nullCodexClientRequiredOptions(entry)
 
 	if contextWindow > 0 {
 		entry["context_window"] = contextWindow
 		entry["max_context_window"] = contextWindow
 	}
 
-	if baseInstructions := stringModelValue(model, "base_instructions"); baseInstructions != "" {
-		entry["base_instructions"] = baseInstructions
-	}
 	if plans, ok := model["available_in_plans"]; ok {
 		entry["available_in_plans"] = cloneCodexClientModelValue(plans)
 	}
+	// Codex 0.156+ caps an explicit model_catalog_url body at 1MiB. Cloning the
+	// full template instructions onto every non-template model exceeds that limit
+	// and the client keeps its bundled catalog.
+	useCompactCodexClientInstructions(entry)
+}
+
+func codexClientThinkingSupport(model map[string]any) *registry.ThinkingSupport {
+	raw, ok := model["thinking"]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch thinking := raw.(type) {
+	case *registry.ThinkingSupport:
+		return thinking
+	case registry.ThinkingSupport:
+		return &thinking
+	}
+	data, errMarshal := json.Marshal(raw)
+	if errMarshal != nil {
+		return nil
+	}
+	var thinking registry.ThinkingSupport
+	if errUnmarshal := json.Unmarshal(data, &thinking); errUnmarshal != nil {
+		return nil
+	}
+	return &thinking
 }
 
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
-	switch strings.TrimSpace(id) {
-	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview":
+	target := strings.TrimSpace(id)
+	if idx := strings.Index(target, "/"); idx != -1 {
+		target = strings.TrimSpace(target[idx+1:])
+	}
+	switch target {
+	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview":
 		entry["visibility"] = "hide"
 	}
 }
@@ -319,10 +727,24 @@ func applyCodexClientInputModalitiesMetadata(entry map[string]any, modalities []
 	if len(modalities) == 0 {
 		return
 	}
-	// Codex client only accepts text/image input modalities.
+	codexModalities := filterCodexInputModalities(modalities)
+	if len(codexModalities) == 0 {
+		return
+	}
+	entry["input_modalities"] = codexModalities
+	if hasImageModality(codexModalities) {
+		entry["supports_image_detail_original"] = true
+	} else {
+		delete(entry, "supports_image_detail_original")
+	}
+}
+
+func filterCodexInputModalities(modalities []string) []any {
+	if len(modalities) == 0 {
+		return []any{}
+	}
 	codexModalities := make([]any, 0, 2)
 	seen := make(map[string]struct{}, 2)
-	supportsImage := false
 	for _, raw := range modalities {
 		switch modality := strings.ToLower(strings.TrimSpace(raw)); modality {
 		case "text", "image":
@@ -331,24 +753,22 @@ func applyCodexClientInputModalitiesMetadata(entry map[string]any, modalities []
 			}
 			seen[modality] = struct{}{}
 			codexModalities = append(codexModalities, modality)
-			if modality == "image" {
-				supportsImage = true
-			}
 		}
 	}
-	if len(codexModalities) == 0 {
-		return
+	return codexModalities
+}
+
+func hasImageModality(modalities []any) bool {
+	for _, m := range modalities {
+		if s, ok := m.(string); ok && s == "image" {
+			return true
+		}
 	}
-	entry["input_modalities"] = codexModalities
-	if supportsImage {
-		entry["supports_image_detail_original"] = true
-	} else {
-		delete(entry, "supports_image_detail_original")
-	}
+	return false
 }
 
 func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.ThinkingSupport, clientVersion string) {
-	if thinking == nil || len(thinking.Levels) == 0 {
+	if thinking == nil {
 		return
 	}
 
@@ -372,6 +792,8 @@ func applyCodexClientThinkingMetadata(entry map[string]any, thinking *registry.T
 		})
 	}
 	if len(levels) == 0 {
+		entry["supported_reasoning_levels"] = levels
+		delete(entry, "default_reasoning_level")
 		return
 	}
 	if defaultLevel == "" {
@@ -406,7 +828,7 @@ func sanitizeCodexClientReasoningMetadata(entry map[string]any, clientVersion st
 	}
 
 	if len(levels) == 0 {
-		delete(entry, "supported_reasoning_levels")
+		entry["supported_reasoning_levels"] = levels
 		delete(entry, "default_reasoning_level")
 		return
 	}

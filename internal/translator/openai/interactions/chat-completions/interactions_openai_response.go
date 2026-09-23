@@ -70,8 +70,9 @@ func ConvertOpenAIResponseToInteractionsNonStream(ctx context.Context, modelName
 			steps = append(steps, interactionsTextStep("model_output", content.String()))
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+			forAntigravity := isAntigravityModel(modelName)
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
+				if step, ok := openAIToolCallToInteractionsStep(toolCall, forAntigravity); ok {
 					steps = append(steps, step)
 				}
 				return true
@@ -152,15 +153,17 @@ func appendOpenAIToolCallDelta(out [][]byte, st *openAIToInteractionsStreamState
 	}
 	function := toolCall.Get("function")
 	if name := function.Get("name").String(); name != "" {
+		if isAntigravityModel(modelName) {
+			name = translatorcommon.AntigravityToolNameToUpstream(name)
+		}
 		st.ToolCallNames[index] = name
 	}
 	stepID := firstNonEmpty(st.ToolCallIDs[index], fmt.Sprintf("call_%d", index))
 	stepName := st.ToolCallNames[index]
 	if st.CurrentStepType != "function_call" || st.CurrentStepID != stepID {
 		out = appendInteractionsStepStop(out, st)
-		step := []byte(`{"type":"function_call","id":"","call_id":"","name":"","arguments":{}}`)
+		step := []byte(`{"type":"function_call","id":"","name":"","arguments":{}}`)
 		step, _ = sjson.SetBytes(step, "id", stepID)
-		step, _ = sjson.SetBytes(step, "call_id", stepID)
 		step, _ = sjson.SetBytes(step, "name", stepName)
 		out = appendInteractionsCreated(out, st, modelName, root)
 		out = appendInteractionsStepStart(out, st, "function_call", gjson.ParseBytes(step))
@@ -214,11 +217,10 @@ func appendInteractionsStepStart(out [][]byte, st *openAIToInteractionsStreamSta
 	payload, _ = sjson.SetBytes(payload, "index", index)
 	payload, _ = sjson.SetBytes(payload, "step.type", stepType)
 	if stepType == "function_call" {
-		id := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), st.CurrentStepID)
+		id := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String(), st.CurrentStepID)
 		st.CurrentStepID = id
 		if id != "" {
 			payload, _ = sjson.SetBytes(payload, "step.id", id)
-			payload, _ = sjson.SetBytes(payload, "step.call_id", id)
 		}
 		payload, _ = sjson.SetBytes(payload, "step.name", step.Get("name").String())
 		payload, _ = sjson.SetRawBytes(payload, "step.arguments", []byte(`{}`))
@@ -325,7 +327,7 @@ func interactionsTextStep(stepType, text string) []byte {
 	return step
 }
 
-func openAIToolCallToInteractionsStep(toolCall gjson.Result) ([]byte, bool) {
+func openAIToolCallToInteractionsStep(toolCall gjson.Result, forAntigravity bool) ([]byte, bool) {
 	if toolType := toolCall.Get("type").String(); toolType != "" && toolType != "function" {
 		return nil, false
 	}
@@ -336,9 +338,12 @@ func openAIToolCallToInteractionsStep(toolCall gjson.Result) ([]byte, bool) {
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
 	if id := toolCall.Get("id").String(); id != "" {
 		step, _ = sjson.SetBytes(step, "id", id)
-		step, _ = sjson.SetBytes(step, "call_id", id)
 	}
-	step, _ = sjson.SetBytes(step, "name", function.Get("name").String())
+	name := function.Get("name").String()
+	if forAntigravity {
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
+	}
+	step, _ = sjson.SetBytes(step, "name", name)
 	setRawJSONValue(&step, "arguments", function.Get("arguments"), []byte(`{}`))
 	return step, true
 }

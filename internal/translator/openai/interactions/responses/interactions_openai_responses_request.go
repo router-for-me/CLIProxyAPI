@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -28,12 +29,41 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
 		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
 	}
+	forAntigravity := isAntigravityModel(model)
+	forDevin := isDevinModel(model) || !forAntigravity
 	if input := root.Get("input"); input.Exists() {
-		out = setResponsesInputOnInteractions(out, input)
+		out = setResponsesInputOnInteractions(out, input, forAntigravity)
 	}
-	out = appendResponsesToolsToInteractions(out, root.Get("tools"))
+	out = appendResponsesToolsToInteractions(out, root, forAntigravity, forDevin)
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", []byte(toolChoice.Raw))
+		if toolChoice.IsObject() {
+			tcRaw := []byte(toolChoice.Raw)
+			fnName := firstNonEmpty(toolChoice.Get("function.name").String(), toolChoice.Get("name").String(), toolChoice.Get("custom.name").String())
+			ns := firstNonEmpty(toolChoice.Get("namespace").String(), toolChoice.Get("function.namespace").String(), toolChoice.Get("custom.namespace").String())
+			if ns != "" && fnName != "" {
+				fnName = util.QualifyResponsesNamespaceToolName(ns, fnName)
+			}
+			if forDevin && (translatorcommon.IsDevinCodexAppAutomationUpdate(ns, fnName) || translatorcommon.IsDevinCodexAppAutomationUpdate("", fnName)) {
+				tcRaw = nil
+			}
+			if forAntigravity && fnName != "" {
+				fnName = translatorcommon.AntigravityToolNameToUpstream(fnName)
+			}
+			if fnName != "" && tcRaw != nil {
+				if toolChoice.Get("function.name").Exists() {
+					tcRaw, _ = sjson.SetBytes(tcRaw, "function.name", fnName)
+				} else if toolChoice.Get("name").Exists() {
+					tcRaw, _ = sjson.SetBytes(tcRaw, "name", fnName)
+				} else if toolChoice.Get("custom.name").Exists() {
+					tcRaw, _ = sjson.SetBytes(tcRaw, "custom.name", fnName)
+				}
+			}
+			if tcRaw != nil {
+				out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", tcRaw)
+			}
+		} else {
+			out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", []byte(toolChoice.Raw))
+		}
 	}
 	if effort := root.Get("reasoning.effort"); effort.Exists() && effort.Type == gjson.String {
 		out, _ = sjson.SetBytes(out, "generation_config.thinking_level", strings.ToLower(strings.TrimSpace(effort.String())))
@@ -53,6 +83,25 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 		for _, knob := range []string{"temperature", "top_p", "top_k", "stop_sequences", "max_output_tokens", "presence_penalty", "frequency_penalty", "candidate_count"} {
 			out, _ = sjson.DeleteBytes(out, "generation_config."+knob)
 		}
+	} else {
+		if maxOutputTokens := firstExisting(root.Get("max_output_tokens"), root.Get("max_tokens"), root.Get("max_completion_tokens")); maxOutputTokens.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.max_output_tokens", maxOutputTokens.Int())
+		}
+		if temp := root.Get("temperature"); temp.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.temperature", temp.Float())
+		}
+		if topP := root.Get("top_p"); topP.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.top_p", topP.Float())
+		}
+		if presencePenalty := root.Get("presence_penalty"); presencePenalty.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.presence_penalty", presencePenalty.Float())
+		}
+		if frequencyPenalty := root.Get("frequency_penalty"); frequencyPenalty.Exists() {
+			out, _ = sjson.SetBytes(out, "generation_config.frequency_penalty", frequencyPenalty.Float())
+		}
+		if stop := root.Get("stop"); stop.Exists() {
+			out, _ = sjson.SetRawBytes(out, "generation_config.stop_sequences", []byte(stop.Raw))
+		}
 	}
 	return out
 }
@@ -60,7 +109,8 @@ func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 func ConvertInteractionsRequestToOpenAIResponses(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
-	out, _ = sjson.SetBytes(out, "model", requestModel(modelName, root))
+	model := requestModel(modelName, root)
+	out, _ = sjson.SetBytes(out, "model", model)
 	if stream || root.Get("stream").Bool() {
 		out, _ = sjson.SetBytes(out, "stream", true)
 	}
@@ -76,10 +126,11 @@ func ConvertInteractionsRequestToOpenAIResponses(modelName string, inputRawJSON 
 	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
 		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
 	}
+	forAntigravity := isAntigravityModel(model)
 	if input := root.Get("input"); input.Exists() {
-		out = setInteractionsInputOnResponses(out, input)
+		out = setInteractionsInputOnResponses(out, input, forAntigravity)
 	}
-	out = appendInteractionsToolsToResponses(out, root.Get("tools"))
+	out = appendInteractionsToolsToResponses(out, root.Get("tools"), forAntigravity)
 	if toolChoice := root.Get("generation_config.tool_choice"); toolChoice.Exists() {
 		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 	} else if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
@@ -178,20 +229,20 @@ func interactionsThinkingEffort(root gjson.Result) string {
 	return ""
 }
 
-func setResponsesInputOnInteractions(out []byte, input gjson.Result) []byte {
+func setResponsesInputOnInteractions(out []byte, input gjson.Result, forAntigravity bool) []byte {
 	functionNamesByCallID := make(map[string]string)
 	items := make([][]byte, 0)
 	if input.Type == gjson.String {
 		items = append(items, interactionsTextStep("user_input", input.String()))
 	} else if input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
-			if converted := responsesInputItemToInteractions(item, functionNamesByCallID); converted != nil {
+			if converted := responsesInputItemToInteractions(item, functionNamesByCallID, forAntigravity); converted != nil {
 				items = append(items, converted)
 			}
 			return true
 		})
 	} else if input.IsObject() {
-		if converted := responsesInputItemToInteractions(input, functionNamesByCallID); converted != nil {
+		if converted := responsesInputItemToInteractions(input, functionNamesByCallID, forAntigravity); converted != nil {
 			items = append(items, converted)
 		}
 	}
@@ -201,7 +252,7 @@ func setResponsesInputOnInteractions(out []byte, input gjson.Result) []byte {
 	return out
 }
 
-func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID map[string]string) []byte {
+func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID map[string]string, forAntigravity bool) []byte {
 	switch item.Get("type").String() {
 	case "message":
 		stepType := "user_input"
@@ -213,14 +264,26 @@ func responsesInputItemToInteractions(item gjson.Result, functionNamesByCallID m
 		return appendResponsesContentToInteractions(step, item.Get("content"))
 	case "function_call":
 		callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
-		if callID != "" {
-			if name := item.Get("name").String(); name != "" {
-				functionNamesByCallID[callID] = name
-			}
+		name := item.Get("name").String()
+		if ns := item.Get("namespace").String(); ns != "" && name != "" {
+			name = util.QualifyResponsesNamespaceToolName(ns, name)
 		}
-		return responsesFunctionCallToInteractions(item)
-	case "function_call_output":
-		return responsesFunctionOutputToInteractions(item, functionNamesByCallID)
+		if callID != "" && name != "" {
+			functionNamesByCallID[callID] = name
+		}
+		return responsesFunctionCallToInteractions(item, forAntigravity)
+	case "custom_tool_call":
+		callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
+		name := item.Get("name").String()
+		if ns := item.Get("namespace").String(); ns != "" && name != "" {
+			name = util.QualifyResponsesNamespaceToolName(ns, name)
+		}
+		if callID != "" && name != "" {
+			functionNamesByCallID[callID] = name
+		}
+		return responsesCustomToolCallToInteractions(item, forAntigravity)
+	case "function_call_output", "custom_tool_call_output":
+		return responsesFunctionOutputToInteractions(item, functionNamesByCallID, forAntigravity)
 	case "input_text", "output_text", "text":
 		stepType := "user_input"
 		if item.Get("type").String() == "output_text" {
@@ -309,9 +372,16 @@ func responsesImagePartToInteractions(part gjson.Result) []byte {
 	return out
 }
 
-func responsesFunctionCallToInteractions(item gjson.Result) []byte {
+func responsesFunctionCallToInteractions(item gjson.Result, forAntigravity bool) []byte {
 	out := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-	out, _ = sjson.SetBytes(out, "name", item.Get("name").String())
+	name := item.Get("name").String()
+	if ns := item.Get("namespace").String(); ns != "" && name != "" {
+		name = util.QualifyResponsesNamespaceToolName(ns, name)
+	}
+	if forAntigravity {
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
+	}
+	out, _ = sjson.SetBytes(out, "name", name)
 	if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String()); callID != "" {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
@@ -319,12 +389,41 @@ func responsesFunctionCallToInteractions(item gjson.Result) []byte {
 	return out
 }
 
-func responsesFunctionOutputToInteractions(item gjson.Result, functionNamesByCallID map[string]string) []byte {
+func responsesCustomToolCallToInteractions(item gjson.Result, forAntigravity bool) []byte {
+	out := []byte(`{"type":"function_call","name":"","arguments":{}}`)
+	name := item.Get("name").String()
+	if ns := item.Get("namespace").String(); ns != "" && name != "" {
+		name = util.QualifyResponsesNamespaceToolName(ns, name)
+	}
+	if forAntigravity {
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
+	}
+	out, _ = sjson.SetBytes(out, "name", name)
+	if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String()); callID != "" {
+		out, _ = sjson.SetBytes(out, "call_id", callID)
+	}
+	if input := item.Get("input"); input.Exists() {
+		out, _ = sjson.SetBytes(out, "arguments.input", input.String())
+	} else {
+		setJSONValue(&out, "arguments", item.Get("arguments"), []byte(`{}`))
+	}
+	return out
+}
+
+func responsesFunctionOutputToInteractions(item gjson.Result, functionNamesByCallID map[string]string, forAntigravity bool) []byte {
 	out := []byte(`{"type":"function_result","name":"","result":{}}`)
 	callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
-	if name := item.Get("name").String(); name != "" {
-		out, _ = sjson.SetBytes(out, "name", name)
-	} else if name := functionNamesByCallID[callID]; name != "" {
+	name := item.Get("name").String()
+	if ns := item.Get("namespace").String(); ns != "" && name != "" {
+		name = util.QualifyResponsesNamespaceToolName(ns, name)
+	}
+	if name == "" && callID != "" {
+		name = functionNamesByCallID[callID]
+	}
+	if name != "" {
+		if forAntigravity {
+			name = translatorcommon.AntigravityToolNameToUpstream(name)
+		}
 		out, _ = sjson.SetBytes(out, "name", name)
 	}
 	if callID != "" {
@@ -345,80 +444,84 @@ func interactionsTextStep(stepType, text string) []byte {
 	return step
 }
 
-func appendResponsesToolsToInteractions(out []byte, tools gjson.Result) []byte {
-	if !tools.Exists() || !tools.IsArray() {
+func appendResponsesToolsToInteractions(out []byte, root gjson.Result, forAntigravity bool, forDevin bool) []byte {
+	if !root.Exists() {
 		return out
 	}
+	targetRoot := root
+	if root.IsArray() {
+		targetRoot = gjson.ParseBytes([]byte(`{"tools":` + root.Raw + `}`))
+	}
+	descriptors := util.CollectResponsesToolDescriptors(targetRoot)
+	if len(descriptors) == 0 {
+		return out
+	}
+	winners := util.CollectResponsesToolWinners(targetRoot)
+
+	seenNames := make(map[string]struct{})
 	var toolItems [][]byte
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		switch tool.Get("type").String() {
-		case "function", "":
-			if converted, ok := functionToolToInteractions(tool); ok {
-				toolItems = append(toolItems, converted)
-			}
-		case "namespace":
-			declarationItems := make([][]byte, 0, 4)
-			children := tool.Get("children")
-			if !children.Exists() {
-				children = tool.Get("tools")
-			}
-			children.ForEach(func(_, child gjson.Result) bool {
-				if converted, ok := functionDeclarationFromTool(child); ok {
-					declarationItems = append(declarationItems, converted)
+	for _, descriptor := range descriptors {
+		winner, ok := winners[descriptor.Name]
+		if !ok || winner.Order != descriptor.Order {
+			continue
+		}
+		if _, seen := seenNames[descriptor.Name]; seen {
+			continue
+		}
+		seenNames[descriptor.Name] = struct{}{}
+
+		if forDevin && (translatorcommon.IsDevinCodexAppAutomationUpdate(descriptor.Namespace, descriptor.LocalName) || translatorcommon.IsDevinCodexAppAutomationUpdate("", descriptor.Name)) {
+			continue
+		}
+
+		name := descriptor.Name
+		if forAntigravity {
+			name = translatorcommon.AntigravityToolNameToUpstream(name)
+		}
+
+		item := []byte(`{"type":"function","name":""}`)
+		item, _ = sjson.SetBytes(item, "name", name)
+		if desc := util.ResponsesToolDescription(descriptor.Tool); desc != "" {
+			if forDevin {
+				desc = translatorcommon.SanitizeDevinToolDescription(descriptor.Name, desc)
+				if descriptor.LocalName != "" && descriptor.LocalName != descriptor.Name {
+					desc = translatorcommon.SanitizeDevinToolDescription(descriptor.LocalName, desc)
 				}
-				return true
-			})
-			if len(declarationItems) > 0 {
-				group := []byte(`{"function_declarations":[]}`)
-				group, _ = sjson.SetRawBytes(group, "function_declarations", translatorcommon.JoinRawArray(declarationItems))
-				toolItems = append(toolItems, group)
+			}
+			item, _ = sjson.SetBytes(item, "description", desc)
+		}
+
+		if descriptor.ToolType == "custom" {
+			item, _ = sjson.SetRawBytes(item, "parameters", []byte(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`))
+		} else {
+			params := util.ResponsesToolParameters(descriptor.Tool)
+			if params.Exists() {
+				item, _ = sjson.SetRawBytes(item, "parameters", []byte(params.Raw))
 			}
 		}
-		return true
-	})
+
+		toolItems = append(toolItems, item)
+	}
+
 	if len(toolItems) > 0 {
 		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
 	}
 	return out
 }
 
-func functionToolToInteractions(tool gjson.Result) ([]byte, bool) {
-	name := firstNonEmpty(tool.Get("name").String(), tool.Get("function.name").String())
-	if name == "" {
-		return nil, false
-	}
-	out := []byte(`{"type":"function","name":""}`)
-	out, _ = sjson.SetBytes(out, "name", name)
-	copyOptionalString(&out, "description", firstExisting(tool.Get("description"), tool.Get("function.description")))
-	copyOptionalRaw(&out, "parameters", firstExisting(tool.Get("parameters"), tool.Get("function.parameters")))
-	return out, true
-}
-
-func functionDeclarationFromTool(tool gjson.Result) ([]byte, bool) {
-	name := firstNonEmpty(tool.Get("name").String(), tool.Get("function.name").String())
-	if name == "" {
-		return nil, false
-	}
-	out := []byte(`{"name":""}`)
-	out, _ = sjson.SetBytes(out, "name", name)
-	copyOptionalString(&out, "description", firstExisting(tool.Get("description"), tool.Get("function.description")))
-	copyOptionalRaw(&out, "parameters", firstExisting(tool.Get("parameters"), tool.Get("function.parameters")))
-	return out, true
-}
-
-func setInteractionsInputOnResponses(out []byte, input gjson.Result) []byte {
+func setInteractionsInputOnResponses(out []byte, input gjson.Result, forAntigravity bool) []byte {
 	items := make([][]byte, 0)
 	if input.Type == gjson.String {
 		items = append(items, interactionsTextMessage(input.String()))
 	} else if input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
-			if converted := interactionsInputItemToResponses(item); converted != nil {
+			if converted := interactionsInputItemToResponses(item, forAntigravity); converted != nil {
 				items = append(items, converted)
 			}
 			return true
 		})
 	} else if input.IsObject() {
-		if converted := interactionsInputItemToResponses(input); converted != nil {
+		if converted := interactionsInputItemToResponses(input, forAntigravity); converted != nil {
 			items = append(items, converted)
 		}
 	}
@@ -434,7 +537,7 @@ func interactionsTextMessage(text string) []byte {
 	return item
 }
 
-func interactionsInputItemToResponses(item gjson.Result) []byte {
+func interactionsInputItemToResponses(item gjson.Result, forAntigravity bool) []byte {
 	switch item.Get("type").String() {
 	case "user_input":
 		return interactionsMessageToResponses(item, "user")
@@ -443,9 +546,9 @@ func interactionsInputItemToResponses(item gjson.Result) []byte {
 	case "thought":
 		return interactionsThoughtToResponses(item)
 	case "function_call":
-		return interactionsFunctionCallToResponses(item)
+		return interactionsFunctionCallToResponses(item, forAntigravity)
 	case "function_result":
-		return interactionsFunctionResultToResponses(item)
+		return interactionsFunctionResultToResponses(item, forAntigravity)
 	default:
 		if item.Type == gjson.String {
 			return interactionsTextMessage(item.String())
@@ -542,22 +645,67 @@ func interactionsContentPartToResponses(part gjson.Result, role string) ([]byte,
 	return nil, false
 }
 
-func interactionsFunctionCallToResponses(item gjson.Result) []byte {
-	out := []byte(`{"type":"function_call","call_id":"","name":"","arguments":"{}"}`)
-	if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String()); callID != "" {
+func interactionsFunctionCallToResponsesWithIdentity(item gjson.Result, forAntigravity bool, toolIdentityMap map[string]util.ResponsesToolIdentity) []byte {
+	rawName := item.Get("name").String()
+	name := rawName
+	var namespace string
+	var isCustom bool
+	if forAntigravity {
+		name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
+	}
+	if toolIdentityMap != nil {
+		if identity, ok := toolIdentityMap[rawName]; ok {
+			name = identity.Name
+			namespace = identity.Namespace
+			isCustom = identity.Custom
+		} else if identity, ok := toolIdentityMap[name]; ok {
+			name = identity.Name
+			namespace = identity.Namespace
+			isCustom = identity.Custom
+		}
+	}
+
+	callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
+	var out []byte
+	if isCustom {
+		out = []byte(`{"type":"custom_tool_call","call_id":"","name":"","input":""}`)
+		if callID != "" {
+			out, _ = sjson.SetBytes(out, "call_id", callID)
+		}
+		if namespace != "" {
+			out, _ = sjson.SetBytes(out, "namespace", namespace)
+		}
+		out, _ = sjson.SetBytes(out, "name", name)
+		inputStr := util.UnwrapResponsesCustomToolInput(jsonStringValue(item.Get("arguments"), "{}"))
+		out, _ = sjson.SetBytes(out, "input", inputStr)
+		return out
+	}
+
+	out = []byte(`{"type":"function_call","call_id":"","name":"","arguments":"{}"}`)
+	if callID != "" {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
-	out, _ = sjson.SetBytes(out, "name", item.Get("name").String())
-	out, _ = sjson.SetBytes(out, "arguments", jsonStringValue(item.Get("arguments"), "{}"))
+	if namespace != "" {
+		out, _ = sjson.SetBytes(out, "namespace", namespace)
+	}
+	out, _ = sjson.SetBytes(out, "name", name)
+	out, _ = translatorcommon.SetStringWithoutHTMLEscape(out, "arguments", jsonStringValue(item.Get("arguments"), "{}"))
 	return out
 }
 
-func interactionsFunctionResultToResponses(item gjson.Result) []byte {
+func interactionsFunctionCallToResponses(item gjson.Result, forAntigravity bool) []byte {
+	return interactionsFunctionCallToResponsesWithIdentity(item, forAntigravity, nil)
+}
+
+func interactionsFunctionResultToResponses(item gjson.Result, forAntigravity bool) []byte {
 	out := []byte(`{"type":"function_call_output","call_id":"","output":""}`)
 	if callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String()); callID != "" {
 		out, _ = sjson.SetBytes(out, "call_id", callID)
 	}
 	if name := item.Get("name").String(); name != "" {
+		if forAntigravity {
+			name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
+		}
 		out, _ = sjson.SetBytes(out, "name", name)
 	}
 	result := item.Get("result")
@@ -568,18 +716,18 @@ func interactionsFunctionResultToResponses(item gjson.Result) []byte {
 	return out
 }
 
-func appendInteractionsToolsToResponses(out []byte, tools gjson.Result) []byte {
+func appendInteractionsToolsToResponses(out []byte, tools gjson.Result, forAntigravity bool) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
 	var toolItems [][]byte
 	tools.ForEach(func(_, tool gjson.Result) bool {
-		if converted, ok := responsesToolFromInteractionsTool(tool); ok {
+		if converted, ok := responsesToolFromInteractionsTool(tool, forAntigravity); ok {
 			toolItems = append(toolItems, converted)
 		}
 		if decls := tool.Get("function_declarations"); decls.Exists() && decls.IsArray() {
 			decls.ForEach(func(_, decl gjson.Result) bool {
-				if converted, ok := responsesToolFromInteractionsTool(decl); ok {
+				if converted, ok := responsesToolFromInteractionsTool(decl, forAntigravity); ok {
 					toolItems = append(toolItems, converted)
 				}
 				return true
@@ -593,10 +741,13 @@ func appendInteractionsToolsToResponses(out []byte, tools gjson.Result) []byte {
 	return out
 }
 
-func responsesToolFromInteractionsTool(tool gjson.Result) ([]byte, bool) {
+func responsesToolFromInteractionsTool(tool gjson.Result, forAntigravity bool) ([]byte, bool) {
 	name := firstNonEmpty(tool.Get("name").String(), tool.Get("function.name").String())
 	if name == "" {
 		return nil, false
+	}
+	if forAntigravity {
+		name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
 	}
 	out := []byte(`{"type":"function","name":""}`)
 	out, _ = sjson.SetBytes(out, "name", name)
@@ -701,6 +852,11 @@ func copyOptionalRaw(out *[]byte, path string, value gjson.Result) {
 
 func isAntigravityModel(model string) bool {
 	return strings.Contains(strings.ToLower(model), "antigravity")
+}
+
+func isDevinModel(model string) bool {
+	clean := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(clean, "devin/") || clean == "devin" || strings.Contains(clean, "devin")
 }
 
 func firstExisting(values ...gjson.Result) gjson.Result {

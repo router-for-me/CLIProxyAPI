@@ -9,12 +9,17 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
+func boolPointer(b bool) *bool {
+	return &b
+}
+
 func TestSessionAffinityAntigravitySubagentDoesNotInheritParentBinding(t *testing.T) {
 	t.Parallel()
 
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Minute,
+		Fallback:         &RoundRobinSelector{},
+		TTL:              time.Minute,
+		SubagentAffinity: boolPointer(false),
 	})
 	defer selector.Stop()
 
@@ -111,8 +116,9 @@ func TestSessionAffinityMixedProviderAntigravitySubagentIsolation(t *testing.T) 
 	t.Parallel()
 
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Minute,
+		Fallback:         &RoundRobinSelector{},
+		TTL:              time.Minute,
+		SubagentAffinity: boolPointer(false),
 	})
 	defer selector.Stop()
 
@@ -242,7 +248,7 @@ func TestSessionAffinityClaudeAndCodexStillInheritParentBinding(t *testing.T) {
 	}
 }
 
-func TestSessionAffinityMixedPoolClaudeInheritsWhileAntigravityIsolates(t *testing.T) {
+func TestSessionAffinityMixedPoolSubagentInheritsParentAcrossProviders(t *testing.T) {
 	t.Parallel()
 
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
@@ -316,8 +322,8 @@ func TestSessionAffinityMixedPoolClaudeInheritsWhileAntigravityIsolates(t *testi
 		t.Fatalf("parent Ag auth = %q, want auth-ag-primary", parentAgAuth.ID)
 	}
 
-	// 4. Subagent of Antigravity parent in mixed pool where Claude is also available
-	// MUST NOT inherit Antigravity auth, and independently picking Claude must NOT overwrite parent binding
+	// 4. Subagent of Antigravity parent in mixed pool under unified inheritance
+	// MUST inherit parent auth-ag-primary for prompt cache reuse
 	mixedCandidates := []*Auth{
 		{ID: "auth-ag-primary", Provider: "antigravity"},
 		{ID: "auth-claude-primary", Provider: "claude"},
@@ -337,25 +343,22 @@ func TestSessionAffinityMixedPoolClaudeInheritsWhileAntigravityIsolates(t *testi
 	if errSubAg != nil {
 		t.Fatalf("subagent Ag Pick() error = %v", errSubAg)
 	}
-	if subAgAuth.ID == parentAgAuth.ID {
-		t.Fatalf("subagent with Antigravity parent incorrectly inherited parent auth %q", parentAgAuth.ID)
-	}
-	if subAgAuth.ID != "auth-claude-primary" {
-		t.Fatalf("subagent Ag auth = %q, want auth-claude-primary", subAgAuth.ID)
+	if subAgAuth.ID != parentAgAuth.ID {
+		t.Fatalf("subagent with Antigravity parent did not inherit parent auth: got %q, want %q", subAgAuth.ID, parentAgAuth.ID)
 	}
 
-	// 5. Verify parent binding in cache was NOT overwritten by subagent picking Claude
+	// 5. Verify parent binding in cache remains intact
 	if bound, ok := selector.cache.Get("mixed::claude:mixed-sess-ag::claude-3-7-sonnet"); !ok || bound != "auth-ag-primary" {
-		t.Fatalf("parent cache binding was overwritten by subagent: got (%q, %v), want (auth-ag-primary, true)", bound, ok)
+		t.Fatalf("parent cache binding was lost: got (%q, %v), want (auth-ag-primary, true)", bound, ok)
 	}
 
-	// 6. Subagent turn 2 must stay sticky to auth-claude-primary
+	// 6. Subagent turn 2 must stay sticky to auth-ag-primary
 	subAgTurn2Auth, errSubAg2 := selector.Pick(context.Background(), "mixed", "claude-3-7-sonnet", subAgOpts, mixedCandidates)
 	if errSubAg2 != nil {
 		t.Fatalf("subagent turn 2 Pick() error = %v", errSubAg2)
 	}
-	if subAgTurn2Auth.ID != "auth-claude-primary" {
-		t.Fatalf("subagent turn 2 auth = %q, want auth-claude-primary", subAgTurn2Auth.ID)
+	if subAgTurn2Auth.ID != "auth-ag-primary" {
+		t.Fatalf("subagent turn 2 auth = %q, want auth-ag-primary", subAgTurn2Auth.ID)
 	}
 
 	// 7. Parent turn 2 must stay sticky to auth-ag-primary
@@ -450,8 +453,9 @@ func TestSessionAffinityOtherGoogleProvidersSubagentIsolation(t *testing.T) {
 	for _, provider := range []string{"gemini", "vertex", "aistudio", "gemini-interactions"} {
 		t.Run(provider, func(t *testing.T) {
 			selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-				Fallback: &RoundRobinSelector{},
-				TTL:      time.Minute,
+				Fallback:         &RoundRobinSelector{},
+				TTL:              time.Minute,
+				SubagentAffinity: boolPointer(false),
 			})
 			defer selector.Stop()
 
@@ -499,8 +503,9 @@ func TestSessionAffinityNestedAntigravitySubagentIsolation(t *testing.T) {
 	t.Parallel()
 
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Minute,
+		Fallback:         &RoundRobinSelector{},
+		TTL:              time.Minute,
+		SubagentAffinity: boolPointer(false),
 	})
 	defer selector.Stop()
 
@@ -617,8 +622,9 @@ func TestSessionAffinityNestedGeminiProviderSubagentIsolation(t *testing.T) {
 	t.Parallel()
 
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
-		Fallback: &RoundRobinSelector{},
-		TTL:      time.Minute,
+		Fallback:         &RoundRobinSelector{},
+		TTL:              time.Minute,
+		SubagentAffinity: boolPointer(false),
 	})
 	defer selector.Stop()
 

@@ -6,31 +6,37 @@ import (
 	"fmt"
 	"strings"
 
+	"net/http"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 type rpcHostHTTPRequest struct {
-	HTTPClientID   string       `json:"http_client_id,omitempty"`
-	HostCallbackID string       `json:"host_callback_id,omitempty"`
-	Method         string       `json:"method,omitempty"`
-	URL            string       `json:"url,omitempty"`
-	Headers        httpHeader   `json:"headers,omitempty"`
-	Body           []byte       `json:"body,omitempty"`
-	Request        *httpRequest `json:"request,omitempty"`
+	HTTPClientID   string                     `json:"http_client_id,omitempty"`
+	HostCallbackID string                     `json:"host_callback_id,omitempty"`
+	Method         string                     `json:"method,omitempty"`
+	URL            string                     `json:"url,omitempty"`
+	Headers        httpHeader                 `json:"headers,omitempty"`
+	Body           []byte                     `json:"body,omitempty"`
+	WireProfile    *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
+	Request        *httpRequest               `json:"request,omitempty"`
 }
 
 type httpHeader map[string][]string
 
 type httpRequest struct {
-	Method  string     `json:"method,omitempty"`
-	URL     string     `json:"url,omitempty"`
-	Headers httpHeader `json:"headers,omitempty"`
-	Body    []byte     `json:"body,omitempty"`
+	Method      string                     `json:"method,omitempty"`
+	URL         string                     `json:"url,omitempty"`
+	Headers     httpHeader                 `json:"headers,omitempty"`
+	Body        []byte                     `json:"body,omitempty"`
+	WireProfile *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
 }
 
 type rpcHostHTTPStreamResponse struct {
@@ -127,6 +133,8 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAuthGetRuntime(ctx, request)
 	case pluginabi.MethodHostAuthSave:
 		return h.callHostAuthSave(ctx, request)
+	case pluginabi.MethodHostAffinityLookup:
+		return h.callHostAffinityLookup(ctx, request)
 	default:
 		return nil, fmt.Errorf("unsupported host callback %s", method)
 	}
@@ -231,19 +239,34 @@ func decodeHostHTTPRequestWithCallbackID(raw []byte) (pluginapi.HTTPRequest, str
 		return pluginapi.HTTPRequest{}, "", fmt.Errorf("decode host http request: %w", errUnmarshal)
 	}
 	if req.Request != nil {
+		wireProfile := req.Request.WireProfile
+		if wireProfile == nil {
+			wireProfile = req.WireProfile
+		}
 		return pluginapi.HTTPRequest{
-			Method:  req.Request.Method,
-			URL:     req.Request.URL,
-			Headers: map[string][]string(req.Request.Headers),
-			Body:    append([]byte(nil), req.Request.Body...),
+			Method:      req.Request.Method,
+			URL:         req.Request.URL,
+			Headers:     map[string][]string(req.Request.Headers),
+			Body:        append([]byte(nil), req.Request.Body...),
+			WireProfile: cloneWireProfile(wireProfile),
 		}, req.HostCallbackID, nil
 	}
 	return pluginapi.HTTPRequest{
-		Method:  req.Method,
-		URL:     req.URL,
-		Headers: map[string][]string(req.Headers),
-		Body:    append([]byte(nil), req.Body...),
+		Method:      req.Method,
+		URL:         req.URL,
+		Headers:     map[string][]string(req.Headers),
+		Body:        append([]byte(nil), req.Body...),
+		WireProfile: cloneWireProfile(req.WireProfile),
 	}, req.HostCallbackID, nil
+}
+
+func cloneWireProfile(src *pluginapi.HTTPWireProfile) *pluginapi.HTTPWireProfile {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	dst.HeaderProfile = append([]string(nil), src.HeaderProfile...)
+	return &dst
 }
 
 func (h *Host) callHostStreamEmit(ctx context.Context, request []byte) ([]byte, error) {
@@ -278,6 +301,9 @@ func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte
 	if req.Stream {
 		return nil, fmt.Errorf("host.model.execute requires stream=false")
 	}
+	if errProxy := validateHostModelProxy(req.ProxyURL); errProxy != nil {
+		return nil, errProxy
+	}
 	executor := h.currentModelExecutor()
 	if executor == nil {
 		return nil, fmt.Errorf("host model executor is unavailable")
@@ -307,18 +333,61 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 		Alt:                     req.Alt,
 		SkipInterceptorPluginID: skipPluginID,
 		SkipRouterPluginID:      skipPluginID,
+		ForcedProvider:          req.ForcedProvider,
+		AuthID:                  req.AuthID,
+		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 	}
+}
+
+func validateHostModelProxy(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if !proxyutil.ValidRequestProxy(raw) {
+		return &modelExecutionStatusError{
+			err:        fmt.Errorf("invalid proxy_url"),
+			statusCode: http.StatusBadRequest,
+		}
+	}
+	return nil
+}
+
+type modelExecutionStatusError struct {
+	err        error
+	statusCode int
+}
+
+func (e *modelExecutionStatusError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	if e.statusCode > 0 {
+		return fmt.Sprintf("model execution failed with status %d", e.statusCode)
+	}
+	return "model execution failed"
+}
+
+func (e *modelExecutionStatusError) StatusCode() int {
+	return e.statusCode
+}
+
+func (e *modelExecutionStatusError) Unwrap() error {
+	return e.err
 }
 
 func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}
+	if errMsg.StatusCode > 0 && clienterror.HTTPStatusFromError(errMsg.Error) != errMsg.StatusCode {
+		return &modelExecutionStatusError{
+			err:        errMsg.Error,
+			statusCode: errMsg.StatusCode,
+		}
+	}
 	if errMsg.Error != nil {
 		return errMsg.Error
-	}
-	if errMsg.StatusCode > 0 {
-		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
 	}
 	return fmt.Errorf("model execution failed")
 }

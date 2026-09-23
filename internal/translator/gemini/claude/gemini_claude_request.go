@@ -88,20 +88,20 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 			}
 			originalRole := roleResult.String()
 			var precedingToolUseIDs []string
-			if originalRole != "system" {
+			if originalRole != "system" && originalRole != "developer" {
 				precedingToolUseIDs = pendingToolUseIDs
 				pendingToolUseIDs = nil
 			}
 			role := originalRole
 			if role == "assistant" {
 				role = "model"
-			} else if role == "system" {
+			} else if role == "system" || role == "developer" {
 				role = "user"
 			}
 
 			partItems := make([][]byte, 0, 4)
 			contentsResult := messageResult.Get("content")
-			if roleResult.String() == "system" {
+			if roleResult.String() == "system" || roleResult.String() == "developer" {
 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
 					part := []byte(`{"text":""}`)
 					part, _ = sjson.SetBytes(part, "text", reminderText)
@@ -176,7 +176,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						part, _ = sjson.SetBytes(part, "functionResponse.id", toolCallID)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
 						if toolResult.ResultIsRaw {
-							part, _ = sjson.SetRawBytes(part, "functionResponse.response.result", []byte(toolResult.Result))
+							part = translatorcommon.SetGeminiFunctionResponseRaw(part, "functionResponse.response.result", toolResult.Result)
 						} else {
 							part, _ = sjson.SetBytes(part, "functionResponse.response.result", toolResult.Result)
 						}
@@ -205,6 +205,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 					}
 					return true
 				})
+				if role == "user" {
+					partItems = translatorcommon.ReorderGeminiUserParts(partItems)
+				}
 				contentItems = append(contentItems, geminiContentWithParts(role, partItems))
 			} else if contentsResult.Type == gjson.String {
 				part := []byte(`{"text":""}`)
@@ -236,12 +239,16 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 	}
 
 	// tools
+	var toolItems [][]byte
+	hasStrictTool := false
 	if toolsResult := gjson.GetBytes(rawJSON, "tools"); toolsResult.IsArray() {
-		var toolItems [][]byte
 		toolsResult.ForEach(func(_, toolResult gjson.Result) bool {
+			if toolResult.Get("strict").Type == gjson.True {
+				hasStrictTool = true
+			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
-				inputSchema := util.CleanJSONSchemaForGemini(inputSchemaResult.Raw)
+				inputSchema := util.CleanJSONSchemaForGeminiJSONSchema(inputSchemaResult.Raw)
 				tool := []byte(toolResult.Raw)
 				var err error
 				tool, err = sjson.DeleteBytes(tool, "input_schema")
@@ -278,7 +285,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 
 	// tool_choice
 	toolChoiceResult := gjson.GetBytes(rawJSON, "tool_choice")
-	if toolChoiceResult.Exists() {
+	if toolChoiceResult.Exists() && toolChoiceResult.Type != gjson.Null {
 		toolChoiceType := ""
 		toolChoiceName := ""
 		if toolChoiceResult.IsObject() {
@@ -290,7 +297,11 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 
 		switch toolChoiceType {
 		case "auto":
-			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "AUTO")
+			if hasStrictTool {
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "VALIDATED")
+			} else {
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "AUTO")
+			}
 		case "none":
 			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "NONE")
 		case "any":
@@ -301,6 +312,8 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)})
 			}
 		}
+	} else if hasStrictTool && len(toolItems) > 0 {
+		out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "VALIDATED")
 	}
 
 	// Map Anthropic thinking -> Gemini thinking config when enabled

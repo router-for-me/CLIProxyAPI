@@ -235,7 +235,8 @@ func TestApplyClaudeHeaders_ClaudeCodeCLIProfileUsesOAuthBetasWithoutPretendingT
 	if errReq != nil {
 		t.Fatalf("NewRequest() error = %v", errReq)
 	}
-	if errHeaders := applyClaudeHeaders(req, auth, "key-third-party", false, nil, []byte(`{"model":"claude-sonnet-5"}`), &config.Config{}, nil, false, "11111111-2222-4333-8444-555555555555"); errHeaders != nil {
+	payload := []byte(`{"model":"claude-sonnet-5"}`)
+	if errHeaders := applyClaudeHeaders(req, auth, "key-third-party", false, nil, payload, &config.Config{}, nil, false, "11111111-2222-4333-8444-555555555555"); errHeaders != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer key-third-party" {
@@ -245,14 +246,8 @@ func TestApplyClaudeHeaders_ClaudeCodeCLIProfileUsesOAuthBetasWithoutPretendingT
 		t.Fatalf("x-api-key = %q, want empty on third-party gateway", got)
 	}
 	betas := req.Header.Get("Anthropic-Beta")
-	if !strings.Contains(betas, "oauth-2025-04-20") {
-		t.Fatalf("Anthropic-Beta = %q, want oauth beta", betas)
-	}
-	if !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
-		t.Fatalf("Anthropic-Beta = %q, want extended-cache-ttl", betas)
-	}
-	if !strings.Contains(betas, "fallback-credit-2026-06-01") {
-		t.Fatalf("Anthropic-Beta = %q, want fallback-credit", betas)
+	if want := claudeCodeCLIBetas(payload, nil, true); betas != want {
+		t.Fatalf("Anthropic-Beta = %q, want %q", betas, want)
 	}
 }
 

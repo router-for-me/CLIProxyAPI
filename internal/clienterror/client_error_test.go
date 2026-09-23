@@ -204,6 +204,12 @@ func TestIsRequestFault(t *testing.T) {
 			want:   false,
 		},
 		{
+			name:   "structured model_not_found is not request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}`),
+			want:   false,
+		},
+		{
 			name:   "rate limit status overrides generic request error code",
 			status: http.StatusTooManyRequests,
 			err:    errors.New(`{"error":{"message":"Rate Limit Reached","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),

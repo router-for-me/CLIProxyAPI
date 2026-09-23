@@ -310,13 +310,14 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 		Config: &config.Config{
 			CodexKey: []config.CodexKey{
 				{
-					APIKey:         "codex-key-123",
-					Prefix:         "dev",
-					BaseURL:        "https://api.openai.com",
-					ProxyURL:       "http://proxy.local",
-					Websockets:     true,
-					AlphaSearch:    true,
-					DisableCooling: boolPointer(true),
+					APIKey:               "codex-key-123",
+					Prefix:               "dev",
+					BaseURL:              "https://api.openai.com",
+					ProxyURL:             "http://proxy.local",
+					Websockets:           true,
+					AlphaSearch:          true,
+					DisableCooling:       boolPointer(true),
+					DisableCodexCloaking: boolPointer(true),
 				},
 			},
 		},
@@ -346,6 +347,9 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 	if auths[0].Attributes[coreauth.AttributeCodexAlphaSearch] != "true" {
 		t.Errorf("expected codex_alpha_search=true, got %s", auths[0].Attributes[coreauth.AttributeCodexAlphaSearch])
+	}
+	if auths[0].Attributes[coreauth.AttributeCodexDisableCloaking] != "true" {
+		t.Errorf("expected codex_disable_cloaking=true, got %s", auths[0].Attributes[coreauth.AttributeCodexDisableCloaking])
 	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
@@ -406,6 +410,53 @@ func TestConfigSynthesizer_XAIKeys(t *testing.T) {
 	}
 	if disabled, ok := auth.Metadata["disable_cooling"].(bool); !ok || !disabled {
 		t.Fatalf("disable_cooling = %#v, want true", auth.Metadata["disable_cooling"])
+	}
+}
+
+func TestConfigSynthesizer_MetaKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	disableCooling := true
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			MetaKey: []config.MetaKey{
+				{
+					APIKey:         "meta-secret",
+					BaseURL:        "https://api.meta.ai/v1",
+					ProxyURL:       "http://proxy.local",
+					DisableCooling: &disableCooling,
+					Models: []config.CodexModel{
+						{Name: "muse-spark-1.3", Alias: "muse-spark-1.3"},
+					},
+					Headers: map[string]string{"X-Custom": "value"},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "meta" {
+		t.Fatalf("provider = %q, want meta", auth.Provider)
+	}
+	if auth.Label != "meta-apikey" {
+		t.Fatalf("label = %q, want meta-apikey", auth.Label)
+	}
+	if auth.Attributes["base_url"] != "https://api.meta.ai/v1" {
+		t.Fatalf("base_url = %q, want https://api.meta.ai/v1", auth.Attributes["base_url"])
+	}
+	if auth.Attributes["header:X-Custom"] != "value" {
+		t.Fatalf("custom header = %q, want value", auth.Attributes["header:X-Custom"])
+	}
+	if auth.ProxyURL != "http://proxy.local" {
+		t.Fatalf("proxy URL = %q, want http://proxy.local", auth.ProxyURL)
 	}
 }
 
@@ -1091,6 +1142,9 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 			XAIKey: []config.XAIKey{
 				{APIKey: "xai-key"},
 			},
+			MetaKey: []config.MetaKey{
+				{APIKey: "meta-key", BaseURL: "https://api.meta.ai/v1"},
+			},
 			OpenAICompatibility: []config.OpenAICompatibility{
 				{Name: "compat", BaseURL: "https://compat.api"},
 			},
@@ -1106,8 +1160,8 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(auths) != 6 {
-		t.Fatalf("expected 6 auths, got %d", len(auths))
+	if len(auths) != 7 {
+		t.Fatalf("expected 7 auths, got %d", len(auths))
 	}
 
 	providers := make(map[string]bool)
@@ -1115,7 +1169,7 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "xai", "openai-compatible-compat", "vertex"}
+	expected := []string{"gemini", "claude", "codex", "xai", "meta", "openai-compatible-compat", "vertex"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)

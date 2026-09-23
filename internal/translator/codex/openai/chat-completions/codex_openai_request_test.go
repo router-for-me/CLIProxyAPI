@@ -1,6 +1,7 @@
 package chat_completions
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -1402,5 +1403,230 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("tool 'search' not found in output tools: %s", gjson.Get(result, "tools").Raw)
+	}
+}
+
+func TestFunctionToolStrictDefaultsToFalse(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "Hi"}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "omitted",
+					"parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+				}
+			},
+			{
+				"type": "function",
+				"function": {
+					"name": "explicit_true",
+					"strict": true,
+					"parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": false}
+				}
+			},
+			{
+				"type": "function",
+				"function": {
+					"name": "explicit_false",
+					"strict": false,
+					"parameters": {"type": "object", "properties": {"query": {"type": "string"}}}
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools, got %d: %s", len(tools), gjson.GetBytes(out, "tools").Raw)
+	}
+
+	expected := map[string]bool{"omitted": false, "explicit_true": true, "explicit_false": false}
+	for _, tool := range tools {
+		name := tool.Get("name").String()
+		strict := tool.Get("strict")
+		if !strict.Exists() {
+			t.Errorf("tool %q: strict missing in output: %s", name, tool.Raw)
+			continue
+		}
+		if strict.Bool() != expected[name] {
+			t.Errorf("tool %q: strict = %v, want %v", name, strict.Bool(), expected[name])
+		}
+	}
+}
+
+func TestNormalizeInvalidToolNames(t *testing.T) {
+	nameWithInvalidChars := "mcp.server:search tool"
+	input := []byte(`{
+		"model": "gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "Search for info"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_1",
+						"type": "function",
+						"function": {
+							"name": "` + nameWithInvalidChars + `",
+							"arguments": "{\"query\":\"test\"}"
+						}
+					}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_1", "content": "result"}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "` + nameWithInvalidChars + `",
+					"description": "Search tool",
+					"parameters": {"type": "object", "properties": {}}
+				}
+			}
+		],
+		"tool_choice": {
+			"type": "function",
+			"function": {"name": "` + nameWithInvalidChars + `"}
+		}
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	toolNameInTools := gjson.GetBytes(out, "tools.0.name").String()
+	nameRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	if !nameRegex.MatchString(toolNameInTools) {
+		t.Fatalf("expected tool name in tools to match ^[a-zA-Z0-9_-]+$, got %q", toolNameInTools)
+	}
+
+	var funcCallName string
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		if item.Get("type").String() == "function_call" {
+			funcCallName = item.Get("name").String()
+			break
+		}
+	}
+	if funcCallName != toolNameInTools {
+		t.Fatalf("expected function_call name %q to match tools declaration %q", funcCallName, toolNameInTools)
+	}
+
+	toolChoiceName := gjson.GetBytes(out, "tool_choice.name").String()
+	if toolChoiceName != toolNameInTools {
+		t.Fatalf("expected tool_choice name %q to match tools declaration %q", toolChoiceName, toolNameInTools)
+	}
+
+	rev := buildReverseMapFromOriginalOpenAI(input)
+	if got := rev[toolNameInTools]; got != nameWithInvalidChars {
+		t.Fatalf("expected reverse map for %q to be %q, got %q", toolNameInTools, nameWithInvalidChars, got)
+	}
+}
+
+func TestNormalizeInvalidToolNamesCollisionAndNonASCII(t *testing.T) {
+	name1 := "tool.search"
+	name2 := "tool:search"
+	nameUnicode := "工具_run"
+	input := []byte(`{
+		"model": "gpt-5.6-sol",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{
+				"type": "function",
+				"function": {"name": "` + name1 + `"}
+			},
+			{
+				"type": "function",
+				"function": {"name": "` + name2 + `"}
+			},
+			{
+				"type": "function",
+				"function": {"name": "` + nameUnicode + `"}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools, got %d", len(tools))
+	}
+	nameRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	seen := map[string]bool{}
+	for i, tool := range tools {
+		name := tool.Get("name").String()
+		if !nameRegex.MatchString(name) {
+			t.Fatalf("tool %d name %q does not match ^[a-zA-Z0-9_-]+$", i, name)
+		}
+		if seen[name] {
+			t.Fatalf("collision detected for tool %d: %q", i, name)
+		}
+		seen[name] = true
+	}
+}
+
+func TestHistoricalToolCallCollisionWithDeclaredTool(t *testing.T) {
+	declaredName := "tool:search"
+	historicalName := "tool.search"
+	input := []byte(`{
+		"model": "gpt-5.6-sol",
+		"messages": [
+			{"role": "user", "content": "previous call"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_hist_1",
+						"type": "function",
+						"function": {
+							"name": "` + historicalName + `",
+							"arguments": "{}"
+						}
+					}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_hist_1", "content": "hist result"},
+			{"role": "user", "content": "new query"}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "` + declaredName + `",
+					"description": "current search tool"
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
+	toolDeclared := gjson.GetBytes(out, "tools.0.name").String()
+
+	var histCallName string
+	for _, item := range gjson.GetBytes(out, "input").Array() {
+		if item.Get("type").String() == "function_call" {
+			histCallName = item.Get("name").String()
+			break
+		}
+	}
+
+	if toolDeclared == "" || histCallName == "" {
+		t.Fatalf("expected both names non-empty, got declared=%q hist=%q", toolDeclared, histCallName)
+	}
+	if toolDeclared == histCallName {
+		t.Fatalf("expected historical tool name and declared tool name not to collide, both got %q", toolDeclared)
+	}
+
+	// Verify reverse mapping in response restores both
+	rev := buildReverseMapFromOriginalOpenAI(input)
+	if got := rev[toolDeclared]; got != declaredName {
+		t.Fatalf("expected reverse map for declared %q to be %q, got %q", toolDeclared, declaredName, got)
+	}
+	if got := rev[histCallName]; got != historicalName {
+		t.Fatalf("expected reverse map for historical %q to be %q, got %q", histCallName, historicalName, got)
 	}
 }
