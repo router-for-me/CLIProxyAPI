@@ -418,6 +418,13 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		out, _ = sjson.SetBytes(out, "user", user.String())
 	}
 
+	// Claude output_config.format is the structured-output contract. Chat
+	// Completions carries it as response_format; leaving it unset drops a
+	// caller-required JSON schema. Effort-only output_config is unchanged.
+	if responseFormat := claudeOutputConfigFormatToResponseFormat(root.Get("output_config.format")); len(responseFormat) > 0 {
+		out, _ = sjson.SetRawBytes(out, "response_format", responseFormat)
+	}
+
 	return out
 }
 
