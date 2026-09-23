@@ -166,8 +166,8 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		}
 	}
 
-	if config.Mode == ModeNone && toFormat == "claude" {
-		// Claude supports explicit disable via thinking.type="disabled".
+	if config.Mode == ModeNone && toFormat == "claude" && support.ZeroAllowed {
+		// Claude supports explicit disable via thinking.type="disabled" unless ZeroAllowed is false.
 		// Keep Budget=0 so applier can omit budget_tokens.
 		config.Budget = 0
 		config.Level = ""
