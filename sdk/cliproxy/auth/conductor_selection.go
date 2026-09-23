@@ -81,8 +81,16 @@ type authSelectionEligibility struct {
 	disallowFreeAuth bool
 }
 
-func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
+// WithRequiredAuthKind returns a context that restricts later credential
+// selection to auths whose AuthKind equals requiredKind. An empty requiredKind
+// does not restrict selection. The value is stored as given and compared
+// exactly with (*Auth).AuthKind; pass AuthKindAPIKey or AuthKindOAuth.
+func WithRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
 	return context.WithValue(ctx, requiredAuthKindContextKey{}, requiredKind)
+}
+
+func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
+	return WithRequiredAuthKind(ctx, requiredKind)
 }
 
 func withCredentialPolicy(ctx context.Context, policy string) context.Context {
