@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,13 @@ const (
 	deferredAPIRequestBytesKey     = "DEFERRED_API_REQUEST_BYTES"
 	creditsUsedKey                 = "__antigravity_credits_used__"
 	maxDeferredAPIRequestBodyBytes = 32 << 20 // 32 MiB
+	// maxAttemptResponseLogBytes bounds the in-memory per-attempt response log
+	// buffer. The buffer is only used when no file-backed response source is
+	// attached (the normal request-log path writes to a temp file instead), but
+	// it grows per streamed chunk and updateAggregatedResponse copies it in
+	// full on every chunk. 8 MiB is far above any realistic debug payload while
+	// keeping worst-case heap bounded.
+	maxAttemptResponseLogBytes = 8 << 20
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -52,6 +60,7 @@ type upstreamAttempt struct {
 	headersWritten       bool
 	bodyStarted          bool
 	bodyHasContent       bool
+	bodyTruncated        bool
 	prevWasSSEEvent      bool
 	errorWritten         bool
 }
@@ -494,6 +503,16 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 	if attempt.response == nil {
 		attempt.response = &strings.Builder{}
 	}
+	if attempt.bodyTruncated {
+		return
+	}
+	// Cap before writing so a single oversized chunk cannot overshoot the
+	// bound. A truncated buffer is flagged rather than silently losing the
+	// tail, so an operator reading the captured log knows it is partial.
+	if attempt.response.Len()+len(payload) > maxAttemptResponseLogBytes {
+		attempt.bodyTruncated = true
+		return
+	}
 	attempt.response.Write(payload)
 }
 
@@ -529,6 +548,11 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 			continue
 		}
 		builder.WriteString(responseText)
+		if attempt.bodyTruncated {
+			builder.WriteString("\n[truncated: response log exceeded ")
+			builder.WriteString(strconv.Itoa(maxAttemptResponseLogBytes))
+			builder.WriteString(" bytes]\n")
+		}
 		if !strings.HasSuffix(responseText, "\n") {
 			builder.WriteString("\n")
 		}
