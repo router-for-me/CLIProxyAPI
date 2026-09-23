@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	antigravityFallbackVersion = "2.2.1"
+	antigravityFallbackVersion = "2.15.1"
 	antigravityHubPlatform     = "darwin/arm64"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second

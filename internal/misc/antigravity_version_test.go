@@ -42,8 +42,8 @@ func TestAntigravityLatestVersionUsesCurrentHubFallback(t *testing.T) {
 	defer restore()
 
 	version := AntigravityLatestVersion()
-	if version != "2.2.1" {
-		t.Fatalf("AntigravityLatestVersion() = %q, want %q", version, "2.2.1")
+	if version != "2.15.1" {
+		t.Fatalf("AntigravityLatestVersion() = %q, want %q", version, "2.15.1")
 	}
 }
 
