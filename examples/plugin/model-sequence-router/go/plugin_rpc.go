@@ -158,7 +158,7 @@ func pluginRegistration(cfg *compiledConfig) registration {
 				{Name: "enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable per-conversation model sequence routing."},
 				{Name: "session_ttl", Type: pluginapi.ConfigFieldTypeString, Description: "Sliding in-memory conversation cursor TTL (1m through 24h)."},
 				{Name: "unavailable_provider", Type: pluginapi.ConfigFieldTypeString, Description: "Skip positions whose provider is not registered, or answer a retryable HTTP 529 without consuming a position."},
-				{Name: "diagnostics", Type: pluginapi.ConfigFieldTypeObject, Description: "Bounded content-free JSONL routing and cache diagnostics."},
+				{Name: "diagnostics", Type: pluginapi.ConfigFieldTypeObject, Description: "Bounded content-free JSONL routing and cache diagnostics, and the opt-in context records the host journal carries."},
 				{Name: "aliases", Type: pluginapi.ConfigFieldTypeArray, Description: "Client-visible aliases and ordered provider/model target sequences."},
 			},
 		},

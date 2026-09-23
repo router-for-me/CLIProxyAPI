@@ -325,7 +325,14 @@ For the four-slot example above, filter for `model-sequence-router: selected tar
 
 ### Replay context diagnostics in the journal
 
-With host debug logging enabled, the plugin emits `model-sequence-router: context` followed by a JSON object directly in the log message. These records use the existing plugin logging interface and require only the plugin shared library to be deployed. They do not require the JSONL sink, a server rebuild, or a client probe change.
+These records are off by default. `diagnostics.context: true` opens them, and that field needs neither `diagnostics.enabled` nor a path:
+
+```yaml
+diagnostics:
+  context: true
+```
+
+With host debug logging enabled and that field set, the plugin emits `model-sequence-router: context` followed by a JSON object directly in the log message. These records use the existing plugin logging interface and require only the plugin shared library to be deployed. They do not require the JSONL sink, a server rebuild, or a client probe change.
 
 - `request_context` records the replay input after credential selection but **before provider translation and sanitization**; it is not a capture of the final upstream wire payload.
 - `response_context` records reasoning items at `response.output_item.added`, `response.output_item.done`, and the completed response's output array.

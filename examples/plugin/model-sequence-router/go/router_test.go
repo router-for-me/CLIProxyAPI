@@ -18,6 +18,7 @@ type capturedPluginLog struct {
 func newTestRuntime(t *testing.T) *runtimeState {
 	t.Helper()
 	cfg, errCompile := decodeAndCompileConfig([]byte(`
+diagnostics: {context: true}
 aliases:
   - alias: Iterative-Model
     display_name: Iterative Model

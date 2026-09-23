@@ -45,6 +45,9 @@ type diagnosticsConfig struct {
 	Path       string `yaml:"path"`
 	MaxSizeMB  int    `yaml:"max_size_mb"`
 	MaxBackups int    `yaml:"max_backups"`
+	// Context opens the reasoning-shape records the host journal carries, which
+	// reach no JSONL sink and need no path.
+	Context bool `yaml:"context"`
 }
 
 func (c *diagnosticsConfig) UnmarshalYAML(node *yaml.Node) error {

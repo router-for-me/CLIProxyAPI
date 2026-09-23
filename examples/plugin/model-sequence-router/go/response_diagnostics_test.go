@@ -6,10 +6,54 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+// contextDiagnosticPayloads carries one reasoning item and the observed calls it
+// reaches, so both gate states exercise identical payloads.
+type contextDiagnosticPayloads struct {
+	Item      map[string]any
+	Request   pluginapi.RequestInterceptRequest
+	Added     pluginapi.StreamChunkInterceptRequest
+	Done      pluginapi.StreamChunkInterceptRequest
+	Completed pluginapi.StreamChunkInterceptRequest
+}
+
+// newContextDiagnosticPayloads builds the calls one reasoning item reaches,
+// using distinguishable content sentinels to prove field-level redaction.
+func newContextDiagnosticPayloads(t *testing.T) contextDiagnosticPayloads {
+	t.Helper()
+	item := map[string]any{
+		"id": "private-reasoning-identifier", "type": "reasoning", "status": "completed",
+		"encrypted_content": "private-encrypted-sentinel",
+		"summary":           []any{map[string]any{"type": "summary_text", "text": "private-summary-sentinel"}},
+	}
+	request := pluginapi.RequestInterceptRequest{
+		RequestID: "diagnostic-request", TraceID: "diagnostic-trace",
+		RequestedModel: "Iterative-Model", Model: "terra",
+		SourceFormat: "openai-response", ToFormat: "codex",
+		Body: marshalBody(t, map[string]any{
+			"previous_response_id": "private-response-identifier", "input": []any{item},
+		}),
+	}
+	stream := pluginapi.StreamChunkInterceptRequest{
+		RequestID: request.RequestID, RequestedModel: request.RequestedModel,
+		Model: request.Model, SourceFormat: request.SourceFormat,
+	}
+	added := stream
+	added.Body = marshalBody(t, map[string]any{"type": "response.output_item.added", "item": item})
+	done := stream
+	done.Body = append([]byte("data: "), marshalBody(t, map[string]any{"type": "response.output_item.done", "item": item})...)
+	completed := stream
+	completed.Body = marshalBody(t, map[string]any{
+		"type":     "response.completed",
+		"response": map[string]any{"id": "private-response-identifier", "output": []any{item}},
+	})
+	return contextDiagnosticPayloads{Item: item, Request: request, Added: added, Done: done, Completed: completed}
+}
 
 // TestContextDiagnosticRPCObservesWithoutRewriting exercises the public methods
 // and verifies journal-visible structure without exposing payload content.
@@ -25,37 +69,11 @@ func TestContextDiagnosticRPCObservesWithoutRewriting(t *testing.T) {
 		t.Fatal("stream observation capability is not published")
 	}
 
-	// Use distinguishable content sentinels to prove field-level redaction.
-	item := map[string]any{
-		"id": "private-reasoning-identifier", "type": "reasoning", "status": "completed",
-		"encrypted_content": "private-encrypted-sentinel",
-		"summary":           []any{map[string]any{"type": "summary_text", "text": "private-summary-sentinel"}},
-	}
-	requestBody := marshalBody(t, map[string]any{
-		"previous_response_id": "private-response-identifier", "input": []any{item},
-	})
-	request := pluginapi.RequestInterceptRequest{
-		RequestID: "diagnostic-request", TraceID: "diagnostic-trace",
-		RequestedModel: "Iterative-Model", Model: "terra",
-		SourceFormat: "openai-response", ToFormat: "codex", Body: requestBody,
-	}
-	before := request
+	payloads := newContextDiagnosticPayloads(t)
+	before := payloads.Request
 	before.ToFormat = ""
-	unrelated := request
+	unrelated := payloads.Request
 	unrelated.RequestedModel = "unrelated-model"
-	stream := pluginapi.StreamChunkInterceptRequest{
-		RequestID: request.RequestID, RequestedModel: request.RequestedModel,
-		Model: request.Model, SourceFormat: request.SourceFormat,
-	}
-	added := stream
-	added.Body = marshalBody(t, map[string]any{"type": "response.output_item.added", "item": item})
-	done := stream
-	done.Body = append([]byte("data: "), marshalBody(t, map[string]any{"type": "response.output_item.done", "item": item})...)
-	completed := stream
-	completed.Body = marshalBody(t, map[string]any{
-		"type":     "response.completed",
-		"response": map[string]any{"id": "private-response-identifier", "output": []any{item}},
-	})
 
 	cases := []struct {
 		name          string
@@ -66,10 +84,10 @@ func TestContextDiagnosticRPCObservesWithoutRewriting(t *testing.T) {
 	}{
 		{name: "before credentials", method: pluginabi.MethodRequestInterceptBefore, request: before},
 		{name: "unrelated model", method: pluginabi.MethodRequestInterceptAfter, request: unrelated},
-		{name: "replay input", method: pluginabi.MethodRequestInterceptAfter, request: request, collectionKey: "input", stage: "before_provider_translation"},
-		{name: "initial item", method: pluginabi.MethodResponseInterceptStreamChunk, request: added, collectionKey: "output", stage: "response.output_item.added"},
-		{name: "finished item", method: pluginabi.MethodResponseInterceptStreamChunk, request: done, collectionKey: "output", stage: "response.output_item.done"},
-		{name: "completed output", method: pluginabi.MethodResponseInterceptStreamChunk, request: completed, collectionKey: "output", stage: "response.completed"},
+		{name: "replay input", method: pluginabi.MethodRequestInterceptAfter, request: payloads.Request, collectionKey: "input", stage: "before_provider_translation"},
+		{name: "initial item", method: pluginabi.MethodResponseInterceptStreamChunk, request: payloads.Added, collectionKey: "output", stage: "response.output_item.added"},
+		{name: "finished item", method: pluginabi.MethodResponseInterceptStreamChunk, request: payloads.Done, collectionKey: "output", stage: "response.output_item.done"},
+		{name: "completed output", method: pluginabi.MethodResponseInterceptStreamChunk, request: payloads.Completed, collectionKey: "output", stage: "response.completed"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -124,7 +142,7 @@ func TestContextDiagnosticRPCObservesWithoutRewriting(t *testing.T) {
 			if errDecode := json.Unmarshal([]byte(strings.TrimPrefix(record.message, "model-sequence-router: context ")), &journal); errDecode != nil {
 				t.Fatal(errDecode)
 			}
-			if journal["request_id"] != request.RequestID || journal["stage"] != testCase.stage {
+			if journal["request_id"] != payloads.Request.RequestID || journal["stage"] != testCase.stage {
 				t.Fatalf("journal correlation = %#v", journal)
 			}
 			collection := journal[testCase.collectionKey].(map[string]any)
@@ -133,14 +151,52 @@ func TestContextDiagnosticRPCObservesWithoutRewriting(t *testing.T) {
 				t.Fatalf("reasoning shapes = %d, want one", len(items))
 			}
 			shape := items[0].(map[string]any)
-			if shape["status"] != item["status"] || shape["id_hash"] != shortValueHash(item["id"].(string)) {
+			if shape["status"] != payloads.Item["status"] || shape["id_hash"] != shortValueHash(payloads.Item["id"].(string)) {
 				t.Fatalf("reasoning shape = %#v", shape)
 			}
 			fields := shape["fields"].(map[string]any)
-			if len(fields) != len(item) || fields["encrypted_content"] != "string" {
+			if len(fields) != len(payloads.Item) || fields["encrypted_content"] != "string" {
 				t.Fatalf("reasoning field types = %#v", fields)
 			}
 		})
+	}
+}
+
+// TestContextDiagnosticsStaySilentWhenUnrequested verifies a configuration that
+// leaves diagnostics.context unset emits no context record at any observed stage.
+func TestContextDiagnosticsStaySilentWhenUnrequested(t *testing.T) {
+	cfg, errCompile := decodeAndCompileConfig([]byte(`
+aliases:
+  - alias: Iterative-Model
+    targets: [{provider: codex, model: terra}]
+`), 1)
+	if errCompile != nil {
+		t.Fatal(errCompile)
+	}
+	runtime := newRuntimeState(func() time.Time { return time.Unix(100, 0) })
+	runtime.config.Store(cfg)
+	previous := runtimePlugin
+	runtimePlugin = runtime
+	t.Cleanup(func() { runtimePlugin = previous })
+	logs := captureRouteLogs(runtime)
+	payloads := newContextDiagnosticPayloads(t)
+
+	calls := []struct {
+		method  string
+		request any
+	}{
+		{method: pluginabi.MethodRequestInterceptAfter, request: payloads.Request},
+		{method: pluginabi.MethodResponseInterceptStreamChunk, request: payloads.Added},
+		{method: pluginabi.MethodResponseInterceptStreamChunk, request: payloads.Done},
+		{method: pluginabi.MethodResponseInterceptStreamChunk, request: payloads.Completed},
+	}
+	for _, call := range calls {
+		if _, errHandle := handleMethod(call.method, marshalBody(t, call.request)); errHandle != nil {
+			t.Fatal(errHandle)
+		}
+	}
+	if len(*logs) != 0 {
+		t.Fatalf("unrequested context diagnostics = %d, want none: %#v", len(*logs), *logs)
 	}
 }
 

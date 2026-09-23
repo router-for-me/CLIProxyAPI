@@ -26,7 +26,7 @@ type reasoningCollectionShape struct {
 // before a response stream exists.
 func (r *runtimeState) observeRequestContext(req pluginapi.RequestInterceptRequest) {
 	cfg := r.loadedConfig()
-	if cfg == nil || !cfg.Enabled || cfg.aliasFor(req.RequestedModel) == nil || req.ToFormat == "" {
+	if cfg == nil || !cfg.Enabled || !cfg.Diagnostics.Context || cfg.aliasFor(req.RequestedModel) == nil || req.ToFormat == "" {
 		return
 	}
 	fields := map[string]any{
@@ -49,7 +49,10 @@ func (r *runtimeState) observeRequestContext(req pluginapi.RequestInterceptReque
 
 // observeResponseContext reports the item shapes emitted at stream boundaries.
 // The router observes these objects without changing the downstream transcript.
-func (r *runtimeState) observeResponseContext(req pluginapi.StreamChunkInterceptRequest, payloads []map[string]any) {
+func (r *runtimeState) observeResponseContext(cfg *compiledConfig, req pluginapi.StreamChunkInterceptRequest, payloads []map[string]any) {
+	if cfg == nil || !cfg.Diagnostics.Context {
+		return
+	}
 	for _, payload := range payloads {
 		event := stringJSONValue(payload["type"])
 		if event != "response.output_item.added" && event != "response.output_item.done" && event != "response.completed" && event != "response.done" {

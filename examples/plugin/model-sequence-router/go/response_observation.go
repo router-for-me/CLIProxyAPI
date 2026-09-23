@@ -35,7 +35,7 @@ func (r *runtimeState) observeStreamChunk(req pluginapi.StreamChunkInterceptRequ
 	} else {
 		// Decode once so identity binding and diagnostics observe the same events.
 		payloads := responsePayloads(req.Body)
-		r.observeResponseContext(req, payloads)
+		r.observeResponseContext(cfg, req, payloads)
 		r.bindResponseIdentity(cfg, payloads, r.chains.heldRequest(requestKey))
 	}
 }
