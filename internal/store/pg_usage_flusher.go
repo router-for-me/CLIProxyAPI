@@ -289,7 +289,7 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 			"provider":        record.Provider,
 			"auth_id":         record.AuthID,
 			"request_id":      record.RequestID,
-		}).Warn("upstream served a different model than requested")
+		}).Warn("postgres usage flusher: upstream served a different model than requested")
 	}
 	now := record.RequestedAt
 	if now.IsZero() {
