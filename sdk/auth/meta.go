@@ -3,10 +3,10 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
-	metaauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -14,7 +14,12 @@ import (
 )
 
 // MetaAuthenticator implements the Meta Muse OAuth device-code flow.
-type MetaAuthenticator struct{}
+type MetaAuthenticator struct {
+	httpClient *http.Client
+	// pollIntervalOverride, when set, replaces the wait between device-flow polls.
+	// Production leaves it zero so the provider interval is used.
+	pollIntervalOverride time.Duration
+}
 
 // NewMetaAuthenticator constructs a new Meta authenticator.
 func NewMetaAuthenticator() Authenticator {
@@ -45,22 +50,20 @@ func (a MetaAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		opts = &LoginOptions{}
 	}
 
-	authSvc := metaauth.NewMetaAuth(cfg)
-
 	fmt.Println("Starting Meta (Muse) authentication...")
-	deviceCode, err := authSvc.StartDeviceFlow(ctx)
+	flow, err := a.StartDeviceFlow(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("meta: failed to start device flow: %w", err)
+		return nil, err
 	}
 
-	verificationURL := strings.TrimSpace(deviceCode.VerificationURIComplete)
+	verificationURL := strings.TrimSpace(flow.VerificationURIComplete)
 	if verificationURL == "" {
-		verificationURL = strings.TrimSpace(deviceCode.VerificationURI)
+		verificationURL = strings.TrimSpace(flow.VerificationURI)
 	}
 
 	fmt.Printf("\nTo authenticate, please visit:\n%s\n\n", verificationURL)
-	if deviceCode.UserCode != "" {
-		fmt.Printf("Then enter this code: %s\n\n", deviceCode.UserCode)
+	if flow.UserCode != "" {
+		fmt.Printf("Then enter this code: %s\n\n", flow.UserCode)
 	}
 
 	if !opts.NoBrowser {
@@ -76,78 +79,13 @@ func (a MetaAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 	}
 
 	fmt.Println("Waiting for authorization...")
-	if deviceCode.ExpiresIn > 0 {
-		fmt.Printf("(This will timeout in %d seconds if not authorized)\n", deviceCode.ExpiresIn)
+	if flow.ExpiresIn > 0 {
+		fmt.Printf("(This will timeout in %d seconds if not authorized)\n", int(flow.ExpiresIn/time.Second))
 	}
 
-	bundle, errWait := authSvc.WaitForAuthorization(ctx, deviceCode)
+	record, errWait := a.CompleteDeviceFlow(ctx, cfg, flow)
 	if errWait != nil {
 		return nil, fmt.Errorf("meta: %w", errWait)
 	}
-
-	tokenStorage := authSvc.CreateTokenStorage(bundle)
-	if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
-		return nil, fmt.Errorf("meta token storage missing access token")
-	}
-
-	fileName := metaauth.CredentialFileName(tokenStorage.Email, tokenStorage.DCAToken)
-	label := strings.TrimSpace(tokenStorage.Email)
-	if label == "" {
-		label = "Meta"
-	}
-
-	metadata := map[string]any{
-		"type":         "meta",
-		"access_token": tokenStorage.AccessToken,
-		"token_type":   tokenStorage.TokenType,
-		"expires_in":   tokenStorage.ExpiresIn,
-		"expired":      tokenStorage.Expired,
-		"last_refresh": tokenStorage.LastRefresh,
-		"base_url":     tokenStorage.BaseURL,
-		"auth_kind":    "oauth",
-	}
-	if tokenStorage.DCAExpired != "" {
-		metadata["dca_expired"] = tokenStorage.DCAExpired
-	}
-	if tokenStorage.DCAExpiresAt > 0 {
-		metadata["dca_expires_at"] = tokenStorage.DCAExpiresAt
-	}
-	if tokenStorage.APIKey != "" {
-		metadata["api_key"] = tokenStorage.APIKey
-	}
-	if tokenStorage.DCAToken != "" {
-		metadata["dca_token"] = tokenStorage.DCAToken
-	}
-	if tokenStorage.Email != "" {
-		metadata["email"] = tokenStorage.Email
-	}
-	if tokenStorage.Name != "" {
-		metadata["name"] = tokenStorage.Name
-	}
-
-	attrs := map[string]string{
-		"auth_kind": "oauth",
-		"base_url":  tokenStorage.BaseURL,
-	}
-	if tokenStorage.APIKey != "" {
-		attrs["api_key"] = tokenStorage.APIKey
-	}
-	if tokenStorage.DCAToken != "" {
-		attrs["dca_token"] = tokenStorage.DCAToken
-	}
-	if tokenStorage.Email != "" {
-		attrs["email"] = tokenStorage.Email
-	}
-
-	fmt.Println("Meta authentication successful")
-
-	return &coreauth.Auth{
-		ID:         fileName,
-		Provider:   a.Provider(),
-		FileName:   fileName,
-		Label:      label,
-		Storage:    tokenStorage,
-		Metadata:   metadata,
-		Attributes: attrs,
-	}, nil
+	return record, nil
 }

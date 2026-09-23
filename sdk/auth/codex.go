@@ -20,6 +20,10 @@ import (
 // CodexAuthenticator implements the OAuth login flow for Codex accounts.
 type CodexAuthenticator struct {
 	CallbackPort int
+	httpClient   *http.Client
+	// pollIntervalOverride, when set, replaces the wait between device-flow polls.
+	// Production leaves it zero so the provider interval is used.
+	pollIntervalOverride time.Duration
 }
 
 // NewCodexAuthenticator constructs a Codex authenticator with default settings.

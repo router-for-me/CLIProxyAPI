@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -14,7 +15,12 @@ import (
 )
 
 // XAIAuthenticator implements the xAI Grok OAuth device-code flow.
-type XAIAuthenticator struct{}
+type XAIAuthenticator struct {
+	httpClient *http.Client
+	// pollIntervalOverride, when set, replaces the wait between device-flow polls.
+	// Production leaves it zero so the provider interval is used.
+	pollIntervalOverride time.Duration
+}
 
 // NewXAIAuthenticator constructs a new xAI authenticator.
 func NewXAIAuthenticator() Authenticator {
@@ -44,22 +50,20 @@ func (a XAIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *L
 		opts = &LoginOptions{}
 	}
 
-	authSvc := xaiauth.NewXAIAuth(cfg)
-
 	fmt.Println("Starting xAI authentication...")
-	deviceCode, err := authSvc.StartDeviceFlow(ctx)
+	flow, err := a.StartDeviceFlow(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("xai: failed to start device flow: %w", err)
+		return nil, err
 	}
 
-	verificationURL := strings.TrimSpace(deviceCode.VerificationURIComplete)
+	verificationURL := strings.TrimSpace(flow.VerificationURIComplete)
 	if verificationURL == "" {
-		verificationURL = strings.TrimSpace(deviceCode.VerificationURI)
+		verificationURL = strings.TrimSpace(flow.VerificationURI)
 	}
 
 	fmt.Printf("\nTo authenticate, please visit:\n%s\n\n", verificationURL)
-	if deviceCode.UserCode != "" {
-		fmt.Printf("Then enter this code: %s\n\n", deviceCode.UserCode)
+	if flow.UserCode != "" {
+		fmt.Printf("Then enter this code: %s\n\n", flow.UserCode)
 	}
 
 	if !opts.NoBrowser {
@@ -75,58 +79,13 @@ func (a XAIAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *L
 	}
 
 	fmt.Println("Waiting for authorization...")
-	if deviceCode.ExpiresIn > 0 {
-		fmt.Printf("(This will timeout in %d seconds if not authorized)\n", deviceCode.ExpiresIn)
+	if flow.ExpiresIn > 0 {
+		fmt.Printf("(This will timeout in %d seconds if not authorized)\n", int(flow.ExpiresIn/time.Second))
 	}
 
-	bundle, errWait := authSvc.WaitForAuthorization(ctx, deviceCode)
+	record, errWait := a.CompleteDeviceFlow(ctx, cfg, flow)
 	if errWait != nil {
 		return nil, fmt.Errorf("xai: %w", errWait)
 	}
-
-	tokenStorage := authSvc.CreateTokenStorage(bundle)
-	if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
-		return nil, fmt.Errorf("xai token storage missing access token")
-	}
-
-	fileName := xaiauth.CredentialFileName(tokenStorage.Email, tokenStorage.Subject)
-	label := strings.TrimSpace(tokenStorage.Email)
-	if label == "" {
-		label = "xAI"
-	}
-
-	metadata := map[string]any{
-		"type":           "xai",
-		"access_token":   tokenStorage.AccessToken,
-		"refresh_token":  tokenStorage.RefreshToken,
-		"id_token":       tokenStorage.IDToken,
-		"token_type":     tokenStorage.TokenType,
-		"expires_in":     tokenStorage.ExpiresIn,
-		"expired":        tokenStorage.Expire,
-		"last_refresh":   tokenStorage.LastRefresh,
-		"base_url":       tokenStorage.BaseURL,
-		"token_endpoint": tokenStorage.TokenEndpoint,
-		"auth_kind":      "oauth",
-	}
-	if tokenStorage.Email != "" {
-		metadata["email"] = tokenStorage.Email
-	}
-	if tokenStorage.Subject != "" {
-		metadata["sub"] = tokenStorage.Subject
-	}
-
-	fmt.Println("xAI authentication successful")
-
-	return &coreauth.Auth{
-		ID:       fileName,
-		Provider: a.Provider(),
-		FileName: fileName,
-		Label:    label,
-		Storage:  tokenStorage,
-		Metadata: metadata,
-		Attributes: map[string]string{
-			"auth_kind": "oauth",
-			"base_url":  tokenStorage.BaseURL,
-		},
-	}, nil
+	return record, nil
 }

@@ -61,6 +61,15 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	}
 }
 
+// SetHTTPClient replaces the client used for token exchange and refresh.
+// A nil client is ignored.
+func (o *CodexAuth) SetHTTPClient(client *http.Client) {
+	if o == nil || client == nil {
+		return
+	}
+	o.httpClient = client
+}
+
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).
 // It constructs the URL with the necessary parameters, including the client ID,
 // response type, redirect URI, scopes, and PKCE challenge.

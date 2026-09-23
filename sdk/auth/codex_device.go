@@ -61,46 +61,151 @@ func shouldUseCodexDeviceFlow(opts *LoginOptions) bool {
 	return strings.EqualFold(strings.TrimSpace(opts.Metadata[codexLoginModeMetadataKey]), codexLoginModeDevice)
 }
 
+func (a *CodexAuthenticator) deviceHTTPClient(cfg *config.Config) *http.Client {
+	if a != nil && a.httpClient != nil {
+		return a.httpClient
+	}
+	var sdkCfg config.SDKConfig
+	if cfg != nil {
+		sdkCfg = cfg.SDKConfig
+	}
+	return util.SetProxy(&sdkCfg, &http.Client{})
+}
+
+func (a *CodexAuthenticator) effectiveInterval(d time.Duration) time.Duration {
+	if a != nil && a.pollIntervalOverride > 0 {
+		return a.pollIntervalOverride
+	}
+	if d <= 0 {
+		return time.Duration(codexDeviceDefaultPollIntervalSeconds) * time.Second
+	}
+	return d
+}
+
 func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if opts == nil {
+		opts = &LoginOptions{}
+	}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
-
-	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
+	flow, err := a.StartDeviceFlow(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	deviceCode := strings.TrimSpace(userCodeResp.UserCode)
-	if deviceCode == "" {
-		deviceCode = strings.TrimSpace(userCodeResp.UserCodeAlt)
-	}
-	deviceAuthID := strings.TrimSpace(userCodeResp.DeviceAuthID)
-	if deviceCode == "" || deviceAuthID == "" {
-		return nil, fmt.Errorf("codex device flow did not return required fields")
-	}
-
-	pollInterval := parseCodexDevicePollInterval(userCodeResp.Interval)
-
 	fmt.Println("Starting Codex device authentication...")
-	fmt.Printf("Codex device URL: %s\n", codexDeviceVerificationURL)
-	fmt.Printf("Codex device code: %s\n", deviceCode)
+	fmt.Printf("Codex device URL: %s\n", flow.VerificationURI)
+	fmt.Printf("Codex device code: %s\n", flow.UserCode)
 
 	if !opts.NoBrowser {
 		if !browser.IsAvailable() {
 			log.Warn("No browser available; please open the device URL manually")
-		} else if errOpen := browser.OpenURL(codexDeviceVerificationURL); errOpen != nil {
+		} else if errOpen := browser.OpenURL(flow.VerificationURI); errOpen != nil {
 			log.Warnf("Failed to open browser automatically: %v", errOpen)
 		}
 	}
 
-	tokenResp, err := pollCodexDeviceToken(ctx, httpClient, deviceAuthID, deviceCode, pollInterval)
+	return a.CompleteDeviceFlow(ctx, cfg, flow)
+}
+
+// StartDeviceFlow requests a Codex device code and returns it without waiting
+// for the user to authorize.
+func (a *CodexAuthenticator) StartDeviceFlow(ctx context.Context, cfg *config.Config) (*DeviceFlow, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("cliproxy auth: configuration is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	userCodeResp, err := requestCodexDeviceUserCode(ctx, a.deviceHTTPClient(cfg))
 	if err != nil {
 		return nil, err
 	}
 
+	userCode := strings.TrimSpace(userCodeResp.UserCode)
+	if userCode == "" {
+		userCode = strings.TrimSpace(userCodeResp.UserCodeAlt)
+	}
+	deviceAuthID := strings.TrimSpace(userCodeResp.DeviceAuthID)
+	if userCode == "" || deviceAuthID == "" {
+		return nil, fmt.Errorf("codex device flow did not return required fields")
+	}
+
+	return &DeviceFlow{
+		Provider:        a.Provider(),
+		UserCode:        userCode,
+		DeviceCode:      deviceAuthID,
+		DeviceAuthID:    deviceAuthID,
+		VerificationURI: codexDeviceVerificationURL,
+		Interval:        parseCodexDevicePollInterval(userCodeResp.Interval),
+	}, nil
+}
+
+// PollDeviceFlow exchanges a Codex device code once.
+// A pending result means the user has not approved yet. Approval exchanges
+// the returned authorization code for a Codex credential.
+func (a *CodexAuthenticator) PollDeviceFlow(ctx context.Context, cfg *config.Config, flow *DeviceFlow) (*DeviceFlowPoll, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("cliproxy auth: configuration is required")
+	}
+	if flow == nil {
+		return nil, fmt.Errorf("codex device flow is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deviceAuthID := strings.TrimSpace(flow.DeviceAuthID)
+	if deviceAuthID == "" {
+		deviceAuthID = strings.TrimSpace(flow.DeviceCode)
+	}
+	userCode := strings.TrimSpace(flow.UserCode)
+	if deviceAuthID == "" || userCode == "" {
+		return nil, fmt.Errorf("codex device flow is missing device fields")
+	}
+
+	tokenResp, pending, err := pollCodexDeviceTokenOnce(ctx, a.deviceHTTPClient(cfg), deviceAuthID, userCode)
+	if err != nil {
+		return nil, err
+	}
+	interval := a.effectiveInterval(flow.Interval)
+	if pending {
+		return &DeviceFlowPoll{Pending: true, Interval: interval}, nil
+	}
+	record, errExchange := a.exchangeCodexDeviceAuthorization(ctx, cfg, tokenResp)
+	if errExchange != nil {
+		return nil, errExchange
+	}
+	return &DeviceFlowPoll{Interval: interval, Auth: record}, nil
+}
+
+// CompleteDeviceFlow polls until the Codex device code is authorized or the flow fails.
+func (a *CodexAuthenticator) CompleteDeviceFlow(ctx context.Context, cfg *config.Config, flow *DeviceFlow) (*coreauth.Auth, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("cliproxy auth: configuration is required")
+	}
+	if flow == nil {
+		return nil, fmt.Errorf("codex device flow is required")
+	}
+	interval := a.effectiveInterval(flow.Interval)
+	deadline := time.Now().Add(codexDeviceTimeout)
+	return pollUntilDeviceAuthorized(ctx, interval, deadline, fmt.Errorf("codex device authentication timed out after 15 minutes"), func() (*DeviceFlowPoll, error) {
+		polled, err := a.PollDeviceFlow(ctx, cfg, flow)
+		if err != nil || polled == nil || polled.Auth != nil {
+			return polled, err
+		}
+		polled.Interval = a.effectiveInterval(polled.Interval)
+		flow.Interval = polled.Interval
+		return polled, nil
+	})
+}
+
+func (a *CodexAuthenticator) exchangeCodexDeviceAuthorization(ctx context.Context, cfg *config.Config, tokenResp *codexDeviceTokenResponse) (*coreauth.Auth, error) {
+	if tokenResp == nil {
+		return nil, fmt.Errorf("codex device flow token response missing required fields")
+	}
 	authCode := strings.TrimSpace(tokenResp.AuthorizationCode)
 	codeVerifier := strings.TrimSpace(tokenResp.CodeVerifier)
 	codeChallenge := strings.TrimSpace(tokenResp.CodeChallenge)
@@ -109,6 +214,9 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 	}
 
 	authSvc := codex.NewCodexAuth(cfg)
+	if a != nil && a.httpClient != nil {
+		authSvc.SetHTTPClient(a.httpClient)
+	}
 	authBundle, err := authSvc.ExchangeCodeForTokensWithRedirect(
 		ctx,
 		authCode,
@@ -121,7 +229,6 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 	if err != nil {
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
-
 	return a.buildAuthRecord(authSvc, authBundle)
 }
 
@@ -168,61 +275,48 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	return &parsed, nil
 }
 
-func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID, userCode string, interval time.Duration) (*codexDeviceTokenResponse, error) {
-	deadline := time.Now().Add(codexDeviceTimeout)
+func pollCodexDeviceTokenOnce(ctx context.Context, client *http.Client, deviceAuthID, userCode string) (*codexDeviceTokenResponse, bool, error) {
+	body, err := json.Marshal(codexDeviceTokenRequest{
+		DeviceAuthID: deviceAuthID,
+		UserCode:     userCode,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to encode codex device poll request: %w", err)
+	}
 
-	for {
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("codex device authentication timed out after 15 minutes")
-		}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexDeviceTokenURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to create codex device poll request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
-		body, err := json.Marshal(codexDeviceTokenRequest{
-			DeviceAuthID: deviceAuthID,
-			UserCode:     userCode,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to encode codex device poll request: %w", err)
-		}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to poll codex device token: %w", err)
+	}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexDeviceTokenURL, bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create codex device poll request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
+	respBody, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		return nil, false, fmt.Errorf("failed to read codex device poll response: %w", readErr)
+	}
 
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to poll codex device token: %w", err)
+	switch {
+	case codexDeviceIsSuccessStatus(resp.StatusCode):
+		var parsed codexDeviceTokenResponse
+		if err := json.Unmarshal(respBody, &parsed); err != nil {
+			return nil, false, fmt.Errorf("failed to decode codex device token response: %w", err)
 		}
-
-		respBody, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("failed to read codex device poll response: %w", readErr)
+		return &parsed, false, nil
+	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound:
+		return nil, true, nil
+	default:
+		trimmed := strings.TrimSpace(string(respBody))
+		if trimmed == "" {
+			trimmed = "empty response body"
 		}
-
-		switch {
-		case codexDeviceIsSuccessStatus(resp.StatusCode):
-			var parsed codexDeviceTokenResponse
-			if err := json.Unmarshal(respBody, &parsed); err != nil {
-				return nil, fmt.Errorf("failed to decode codex device token response: %w", err)
-			}
-			return &parsed, nil
-		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound:
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(interval):
-				continue
-			}
-		default:
-			trimmed := strings.TrimSpace(string(respBody))
-			if trimmed == "" {
-				trimmed = "empty response body"
-			}
-			return nil, fmt.Errorf("codex device token polling failed with status %d: %s", resp.StatusCode, trimmed)
-		}
+		return nil, false, fmt.Errorf("codex device token polling failed with status %d: %s", resp.StatusCode, trimmed)
 	}
 }
 

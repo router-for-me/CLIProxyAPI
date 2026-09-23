@@ -250,6 +250,15 @@ func NewMetaAuthWithProxyURL(cfg *config.Config, proxyURL string) *MetaAuth {
 	}
 }
 
+// SetHTTPClient replaces the client used for device flow, token poll, and key minting.
+// A nil client is ignored.
+func (a *MetaAuth) SetHTTPClient(client *http.Client) {
+	if a == nil || client == nil {
+		return
+	}
+	a.httpClient = client
+}
+
 // StartDeviceFlow initiates the device authorization flow with Meta.
 func (a *MetaAuth) StartDeviceFlow(ctx context.Context) (*DeviceCodeResponse, error) {
 	return a.StartDeviceFlowWithEndpoint(ctx, DeviceAuthorizationEndpoint)
@@ -315,11 +324,6 @@ func (a *MetaAuth) WaitForAuthorization(ctx context.Context, dcr *DeviceCodeResp
 		return nil, fmt.Errorf("meta auth: missing device code response")
 	}
 
-	tokenEndpoint := dcr.TokenEndpoint
-	if tokenEndpoint == "" {
-		tokenEndpoint = TokenEndpoint
-	}
-
 	interval := time.Duration(dcr.Interval) * time.Second
 	if interval <= 0 {
 		interval = DefaultPollInterval
@@ -344,81 +348,112 @@ func (a *MetaAuth) WaitForAuthorization(ctx context.Context, dcr *DeviceCodeResp
 		case <-ctx.Done():
 			return nil, fmt.Errorf("meta auth: authorization timed out or canceled: %w", ctx.Err())
 		case <-ticker.C:
-			form := url.Values{
-				"grant_type":  {DeviceCodeGrantType},
-				"device_code": {dcr.DeviceCode},
-				"client_id":   {ClientID},
-			}
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
+			bundle, next, err := a.PollDeviceCodeOnce(ctx, dcr, interval)
 			if err != nil {
-				return nil, fmt.Errorf("meta auth: create token request: %w", err)
+				return nil, err
 			}
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			req.Header.Set("Accept", "application/json")
-			req.Header.Set("User-Agent", "muse-code/1.0.2")
-
-			resp, err := a.httpClient.Do(req)
-			if err != nil {
-				log.Warnf("meta auth: poll request error: %v (retrying)", err)
-				continue
-			}
-
-			body, errRead := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if errRead != nil {
-				log.Warnf("meta auth: read token response error: %v (retrying)", errRead)
-				continue
-			}
-
-			if resp.StatusCode == http.StatusOK {
-				var tokenData TokenData
-				if err := json.Unmarshal(body, &tokenData); err != nil {
-					return nil, fmt.Errorf("meta auth: parse token response: %w", err)
-				}
-				if tokenData.AccessToken == "" {
-					return nil, fmt.Errorf("meta auth: response missing access_token")
-				}
-				if tokenData.ExpiresIn > 0 {
-					tokenData.ExpiresAt = time.Now().Add(time.Duration(tokenData.ExpiresIn) * time.Second).Unix()
-				}
-				bundle := &MetaAuthBundle{
-					TokenData: &tokenData,
-				}
-				minted, errMint := a.MintAPIKey(ctx, tokenData.AccessToken)
-				if errMint != nil {
-					log.Warnf("meta auth: could not mint api_key from dca_token: %v", errMint)
-				} else if minted != nil {
-					bundle.MintedKey = minted
-					if minted.UserEmail != "" {
-						bundle.Email = minted.UserEmail
-					}
-					if minted.UserFullName != "" {
-						bundle.Name = minted.UserFullName
-					}
-				}
+			if bundle != nil {
 				return bundle, nil
 			}
-
-			var errResp TokenData
-			_ = json.Unmarshal(body, &errResp)
-			switch errResp.Error {
-			case "authorization_pending":
-				continue
-			case "slow_down":
-				interval += 5 * time.Second
+			if next > interval {
+				interval = next
 				ticker.Reset(interval)
-				continue
-			case "access_denied":
-				return nil, fmt.Errorf("meta auth: access was denied by user")
-			case "expired_token":
-				return nil, fmt.Errorf("meta auth: device code has expired")
-			default:
-				if errResp.Error != "" {
-					return nil, fmt.Errorf("meta auth: error from authorization server: %s: %s", errResp.Error, errResp.ErrorDescription)
-				}
-				log.Warnf("meta auth: unexpected response %d: %s", resp.StatusCode, string(body))
 			}
 		}
+	}
+}
+
+// PollDeviceCodeOnce performs one device-code token request and, on approval, mints an API key.
+// A nil bundle and a nil error means the user has not authorized yet.
+// nextInterval is the delay before another attempt; slow_down increases it.
+func (a *MetaAuth) PollDeviceCodeOnce(ctx context.Context, dcr *DeviceCodeResponse, interval time.Duration) (*MetaAuthBundle, time.Duration, error) {
+	if dcr == nil || dcr.DeviceCode == "" {
+		return nil, interval, fmt.Errorf("meta auth: missing device code response")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if interval <= 0 {
+		interval = DefaultPollInterval
+	}
+
+	tokenEndpoint := dcr.TokenEndpoint
+	if tokenEndpoint == "" {
+		tokenEndpoint = TokenEndpoint
+	}
+
+	form := url.Values{
+		"grant_type":  {DeviceCodeGrantType},
+		"device_code": {dcr.DeviceCode},
+		"client_id":   {ClientID},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, interval, fmt.Errorf("meta auth: create token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "muse-code/1.0.2")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		log.Warnf("meta auth: poll request error: %v (retrying)", err)
+		return nil, interval, nil
+	}
+
+	body, errRead := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if errRead != nil {
+		log.Warnf("meta auth: read token response error: %v (retrying)", errRead)
+		return nil, interval, nil
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		var tokenData TokenData
+		if err := json.Unmarshal(body, &tokenData); err != nil {
+			return nil, interval, fmt.Errorf("meta auth: parse token response: %w", err)
+		}
+		if tokenData.AccessToken == "" {
+			return nil, interval, fmt.Errorf("meta auth: response missing access_token")
+		}
+		if tokenData.ExpiresIn > 0 {
+			tokenData.ExpiresAt = time.Now().Add(time.Duration(tokenData.ExpiresIn) * time.Second).Unix()
+		}
+		bundle := &MetaAuthBundle{
+			TokenData: &tokenData,
+		}
+		minted, errMint := a.MintAPIKey(ctx, tokenData.AccessToken)
+		if errMint != nil {
+			log.Warnf("meta auth: could not mint api_key from dca_token: %v", errMint)
+		} else if minted != nil {
+			bundle.MintedKey = minted
+			if minted.UserEmail != "" {
+				bundle.Email = minted.UserEmail
+			}
+			if minted.UserFullName != "" {
+				bundle.Name = minted.UserFullName
+			}
+		}
+		return bundle, interval, nil
+	}
+
+	var errResp TokenData
+	_ = json.Unmarshal(body, &errResp)
+	switch errResp.Error {
+	case "authorization_pending":
+		return nil, interval, nil
+	case "slow_down":
+		return nil, interval + 5*time.Second, nil
+	case "access_denied":
+		return nil, interval, fmt.Errorf("meta auth: access was denied by user")
+	case "expired_token":
+		return nil, interval, fmt.Errorf("meta auth: device code has expired")
+	default:
+		if errResp.Error != "" {
+			return nil, interval, fmt.Errorf("meta auth: error from authorization server: %s: %s", errResp.Error, errResp.ErrorDescription)
+		}
+		log.Warnf("meta auth: unexpected response %d: %s", resp.StatusCode, string(body))
+		return nil, interval, nil
 	}
 }
 

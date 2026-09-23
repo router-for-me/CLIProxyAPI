@@ -44,6 +44,15 @@ func NewXAIAuthWithProxyURL(cfg *config.Config, proxyURL string) *XAIAuth {
 	return &XAIAuth{httpClient: util.SetProxy(&sdkCfg, &http.Client{Timeout: httpClientTimeout})}
 }
 
+// SetHTTPClient replaces the client used for discovery, device flow, and refresh.
+// A nil client is ignored.
+func (a *XAIAuth) SetHTTPClient(client *http.Client) {
+	if a == nil || client == nil {
+		return
+	}
+	a.httpClient = client
+}
+
 // ValidateOAuthEndpoint validates an endpoint returned by xAI discovery.
 func ValidateOAuthEndpoint(rawURL string, field string) (string, error) {
 	rawURL = strings.TrimSpace(rawURL)
@@ -194,6 +203,46 @@ func (a *XAIAuth) WaitForAuthorization(ctx context.Context, deviceCode *DeviceCo
 	}, nil
 }
 
+// PollDeviceCodeOnce performs one device-code token request.
+// A nil token and a nil error means the user has not authorized yet.
+// nextInterval is the delay before another attempt; slow_down increases it.
+func (a *XAIAuth) PollDeviceCodeOnce(ctx context.Context, deviceCode *DeviceCodeResponse, interval time.Duration) (*TokenData, time.Duration, error) {
+	if deviceCode == nil {
+		return nil, interval, fmt.Errorf("xai device code: response is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if interval <= 0 {
+		interval = defaultPollInterval
+		if a != nil && a.minPollInterval > 0 {
+			interval = a.minPollInterval
+		}
+	}
+
+	tokenEndpoint := strings.TrimSpace(deviceCode.TokenEndpoint)
+	if tokenEndpoint == "" {
+		discovery, errDiscover := a.Discover(ctx)
+		if errDiscover != nil {
+			return nil, interval, errDiscover
+		}
+		tokenEndpoint = discovery.TokenEndpoint
+		deviceCode.TokenEndpoint = tokenEndpoint
+	}
+
+	token, pollErr, nextInterval, shouldContinue := a.exchangeDeviceCode(ctx, tokenEndpoint, deviceCode.DeviceCode, interval)
+	if token != nil {
+		return token, nextInterval, nil
+	}
+	if shouldContinue {
+		return nil, nextInterval, nil
+	}
+	if pollErr == nil {
+		pollErr = fmt.Errorf("xai device token exchange failed")
+	}
+	return nil, nextInterval, pollErr
+}
+
 // PollForToken polls the token endpoint until the user authorizes or the device code expires.
 func (a *XAIAuth) PollForToken(ctx context.Context, deviceCode *DeviceCodeResponse) (*TokenData, error) {
 	if deviceCode == nil {
@@ -201,15 +250,6 @@ func (a *XAIAuth) PollForToken(ctx context.Context, deviceCode *DeviceCodeRespon
 	}
 	if ctx == nil {
 		ctx = context.Background()
-	}
-
-	tokenEndpoint := strings.TrimSpace(deviceCode.TokenEndpoint)
-	if tokenEndpoint == "" {
-		discovery, errDiscover := a.Discover(ctx)
-		if errDiscover != nil {
-			return nil, errDiscover
-		}
-		tokenEndpoint = discovery.TokenEndpoint
 	}
 
 	minInterval := defaultPollInterval
@@ -247,11 +287,11 @@ func (a *XAIAuth) PollForToken(ctx context.Context, deviceCode *DeviceCodeRespon
 			}
 			firstAttempt = false
 
-			token, pollErr, nextInterval, shouldContinue := a.exchangeDeviceCode(ctx, tokenEndpoint, deviceCode.DeviceCode, interval)
+			token, nextInterval, pollErr := a.PollDeviceCodeOnce(ctx, deviceCode, interval)
 			if token != nil {
 				return token, nil
 			}
-			if !shouldContinue {
+			if pollErr != nil {
 				return nil, pollErr
 			}
 			interval = nextInterval
