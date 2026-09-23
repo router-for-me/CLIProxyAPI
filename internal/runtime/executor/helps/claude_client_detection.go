@@ -79,9 +79,12 @@ const (
 	claudeCodeHelperModel = "claude-haiku-4-5-20251001"
 )
 
-// These are the six exact beta sequences observed across 14 markerless native
-// Claude Code 2.1.220 Haiku helper requests. Keeping the allowlist exact avoids
-// turning the helper exception into a generic no-claude-code-beta bypass.
+// These are the exact beta sequences observed on markerless native Haiku
+// helper requests. The first six are Claude Code 2.1.220. The last is the
+// 2.1.280 title helper captured 2026-09-23: structured output, then
+// server-side fallback, fallback credit, and cache diagnosis. Keeping the
+// allowlist exact avoids turning the helper exception into a generic
+// no-claude-code-beta bypass.
 var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
 	claudeCodeHelperBetaProfile(true):  claudeCodeHelperShapeMinimal,
 	claudeCodeHelperBetaProfile(false): claudeCodeHelperShapeMinimal,
@@ -99,6 +102,12 @@ var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
 	): claudeCodeHelperShapeStructured,
 	claudeCodeHelperBetaProfile(false,
 		"structured-outputs-2025-12-15",
+	): claudeCodeHelperShapeStructured,
+	claudeCodeHelperBetaProfile(true,
+		"structured-outputs-2025-12-15",
+		"server-side-fallback-2026-06-01",
+		"fallback-credit-2026-06-01",
+		"cache-diagnosis-2026-04-07",
 	): claudeCodeHelperShapeStructured,
 }
 
