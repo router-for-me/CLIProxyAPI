@@ -53,7 +53,7 @@ jobs:
           ASSET_ARCH: ${{ matrix.asset_arch }}
         run: |
           set -euo pipefail
-          RELEASE_VERSION="7.5.4"
+          RELEASE_VERSION="7.5.5"
           COMMIT="$(git rev-parse --short HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           mkdir -p dist/archive
@@ -87,8 +87,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="v7.5.4-$(git rev-parse --short HEAD)"
+          TAG="v7.5.5-$(git rev-parse --short HEAD)"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
-            --title "CLIProxyAPI 7.5.4 (sync)" \
+            --title "CLIProxyAPI 7.5.5 (sync)" \
             --notes "Automated build from the \`sync\` branch (linux/amd64 + darwin/amd64)."
           gh release upload "$TAG" dist/CLIProxyAPI_*.tar.gz --clobber
