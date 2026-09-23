@@ -323,6 +323,20 @@ At startup or successful reconfiguration, the info log `model-sequence-router: c
 
 For the four-slot example above, filter for `model-sequence-router: selected target`. With the default `random_start: true`, a conversation begins at any one index and then follows cyclic order—for example, `2, 3, 0, 1, 2`. Set `random_start: false` when testing if you want the exact trace `0, 1, 2, 3, 0`. Host logs carry a supplementary subset of these fields; the JSONL diagnostic file is the authoritative record.
 
+### Replay context diagnostics in the journal
+
+With host debug logging enabled, the plugin emits `model-sequence-router: context` followed by a JSON object directly in the log message. These records use the existing plugin logging interface and require only the plugin shared library to be deployed. They do not require the JSONL sink, a server rebuild, or a client probe change.
+
+- `request_context` records the replay input after credential selection but **before provider translation and sanitization**; it is not a capture of the final upstream wire payload.
+- `response_context` records reasoning items at `response.output_item.added`, `response.output_item.done`, and the completed response's output array.
+- `request_id` joins request and response records; the request record's `trace_id` connects them to the host's request-prefixed error logs.
+- `response_hash` and `previous_response_hash` connect successive turns without exposing response identifiers; `id_hash` connects one reasoning item across event stages and replay input.
+- `input` and `output` report total item count and reasoning-item positions, field names and types, and bounded `status` labels; an empty reasoning list explicitly reports that no reasoning item was observed in that collection.
+
+Compare a completed response's reasoning fields with the next request's replay fields using their hashes. For example, a `status` field present in both records identifies a field retained across replay; it does not establish what the later provider adapter sends on the wire. An added-item record is not a substitute for a completed-output record.
+
+The hooks return no request or response modifications. They do not log text, summaries, encrypted content, credentials, or raw item and response identifiers. Unrecognized status values are reported as `other` rather than printed. Diagnostics expose payload compatibility evidence; they do not repair rejected inputs.
+
 ### Cache diagnostics and inspection
 
 Enable the plugin-owned, bounded JSONL diagnostics sink without enabling raw request logging:

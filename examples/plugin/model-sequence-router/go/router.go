@@ -22,6 +22,13 @@ type routeDecision struct {
 	TargetModel  string
 }
 
+// aliasFor resolves the alias one requested model names, ignoring the effort
+// suffix a caller may append.
+func (c *compiledConfig) aliasFor(requested string) *compiledAlias {
+	base, _, _ := parseSupportedEffortSuffix(strings.TrimSpace(requested))
+	return c.ByLookup[normalizedAliasKey(base)]
+}
+
 func (r *runtimeState) route(req pluginapi.ModelRouteRequest) pluginapi.ModelRouteResponse {
 	return r.routeWithCallback(req, "")
 }
@@ -35,8 +42,8 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 		return pluginapi.ModelRouteResponse{Handled: false}
 	}
 	requested := strings.TrimSpace(req.RequestedModel)
-	requestedBase, requestedSuffix, _ := parseSupportedEffortSuffix(requested)
-	alias := cfg.ByLookup[normalizedAliasKey(requestedBase)]
+	_, requestedSuffix, _ := parseSupportedEffortSuffix(requested)
+	alias := cfg.aliasFor(requested)
 	if alias == nil {
 		return pluginapi.ModelRouteResponse{Handled: false}
 	}
@@ -46,14 +53,18 @@ func (r *runtimeState) routeWithCallback(req pluginapi.ModelRouteRequest, hostCa
 			available[key] = struct{}{}
 		}
 	}
-	observation := inspectRequest(req.Body, r.fingerprintSalt)
+	observation, identity := r.conversationState(identityInput{
+		SourceFormat: req.SourceFormat,
+		Body:         req.Body,
+		Metadata:     req.Metadata,
+	}, cfg)
 	decision := routeDecision{
 		Config:       cfg,
 		Alias:        alias,
 		SourceFormat: req.SourceFormat,
 		Stream:       req.Stream,
 		Observation:  observation,
-		Identity:     newConversationIdentity(req),
+		Identity:     identity,
 	}
 	decision.Selection = r.selectSequencePosition(decision, available)
 	switch decision.Selection.Outcome {

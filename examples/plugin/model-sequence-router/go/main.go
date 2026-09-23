@@ -67,13 +67,14 @@ import (
 
 const (
 	pluginIdentifier = "model-sequence-router"
-	pluginVersion    = "0.11.0"
+	pluginVersion    = "0.16.0"
 )
 
 type runtimeState struct {
 	configMu        sync.Mutex
 	config          atomic.Pointer[compiledConfig]
 	cursors         *cursorStore
+	chains          *continuationChainStore
 	observations    *laneObservationStore
 	cleanup         cleanupLoop
 	loadedAt        time.Time
@@ -91,6 +92,7 @@ func newRuntimeState(clock func() time.Time) *runtimeState {
 	}
 	return &runtimeState{
 		cursors:         newCursorStore(clock),
+		chains:          newContinuationChainStore(clock),
 		observations:    newLaneObservationStore(clock),
 		loadedAt:        stableLoadTime(now()),
 		clock:           now,
@@ -173,9 +175,10 @@ func (r *runtimeState) configure(configYAML []byte) error {
 	// A route running under the prior generation keys its entry by that generation,
 	// which the new configuration never reads and the expiry sweep removes.
 	r.cursors.reset()
+	r.chains.reset()
 	r.observations.reset()
 	r.config.Store(next)
-	r.cleanup.restart(next.SessionTTL, r.cursors, r.observations)
+	r.cleanup.restart(next.SessionTTL, r.cursors, r.chains, r.observations)
 	r.replaceDiagnosticSink(nextDiagnostic)
 	lengths := make(map[string]int, len(next.Aliases))
 	for _, alias := range next.Aliases {
@@ -197,6 +200,7 @@ func (r *runtimeState) shutdown() {
 	}
 	r.cleanup.stop()
 	r.replaceDiagnosticSink(nil)
+	r.chains.reset()
 	r.observations.reset()
 }
 

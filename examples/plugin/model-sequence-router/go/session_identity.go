@@ -3,7 +3,6 @@ package main
 import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
@@ -38,6 +37,31 @@ type turnIdentity struct {
 	fingerprint string
 }
 
+// identityInput carries the request facts one conversation identity derives from.
+type identityInput struct {
+	SourceFormat string
+	Body         []byte
+	Metadata     map[string]any
+}
+
+// conversationState observes one request and names the conversation whose cursor
+// that request advances. A self-contained request names its conversation by
+// content. A continuation request carries only its newest items while the
+// provider holds the rest, so it adopts the conversation bound to the response it
+// names instead of naming a second conversation from its fragment.
+func (r *runtimeState) conversationState(input identityInput, cfg *compiledConfig) (requestObservation, conversationIdentity) {
+	observation := inspectRequest(input.Body, r.fingerprintSalt)
+	identity := newConversationIdentity(input)
+	chained := r.chains.lookupResponse(continuationResponseKey{
+		Generation: cfg.Generation,
+		ResponseID: observation.PreviousResponseID,
+	})
+	if chained != "" {
+		identity = chained
+	}
+	return observation, identity
+}
+
 // newConversationIdentity resolves the identity that keys one conversation cursor.
 // Sequence position belongs to the conversation, so identity folds the leading
 // instructions and the first complete user input through the shared protocol-aware
@@ -45,9 +69,9 @@ type turnIdentity struct {
 // transport identifiers naming a cache lane, an affinity group, one request, or an
 // account never reach a cursor key. The identity is empty when the body carries no
 // user input.
-func newConversationIdentity(req pluginapi.ModelRouteRequest) conversationIdentity {
-	callerScope, _ := req.Metadata[coreexecutor.CallerScopeMetadataKey].(string)
-	derived := coresession.DeriveID(sdktranslator.FromString(req.SourceFormat), req.Body, callerScope)
+func newConversationIdentity(input identityInput) conversationIdentity {
+	callerScope, _ := input.Metadata[coreexecutor.CallerScopeMetadataKey].(string)
+	derived := coresession.DeriveID(sdktranslator.FromString(input.SourceFormat), input.Body, callerScope)
 	if derived == "" {
 		return ""
 	}

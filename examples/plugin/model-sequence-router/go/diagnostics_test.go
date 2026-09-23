@@ -33,6 +33,38 @@ func TestLaneObservationSweepReleasesOnlyExpiredLanes(t *testing.T) {
 	}
 }
 
+// TestContinuationChainSweepReleasesOnlyExpiredLinks verifies that the shared
+// sweep releases an expired held request and an expired response binding while
+// preserving a live binding's conversation.
+func TestContinuationChainSweepReleasesOnlyExpiredLinks(t *testing.T) {
+	now := time.Unix(100, 0)
+	store := newContinuationChainStore(func() time.Time { return now })
+	ttl := time.Minute
+	departedRequest := continuationRequestKey{Generation: 1, RequestID: "req-departed"}
+	departedResponse := continuationResponseKey{Generation: 1, ResponseID: "resp-departed"}
+	activeResponse := continuationResponseKey{Generation: 1, ResponseID: "resp-active"}
+
+	store.holdRequest(departedRequest, "derived:departed", ttl)
+	store.bindResponse(departedResponse, "derived:departed", ttl)
+	now = now.Add(2 * time.Minute)
+	store.bindResponse(activeResponse, "derived:active", ttl)
+
+	cleanupExpiredStores(store)
+
+	if size := store.size(); size != 1 {
+		t.Fatalf("chain links held after sweep = %d, want 1", size)
+	}
+	if identity := store.heldRequest(departedRequest); identity != "" {
+		t.Fatalf("swept request resolved to %q, want an absent conversation", identity)
+	}
+	if identity := store.lookupResponse(departedResponse); identity != "" {
+		t.Fatalf("swept response resolved to %q, want an absent conversation", identity)
+	}
+	if identity := store.lookupResponse(activeResponse); identity != "derived:active" {
+		t.Fatalf("live response resolved to %q, want derived:active", identity)
+	}
+}
+
 // TestCursorSweepReleasesOnlyExpiredConversations verifies that the shared sweep
 // releases an expired cursor while preserving a live cursor's next position.
 func TestCursorSweepReleasesOnlyExpiredConversations(t *testing.T) {

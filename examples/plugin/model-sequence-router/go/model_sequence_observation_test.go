@@ -30,11 +30,19 @@ func captureRouteLogs(runtime *runtimeState) *[]capturedPluginLog {
 // and sequence position in call order.
 func assertRouteRecords(t *testing.T, logs *[]capturedPluginLog, expectations []routeRecordExpectation) {
 	t.Helper()
-	if len(*logs) != len(expectations) {
-		t.Fatalf("route records = %d, want %d: %#v", len(*logs), len(expectations), *logs)
+	// Select route records independently of request and response diagnostics.
+	records := make([]capturedPluginLog, 0, len(*logs))
+	for _, record := range *logs {
+		if record.fields["event"] != "route" {
+			continue
+		}
+		records = append(records, record)
+	}
+	if len(records) != len(expectations) {
+		t.Fatalf("route records = %d, want %d: %#v", len(records), len(expectations), records)
 	}
 	for index, expectation := range expectations {
-		record := (*logs)[index]
+		record := records[index]
 		if record.fields["outcome"] != expectation.outcome || record.fields["sequence_index"] != expectation.sequenceIndex {
 			t.Fatalf("record %d = %#v, want %s at %d", index, record.fields, expectation.outcome, expectation.sequenceIndex)
 		}

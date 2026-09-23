@@ -53,6 +53,28 @@ func messagesTurn(t *testing.T, conversation string, turns int) []byte {
 	return marshalBody(t, messagesBody{Messages: conversationTurns(conversation, turns)})
 }
 
+// observeResponse feeds the stream observation of one route request, binding the
+// named provider response to the conversation that request belongs to. The host
+// delivers the client body on the header initialization call and the response
+// identifier inside a later payload chunk.
+func observeResponse(runtime *runtimeState, req pluginapi.ModelRouteRequest, responseID string) {
+	runtime.observeStreamChunk(pluginapi.StreamChunkInterceptRequest{
+		RequestID:       responseID,
+		SourceFormat:    req.SourceFormat,
+		RequestedModel:  req.RequestedModel,
+		OriginalRequest: req.Body,
+		Metadata:        req.Metadata,
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	})
+	runtime.observeStreamChunk(pluginapi.StreamChunkInterceptRequest{
+		RequestID:      responseID,
+		SourceFormat:   req.SourceFormat,
+		RequestedModel: req.RequestedModel,
+		Body:           []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":%q}}`, responseID)),
+		ChunkIndex:     0,
+	})
+}
+
 // responsesRoute builds one Responses-format route request for a conversation at the
 // given turn count, naming the credential cache lane the request carries.
 func responsesRoute(t *testing.T, conversation, promptCacheKey string, turns int) pluginapi.ModelRouteRequest {

@@ -33,13 +33,15 @@ type registration struct {
 }
 
 type registrationCapability struct {
-	ModelRegistrar        bool                         `json:"model_registrar"`
-	ModelRouter           bool                         `json:"model_router"`
-	UsagePlugin           bool                         `json:"usage_plugin"`
-	Executor              bool                         `json:"executor,omitempty"`
-	ExecutorModelScope    pluginapi.ExecutorModelScope `json:"executor_model_scope,omitempty"`
-	ExecutorInputFormats  []string                     `json:"executor_input_formats,omitempty"`
-	ExecutorOutputFormats []string                     `json:"executor_output_formats,omitempty"`
+	ModelRegistrar            bool                         `json:"model_registrar"`
+	ModelRouter               bool                         `json:"model_router"`
+	UsagePlugin               bool                         `json:"usage_plugin"`
+	RequestInterceptor        bool                         `json:"request_interceptor"`
+	ResponseStreamInterceptor bool                         `json:"response_stream_interceptor"`
+	Executor                  bool                         `json:"executor,omitempty"`
+	ExecutorModelScope        pluginapi.ExecutorModelScope `json:"executor_model_scope,omitempty"`
+	ExecutorInputFormats      []string                     `json:"executor_input_formats,omitempty"`
+	ExecutorOutputFormats     []string                     `json:"executor_output_formats,omitempty"`
 }
 
 type rpcModelRouteRequest struct {
@@ -71,6 +73,21 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			return nil, fmt.Errorf("decode model route request: %w", errUnmarshal)
 		}
 		return okEnvelope(runtimePlugin.routeWithCallback(req.ModelRouteRequest, req.HostCallbackID))
+	case pluginabi.MethodRequestInterceptBefore, pluginabi.MethodRequestInterceptAfter:
+		var req pluginapi.RequestInterceptRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, fmt.Errorf("decode request intercept request: %w", errUnmarshal)
+		}
+		runtimePlugin.observeRequestContext(req)
+		return okEnvelope(pluginapi.RequestInterceptResponse{})
+	case pluginabi.MethodResponseInterceptStreamChunk:
+		// Observation only: the chunk reaches the client exactly as the host framed it.
+		var req pluginapi.StreamChunkInterceptRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, fmt.Errorf("decode stream chunk intercept request: %w", errUnmarshal)
+		}
+		runtimePlugin.observeStreamChunk(req)
+		return okEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	case pluginabi.MethodUsageHandle:
 		var record pluginapi.UsageRecord
 		if errUnmarshal := json.Unmarshal(request, &record); errUnmarshal != nil {
@@ -96,7 +113,13 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 // pluginRegistration describes the configured plugin capabilities. The executor
 // declaration exists only when routing can self-target an unavailable position.
 func pluginRegistration(cfg *compiledConfig) registration {
-	capabilities := registrationCapability{ModelRegistrar: true, ModelRouter: true, UsagePlugin: true}
+	capabilities := registrationCapability{
+		ModelRegistrar:            true,
+		ModelRouter:               true,
+		UsagePlugin:               true,
+		RequestInterceptor:        true,
+		ResponseStreamInterceptor: true,
+	}
 	if cfg != nil && cfg.UnavailableProvider == unavailableError {
 		// A host treats a format mismatch as unhandled and lets a self-targeted
 		// route fall through, so the declaration names every entry protocol.

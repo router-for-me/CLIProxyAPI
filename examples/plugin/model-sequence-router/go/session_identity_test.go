@@ -3,8 +3,6 @@ package main
 import (
 	"strings"
 	"testing"
-
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // testIdentitySalt returns the stable fingerprint salt used by identity tests.
@@ -15,11 +13,11 @@ func testIdentitySalt() []byte {
 // TestConversationIdentityHoldsWhenPromptCacheKeyAppears proves a conversation keeps
 // one cursor key when a prompt cache key joins its later turns.
 func TestConversationIdentityHoldsWhenPromptCacheKeyAppears(t *testing.T) {
-	opening := newConversationIdentity(pluginapi.ModelRouteRequest{
+	opening := newConversationIdentity(identityInput{
 		SourceFormat: "openai-response",
 		Body:         []byte(`{"input":[{"role":"user","content":"opening"}]}`),
 	})
-	cached := newConversationIdentity(pluginapi.ModelRouteRequest{
+	cached := newConversationIdentity(identityInput{
 		SourceFormat: "openai-response",
 		Body:         []byte(`{"prompt_cache_key":"cache-lane","input":[{"role":"user","content":"opening"},{"role":"assistant","content":"answer"},{"role":"user","content":"second turn"}]}`),
 	})
@@ -35,11 +33,11 @@ func TestConversationIdentityHoldsWhenPromptCacheKeyAppears(t *testing.T) {
 // TestConversationsSharingPromptCacheKeyStayDistinct proves a shared cache lane cannot
 // merge two conversation cursor keys.
 func TestConversationsSharingPromptCacheKeyStayDistinct(t *testing.T) {
-	first := newConversationIdentity(pluginapi.ModelRouteRequest{
+	first := newConversationIdentity(identityInput{
 		SourceFormat: "openai-response",
 		Body:         []byte(`{"prompt_cache_key":"shared-lane","input":[{"role":"user","content":"first conversation"}]}`),
 	})
-	second := newConversationIdentity(pluginapi.ModelRouteRequest{
+	second := newConversationIdentity(identityInput{
 		SourceFormat: "openai-response",
 		Body:         []byte(`{"prompt_cache_key":"shared-lane","input":[{"role":"user","content":"second conversation"}]}`),
 	})
@@ -51,7 +49,7 @@ func TestConversationsSharingPromptCacheKeyStayDistinct(t *testing.T) {
 // TestPromptCacheKeyAloneNeverKeysAConversation proves a cache-only signal yields a
 // content-derived cursor key rather than a cache-lane key.
 func TestPromptCacheKeyAloneNeverKeysAConversation(t *testing.T) {
-	identity := newConversationIdentity(pluginapi.ModelRouteRequest{
+	identity := newConversationIdentity(identityInput{
 		SourceFormat: "openai-response",
 		Body:         []byte(`{"prompt_cache_key":"cache-lane","input":[{"role":"user","content":"opening"}]}`),
 	})
@@ -66,10 +64,10 @@ func TestPromptCacheKeyAloneNeverKeysAConversation(t *testing.T) {
 // TestDerivedIdentityHoldsAcrossTurns proves protocol-aware derivation stays fixed as
 // later assistant and user turns extend the transcript.
 func TestDerivedIdentityHoldsAcrossTurns(t *testing.T) {
-	opening := newConversationIdentity(pluginapi.ModelRouteRequest{
+	opening := newConversationIdentity(identityInput{
 		Body: []byte(`{"system":"shared instructions","messages":[{"role":"user","content":"opening"}]}`),
 	})
-	answered := newConversationIdentity(pluginapi.ModelRouteRequest{
+	answered := newConversationIdentity(identityInput{
 		Body: []byte(`{"system":"shared instructions","messages":[{"role":"user","content":"opening"},{"role":"assistant","content":"answer"},{"role":"user","content":"second turn"}]}`),
 	})
 
@@ -84,10 +82,10 @@ func TestDerivedIdentityHoldsAcrossTurns(t *testing.T) {
 // TestDistinctOpeningsProduceDistinctIdentities proves different first user content
 // separates two conversations.
 func TestDistinctOpeningsProduceDistinctIdentities(t *testing.T) {
-	first := newConversationIdentity(pluginapi.ModelRouteRequest{
+	first := newConversationIdentity(identityInput{
 		Body: []byte(`{"messages":[{"role":"user","content":"first conversation"}]}`),
 	})
-	second := newConversationIdentity(pluginapi.ModelRouteRequest{
+	second := newConversationIdentity(identityInput{
 		Body: []byte(`{"messages":[{"role":"user","content":"second conversation"}]}`),
 	})
 	if first == second {
@@ -98,7 +96,7 @@ func TestDistinctOpeningsProduceDistinctIdentities(t *testing.T) {
 // TestAbsentContentYieldsNoIdentity proves a request with no user input remains
 // stateless and creates no cursor key.
 func TestAbsentContentYieldsNoIdentity(t *testing.T) {
-	identity := newConversationIdentity(pluginapi.ModelRouteRequest{Body: []byte(`{"model":"routed"}`)})
+	identity := newConversationIdentity(identityInput{Body: []byte(`{"model":"routed"}`)})
 	if identity != "" || identity.source() != identitySourceAbsent {
 		t.Fatalf("identity = %q with source %q, want an absent identity", identity, identity.source())
 	}

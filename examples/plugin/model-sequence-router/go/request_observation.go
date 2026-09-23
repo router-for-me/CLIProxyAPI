@@ -18,7 +18,7 @@ type requestObservation struct {
 	HistoryItems       []string
 	InputKind          string
 	HasToolResult      bool
-	HasPreviousID      bool
+	PreviousResponseID string
 	HasConversationID  bool
 	HasContainer       bool
 	ThinkingSignatures int
@@ -64,7 +64,7 @@ func inspectRequest(body []byte, salt []byte) requestObservation {
 			observation.InputKind = "history"
 		}
 	}
-	observation.HasPreviousID = nonEmptyJSONValue(root["previous_response_id"])
+	observation.PreviousResponseID = stringJSONValue(root["previous_response_id"])
 	observation.HasConversationID = nonEmptyJSONValue(root["conversation_id"]) || nonEmptyJSONValue(root["conversation"])
 	observation.HasContainer = nonEmptyJSONValue(root["container_id"]) || nonEmptyJSONValue(root["container"])
 	walkJSON(root, func(node map[string]any) {
@@ -107,6 +107,13 @@ func firstHistory(root map[string]any, keys ...string) []any {
 		}
 	}
 	return nil
+}
+
+// hasOpaqueContinuation reports whether the request continues a conversation
+// through an identifier the provider resolves rather than through the transcript
+// the request carries.
+func (o requestObservation) hasOpaqueContinuation() bool {
+	return o.PreviousResponseID != "" || o.HasConversationID || o.HasContainer
 }
 
 func containsToolResult(value any) bool {
@@ -165,6 +172,13 @@ func nonEmptyJSONValue(value any) bool {
 	default:
 		return true
 	}
+}
+
+// stringJSONValue reads one decoded JSON value as trimmed text. A value of any
+// other shape reads as absent.
+func stringJSONValue(value any) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
 }
 
 func fingerprintJSON(value any, salt []byte) string {

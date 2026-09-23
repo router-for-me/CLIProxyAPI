@@ -191,13 +191,13 @@ func (s *laneObservationStore) reset() {
 // one route record, including the continuity comparison for the selected lane.
 func (r *runtimeState) diagnosticFields(decision routeDecision) map[string]any {
 	observation := decision.Observation
-	opaqueContinuation := observation.HasPreviousID || observation.HasConversationID || observation.HasContainer
+	opaqueContinuation := observation.hasOpaqueContinuation()
 	fields := map[string]any{
 		"source_format":             decision.SourceFormat,
 		"stream":                    decision.Stream,
 		"input_kind":                observation.InputKind,
 		"has_tool_result":           observation.HasToolResult,
-		"has_previous_response_id":  observation.HasPreviousID,
+		"has_previous_response_id":  observation.PreviousResponseID != "",
 		"has_conversation_id":       observation.HasConversationID,
 		"has_hosted_container":      observation.HasContainer,
 		"opaque_continuation":       opaqueContinuation,
