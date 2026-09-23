@@ -399,6 +399,16 @@ func (m *Manager) Load(ctx context.Context) error {
 		}
 	}
 
+	// Snapshots are taken under the lock. OnAuthRegistered runs after unlock,
+	// matching Register. Removals are not registrations.
+	installed := make([]*Auth, 0, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		installed = append(installed, auth.Clone())
+	}
+
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
@@ -413,6 +423,9 @@ func (m *Manager) Load(ctx context.Context) error {
 	}
 	m.structuralEpoch.Add(1)
 	m.syncScheduler()
+	for _, auth := range installed {
+		m.hook.OnAuthRegistered(ctx, auth.Clone())
+	}
 	return nil
 }
 
