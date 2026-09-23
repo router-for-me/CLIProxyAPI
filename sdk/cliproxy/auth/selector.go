@@ -820,6 +820,14 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
+// IsAuthBlockedForModel reports whether auth is blocked for model at now.
+// It returns only the blocked flag from isAuthBlockedForModel. Block reasons
+// and recovery times stay unexported, and the decision itself is unchanged.
+func IsAuthBlockedForModel(auth *Auth, model string, now time.Time) bool {
+	blocked, _, _ := isAuthBlockedForModel(auth, model, now)
+	return blocked
+}
+
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
