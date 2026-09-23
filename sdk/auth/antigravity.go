@@ -279,12 +279,25 @@ func BuildAntigravityAuthURL(state, redirectURI string) string {
 }
 
 // ExchangeAntigravityCode exchanges an authorization code for access and refresh tokens.
+// It omits PKCE. Call ExchangeAntigravityCodeWithPKCE to send a code_verifier.
 func ExchangeAntigravityCode(ctx context.Context, code, redirectURI string, httpClient *http.Client) (*AntigravityTokenResponse, error) {
+	return exchangeAntigravityCode(ctx, code, redirectURI, "", httpClient)
+}
+
+// ExchangeAntigravityCodeWithPKCE exchanges an authorization code and includes
+// codeVerifier as the OAuth PKCE code_verifier when it is non-empty.
+// An empty or whitespace-only verifier is omitted, so the request matches
+// ExchangeAntigravityCode.
+func ExchangeAntigravityCodeWithPKCE(ctx context.Context, code, redirectURI, codeVerifier string, httpClient *http.Client) (*AntigravityTokenResponse, error) {
+	return exchangeAntigravityCode(ctx, code, redirectURI, codeVerifier, httpClient)
+}
+
+func exchangeAntigravityCode(ctx context.Context, code, redirectURI, codeVerifier string, httpClient *http.Client) (*AntigravityTokenResponse, error) {
 	if strings.TrimSpace(redirectURI) == "" {
 		redirectURI = AntigravityDefaultCallbackURI()
 	}
 	authSvc := antigravity.NewAntigravityAuth(nil, httpClient)
-	tokenResp, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI)
+	tokenResp, errExchange := authSvc.ExchangeCodeForTokensWithPKCE(ctx, code, redirectURI, codeVerifier)
 	if errExchange != nil {
 		return nil, errExchange
 	}

@@ -110,6 +110,88 @@ func TestExchangeAntigravityCode(t *testing.T) {
 	}
 }
 
+func TestExchangeAntigravityCodeOptionalPKCEVerifier(t *testing.T) {
+	const (
+		redirectURI = "http://localhost:51121/oauth-callback"
+		code        = "auth-code-123"
+		verifier    = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk~plus+slash/"
+	)
+	tokenJSON := `{"access_token":"mock-access-token","refresh_token":"mock-refresh-token","expires_in":3600,"token_type":"Bearer"}`
+
+	capture := func(dst *url.Values) *http.Client {
+		return &http.Client{Transport: mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPost || req.URL.String() != "https://oauth2.googleapis.com/token" {
+				t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			}
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatalf("read body: %v", errRead)
+			}
+			form, errParse := url.ParseQuery(string(body))
+			if errParse != nil {
+				t.Fatalf("parse form: %v", errParse)
+			}
+			if verifierSent := form.Get("code_verifier"); verifierSent != "" && !strings.Contains(string(body), "code_verifier="+url.QueryEscape(verifierSent)) {
+				t.Fatalf("body did not encode code_verifier: %s", body)
+			}
+			*dst = form
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(tokenJSON)),
+			}, nil
+		})}
+	}
+
+	var absent url.Values
+	absentResp, err := auth.ExchangeAntigravityCode(context.Background(), code, redirectURI, capture(&absent))
+	if err != nil {
+		t.Fatalf("ExchangeAntigravityCode error: %v", err)
+	}
+	if absentResp.AccessToken != "mock-access-token" || absentResp.RefreshToken != "mock-refresh-token" {
+		t.Fatalf("absent exchange tokens = %+v", absentResp)
+	}
+	if _, ok := absent["code_verifier"]; ok {
+		t.Fatalf("absent verifier must omit code_verifier, got %q", absent.Get("code_verifier"))
+	}
+	for _, key := range []string{"code", "client_id", "client_secret", "redirect_uri", "grant_type"} {
+		if absent.Get(key) == "" {
+			t.Fatalf("absent exchange missing %s: %v", key, absent)
+		}
+	}
+	if absent.Get("code") != code || absent.Get("redirect_uri") != redirectURI || absent.Get("grant_type") != "authorization_code" {
+		t.Fatalf("absent exchange form = %v", absent)
+	}
+
+	var blank url.Values
+	if _, err = auth.ExchangeAntigravityCodeWithPKCE(context.Background(), code, redirectURI, " \t", capture(&blank)); err != nil {
+		t.Fatalf("whitespace verifier exchange error: %v", err)
+	}
+	if _, ok := blank["code_verifier"]; ok {
+		t.Fatalf("whitespace verifier must omit code_verifier, got %q", blank.Get("code_verifier"))
+	}
+	if blank.Encode() != absent.Encode() {
+		t.Fatalf("whitespace verifier changed the exchange\nabsent: %s\nblank:  %s", absent.Encode(), blank.Encode())
+	}
+
+	var present url.Values
+	presentResp, err := auth.ExchangeAntigravityCodeWithPKCE(context.Background(), code, redirectURI, "  "+verifier+"  ", capture(&present))
+	if err != nil {
+		t.Fatalf("ExchangeAntigravityCodeWithPKCE error: %v", err)
+	}
+	if presentResp.AccessToken != absentResp.AccessToken || presentResp.RefreshToken != absentResp.RefreshToken || presentResp.ExpiresIn != absentResp.ExpiresIn {
+		t.Fatalf("pkce exchange tokens = %+v", presentResp)
+	}
+	if present.Get("code_verifier") != verifier {
+		t.Fatalf("code_verifier = %q, want %q", present.Get("code_verifier"), verifier)
+	}
+	for _, key := range []string{"code", "client_id", "client_secret", "redirect_uri", "grant_type"} {
+		if present.Get(key) != absent.Get(key) {
+			t.Fatalf("pkce exchange changed %s: got %q want %q", key, present.Get(key), absent.Get(key))
+		}
+	}
+}
+
 func TestFetchAntigravityUserInfo(t *testing.T) {
 	client := &http.Client{
 		Transport: mockRoundTripper(func(req *http.Request) (*http.Response, error) {

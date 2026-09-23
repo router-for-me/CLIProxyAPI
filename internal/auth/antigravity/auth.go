@@ -154,14 +154,26 @@ func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) string {
 	return AuthEndpoint + "?" + params.Encode()
 }
 
-// ExchangeCodeForTokens exchanges authorization code for access and refresh tokens
+// ExchangeCodeForTokens exchanges an authorization code for access and refresh tokens.
+// It omits PKCE. Call ExchangeCodeForTokensWithPKCE to send a code_verifier.
 func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*TokenResponse, error) {
+	return o.ExchangeCodeForTokensWithPKCE(ctx, code, redirectURI, "")
+}
+
+// ExchangeCodeForTokensWithPKCE exchanges an authorization code for tokens.
+// codeVerifier is optional: empty or whitespace omits code_verifier, so the
+// body matches ExchangeCodeForTokens. A non-empty value is trimmed and sent
+// as the PKCE code_verifier.
+func (o *AntigravityAuth) ExchangeCodeForTokensWithPKCE(ctx context.Context, code, redirectURI, codeVerifier string) (*TokenResponse, error) {
 	data := url.Values{}
 	data.Set("code", code)
 	data.Set("client_id", ClientID)
 	data.Set("client_secret", ClientSecret)
 	data.Set("redirect_uri", redirectURI)
 	data.Set("grant_type", "authorization_code")
+	if verifier := strings.TrimSpace(codeVerifier); verifier != "" {
+		data.Set("code_verifier", verifier)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, TokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
