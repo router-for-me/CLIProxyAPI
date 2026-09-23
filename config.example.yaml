@@ -730,7 +730,7 @@ nonstream-keepalive-interval: 0
 # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
 # the same exact software baseline rather than learning newer client versions.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.258 (external, cli)"
+#   user-agent: "claude-cli/2.1.280 (external, cli)"
 #   package-version: "0.112.1"
 #   runtime-version: "v26.3.0"
 #   os: "MacOS"
