@@ -124,6 +124,35 @@ func TestAlertStoreSettingsClampAndToggle(t *testing.T) {
 	}
 	_ = up
 
+	// The model_substitution toggle must round-trip independently of its
+	// sibling booleans: a placeholder renumbering in the upsert can silently
+	// move a same-type value between adjacent columns.
+	got.EnableModelSubstitution = false
+	if _, err = as.UpsertAlertSettings(ctx, got); err != nil {
+		t.Fatalf("UpsertAlertSettings disable model substitution: %v", err)
+	}
+	got, err = as.GetAlertSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetAlertSettings after disabling model substitution: %v", err)
+	}
+	if got.CategoryEnabled(AlertTypeModelSubstitution) {
+		t.Fatal("expected model_substitution category disabled")
+	}
+	if !got.CategoryEnabled(AlertTypeProviderCooldown) {
+		t.Fatal("expected provider_cooldown still enabled (sibling bool not clobbered)")
+	}
+	got.EnableModelSubstitution = true
+	if _, err = as.UpsertAlertSettings(ctx, got); err != nil {
+		t.Fatalf("UpsertAlertSettings re-enable model substitution: %v", err)
+	}
+	got, err = as.GetAlertSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetAlertSettings after re-enable: %v", err)
+	}
+	if !got.CategoryEnabled(AlertTypeModelSubstitution) {
+		t.Fatal("expected model_substitution category re-enabled")
+	}
+
 	got.EnableErrorRate = false
 	got, err = as.UpsertAlertSettings(ctx, got)
 	if err != nil {
