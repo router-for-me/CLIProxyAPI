@@ -33,6 +33,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	// Record the client-requested model before any publish path snapshots the
+	// record, so usage rows can be checked for misrouting against the resolved model.
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")

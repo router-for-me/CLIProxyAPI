@@ -135,6 +135,9 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	// Record the client-requested model before any publish path snapshots the
+	// record, so usage rows can be checked for misrouting against the resolved model.
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 
 	// Official Gemini API via API key.
 	from := opts.SourceFormat
@@ -249,6 +252,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -397,6 +401,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	apiKey := geminiAPIKey(auth)
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetName, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 
 	body := translateGeminiInteractionsRequestBody(ctx, e.cfg, targetName, req.Payload, opts, false, helps.APIKeyModelIsCompat(req))
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {
@@ -480,6 +485,7 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 	apiKey := geminiAPIKey(auth)
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetName, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 
 	body := translateGeminiInteractionsRequestBody(ctx, e.cfg, targetName, req.Payload, opts, true, helps.APIKeyModelIsCompat(req))
 	if gjson.GetBytes(body, "model").Exists() && targetName != "" {

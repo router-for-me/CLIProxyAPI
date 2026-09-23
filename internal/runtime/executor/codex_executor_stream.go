@@ -35,6 +35,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	// Record the client-requested model before any publish path snapshots the
+	// record, so usage rows can be checked for misrouting against the resolved model.
+	reporter.SetRouteModel(helps.PayloadRequestedModel(opts, req.Model))
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
