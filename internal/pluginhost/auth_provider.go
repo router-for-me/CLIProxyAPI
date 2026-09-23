@@ -494,6 +494,11 @@ func (s *pluginTokenStorage) SaveTokenToFile(path string) error {
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return fmt.Errorf("plugin token storage payload is empty")
 	}
+	// This is the second door a plugin credential leaves through: the refresh
+	// flow persists the token storage the plugin handed over, which never
+	// carries the keys CPA itself put in the file. Same preservation as
+	// saveAuthFile, otherwise a single refresh wipes priority/prefix/note.
+	payload = preserveHostOwnedAuthKeys(path, payload)
 	if pluginTokenStorageFileCurrent(path, payload) {
 		return nil
 	}
