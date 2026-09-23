@@ -56,9 +56,20 @@ type Record struct {
 	RequestedAt time.Time
 	Latency     time.Duration
 	TTFT        time.Duration
-	Failed      bool
-	Fail        Failure
-	Detail      Detail
+	// UpstreamTTFB is the duration from dispatching the upstream request until the
+	// first upstream response header byte arrives at the gateway.
+	UpstreamTTFB time.Duration
+	// FirstPacket is the duration from dispatching the upstream request until the
+	// first upstream response body byte arrives at the gateway.
+	FirstPacket time.Duration
+	// ConnSetup is the accumulated DNS + TCP connect + TLS handshake duration of
+	// the upstream attempt. It is zero when a pooled connection was reused.
+	ConnSetup time.Duration
+	// ConnReused reports whether the upstream attempt reused a pooled connection.
+	ConnReused bool
+	Failed     bool
+	Fail       Failure
+	Detail     Detail
 	// ResponseHeaders stores a snapshot of upstream response headers for usage sinks.
 	ResponseHeaders http.Header
 }

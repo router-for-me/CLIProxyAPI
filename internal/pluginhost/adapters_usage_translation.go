@@ -184,6 +184,10 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 		RequestedAt:         record.RequestedAt,
 		Latency:             record.Latency,
 		TTFT:                record.TTFT,
+		UpstreamTTFB:        record.UpstreamTTFB,
+		FirstPacket:         record.FirstPacket,
+		ConnSetup:           record.ConnSetup,
+		ConnReused:          record.ConnReused,
 		Failed:              record.Failed,
 		Failure: pluginapi.UsageFailure{
 			StatusCode: record.Fail.StatusCode,
