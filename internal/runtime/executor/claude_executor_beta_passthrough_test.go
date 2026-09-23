@@ -65,6 +65,46 @@ func TestApplyClaudeHeaders_StillGatesManagedCallerBetas(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeHeaders_PreservesNativeGatewayHintsOnly(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		requestClass string
+		confirmed    bool
+	}{
+		{name: "confirmed main", requestClass: "main", confirmed: true},
+		{name: "confirmed auxiliary", requestClass: "auxiliary", confirmed: true},
+		{name: "unconfirmed caller", requestClass: "main"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			incoming := http.Header{
+				"x-claude-code-request-class":       {tt.requestClass},
+				"x-claude-code-agent-type":          {"builtin"},
+				"x-claude-code-prev-tool-durations": {"5"},
+				"x-claude-code-compaction":          {"false"},
+				"x-claude-code-context-compacted":   {"false"},
+			}
+			auth := fixtureAuth()
+			if err := applyClaudeHeaders(req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil,
+				[]byte(`{"model":"claude-opus-5-5"}`), &config.Config{}, incoming, tt.confirmed); err != nil {
+				t.Fatal(err)
+			}
+			for key, values := range incoming {
+				got := req.Header.Get(key)
+				if tt.confirmed && got != values[0] {
+					t.Errorf("%s = %q, want %q", key, got, values[0])
+				}
+				if !tt.confirmed && got != "" {
+					t.Errorf("unconfirmed caller forwarded %s = %q", key, got)
+				}
+			}
+		})
+	}
+}
+
 // TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas_OAuth verifies the exact
 // scenario reported in #5738: an OAuth credential with an unconfirmed client
 // sending a per-turn effort directive turn.

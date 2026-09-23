@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -129,26 +130,26 @@ func injectFakeUserID(ctx context.Context, payload []byte, apiKey string, useCac
 const fingerprintSalt = "59cf53e54c78"
 
 // computeFingerprint computes the 3-char build fingerprint that Claude Code embeds in cc_version.
-// Algorithm: SHA256(salt + messageText[4] + messageText[7] + messageText[20] + version)[:3]
+// Algorithm: SHA256(salt + messageText[4] + messageText[7] + messageText[20] + version)[:3].
+// JavaScript indexes UTF-16 code units; an isolated surrogate becomes U+FFFD
+// when Node encodes the sampled string as UTF-8 for hashing.
 func computeFingerprint(messageText, version string) string {
-	indices := [3]int{4, 7, 20}
-	runes := []rune(messageText)
-	var sb strings.Builder
-	for _, idx := range indices {
-		if idx < len(runes) {
-			sb.WriteRune(runes[idx])
-		} else {
-			sb.WriteRune('0')
+	units := utf16.Encode([]rune(messageText))
+	var sampled [3]uint16
+	for i, idx := range [...]int{4, 7, 20} {
+		sampled[i] = '0'
+		if idx < len(units) {
+			sampled[i] = units[idx]
 		}
 	}
-	input := fingerprintSalt + sb.String() + version
+	input := fingerprintSalt + string(utf16.Decode(sampled[:])) + version
 	h := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(h[:])[:3]
 }
 
 // generateBillingHeader creates the x-anthropic-billing-header text block that
 // Claude Code prepends to its system prompt. cch is present only on signed paths.
-func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, workload string, isSubagent bool, prevReq, promptID string) string {
+func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, workload string, isSubagent bool, prevReq, promptID string, turnOrigin ...string) string {
 	if entrypoint == "" {
 		entrypoint = "cli"
 	}
@@ -183,6 +184,9 @@ func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, wo
 			b.WriteString(" cc_prompt_id=")
 			b.WriteString(promptID)
 			b.WriteByte(';')
+		}
+		if len(turnOrigin) > 0 && turnOrigin[0] == "human" {
+			b.WriteString(" cc_turn_origin=human;")
 		}
 	}
 	return b.String()
@@ -257,6 +261,7 @@ func claudeBillingFingerprintMessageText(payload []byte) string {
 				text := part.Get("text").String()
 				if !isClaudeCodeCurrentDateReminder(text) && !isClaudeCodeContextReminder(text) {
 					messageText = text
+					return false
 				}
 			}
 			return true
@@ -335,11 +340,12 @@ func checkSystemInstructionsWithSigningModeAt(
 	now time.Time,
 	isSubagent bool,
 	prevReq, promptID string,
+	turnOrigin ...string,
 ) []byte {
 	system := gjson.GetBytes(payload, "system")
 	messageText := claudeBillingFingerprintMessageText(payload)
 
-	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID)
+	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID, turnOrigin...)
 	billingBlock := buildTextBlock(billingText, nil)
 	agentBlock := buildTextBlock(claudeCodeCLIIdentity, &claudeCodeCacheControl)
 
@@ -971,6 +977,20 @@ func reconcileClaudeCodeFableModelAfterPayload(
 		return body
 	}
 	currentModel := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "model").String()))
+	// A model rewrite may change the native fallback target. Never override a
+	// caller or payload-rule fallback; only replace one inserted by the cloak.
+	if fableState.injectedFallbacks && !payloadTouchedFallbacks {
+		wantFallback := ""
+		switch {
+		case isClaudeFable51Model(currentModel):
+			wantFallback = "claude-opus-5"
+		case isClaudeOpus55Model(currentModel):
+			wantFallback = "claude-opus-4-8"
+		}
+		if gjson.GetBytes(body, "fallbacks.0.model").String() != wantFallback {
+			body, _ = sjson.DeleteBytes(body, "fallbacks")
+		}
+	}
 
 	if isClaudeFable51Model(currentModel) {
 		// Non-Fable rewritten to Fable 5.1 (or original Fable 5.1): attach Fable additions
@@ -1014,10 +1034,8 @@ func reconcileClaudeCodeFableModelAfterPayload(
 		return body
 	}
 
-	// Target model is Non-Fable 5.1:
-	// Only delete fallbacks if CPA automatically injected it and matching payload rules did NOT explicitly configure/modify it
-	if fableState.injectedFallbacks && !payloadTouchedFallbacks {
-		body, _ = sjson.DeleteBytes(body, "fallbacks")
+	if isClaudeOpus55Model(currentModel) && !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
+		body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
 	}
 	if fableState.injectedDisplay && !payloadTouchedDisplay {
 		body, _ = sjson.DeleteBytes(body, "thinking.display")
@@ -1405,6 +1423,10 @@ func applyCloakingInternal(
 		}
 	}
 
+	turnOrigin := ""
+	if !isProbeOrHelper && !isSubagent {
+		turnOrigin = "human"
+	}
 	payload = checkSystemInstructionsWithSigningModeAt(
 		payload,
 		settings.strictMode,
@@ -1416,11 +1438,15 @@ func applyCloakingInternal(
 		isSubagent,
 		prevReq,
 		promptID,
+		turnOrigin,
 	)
 
 	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
 	// "fallbacks": [{"model": "claude-opus-5"}]
 	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
+	if isClaudeOpus55Model(model) && !isProbeOrHelper && !gjson.GetBytes(payload, "fallbacks").Exists() {
+		payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
+	}
 	if isClaudeFable51Model(model) && !isProbeOrHelper {
 		if !gjson.GetBytes(payload, "fallbacks").Exists() {
 			payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))

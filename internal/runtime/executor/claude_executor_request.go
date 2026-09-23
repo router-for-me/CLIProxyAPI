@@ -248,7 +248,8 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 		}
 	}
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
-	if requested[claudeThinkingBindingBeta] || gjson.GetBytes(body, "thinking.block_binding").Exists() {
+	if requested[claudeThinkingBindingBeta] || gjson.GetBytes(body, "thinking.block_binding").Exists() ||
+		(isClaudeOpus55Model(gjson.GetBytes(body, "model").String()) && thinkingType == "adaptive") {
 		betas = append(betas, claudeThinkingBindingBeta)
 	}
 	if !isProbeOrHelper && thinkingType != "disabled" && (requested[claudeThinkingDisplayUpdatesBeta] || claudeThinkingDisplayUpdates(body)) {
@@ -294,9 +295,13 @@ func claudeCanonicalModel(model string) string {
 
 // claudeModelHasPerTurnEffort reports models whose 2.1.280 catalog capability
 // per_turn_effort puts per-turn-control-2026-07-01 on every first-party request.
-func claudeModelHasPerTurnEffort(model string) bool {
+func isClaudeOpus55Model(model string) bool {
 	model = claudeCanonicalModel(model)
-	return strings.HasPrefix(model, "claude-opus-5-5") || strings.HasPrefix(model, "claude-fable-5-1")
+	return model == "claude-opus-5-5" || strings.HasPrefix(model, "claude-opus-5-5[")
+}
+
+func claudeModelHasPerTurnEffort(model string) bool {
+	return isClaudeOpus55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1")
 }
 
 // claudeModelHasPerTurnTiming reports models whose catalog lists per_turn_timing.
@@ -354,7 +359,7 @@ func claudeIncludeInlineTools(body []byte, requested map[string]bool) bool {
 }
 
 func claudeIncludeMidConvClearAt(body []byte, requested map[string]bool) bool {
-	if requested[claudeMidConvSystemClearAtBeta] {
+	if requested[claudeMidConvSystemClearAtBeta] || isClaudeOpus55Model(gjson.GetBytes(body, "model").String()) {
 		return true
 	}
 	found := false
@@ -1322,6 +1327,21 @@ func applyClaudeHeadersWithNativeProfile(
 	} {
 		if val := helps.HeaderValueCaseInsensitive(incomingHeaders, hdr); val != "" {
 			r.Header.Set(hdr, val)
+		}
+	}
+	// Gateway hints are caller-owned software state. Preserve them only for a
+	// confirmed native client; an unconfirmed caller must not spoof its class.
+	if confirmedClaudeCode {
+		for _, hdr := range []string{
+			"X-Claude-Code-Request-Class",
+			"X-Claude-Code-Agent-Type",
+			"X-Claude-Code-Prev-Tool-Durations",
+			"X-Claude-Code-Compaction",
+			"X-Claude-Code-Context-Compacted",
+		} {
+			if val := helps.HeaderValueCaseInsensitive(incomingHeaders, hdr); val != "" {
+				r.Header.Set(hdr, val)
+			}
 		}
 	}
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
