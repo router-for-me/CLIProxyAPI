@@ -44,6 +44,7 @@ remote-management:
 auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
+# Generate random ones with: openssl rand -base64 32
 api-keys:
   - "your-api-key-1"
   - "your-api-key-2"
