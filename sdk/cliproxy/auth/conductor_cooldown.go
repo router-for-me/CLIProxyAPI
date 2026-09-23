@@ -815,6 +815,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.Status = StatusError
 					state.UpdatedAt = now
 					prevModelRetryAfter := state.NextRetryAfter
+					prevModelQuotaRecover := state.Quota.NextRecoverAt
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
 						state.StatusMessage = result.Error.Message
@@ -870,10 +871,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
 								if result.RetryAfter != nil {
-									cooldown := *result.RetryAfter
-									if cooldown < minQuotaCooldownFloor {
-										cooldown = minQuotaCooldownFloor
-									}
+									cooldown := quotaRetryCooldown(*result.RetryAfter, result.Error != nil && result.Error.Code == ErrorCodeForceCooldown)
 									next = now.Add(cooldown).Round(0)
 								} else {
 									next, backoffLevel = quotaCooldownAfterFailure(state.Quota, now)
@@ -936,10 +934,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state.Unavailable = false
 						state.Quota.Exceeded = false
 					}
-					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown && state.NextRetryAfter.IsZero() {
-						state.NextRetryAfter = now.Add(transientErrorCooldown)
-						state.Unavailable = true
+					priorLive := prevModelRetryAfter
+					if prevModelQuotaRecover.After(priorLive) {
+						priorLive = prevModelQuotaRecover
 					}
+					errCode := ""
+					if result.Error != nil {
+						errCode = result.Error.Code
+					}
+					var modelQuota *QuotaState
+					if state.Quota.Exceeded {
+						modelQuota = &state.Quota
+					}
+					applyForceCooldownRetryAfter(errCode, result.RetryAfter, now, priorLive, &state.NextRetryAfter, &state.Unavailable, modelQuota)
 					// A later failure only extends a still-live cooldown; it never
 					// shortens one. A deliberate zero write (disableCooling) still
 					// clears the deadline.
@@ -2157,6 +2164,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		return
 	}
 	prevAuthRetryAfter := auth.NextRetryAfter
+	prevAuthQuotaRecover := auth.Quota.NextRecoverAt
 	if shouldSkipCredentialCooldown(resultErr) {
 		return
 	}
@@ -2223,10 +2231,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			var next time.Time
 			if !disableCooling {
 				if retryAfter != nil {
-					cooldown := *retryAfter
-					if cooldown < minQuotaCooldownFloor {
-						cooldown = minQuotaCooldownFloor
-					}
+					cooldown := quotaRetryCooldown(*retryAfter, resultErr != nil && resultErr.Code == ErrorCodeForceCooldown)
 					next = now.Add(cooldown).Round(0)
 				} else {
 					next, auth.Quota.BackoffLevel = quotaCooldownAfterFailure(auth.Quota, now)
@@ -2249,14 +2254,67 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.Unavailable = !auth.NextRetryAfter.IsZero()
 		}
 	}
-	// A later failure only extends a still-live credential cooldown; a
-	// deliberate zero write (disableCooling) still clears it.
+	priorLive := prevAuthRetryAfter
+	if prevAuthQuotaRecover.After(priorLive) {
+		priorLive = prevAuthQuotaRecover
+	}
+	errCode := ""
+	if resultErr != nil {
+		errCode = resultErr.Code
+	}
+	var authQuota *QuotaState
+	if auth.Quota.Exceeded {
+		authQuota = &auth.Quota
+	}
+	// Honour a positive hint before the monotonic extend, matching the model
+	// path. A later failure still cannot shorten a live deadline.
+	applyForceCooldownRetryAfter(errCode, retryAfter, now, priorLive, &auth.NextRetryAfter, &auth.Unavailable, authQuota)
 	if !auth.NextRetryAfter.IsZero() && prevAuthRetryAfter.After(auth.NextRetryAfter) && prevAuthRetryAfter.After(now) {
 		auth.NextRetryAfter = prevAuthRetryAfter
 	}
-	if resultErr != nil && resultErr.Code == ErrorCodeForceCooldown && auth.NextRetryAfter.IsZero() {
-		auth.NextRetryAfter = now.Add(transientErrorCooldown)
-		auth.Unavailable = true
+}
+
+// quotaRetryCooldown is the 429 recovery delay. A force-cooldown positive
+// hint is kept as given; every other 429 stays on the quota floor.
+func quotaRetryCooldown(cooldown time.Duration, forceExact bool) time.Duration {
+	if cooldown > 0 && forceExact {
+		return cooldown
+	}
+	if cooldown < minQuotaCooldownFloor {
+		return minQuotaCooldownFloor
+	}
+	return cooldown
+}
+
+// applyForceCooldownRetryAfter records an ErrorCodeForceCooldown deadline.
+// A positive RetryAfter wins for every HTTP status, including 401/403/429,
+// not only the 408/5xx hint arm. A still-live prior deadline is left for the
+// caller to extend. When the status arm left a zero deadline and no positive
+// hint was supplied, the transient cooldown applies — that fallback must not
+// replace a positive RetryAfter.
+func applyForceCooldownRetryAfter(code string, retryAfter *time.Duration, now, priorLive time.Time, next *time.Time, unavailable *bool, quota *QuotaState) {
+	if code != ErrorCodeForceCooldown || next == nil {
+		return
+	}
+	if retryAfter != nil && *retryAfter > 0 {
+		hinted := now.Add(*retryAfter)
+		if priorLive.After(now) && priorLive.After(hinted) {
+			return
+		}
+		*next = hinted
+		if unavailable != nil {
+			*unavailable = true
+		}
+		if quota != nil && quota.Exceeded {
+			quota.NextRecoverAt = hinted
+		}
+		return
+	}
+	if next.IsZero() {
+		*next = now.Add(transientErrorCooldown)
+		if unavailable != nil {
+			*unavailable = true
+		}
 	}
 }
 
