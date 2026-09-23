@@ -32,6 +32,7 @@ const CATEGORY_OPTIONS = [
   { value: 'api_key_budget', label: 'API key max spend' },
   { value: 'error_rate', label: 'Error rate' },
   { value: 'provider_cooldown', label: 'Provider cooldown' },
+  { value: 'model_substitution', label: 'Model substitution' },
 ];
 
 const SEVERITY_OPTIONS = [

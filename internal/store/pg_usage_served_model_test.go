@@ -3,6 +3,7 @@ package store
 import (
 	"strings"
 	"testing"
+	"time"
 
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
@@ -194,5 +195,61 @@ func TestFlusherSubstitutionDetection(t *testing.T) {
 	}
 	if coreusage.DetectSubstitution("", "claude-opus-5").Substituted {
 		t.Fatalf("DetectSubstitution(empty, opus).Substituted = true, want false")
+	}
+}
+
+// TestUsageStore_ListSubstitutions covers the alert detector's aggregate query:
+// only rows where a non-empty served_model differs (case-insensitively) from
+// the requested model count, and they group per provider/model/served triple
+// with a descending-count order. An equal served model and an empty served
+// model must be excluded, and a case-only difference must NOT count as a
+// substitution — matching DetectSubstitution's EqualFold semantics upstream.
+func TestUsageStore_ListSubstitutions(t *testing.T) {
+	ps := newTestPostgresStore(t, "usage_substitutions_test")
+	ctx := cancelableTestCtx(t)
+	us := NewUsageStore(ps)
+
+	events := []UsageEvent{
+		// Two substituted rows for the same triple → one aggregate, Count=2.
+		{Provider: "anthropic", Model: "claude-opus-5", ServedModel: "claude-haiku-4-5", RequestedAt: now()},
+		{Provider: "anthropic", Model: "claude-opus-5", ServedModel: "claude-haiku-4-5", RequestedAt: now()},
+		// Loud triple (3 rows) must sort before the 2-row triple.
+		{Provider: "google", Model: "gemini-3-pro", ServedModel: "gemini-3-flash", RequestedAt: now()},
+		{Provider: "google", Model: "gemini-3-pro", ServedModel: "gemini-3-flash", RequestedAt: now()},
+		{Provider: "google", Model: "gemini-3-pro", ServedModel: "gemini-3-flash", RequestedAt: now()},
+		// Not substitutions: equal model, empty served, and a case-only
+		// difference (EqualFold semantics → treated as the same model).
+		{Provider: "anthropic", Model: "claude-opus-5", ServedModel: "claude-opus-5", RequestedAt: now()},
+		{Provider: "anthropic", Model: "claude-opus-5", ServedModel: "", RequestedAt: now()},
+		{Provider: "anthropic", Model: "Claude-Haiku", ServedModel: "claude-haiku", RequestedAt: now()},
+	}
+	if err := us.BatchInsertEvents(ctx, events); err != nil {
+		t.Fatalf("BatchInsertEvents: %v", err)
+	}
+
+	rows, err := us.ListSubstitutions(ctx, time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ListSubstitutions: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("ListSubstitutions returned %d rows, want 2: %+v", len(rows), rows)
+	}
+	// Descending count: the 3-row google triple first, then anthropic.
+	if rows[0].Provider != "google" || rows[0].Count != 3 {
+		t.Fatalf("rows[0] = %+v, want google/gemini-3-pro→gemini-3-flash count 3", rows[0])
+	}
+	want := SubstitutionRow{Provider: "anthropic", Model: "claude-opus-5", ServedModel: "claude-haiku-4-5", Count: 2}
+	if rows[1] != want {
+		t.Fatalf("rows[1] = %+v, want %+v", rows[1], want)
+	}
+
+	// The window bound must exclude older events: a far-future `since` finds
+	// nothing.
+	rows, err = us.ListSubstitutions(ctx, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ListSubstitutions(future): %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("ListSubstitutions(future) returned %d rows, want 0", len(rows))
 	}
 }

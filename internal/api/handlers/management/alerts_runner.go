@@ -16,6 +16,12 @@ import (
 // sweep (many keys/users) plus a re-tick does not double up.
 var alertSweepRunning sync.Mutex
 
+// alertSubstitutionLookback bounds how far back the substitution detector
+// scans. Bounded to one hour: substitutions are actionable while the
+// affected traffic is recent, and a wider window would re-alert on a
+// condition the operator already acknowledged.
+const alertSubstitutionLookback = 30 * time.Minute
+
 // shouldWarnDrops reports whether the cumulative usage-flusher drop counter
 // increased between two alert sweeps. Equal/steady counts must NOT warn
 // (anti-spam: a quiescent drain stays silent), and a decrease (counter reset or
@@ -102,6 +108,9 @@ func (h *Handler) runAlertChecks(ctx context.Context) {
 	}
 	if settings.CategoryEnabled(store.AlertTypeProviderCooldown) && authManager != nil {
 		h.alertProviderCooldown(ctx, alerts, authManager, suppression)
+	}
+	if settings.CategoryEnabled(store.AlertTypeModelSubstitution) && usage != nil {
+		h.alertModelSubstitution(ctx, alerts, usage, suppression)
 	}
 }
 
@@ -332,4 +341,53 @@ func (h *Handler) StartAlertSweep() {
 			timer.Reset(interval)
 		}
 	}()
+}
+
+// formatSubstitutionMessage renders the operator-facing sentence for one
+// provider/model/served triple.
+func formatSubstitutionMessage(requested, served, provider string, count int64) string {
+	return fmt.Sprintf(`%s served %q for %d request(s) that asked for %q.`, provider, served, count, requested)
+}
+
+// substitutionFingerprint keys the suppression window on the provider and the
+// requested→served pair, so a recurring substitution bumps the existing row
+// while a different served model raises a new alert.
+func substitutionFingerprint(provider, requested, served string) string {
+	return alertFingerprintKey(store.AlertTypeModelSubstitution,
+		provider, requested+"->"+served)
+}
+
+// alertModelSubstitution records one alert per provider/model/served triple
+// seen in the lookback window. Silent substitution is always at least a
+// warning: the client asked for a specific model and received another.
+func (h *Handler) alertModelSubstitution(ctx context.Context, alerts *store.AlertStore, usage *store.UsageStore, suppression time.Duration) {
+	since := time.Now().UTC().Add(-alertSubstitutionLookback)
+	rows, errList := usage.ListSubstitutions(ctx, since)
+	if errList != nil {
+		log.WithError(errList).Warn("alerts: list substitutions failed; skipping")
+		return
+	}
+	for _, row := range rows {
+		_, _, errRecord := alerts.RecordAlert(ctx, store.Alert{
+			AlertType:  store.AlertTypeModelSubstitution,
+			Severity:   store.AlertSeverityWarning,
+			Title:      "Upstream served a different model",
+			Message:    formatSubstitutionMessage(row.Model, row.ServedModel, row.Provider, row.Count),
+			EntityID:   row.Provider,
+			EntityName: row.Provider,
+			Model:      row.Model,
+			Provider:   row.Provider,
+			Data: map[string]any{
+				"requested_model":    row.Model,
+				"served_model":       row.ServedModel,
+				"substitution_count": row.Count,
+				"lookback_minutes":   int(alertSubstitutionLookback.Minutes()),
+			},
+			Fingerprint: substitutionFingerprint(row.Provider, row.Model, row.ServedModel),
+		}, suppression)
+		if errRecord != nil {
+			log.WithError(errRecord).WithField("provider", row.Provider).
+				Debug("alerts: record model substitution alert failed")
+		}
+	}
 }

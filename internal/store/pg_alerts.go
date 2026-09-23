@@ -22,10 +22,11 @@ const (
 // Alert type labels, one per detector. These key both the feed filter dropdown
 // and the per-category settings toggles.
 const (
-	AlertTypeUserBudget       = "user_budget"
-	AlertTypeAPIKeyBudget     = "api_key_budget"
-	AlertTypeErrorRate        = "error_rate"
-	AlertTypeProviderCooldown = "provider_cooldown"
+	AlertTypeUserBudget        = "user_budget"
+	AlertTypeAPIKeyBudget      = "api_key_budget"
+	AlertTypeErrorRate         = "error_rate"
+	AlertTypeProviderCooldown  = "provider_cooldown"
+	AlertTypeModelSubstitution = "model_substitution"
 )
 
 // AlertFeedCategories lists every alert type in display order. Used by the
@@ -35,6 +36,7 @@ var AlertFeedCategories = []string{
 	AlertTypeAPIKeyBudget,
 	AlertTypeErrorRate,
 	AlertTypeProviderCooldown,
+	AlertTypeModelSubstitution,
 }
 
 // alertSuppressionDefault is the default suppression window applied when the

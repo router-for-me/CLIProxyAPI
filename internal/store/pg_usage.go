@@ -2574,3 +2574,53 @@ func (s *UsageStore) SelectAutoRouterTierPerformance(ctx context.Context, filter
 	}
 	return out, nil
 }
+
+// SubstitutionRow aggregates usage_events rows where the upstream reported
+// serving a different model than the one requested, over the given window.
+type SubstitutionRow struct {
+	Provider    string
+	Model       string
+	ServedModel string
+	Count       int64
+}
+
+// ListSubstitutions returns substitution aggregates for events requested at or
+// after since. Rows with an empty or equal served_model are excluded; the
+// comparison is case-insensitive, mirroring DetectSubstitution's EqualFold in
+// sdk/cliproxy/usage. The IS NOT NULL guard covers legacy rows that predate
+// the served_model column (added via ALTER TABLE, so pre-existing rows are
+// NULL), and the empty-string guard covers events whose upstream reported no
+// served model (the flusher persists ""). No COALESCE is needed on read: the
+// WHERE clause already excludes every NULL served_model row. Results are
+// ordered by descending count so the loudest substitution surfaces first.
+func (s *UsageStore) ListSubstitutions(ctx context.Context, since time.Time) ([]SubstitutionRow, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT provider, model, served_model, COUNT(*) AS substitution_count
+		FROM %s
+		WHERE requested_at >= $1
+		  AND served_model IS NOT NULL
+		  AND served_model <> ''
+		  AND LOWER(served_model) <> LOWER(model)
+		GROUP BY provider, model, served_model
+		ORDER BY substitution_count DESC
+	`, s.eventsTable), since)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: list substitutions: %w", err)
+	}
+	defer rows.Close()
+	var out []SubstitutionRow
+	for rows.Next() {
+		var row SubstitutionRow
+		if errScan := rows.Scan(&row.Provider, &row.Model, &row.ServedModel, &row.Count); errScan != nil {
+			return nil, fmt.Errorf("postgres store: scan substitution row: %w", errScan)
+		}
+		out = append(out, row)
+	}
+	if errRows := rows.Err(); errRows != nil {
+		return nil, fmt.Errorf("postgres store: iterate substitutions: %w", errRows)
+	}
+	return out, nil
+}
