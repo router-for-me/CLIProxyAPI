@@ -910,6 +910,12 @@ func payloadRawValue(value any) ([]byte, bool) {
 	}
 }
 
+// PayloadRequestedModel returns the model name the client asked for, read from
+// opts.Metadata (seeded by the handler before alias resolution), with fallback
+// only when that metadata is absent or empty. At executor call sites fallback
+// is req.Model, which is already the alias-resolved upstream model, so the
+// metadata path is what carries the true client name; falling back is a
+// degradation to "no substitution info", not to the client-requested model.
 func PayloadRequestedModel(opts cliproxyexecutor.Options, fallback string) string {
 	fallback = strings.TrimSpace(fallback)
 	if len(opts.Metadata) == 0 {

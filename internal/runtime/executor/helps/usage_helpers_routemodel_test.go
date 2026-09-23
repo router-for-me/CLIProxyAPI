@@ -9,7 +9,7 @@ import (
 
 // RouteModel is the requested side of the substitution comparison; a reporter
 // that loses it makes Task 4's alerts blind for that provider.
-func TestUsageReporterSetRouteModelRoundTrip(t *testing.T) {
+func TestUsageReporter_SetRouteModelRoundTrip(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "claude", "claude-opus-5", nil)
 	reporter.SetRouteModel("claude-opus-5-alias")
 
@@ -19,7 +19,7 @@ func TestUsageReporterSetRouteModelRoundTrip(t *testing.T) {
 	}
 }
 
-func TestUsageReporterRouteModelStaysEmptyWhenUnset(t *testing.T) {
+func TestUsageReporter_SetRouteModelStaysEmptyWhenUnset(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "claude", "claude-opus-5", nil)
 
 	record := reporter.buildRecord(usage.Detail{}, false, usage.Failure{})
@@ -28,7 +28,7 @@ func TestUsageReporterRouteModelStaysEmptyWhenUnset(t *testing.T) {
 	}
 }
 
-func TestUsageReporterSetRouteModelTrimsWhitespace(t *testing.T) {
+func TestUsageReporter_SetRouteModelTrimsWhitespace(t *testing.T) {
 	reporter := NewUsageReporter(context.Background(), "claude", "claude-opus-5", nil)
 	reporter.SetRouteModel(" x ")
 
@@ -38,7 +38,7 @@ func TestUsageReporterSetRouteModelTrimsWhitespace(t *testing.T) {
 	}
 }
 
-func TestUsageReporterSetRouteModelNilReporter(t *testing.T) {
+func TestUsageReporter_SetRouteModelNilReporter(t *testing.T) {
 	var reporter *UsageReporter
 	reporter.SetRouteModel("claude-opus-5") // must not panic
 }
