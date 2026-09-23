@@ -64,6 +64,7 @@ const (
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
+// An HTML error page becomes a short plain summary in error.message; other text is unchanged.
 func BuildErrorResponseBody(status int, errText string) []byte {
 	return BuildErrorResponseBodyWithError(status, errText, nil)
 }
@@ -82,8 +83,9 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	trimmed := strings.TrimSpace(errText)
 
 	if coreauth.IsTerminalAuthError(err) {
-		message := errText
+		message := clientFacingErrorMessage(errText)
 		if trimmed != "" && json.Valid([]byte(trimmed)) {
+			message = errText
 			var parsed map[string]any
 			if errUnmarshal := json.Unmarshal([]byte(trimmed), &parsed); errUnmarshal == nil {
 				if msg, ok := parsed["message"].(string); ok && msg != "" {
@@ -136,15 +138,16 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 		}
 	}
 
+	message := clientFacingErrorMessage(errText)
 	payload, errMarshal := json.Marshal(ErrorResponse{
 		Error: ErrorDetail{
-			Message: errText,
+			Message: message,
 			Type:    errType,
 			Code:    code,
 		},
 	})
 	if errMarshal != nil {
-		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText))
+		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, message))
 	}
 	return payload
 }

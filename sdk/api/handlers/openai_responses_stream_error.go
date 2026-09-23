@@ -99,6 +99,8 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 	message := strings.TrimSpace(errText)
 	if message == "" {
 		message = http.StatusText(status)
+	} else {
+		message = clientFacingErrorMessage(message)
 	}
 
 	code := openAIResponsesStreamErrorCode(status)
@@ -222,6 +224,8 @@ func BuildOpenAIResponsesStreamFailedChunk(status int, errText string, sequenceN
 		message := strings.TrimSpace(errText)
 		if message == "" {
 			message = http.StatusText(status)
+		} else {
+			message = clientFacingErrorMessage(message)
 		}
 		errorDetail = openAIResponsesStreamErrorDetail(status, errText, code, message)
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,36 @@ func TestClaudeErrorExtractsClaudeStyleUpstreamJSON(t *testing.T) {
 	}
 	if got.Error.Message != "This request would exceed your account's rate limit. Please try again later." {
 		t.Fatalf("error.message = %q", got.Error.Message)
+	}
+}
+
+func TestClaudeErrorSummarizesHTMLAndKeepsJSON(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	long := strings.Repeat("y", 400)
+	htmlBody := "<html><head><script>secret()</script><title>Bad Gateway</title></head><body><h1>Bad Gateway</h1><p>" + long + "</p></body></html>"
+	got := handler.toClaudeError(&interfaces.ErrorMessage{
+		StatusCode: http.StatusBadGateway,
+		Error:      errors.New(htmlBody),
+	})
+	if strings.Contains(got.Error.Message, "<") || strings.Contains(got.Error.Message, "secret()") {
+		t.Fatalf("error.message = %q, want plain summary", got.Error.Message)
+	}
+	if !strings.Contains(got.Error.Message, "Bad Gateway") {
+		t.Fatalf("error.message = %q, want visible text", got.Error.Message)
+	}
+	if len([]rune(got.Error.Message)) > 200 {
+		t.Fatalf("error.message length = %d, want <= 200", len([]rune(got.Error.Message)))
+	}
+
+	jsonMsg := handler.toClaudeError(&interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"error":{"message":"keep <div> intact","type":"invalid_request_error"}}`),
+	})
+	if jsonMsg.Error.Message != "keep <div> intact" {
+		t.Fatalf("JSON message = %q, want intact", jsonMsg.Error.Message)
+	}
+	if jsonMsg.Error.Type != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error", jsonMsg.Error.Type)
 	}
 }
 

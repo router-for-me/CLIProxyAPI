@@ -440,6 +440,10 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 				}
 			}
 		}
+		return errType, message
+	}
+	if summary, ok := handlers.SummarizeHTMLClientMessage(message); ok {
+		message = summary
 	}
 
 	return errType, message
