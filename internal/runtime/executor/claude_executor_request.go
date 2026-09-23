@@ -777,6 +777,36 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
+// claudeModelRejectsForcedToolChoice reports models that return 400 for
+// tool_choice type "any" or "tool" on both Messages and count_tokens.
+// See: https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5#forced-tool-use-is-not-supported
+func claudeModelRejectsForcedToolChoice(model string) bool {
+	model = claudeCanonicalModel(model)
+	return strings.HasPrefix(model, "claude-opus-5-5") || strings.HasPrefix(model, "claude-fable-5-1")
+}
+
+// relaxForcedToolChoiceForModel downgrades a forced tool_choice to "auto" for
+// models that reject forced tool use. disable_parallel_tool_use is preserved.
+// It must run before disableThinkingIfToolChoiceForced: these models keep
+// thinking always on, so thinking controls stay in place.
+func relaxForcedToolChoiceForModel(body []byte) []byte {
+	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
+	if toolChoiceType != "any" && toolChoiceType != "tool" {
+		return body
+	}
+	model := gjson.GetBytes(body, "model").String()
+	if !claudeModelRejectsForcedToolChoice(model) {
+		return body
+	}
+	log.WithFields(log.Fields{
+		"model":       model,
+		"tool_choice": toolChoiceType,
+	}).Debug("claude: forced tool_choice not supported by model, downgraded to auto")
+	body, _ = sjson.SetBytes(body, "tool_choice.type", "auto")
+	body, _ = sjson.DeleteBytes(body, "tool_choice.name")
+	return body
+}
+
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
 // Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
 // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
