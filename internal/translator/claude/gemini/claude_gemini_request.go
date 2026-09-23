@@ -379,7 +379,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Stream setting configuration
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	return out
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "gemini", modelName)
 }
 
 func normalizeClaudeToolSchema(parameters gjson.Result) []byte {

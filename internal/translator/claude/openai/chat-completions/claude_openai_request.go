@@ -452,7 +452,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		}
 	}
 
-	return out
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai", modelName)
 }
 
 func convertOpenAIContentPartToClaudePartRaw(part gjson.Result) []byte {

@@ -265,7 +265,7 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	auth := &cliproxyauth.Auth{
 		ID:         "test-cloaked-multiturn-oauth",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-multiturn"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-multiturn", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid": "11111111-2222-4333-8444-555555555555",
 			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
@@ -581,7 +581,7 @@ func TestClaudeCloakedToolContinuationPreservesExplicitPromptID(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	auth := &cliproxyauth.Auth{
 		ID:         "test-cloaked-explicit-prompt-oauth",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-explicit-prompt-key"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-explicit-prompt-key", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid": "11111111-2222-4333-8444-555555555555",
 			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
@@ -673,7 +673,7 @@ func TestClaudeCloakedColdStartToolContinuationUsesDeterministicPromptID(t *test
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	auth := &cliproxyauth.Auth{
 		ID:         "test-cloaked-cold-start-tool-oauth",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-cold-start-key"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-cold-start-key", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid": "11111111-2222-4333-8444-555555555555",
 			claudeauth.ClaudeDeviceIDsMetadataKey: []string{

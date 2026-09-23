@@ -41,6 +41,34 @@ func detectIncomingClaudeCodeRequest(ctx context.Context, incoming http.Header, 
 	return resolved, helps.DetectClaudeCodeRequest(resolved, payload, countTokens, cfg)
 }
 
+type claudeInboundFormatContextKey struct{}
+type claudeDirectMessagesPassthroughContextKey struct{}
+
+func withClaudeInboundFormat(ctx context.Context, format string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, claudeInboundFormatContextKey{}, strings.ToLower(strings.TrimSpace(format)))
+}
+
+func withClaudeDirectMessagesPassthrough(ctx context.Context, enabled bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, claudeDirectMessagesPassthroughContextKey{}, enabled)
+}
+
+// claudeInboundMessagesPassthrough reports a direct Anthropic Messages caller.
+// Translated Responses, Chat, and Gemini requests are cloaked separately.
+func claudeInboundMessagesPassthrough(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	format, _ := ctx.Value(claudeInboundFormatContextKey{}).(string)
+	passthrough, _ := ctx.Value(claudeDirectMessagesPassthroughContextKey{}).(bool)
+	return format == "claude" && passthrough
+}
+
 // getWorkloadFromContext extracts workload identifier from the gin request headers.
 func getWorkloadFromContext(ctx context.Context) string {
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -1031,14 +1059,20 @@ func reconcileClaudeCodeFableModelAfterPayload(
 				body, _ = sjson.SetRawBytes(body, "system", []byte("["+strings.Join(blocks, ",")+"]"))
 			}
 		}
+		if !isProbeOrHelper {
+			body = applyClaudeCloakThinkingDisplay(body, payloadTouchedDisplay)
+		}
 		return body
 	}
 
 	if isClaudeOpus55Model(currentModel) && !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
 		body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
 	}
-	if fableState.injectedDisplay && !payloadTouchedDisplay {
+	if fableState.injectedDisplay && !payloadTouchedDisplay && !claudeModelUsesProgressDisplay(currentModel) {
 		body, _ = sjson.DeleteBytes(body, "thinking.display")
+	}
+	if !isProbeOrHelper {
+		body = applyClaudeCloakThinkingDisplay(body, payloadTouchedDisplay)
 	}
 
 	// Remove Reporting outcomes if CPA automatically injected it
@@ -1296,6 +1330,7 @@ type claudeWirePolicy struct {
 	OAuth                bool // real OAuth token runtime identity
 	ProfileClaudeCodeCLI bool // request fingerprint looks like Claude Code CLI
 	ConfirmedClaudeCode  bool
+	CloakConfigured      bool // operator explicitly configured cloak behavior
 	Cloak                bool
 }
 
@@ -1342,6 +1377,7 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		OAuth:                fp.AuthIsOAuthToken,
 		ProfileClaudeCodeCLI: fp.ProfileClaudeCodeCLI,
 		ConfirmedClaudeCode:  confirmedClaudeCode,
+		CloakConfigured:      cloakConfigured,
 		Cloak:                (fp.ProfileClaudeCodeCLI || cloakConfigured) && !confirmedClaudeCode,
 	}
 	if confirmedClaudeCode {
@@ -1389,6 +1425,9 @@ func applyCloakingInternal(
 	obfuscateSensitiveWords bool,
 ) ([]byte, bool, error) {
 	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
+	if claudeInboundMessagesPassthrough(ctx) && policy.OAuth && !policy.CloakConfigured {
+		policy.Cloak = false
+	}
 	if !policy.Cloak {
 		return payload, false, nil
 	}
@@ -1451,12 +1490,9 @@ func applyCloakingInternal(
 		if !gjson.GetBytes(payload, "fallbacks").Exists() {
 			payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
 		}
-		if gjson.GetBytes(payload, "thinking").Exists() {
-			thinkingType := gjson.GetBytes(payload, "thinking.type").String()
-			if thinkingType == "adaptive" && !gjson.GetBytes(payload, "thinking.display").Exists() {
-				payload, _ = sjson.SetBytes(payload, "thinking.display", "updates")
-			}
-		}
+	}
+	if !isProbeOrHelper {
+		payload = applyClaudeCloakThinkingDisplay(payload, false)
 	}
 
 	// Probes never use 1h cache in native Claude Code; ensure any caller-supplied

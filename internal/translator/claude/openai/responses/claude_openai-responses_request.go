@@ -623,7 +623,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 
-	return out
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai-response", modelName)
 }
 
 func defaultClaudeResponsesMaxTokensForModel(modelName string) int {

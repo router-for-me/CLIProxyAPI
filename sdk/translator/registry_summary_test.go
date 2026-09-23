@@ -20,13 +20,21 @@ func TestRegistryTranslateRequestAppliesSummaryIntent(t *testing.T) {
 		wantExists bool
 	}{
 		{
-			name:       "chat effort enables Claude summary",
+			name:       "chat effort leaves Claude display unspecified",
 			from:       FormatOpenAI,
 			to:         FormatClaude,
 			input:      `{"reasoning_effort":"high"}`,
 			translated: `{"thinking":{"type":"adaptive"}}`,
 			path:       "thinking.display",
-			want:       "summarized",
+		},
+		{
+			name:       "chat explicit exclusion disables Claude summary",
+			from:       FormatOpenAI,
+			to:         FormatClaude,
+			input:      `{"reasoning_effort":"high","reasoning":{"exclude":true}}`,
+			translated: `{"thinking":{"type":"adaptive"}}`,
+			path:       "thinking.display",
+			want:       "omitted",
 			wantExists: true,
 		},
 		{

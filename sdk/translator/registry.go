@@ -124,7 +124,7 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	r.mu.RUnlock()
 
 	if fn != nil {
-		summaryConfig := thinking.ExtractSummaryConfig(req.Body, from.String())
+		summaryConfig := thinking.ExtractTranslatedSummaryConfig(req.Body, from.String(), to.String())
 		req = fn(ctx, req)
 		req.Body = thinking.ApplySummaryConfigForModel(req.Body, to.String(), req.Model, summaryConfig)
 		if hooks != nil {
@@ -154,7 +154,7 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	// translator gets a chance to handle a missing native route. Extract summary
 	// intent from that normalized source so a normalizer can remove or rewrite it.
 	req.Body = hooks.NormalizeRequest(ctx, from, to, req.Model, req.Body, req.Stream)
-	summaryConfig := thinking.ExtractSummaryConfig(req.Body, from.String())
+	summaryConfig := thinking.ExtractTranslatedSummaryConfig(req.Body, from.String(), to.String())
 	if translated, ok := hooks.TranslateRequest(ctx, from, to, req.Model, req.Body, req.Stream); ok {
 		req.Body = thinking.ApplySummaryConfigForModel(translated, to.String(), req.Model, summaryConfig)
 	}

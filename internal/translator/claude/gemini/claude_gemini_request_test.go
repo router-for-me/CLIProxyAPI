@@ -7,6 +7,25 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertGeminiRequestToClaude_ThinkingSummaryVisibility(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		wanted string
+	}{
+		{name: "include thoughts", input: `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":true}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, wanted: "summarized"},
+		{name: "exclude thoughts", input: `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"high","includeThoughts":false}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`, wanted: "omitted"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out := ConvertGeminiRequestToClaude("claude-opus-5-5", []byte(test.input), false)
+			if got := gjson.GetBytes(out, "thinking.display").String(); got != test.wanted {
+				t.Fatalf("thinking.display = %q, want %q; body=%s", got, test.wanted, out)
+			}
+		})
+	}
+}
+
 func TestConvertGeminiRequestToClaude_PreservesCustomToolIDs(t *testing.T) {
 	tests := []struct {
 		name          string

@@ -35,8 +35,8 @@ func translatedRequestSummaryConfig(body, currentSourcePayload, originalSourcePa
 		return targetSummary
 	}
 
-	currentSummary := thinking.ExtractSummaryConfig(currentSourcePayload, fromFormat)
-	originalSummary := thinking.ExtractSummaryConfig(originalSourcePayload, fromFormat)
+	currentSummary := thinking.ExtractTranslatedSummaryConfig(currentSourcePayload, fromFormat, toFormat)
+	originalSummary := thinking.ExtractTranslatedSummaryConfig(originalSourcePayload, fromFormat, toFormat)
 	if currentSummary.Mode == thinking.SummaryUnspecified {
 		return originalSummary
 	}

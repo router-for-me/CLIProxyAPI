@@ -64,7 +64,7 @@ func TestClaudeExecutorDiagnosticsAdvancesAfterSuccessfulResponse(t *testing.T) 
 	testID := uuid.NewString()
 	auth := &cliproxyauth.Auth{
 		ID:         "diagnostics-live-path-" + testID,
-		Attributes: map[string]string{"api_key": "sk-ant-oat-diagnostics-live-path"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-diagnostics-live-path", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid":                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 			claudeauth.ClaudeDeviceIDsMetadataKey: deviceIDs,
@@ -134,7 +134,7 @@ func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *
 	testID := uuid.NewString()
 	auth := &cliproxyauth.Auth{
 		ID:         "continuity-test-" + testID,
-		Attributes: map[string]string{"api_key": "sk-ant-oat-continuity-test"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-continuity-test", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid":                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 			claudeauth.ClaudeDeviceIDsMetadataKey: deviceIDs,

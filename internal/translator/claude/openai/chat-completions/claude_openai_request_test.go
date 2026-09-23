@@ -7,6 +7,26 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToClaude_ThinkingSummaryVisibility(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		wanted string
+	}{
+		{name: "effort only leaves display unspecified", input: `{"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, wanted: ""},
+		{name: "explicit include enables summary", input: `{"reasoning_effort":"high","include_reasoning":true,"messages":[{"role":"user","content":"hi"}]}`, wanted: "summarized"},
+		{name: "explicit exclude omits summary", input: `{"reasoning_effort":"high","reasoning":{"exclude":true},"messages":[{"role":"user","content":"hi"}]}`, wanted: "omitted"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToClaude("claude-opus-5-5", []byte(test.input), false)
+			if got := gjson.GetBytes(out, "thinking.display").String(); got != test.wanted {
+				t.Fatalf("thinking.display = %q, want %q; body=%s", got, test.wanted, out)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIRequestToClaudeWithCompat_GroupsAssistantThinkingTextAndTools(t *testing.T) {
 	inputJSON := []byte(`{
 		"messages":[
