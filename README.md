@@ -134,6 +134,8 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+Using Codex behind an additional reverse proxy or local bridge? See [Codex tool routes and troubleshooting](docs/codex-proxy-routes.md) if text responses work but image generation or standalone web search fails.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
