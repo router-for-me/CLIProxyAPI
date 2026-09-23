@@ -566,18 +566,23 @@ func TestManager_RestoreCooldownStates(t *testing.T) {
 
 func TestManager_RestoreCooldownStatesCanonicalizesThinkingSuffixes(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	laterRetry := now.Add(2 * time.Hour)
+	// Both deadlines stay inside maxQuotaCooldownCeiling: this test is about
+	// canonicalizing thinking suffixes to a single model key and letting the later
+	// record win, not about the quota ceiling, so it must not depend on deadlines the
+	// restore path now clamps.
+	earlierRetry := now.Add(30 * time.Minute)
+	laterRetry := now.Add(45 * time.Minute)
 	store := &recordingCooldownStateStore{
 		load: []CooldownStateRecord{
 			{
 				Provider:       "gemini",
 				AuthID:         "auth-thinking",
 				Model:          "gemini-3.1-pro-preview(high)",
-				NextRetryAfter: now.Add(time.Hour),
+				NextRetryAfter: earlierRetry,
 				Quota: QuotaState{
 					Exceeded:      true,
 					Reason:        "quota",
-					NextRecoverAt: now.Add(time.Hour),
+					NextRecoverAt: earlierRetry,
 				},
 				UpdatedAt: now,
 			},
