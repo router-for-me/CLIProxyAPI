@@ -27,6 +27,12 @@ func TestSubstitutionFingerprintIsStablePerProviderModelPair(t *testing.T) {
 	if a == d {
 		t.Fatalf("fingerprint must differ when the provider differs")
 	}
+	// The key is the requested→served pair, so a different requested model
+	// with the same provider and served model must also raise a new alert.
+	e := substitutionFingerprint("anthropic", "claude-opus-4-5", "claude-haiku-4-5")
+	if a == e {
+		t.Fatalf("fingerprint must differ when the requested model differs")
+	}
 }
 
 func TestSubstitutionDetectorIntervalIsPositive(t *testing.T) {

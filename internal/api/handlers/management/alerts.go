@@ -243,15 +243,16 @@ func (h *Handler) GetAlertSettings(c *gin.Context) {
 // alertSettingsRequest is the JSON body accepted by PutAlertSettings. All
 // fields are optional; omitted fields fall back to the existing/defaults.
 type alertSettingsRequest struct {
-	Enabled                *bool    `json:"enabled,omitempty"`
-	IntervalSeconds        *int     `json:"interval_seconds,omitempty"`
-	SuppressionMinutes     *int     `json:"suppression_minutes,omitempty"`
-	EnableUserBudget       *bool    `json:"enable_user_budget,omitempty"`
-	EnableAPIKeyBudget     *bool    `json:"enable_api_key_budget,omitempty"`
-	EnableErrorRate        *bool    `json:"enable_error_rate,omitempty"`
-	EnableProviderCooldown *bool    `json:"enable_provider_cooldown,omitempty"`
-	ErrorRateThreshold     *float64 `json:"error_rate_threshold,omitempty"`
-	ErrorWindowMinutes     *int     `json:"error_window_minutes,omitempty"`
+	Enabled                 *bool    `json:"enabled,omitempty"`
+	IntervalSeconds         *int     `json:"interval_seconds,omitempty"`
+	SuppressionMinutes      *int     `json:"suppression_minutes,omitempty"`
+	EnableUserBudget        *bool    `json:"enable_user_budget,omitempty"`
+	EnableAPIKeyBudget      *bool    `json:"enable_api_key_budget,omitempty"`
+	EnableErrorRate         *bool    `json:"enable_error_rate,omitempty"`
+	EnableProviderCooldown  *bool    `json:"enable_provider_cooldown,omitempty"`
+	EnableModelSubstitution *bool    `json:"enable_model_substitution,omitempty"`
+	ErrorRateThreshold      *float64 `json:"error_rate_threshold,omitempty"`
+	ErrorWindowMinutes      *int     `json:"error_window_minutes,omitempty"`
 }
 
 // PutAlertSettings handles PUT/PATCH /v0/management/alerts/settings.
@@ -277,8 +278,8 @@ func (h *Handler) PutAlertSettings(c *gin.Context) {
 		current = store.AlertSettings{
 			Enabled: true, IntervalSeconds: 60, SuppressionMinutes: 60,
 			EnableUserBudget: true, EnableAPIKeyBudget: true, EnableErrorRate: true,
-			EnableProviderCooldown: true,
-			ErrorRateThreshold:     0.5, ErrorWindowMinutes: 5,
+			EnableProviderCooldown: true, EnableModelSubstitution: true,
+			ErrorRateThreshold: 0.5, ErrorWindowMinutes: 5,
 		}
 	}
 	if body.Enabled != nil {
@@ -301,6 +302,9 @@ func (h *Handler) PutAlertSettings(c *gin.Context) {
 	}
 	if body.EnableProviderCooldown != nil {
 		current.EnableProviderCooldown = *body.EnableProviderCooldown
+	}
+	if body.EnableModelSubstitution != nil {
+		current.EnableModelSubstitution = *body.EnableModelSubstitution
 	}
 	if body.ErrorRateThreshold != nil {
 		current.ErrorRateThreshold = *body.ErrorRateThreshold

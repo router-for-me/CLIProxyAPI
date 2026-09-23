@@ -2276,6 +2276,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			enable_api_key_budget         BOOLEAN NOT NULL DEFAULT TRUE,
 			enable_error_rate             BOOLEAN NOT NULL DEFAULT TRUE,
 			enable_provider_cooldown      BOOLEAN NOT NULL DEFAULT TRUE,
+			enable_model_substitution     BOOLEAN NOT NULL DEFAULT TRUE,
 			error_rate_threshold          DOUBLE PRECISION NOT NULL DEFAULT 0.5,
 			error_window_minutes          INTEGER NOT NULL DEFAULT 5,
 			updated_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -2291,6 +2292,15 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 		`ALTER TABLE %s DROP COLUMN IF EXISTS enable_model_health`, alertSettingsTable,
 	)); err != nil {
 		return fmt.Errorf("postgres store: drop alert_settings enable_model_health: %w", err)
+	}
+	// Add the model-substitution category toggle column for stores created
+	// before the detector existed. Idempotent ALTER; NOT NULL DEFAULT TRUE
+	// backfills existing rows so the new detector is on unless an operator
+	// turns it off (same default posture as the other four toggles).
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS enable_model_substitution BOOLEAN NOT NULL DEFAULT TRUE`, alertSettingsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: add alert_settings enable_model_substitution: %w", err)
 	}
 	// Seed the singleton row so GetAlertSettings always finds a row.
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(

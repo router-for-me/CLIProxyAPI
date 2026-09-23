@@ -121,16 +121,17 @@ type AlertFilter struct {
 // ErrorRateThreshold / ErrorWindowMinutes tune the error-rate detector; the
 // interval / suppression apply globally.
 type AlertSettings struct {
-	Enabled                bool    `json:"enabled"`
-	IntervalSeconds        int     `json:"interval_seconds"`
-	SuppressionMinutes     int     `json:"suppression_minutes"`
-	EnableUserBudget       bool    `json:"enable_user_budget"`
-	EnableAPIKeyBudget     bool    `json:"enable_api_key_budget"`
-	EnableErrorRate        bool    `json:"enable_error_rate"`
-	EnableProviderCooldown bool    `json:"enable_provider_cooldown"`
-	ErrorRateThreshold     float64 `json:"error_rate_threshold"`
-	ErrorWindowMinutes     int     `json:"error_window_minutes"`
-	UpdatedAt              time.Time
+	Enabled                 bool    `json:"enabled"`
+	IntervalSeconds         int     `json:"interval_seconds"`
+	SuppressionMinutes      int     `json:"suppression_minutes"`
+	EnableUserBudget        bool    `json:"enable_user_budget"`
+	EnableAPIKeyBudget      bool    `json:"enable_api_key_budget"`
+	EnableErrorRate         bool    `json:"enable_error_rate"`
+	EnableProviderCooldown  bool    `json:"enable_provider_cooldown"`
+	EnableModelSubstitution bool    `json:"enable_model_substitution"`
+	ErrorRateThreshold      float64 `json:"error_rate_threshold"`
+	ErrorWindowMinutes      int     `json:"error_window_minutes"`
+	UpdatedAt               time.Time
 }
 
 // Suppression returns the configured suppression window as a duration.
@@ -155,6 +156,8 @@ func (s AlertSettings) CategoryEnabled(alertType string) bool {
 		return s.EnableErrorRate
 	case AlertTypeProviderCooldown:
 		return s.EnableProviderCooldown
+	case AlertTypeModelSubstitution:
+		return s.EnableModelSubstitution
 	default:
 		return true
 	}
@@ -605,13 +608,13 @@ func (s *AlertStore) getAlertSettingsRow(ctx context.Context) (AlertSettings, er
 	row := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT enabled, interval_seconds, suppression_minutes,
 			enable_user_budget, enable_api_key_budget, enable_error_rate,
-			enable_provider_cooldown,
+			enable_provider_cooldown, enable_model_substitution,
 			error_rate_threshold, error_window_minutes, updated_at
 		FROM %s WHERE id = 1`, s.settingsTable))
 	err := row.Scan(
 		&set.Enabled, &set.IntervalSeconds, &set.SuppressionMinutes,
 		&set.EnableUserBudget, &set.EnableAPIKeyBudget, &set.EnableErrorRate,
-		&set.EnableProviderCooldown,
+		&set.EnableProviderCooldown, &set.EnableModelSubstitution,
 		&set.ErrorRateThreshold, &set.ErrorWindowMinutes, &set.UpdatedAt,
 	)
 	return set, err
@@ -646,24 +649,25 @@ func (s *AlertStore) UpsertAlertSettings(ctx context.Context, set AlertSettings)
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, enabled, interval_seconds, suppression_minutes,
 			enable_user_budget, enable_api_key_budget, enable_error_rate,
-			enable_provider_cooldown,
+			enable_provider_cooldown, enable_model_substitution,
 			error_rate_threshold, error_window_minutes, updated_at)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
 		ON CONFLICT (id) DO UPDATE SET
-			enabled                  = EXCLUDED.enabled,
-			interval_seconds         = EXCLUDED.interval_seconds,
-			suppression_minutes      = EXCLUDED.suppression_minutes,
-			enable_user_budget       = EXCLUDED.enable_user_budget,
-			enable_api_key_budget    = EXCLUDED.enable_api_key_budget,
-			enable_error_rate        = EXCLUDED.enable_error_rate,
-			enable_provider_cooldown = EXCLUDED.enable_provider_cooldown,
-			error_rate_threshold     = EXCLUDED.error_rate_threshold,
-			error_window_minutes     = EXCLUDED.error_window_minutes,
-			updated_at               = EXCLUDED.updated_at
+			enabled                   = EXCLUDED.enabled,
+			interval_seconds          = EXCLUDED.interval_seconds,
+			suppression_minutes       = EXCLUDED.suppression_minutes,
+			enable_user_budget        = EXCLUDED.enable_user_budget,
+			enable_api_key_budget     = EXCLUDED.enable_api_key_budget,
+			enable_error_rate         = EXCLUDED.enable_error_rate,
+			enable_provider_cooldown  = EXCLUDED.enable_provider_cooldown,
+			enable_model_substitution = EXCLUDED.enable_model_substitution,
+			error_rate_threshold      = EXCLUDED.error_rate_threshold,
+			error_window_minutes      = EXCLUDED.error_window_minutes,
+			updated_at                = EXCLUDED.updated_at
 		`, s.settingsTable),
 		set.Enabled, set.IntervalSeconds, set.SuppressionMinutes,
 		set.EnableUserBudget, set.EnableAPIKeyBudget, set.EnableErrorRate,
-		set.EnableProviderCooldown,
+		set.EnableProviderCooldown, set.EnableModelSubstitution,
 		set.ErrorRateThreshold, set.ErrorWindowMinutes,
 	)
 	if err != nil {
@@ -674,15 +678,16 @@ func (s *AlertStore) UpsertAlertSettings(ctx context.Context, set AlertSettings)
 
 func defaultAlertSettings() AlertSettings {
 	return AlertSettings{
-		Enabled:                true,
-		IntervalSeconds:        int(alertSettingsDefaultInterval.Seconds()),
-		SuppressionMinutes:     int(alertSuppressionDefault.Minutes()),
-		EnableUserBudget:       true,
-		EnableAPIKeyBudget:     true,
-		EnableErrorRate:        true,
-		EnableProviderCooldown: true,
-		ErrorRateThreshold:     0.5,
-		ErrorWindowMinutes:     5,
+		Enabled:                 true,
+		IntervalSeconds:         int(alertSettingsDefaultInterval.Seconds()),
+		SuppressionMinutes:      int(alertSuppressionDefault.Minutes()),
+		EnableUserBudget:        true,
+		EnableAPIKeyBudget:      true,
+		EnableErrorRate:         true,
+		EnableProviderCooldown:  true,
+		EnableModelSubstitution: true,
+		ErrorRateThreshold:      0.5,
+		ErrorWindowMinutes:      5,
 	}
 }
 

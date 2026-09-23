@@ -102,6 +102,7 @@ function AlertSettingsCard(_props) {
         enable_api_key_budget: draft.enable_api_key_budget,
         enable_error_rate: draft.enable_error_rate,
         enable_provider_cooldown: draft.enable_provider_cooldown,
+        enable_model_substitution: draft.enable_model_substitution,
         error_rate_threshold: Number(draft.error_rate_threshold) || 0,
         error_window_minutes: Number(draft.error_window_minutes) || 5,
       };
@@ -160,6 +161,7 @@ function AlertSettingsCard(_props) {
               <ToggleRow label="API key max spend" checked={!!draft.enable_api_key_budget} onChange={(v) => set({ enable_api_key_budget: v })} />
               <ToggleRow label="Error rate" checked={!!draft.enable_error_rate} onChange={(v) => set({ enable_error_rate: v })} />
               <ToggleRow label="Provider cooldown" checked={!!draft.enable_provider_cooldown} onChange={(v) => set({ enable_provider_cooldown: v })} />
+              <ToggleRow label="Model substitution" checked={!!draft.enable_model_substitution} onChange={(v) => set({ enable_model_substitution: v })} />
             </div>
           </div>
 

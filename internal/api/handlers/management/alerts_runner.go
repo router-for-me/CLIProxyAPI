@@ -17,7 +17,7 @@ import (
 var alertSweepRunning sync.Mutex
 
 // alertSubstitutionLookback bounds how far back the substitution detector
-// scans. Bounded to one hour: substitutions are actionable while the
+// scans. Bounded to 30 minutes: substitutions are actionable while the
 // affected traffic is recent, and a wider window would re-alert on a
 // condition the operator already acknowledged.
 const alertSubstitutionLookback = 30 * time.Minute
@@ -377,6 +377,7 @@ func (h *Handler) alertModelSubstitution(ctx context.Context, alerts *store.Aler
 			EntityName: row.Provider,
 			Model:      row.Model,
 			Provider:   row.Provider,
+			Value:      float64(row.Count),
 			Data: map[string]any{
 				"requested_model":    row.Model,
 				"served_model":       row.ServedModel,

@@ -2586,13 +2586,17 @@ type SubstitutionRow struct {
 
 // ListSubstitutions returns substitution aggregates for events requested at or
 // after since. Rows with an empty or equal served_model are excluded; the
-// comparison is case-insensitive, mirroring DetectSubstitution's EqualFold in
-// sdk/cliproxy/usage. The IS NOT NULL guard covers legacy rows that predate
-// the served_model column (added via ALTER TABLE, so pre-existing rows are
-// NULL), and the empty-string guard covers events whose upstream reported no
-// served model (the flusher persists ""). No COALESCE is needed on read: the
-// WHERE clause already excludes every NULL served_model row. Results are
-// ordered by descending count so the loudest substitution surfaces first.
+// comparison is trimmed and case-insensitive, mirroring DetectSubstitution
+// (TrimSpace + EqualFold) in sdk/cliproxy/usage. The IS NOT NULL guard covers
+// legacy rows that predate the served_model column (added via ALTER TABLE, so
+// pre-existing rows are NULL), and the empty-string guard covers events whose
+// upstream reported no served model (the flusher persists ""). No COALESCE is
+// needed on read: the WHERE clause already excludes every NULL served_model
+// row. Results are ordered by descending count so the loudest substitution
+// surfaces first, capped at 50 triples per call: a pathological upstream that
+// varies served_model per request cannot fan out the alert sweep unbounded,
+// and dropping the quietest triples beyond the cap is acceptable for a
+// lookback alert.
 func (s *UsageStore) ListSubstitutions(ctx context.Context, since time.Time) ([]SubstitutionRow, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store: usage store not initialized")
@@ -2602,10 +2606,11 @@ func (s *UsageStore) ListSubstitutions(ctx context.Context, since time.Time) ([]
 		FROM %s
 		WHERE requested_at >= $1
 		  AND served_model IS NOT NULL
-		  AND served_model <> ''
-		  AND LOWER(served_model) <> LOWER(model)
+		  AND TRIM(served_model) <> ''
+		  AND LOWER(TRIM(served_model)) <> LOWER(TRIM(model))
 		GROUP BY provider, model, served_model
 		ORDER BY substitution_count DESC
+		LIMIT 50
 	`, s.eventsTable), since)
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: list substitutions: %w", err)

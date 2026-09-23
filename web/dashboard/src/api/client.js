@@ -1133,7 +1133,8 @@ export async function clearAlerts() {
 // Singleton operator settings for the alert sweep.
 // Returns { settings: { enabled, interval_seconds, suppression_minutes,
 // enable_user_budget, enable_api_key_budget, enable_error_rate,
-// enable_provider_cooldown, error_rate_threshold, error_window_minutes } }.
+// enable_provider_cooldown, enable_model_substitution, error_rate_threshold,
+// error_window_minutes } }.
 export async function getAlertSettings() {
   return fetchJSON('/alerts/settings');
 }
