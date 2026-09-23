@@ -37,6 +37,7 @@ type registrationCapability struct {
 	ModelRouter               bool                         `json:"model_router"`
 	UsagePlugin               bool                         `json:"usage_plugin"`
 	RequestInterceptor        bool                         `json:"request_interceptor"`
+	ResponseInterceptor       bool                         `json:"response_interceptor"`
 	ResponseStreamInterceptor bool                         `json:"response_stream_interceptor"`
 	Executor                  bool                         `json:"executor,omitempty"`
 	ExecutorModelScope        pluginapi.ExecutorModelScope `json:"executor_model_scope,omitempty"`
@@ -80,6 +81,14 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		}
 		runtimePlugin.observeRequestContext(req)
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
+	case pluginabi.MethodResponseInterceptAfter:
+		// Observation only: the body reaches the client exactly as the host framed it.
+		var req pluginapi.ResponseInterceptRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, fmt.Errorf("decode response intercept request: %w", errUnmarshal)
+		}
+		runtimePlugin.observeCompleteResponse(req)
+		return okEnvelope(pluginapi.ResponseInterceptResponse{})
 	case pluginabi.MethodResponseInterceptStreamChunk:
 		// Observation only: the chunk reaches the client exactly as the host framed it.
 		var req pluginapi.StreamChunkInterceptRequest
@@ -118,6 +127,7 @@ func pluginRegistration(cfg *compiledConfig) registration {
 		ModelRouter:               true,
 		UsagePlugin:               true,
 		RequestInterceptor:        true,
+		ResponseInterceptor:       true,
 		ResponseStreamInterceptor: true,
 	}
 	if cfg != nil && cfg.UnavailableProvider == unavailableError {

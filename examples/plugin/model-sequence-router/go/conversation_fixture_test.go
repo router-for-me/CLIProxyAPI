@@ -75,6 +75,19 @@ func observeResponse(runtime *runtimeState, req pluginapi.ModelRouteRequest, res
 	})
 }
 
+// observeCompleteReply feeds the non-streamed observation of one route request,
+// binding the named provider response to the conversation that request belongs
+// to. The host delivers the client body and the complete reply in one call.
+func observeCompleteReply(runtime *runtimeState, req pluginapi.ModelRouteRequest, responseID string) {
+	runtime.observeCompleteResponse(pluginapi.ResponseInterceptRequest{
+		SourceFormat:    req.SourceFormat,
+		RequestedModel:  req.RequestedModel,
+		OriginalRequest: req.Body,
+		Metadata:        req.Metadata,
+		Body:            []byte(fmt.Sprintf(`{"object":"response","id":%q}`, responseID)),
+	})
+}
+
 // responsesRoute builds one Responses-format route request for a conversation at the
 // given turn count, naming the credential cache lane the request carries.
 func responsesRoute(t *testing.T, conversation, promptCacheKey string, turns int) pluginapi.ModelRouteRequest {

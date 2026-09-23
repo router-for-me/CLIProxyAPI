@@ -2,6 +2,33 @@ package main
 
 import "testing"
 
+// TestObserveCompleteResponseBindsConversation verifies one non-streamed reply
+// binds to the conversation its originating request belongs to, so a following
+// continuation turn recovers that conversation instead of naming a second one.
+func TestObserveCompleteResponseBindsConversation(t *testing.T) {
+	runtime := newTestRuntime(t)
+	cfg := runtime.loadedConfig()
+	opening := responsesRoute(t, "complete-conv", "", 1)
+	_, identity := runtime.conversationState(identityInput{
+		SourceFormat: opening.SourceFormat,
+		Body:         opening.Body,
+		Metadata:     opening.Metadata,
+	}, cfg)
+	if identity == "" {
+		t.Fatal("the opening request named no conversation")
+	}
+
+	observeCompleteReply(runtime, opening, "resp-complete")
+
+	bound := runtime.chains.lookupResponse(continuationResponseKey{
+		Generation: cfg.Generation,
+		ResponseID: "resp-complete",
+	})
+	if bound != identity {
+		t.Fatalf("bound identity = %q, want %q", bound, identity)
+	}
+}
+
 // TestResponseIDFromChunkReadsEveryFraming verifies the provider response
 // identifier is read from a raw event object, from server-sent event data lines,
 // and from a complete response object, while a chunk naming none reads as absent.

@@ -102,6 +102,31 @@ func TestRouteWalksSequenceAcrossIncrementalContinuation(t *testing.T) {
 	})
 }
 
+// TestRouteWalksSequenceAcrossNonStreamedContinuation verifies that the turns of
+// one non-streaming session walk the configured sequence while the provider holds
+// the transcript and each request carries only its newest items.
+func TestRouteWalksSequenceAcrossNonStreamedContinuation(t *testing.T) {
+	runtime := newTestRuntime(t)
+	logs := captureRouteLogs(runtime)
+	opening := responsesRoute(t, "complete-conv", "", 1)
+	second := opening
+	second.Body = []byte(`{"previous_response_id":"resp-1","input":[{"role":"user","content":"second turn"}]}`)
+	third := opening
+	third.Body = []byte(`{"previous_response_id":"resp-2","input":[{"role":"user","content":"third turn"}]}`)
+
+	runtime.route(opening)
+	observeCompleteReply(runtime, opening, "resp-1")
+	runtime.route(second)
+	observeCompleteReply(runtime, second, "resp-2")
+	runtime.route(third)
+
+	assertRouteRecords(t, logs, []routeRecordExpectation{
+		{outcome: "advanced", sequenceIndex: 0},
+		{outcome: "advanced", sequenceIndex: 1},
+		{outcome: "advanced", sequenceIndex: 2},
+	})
+}
+
 // TestRouteReplaysScalarResponsesInput verifies that scalar and equivalent
 // array input share one observed turn before an extended transcript advances.
 func TestRouteReplaysScalarResponsesInput(t *testing.T) {

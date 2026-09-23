@@ -36,14 +36,41 @@ func (r *runtimeState) observeStreamChunk(req pluginapi.StreamChunkInterceptRequ
 		// Decode once so identity binding and diagnostics observe the same events.
 		payloads := responsePayloads(req.Body)
 		r.observeResponseContext(req, payloads)
-		if responseID := responseIDFromPayloads(payloads); responseID != "" {
-			r.chains.bindResponse(
-				continuationResponseKey{Generation: cfg.Generation, ResponseID: responseID},
-				r.chains.heldRequest(requestKey),
-				cfg.SessionTTL,
-			)
-		}
+		r.bindResponseIdentity(cfg, payloads, r.chains.heldRequest(requestKey))
 	}
+}
+
+// bindResponseIdentity names the conversation one provider response belongs to,
+// reading the identifier from already-decoded payloads.
+func (r *runtimeState) bindResponseIdentity(cfg *compiledConfig, payloads []map[string]any, identity conversationIdentity) {
+	responseID := responseIDFromPayloads(payloads)
+	if responseID == "" {
+		return
+	}
+	r.chains.bindResponse(
+		continuationResponseKey{Generation: cfg.Generation, ResponseID: responseID},
+		identity,
+		cfg.SessionTTL,
+	)
+}
+
+// observeCompleteResponse records which conversation a non-streamed provider
+// response belongs to. The host delivers the client request and the complete
+// reply in one call, so the conversation binds without an intervening hold.
+func (r *runtimeState) observeCompleteResponse(req pluginapi.ResponseInterceptRequest) {
+	cfg := r.loadedConfig()
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+	if cfg.aliasFor(req.RequestedModel) == nil {
+		return
+	}
+	_, identity := r.conversationState(identityInput{
+		SourceFormat: req.SourceFormat,
+		Body:         req.OriginalRequest,
+		Metadata:     req.Metadata,
+	}, cfg)
+	r.bindResponseIdentity(cfg, responsePayloads(req.Body), identity)
 }
 
 // responsePayloads decodes raw JSON objects and server-sent event data lines.
