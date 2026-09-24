@@ -136,6 +136,9 @@ var runInnerLoopFn = RunInnerLoop
 //     or an application-level error) exits with ReasonSuccess or
 //     ReasonNonTransient respectively. The caller distinguishes 2xx from
 //     hard-fail by inspecting Result.Last.Status and Result.Last.Err.
+//   - Overage/spend-cap rejection (error implementing OverageRejected()) is
+//     classified non-transient: it exits immediately after one attempt like
+//     other hard failures, never retried, regardless of the HTTP status.
 //
 // Conductor integration: executeMixedOnce and executeCountMixedOnce build
 // an InnerLoopOpts from routing.retry (innerLoopOptsFromConfig) and enter
@@ -178,6 +181,14 @@ func RunInnerLoop(parent context.Context, opts InnerLoopOpts, attempt AttemptFn)
 
 		if r.FirstByte {
 			res.Reason = ReasonStreamStarted
+			res.Attempts = atomic.LoadInt32(&attempts)
+			return res
+		}
+		// An overage/spend-cap rejection is an account-level cap, not a
+		// throttle: no wait hint applies and it must never be retried
+		// against this credential, even when 429 is in the retryable set.
+		if r.Err != nil && overageRejectedFromError(r.Err) {
+			res.Reason = ReasonNonTransient
 			res.Attempts = atomic.LoadInt32(&attempts)
 			return res
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -174,6 +175,39 @@ type stubCarrier struct{ d *time.Duration }
 
 func (s stubCarrier) Error() string              { return "stub" }
 func (s stubCarrier) RetryAfter() *time.Duration { return s.d }
+
+// TestInnerLoopStopsOnOverageMarked429 pins that an overage/spend-cap
+// rejection surfacing as a 429 (OverageRejected() error) is classified
+// non-transient: it exits after a single attempt with ReasonNonTransient,
+// never retried against the same credential — even though 429 is in the
+// retryable status set.
+func TestInnerLoopStopsOnOverageMarked429(t *testing.T) {
+	fn, counter := sequence(InnerAttemptResult{Status: http.StatusTooManyRequests, Err: overageMarkedTestError{status: http.StatusTooManyRequests}})
+	res := RunInnerLoop(context.Background(), InnerLoopOpts{MaxAttempts: 3, MaxTimeMS: 10000, BackoffMS: 1}, fn)
+	if res.Reason != ReasonNonTransient {
+		t.Fatalf("want non_transient, got %v (attempts=%d, counter=%d)", res.Reason, res.Attempts, *counter)
+	}
+	if res.Attempts != 1 {
+		t.Fatalf("want 1 attempt (no retry on overage-marked 429), got %d (counter=%d)", res.Attempts, *counter)
+	}
+}
+
+// TestInnerLoopStillRetriesPlainThrottle429 is the regression guard / opposite:
+// an ordinary 429 without the overage marker must still be retried exactly as
+// before, then succeed on the second attempt.
+func TestInnerLoopStillRetriesPlainThrottle429(t *testing.T) {
+	fn, counter := sequence(
+		InnerAttemptResult{Status: http.StatusTooManyRequests},
+		InnerAttemptResult{Status: 200},
+	)
+	res := RunInnerLoop(context.Background(), InnerLoopOpts{MaxAttempts: 3, MaxTimeMS: 10000, BackoffMS: 1}, fn)
+	if res.Reason != ReasonSuccess {
+		t.Fatalf("want success after 1 retry, got %v (attempts=%d, counter=%d)", res.Reason, res.Attempts, *counter)
+	}
+	if res.Attempts != 2 {
+		t.Fatalf("want 2 attempts, got %d (counter=%d)", res.Attempts, *counter)
+	}
+}
 
 func TestExtractRetryAfterWithCarrier(t *testing.T) {
 	d := 7 * time.Second
