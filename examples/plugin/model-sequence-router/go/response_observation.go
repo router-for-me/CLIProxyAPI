@@ -33,9 +33,10 @@ func (r *runtimeState) observeStreamChunk(req pluginapi.StreamChunkInterceptRequ
 		}, cfg)
 		r.chains.holdRequest(requestKey, identity, cfg.SessionTTL)
 	} else {
-		// Decode once so identity binding and diagnostics observe the same events.
+		// Decode once so provenance, identity binding, and diagnostics observe the same events.
 		payloads := responsePayloads(req.Body)
 		r.observeResponseContext(cfg, req, payloads)
+		r.recordReasoningOwners(cfg, req, payloads)
 		r.bindResponseIdentity(cfg, payloads, r.chains.heldRequest(requestKey))
 	}
 }
@@ -109,4 +110,30 @@ func responseIDFromRoot(root map[string]any) string {
 		identifier, _ = root["id"].(string)
 	}
 	return strings.TrimSpace(identifier)
+}
+
+// finishedOutputItems reads the output items one response event has finished. A
+// finished item event carries the single item it completed, and a completed
+// response carries its whole output array.
+func finishedOutputItems(payload map[string]any) []any {
+	var items []any
+	switch stringJSONValue(payload["type"]) {
+	case "response.output_item.done":
+		item, isObject := payload["item"].(map[string]any)
+		if !isObject {
+			// an event framing no item object finished no output item
+			break
+		}
+		items = []any{item}
+	case "response.completed":
+		response, isObject := payload["response"].(map[string]any)
+		if !isObject {
+			// an event framing no response object finished no output item
+			break
+		}
+		items, _ = response["output"].([]any)
+	default:
+		// every other event names no finished output item
+	}
+	return items
 }

@@ -323,6 +323,19 @@ At startup or successful reconfiguration, the info log `model-sequence-router: c
 
 For the four-slot example above, filter for `model-sequence-router: selected target`. With the default `random_start: true`, a conversation begins at any one index and then follows cyclic order—for example, `2, 3, 0, 1, 2`. Set `random_start: false` when testing if you want the exact trace `0, 1, 2, 3, 0`. Host logs carry a supplementary subset of these fields; the JSONL diagnostic file is the authoritative record.
 
+### Reasoning provenance projection
+
+A provider rejects reasoning items that another provider produced. When a conversation rotates to a new target, the replayed history carries the previous target's reasoning, so the plugin removes those items from each outgoing request.
+
+A **lane** is one provider plus one canonical base model. Two models from the same provider are separate lanes.
+
+- **Recording:** the plugin stores each reasoning item's `id` with the lane that produced it. It reads items from `response.output_item.done` events and from completed-response output arrays. Only the `id` is compared; signatures and encrypted content are never read.
+- **Removal:** after credential selection, the plugin removes every reasoning item not recorded for the target lane from the `messages`, `input`, or `contents` array. All other items stay in place and in order.
+- **Unrecorded items** are removed. That costs at most one cache miss, while sending a foreign item fails the turn. Items without an `id` are kept.
+- **Pass-through:** the request is sent unchanged when its model does not resolve to exactly one lane, or when nothing is removed. If removal fails, the plugin returns an error, which the host logs before sending the request unchanged.
+- **Cache stability:** the result depends only on the history and the lane, so each lane's view only grows at the end and its cached prefix stays valid.
+- **Lifetime:** records live in memory, scoped to the configuration generation. Every projection that consults a record, whether it withholds or keeps the item, extends that record by `session_ttl`, so a record expires only after `session_ttl` passes without a lookup. An expired record counts as unrecorded.
+
 ### Replay context diagnostics in the journal
 
 These records are off by default. `diagnostics.context: true` opens them, and that field needs neither `diagnostics.enabled` nor a path:
@@ -339,10 +352,11 @@ With host debug logging enabled and that field set, the plugin emits `model-sequ
 - `request_id` joins request and response records; the request record's `trace_id` connects them to the host's request-prefixed error logs.
 - `response_hash` and `previous_response_hash` connect successive turns without exposing response identifiers; `id_hash` connects one reasoning item across event stages and replay input.
 - `input` and `output` report total item count and reasoning-item positions, field names and types, and bounded `status` labels; an empty reasoning list explicitly reports that no reasoning item was observed in that collection.
+- `request_context` adds `target_lane` and the counts `reasoning_dropped` and `reasoning_retained`; `response_context` adds `owner_lane`. An unresolved lane is empty.
 
 Compare a completed response's reasoning fields with the next request's replay fields using their hashes. For example, a `status` field present in both records identifies a field retained across replay; it does not establish what the later provider adapter sends on the wire. An added-item record is not a substitute for a completed-output record.
 
-The hooks return no request or response modifications. They do not log text, summaries, encrypted content, credentials, or raw item and response identifiers. Unrecognized status values are reported as `other` rather than printed. Diagnostics expose payload compatibility evidence; they do not repair rejected inputs.
+The response hooks never modify payloads. The after-credential request hook returns a new body only when it removes a reasoning item. They do not log text, summaries, encrypted content, credentials, or raw item and response identifiers. Unrecognized status values are reported as `other` rather than printed. Diagnostics only report payload compatibility; the reasoning removal above is the only request change.
 
 ### Cache diagnostics and inspection
 
@@ -377,7 +391,7 @@ Fingerprints, session identifiers, callback identifiers, and credential identifi
 
 The plugin selects the provider and model from YAML before credential affinity runs. The affinity selector receives that selected provider and model and can choose only a credential within the selected target; it cannot replace or pin the provider. Its key includes provider, affinity identity, and canonical base model, so repeated sequence positions using the same provider and base model retain one provider-local credential lane while different providers and models remain separate.
 
-The plugin preserves the client body, prompt-cache keys, headers, system prompts, and message order. Prompt-cache keys remain downstream credential-affinity inputs and never enter the router cursor. Codex and Claude maintain independent upstream caches; switching providers does not share cache contents. Cache TTLs, prefix rules, and read/write costs remain controlled by each upstream. With affinity disabled and multiple credentials configured, additional cache warmups are expected.
+The plugin preserves the client body, prompt-cache keys, headers, system prompts, and message order; it removes only reasoning items another lane produced. Prompt-cache keys remain downstream credential-affinity inputs and never enter the router cursor. Codex and Claude maintain independent upstream caches; switching providers does not share cache contents. Cache TTLs, prefix rules, and read/write costs remain controlled by each upstream. With affinity disabled and multiple credentials configured, additional cache warmups are expected.
 
 ## v1 boundaries
 

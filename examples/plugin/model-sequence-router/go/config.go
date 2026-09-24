@@ -120,6 +120,32 @@ func (c *compiledConfig) probeLimit(sequence []compiledTarget) int {
 	return limit
 }
 
+// laneFor resolves the provider and canonical base model one request targets.
+// A model no configured position names, and a model two providers serve inside
+// one alias, both answer with no lane, so a degenerate sequence attributes no
+// reasoning.
+func (c *compiledConfig) laneFor(requestedModel, resolvedModel string) (reasoningLane, bool) {
+	alias := c.aliasFor(requestedModel)
+	if alias == nil {
+		return reasoningLane{}, false
+	}
+	base, _, _ := parseSupportedEffortSuffix(strings.TrimSpace(resolvedModel))
+	provider := ""
+	distinct := 0
+	for _, target := range alias.Sequence {
+		targetBase, _, _ := parseSupportedEffortSuffix(target.Model)
+		if targetBase != base || target.Provider == provider {
+			continue
+		}
+		provider = target.Provider
+		distinct++
+	}
+	if distinct != 1 {
+		return reasoningLane{}, false
+	}
+	return reasoningLane{Provider: provider, Model: base}, true
+}
+
 type compiledAlias struct {
 	Alias       string
 	LookupKey   string

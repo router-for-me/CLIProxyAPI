@@ -19,9 +19,19 @@ type continuationResponseKey struct {
 	ResponseID string
 }
 
+// expiringEntry is one generation-scoped record that answers when it lapses.
+type expiringEntry interface {
+	expiry() time.Time
+}
+
 type continuationEntry struct {
 	Identity  conversationIdentity
 	ExpiresAt time.Time
+}
+
+// expiry reports when this conversation binding lapses.
+func (e continuationEntry) expiry() time.Time {
+	return e.ExpiresAt
 }
 
 // continuationChainStore remembers which conversation each provider response
@@ -123,16 +133,23 @@ func (s *continuationChainStore) reset() {
 // liveIdentity returns the identity of an entry that has not expired. A missing
 // entry reads as expired, so an absent key and a stale key answer alike.
 func liveIdentity(entry continuationEntry, now time.Time) conversationIdentity {
-	if !entry.ExpiresAt.After(now) {
+	if !entryLive(entry, now) {
 		return ""
 	}
 	return entry.Identity
 }
 
+// entryLive reports whether one stored record still stands at the given moment.
+// A zero-valued record reads as lapsed, so an absent key and a stale key answer
+// alike wherever a store reads one.
+func entryLive(entry expiringEntry, now time.Time) bool {
+	return entry.expiry().After(now)
+}
+
 // expireEntries removes every entry whose expiry has passed.
-func expireEntries[K comparable](entries map[K]continuationEntry, now time.Time) {
+func expireEntries[K comparable, V expiringEntry](entries map[K]V, now time.Time) {
 	for key, entry := range entries {
-		if !entry.ExpiresAt.After(now) {
+		if !entryLive(entry, now) {
 			delete(entries, key)
 		}
 	}

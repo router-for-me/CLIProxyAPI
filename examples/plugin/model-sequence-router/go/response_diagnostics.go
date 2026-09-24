@@ -21,10 +21,10 @@ type reasoningCollectionShape struct {
 	Reasoning []reasoningItemShape `json:"reasoning"`
 }
 
-// observeRequestContext reports the replay input before provider translation.
-// The after-credential hook runs even when an upstream rejects the request
-// before a response stream exists.
-func (r *runtimeState) observeRequestContext(req pluginapi.RequestInterceptRequest) {
+// observeRequestContext reports the replay input before provider translation
+// beside the projection the outgoing request received. The after-credential hook
+// runs even when an upstream rejects the request before a response stream exists.
+func (r *runtimeState) observeRequestContext(req pluginapi.RequestInterceptRequest, projection laneProjection) {
 	cfg := r.loadedConfig()
 	if cfg == nil || !cfg.Enabled || !cfg.Diagnostics.Context || cfg.aliasFor(req.RequestedModel) == nil || req.ToFormat == "" {
 		return
@@ -34,7 +34,8 @@ func (r *runtimeState) observeRequestContext(req pluginapi.RequestInterceptReque
 		"request_id": req.RequestID, "trace_id": req.TraceID,
 		"alias": req.RequestedModel, "model": req.Model,
 		"source_format": req.SourceFormat, "target_format": req.ToFormat,
-		"stage": "before_provider_translation",
+		"stage": "before_provider_translation", "target_lane": projection.Lane.String(),
+		"reasoning_dropped": projection.Dropped, "reasoning_retained": projection.Retained,
 	}
 	var root map[string]any
 	if errDecode := json.Unmarshal(req.Body, &root); errDecode != nil {
@@ -53,6 +54,7 @@ func (r *runtimeState) observeResponseContext(cfg *compiledConfig, req pluginapi
 	if cfg == nil || !cfg.Diagnostics.Context {
 		return
 	}
+	ownerLane, _ := cfg.laneFor(req.RequestedModel, req.Model)
 	for _, payload := range payloads {
 		event := stringJSONValue(payload["type"])
 		if event != "response.output_item.added" && event != "response.output_item.done" && event != "response.completed" && event != "response.done" {
@@ -62,6 +64,7 @@ func (r *runtimeState) observeResponseContext(cfg *compiledConfig, req pluginapi
 			"event": "response_context", "version": pluginVersion,
 			"request_id": req.RequestID, "alias": req.RequestedModel,
 			"model": req.Model, "stage": event, "chunk_index": req.ChunkIndex,
+			"owner_lane": ownerLane.String(),
 		}
 		if event == "response.output_item.added" || event == "response.output_item.done" {
 			item, ok := payload["item"].(map[string]any)

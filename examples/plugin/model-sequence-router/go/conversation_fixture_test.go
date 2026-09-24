@@ -37,6 +37,15 @@ func conversationTurns(conversation string, turns int) []conversationMessage {
 	return messages
 }
 
+// installTestPlugin points the exported plugin methods at one runtime and
+// restores the prior runtime when the test ends.
+func installTestPlugin(t *testing.T, runtime *runtimeState) {
+	t.Helper()
+	previous := runtimePlugin
+	runtimePlugin = runtime
+	t.Cleanup(func() { runtimePlugin = previous })
+}
+
 // marshalBody renders one request body.
 func marshalBody(t *testing.T, body any) []byte {
 	t.Helper()

@@ -74,13 +74,24 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			return nil, fmt.Errorf("decode model route request: %w", errUnmarshal)
 		}
 		return okEnvelope(runtimePlugin.routeWithCallback(req.ModelRouteRequest, req.HostCallbackID))
-	case pluginabi.MethodRequestInterceptBefore, pluginabi.MethodRequestInterceptAfter:
+	case pluginabi.MethodRequestInterceptBefore:
+		// Observation only: credential selection has not yet named a target lane.
 		var req pluginapi.RequestInterceptRequest
 		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 			return nil, fmt.Errorf("decode request intercept request: %w", errUnmarshal)
 		}
-		runtimePlugin.observeRequestContext(req)
+		runtimePlugin.observeRequestContext(req, laneProjection{})
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
+	case pluginabi.MethodRequestInterceptAfter:
+		var req pluginapi.RequestInterceptRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, fmt.Errorf("decode request intercept request: %w", errUnmarshal)
+		}
+		projection, errIntercept := runtimePlugin.interceptRequestAfter(req)
+		if errIntercept != nil {
+			return nil, fmt.Errorf("project request lane: %w", errIntercept)
+		}
+		return okEnvelope(projection)
 	case pluginabi.MethodResponseInterceptAfter:
 		// Observation only: the body reaches the client exactly as the host framed it.
 		var req pluginapi.ResponseInterceptRequest

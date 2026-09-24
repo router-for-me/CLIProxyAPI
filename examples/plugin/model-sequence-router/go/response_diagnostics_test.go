@@ -55,13 +55,12 @@ func newContextDiagnosticPayloads(t *testing.T) contextDiagnosticPayloads {
 	return contextDiagnosticPayloads{Item: item, Request: request, Added: added, Done: done, Completed: completed}
 }
 
-// TestContextDiagnosticRPCObservesWithoutRewriting exercises the public methods
-// and verifies journal-visible structure without exposing payload content.
-func TestContextDiagnosticRPCObservesWithoutRewriting(t *testing.T) {
+// TestContextDiagnosticRPCRedactsContentAndProjectsLane exercises the public
+// methods and verifies journal-visible structure without exposing payload
+// content, and that the lane projection alone rewrites the outgoing request.
+func TestContextDiagnosticRPCRedactsContentAndProjectsLane(t *testing.T) {
 	runtime := newTestRuntime(t)
-	previous := runtimePlugin
-	runtimePlugin = runtime
-	t.Cleanup(func() { runtimePlugin = previous })
+	installTestPlugin(t, runtime)
 	if !pluginRegistration(runtime.loadedConfig()).Capabilities.RequestInterceptor {
 		t.Fatal("request observation capability is not published")
 	}
@@ -76,15 +75,16 @@ func TestContextDiagnosticRPCObservesWithoutRewriting(t *testing.T) {
 	unrelated.RequestedModel = "unrelated-model"
 
 	cases := []struct {
-		name          string
-		method        string
-		request       any
-		collectionKey string
-		stage         string
+		name           string
+		method         string
+		request        any
+		collectionKey  string
+		stage          string
+		wantProjection bool
 	}{
 		{name: "before credentials", method: pluginabi.MethodRequestInterceptBefore, request: before},
 		{name: "unrelated model", method: pluginabi.MethodRequestInterceptAfter, request: unrelated},
-		{name: "replay input", method: pluginabi.MethodRequestInterceptAfter, request: payloads.Request, collectionKey: "input", stage: "before_provider_translation"},
+		{name: "replay input", method: pluginabi.MethodRequestInterceptAfter, request: payloads.Request, collectionKey: "input", stage: "before_provider_translation", wantProjection: true},
 		{name: "initial item", method: pluginabi.MethodResponseInterceptStreamChunk, request: payloads.Added, collectionKey: "output", stage: "response.output_item.added"},
 		{name: "finished item", method: pluginabi.MethodResponseInterceptStreamChunk, request: payloads.Done, collectionKey: "output", stage: "response.output_item.done"},
 		{name: "completed output", method: pluginabi.MethodResponseInterceptStreamChunk, request: payloads.Completed, collectionKey: "output", stage: "response.completed"},
@@ -116,9 +116,19 @@ func TestContextDiagnosticRPCObservesWithoutRewriting(t *testing.T) {
 				t.Fatal(errDecode)
 			}
 			for name, value := range modifications {
+				if name == "Body" {
+					continue
+				}
 				if value != nil && !reflect.ValueOf(value).IsZero() {
 					t.Fatalf("interceptor returned a modification for %s: %#v", name, value)
 				}
+			}
+			var projection pluginapi.RequestInterceptResponse
+			if errDecode := json.Unmarshal(reply.Result, &projection); errDecode != nil {
+				t.Fatal(errDecode)
+			}
+			if (len(projection.Body) != 0) != testCase.wantProjection {
+				t.Fatalf("lane projection rewrote %d body bytes, want a projection = %v", len(projection.Body), testCase.wantProjection)
 			}
 			if testCase.collectionKey == "" {
 				if len(*logs) != 0 {
@@ -175,9 +185,7 @@ aliases:
 	}
 	runtime := newRuntimeState(func() time.Time { return time.Unix(100, 0) })
 	runtime.config.Store(cfg)
-	previous := runtimePlugin
-	runtimePlugin = runtime
-	t.Cleanup(func() { runtimePlugin = previous })
+	installTestPlugin(t, runtime)
 	logs := captureRouteLogs(runtime)
 	payloads := newContextDiagnosticPayloads(t)
 

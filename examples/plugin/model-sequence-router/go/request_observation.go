@@ -9,7 +9,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
+
+// historyFieldKeys orders the request fields that carry conversation history.
+var historyFieldKeys = []string{"messages", "input", "contents"}
 
 type requestObservation struct {
 	SystemFingerprint  string
@@ -46,7 +51,7 @@ func inspectRequest(body []byte, salt []byte) requestObservation {
 	if tools, ok := root["tools"]; ok {
 		observation.ToolsFingerprint = fingerprintJSON(tools, salt)
 	}
-	history := firstHistory(root, "messages", "input", "contents")
+	history := firstHistory(root, historyFieldKeys...)
 	if len(history) > 0 {
 		observation.HistoryItems = make([]string, 0, len(history))
 		for _, item := range history {
@@ -107,6 +112,18 @@ func firstHistory(root map[string]any, keys ...string) []any {
 		}
 	}
 	return nil
+}
+
+// historyFieldName reports which history field one body carries as an array.
+// Only an array addresses its elements individually, so a shorthand encoding
+// names no rewritable field.
+func historyFieldName(body []byte) (string, bool) {
+	for _, key := range historyFieldKeys {
+		if gjson.GetBytes(body, key).IsArray() {
+			return key, true
+		}
+	}
+	return "", false
 }
 
 // hasOpaqueContinuation reports whether the request continues a conversation
