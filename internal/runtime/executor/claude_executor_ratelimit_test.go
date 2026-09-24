@@ -117,6 +117,41 @@ func TestClaudeCountTokensUpstreamErrorCarriesRetryAfterHint(t *testing.T) {
 	}
 }
 
+// The count-tokens decode-failure site wraps its statusErr before the body is
+// ever read; a 429 whose body cannot be decoded must still carry the upstream
+// Retry-After hint. Corrupt gzip bytes force the decode failure.
+func TestClaudeCountTokensDecodeFailureErrorCarriesRetryAfterHint(t *testing.T) {
+	corruptGzip := []byte{0x1f, 0x8b, 0x00, 0x00}
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Retry-After": []string{"14"}, "Content-Encoding": []string{"gzip"}, "Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(corruptGzip)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-api03-count-tokens-decode-failure"}}
+	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	_, err := NewClaudeExecutor(&config.Config{}).countTokensUpstream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err == nil {
+		t.Fatal("countTokensUpstream() error = nil, want the decode failure 429")
+	}
+	if got, want := err.Error(), "failed to decode error response body"; !strings.Contains(got, want) {
+		t.Fatalf("error = %s, want the decode-failure sentinel %q", got, want)
+	}
+	var status interface{ RetryAfter() *time.Duration }
+	if !errors.As(err, &status) {
+		t.Fatalf("countTokensUpstream() error = %T, want an error with RetryAfter()", err)
+	}
+	if got := status.RetryAfter(); got == nil || *got != 14*time.Second {
+		t.Fatalf("RetryAfter() = %v, want 14s from the upstream header", got)
+	}
+}
+
 // The execute and stream decode-failure sites wrap a raw statusErr when the
 // error body itself cannot be decoded; the upstream *http.Response is in scope
 // there, so a Retry-After hint on such a 429 must survive on the returned
