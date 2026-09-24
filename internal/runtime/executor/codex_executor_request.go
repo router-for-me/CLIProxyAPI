@@ -173,7 +173,19 @@ func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, 
 	if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-turn-metadata", applyCodexTurnMetadataIdentityConfuse(turnMetadata, &state))
 	}
+	if turnID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.turn_id").String()); turnID != "" {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.turn_id", state.confuseTurnID(turnID))
+	}
+	if rootTurnID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.root_turn_id").String()); rootTurnID != "" {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.root_turn_id", state.confuseTurnID(rootTurnID))
+	}
 	if state.promptCacheKey != "" {
+		if sessionID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.session_id").String()); sessionID != "" {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.session_id", state.promptCacheKey)
+		}
+		if threadID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.thread_id").String()); threadID != "" {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.thread_id", state.promptCacheKey)
+		}
 		if windowID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-window-id").String()); windowID != "" {
 			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-window-id", state.promptCacheKey+":0")
 		}
@@ -300,8 +312,8 @@ func applyModelHeaderOverrides(headers http.Header, modelName string) {
 	for key, value := range overrides {
 		headers.Set(key, value)
 	}
-	if strings.Contains(headers.Get("User-Agent"), "Mac OS") && codexSessionHeaderValue(headers) == "" {
-		headers.Set("Session_id", uuid.NewString())
+	if helps.IsFirstPartyCodexIdentity(headers.Get("User-Agent"), headers.Get("Originator")) && codexSessionHeaderValue(headers) == "" {
+		headers.Set("Session-Id", uuid.NewString())
 	}
 }
 
@@ -340,14 +352,17 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Openai-Internal-Codex-Responses-Lite", "")
 
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	if nativeUserAgent := helps.NativeCodexUserAgent(cfg, ginHeaders); nativeUserAgent != "" {
+		r.Header.Set("User-Agent", nativeUserAgent)
+	} else {
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	}
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 	} else {
 		r.Header.Set("Accept", "application/json")
 	}
-	r.Header.Set("Connection", "Keep-Alive")
 
 	isAPIKey := codexAuthUsesAPIKey(auth)
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
@@ -439,8 +454,14 @@ func isCodexCloakingDisabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
 	return false
 }
 
+// applyCodexCloakingHeaders forces the built-in Codex identity headers as a fallback.
+// When identity preservation is enabled and the request already presents a coherent first-party
+// Codex identity, both User-Agent and Originator are left untouched; anything else is cloaked.
 func applyCodexCloakingHeaders(headers http.Header, cfg *config.Config, auth *cliproxyauth.Auth) {
 	if headers == nil || cfg == nil || isCodexCloakingDisabled(cfg, auth) {
+		return
+	}
+	if helps.PreserveNativeCodexIdentity(cfg) && helps.IsFirstPartyCodexIdentity(headers.Get("User-Agent"), headers.Get("Originator")) {
 		return
 	}
 	headers.Set("User-Agent", codexUserAgent)

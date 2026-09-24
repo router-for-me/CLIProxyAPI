@@ -4,7 +4,45 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestParseConfigBytes_CodexRuntimeDefaults(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`{}`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if !cfg.Codex.StreamBootstrapBuffering {
+		t.Fatal("default StreamBootstrapBuffering = false, want true")
+	}
+	if got := cfg.Codex.StreamBootstrapTimeoutDuration(); got != 30*time.Second {
+		t.Fatalf("default StreamBootstrapTimeoutDuration() = %v, want 30s", got)
+	}
+	if got := cfg.DisableImageGeneration; got != DisableImageGenerationPassthrough {
+		t.Fatalf("default DisableImageGeneration = %v, want passthrough", got)
+	}
+}
+
+func TestParseConfigBytes_CodexRuntimeDefaultsCanBeOverridden(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`
+disable-image-generation: false
+codex:
+  stream-bootstrap-buffering: false
+  stream-bootstrap-timeout: "0"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if cfg.Codex.StreamBootstrapBuffering {
+		t.Fatal("StreamBootstrapBuffering = true, want explicit false")
+	}
+	if got := cfg.Codex.StreamBootstrapTimeoutDuration(); got != 0 {
+		t.Fatalf("StreamBootstrapTimeoutDuration() = %v, want 0", got)
+	}
+	if got := cfg.DisableImageGeneration; got != DisableImageGenerationOff {
+		t.Fatalf("DisableImageGeneration = %v, want false", got)
+	}
+}
 
 func TestLoadConfigOptional_CodexHeaderDefaults(t *testing.T) {
 	dir := t.TempDir()

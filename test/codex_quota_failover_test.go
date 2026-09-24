@@ -205,7 +205,7 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 			defer server.Close()
 			manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
 			manager.SetRetryConfig(0, 0, 0)
-			cfg, errParse := config.ParseConfigBytes([]byte("codex:\n  model-level-cooling: true\n"))
+			cfg, errParse := config.ParseConfigBytes([]byte("codex:\n  model-level-cooling: true\n  stream-bootstrap-buffering: false\n"))
 			if errParse != nil {
 				t.Fatalf("parse config: %v", errParse)
 			}

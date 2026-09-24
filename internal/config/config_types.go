@@ -183,6 +183,12 @@ type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
+	// PreserveNativeClientIdentity keeps the downstream User-Agent and Originator untouched when the
+	// request already presents a coherent first-party Codex identity, instead of overwriting both with
+	// the built-in Codex identity. Every other request is still cloaked as before. Ignored when
+	// DisableCodexCloaking is true, because that flag already skips cloaking entirely.
+	// Default is true; a nil pointer means enabled.
+	PreserveNativeClientIdentity *bool `yaml:"preserve-native-client-identity,omitempty" json:"preserve-native-client-identity,omitempty"`
 	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
 	// which the client has seen anything from - the handshake (response.created, response.in_progress,
 	// the websocket metadata frames), keepalive heartbeats, and the *.added announcements of an item
@@ -200,11 +206,11 @@ type CodexConfig struct {
 	// reasoning phase instead of ending at the first keepalive: a clean end with no terminal event
 	// is request-scoped on SSE and stops there, while a websocket close or a transport error on
 	// either transport is not, so the request may be retried on another credential.
-	// Default is false.
+	// Default is true.
 	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
 	// StreamBootstrapTimeout specifies an optional maximum duration to hold back uncommitted response
 	// headers during bootstrap buffering before releasing the stream to the client.
-	// Defaults to "0" (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
+	// Config loaders default this to 30 seconds. A zero-value CodexConfig remains unlimited.
 	// When set (e.g. "20s"), the stream is released once the time ceiling is reached, avoiding
 	// reverse-proxy timeouts (e.g. Nginx 60s proxy_read_timeout).
 	StreamBootstrapTimeout string `yaml:"stream-bootstrap-timeout,omitempty" json:"stream-bootstrap-timeout,omitempty"`
@@ -223,13 +229,13 @@ type CodexConfig struct {
 }
 
 // DefaultCodexStreamBootstrapTimeout is the default maximum duration to buffer bootstrap events.
-// By default, it is 0 (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
+// A loaded runtime config initializes the field to 30 seconds before reaching this fallback.
 const DefaultCodexStreamBootstrapTimeout = 0
 
 const maxBootstrapTimeoutSeconds = int64(math.MaxInt64 / time.Second)
 
 // StreamBootstrapTimeoutDuration returns the maximum duration to buffer bootstrap events.
-// Defaults to 0 (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
+// Defaults to 0 for a zero-value CodexConfig; loaded runtime configs initialize the field to 30 seconds.
 // If explicitly set to a positive duration (e.g. "10s", "500ms", "15"), returns that duration.
 // If set to "0", "0s", "none", "unlimited", "disabled", "off", "never", or invalid strings, returns 0.
 func (c *CodexConfig) StreamBootstrapTimeoutDuration() time.Duration {

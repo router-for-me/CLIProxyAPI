@@ -143,6 +143,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Codex.DisableCodexCloaking != newCfg.Codex.DisableCodexCloaking {
 		changes = append(changes, fmt.Sprintf("codex.disable-codex-cloaking: %t -> %t", oldCfg.Codex.DisableCodexCloaking, newCfg.Codex.DisableCodexCloaking))
 	}
+	if boolPtrValue(oldCfg.Codex.PreserveNativeClientIdentity, true) != boolPtrValue(newCfg.Codex.PreserveNativeClientIdentity, true) {
+		changes = append(changes, fmt.Sprintf("codex.preserve-native-client-identity: %t -> %t", boolPtrValue(oldCfg.Codex.PreserveNativeClientIdentity, true), boolPtrValue(newCfg.Codex.PreserveNativeClientIdentity, true)))
+	}
 	if oldCfg.Codex.StreamBootstrapBuffering != newCfg.Codex.StreamBootstrapBuffering {
 		changes = append(changes, fmt.Sprintf("codex.stream-bootstrap-buffering: %t -> %t", oldCfg.Codex.StreamBootstrapBuffering, newCfg.Codex.StreamBootstrapBuffering))
 	}
@@ -660,4 +663,12 @@ func formatURL(raw string) string {
 		return host
 	}
 	return scheme + "://" + host
+}
+
+// boolPtrValue dereferences an optional bool, falling back to def when unset.
+func boolPtrValue(v *bool, def bool) bool {
+	if v == nil {
+		return def
+	}
+	return *v
 }
