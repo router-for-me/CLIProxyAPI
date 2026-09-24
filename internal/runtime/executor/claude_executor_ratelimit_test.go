@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -113,5 +114,54 @@ func TestClaudeCountTokensUpstreamErrorCarriesRetryAfterHint(t *testing.T) {
 	}
 	if got := status.RetryAfter(); got == nil || *got != 12*time.Second {
 		t.Fatalf("RetryAfter() = %v, want 12s from the upstream header", got)
+	}
+}
+
+// The execute and stream decode-failure sites wrap a raw statusErr when the
+// error body itself cannot be decoded; the upstream *http.Response is in scope
+// there, so a Retry-After hint on such a 429 must survive on the returned
+// error. Corrupt gzip bytes force the decode failure.
+func TestClaudeExecuteDecodeFailureErrorCarriesRetryAfterHint(t *testing.T) {
+	corruptGzip := []byte{0x1f, 0x8b, 0x00, 0x00}
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Retry-After": []string{"20"}, "Content-Encoding": []string{"gzip"}, "Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(corruptGzip)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	auth := &cliproxyauth.Auth{
+		ID:         "decode-failure-retry-after",
+		Attributes: map[string]string{"api_key": "sk-ant-oat-decode-failure-retry-after"},
+		Metadata:   map[string]any{"account_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+	}
+	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	req := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+
+	executor := NewClaudeExecutor(&config.Config{})
+	_, errExecute := executor.Execute(ctx, auth, req, opts)
+	if errExecute == nil {
+		t.Fatal("Execute() error = nil, want the decode failure 429")
+	}
+	var status interface{ RetryAfter() *time.Duration }
+	if !errors.As(errExecute, &status) {
+		t.Fatalf("Execute() error = %T, want an error with RetryAfter()", errExecute)
+	}
+	if got := status.RetryAfter(); got == nil || *got != 20*time.Second {
+		t.Fatalf("Execute() RetryAfter() = %v, want 20s from the upstream header", got)
+	}
+
+	_, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+	if errStream == nil {
+		t.Fatal("ExecuteStream() error = nil, want the decode failure 429")
+	}
+	if !errors.As(errStream, &status) {
+		t.Fatalf("ExecuteStream() error = %T, want an error with RetryAfter()", errStream)
+	}
+	if got := status.RetryAfter(); got == nil || *got != 20*time.Second {
+		t.Fatalf("ExecuteStream() RetryAfter() = %v, want 20s from the upstream header", got)
 	}
 }
