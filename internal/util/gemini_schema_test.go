@@ -1288,3 +1288,26 @@ func TestCleanJSONSchemaKeepsPropertiesNamedLikeKeywords(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanJSONSchemaHandlesBooleanSubschemas(t *testing.T) {
+	// Boolean true — accept everything
+	resultTrue := CleanJSONSchemaForAntigravity(`true`)
+	if resultTrue != "true" {
+		t.Errorf("true subschema: got %q, want %q", resultTrue, "true")
+	}
+
+	// Boolean false — reject everything
+	resultFalse := CleanJSONSchemaForAntigravity(`false`)
+	if resultFalse != "false" {
+		t.Errorf("false subschema: got %q, want %q", resultFalse, "false")
+	}
+
+	// Boolean subschema nested in anyOf — must not crash or produce invalid JSON.
+	// The anyOf may or may not be flattened depending on other transforms; the
+	// critical requirement is no panic and valid output.
+	nested := `{"type":"object","properties":{"items":{"anyOf":[{"type":"string"},true]}}}`
+	resultNested := CleanJSONSchemaForAntigravity(nested)
+	if !gjson.Valid(resultNested) {
+		t.Fatalf("invalid JSON after boolean subschema in anyOf: %s", resultNested)
+	}
+}

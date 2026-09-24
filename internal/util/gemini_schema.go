@@ -60,6 +60,13 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
 func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
+	// Phase 0: Handle boolean subschemas (JSON Schema true/false literals).
+	// A bare boolean is a complete schema: true = accept everything, false = reject everything.
+	// No cleaning is needed — return directly to avoid gjson/sjson parse errors.
+	trimmed := strings.TrimSpace(jsonStr)
+	if trimmed == "true" || trimmed == "false" {
+		return jsonStr
+	}
 	// Phase 1: Convert and add hints
 	jsonStr = convertRefsToHints(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
