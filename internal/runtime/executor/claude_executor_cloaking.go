@@ -299,7 +299,7 @@ const claudeCodeFableReportingOutcomes = `# Reporting outcomes
 Report what actually happened, not what you intended. When you say something is done, sent, saved, fixed, or verified, that claim must rest on a result you observed in this session — tool output, the file as it now reads, the page as it now loads — not on what the step should have produced. If you did not check, say you did not check. If any step failed, was skipped, or came back different from what you expected, say so in the first sentence of your report, before anything else, even when the rest of the work succeeded. Never quietly work around a failure in a way that makes it look resolved; a problem the user can see is recoverable, one your summary hides is not. When you stop before the task is complete, your first line says so plainly and names what is left. Do not describe partial work as done, and do not let a summary read as more certain than the evidence behind it.`
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.258", "cli", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.280", "cli", "")
 }
 
 // checkSystemInstructionsWithSigningMode keeps the top-level system in Claude
@@ -694,7 +694,7 @@ func claudeCallerSystemReminder(text string) string {
 }
 
 // claudeHistoryHasAdvisorCallOrResult reports whether messages contains an advisor
-// tool invocation (server_tool_use / tool_use) or advisor result (advisor_tool_result /
+// tool invocation (server_tool_use) or advisor result (advisor_tool_result /
 // advisor_redacted_result). Anthropic cryptographically binds the encrypted
 // advisor result to the conversation layout; any mid-conversation system splice
 // shifts message indices and causes upstream 400 errors.
@@ -711,7 +711,7 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 				switch blockType {
 				case "advisor_tool_result", "advisor_redacted_result":
 					return true
-				case "server_tool_use", "tool_use":
+				case "server_tool_use":
 					if block.Get("name").String() == "advisor" {
 						return true
 					}

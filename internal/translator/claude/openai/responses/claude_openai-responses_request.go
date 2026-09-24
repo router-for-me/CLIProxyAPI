@@ -130,6 +130,9 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	// (mid-conversation role=system messages, or system reminders on legacy
 	// models), so this layer must not merge, trim or downgrade them to user text.
 	messageCapacity := root.Get("input.#").Int()
+	if messageCapacity == 0 && root.Get("input").Type == gjson.String {
+		messageCapacity = 1
+	}
 	messageBlocks := common.NewRawArrayItems(messageCapacity)
 	systemBlocks := make([][]byte, 0, 4)
 	appendSystemText := func(text string, cacheSource gjson.Result) {
@@ -274,8 +277,14 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	var inputItems []gjson.Result
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		inputItems = common.NormalizeResponsesToolCallOutputs(input.Array())
+	if input := root.Get("input"); input.Exists() {
+		if input.IsArray() {
+			inputItems = common.NormalizeResponsesToolCallOutputs(input.Array())
+		} else if input.Type == gjson.String {
+			contentPart := []byte(`{"type":"text","text":""}`)
+			contentPart, _ = sjson.SetBytes(contentPart, "text", input.String())
+			appendParts("user", contentPart)
+		}
 	}
 
 	lastToolResult := map[string]gjson.Result{}

@@ -192,6 +192,45 @@ func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 	}
 	normalized := make([]map[string]any, 0)
 	tools.ForEach(func(_, tool gjson.Result) bool {
+		if uc := tool.Get("urlContext"); uc.Exists() {
+			entry := map[string]any{"type": "url_context"}
+			if uc.IsObject() && len(uc.Map()) > 0 {
+				entry["url_context"] = json.RawMessage(uc.Raw)
+			}
+			normalized = append(normalized, entry)
+		} else if uc := tool.Get("url_context"); uc.Exists() {
+			entry := map[string]any{"type": "url_context"}
+			if uc.IsObject() && len(uc.Map()) > 0 {
+				entry["url_context"] = json.RawMessage(uc.Raw)
+			}
+			normalized = append(normalized, entry)
+		}
+		if ce := tool.Get("codeExecution"); ce.Exists() {
+			entry := map[string]any{"type": "code_execution"}
+			if ce.IsObject() && len(ce.Map()) > 0 {
+				entry["code_execution"] = json.RawMessage(ce.Raw)
+			}
+			normalized = append(normalized, entry)
+		} else if ce := tool.Get("code_execution"); ce.Exists() {
+			entry := map[string]any{"type": "code_execution"}
+			if ce.IsObject() && len(ce.Map()) > 0 {
+				entry["code_execution"] = json.RawMessage(ce.Raw)
+			}
+			normalized = append(normalized, entry)
+		}
+		if gs := tool.Get("googleSearch"); gs.Exists() {
+			entry := map[string]any{"type": "google_search"}
+			if gs.IsObject() && len(gs.Map()) > 0 {
+				entry["google_search"] = json.RawMessage(gs.Raw)
+			}
+			normalized = append(normalized, entry)
+		} else if gs := tool.Get("google_search"); gs.Exists() {
+			entry := map[string]any{"type": "google_search"}
+			if gs.IsObject() && len(gs.Map()) > 0 {
+				entry["google_search"] = json.RawMessage(gs.Raw)
+			}
+			normalized = append(normalized, entry)
+		}
 		if name := tool.Get("name"); name.Exists() {
 			entry := map[string]any{
 				"type": "function",
@@ -666,19 +705,70 @@ func copyInteractionsTools(out []byte, root gjson.Result) []byte {
 			return false
 		}
 		entry := map[string]any{}
-		if decls := tool.Get("function_declarations"); decls.Exists() && decls.IsArray() {
-			entry["functionDeclarations"] = json.RawMessage(decls.Raw)
-		} else if name := tool.Get("name"); name.Exists() {
-			decl := map[string]any{"name": name.String()}
-			if desc := tool.Get("description"); desc.Exists() {
-				decl["description"] = desc.String()
+		toolType := tool.Get("type").String()
+		switch toolType {
+		case "url_context":
+			raw := json.RawMessage(`{}`)
+			if uc := tool.Get("url_context"); uc.Exists() && uc.IsObject() {
+				raw = json.RawMessage(uc.Raw)
+			} else if uc := tool.Get("urlContext"); uc.Exists() && uc.IsObject() {
+				raw = json.RawMessage(uc.Raw)
 			}
-			if params := tool.Get("parameters"); params.Exists() {
-				decl["parameters"] = json.RawMessage(params.Raw)
+			entry["urlContext"] = raw
+		case "code_execution":
+			raw := json.RawMessage(`{}`)
+			if ce := tool.Get("code_execution"); ce.Exists() && ce.IsObject() {
+				raw = json.RawMessage(ce.Raw)
+			} else if ce := tool.Get("codeExecution"); ce.Exists() && ce.IsObject() {
+				raw = json.RawMessage(ce.Raw)
 			}
-			entry["functionDeclarations"] = []map[string]any{decl}
-		} else {
-			entry = nil
+			entry["codeExecution"] = raw
+		case "google_search", "web_search":
+			raw := json.RawMessage(`{}`)
+			if gs := tool.Get("google_search"); gs.Exists() && gs.IsObject() {
+				raw = json.RawMessage(gs.Raw)
+			} else if gs := tool.Get("googleSearch"); gs.Exists() && gs.IsObject() {
+				raw = json.RawMessage(gs.Raw)
+			}
+			entry["googleSearch"] = raw
+		default:
+			if decls := tool.Get("function_declarations"); decls.Exists() && decls.IsArray() {
+				entry["functionDeclarations"] = json.RawMessage(decls.Raw)
+			} else if name := tool.Get("name"); name.Exists() {
+				decl := map[string]any{"name": name.String()}
+				if desc := tool.Get("description"); desc.Exists() {
+					decl["description"] = desc.String()
+				}
+				if params := tool.Get("parameters"); params.Exists() {
+					decl["parameters"] = json.RawMessage(params.Raw)
+				}
+				entry["functionDeclarations"] = []map[string]any{decl}
+			} else {
+				var rawMap map[string]any
+				if errUnmarshal := json.Unmarshal([]byte(tool.Raw), &rawMap); errUnmarshal == nil {
+					if toolType == "" {
+						if uc, ok := rawMap["url_context"]; ok {
+							rawMap["urlContext"] = uc
+							delete(rawMap, "url_context")
+						}
+						if ce, ok := rawMap["code_execution"]; ok {
+							rawMap["codeExecution"] = ce
+							delete(rawMap, "code_execution")
+						}
+						if gs, ok := rawMap["google_search"]; ok {
+							rawMap["googleSearch"] = gs
+							delete(rawMap, "google_search")
+						}
+						if ws, ok := rawMap["web_search"]; ok {
+							rawMap["googleSearch"] = ws
+							delete(rawMap, "web_search")
+						}
+					}
+					entry = rawMap
+				} else {
+					entry = nil
+				}
+			}
 		}
 		if entry != nil {
 			normalized = append(normalized, entry)
@@ -1042,7 +1132,7 @@ func appendInteractionsFunctionResult(items *[][]byte, item gjson.Result) {
 		part, _ = sjson.SetBytes(part, "functionResponse.id", id.String())
 	}
 	if result := item.Get("result"); result.Exists() {
-		part, _ = sjson.SetRawBytes(part, "functionResponse.response", []byte(result.Raw))
+		part = translatorcommon.SetGeminiFunctionResponseResult(part, "functionResponse.response", result)
 	}
 	*items = append(*items, interactionsGeminiContent("user", [][]byte{part}))
 }

@@ -19,9 +19,10 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
 		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
 		ctx = internallogging.WithClientRequestMetadata(ctx, internallogging.ClientRequestMetadata{
-			ClientIP:      "192.0.2.10",
-			XForwardedFor: "203.0.113.5, 198.51.100.8",
-			UserAgent:     "test-client/1.0",
+			ClientIP:         "192.0.2.10",
+			ResolvedClientIP: "203.0.113.5",
+			XForwardedFor:    "203.0.113.5, 198.51.100.8",
+			UserAgent:        "test-client/1.0",
 		})
 		ctx = internallogging.WithResponseStatusHolder(ctx)
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
@@ -43,6 +44,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			ReasoningEffort:     "medium",
 			ServiceTier:         "auto",
 			ResponseServiceTier: "default",
+			ResponseModel:       "gpt-5.6-luna",
 			Generate:            coreusage.GenerateFlag(true),
 			RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
 			Latency:             1500 * time.Millisecond,
@@ -66,12 +68,14 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireStringField(t, payload, "client_ip", "192.0.2.10")
+		requireStringField(t, payload, "resolved_client_ip", "203.0.113.5")
 		requireStringField(t, payload, "x_forwarded_for", "203.0.113.5, 198.51.100.8")
 		requireStringField(t, payload, "user_agent", "test-client/1.0")
 		requireStringField(t, payload, "reasoning_effort", "medium")
 		requireStringField(t, payload, "service_tier", "auto")
 		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
+		requireStringField(t, payload, "response_model", "gpt-5.6-luna")
 		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
 		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 30)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
@@ -707,4 +711,72 @@ func TestUsageQueuePluginPayloadSameOriginFallback(t *testing.T) {
 			t.Fatalf("expected parent_session_id to be omitted when record is independent root, got %s", payload["parent_session_id"])
 		}
 	})
+}
+
+func TestUsageQueuePlugin_SchemeB_ExecutionIDAndTraceID(t *testing.T) {
+	prevEnabled := Enabled()
+	prevUsageEnabled := UsageStatisticsEnabled()
+	SetEnabled(true)
+	SetUsageStatisticsEnabled(true)
+	t.Cleanup(func() {
+		SetEnabled(prevEnabled)
+		SetUsageStatisticsEnabled(prevUsageEnabled)
+	})
+
+	plugin := &usageQueuePlugin{}
+	ctx := internallogging.WithRequestID(context.Background(), "000000ab")
+	execUUID := "12345678-1234-4234-8234-123456789abc"
+
+	plugin.HandleUsage(ctx, coreusage.Record{
+		RequestID: execUUID,
+		TraceID:   "000000ab",
+		Provider:  "openai",
+		Model:     "gpt-5.4",
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	})
+
+	payload := popSinglePayload(t)
+	// Scheme B: request_id preserves the 8-character hex trace ID
+	requireStringField(t, payload, "request_id", "000000ab")
+	// Scheme B: execution_id carries the UUID v4 execution instance ID
+	requireStringField(t, payload, "execution_id", execUUID)
+	// Scheme B: trace_id explicitly carries the 8-character hex trace ID
+	requireStringField(t, payload, "trace_id", "000000ab")
+}
+
+func TestUsageQueuePlugin_SchemeB_StrictLegacyRequestIDPreservation(t *testing.T) {
+	prevEnabled := Enabled()
+	prevUsageEnabled := UsageStatisticsEnabled()
+	SetEnabled(true)
+	SetUsageStatisticsEnabled(true)
+	t.Cleanup(func() {
+		SetEnabled(prevEnabled)
+		SetUsageStatisticsEnabled(prevUsageEnabled)
+	})
+
+	plugin := &usageQueuePlugin{}
+	ctx := internallogging.WithRequestID(context.Background(), "legacy-log-id")
+	execUUID := "12345678-1234-4234-8234-123456789abc"
+
+	plugin.HandleUsage(ctx, coreusage.Record{
+		RequestID: execUUID,
+		TraceID:   "custom-trace-id",
+		Provider:  "openai",
+		Model:     "gpt-5.4",
+		Detail: coreusage.Detail{
+			InputTokens: 5,
+		},
+	})
+
+	payload := popSinglePayload(t)
+	// request_id strictly preserves legacy GetRequestID(ctx)
+	requireStringField(t, payload, "request_id", "legacy-log-id")
+	// execution_id carries the UUID v4
+	requireStringField(t, payload, "execution_id", execUUID)
+	// trace_id reflects the record.TraceID
+	requireStringField(t, payload, "trace_id", "custom-trace-id")
 }

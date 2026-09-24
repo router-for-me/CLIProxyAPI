@@ -14,8 +14,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []byte, allowIncrementalInputWithPreviousResponseID bool) bool {
-	if allowIncrementalInputWithPreviousResponseID || len(lastRequest) != 0 {
+func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, allowIncrementalInputWithPreviousResponseID bool) bool {
+	if allowIncrementalInputWithPreviousResponseID {
 		return false
 	}
 	if strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String()) != wsRequestTypeCreate {

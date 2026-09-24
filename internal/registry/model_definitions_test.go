@@ -9,6 +9,15 @@ func TestGetStaticModelDefinitionsByChannelSupportsGeminiInteractions(t *testing
 	}
 }
 
+func TestGetStaticModelDefinitionsByChannelSupportsKimiAndKimiAI(t *testing.T) {
+	for _, channel := range []string{"kimi", "kimi-ai", "kimi.ai", "kimi.com"} {
+		models := GetStaticModelDefinitionsByChannel(channel)
+		if len(models) == 0 {
+			t.Fatalf("GetStaticModelDefinitionsByChannel(%s) returned no models", channel)
+		}
+	}
+}
+
 func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	const wantUA = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
 	got := ModelOverrideHeaders("gpt-5.6-luna")

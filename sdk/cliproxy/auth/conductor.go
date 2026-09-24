@@ -147,6 +147,9 @@ type Manager struct {
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex
 	configCooldownMu          sync.Mutex
+	syncSchedulerMu           sync.Mutex
+	structuralEpoch           atomic.Uint64
+	syncedVersion             atomic.Uint64
 	auths                     map[string]*Auth
 	authEpochs                map[string]uint64
 	scheduler                 *authScheduler

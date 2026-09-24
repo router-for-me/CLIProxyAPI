@@ -3,6 +3,7 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -753,4 +754,270 @@ func ssePayload(event []byte) []byte {
 		return nil
 	}
 	return event[idx+len(prefix):]
+}
+
+func TestConvertInteractionsRequestToGeminiBuiltinTools(t *testing.T) {
+	t.Run("url_context only", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.5-flash",
+			"input":"read url",
+			"tools":[{"type":"url_context"}]
+		}`)
+		out := ConvertInteractionsRequestToGemini("gemini-3.5-flash", inputJSON, false)
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
+		}
+		if !tools[0].Get("urlContext").Exists() {
+			t.Fatalf("expected urlContext tool, got %s", tools[0].Raw)
+		}
+		if tools[0].Get("type").Exists() {
+			t.Fatalf("expected type field to be omitted from upstream tool, got %s", tools[0].Raw)
+		}
+	})
+
+	t.Run("code_execution only", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.5-flash",
+			"input":"execute code",
+			"tools":[{"type":"code_execution"}]
+		}`)
+		out := ConvertInteractionsRequestToGemini("gemini-3.5-flash", inputJSON, false)
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
+		}
+		if !tools[0].Get("codeExecution").Exists() {
+			t.Fatalf("expected codeExecution tool, got %s", tools[0].Raw)
+		}
+		if tools[0].Get("type").Exists() {
+			t.Fatalf("expected type field to be omitted from upstream tool, got %s", tools[0].Raw)
+		}
+	})
+
+	t.Run("google_search only", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.5-flash",
+			"input":"search web",
+			"tools":[{"type":"google_search"}]
+		}`)
+		out := ConvertInteractionsRequestToGemini("gemini-3.5-flash", inputJSON, false)
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
+		}
+		if !tools[0].Get("googleSearch").Exists() {
+			t.Fatalf("expected googleSearch tool, got %s", tools[0].Raw)
+		}
+		if tools[0].Get("type").Exists() {
+			t.Fatalf("expected type field to be omitted from upstream tool, got %s", tools[0].Raw)
+		}
+	})
+
+	t.Run("reverse gemini to interactions builtin tools", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.5-flash",
+			"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+			"tools":[{"urlContext":{}},{"codeExecution":{}},{"googleSearch":{}}]
+		}`)
+		out := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 3 {
+			t.Fatalf("expected 3 tools, got %d. Output: %s", len(tools), string(out))
+		}
+		if got := tools[0].Get("type").String(); got != "url_context" {
+			t.Fatalf("expected url_context, got %s", got)
+		}
+		if got := tools[1].Get("type").String(); got != "code_execution" {
+			t.Fatalf("expected code_execution, got %s", got)
+		}
+		if got := tools[2].Get("type").String(); got != "google_search" {
+			t.Fatalf("expected google_search, got %s", got)
+		}
+	})
+
+	t.Run("reverse gemini to interactions with options preserved", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.5-flash",
+			"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+			"tools":[{"googleSearch":{"mode":"search"}},{"codeExecution":{"sandbox":true}}]
+		}`)
+		out := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 2 {
+			t.Fatalf("expected 2 tools, got %d. Output: %s", len(tools), string(out))
+		}
+		if got := tools[0].Get("google_search.mode").String(); got != "search" {
+			t.Fatalf("expected google_search.mode=search, got %s", tools[0].Raw)
+		}
+		if got := tools[1].Get("code_execution.sandbox").Bool(); !got {
+			t.Fatalf("expected code_execution.sandbox=true, got %s", tools[1].Raw)
+		}
+	})
+
+	t.Run("nested parameters and aliases preserved", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.5-flash",
+			"input":"test options",
+			"tools":[
+				{"type":"url_context","url_context":{"max_urls":3}},
+				{"code_execution":{"environment":"sandbox"}},
+				{"type":"web_search","google_search":{"mode":"search"}}
+			]
+		}`)
+		out := ConvertInteractionsRequestToGemini("gemini-3.5-flash", inputJSON, false)
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 3 {
+			t.Fatalf("expected 3 tools, got %d. Output: %s", len(tools), string(out))
+		}
+		if got := tools[0].Get("urlContext.max_urls").Int(); got != 3 {
+			t.Fatalf("expected urlContext.max_urls=3, got %d. Tool: %s", got, tools[0].Raw)
+		}
+		if got := tools[1].Get("codeExecution.environment").String(); got != "sandbox" {
+			t.Fatalf("expected codeExecution.environment=sandbox, got %s. Tool: %s", got, tools[1].Raw)
+		}
+		if got := tools[2].Get("googleSearch.mode").String(); got != "search" {
+			t.Fatalf("expected googleSearch.mode=search, got %s. Tool: %s", got, tools[2].Raw)
+		}
+	})
+
+	t.Run("native composite tools preserved without truncation", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.5-flash",
+			"input":"native composite tools",
+			"tools":[{"googleSearch":{},"urlContext":{}}]
+		}`)
+		out := ConvertInteractionsRequestToGemini("gemini-3.5-flash", inputJSON, false)
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool node, got %d. Output: %s", len(tools), string(out))
+		}
+		if !tools[0].Get("googleSearch").Exists() {
+			t.Fatalf("expected googleSearch preserved in composite tool, got %s", tools[0].Raw)
+		}
+		if !tools[0].Get("urlContext").Exists() {
+			t.Fatalf("expected urlContext preserved in composite tool, got %s", tools[0].Raw)
+		}
+
+		// Reverse conversion from Gemini composite tool
+		geminiReq := []byte(`{
+			"model":"gemini-3.5-flash",
+			"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+			"tools":[{"googleSearch":{},"urlContext":{}}]
+		}`)
+		interactionsOut := ConvertGeminiRequestToInteractions("gemini-3.5-flash", geminiReq, false)
+		interTools := gjson.GetBytes(interactionsOut, "tools").Array()
+		if len(interTools) != 2 {
+			t.Fatalf("expected 2 converted tools from composite, got %d. Output: %s", len(interTools), string(interactionsOut))
+		}
+		hasURL := false
+		hasSearch := false
+		for _, it := range interTools {
+			if it.Get("type").String() == "url_context" {
+				hasURL = true
+			}
+			if it.Get("type").String() == "google_search" {
+				hasSearch = true
+			}
+		}
+		if !hasURL || !hasSearch {
+			t.Fatalf("expected both url_context and google_search converted from composite, got url=%v, search=%v", hasURL, hasSearch)
+		}
+	})
+
+	t.Run("unrecognized tool retained and not silently dropped", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model":"gemini-3.5-flash",
+			"input":"unrecognized tool",
+			"tools":[{"type":"file_search","file_search":{"max_results":5}}]
+		}`)
+		out := ConvertInteractionsRequestToGemini("gemini-3.5-flash", inputJSON, false)
+		tools := gjson.GetBytes(out, "tools").Array()
+		if len(tools) != 1 {
+			t.Fatalf("expected 1 tool retained, got %d. Output: %s", len(tools), string(out))
+		}
+		if got := tools[0].Get("type").String(); got != "file_search" {
+			t.Fatalf("expected tool type file_search retained, got %s", tools[0].Raw)
+		}
+	})
+}
+
+func TestConvertInteractionsRequestToGemini_FunctionResponseJSONRef(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash",
+		"input": [
+			{
+				"type": "function_result",
+				"name": "lookup",
+				"call_id": "call_1",
+				"result": {
+					"schema": {
+						"$ref": "#/components/schemas/ErrorModel"
+					}
+				}
+			}
+		]
+	}`)
+	out := ConvertInteractionsRequestToGemini("gemini-3.5-flash", inputJSON, false)
+	val := gjson.GetBytes(out, "contents.0.parts.0.functionResponse.response.result")
+	if val.Type != gjson.String {
+		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", val.Type, val.Raw)
+	}
+	if !strings.Contains(val.String(), "#/components/schemas/ErrorModel") {
+		t.Fatalf("expected string result to contain ref target, got %q", val.String())
+	}
+}
+
+func TestConvertInteractionsResponseToGemini_FunctionCallArgsPreservesRef(t *testing.T) {
+	raw := []byte(`{
+		"id": "i1",
+		"model": "gemini-3.1-flash-lite",
+		"steps": [
+			{
+				"type": "function_call",
+				"call_id": "call_1",
+				"name": "validate_schema",
+				"arguments": {
+					"schema": {
+						"$ref": "#/components/schemas/ErrorModel"
+					}
+				}
+			}
+		]
+	}`)
+	out := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, raw, nil)
+	args := gjson.GetBytes(out, "candidates.0.content.parts.0.functionCall.args")
+	if !args.IsObject() {
+		t.Fatalf("expected functionCall.args to remain an object, got %s (raw: %s)", args.Type, args.Raw)
+	}
+	if got := args.Get("schema.$ref").String(); got != "#/components/schemas/ErrorModel" {
+		t.Fatalf("expected schema.$ref to be preserved in args object, got %q", got)
+	}
+}
+
+func TestConvertInteractionsResponseToGemini_FunctionResultWithRef(t *testing.T) {
+	raw := []byte(`{
+		"id": "i1",
+		"model": "gemini-3.1-flash-lite",
+		"steps": [
+			{
+				"type": "function_result",
+				"call_id": "call_1",
+				"name": "get_schema",
+				"result": {
+					"schema": {
+						"$ref": "#/components/schemas/ErrorModel"
+					}
+				}
+			}
+		]
+	}`)
+	out := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, raw, nil)
+	val := gjson.GetBytes(out, "candidates.0.content.parts.0.functionResponse.response.result")
+	if val.Type != gjson.String {
+		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", val.Type, val.Raw)
+	}
+	if !strings.Contains(val.String(), "#/components/schemas/ErrorModel") {
+		t.Fatalf("expected string result to contain ref target, got %q", val.String())
+	}
 }

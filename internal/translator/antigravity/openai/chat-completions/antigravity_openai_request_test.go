@@ -1,8 +1,10 @@
 package chat_completions
 
 import (
+	"regexp"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/tidwall/gjson"
 )
 
@@ -706,5 +708,299 @@ func TestConvertOpenAIRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T)
 				t.Fatalf("expected request.tools to be omitted, got %s", gjson.GetBytes(out, "request.tools").Raw)
 			}
 		})
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravity_MultiTurnRepeatedToolCallID_Issue5933(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role": "user", "content": "list files"},
+			{
+				"role": "assistant",
+				"tool_calls": [{
+					"id": "call_1",
+					"type": "function",
+					"function": {"name": "glob", "arguments": "{\"pattern\":\"*.go\"}"}
+				}]
+			},
+			{"role": "tool", "tool_call_id": "call_1", "content": "[\"main.go\"]"},
+			{"role": "user", "content": "read main.go"},
+			{
+				"role": "assistant",
+				"tool_calls": [{
+					"id": "call_1",
+					"type": "function",
+					"function": {"name": "read", "arguments": "{\"path\":\"main.go\"}"}
+				}]
+			},
+			{"role": "tool", "tool_call_id": "call_1", "content": "package main"}
+		]
+	}`
+
+	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+
+	// In Turn 1 (contents[1] = model functionCall, contents[2] = user functionResponse):
+	// functionCall.name must be "glob", and functionResponse.name must be "glob".
+	call1Name := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.name").String()
+	resp1Name := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.name").String()
+	resp1Result := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+
+	if call1Name != "glob" {
+		t.Fatalf("turn 1 functionCall.name = %q, want glob", call1Name)
+	}
+	if resp1Name != "glob" {
+		t.Fatalf("turn 1 functionResponse.name = %q, want glob (got overwritten by subsequent turn)", resp1Name)
+	}
+	if resp1Result != "[\"main.go\"]" {
+		t.Fatalf("turn 1 functionResponse result = %q, want [\"main.go\"]", resp1Result)
+	}
+
+	// In Turn 2 (contents[4] = model functionCall, contents[5] = user functionResponse):
+	// functionCall.name must be "read", and functionResponse.name must be "read".
+	call2Name := gjson.GetBytes(out, "request.contents.4.parts.0.functionCall.name").String()
+	resp2Name := gjson.GetBytes(out, "request.contents.5.parts.0.functionResponse.name").String()
+	resp2Result := gjson.GetBytes(out, "request.contents.5.parts.0.functionResponse.response.result").String()
+
+	if call2Name != "read" {
+		t.Fatalf("turn 2 functionCall.name = %q, want read", call2Name)
+	}
+	if resp2Name != "read" {
+		t.Fatalf("turn 2 functionResponse.name = %q, want read", resp2Name)
+	}
+	if resp2Result != "package main" {
+		t.Fatalf("turn 2 functionResponse result = %q, want package main", resp2Result)
+	}
+
+	// Verify pairing validator passes without error
+	if errPairing := signature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed on Antigravity output: %v; output=%s", errPairing, out)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravity_ParallelAndOutOfOrderToolResponses(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role": "user", "content": "run parallel tools"},
+			{
+				"role": "assistant",
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
+					{"id": "call_2", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_2", "content": "res_b"},
+			{"role": "tool", "tool_call_id": "call_1", "content": "res_a"}
+		]
+	}`
+
+	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+
+	resp0Name := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.name").String()
+	resp0Result := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+	resp1Name := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse.name").String()
+	resp1Result := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse.response.result").String()
+
+	if resp0Name != "tool_a" || resp0Result != "res_a" {
+		t.Fatalf("part 0 want tool_a / res_a, got %s / %s", resp0Name, resp0Result)
+	}
+	if resp1Name != "tool_b" || resp1Result != "res_b" {
+		t.Fatalf("part 1 want tool_b / res_b, got %s / %s", resp1Name, resp1Result)
+	}
+
+	if errPairing := signature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, out)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravity_SanitizesClaudeToolIDs(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{"role": "user", "content": "hello"},
+			{
+				"role": "assistant",
+				"tool_calls": [
+					{
+						"id": "call_test|fc_test",
+						"type": "function",
+						"function": {"name": "example_tool", "arguments": "{\"arg\":\"val\"}"}
+					},
+					{
+						"id": "call_valid-123_456",
+						"type": "function",
+						"function": {"name": "valid_tool", "arguments": "{}"}
+					}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_test|fc_test", "content": "{\"result\":\"ok\"}"},
+			{"role": "tool", "tool_call_id": "call_valid-123_456", "content": "{\"result\":\"valid_ok\"}"}
+		]
+	}`
+
+	out := ConvertOpenAIRequestToAntigravity("claude-sonnet-4-6", []byte(inputJSON), false)
+
+	claudePattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+	fc0ID := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.id").String()
+	fc1ID := gjson.GetBytes(out, "request.contents.1.parts.1.functionCall.id").String()
+	fr0ID := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.id").String()
+	fr1ID := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse.id").String()
+
+	if !claudePattern.MatchString(fc0ID) {
+		t.Fatalf("functionCall 0 id %q does not match Claude pattern ^[a-zA-Z0-9_-]+$", fc0ID)
+	}
+	if want := "call_test_fc_test"; fc0ID != want {
+		t.Fatalf("functionCall 0 id = %q, want %q", fc0ID, want)
+	}
+	if fr0ID != fc0ID {
+		t.Fatalf("functionResponse 0 id = %q, want matching functionCall id %q", fr0ID, fc0ID)
+	}
+
+	fr0Result := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+	if want := `{"result":"ok"}`; fr0Result != want {
+		t.Fatalf("functionResponse 0 result = %q, want %q", fr0Result, want)
+	}
+
+	if !claudePattern.MatchString(fc1ID) {
+		t.Fatalf("functionCall 1 id %q does not match Claude pattern ^[a-zA-Z0-9_-]+$", fc1ID)
+	}
+	if want := "call_valid-123_456"; fc1ID != want {
+		t.Fatalf("functionCall 1 id = %q, want %q", fc1ID, want)
+	}
+	if fr1ID != fc1ID {
+		t.Fatalf("functionResponse 1 id = %q, want matching functionCall id %q", fr1ID, fc1ID)
+	}
+
+	fr1Result := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse.response.result").String()
+	if want := `{"result":"valid_ok"}`; fr1Result != want {
+		t.Fatalf("functionResponse 1 result = %q, want %q", fr1Result, want)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravity_SanitizesClaudeToolIDs_DisambiguatesCollisionsAndReversedResponses(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{"role": "user", "content": "run multiple tools"},
+			{
+				"role": "assistant",
+				"tool_calls": [
+					{
+						"id": "call_a|b",
+						"type": "function",
+						"function": {"name": "tool_first", "arguments": "{\"n\":1}"}
+					},
+					{
+						"id": "call_a_b",
+						"type": "function",
+						"function": {"name": "tool_second", "arguments": "{\"n\":2}"}
+					}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_a_b", "content": "result_for_a_b"},
+			{"role": "tool", "tool_call_id": "call_a|b", "content": "result_for_a_pipe_b"}
+		]
+	}`
+
+	out := ConvertOpenAIRequestToAntigravity("claude-sonnet-4-6", []byte(inputJSON), false)
+
+	claudePattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+	fc0ID := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.id").String()
+	fc1ID := gjson.GetBytes(out, "request.contents.1.parts.1.functionCall.id").String()
+	fr0ID := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.id").String()
+	fr1ID := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse.id").String()
+
+	if !claudePattern.MatchString(fc0ID) {
+		t.Fatalf("functionCall 0 id %q does not match Claude pattern", fc0ID)
+	}
+	if !claudePattern.MatchString(fc1ID) {
+		t.Fatalf("functionCall 1 id %q does not match Claude pattern", fc1ID)
+	}
+	if fc0ID == fc1ID {
+		t.Fatalf("functionCall IDs collided: fc0=%q, fc1=%q", fc0ID, fc1ID)
+	}
+
+	if fr0ID != fc0ID {
+		t.Fatalf("functionResponse 0 id = %q, want matching functionCall id %q", fr0ID, fc0ID)
+	}
+	if fr1ID != fc1ID {
+		t.Fatalf("functionResponse 1 id = %q, want matching functionCall id %q", fr1ID, fc1ID)
+	}
+
+	// Verify that results did not get swapped or overwritten despite reverse response order and raw ID collision
+	fr0Result := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+	if want := "result_for_a_pipe_b"; fr0Result != want {
+		t.Fatalf("functionResponse 0 result = %q, want %q", fr0Result, want)
+	}
+
+	fr1Result := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse.response.result").String()
+	if want := "result_for_a_b"; fr1Result != want {
+		t.Fatalf("functionResponse 1 result = %q, want %q", fr1Result, want)
+	}
+
+	if errPairing := signature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, out)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravity_SanitizesClaudeToolIDs_MissingResponseDoesNotStealCollidingID(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{"role": "user", "content": "run multiple tools"},
+			{
+				"role": "assistant",
+				"tool_calls": [
+					{
+						"id": "call_a|b",
+						"type": "function",
+						"function": {"name": "tool_first", "arguments": "{\"n\":1}"}
+					},
+					{
+						"id": "call_a_b",
+						"type": "function",
+						"function": {"name": "tool_second", "arguments": "{\"n\":2}"}
+					}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_a_b", "content": "result_for_a_b"}
+		]
+	}`
+
+	out := ConvertOpenAIRequestToAntigravity("claude-sonnet-4-6", []byte(inputJSON), false)
+
+	claudePattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+	fc0ID := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.id").String()
+	fc1ID := gjson.GetBytes(out, "request.contents.1.parts.1.functionCall.id").String()
+	fr0ID := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.id").String()
+	fr1ID := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse.id").String()
+
+	if !claudePattern.MatchString(fc0ID) || !claudePattern.MatchString(fc1ID) {
+		t.Fatalf("functionCall ids do not match Claude pattern: fc0=%q, fc1=%q", fc0ID, fc1ID)
+	}
+	if fc0ID == fc1ID {
+		t.Fatalf("functionCall IDs collided: fc0=%q, fc1=%q", fc0ID, fc1ID)
+	}
+	if fr0ID != fc0ID || fr1ID != fc1ID {
+		t.Fatalf("functionResponse ids must match functionCall ids: fr0=%q, fc0=%q, fr1=%q, fc1=%q", fr0ID, fc0ID, fr1ID, fc1ID)
+	}
+
+	// First call has missing response, should fallback to "{}" and NOT steal second call's result
+	fr0Result := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+	if want := "{}"; fr0Result != want {
+		t.Fatalf("functionResponse 0 result = %q, want %q (stole colliding call's result)", fr0Result, want)
+	}
+
+	fr1Result := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse.response.result").String()
+	if want := "result_for_a_b"; fr1Result != want {
+		t.Fatalf("functionResponse 1 result = %q, want %q", fr1Result, want)
+	}
+
+	if errPairing := signature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, out)
 	}
 }
