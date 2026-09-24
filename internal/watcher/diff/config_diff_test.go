@@ -87,6 +87,39 @@ func TestBuildConfigChangeDetails(t *testing.T) {
 	expectContains(t, details, "  provider updated: compat-a (models 1 -> 2)")
 }
 
+func TestBuildConfigChangeDetails_RoutingPoolModelCooldown(t *testing.T) {
+	enabled := true
+	disabled := false
+	oldEnabled := &enabled
+	newEnabled := &enabled
+
+	// nil -> explicit false is a real toggle change and must surface as
+	// true -> false (nil means the default "enabled").
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{Routing: config.RoutingConfig{PoolModelCooldown: &disabled}}
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "routing.pool-model-cooldown: true -> false")
+
+	// nil -> true and true -> true both mean "enabled" (no behavioral
+	// change), so neither is a reload-relevant edit.
+	oldCfg = &config.Config{}
+	newCfg = &config.Config{Routing: config.RoutingConfig{PoolModelCooldown: newEnabled}}
+	if details := BuildConfigChangeDetails(oldCfg, newCfg); len(details) != 0 {
+		t.Fatalf("nil -> true (both enabled) must not surface as a change, got %v", details)
+	}
+	oldCfg = &config.Config{Routing: config.RoutingConfig{PoolModelCooldown: oldEnabled}}
+	newCfg = &config.Config{Routing: config.RoutingConfig{PoolModelCooldown: newEnabled}}
+	if details := BuildConfigChangeDetails(oldCfg, newCfg); len(details) != 0 {
+		t.Fatalf("true -> true must not surface as a change, got %v", details)
+	}
+
+	// true -> false surfaces the toggle.
+	oldCfg = &config.Config{Routing: config.RoutingConfig{PoolModelCooldown: newEnabled}}
+	newCfg = &config.Config{Routing: config.RoutingConfig{PoolModelCooldown: &disabled}}
+	details = BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "routing.pool-model-cooldown: true -> false")
+}
+
 func TestBuildConfigChangeDetails_NoChanges(t *testing.T) {
 	cfg := &config.Config{
 		Port: 8080,

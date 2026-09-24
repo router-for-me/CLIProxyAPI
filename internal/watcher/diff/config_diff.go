@@ -152,6 +152,13 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			oldCfg.Routing.CooldownWait.MaxWaitMS, oldCfg.Routing.CooldownWait.MaxAttempts, oldCfg.Routing.CooldownWait.Reclassify403,
 			newCfg.Routing.CooldownWait.MaxWaitMS, newCfg.Routing.CooldownWait.MaxAttempts, newCfg.Routing.CooldownWait.Reclassify403))
 	}
+	// pool-model-cooldown is *bool: nil and the pointer-to-true both mean
+	// "enabled" (see service_auth.go), so surface the toggle only when the
+	// operator's stated value changes.
+	if displayOptionalBool(oldCfg.Routing.PoolModelCooldown) != displayOptionalBool(newCfg.Routing.PoolModelCooldown) {
+		changes = append(changes, fmt.Sprintf("routing.pool-model-cooldown: %s -> %s",
+			displayOptionalBool(oldCfg.Routing.PoolModelCooldown), displayOptionalBool(newCfg.Routing.PoolModelCooldown)))
+	}
 	if !reflect.DeepEqual(oldCfg.Payload, newCfg.Payload) {
 		changes = appendPayloadConfigChanges(changes, oldCfg.Payload, newCfg.Payload)
 	}
@@ -483,6 +490,18 @@ func equalStringMap(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// displayOptionalBool renders a *bool by its EFFECTIVE value: nil means the
+// default "enabled" for pool-model-cooldown (service_auth.go: nil || *x →
+// true), so nil and pointer-to-true render identically and a no-op reload
+// edit does not surface. Only a real toggle (nil/true → false, or the rare
+// false → enabled) shows up in the change summary.
+func displayOptionalBool(v *bool) string {
+	if v == nil || *v {
+		return "true"
+	}
+	return "false"
 }
 
 func displayOptionalValue(raw string) string {
