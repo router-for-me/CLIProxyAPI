@@ -3,6 +3,7 @@ package helps
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,30 +23,12 @@ const (
 // getLower looks up a header value case-insensitively, including raw map
 // writes that bypass http.Header.Set's canonical key casing.
 func getLower(h http.Header, name string) string {
-	lower := []byte(name)
 	for k, vs := range h {
-		if len(k) != len(lower) {
-			continue
-		}
-		match := true
-		for i := 0; i < len(k); i++ {
-			if lowerByte(k[i]) != lower[i] {
-				match = false
-				break
-			}
-		}
-		if match && len(vs) > 0 {
+		if strings.EqualFold(k, name) && len(vs) > 0 {
 			return vs[0]
 		}
 	}
 	return ""
-}
-
-func lowerByte(b byte) byte {
-	if b >= 'A' && b <= 'Z' {
-		return b + 'a' - 'A'
-	}
-	return b
 }
 
 // ClaudeSharedWindowRejected reports whether any of the unified, 5h or 7d

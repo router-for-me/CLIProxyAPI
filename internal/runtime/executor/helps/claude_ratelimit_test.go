@@ -45,9 +45,50 @@ func TestClaudeRatelimitParseRetryAfter(t *testing.T) {
 			want: durationPtr(12 * time.Second),
 		},
 		{
-			name:    "garbage value no fallback",
+			// Pins the doc-comment contract: an overage-only rejection is an
+			// account cap, not a throttle, so Retry-After must NOT surface.
+			name: "overage-only rejection suppresses Retry-After",
+			headers: map[string][]string{
+				"anthropic-ratelimit-unified-status":         {"allowed"},
+				"anthropic-ratelimit-unified-5h-status":      {"allowed"},
+				"anthropic-ratelimit-unified-7d-status":      {"allowed"},
+				"anthropic-ratelimit-unified-overage-status": {"rejected"},
+				"Retry-After": {"12"},
+			},
+			want: nil,
+		},
+		{
+			name: "past http-date is no hint",
+			headers: map[string][]string{
+				"Retry-After": {now.Add(-45 * time.Second).UTC().Format(http.TimeFormat)},
+			},
+			want: nil,
+		},
+		{
+			name:    "zero ms is no hint",
+			headers: map[string][]string{"Retry-After-Ms": {"0"}},
+			want:    nil,
+		},
+		{
+			name:    "garbage seconds with no fallback",
 			headers: map[string][]string{"Retry-After": {"soon"}},
 			want:    nil,
+		},
+		{
+			// Pins current behavior: garbage Retry-After falls through to Retry-After-Ms.
+			name: "garbage seconds falls through to ms",
+			headers: map[string][]string{
+				"Retry-After":    {"soon"},
+				"Retry-After-Ms": {"1500"},
+			},
+			want: durationPtr(1500 * time.Millisecond),
+		},
+		{
+			// Multi-value headers: the first value wins, matching net/http
+			// single-value lookup semantics.
+			name:    "duplicate values first wins",
+			headers: map[string][]string{"retry-after": {"12", "999"}},
+			want:    durationPtr(12 * time.Second),
 		},
 		{
 			name:    "empty headers",
@@ -207,6 +248,13 @@ func TestClaudeSharedWindowRejected(t *testing.T) {
 			name:    "5h rejected",
 			headers: map[string][]string{"anthropic-ratelimit-unified-5h-status": {"rejected"}},
 			want:    true,
+		},
+		{
+			// Real API emits lowercase enums; comparison is exact-lowercase,
+			// so an uppercase value is not a rejection signal.
+			name:    "uppercase REJECTED is not rejected",
+			headers: map[string][]string{"anthropic-ratelimit-unified-status": {"REJECTED"}},
+			want:    false,
 		},
 		{
 			name:    "7d rejected",
