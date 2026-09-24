@@ -78,12 +78,16 @@ type Detail struct {
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
-	// CacheInputMode is the optional cache accounting contract reported by the
-	// upstream response (for example "included_in_input" or
-	// "separate_from_input"). It lets a provider state explicitly whether the
-	// input token bucket already contains the cache read/creation tokens, so
-	// downstream usage sinks do not have to guess from the provider name.
-	// Empty means the provider did not declare a contract.
+	// CacheInputMode carries the optional cache accounting contract defined by
+	// the downstream billing system CPA-Manager-Plus (CPAMP). It is a
+	// forward-only field: a usage producer (for example the WorkBuddy plugin,
+	// which wraps Tencent CodeBuddy) sets "included_in_input" to declare that
+	// its input token bucket already contains the cache read/creation tokens,
+	// so CPAMP does not add the cache buckets on top of the input a second
+	// time. "separate_from_input" is CPAMP's own fallback verdict for
+	// unrecognized providers and is not produced by our plugins. CPA forwards
+	// this value to usage sinks as-is and does not interpret it. Empty means no
+	// contract was declared.
 	CacheInputMode string
 }
 

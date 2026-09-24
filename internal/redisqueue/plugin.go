@@ -184,17 +184,20 @@ type requestDetail struct {
 }
 
 type tokenStats struct {
-	InputTokens            int64  `json:"input_tokens"`
-	OutputTokens           int64  `json:"output_tokens"`
-	ReasoningTokens        int64  `json:"reasoning_tokens"`
-	CachedTokens           int64  `json:"cached_tokens"`
-	CacheReadTokens        int64  `json:"cache_read_tokens"`
-	CacheReadTokensPresent bool   `json:"cache_read_tokens_present"`
-	CacheCreationTokens    int64  `json:"cache_creation_tokens"`
-	TotalTokens            int64  `json:"total_tokens"`
-	// CacheInputMode forwards the cache accounting contract reported by the
-	// upstream response so downstream usage sinks can price cache tokens
-	// without guessing from the provider or model name.
+	InputTokens            int64 `json:"input_tokens"`
+	OutputTokens           int64 `json:"output_tokens"`
+	ReasoningTokens        int64 `json:"reasoning_tokens"`
+	CachedTokens           int64 `json:"cached_tokens"`
+	CacheReadTokens        int64 `json:"cache_read_tokens"`
+	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
+	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
+	TotalTokens            int64 `json:"total_tokens"`
+	// CacheInputMode forwards the cache accounting contract defined by the
+	// downstream billing system CPA-Manager-Plus (CPAMP). A usage producer such
+	// as the WorkBuddy plugin declares "included_in_input" so CPAMP stops
+	// guessing from the provider or model name and adding the cache buckets on
+	// top of the input a second time. CPA only forwards this value; it does not
+	// interpret it. Omitted when no contract was declared.
 	CacheInputMode string `json:"cache_input_mode,omitempty"`
 }
 

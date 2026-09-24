@@ -1092,16 +1092,33 @@ func extractResponseServiceTierFromValidJSON(payload []byte) string {
 // cacheInputModeValues enumerates the accepted cache accounting contracts.
 // Anything else is ignored so a malformed or unknown value cannot silently
 // flip how cache tokens are priced downstream.
+//
+// This is NOT an upstream provider field. "cache_input_mode" is a contract
+// defined by the downstream billing system CPA-Manager-Plus (CPAMP): a usage
+// producer sets it so CPAMP classifies cache tokens explicitly instead of
+// falling back to provider-name heuristics. In practice the only value our
+// stack produces is "included_in_input", injected by the WorkBuddy plugin
+// (which wraps Tencent CodeBuddy) to declare that prompt_tokens is already the
+// full input including cache reads. "separate_from_input" is CPAMP's own
+// fallback verdict for unrecognized providers; it is not emitted by our
+// providers or plugins. CPA forwards this field verbatim and does not use it
+// to build or alter TokenBreakdown (see parseOpenAIStyleUsageNode).
 var cacheInputModeValues = map[string]struct{}{
-	"included_in_input": {},
+	"included_in_input":   {},
 	"separate_from_input": {},
 }
 
 // extractCacheInputModeFromUsageNode reads the optional cache accounting
-// contract declared inside a usage object. Providers that report
-// prompt_tokens as the full input (including cache reads) can set
-// "cache_input_mode": "included_in_input" so downstream consumers do not add
-// the cache buckets on top of the input again.
+// contract carried inside a usage object and whitelists its values.
+//
+// The field is a downstream (CPAMP) contract, not an upstream cache-accounting
+// signal: it is injected by a usage producer such as the WorkBuddy plugin so
+// that "prompt_tokens is the full input, cache reads included" is stated
+// explicitly rather than guessed from the provider or model name. CPA's role
+// here is forwarding only — the parser copies the declared value into
+// usage.Detail.CacheInputMode so it reaches sinks, and deliberately does not
+// branch TokenBreakdown construction on it. Refer to the WorkBuddy plugin for
+// the producing side.
 func extractCacheInputModeFromUsageNode(usageNode gjson.Result) string {
 	for _, path := range []string{"cache_input_mode", "cacheInputMode"} {
 		mode := strings.ToLower(strings.TrimSpace(usageNode.Get(path).String()))
