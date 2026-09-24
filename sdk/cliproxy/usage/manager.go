@@ -46,6 +46,9 @@ type Record struct {
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
+	// FinishReason records the upstream stop_reason / finish_reason from the
+	// provider response. Empty when no reason was reported.
+	FinishReason string
 	// Tier stores the Auto Router complexity tier (simple/medium/complex/reasoning)
 	// that routed this request; empty for non-routed requests.
 	Tier string
