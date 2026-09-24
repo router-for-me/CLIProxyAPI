@@ -176,7 +176,7 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						part, _ = sjson.SetBytes(part, "functionResponse.id", toolCallID)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
 						if toolResult.ResultIsRaw {
-							part, _ = sjson.SetRawBytes(part, "functionResponse.response.result", []byte(toolResult.Result))
+							part = translatorcommon.SetGeminiFunctionResponseRaw(part, "functionResponse.response.result", toolResult.Result)
 						} else {
 							part, _ = sjson.SetBytes(part, "functionResponse.response.result", toolResult.Result)
 						}

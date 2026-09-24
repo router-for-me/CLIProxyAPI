@@ -929,6 +929,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	if len(data.Attributes) == 0 && auth != nil {
 		data.Attributes = cloneStringMap(auth.Attributes)
 	}
+	preserveFileAuthPriority(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
 	}

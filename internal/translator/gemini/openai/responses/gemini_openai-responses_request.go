@@ -1701,7 +1701,7 @@ func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesB
 		result, isRaw, images := parseOpenAIResponsesArrayOutput(outputResult)
 		imageParts = images
 		if isRaw {
-			functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.response.result", []byte(result))
+			functionResponse = translatorcommon.SetGeminiFunctionResponseRaw(functionResponse, "functionResponse.response.result", result)
 		} else {
 			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", result)
 		}
@@ -1710,7 +1710,7 @@ func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesB
 			imageParts = append(imageParts, geminiResponsesInlineDataPart(mimeType, data))
 			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", "")
 		} else {
-			functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.response.result", []byte(outputResult.Raw))
+			functionResponse = translatorcommon.SetGeminiFunctionResponseResult(functionResponse, "functionResponse.response.result", outputResult)
 		}
 	case outputResult.Raw != "" && outputResult.Raw != "null":
 		functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", outputResult.String())

@@ -511,7 +511,7 @@ func appendInteractionsFunctionResultToAntigravity(items *[][]byte, step gjson.R
 		part, _ = sjson.SetBytes(part, "functionResponse.id", id.String())
 	}
 	if result := step.Get("result"); result.Exists() {
-		part, _ = sjson.SetRawBytes(part, "functionResponse.response", []byte(result.Raw))
+		part = translatorcommon.SetGeminiFunctionResponseResult(part, "functionResponse.response", result)
 	}
 	*items = append(*items, antigravityContent("user", [][]byte{part}))
 }

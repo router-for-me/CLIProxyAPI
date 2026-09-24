@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -53,6 +54,14 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	apiKey := strings.TrimSpace(record.APIKey)
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
+	traceID := strings.TrimSpace(record.TraceID)
+	if traceID == "" {
+		traceID = requestID
+	}
+	executionID := strings.TrimSpace(record.RequestID)
+	if executionID == "" {
+		executionID = uuid.NewString()
+	}
 	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
@@ -135,6 +144,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		AuthType:            authType,
 		APIKey:              apiKey,
 		RequestID:           requestID,
+		ExecutionID:         executionID,
+		TraceID:             traceID,
 		SessionID:           sessionID,
 		ParentSessionID:     parentSessionID,
 		NodeKind:            strings.TrimSpace(clientRequestMetadata.NodeKind),
@@ -163,6 +174,8 @@ type queuedUsageDetail struct {
 	AuthType            string                   `json:"auth_type"`
 	APIKey              string                   `json:"api_key"`
 	RequestID           string                   `json:"request_id"`
+	ExecutionID         string                   `json:"execution_id,omitempty"`
+	TraceID             string                   `json:"trace_id,omitempty"`
 	SessionID           string                   `json:"session_id,omitempty"`
 	ParentSessionID     string                   `json:"parent_session_id,omitempty"`
 	NodeKind            string                   `json:"node_kind,omitempty"`

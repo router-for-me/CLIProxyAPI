@@ -1,6 +1,8 @@
 package common
 
 import (
+	"strings"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -142,4 +144,59 @@ func MergeAdjacentGeminiUserContents(contents [][]byte) [][]byte {
 		merged = append(merged, content)
 	}
 	return merged
+}
+
+// ContainsJSONRef reports whether value (recursively) contains a string-valued "$ref" property.
+func ContainsJSONRef(value gjson.Result) bool {
+	if !value.IsObject() && !value.IsArray() {
+		return false
+	}
+	found := false
+	value.ForEach(func(key, child gjson.Result) bool {
+		if value.IsObject() && key.String() == "$ref" && child.Type == gjson.String {
+			found = true
+			return false
+		}
+		if ContainsJSONRef(child) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// SetGeminiFunctionResponseResult sets the Gemini functionResponse result or response field.
+// If the result contains a JSON Schema or OpenAPI "$ref" property with a string value, it is
+// preserved as opaque JSON text with sjson.SetBytes. This prevents Gemini/Vertex AI from
+// interpreting "$ref" as a reference to a media part in function_response.parts and rejecting
+// the request with HTTP 400.
+// If path points to "functionResponse.response" or "response", a stringified result is placed
+// under the ".result" child object to satisfy Gemini's requirement that "response" is an object.
+func SetGeminiFunctionResponseResult(part []byte, path string, result gjson.Result) []byte {
+	if !result.Exists() {
+		part, _ = sjson.SetBytes(part, path, "")
+		return part
+	}
+	if ContainsJSONRef(result) {
+		targetPath := path
+		if strings.HasSuffix(path, "response") {
+			targetPath = path + ".result"
+		}
+		part, _ = sjson.SetBytes(part, targetPath, result.Raw)
+		return part
+	}
+	part, _ = sjson.SetRawBytes(part, path, []byte(result.Raw))
+	return part
+}
+
+// SetGeminiFunctionResponseRaw is a convenience wrapper around SetGeminiFunctionResponseResult
+// for raw JSON strings.
+func SetGeminiFunctionResponseRaw(part []byte, path string, rawJSON string) []byte {
+	trimmed := strings.TrimSpace(rawJSON)
+	if trimmed == "" {
+		part, _ = sjson.SetBytes(part, path, "")
+		return part
+	}
+	return SetGeminiFunctionResponseResult(part, path, gjson.Parse(trimmed))
 }

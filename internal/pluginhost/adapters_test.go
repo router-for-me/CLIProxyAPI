@@ -2423,6 +2423,35 @@ func TestUsageAdapterPropagatesResponseModelServiceTierAndStream(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterPropagatesRequestIDAndTraceID(t *testing.T) {
+	var gotRecord pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotRecord = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-request-trace-id",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	host.RegisterUsagePlugins()
+
+	adapter := &usageAdapter{host: host, pluginID: "usage-request-trace-id", plugin: plugin}
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		RequestID: "b5db448b-3d6d-495c-9c71-f925b68926cb",
+		TraceID:   "00000001",
+		Provider:  "codex",
+		Model:     "gpt-5.6-luna",
+	})
+
+	if gotRecord.RequestID != "b5db448b-3d6d-495c-9c71-f925b68926cb" {
+		t.Fatalf("plugin RequestID = %q, want b5db448b-3d6d-495c-9c71-f925b68926cb", gotRecord.RequestID)
+	}
+	if gotRecord.TraceID != "00000001" {
+		t.Fatalf("plugin TraceID = %q, want 00000001", gotRecord.TraceID)
+	}
+}
+
 func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	var gotGenerate bool
 	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
@@ -2924,7 +2953,8 @@ func TestExecutorAdapterMethods(t *testing.T) {
 			}
 			return pluginapi.AuthRefreshResponse{
 				Auth: pluginapi.AuthData{
-					Metadata: map[string]any{"token": "new"},
+					Metadata:   map[string]any{"token": "new", "priority": float64(0)},
+					Attributes: map[string]string{"priority": "0"},
 				},
 			}, nil
 		},
@@ -2987,7 +3017,12 @@ func TestExecutorAdapterMethods(t *testing.T) {
 	auth := &coreauth.Auth{
 		ID:       "auth-1",
 		Provider: "plugin-provider",
-		Metadata: map[string]any{"old": "value"},
+		Metadata: map[string]any{"old": "value", "priority": float64(1)},
+		Attributes: map[string]string{
+			coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+			coreauth.AttributeFilePriority:  "true",
+			"priority":                      "1",
+		},
 	}
 	req := coreexecutor.Request{
 		Model:   "model-1",
@@ -3047,6 +3082,9 @@ func TestExecutorAdapterMethods(t *testing.T) {
 	}
 	if refreshed.Metadata["token"] != "new" {
 		t.Fatalf("Refresh() metadata = %#v, want token=new", refreshed.Metadata)
+	}
+	if refreshed.Attributes["priority"] != "1" || refreshed.Metadata["priority"] != float64(1) {
+		t.Fatalf("Refresh() priority = %q/%v, want 1/1", refreshed.Attributes["priority"], refreshed.Metadata["priority"])
 	}
 
 	count, errCountTokens := adapter.CountTokens(context.Background(), auth, req, opts)

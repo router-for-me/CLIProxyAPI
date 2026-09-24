@@ -3,6 +3,7 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -939,4 +940,84 @@ func TestConvertInteractionsRequestToGeminiBuiltinTools(t *testing.T) {
 			t.Fatalf("expected tool type file_search retained, got %s", tools[0].Raw)
 		}
 	})
+}
+
+func TestConvertInteractionsRequestToGemini_FunctionResponseJSONRef(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.5-flash",
+		"input": [
+			{
+				"type": "function_result",
+				"name": "lookup",
+				"call_id": "call_1",
+				"result": {
+					"schema": {
+						"$ref": "#/components/schemas/ErrorModel"
+					}
+				}
+			}
+		]
+	}`)
+	out := ConvertInteractionsRequestToGemini("gemini-3.5-flash", inputJSON, false)
+	val := gjson.GetBytes(out, "contents.0.parts.0.functionResponse.response.result")
+	if val.Type != gjson.String {
+		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", val.Type, val.Raw)
+	}
+	if !strings.Contains(val.String(), "#/components/schemas/ErrorModel") {
+		t.Fatalf("expected string result to contain ref target, got %q", val.String())
+	}
+}
+
+func TestConvertInteractionsResponseToGemini_FunctionCallArgsPreservesRef(t *testing.T) {
+	raw := []byte(`{
+		"id": "i1",
+		"model": "gemini-3.1-flash-lite",
+		"steps": [
+			{
+				"type": "function_call",
+				"call_id": "call_1",
+				"name": "validate_schema",
+				"arguments": {
+					"schema": {
+						"$ref": "#/components/schemas/ErrorModel"
+					}
+				}
+			}
+		]
+	}`)
+	out := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, raw, nil)
+	args := gjson.GetBytes(out, "candidates.0.content.parts.0.functionCall.args")
+	if !args.IsObject() {
+		t.Fatalf("expected functionCall.args to remain an object, got %s (raw: %s)", args.Type, args.Raw)
+	}
+	if got := args.Get("schema.$ref").String(); got != "#/components/schemas/ErrorModel" {
+		t.Fatalf("expected schema.$ref to be preserved in args object, got %q", got)
+	}
+}
+
+func TestConvertInteractionsResponseToGemini_FunctionResultWithRef(t *testing.T) {
+	raw := []byte(`{
+		"id": "i1",
+		"model": "gemini-3.1-flash-lite",
+		"steps": [
+			{
+				"type": "function_result",
+				"call_id": "call_1",
+				"name": "get_schema",
+				"result": {
+					"schema": {
+						"$ref": "#/components/schemas/ErrorModel"
+					}
+				}
+			}
+		]
+	}`)
+	out := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, raw, nil)
+	val := gjson.GetBytes(out, "candidates.0.content.parts.0.functionResponse.response.result")
+	if val.Type != gjson.String {
+		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", val.Type, val.Raw)
+	}
+	if !strings.Contains(val.String(), "#/components/schemas/ErrorModel") {
+		t.Fatalf("expected string result to contain ref target, got %q", val.String())
+	}
 }

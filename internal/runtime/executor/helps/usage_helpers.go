@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -25,6 +26,8 @@ import (
 )
 
 type UsageReporter struct {
+	requestID           string
+	traceID             string
 	provider            string
 	baseURL             string
 	executorType        string
@@ -106,7 +109,13 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 			}
 		}
 	}
+	traceID := usage.TraceIDFromContext(ctx)
+	if traceID == "" {
+		traceID = internallogging.GetRequestID(ctx)
+	}
 	reporter := &UsageReporter{
+		requestID:       uuid.NewString(),
+		traceID:         traceID,
 		provider:        provider,
 		baseURL:         baseURL,
 		model:           model,
@@ -515,7 +524,9 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(model, detail, false, usage.Failure{}), true
+	rec := r.buildRecordForModel(model, detail, false, usage.Failure{})
+	rec.RequestID = uuid.NewString()
+	return rec, true
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
@@ -585,6 +596,22 @@ func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) 
 	usage.PublishRecord(ctx, record)
 }
 
+// RequestID returns the execution instance request ID for this reporter.
+func (r *UsageReporter) RequestID() string {
+	if r == nil {
+		return ""
+	}
+	return r.requestID
+}
+
+// TraceID returns the parent inbound request ID for this reporter.
+func (r *UsageReporter) TraceID() string {
+	if r == nil {
+		return ""
+	}
+	return r.traceID
+}
+
 func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
 	var fail usage.Failure
 	if len(failures) > 0 {
@@ -607,6 +634,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		responseModel = r.ResponseModel()
 	}
 	return usage.Record{
+		RequestID:           r.requestID,
+		TraceID:             r.traceID,
 		Provider:            r.provider,
 		BaseURL:             r.baseURL,
 		ExecutorType:        r.executorType,

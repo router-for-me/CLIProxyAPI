@@ -1132,7 +1132,7 @@ func appendInteractionsFunctionResult(items *[][]byte, item gjson.Result) {
 		part, _ = sjson.SetBytes(part, "functionResponse.id", id.String())
 	}
 	if result := item.Get("result"); result.Exists() {
-		part, _ = sjson.SetRawBytes(part, "functionResponse.response", []byte(result.Raw))
+		part = translatorcommon.SetGeminiFunctionResponseResult(part, "functionResponse.response", result)
 	}
 	*items = append(*items, interactionsGeminiContent("user", [][]byte{part}))
 }

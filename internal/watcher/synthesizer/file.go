@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
@@ -139,6 +138,12 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
 					return nil, fmt.Errorf("invalid plugin auth weight in %s: %w", filepath.Base(fullPath), errWeight)
 				}
+				coreauth.ApplyAuthPriorityMetadata(auth, metadata)
+				if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
+					if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+						setter.SetMetadata(auth.Metadata)
+					}
+				}
 				coreauth.SetOAuthModelAliasesAttribute(auth, perAccountModelAliases)
 				ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
 				coreauth.ApplyCustomHeadersFromMetadata(auth)
@@ -208,17 +213,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		UpdatedAt: now,
 	}
 	// Read priority from auth file.
-	if rawPriority, ok := metadata["priority"]; ok {
-		switch v := rawPriority.(type) {
-		case float64:
-			a.Attributes["priority"] = strconv.Itoa(int(v))
-		case string:
-			priority := strings.TrimSpace(v)
-			if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
-				a.Attributes["priority"] = priority
-			}
-		}
-	}
+	coreauth.ApplyAuthPriorityMetadata(a, metadata)
 	if errWeight := coreauth.ApplyAuthWeightMetadata(a, metadata); errWeight != nil {
 		return nil, fmt.Errorf("invalid auth weight in %s: %w", filepath.Base(fullPath), errWeight)
 	}

@@ -200,3 +200,91 @@ func TestReorderGeminiUserParts(t *testing.T) {
 		}
 	})
 }
+
+func TestContainsJSONRef(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want bool
+	}{
+		{
+			name: "top-level $ref object",
+			json: `{"$ref": "#/components/schemas/ErrorModel"}`,
+			want: true,
+		},
+		{
+			name: "nested $ref in object",
+			json: `{"responses":{"400":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ErrorModel"}}}}}}`,
+			want: true,
+		},
+		{
+			name: "nested $ref in array",
+			json: `[{"schema":{"$ref":"#/components/schemas/ErrorModel"}}]`,
+			want: true,
+		},
+		{
+			name: "plain object without $ref",
+			json: `{"temperature": 72, "city": "Seattle"}`,
+			want: false,
+		},
+		{
+			name: "plain array without $ref",
+			json: `[1, 2, {"name": "test"}]`,
+			want: false,
+		},
+		{
+			name: "$ref with non-string value is not a schema ref",
+			json: `{"$ref": 123}`,
+			want: false,
+		},
+		{
+			name: "primitive string containing $ref text is not a schema ref",
+			json: `"this is just a string containing $ref"`,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ContainsJSONRef(gjson.Parse(tt.json))
+			if got != tt.want {
+				t.Errorf("ContainsJSONRef() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetGeminiFunctionResponseResult(t *testing.T) {
+	t.Run("preserves $ref as string under result", func(t *testing.T) {
+		part := []byte(`{"functionResponse":{"name":"test"}}`)
+		res := gjson.Parse(`{"schema":{"$ref":"#/components/schemas/ErrorModel"}}`)
+		updated := SetGeminiFunctionResponseResult(part, "functionResponse.response.result", res)
+		val := gjson.GetBytes(updated, "functionResponse.response.result")
+		if val.Type != gjson.String {
+			t.Fatalf("expected string type, got %s (raw: %s)", val.Type, val.Raw)
+		}
+	})
+
+	t.Run("keeps non-$ref object as raw JSON under result", func(t *testing.T) {
+		part := []byte(`{"functionResponse":{"name":"test"}}`)
+		res := gjson.Parse(`{"ok":true,"code":200}`)
+		updated := SetGeminiFunctionResponseResult(part, "functionResponse.response.result", res)
+		val := gjson.GetBytes(updated, "functionResponse.response.result")
+		if !val.IsObject() {
+			t.Fatalf("expected object type, got %s (raw: %s)", val.Type, val.Raw)
+		}
+		if !val.Get("ok").Bool() {
+			t.Fatalf("expected ok=true, got %v", val.Get("ok"))
+		}
+	})
+
+	t.Run("places stringified $ref under .result when path ends with response", func(t *testing.T) {
+		part := []byte(`{"functionResponse":{"name":"test"}}`)
+		res := gjson.Parse(`{"schema":{"$ref":"#/components/schemas/ErrorModel"}}`)
+		updated := SetGeminiFunctionResponseResult(part, "functionResponse.response", res)
+		val := gjson.GetBytes(updated, "functionResponse.response.result")
+		if val.Type != gjson.String {
+			t.Fatalf("expected string type under response.result, got %s (raw: %s)", val.Type, val.Raw)
+		}
+	})
+}
