@@ -5810,14 +5810,14 @@ func TestClaudeOpus55FallbackReconcilesAfterModelOverride(t *testing.T) {
 		{name: "Opus probe", body: string(cloaked), probe: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := reconcileClaudeCodeFableModelAfterPayload([]byte(tt.body), state, false, false, true, tt.probe)
+			got := reconcileClaudeCodeFableModelAfterPayload([]byte(tt.body), state, false, false, true, tt.probe, claudeCloakSettings{})
 			if model := gjson.GetBytes(got, "fallbacks.0.model").String(); model != tt.wantFallback {
 				t.Errorf("fallback = %q, want %q", model, tt.wantFallback)
 			}
 		})
 	}
 	got := reconcileClaudeCodeFableModelAfterPayload(
-		[]byte(`{"model":"claude-opus-5-5","system":[]}`), claudeCodeFableState{}, false, false, true, false,
+		[]byte(`{"model":"claude-opus-5-5","system":[]}`), claudeCodeFableState{}, false, false, true, false, claudeCloakSettings{},
 	)
 	if fallback := gjson.GetBytes(got, "fallbacks.0.model").String(); fallback != "claude-opus-4-8" {
 		t.Errorf("Sonnet rewritten to Opus fallback = %q", fallback)
