@@ -31,14 +31,23 @@ func (e *poolRateLimitError) StatusCode() int { return http.StatusTooManyRequest
 func (e *poolRateLimitError) RetryAfter() *time.Duration { return &e.retryAfter }
 
 // poolRateLimitExecutor is a claude executor stub: auths named in cool map get
-// a 429 with the mapped Retry-After; all others succeed.
+// a 429 with the mapped Retry-After; all others succeed. identifier overrides
+// the default "claude" channel so multi-channel tests can register distinct
+// executors.
 type poolRateLimitExecutor struct {
 	mu    sync.Mutex
 	cool  map[string]time.Duration
 	calls []string
+
+	identifier string
 }
 
-func (e *poolRateLimitExecutor) Identifier() string { return "claude" }
+func (e *poolRateLimitExecutor) Identifier() string {
+	if e.identifier != "" {
+		return e.identifier
+	}
+	return "claude"
+}
 
 func (e *poolRateLimitExecutor) setCool(authID string, d time.Duration) {
 	e.mu.Lock()
@@ -293,4 +302,151 @@ func TestPoolFailFastToggleOffDisablesRecording(t *testing.T) {
 	if _, blocked := manager.modelPoolCooldowns.block([]string{"claude"}, model, time.Now()); blocked {
 		t.Fatal("pool aggregate recorded entries while the toggle was off")
 	}
+}
+
+// newPoolFailFastMultiChannelManager registers two executor channels
+// ("alpha" and "beta"), two credentials each, all serving the same model. Two
+// per channel because the aggregate threshold requires at least two cooling
+// credentials before a channel can block at all. It exists to pin the ALL-of
+// rule: the fail-fast must fire only when EVERY candidate channel is blocked.
+func newPoolFailFastMultiChannelManager(t *testing.T) (*Manager, *poolRateLimitExecutor, *poolRateLimitExecutor, string) {
+	t.Helper()
+	model := "pool-failfast-multichannel-model-" + uuid.NewString()
+	alphaExecutor := &poolRateLimitExecutor{cool: make(map[string]time.Duration), identifier: "alpha"}
+	betaExecutor := &poolRateLimitExecutor{cool: make(map[string]time.Duration), identifier: "beta"}
+	manager := NewManager(nil, nil, NoopHook{})
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(alphaExecutor)
+	manager.RegisterExecutor(betaExecutor)
+
+	type registration struct {
+		id       string
+		provider string
+	}
+	registrations := []registration{
+		{id: "pool-multichannel-alpha-1", provider: "alpha"},
+		{id: "pool-multichannel-alpha-2", provider: "alpha"},
+		{id: "pool-multichannel-beta-1", provider: "beta"},
+		{id: "pool-multichannel-beta-2", provider: "beta"},
+	}
+	reg := registry.GetGlobalRegistry()
+	for _, r := range registrations {
+		auth := &Auth{ID: r.id, Provider: r.provider, Status: StatusActive}
+		reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, r := range registrations {
+			reg.UnregisterClient(r.id)
+		}
+	})
+	return manager, alphaExecutor, betaExecutor, model
+}
+
+// requestMultiChannel drives one non-streaming Execute across both channels.
+func requestMultiChannel(t *testing.T, manager *Manager, model string) (string, error) {
+	t.Helper()
+	resp, errExecute := manager.Execute(context.Background(), []string{"alpha", "beta"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		return "", errExecute
+	}
+	return string(resp.Payload), nil
+}
+
+func TestPoolFailFastMultiChannelOneOpenDoesNotBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		legacy bool
+	}{{"fast", false}, {"legacy", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, alphaExecutor, betaExecutor, model := newPoolFailFastMultiChannelManager(t)
+			if tc.legacy {
+				// Force the legacy path by switching to a non-builtin
+				// selector shape: disabling cooldown-wait no; the practical
+				// legacy gate is hasPluginScheduler/useSchedulerFastPath.
+				// Simplest deterministic switch: wrap the picker through the
+				// compound-route path by pinning a compound provider key is
+				// overkill; instead mark the manager's selector custom via
+				// SetSelector with a stub that delegates.
+				manager.SetSelector(&legacyDelegatingSelector{model: model})
+			}
+
+			// Only alpha's two credentials cooling (2 of 2 meets the
+			// threshold); beta is healthy. The request must NOT fail fast:
+			// a beta credential serves.
+			ra := 5 * time.Minute
+			markFour29(t, manager, "pool-multichannel-alpha-1", model, ra)
+			markFour29(t, manager, "pool-multichannel-alpha-2", model, ra)
+
+			served, errExecute := requestMultiChannel(t, manager, model)
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v, want the healthy beta channel to serve (ALL-of rule)", errExecute)
+			}
+			if served != "pool-multichannel-beta-1" && served != "pool-multichannel-beta-2" {
+				t.Fatalf("served by %q, want a healthy beta credential", served)
+			}
+			if got := len(betaExecutor.ExecuteCalls()); got < 1 {
+				t.Fatalf("beta executor calls = %d, want >= 1", got)
+			}
+			// Alpha's aggregate must not have poisoned the pick.
+			if got := len(alphaExecutor.ExecuteCalls()); got != 0 {
+				t.Fatalf("alpha executor calls = %v, want 0 (fail-fast must not fire with beta open)", alphaExecutor.ExecuteCalls())
+			}
+		})
+	}
+}
+
+func TestPoolFailFastMultiChannelAllBlockedFailsFast(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		legacy bool
+	}{{"fast", false}, {"legacy", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, alphaExecutor, betaExecutor, model := newPoolFailFastMultiChannelManager(t)
+			if tc.legacy {
+				manager.SetSelector(&legacyDelegatingSelector{model: model})
+			}
+
+			// Both channels cooling at/above their thresholds (2 of 2 on
+			// each): fail-fast engages and the error must name an ACTUALLY
+			// blocked channel.
+			ra := 5 * time.Minute
+			markFour29(t, manager, "pool-multichannel-alpha-1", model, ra)
+			markFour29(t, manager, "pool-multichannel-alpha-2", model, ra)
+			markFour29(t, manager, "pool-multichannel-beta-1", model, ra)
+			markFour29(t, manager, "pool-multichannel-beta-2", model, ra)
+
+			_, errExecute := requestMultiChannel(t, manager, model)
+			var cooldownErr *modelCooldownError
+			if !errors.As(errExecute, &cooldownErr) {
+				t.Fatalf("Execute() error = %v, want *modelCooldownError fail-fast", errExecute)
+			}
+			if cooldownErr.provider != "alpha" && cooldownErr.provider != "beta" {
+				t.Fatalf("cooldown provider = %q, want a blocked channel (alpha or beta)", cooldownErr.provider)
+			}
+			if cooldownErr.resetIn <= 4*time.Minute || cooldownErr.resetIn > 5*time.Minute {
+				t.Fatalf("resetIn = %v, want ~= 5m", cooldownErr.resetIn)
+			}
+			// Both candidate channels are blocked, so no upstream attempts
+			// should have been made by THIS request (the MarkResults came
+			// from seeding, before the Execute).
+			if alphaCount, betaCount := len(alphaExecutor.ExecuteCalls()), len(betaExecutor.ExecuteCalls()); alphaCount != 0 || betaCount != 0 {
+				t.Fatalf("executor calls alpha=%d beta=%d, want 0/0 (seeding used MarkResult, not Execute)", alphaCount, betaCount)
+			}
+		})
+	}
+}
+
+// legacyDelegatingSelector forces pickNextMixed off the scheduler fast path
+// (useSchedulerFastPath requires a builtin selector), routing picks through
+// pickNextMixedLegacy while still handing picking to a round-robin selector.
+type legacyDelegatingSelector struct {
+	model string
+}
+
+func (s *legacyDelegatingSelector) Pick(ctx context.Context, provider, _ string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	delegate := &RoundRobinSelector{}
+	return delegate.Pick(ctx, provider, s.model, opts, auths)
 }

@@ -1770,9 +1770,10 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	// Pool-wide per-model cooldown fail-fast (Phase 2 F2), mirroring the
-	// pickNextMixed insertion. Per-provider-AND semantics: fires only when
-	// EVERY provider represented among the eligible candidates is blocked
-	// for the model; an empty eligible set never blocks (preserved above).
+	// pickNextMixed insertion. ALL-of semantics: fires only when EVERY
+	// provider represented among the eligible candidates is blocked for the
+	// model (enforced inside poolModelCooldownBlock); an empty eligible set
+	// never blocks (preserved above).
 	if modelKey != "" {
 		keyed := make(map[string]struct{}, len(candidates))
 		for _, candidate := range candidates {
@@ -1787,9 +1788,13 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			for providerKey := range keyed {
 				providersWithCandidates = append(providersWithCandidates, providerKey)
 			}
-			if deadline, blocked := m.poolModelCooldownBlock(providersWithCandidates, model, time.Now()); blocked {
+			sort.Strings(providersWithCandidates)
+			if deadline, blockedKey, blocked := m.poolModelCooldownBlock(providersWithCandidates, model, time.Now()); blocked {
 				m.mu.RUnlock()
-				return nil, nil, "", newModelCooldownError(canonicalModelKey(model), providersWithCandidates[0], time.Until(deadline))
+				// The attribution key names a channel that is ACTUALLY
+				// blocked (all of them are at this point), sorted-first
+				// for deterministic error text.
+				return nil, nil, "", newModelCooldownError(canonicalModelKey(model), blockedKey, time.Until(deadline))
 			}
 		}
 	}
@@ -1944,6 +1949,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	poolCooldown := false
 	var poolDeadline time.Time
+	poolBlockedKey := ""
 	if strings.TrimSpace(model) != "" {
 		providerSet := make(map[string]struct{}, len(eligibleProviders))
 		for _, providerKey := range eligibleProviders {
@@ -1959,9 +1965,10 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		// An empty eligible-candidate union never triggers a spurious
 		// fail-fast (the empty behavior below is preserved).
 		if providersWithCandidates := m.poolCooldownCandidateProvidersLocked(providerSet, eligibility, tried, model); len(providersWithCandidates) > 0 {
-			if deadline, blocked := m.poolModelCooldownBlock(providersWithCandidates, model, time.Now()); blocked {
+			if deadline, blockedKey, blocked := m.poolModelCooldownBlock(providersWithCandidates, model, time.Now()); blocked {
 				poolCooldown = true
 				poolDeadline = deadline
+				poolBlockedKey = blockedKey
 			}
 		}
 		for _, candidate := range m.auths {
@@ -1985,8 +1992,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		m.mu.RUnlock()
 		if poolCooldown {
 			// Canonical model key for the error body so per-model thinking
-			// suffixes collapse onto the aggregate's key.
-			return nil, nil, "", newModelCooldownError(canonicalModelKey(model), eligibleProviders[0], time.Until(poolDeadline))
+			// suffixes collapse onto the aggregate's key. The attribution
+			// key names a channel that is ACTUALLY blocked.
+			return nil, nil, "", newModelCooldownError(canonicalModelKey(model), poolBlockedKey, time.Until(poolDeadline))
 		}
 	}
 

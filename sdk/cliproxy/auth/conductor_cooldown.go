@@ -26,11 +26,11 @@ var quotaCooldownDisabled atomic.Bool
 // (recording in MarkResult and fail-fast in selection). It defaults ON;
 // routing.pool-model-cooldown: false restores legacy rotation through
 // cooling credentials.
-var poolModelCooldownEnabled atomic.Bool = func() atomic.Bool {
-	var v atomic.Bool
-	v.Store(true)
-	return v
-}()
+var poolModelCooldownEnabled atomic.Bool
+
+func init() {
+	poolModelCooldownEnabled.Store(true)
+}
 
 // SetPoolModelCooldownEnabled toggles the pool-wide per-model cooldown
 // behavior. When disabled, MarkResult stops creating pool entries and
@@ -1103,20 +1103,43 @@ func (m *Manager) modelPoolCooldownAuthsLocked(provider string) []*Auth {
 	return auths
 }
 
-// poolModelCooldownBlock reports the pool-wide fail-fast deadline for a model
-// across the given provider keys, honoring the poolModelCooldownEnabled
-// toggle. Providers are checked independently (per-provider-AND is applied by
-// the selection callers): a single blocked provider key is enough for this
-// helper to report a block. Returns (deadline, true) when the model is
-// pool-blocked for any of the providers.
-func (m *Manager) poolModelCooldownBlock(providers []string, model string, now time.Time) (time.Time, bool) {
-	if m == nil || m.modelPoolCooldowns == nil {
-		return time.Time{}, false
+// poolModelCooldownBlock reports the pool-wide fail-fast state for a model
+// across the given candidate provider keys, honoring the
+// poolModelCooldownEnabled toggle. It enforces the ALL-of rule itself: the
+// fail-fast fires only when EVERY provider key in the list is blocked for
+// the model (the underlying aggregate's block() ORs — the Task-5 contract —
+// so the per-channel queries happen here). The candidate list must be the
+// selection callers' eligible-candidate set, so one open provider keeps
+// rotation going. When all are blocked, the deadline is the MAX across the
+// blocked channels and the returned attribution key is the
+// lexicographically-first blocked channel (deterministic for error text).
+func (m *Manager) poolModelCooldownBlock(providers []string, model string, now time.Time) (time.Time, string, bool) {
+	if m == nil || m.modelPoolCooldowns == nil || len(providers) == 0 {
+		return time.Time{}, "", false
 	}
 	if !poolModelCooldownEnabled.Load() {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
-	return m.modelPoolCooldowns.block(providers, model, now)
+	// The ALL-of rule needs every channel blocked and the MAX deadline
+	// across those channels (resetIn must not shortchange a longer-lived
+	// contributor); the aggregate's block() ORs (Task-5 contract), so the
+	// per-channel queries happen here. All channels are blocked once the
+	// loop completes, so the attribution key is the sorted-first one.
+	maxDeadline := time.Time{}
+	firstBlocked := ""
+	for _, provider := range providers {
+		deadline, blocked := m.modelPoolCooldowns.block([]string{provider}, model, now)
+		if !blocked {
+			return time.Time{}, "", false
+		}
+		if deadline.After(maxDeadline) {
+			maxDeadline = deadline
+		}
+		if firstBlocked == "" || provider < firstBlocked {
+			firstBlocked = provider
+		}
+	}
+	return maxDeadline, firstBlocked, true
 }
 
 // poolCooldownCandidateProvidersLocked returns the subset of provider keys
