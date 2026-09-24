@@ -501,6 +501,14 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = coreusage.WithTraceID(parentCtx, trID)
 		}
 	}
+	// Propagate WithPinnedAuthID from the inbound request context. Handlers call
+	// GetContextWithCancel with context.Background(); without this copy the pin
+	// never reaches requestExecutionMetadata / Execute (embedding-host S6).
+	if requestCtx != nil && pinnedAuthIDFromContext(parentCtx) == "" {
+		if pin := pinnedAuthIDFromContext(requestCtx); pin != "" {
+			parentCtx = WithPinnedAuthID(parentCtx, pin)
+		}
+	}
 	newCtx, cancel := context.WithCancel(parentCtx)
 
 	endpoint := ""
