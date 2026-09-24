@@ -3932,5 +3932,26 @@
       "context_length": 200000,
       "max_completion_tokens": 32768
     }
+  ],
+  "meta": [
+    {
+      "id": "muse-code",
+      "object": "model",
+      "created": 1784592000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Code",
+      "name": "muse-code",
+      "version": "muse-code",
+      "description": "Meta Muse Code coding model (minted LLM API key served via OpenAI-compatible API)",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    }
   ]
 }

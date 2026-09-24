@@ -29,6 +29,7 @@ type staticModelsJSON struct {
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
+	Meta        []*ModelInfo `json:"meta"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -109,6 +110,39 @@ func AntigravityWebSearchModelFor(modelID string) string {
 // GetXAIModels returns the standard xAI Grok model definitions.
 func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
+}
+
+// GetMetaModels returns the standard Meta model definitions.
+func GetMetaModels() []*ModelInfo {
+	return WithMetaBuiltins(cloneModelInfos(getModels().Meta))
+}
+
+// WithMetaBuiltins injects hard-coded Meta model definitions that should
+// not depend on remote models.json updates.
+func WithMetaBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, metaBuiltinModelInfo())
+}
+
+func metaBuiltinModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  "muse-code",
+		Object:              "model",
+		Created:             1784592000, // 2026-07-21
+		OwnedBy:             "meta",
+		Type:                "meta",
+		DisplayName:         "Muse Code",
+		Name:                "muse-code",
+		Version:             "muse-code",
+		Description:         "Meta Muse Code Coding model (LLM API key served via OpenAI-compatible API)",
+		ContextLength:       200000, // TODO(verify-live): placeholder until Meta publishes params
+		MaxCompletionTokens: 65536,  // TODO(verify-live): placeholder until Meta publishes params
+		SupportedInputModalities: []string{
+			"text",
+		},
+		SupportedOutputModalities: []string{
+			"text",
+		},
+	}
 }
 
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
@@ -310,6 +344,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "meta", "muse", "muse-code":
+		return GetMetaModels()
 	default:
 		return nil
 	}
@@ -332,6 +368,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
+		data.Meta,
 	}
 	for _, models := range allModels {
 		for _, m := range models {
