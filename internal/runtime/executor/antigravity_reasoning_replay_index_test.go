@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -986,5 +987,56 @@ func BenchmarkApplyAntigravityReasoningReplayItemsLargeSegmentedFallback(b *test
 	b.ResetTimer()
 	for b.Loop() {
 		_, _ = applyAntigravityReasoningReplayItems(payload, items, toolSchemas)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_PreservesContextHashRejectionLoggingAcrossRebuilds(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	nativeID2 := "native-call-2"
+	name2 := "search"
+	args2 := `{"q":"go"}`
+	opaqueID2 := util.GeminiClaudeToolUseID(nativeID2, name2, args2)
+
+	payload := []byte(fmt.Sprintf(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"exec","args":{"cmd":"ls"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"exec","response":{"result":"ok"}}}]},
+		{"role":"model","parts":[{"functionCall":{"id":%q,"name":%q,"args":%s}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":%q,"name":%q,"response":{"result":"done"}}}]}
+	]}}`, opaqueID2, name2, args2, opaqueID2, name2))
+
+	item1 := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+	item2 := []byte(fmt.Sprintf(`{"type":"function_call_part","call_id":%q,"name":%q,"args":%s,"thoughtSignature":"sig-2"}`, nativeID2, name2, args2))
+	item3 := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-3","contextHash":"wrong-hash-2"}`)
+
+	toolSchemas := map[string]any{"search": map[string]any{"type": "object"}}
+	updated, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item1, item2, item3}, toolSchemas)
+	if !changed {
+		t.Fatal("expected item2 to apply and change payload")
+	}
+	if !strings.Contains(string(updated), nativeID2) {
+		t.Fatalf("expected payload to have restored %q, got: %s", nativeID2, string(updated))
+	}
+
+	detailCount := 0
+	suppressedCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if strings.Contains(entry.Message, "rejected by context hash") {
+			detailCount++
+		}
+		if strings.Contains(entry.Message, "suppressed") && strings.Contains(entry.Message, "repeated context-hash rejections") {
+			suppressedCount++
+		}
+	}
+
+	if detailCount != 1 {
+		t.Fatalf("expected exactly 1 detailed rejection log, got %d", detailCount)
+	}
+	if suppressedCount != 1 {
+		t.Fatalf("expected exactly 1 suppressed summary log across rebuilds, got %d", suppressedCount)
 	}
 }
