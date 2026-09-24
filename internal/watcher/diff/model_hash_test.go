@@ -208,6 +208,14 @@ func TestComputeOtherModelHashesIncludeForceMapping(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHashIncludesUseMaxCompletionTokens(t *testing.T) {
+	withoutMCT := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m"}})
+	withMCT := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m", UseMaxCompletionTokens: true}})
+	if withoutMCT == "" || withoutMCT == withMCT {
+		t.Fatalf("use-max-completion-tokens must change model hash: %q / %q", withoutMCT, withMCT)
+	}
+}
+
 func TestComputeExcludedModelsHash_Normalizes(t *testing.T) {
 	hash1 := ComputeExcludedModelsHash([]string{" A ", "b", "a"})
 	hash2 := ComputeExcludedModelsHash([]string{"a", " b", "A"})

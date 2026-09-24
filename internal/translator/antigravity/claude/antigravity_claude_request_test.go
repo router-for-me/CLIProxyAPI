@@ -3749,3 +3749,40 @@ func TestConvertClaudeRequestToAntigravityToolChoiceNoneOmitsInterleavedThinking
 		})
 	}
 }
+
+func TestConvertClaudeRequestToAntigravity_FunctionResponseJSONRef(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_schema_1", "name": "get_schema", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "toolu_schema_1",
+						"content": {
+							"schema": {
+								"$ref": "#/components/schemas/ErrorModel"
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	result := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse.response.result")
+	if result.Type != gjson.String {
+		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", result.Type, result.Raw)
+	}
+	if !strings.Contains(result.String(), "#/components/schemas/ErrorModel") {
+		t.Fatalf("expected result to contain ref target, got %q", result.String())
+	}
+}

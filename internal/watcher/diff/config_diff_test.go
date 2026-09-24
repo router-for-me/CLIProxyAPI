@@ -204,6 +204,15 @@ func TestBuildConfigChangeDetails_CodexAlphaSearch(t *testing.T) {
 	expectContains(t, changes, "codex[0].alpha-search: false -> true")
 }
 
+func TestBuildConfigChangeDetails_CodexKey_DisableCodexCloaking(t *testing.T) {
+	disabled := true
+	oldCfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "key", BaseURL: "https://codex.example.com"}}}
+	newCfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "key", BaseURL: "https://codex.example.com", DisableCodexCloaking: &disabled}}}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "codex[0].disable-codex-cloaking: inherit -> true")
+}
+
 func TestBuildConfigChangeDetails_CodexOrphanDelegationCompatibility(t *testing.T) {
 	oldCfg := &config.Config{Codex: config.CodexConfig{OrphanDelegationCompatibility: false}}
 	newCfg := &config.Config{Codex: config.CodexConfig{OrphanDelegationCompatibility: true}}

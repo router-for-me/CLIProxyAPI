@@ -695,7 +695,11 @@ func syncAuthFilePriorityAttribute(auth *coreauth.Auth) {
 	priority, ok := authFileIntValue(auth.Metadata["priority"])
 	if !ok {
 		delete(auth.Attributes, "priority")
+		delete(auth.Attributes, coreauth.AttributeFilePriority)
 		return
+	}
+	if auth.Attributes[coreauth.AttributeSourceBackend] == coreauth.AuthSourceFile {
+		auth.Attributes[coreauth.AttributeFilePriority] = "true"
 	}
 	if priority == 0 {
 		delete(auth.Attributes, "priority")

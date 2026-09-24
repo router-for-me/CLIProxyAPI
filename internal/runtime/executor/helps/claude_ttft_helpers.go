@@ -91,6 +91,9 @@ func IsClaudeTokenEvent(payload []byte) bool {
 // represents the first meaningful token event. It records first-packet arrival time as fallback
 // and returns immediately with zero allocations once effective token TTFT is set.
 func ObserveClaudeTokenEvent(reporter *UsageReporter, payload []byte) {
+	if reporter != nil && len(payload) > 0 {
+		reporter.ObserveResponseModel(payload)
+	}
 	if reporter == nil || len(payload) == 0 {
 		return
 	}

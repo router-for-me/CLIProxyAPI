@@ -162,26 +162,36 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if sessionID == "" || sessionID == parentSessionID {
 		parentSessionID = ""
 	}
+	requestID := strings.TrimSpace(record.RequestID)
+	traceID := strings.TrimSpace(record.TraceID)
+	if traceID == "" {
+		traceID = strings.TrimSpace(logging.GetRequestID(ctx))
+	}
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
-		Provider:        record.Provider,
-		BaseURL:         record.BaseURL,
-		ExecutorType:    record.ExecutorType,
-		Model:           record.Model,
-		Alias:           record.Alias,
-		APIKey:          record.APIKey,
-		SessionID:       sessionID,
-		ParentSessionID: parentSessionID,
-		AuthID:          record.AuthID,
-		AuthIndex:       record.AuthIndex,
-		AuthType:        record.AuthType,
-		Source:          record.Source,
-		ReasoningEffort: record.ReasoningEffort,
-		ServiceTier:     record.ServiceTier,
-		Generate:        coreusage.GenerateEnabled(record.Generate),
-		RequestedAt:     record.RequestedAt,
-		Latency:         record.Latency,
-		TTFT:            record.TTFT,
-		Failed:          record.Failed,
+		RequestID:           requestID,
+		TraceID:             traceID,
+		Provider:            record.Provider,
+		BaseURL:             record.BaseURL,
+		ExecutorType:        record.ExecutorType,
+		Model:               record.Model,
+		Alias:               record.Alias,
+		APIKey:              record.APIKey,
+		SessionID:           sessionID,
+		ParentSessionID:     parentSessionID,
+		AuthID:              record.AuthID,
+		AuthIndex:           record.AuthIndex,
+		AuthType:            record.AuthType,
+		Source:              record.Source,
+		ReasoningEffort:     record.ReasoningEffort,
+		ServiceTier:         record.ServiceTier,
+		ResponseServiceTier: record.ResponseServiceTier,
+		ResponseModel:       record.ResponseModel,
+		Generate:            coreusage.GenerateEnabled(record.Generate),
+		Stream:              record.Stream,
+		RequestedAt:         record.RequestedAt,
+		Latency:             record.Latency,
+		TTFT:                record.TTFT,
+		Failed:              record.Failed,
 		Failure: pluginapi.UsageFailure{
 			StatusCode: record.Fail.StatusCode,
 			Body:       record.Fail.Body,
