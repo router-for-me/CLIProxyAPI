@@ -145,6 +145,18 @@ func (cfg *Config) SanitizeXAIKeys() {
 	}
 }
 
+// SanitizeMetaKeys removes Meta API key entries missing a BaseURL.
+// It applies the same normalization rules as codex-api-key.
+func (cfg *Config) SanitizeMetaKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.MetaKey = sanitizeCodexKeyEntries(cfg.MetaKey)
+	for i := range cfg.MetaKey {
+		cfg.MetaKey[i].AlphaSearch = false
+	}
+}
+
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	if len(entries) == 0 {
 		return entries
