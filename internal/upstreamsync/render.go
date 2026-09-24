@@ -42,6 +42,7 @@ const (
 	TypeOAuthVertex      = "oauth:vertex"
 	TypeOAuthAIStudio    = "oauth:aistudio"
 	TypeOAuthAntigravity = "oauth:antigravity"
+	TypeOAuthMeta        = "oauth:meta"
 )
 
 // IsOAuth reports whether providerType is an OAuth/file-backed auth.
