@@ -280,6 +280,9 @@ func classifyClaudeUpstreamError(statusCode int, headers http.Header, body []byt
 	if ra := helps.ParseClaudeRetryAfterHeaders(headers, time.Now()); ra != nil {
 		err.retryAfter = ra
 	}
+	if overageIndicated(statusCode, headers, body) {
+		return &claudeOverageError{err}
+	}
 	return err
 }
 

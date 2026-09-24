@@ -81,6 +81,149 @@ func TestClassifyClaudeUpstreamError_RetryAfterOnNon429(t *testing.T) {
 	}
 }
 
+// An overage-only rejection is a billing cap on the account, not a throttle:
+// the classifier must wrap the status error so downstream consumers can send
+// the credential into a long overage cooldown instead of the throttle ladder,
+// while StatusCode/RetryAfter stay reachable through Unwrap.
+func TestClassifyClaudeUpstreamError_OverageOnlyRejectionMarksOverage(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("anthropic-ratelimit-unified-status", "allowed")
+	headers.Set("anthropic-ratelimit-unified-overage-status", "rejected")
+	headers.Set("anthropic-ratelimit-unified-5h-status", "allowed")
+	err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, []byte("{}"))
+
+	overage, ok := err.(interface{ OverageRejected() bool })
+	if !ok || !overage.OverageRejected() {
+		t.Fatalf("overage-only rejection = %T, want an error marked OverageRejected", err)
+	}
+	var status *statusErr
+	if !errors.As(err, &status) {
+		t.Fatalf("overage error %T does not unwrap to statusErr", err)
+	}
+	if status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("StatusCode() = %d, want 429", status.StatusCode())
+	}
+}
+
+// A plain throttle with a usable Retry-After is not an overage cap; the hint
+// must survive untouched and no overage marker may be attached.
+func TestClassifyClaudeUpstreamError_PlainThrottleNotOverage(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Retry-After", "30")
+	err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, []byte("{}"))
+
+	if overage, ok := err.(interface{ OverageRejected() bool }); ok && overage.OverageRejected() {
+		t.Fatalf("plain 429 with Retry-After was misclassified as overage")
+	}
+	var status interface {
+		StatusCode() int
+		RetryAfter() *time.Duration
+	}
+	if !errors.As(err, &status) {
+		t.Fatalf("classifier returned %T, want an error unwrapping to statusErr", err)
+	}
+	if got := status.RetryAfter(); got == nil || *got != 30*time.Second {
+		t.Fatalf("RetryAfter() = %v, want 30s", got)
+	}
+}
+
+// A rejected shared window is the real throttle even when the overage header
+// exists; Retry-After wins and the rejection stays a throttle.
+func TestClassifyClaudeUpstreamError_SharedWindowThrottleNotOverage(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Retry-After", "30")
+	headers.Set("anthropic-ratelimit-unified-status", "rejected")
+	headers.Set("anthropic-ratelimit-unified-overage-status", "rejected")
+	err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, []byte("{}"))
+
+	if overage, ok := err.(interface{ OverageRejected() bool }); ok && overage.OverageRejected() {
+		t.Fatalf("shared-window rejected 429 was misclassified as overage")
+	}
+	var status interface {
+		StatusCode() int
+		RetryAfter() *time.Duration
+	}
+	if !errors.As(err, &status) {
+		t.Fatalf("classifier returned %T, want an error unwrapping to statusErr", err)
+	}
+	if got := status.RetryAfter(); got == nil || *got != 30*time.Second {
+		t.Fatalf("RetryAfter() = %v, want 30s preserved on the shared throttle", got)
+	}
+}
+
+// Without headers, the body message is the only signal of a spend cap; a 403
+// billing error and a 429 usage-limit notice must both be marked as overage.
+func TestClassifyClaudeUpstreamError_BodyKeywordFallback(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		body       []byte
+	}{
+		{
+			name:       "403 spend cap",
+			statusCode: http.StatusForbidden,
+			body:       []byte(`{"type":"error","error":{"type":"billing_error","message":"Your org has reached its monthly spend cap."}}`),
+		},
+		{
+			name:       "429 usage limit",
+			statusCode: http.StatusTooManyRequests,
+			body:       []byte(`{"type":"error","error":{"type":"billing_error","message":"Your usage limit has been reached."}}`),
+		},
+	}
+	for _, tc := range cases {
+		err := classifyClaudeUpstreamError(tc.statusCode, http.Header{}, tc.body)
+		overage, ok := err.(interface{ OverageRejected() bool })
+		if !ok || !overage.OverageRejected() {
+			t.Fatalf("%s: error = %T, want an error marked OverageRejected", tc.name, err)
+		}
+		var status *statusErr
+		if !errors.As(err, &status) {
+			t.Fatalf("%s: error %T does not unwrap to statusErr", tc.name, err)
+		}
+		if status.StatusCode() != tc.statusCode {
+			t.Fatalf("%s: StatusCode() = %d, want %d", tc.name, status.StatusCode(), tc.statusCode)
+		}
+	}
+}
+
+// A usable Retry-After means the upstream is throttling, not capping: the body
+// keyword alone must not override an explicit wait hint.
+func TestClassifyClaudeUpstreamError_RetryAfterBeatsBodyKeyword(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Retry-After", "30")
+	headers.Set("anthropic-ratelimit-unified-status", "rejected")
+	body := []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Your usage limit has been reached."}}`)
+	err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, body)
+
+	if overage, ok := err.(interface{ OverageRejected() bool }); ok && overage.OverageRejected() {
+		t.Fatalf("throttle with Retry-After and a usage-limit body was misclassified as overage")
+	}
+	var status interface {
+		StatusCode() int
+		RetryAfter() *time.Duration
+	}
+	if !errors.As(err, &status) {
+		t.Fatalf("classifier returned %T, want an error unwrapping to statusErr", err)
+	}
+	if got := status.RetryAfter(); got == nil || *got != 30*time.Second {
+		t.Fatalf("RetryAfter() = %v, want 30s", got)
+	}
+}
+
+// The fast-mode credits entitlement path returns before the overage check and
+// must remain unmarked: it is request-scoped, never a credential cooldown.
+func TestClassifyClaudeUpstreamError_FastModeEntitlementNeverOverage(t *testing.T) {
+	body := []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for fast mode."}}`)
+	err := classifyClaudeUpstreamError(http.StatusTooManyRequests, http.Header{}, body)
+
+	if _, ok := err.(claudeEntitlementError); !ok {
+		t.Fatalf("fast-mode credits refusal = %T, want claudeEntitlementError", err)
+	}
+	if overage, ok := err.(interface{ OverageRejected() bool }); ok && overage.OverageRejected() {
+		t.Fatalf("fast-mode entitlement refusal was misclassified as overage")
+	}
+}
+
 // The count-tokens path builds its status errors directly; when the upstream
 // *http.Response is in scope there, the retry-at hint must survive just as it
 // does on the execute and stream paths. Direct call: the CountTokens gate only
