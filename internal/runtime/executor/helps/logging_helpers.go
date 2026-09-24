@@ -21,13 +21,14 @@ import (
 )
 
 const (
-	apiAttemptsKey                 = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey                  = "API_REQUEST"
-	apiResponseKey                 = "API_RESPONSE"
-	apiWebsocketTimelineKey        = "API_WEBSOCKET_TIMELINE"
-	deferredAPIRequestBytesKey     = "DEFERRED_API_REQUEST_BYTES"
-	creditsUsedKey                 = "__antigravity_credits_used__"
-	maxDeferredAPIRequestBodyBytes = 32 << 20 // 32 MiB
+	apiAttemptsKey                     = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey                      = "API_REQUEST"
+	apiResponseKey                     = "API_RESPONSE"
+	apiResponseAggregateFingerprintKey = "API_RESPONSE_AGGREGATE_FINGERPRINT"
+	apiWebsocketTimelineKey            = "API_WEBSOCKET_TIMELINE"
+	deferredAPIRequestBytesKey         = "DEFERRED_API_REQUEST_BYTES"
+	creditsUsedKey                     = "__antigravity_credits_used__"
+	maxDeferredAPIRequestBodyBytes     = 32 << 20 // 32 MiB
 	// maxAttemptResponseLogBytes bounds the in-memory per-attempt response log
 	// buffer. The buffer is only used when no file-backed response source is
 	// attached (the normal request-log path writes to a temp file instead), but
@@ -500,15 +501,18 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 			attempt.responseSource = nil
 		}
 	}
-	if attempt.response == nil {
-		attempt.response = &strings.Builder{}
-	}
 	if attempt.bodyTruncated {
 		return
+	}
+	if attempt.response == nil {
+		attempt.response = &strings.Builder{}
 	}
 	// Cap before writing so a single oversized chunk cannot overshoot the
 	// bound. A truncated buffer is flagged rather than silently losing the
 	// tail, so an operator reading the captured log knows it is partial.
+	// Once flagged, any later content too (including error text appended via
+	// RecordAPIResponseError) is dropped from the in-memory buffer; the
+	// aggregate marker tells the operator the tail is missing (accepted v1).
 	if attempt.response.Len()+len(payload) > maxAttemptResponseLogBytes {
 		attempt.bodyTruncated = true
 		return
@@ -531,7 +535,47 @@ func updateAggregatedResponseIfMemoryBacked(ginCtx *gin.Context, attempts []*ups
 	if apiResponseSourceOrNil(ginCtx) != nil {
 		return
 	}
+	// Once the per-attempt cap trips, attempt.response stops growing, so every
+	// later chunk would rebuild a byte-identical aggregate: a full multi-MiB
+	// copy plus allocation per remaining chunk of a long stream. Cache a
+	// fingerprint of the aggregate inputs (attempt count, total buffered bytes,
+	// and whether any attempt hit the cap) and skip the rebuild while it is
+	// unchanged. The truncated flag is part of the fingerprint because the
+	// chunk that trips the cap writes zero bytes yet must still force the one
+	// rebuild that appends the "[truncated: ...]" marker. New attempts
+	// (retries) or late error text change the count or size and re-enable
+	// rebuilds.
+	fingerprint := responseAggregateFingerprint(attempts)
+	if ginCtx != nil {
+		if cached, exists := ginCtx.Get(apiResponseAggregateFingerprintKey); exists {
+			if cachedBytes, ok := cached.([]byte); ok && bytes.Equal(cachedBytes, fingerprint) {
+				return
+			}
+		}
+		ginCtx.Set(apiResponseAggregateFingerprintKey, fingerprint)
+	}
 	updateAggregatedResponse(ginCtx, attempts)
+}
+
+// responseAggregateFingerprint returns an opaque key identifying the exact
+// inputs updateAggregatedResponse consumes: attempt count, summed buffered
+// response size, and the truncated flag (see the comment at its call site for
+// why the flag is load-bearing).
+func responseAggregateFingerprint(attempts []*upstreamAttempt) []byte {
+	totalSize := 0
+	anyTruncated := false
+	for _, attempt := range attempts {
+		if attempt == nil || attempt.responseSource != nil {
+			continue
+		}
+		if attempt.response != nil {
+			totalSize += attempt.response.Len()
+		}
+		if attempt.bodyTruncated {
+			anyTruncated = true
+		}
+	}
+	return []byte(strconv.Itoa(len(attempts)) + "|" + strconv.Itoa(totalSize) + "|" + strconv.FormatBool(anyTruncated))
 }
 
 func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
@@ -549,9 +593,9 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 		}
 		builder.WriteString(responseText)
 		if attempt.bodyTruncated {
-			builder.WriteString("\n[truncated: response log exceeded ")
+			builder.WriteString("\n[truncated: response log would exceed the ")
 			builder.WriteString(strconv.Itoa(maxAttemptResponseLogBytes))
-			builder.WriteString(" bytes]\n")
+			builder.WriteString("-byte cap]\n")
 		}
 		if !strings.HasSuffix(responseText, "\n") {
 			builder.WriteString("\n")
