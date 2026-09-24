@@ -896,7 +896,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							// belongs to the overage horizon, not the 30-minute
 							// payment-required cooldown; the code is only
 							// pinned when the executor classified the body as
-							// an overage rejection.
+							// an overage rejection. Note 402 can never carry
+							// the code: the executor only overage-marks 403 and
+							// 429, so 402 keeps plain payment_required handling.
 							if result.Error != nil && result.Error.Code == overageErrorCode {
 								applyModelOverageQuota(state, now, disableCooling)
 								if !disableCooling {
@@ -926,7 +928,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 429:
 							// Overage (spend-cap) rejections take a long fixed
 							// horizon instead of the throttle ladder; see
-							// applyModelOverageQuota.
+							// applyModelOverageQuota. The sibling 402/403 case
+							// gates on the same overage code before its
+							// payment_required handling.
 							isOverage := result.Error != nil && result.Error.Code == overageErrorCode
 							if isOverage {
 								applyModelOverageQuota(state, now, disableCooling)

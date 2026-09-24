@@ -82,6 +82,31 @@ func TestResultErrorFromErrorPlainThrottleNotOverage(t *testing.T) {
 	}
 }
 
+// overageRequestScopedTestError carries both an overage marker and a
+// request-scoped classification, so precedence between the two pins is
+// observable: a request-scoped fault must always win the code.
+type overageRequestScopedTestError struct {
+	status int
+}
+
+func (e overageRequestScopedTestError) Error() string       { return "fast-mode credits required" }
+func (e overageRequestScopedTestError) StatusCode() int     { return e.status }
+func (overageRequestScopedTestError) OverageRejected() bool { return true }
+func (overageRequestScopedTestError) IsRequestScoped() bool { return true }
+
+// TestResultErrorFromErrorRequestScopedBeatsOverage pins that a request-scoped
+// classification wins the result-error code even when the error is also
+// overage-marked: request faults always take precedence over the overage pin.
+func TestResultErrorFromErrorRequestScopedBeatsOverage(t *testing.T) {
+	resultErr := resultErrorFromError(overageRequestScopedTestError{status: http.StatusTooManyRequests})
+	if resultErr == nil {
+		t.Fatal("resultErrorFromError() = nil, want *Error")
+	}
+	if resultErr.Code != requestScopedErrorCode {
+		t.Fatalf("Code = %q, want %q (request-scoped wins over overage)", resultErr.Code, requestScopedErrorCode)
+	}
+}
+
 // TestMarkResultOverageScopedQuota verifies that a model-level 429 carrying
 // the overage code enters the long fixed overage horizon (7 days) with
 // Reason "overage" instead of the exponential throttle ladder, and suspends
@@ -109,6 +134,24 @@ func TestMarkResultOverageScopedQuota(t *testing.T) {
 	}
 
 	before := time.Now()
+	// Seed the backoff ladder with an ordinary 429 first so the BackoffLevel
+	// assertion below is non-vacuous: the overage hit must reset it, not
+	// merely inherit a zero.
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   authID,
+		Provider: provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{Code: "rate_limit_error", Message: "rate limited", HTTPStatus: http.StatusTooManyRequests},
+	})
+	seeded := manager.auths[authID].ModelStates[model]
+	if seeded == nil || seeded.Quota.BackoffLevel == 0 {
+		t.Fatalf("seed 429 did not advance the backoff ladder: %+v", seeded)
+	}
+	// The registry's SuspendClientModel is first-write-wins, so the seed's
+	// "quota" suspension would mask the overage suspension below; resume the
+	// seed suspension so the overage reason is observable.
+	registry.GetGlobalRegistry().ResumeClientModel(authID, model)
 	manager.MarkResult(context.Background(), Result{
 		AuthID:   authID,
 		Provider: provider,
@@ -234,6 +277,24 @@ func TestMarkResultOverage403ScopedQuota(t *testing.T) {
 	}
 
 	before := time.Now()
+	// Seed the backoff ladder with an ordinary 429 first so the BackoffLevel
+	// assertion below is non-vacuous: the overage hit must reset it, not
+	// merely inherit a zero.
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   authID,
+		Provider: provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{Code: "rate_limit_error", Message: "rate limited", HTTPStatus: http.StatusTooManyRequests},
+	})
+	seeded := manager.auths[authID].ModelStates[model]
+	if seeded == nil || seeded.Quota.BackoffLevel == 0 {
+		t.Fatalf("seed 429 did not advance the backoff ladder: %+v", seeded)
+	}
+	// The registry's SuspendClientModel is first-write-wins, so the seed's
+	// "quota" suspension would mask the overage suspension below; resume the
+	// seed suspension so the overage reason is observable.
+	registry.GetGlobalRegistry().ResumeClientModel(authID, model)
 	manager.MarkResult(context.Background(), Result{
 		AuthID:   authID,
 		Provider: provider,
