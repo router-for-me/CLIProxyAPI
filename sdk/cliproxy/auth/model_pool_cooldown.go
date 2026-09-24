@@ -166,6 +166,14 @@ func (m *modelPoolCooldowns) snapshotRecords(now time.Time) []CooldownStateRecor
 			continue
 		}
 		provider, modelKey, _ := strings.Cut(key, "\x00")
+		// Pool-level records carry "pool_quota" (not the credential-scoped
+		// "quota"/"overage") so CooldownStateSnapshot consumers such as the
+		// dashboard and the alert runner can distinguish a pool-wide fail-fast
+		// from a single-credential cooldown without parsing. This mirrors the
+		// contract documented at the Manager.snapshotRecords call site in
+		// conductor_cooldown.go. AuthID stays empty: the record is owned by
+		// the (provider, model) key, not by any credential, and the file store
+		// skips AuthID-less records by design.
 		records = append(records, CooldownStateRecord{
 			Provider:       provider,
 			AuthID:         "",
