@@ -1,0 +1,171 @@
+package auth
+
+import (
+	"context"
+	"net/http"
+	"testing"
+	"time"
+)
+
+// Alias-mapped models: the provider's structured 404 names the alias-resolved
+// upstream identifier, not the public route model. Classification must match
+// either name before falling back to the short transient window (#5476 review).
+func TestManager_MarkResult_ExplicitNotFoundMatchesUpstreamModel(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-alias-404", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "public-model",
+		UpstreamModel: "upstream-name",
+		Success:       false,
+		Error: &Error{
+			HTTPStatus: http.StatusNotFound,
+			Message:    `{"type":"not_found_error","message":"model upstream-name was not found"}`,
+		},
+	})
+
+	before := time.Now()
+	updated, _ := m.GetByID(auth.ID)
+	state := existingModelState(updated, canonicalModelKey("public-model"))
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
+		t.Fatalf("upstream-named 404 fell into the transient branch: %v", state.NextRetryAfter.Sub(before))
+	}
+}
+
+// The credential-level clamp inherited from the merged #5501 work keeps a live
+// 401 deadline when a later generic 404 proposes a shorter window (#5476 review).
+func TestManager_MarkResult_Transient404KeepsLongerCredentialDeadline(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-cred-404-order", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "",
+		Success: false, Error: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+	})
+	before := time.Now()
+	snap, _ := m.GetByID(auth.ID)
+	if snap.NextRetryAfter.Before(before.Add(25 * time.Minute)) {
+		t.Fatalf("precondition failed: expected ~30m 401 deadline, got %v", snap.NextRetryAfter.Sub(before))
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: "",
+		Success: false, Error: &Error{HTTPStatus: http.StatusNotFound, Message: "upstream stream failed"},
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	if updated.NextRetryAfter.Before(before.Add(25 * time.Minute)) {
+		t.Fatalf("transient 404 shortened the live credential deadline to %v", updated.NextRetryAfter.Sub(before))
+	}
+}
+
+// Concurrent in-flight 404s complete in any order: a generic transient 404
+// landing after an explicit model-not-found result must not shorten the model's
+// still-live long cooldown (#5476 review).
+func TestManager_MarkResult_Transient404KeepsLongerModelDeadline(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-404-order", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	model := "gpt-5.6-sol"
+
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: model,
+		Success: false,
+		Error: &Error{
+			Code:       "model_not_found",
+			HTTPStatus: http.StatusNotFound,
+			Message:    `model gpt-5.6-sol was not found`,
+		},
+	})
+	before := time.Now()
+	snap, _ := m.GetByID(auth.ID)
+	state := existingModelState(snap, canonicalModelKey(model))
+	if state == nil || state.NextRetryAfter.Before(before.Add(6*time.Hour)) {
+		t.Fatalf("precondition failed: expected long model-not-found deadline, got %+v", state)
+	}
+
+	m.MarkResult(context.Background(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: model,
+		Success: false,
+		Error:   &Error{HTTPStatus: http.StatusNotFound, Message: `upstream stream failed`},
+	})
+
+	updated, _ := m.GetByID(auth.ID)
+	stateAfter := existingModelState(updated, canonicalModelKey(model))
+	if stateAfter == nil || stateAfter.NextRetryAfter.Before(before.Add(6*time.Hour)) {
+		t.Fatalf("transient 404 shortened the model's long deadline to %v", stateAfter.NextRetryAfter.Sub(before))
+	}
+}
+
+// A single upstream 404 is frequently transient on Codex routes (streamed
+// response.failed events map to 404), so it must cool the credential for
+// minutes instead of the 12h fixed window (#5476). Structured model-support
+// errors keep their own long cooldown path.
+func TestManager_MarkResult_SingleNotFoundCooldownsMinutes(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	notFoundErr := &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"error":{"type":"response_failed","message":"upstream stream failed"}}`,
+	}
+
+	tests := []struct {
+		name  string
+		model string
+	}{
+		{name: "credential level", model: ""},
+		{name: "model level", model: "gpt-5.6-sol"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			auth := &Auth{ID: "auth-not-found-" + tc.name, Provider: "codex"}
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			before := time.Now()
+			m.MarkResult(context.Background(), Result{
+				AuthID:   auth.ID,
+				Provider: auth.Provider,
+				Model:    tc.model,
+				Success:  false,
+				Error:    notFoundErr,
+			})
+
+			updated, ok := m.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatalf("expected auth to be present")
+			}
+			cooldown := updated.NextRetryAfter.Sub(before)
+			if cooldown <= 0 || cooldown > 15*time.Minute {
+				t.Fatalf("single 404 cooldown = %v, want a short window (minutes)", cooldown)
+			}
+		})
+	}
+}
