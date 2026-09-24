@@ -122,6 +122,7 @@ func TestParseCodexRetryAfterQuotaLayouts(t *testing.T) {
 		}{
 			{name: "relative reset", body: `{"type":"usage_limit_reached","resets_in_seconds":3600}`, want: time.Hour},
 			{name: "absolute reset wins", body: `{"type":"usage_limit_reached","resets_at":1700000300,"resets_in_seconds":1}`, want: 5 * time.Minute},
+			{name: "millisecond absolute reset", body: `{"type":"usage_limit_reached","resets_at":1700000300000,"resets_in_seconds":1}`, want: 5 * time.Minute},
 			{name: "expired absolute reset falls back", body: `{"type":"usage_limit_reached","resets_at":1699999940,"resets_in_seconds":77}`, want: 77 * time.Second},
 			{name: "type matching agrees with quota classification", body: `{"type":" USAGE_LIMIT_REACHED ","resets_in_seconds":30}`, want: 30 * time.Second},
 			{name: "missing reset", body: `{"type":"usage_limit_reached"}`},
@@ -184,6 +185,58 @@ func TestParseCodexRetryAfter(t *testing.T) {
 		}
 		if *retryAfter != 77*time.Second {
 			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 77*time.Second)
+		}
+	})
+
+	t.Run("millisecond resets_at", func(t *testing.T) {
+		resetAt := now.Add(5 * time.Minute).UnixMilli()
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":1}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter < 5*time.Minute-time.Second || *retryAfter > 5*time.Minute+time.Second {
+			t.Fatalf("retryAfter = %v, want ~5m (not millennia from treating millis as seconds)", *retryAfter)
+		}
+	})
+
+	t.Run("fallback when millisecond resets_at is past", func(t *testing.T) {
+		resetAt := now.Add(-1 * time.Minute).UnixMilli()
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":77}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter != 77*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 77*time.Second)
+		}
+	})
+
+	t.Run("garbage zero resets_at without resets_in_seconds", func(t *testing.T) {
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":0}}`)
+		if got := parseCodexRetryAfter(http.StatusTooManyRequests, body, now); got != nil {
+			t.Fatalf("expected nil for zero resets_at, got %v", *got)
+		}
+	})
+
+	t.Run("garbage empty body fields", func(t *testing.T) {
+		body := []byte(`{"error":{"type":"usage_limit_reached"}}`)
+		if got := parseCodexRetryAfter(http.StatusTooManyRequests, body, now); got != nil {
+			t.Fatalf("expected nil for empty reset fields, got %v", *got)
+		}
+	})
+
+	t.Run("implausible epoch falls back to resets_in_seconds", func(t *testing.T) {
+		// Microseconds (or any value that still lands centuries ahead after the
+		// milli heuristic) must not park the credential; fall through instead.
+		resetAt := now.Add(5 * time.Minute).UnixMicro()
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":42}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter from resets_in_seconds fallback, got nil")
+		}
+		if *retryAfter != 42*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 42*time.Second)
 		}
 	})
 
