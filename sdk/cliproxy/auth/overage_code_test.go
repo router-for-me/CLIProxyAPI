@@ -208,6 +208,131 @@ func TestMarkResultThrottleStillQuotaReason(t *testing.T) {
 	}
 }
 
+// TestMarkResultOverage403ScopedQuota verifies that an overage-marked 403
+// (spend-cap refusal) takes the same long fixed overage horizon as an
+// overage-marked 429 instead of the 30-minute payment_required cooldown.
+func TestMarkResultOverage403ScopedQuota(t *testing.T) {
+	const (
+		provider = "overage-403-test"
+		model    = "overage-403-test-model"
+		authID   = "overage-403-test-auth"
+	)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(authID, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(authID) })
+
+	manager := NewManager(nil, &RoundRobinSelector{}, NoopHook{})
+	manager.SetRetryConfig(0, 0, 0)
+	auth := &Auth{
+		ID:       authID,
+		Provider: provider,
+		Status:   StatusActive,
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register(): %v", errRegister)
+	}
+
+	before := time.Now()
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   authID,
+		Provider: provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{Code: "overage", Message: "spend cap reached", HTTPStatus: http.StatusForbidden},
+	})
+
+	updated := manager.auths[authID]
+	if updated == nil {
+		t.Fatal("auth missing after MarkResult")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("model state for %q missing after MarkResult", model)
+	}
+	if !state.Quota.Exceeded {
+		t.Fatal("Quota.Exceeded = false, want true")
+	}
+	if state.Quota.Reason != "overage" {
+		t.Fatalf("Quota.Reason = %q, want %q (payment_required horizon must not apply)", state.Quota.Reason, "overage")
+	}
+	if state.StatusMessage == "payment_required" {
+		t.Fatal("StatusMessage = payment_required, want overage handling")
+	}
+	horizonStart := before.Add(7 * 24 * time.Hour).Add(-time.Minute)
+	horizonEnd := before.Add(7 * 24 * time.Hour).Add(time.Minute)
+	if state.Quota.NextRecoverAt.Before(horizonStart) || state.Quota.NextRecoverAt.After(horizonEnd) {
+		t.Fatalf("Quota.NextRecoverAt = %v, want within a minute of %v (7-day overage horizon, not 30-min payment cooldown)", state.Quota.NextRecoverAt, before.Add(7*24*time.Hour))
+	}
+	if !state.NextRetryAfter.Equal(state.Quota.NextRecoverAt) {
+		t.Fatalf("NextRetryAfter = %v, want = Quota.NextRecoverAt %v", state.NextRetryAfter, state.Quota.NextRecoverAt)
+	}
+	if state.Quota.BackoffLevel != 0 {
+		t.Fatalf("Quota.BackoffLevel = %d, want 0 (overage must not escalate the throttle ladder)", state.Quota.BackoffLevel)
+	}
+	if reason := registrySuspendReasonForTest(t, authID, model); reason != "overage" {
+		t.Fatalf("registry suspension reason = %q, want %q", reason, "overage")
+	}
+}
+
+// TestMarkResultPlain403StaysPaymentRequired pins the negative case: a
+// permission-type 403 without the overage code keeps the payment_required
+// class (30-minute cooldown, registry suspension reason "payment_required").
+func TestMarkResultPlain403StaysPaymentRequired(t *testing.T) {
+	const (
+		provider = "plain-403-test"
+		model    = "plain-403-test-model"
+		authID   = "plain-403-test-auth"
+	)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(authID, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(authID) })
+
+	manager := NewManager(nil, &RoundRobinSelector{}, NoopHook{})
+	manager.SetRetryConfig(0, 0, 0)
+	auth := &Auth{
+		ID:       authID,
+		Provider: provider,
+		Status:   StatusActive,
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(context.Background()), auth); errRegister != nil {
+		t.Fatalf("Register(): %v", errRegister)
+	}
+
+	before := time.Now()
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   authID,
+		Provider: provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{Code: "forbidden", Message: "permission denied for this model", HTTPStatus: http.StatusForbidden},
+	})
+
+	updated := manager.auths[authID]
+	if updated == nil {
+		t.Fatal("auth missing after MarkResult")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("model state for %q missing after MarkResult", model)
+	}
+	if state.Quota.Reason != "" {
+		t.Fatalf("Quota.Reason = %q, want untouched (payment_required class does not set quota)", state.Quota.Reason)
+	}
+	if state.Quota.NextRecoverAt.After(before.Add(5 * time.Second)) {
+		t.Fatalf("Quota.NextRecoverAt = %v, want zero (payment_required class does not set quota window)", state.Quota.NextRecoverAt)
+	}
+	// 30-minute payment cooldown; anything near the 7-day horizon means the
+	// overage path leaked into the plain 403.
+	if state.NextRetryAfter.Before(before.Add(29 * time.Minute)) {
+		t.Fatalf("NextRetryAfter = %v, want ~30min payment_required cooldown", state.NextRetryAfter)
+	}
+	if reason := registrySuspendReasonForTest(t, authID, model); reason != "payment_required" {
+		t.Fatalf("registry suspension reason = %q, want %q", reason, "payment_required")
+	}
+}
+
 // TestMarkResultOverageDisableCoolingKeepsAvailable mirrors the ordinary 429
 // disable-cooling contract: a disable-cooling credential hit by an overage
 // rejection must never carry a residual cooldown or registry suspension.

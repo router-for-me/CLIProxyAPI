@@ -736,6 +736,31 @@ func cooldownReason(statusMessage string, quota QuotaState, lastErr *Error) stri
 	return ""
 }
 
+// applyModelOverageQuota puts a model state into the long fixed overage
+// cooldown: overage (spend-cap) rejections have no wait hint, so escalating
+// backoff would retry into the same wall, and the ladder state would make an
+// eventual recovery wait longer than necessary. BackoffLevel resets so a
+// later ordinary throttle starts at the base. With cooling disabled the
+// deadline stays zero so the disable-cooling guard downstream can clear the
+// residual state. Returns the cooldown deadline.
+func applyModelOverageQuota(state *ModelState, now time.Time, disableCooling bool) time.Time {
+	if state == nil {
+		return time.Time{}
+	}
+	var next time.Time
+	if !disableCooling {
+		next = now.Add(OverageCooldownHorizon)
+	}
+	state.NextRetryAfter = next
+	state.Quota = QuotaState{
+		Exceeded:      true,
+		Reason:        overageErrorCode,
+		NextRecoverAt: next,
+		BackoffLevel:  0,
+	}
+	return next
+}
+
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
@@ -867,6 +892,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 							}
 						case 402, 403:
+							// An overage-marked 403 (spend-cap refusal)
+							// belongs to the overage horizon, not the 30-minute
+							// payment-required cooldown; the code is only
+							// pinned when the executor classified the body as
+							// an overage rejection.
+							if result.Error != nil && result.Error.Code == overageErrorCode {
+								applyModelOverageQuota(state, now, disableCooling)
+								if !disableCooling {
+									suspendReason = overageErrorCode
+									shouldSuspendModel = true
+									setModelQuota = true
+								}
+								break
+							}
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
 							} else {
@@ -886,21 +925,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						case 429:
 							// Overage (spend-cap) rejections take a long fixed
-							// horizon instead of the throttle ladder: the
-							// account cap has no wait hint, so escalating
-							// backoff would retry into the same wall, and the
-							// ladder state would make an eventual recovery
-							// wait longer than necessary. BackoffLevel resets
-							// so a later ordinary throttle starts at the base.
+							// horizon instead of the throttle ladder; see
+							// applyModelOverageQuota.
 							isOverage := result.Error != nil && result.Error.Code == overageErrorCode
+							if isOverage {
+								applyModelOverageQuota(state, now, disableCooling)
+								if !disableCooling {
+									suspendReason = overageErrorCode
+									shouldSuspendModel = true
+									setModelQuota = true
+								}
+								break
+							}
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
-							if isOverage {
-								backoffLevel = 0
-								if !disableCooling {
-									next = now.Add(OverageCooldownHorizon)
-								}
-							} else if !disableCooling {
+							if !disableCooling {
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
 								} else {
@@ -908,20 +947,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 							}
 							state.NextRetryAfter = next
-							quotaReason := "quota"
-							suspendedReason := "quota"
-							if isOverage {
-								quotaReason = "overage"
-								suspendedReason = "overage"
-							}
 							state.Quota = QuotaState{
 								Exceeded:      true,
-								Reason:        quotaReason,
+								Reason:        "quota",
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
 							}
 							if !disableCooling {
-								suspendReason = suspendedReason
+								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
