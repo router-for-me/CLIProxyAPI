@@ -533,8 +533,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if outcome.Attempts == 0 {
 					// The budget expired before any attempt ran; surface it
 					// as a failed attempt rather than a false success.
-					errExec = &Error{Code: "entry_budget_exhausted", Message: "per-entry retry budget expired before the first attempt"}
-				} else if outcome.Attempts > 1 && log.IsLevelEnabled(log.DebugLevel) {
+					// Retryable mirrors the other conductor-synthesized
+					// transient codes (home_unavailable, empty_stream).
+					errExec = &Error{Code: "entry_budget_exhausted", Message: "per-entry retry budget expired before the first attempt", Retryable: true}
+				}
+				if outcome.Attempts != 1 && log.IsLevelEnabled(log.DebugLevel) {
+					// Log multi-attempt exits plus the degenerate zero-attempt
+					// exit so entry_retry_reason covers every non-trivial path.
 					LogInnerLoopResult(logEntryWithRequestID(execCtx), upstreamModel, auth.ID, outcome, time.Since(loopStart), innerOpts.MaxAttempts, innerOpts.MaxTimeMS)
 				}
 			} else {
@@ -739,8 +744,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if outcome.Attempts == 0 {
 					// The budget expired before any attempt ran; surface it
 					// as a failed attempt rather than a false success.
-					errExec = &Error{Code: "entry_budget_exhausted", Message: "per-entry retry budget expired before the first attempt"}
-				} else if outcome.Attempts > 1 && log.IsLevelEnabled(log.DebugLevel) {
+					// Retryable mirrors the other conductor-synthesized
+					// transient codes (home_unavailable, empty_stream).
+					errExec = &Error{Code: "entry_budget_exhausted", Message: "per-entry retry budget expired before the first attempt", Retryable: true}
+				}
+				if outcome.Attempts != 1 && log.IsLevelEnabled(log.DebugLevel) {
+					// Log multi-attempt exits plus the degenerate zero-attempt
+					// exit so entry_retry_reason covers every non-trivial path.
 					LogInnerLoopResult(logEntryWithRequestID(execCtx), upstreamModel, auth.ID, outcome, time.Since(loopStart), innerOpts.MaxAttempts, innerOpts.MaxTimeMS)
 				}
 			} else {

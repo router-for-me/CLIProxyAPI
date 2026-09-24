@@ -378,7 +378,10 @@ func TestRetryWiringExecuteCountRetriesTransientStatus(t *testing.T) {
 
 // swapRunInnerLoopSeam installs fn as the conductor's inner-loop driver for
 // the duration of the test and restores the real RunInnerLoop afterwards.
-// Only non-parallel tests may use it: the seam is a package-level variable.
+// The seam is a package-level variable, so the discipline is two-sided:
+// only non-parallel tests may use it, AND no test that enables
+// routing.retry (MaxAttempts >= 2) may call t.Parallel() — otherwise it
+// could race a swapped seam. go test -race is the backstop for violations.
 func swapRunInnerLoopSeam(t *testing.T, fn func(context.Context, InnerLoopOpts, AttemptFn) InnerLoopResult) {
 	t.Helper()
 	prev := runInnerLoopFn
