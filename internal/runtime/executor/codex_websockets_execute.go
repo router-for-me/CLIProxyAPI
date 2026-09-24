@@ -22,6 +22,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if opts.Alt != "responses/compact" && helps.HasResponsesCompactionTrigger(req.Payload) {
+		return e.CodexExecutor.Execute(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
 	}
