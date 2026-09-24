@@ -200,6 +200,53 @@ func TestSanitizeGeminiRequestThoughtSignaturesLogsBypassReplacement(t *testing.
 	assertSignatureDebugDoesNotLeak(t, hook, sig)
 }
 
+func TestSanitizeGeminiRequestThoughtSignaturesSuppressesRepeatedLogs(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	input := []byte(`{"contents":[
+		{"role":"model","parts":[{"text":"a","thoughtSignature":"invalid_sig_1"}]},
+		{"role":"model","parts":[{"text":"b","thoughtSignature":"invalid_sig_2"}]},
+		{"role":"model","parts":[{"text":"c","thoughtSignature":"invalid_sig_3"}]}
+	]}`)
+
+	out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+
+	for i := 0; i < 3; i++ {
+		path := fmt.Sprintf("contents.%d.parts.0.thoughtSignature", i)
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("expected part %d signature to be dropped, got: %s", i, string(out))
+		}
+	}
+
+	detailCount := 0
+	suppressedCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if entry.Message == "gemini request: sanitized thoughtSignature before upstream" {
+			if entry.Data["action"] == "drop_signature" &&
+				entry.Data["reason"] == "non-function model parts do not synthesize Gemini bypass signatures" {
+				detailCount++
+			}
+		}
+		if entry.Message == "gemini request: suppressed repeated thoughtSignature sanitizations in same request" {
+			if entry.Data["action"] == "drop_signature" &&
+				entry.Data["reason"] == "non-function model parts do not synthesize Gemini bypass signatures" &&
+				entry.Data["suppressed_count"] == 2 &&
+				entry.Data["total_count"] == 3 {
+				suppressedCount++
+			}
+		}
+	}
+
+	if detailCount != 1 {
+		t.Fatalf("expected 1 detailed debug log entry for repeated drops, got %d", detailCount)
+	}
+	if suppressedCount != 1 {
+		t.Fatalf("expected 1 aggregated suppression debug log entry, got %d", suppressedCount)
+	}
+}
+
 func TestSanitizeGeminiRequestThoughtSignaturesPreservesField2WrappedUUIDFunctionCall(t *testing.T) {
 	sig := testGemini3ThoughtSignature([]byte("e24830a7-5cd6-42fe-998b-ee539e72b9c3"))
 	input := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{}},"thoughtSignature":"` + sig + `"}]}]}}`)

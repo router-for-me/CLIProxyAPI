@@ -172,7 +172,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								pieces := strings.SplitN(imageURL[5:], ";", 2)
 								if len(pieces) == 2 && len(pieces[1]) > 7 {
 									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:], false)
-									part, _ = sjson.SetBytes(part, "thoughtSignature", antigravityFunctionThoughtSignature)
 									partItems = append(partItems, part)
 								}
 							}
@@ -210,7 +209,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				if reasoningContent := m.Get("reasoning_content"); reasoningContent.Type == gjson.String && reasoningContent.String() != "" {
 					part := antigravityOpenAITextPart(reasoningContent.String())
 					part, _ = sjson.SetBytes(part, "thought", true)
-					part, _ = sjson.SetBytes(part, "thoughtSignature", antigravityFunctionThoughtSignature)
 					partItems = append(partItems, part)
 				}
 				if content.Type == gjson.String && content.String() != "" {
@@ -228,7 +226,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								pieces := strings.SplitN(imageURL[5:], ";", 2)
 								if len(pieces) == 2 && len(pieces[1]) > 7 {
 									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:], false)
-									part, _ = sjson.SetBytes(part, "thoughtSignature", antigravityFunctionThoughtSignature)
 									partItems = append(partItems, part)
 								}
 							}
