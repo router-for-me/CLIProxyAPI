@@ -56,9 +56,14 @@ func (s *Service) Run(ctx context.Context) error {
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
 	defer func() {
+		// The deadline starts when the service stops. Created before the
+		// server starts, it expires while the service runs, and a later stop
+		// then closes every open request at once.
+		timeout := s.shutdownTimeout()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), timeout)
+		defer shutdownCancel()
+		log.Infof("service stopping: open requests have up to %s to finish", timeout)
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			log.Errorf("service shutdown returned error: %v", err)
 		}
@@ -325,9 +330,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		// no legacy clients to persist
 
 		if s.server != nil {
-			shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			stopCtx, cancel := serverStopContext(ctx, s.shutdownTimeout())
 			defer cancel()
-			if err := s.server.Stop(shutdownCtx); err != nil {
+			if err := s.server.Stop(stopCtx); err != nil {
 				log.Errorf("error stopping API server: %v", err)
 				if shutdownErr == nil {
 					shutdownErr = err
@@ -374,4 +379,27 @@ func (s *Service) ensureAuthDir() error {
 		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", s.cfg.AuthDir)
 	}
 	return nil
+}
+
+const defaultShutdownTimeout = 30 * time.Second
+
+// shutdownTimeout is how long a stop waits for open requests to finish, from
+// shutdown-timeout-seconds in the current config.
+func (s *Service) shutdownTimeout() time.Duration {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg == nil || cfg.ShutdownTimeoutSeconds <= 0 {
+		return defaultShutdownTimeout
+	}
+	return time.Duration(cfg.ShutdownTimeoutSeconds) * time.Second
+}
+
+// serverStopContext keeps a deadline the caller already set, so a caller that
+// allows a longer drain gets it. A context without a deadline gets timeout.
+func serverStopContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
