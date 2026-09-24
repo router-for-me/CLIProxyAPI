@@ -493,6 +493,14 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
+	// Propagate embedding-host TraceID (usage.WithTraceID on the inbound
+	// request context) into the SDK execution context so usage.Record.TraceID
+	// is the host request id, not the process-counter logging id.
+	if requestCtx != nil && coreusage.TraceIDFromContext(parentCtx) == "" {
+		if trID := coreusage.TraceIDFromContext(requestCtx); trID != "" {
+			parentCtx = coreusage.WithTraceID(parentCtx, trID)
+		}
+	}
 	newCtx, cancel := context.WithCancel(parentCtx)
 
 	endpoint := ""
