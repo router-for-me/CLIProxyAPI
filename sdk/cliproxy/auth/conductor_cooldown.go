@@ -885,9 +885,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 							}
 						case 429:
+							// Overage (spend-cap) rejections take a long fixed
+							// horizon instead of the throttle ladder: the
+							// account cap has no wait hint, so escalating
+							// backoff would retry into the same wall, and the
+							// ladder state would make an eventual recovery
+							// wait longer than necessary. BackoffLevel resets
+							// so a later ordinary throttle starts at the base.
+							isOverage := result.Error != nil && result.Error.Code == overageErrorCode
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
-							if !disableCooling {
+							if isOverage {
+								backoffLevel = 0
+								if !disableCooling {
+									next = now.Add(OverageCooldownHorizon)
+								}
+							} else if !disableCooling {
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
 								} else {
@@ -895,14 +908,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 							}
 							state.NextRetryAfter = next
+							quotaReason := "quota"
+							suspendedReason := "quota"
+							if isOverage {
+								quotaReason = "overage"
+								suspendedReason = "overage"
+							}
 							state.Quota = QuotaState{
 								Exceeded:      true,
-								Reason:        "quota",
+								Reason:        quotaReason,
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
 							}
 							if !disableCooling {
-								suspendReason = "quota"
+								suspendReason = suspendedReason
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
@@ -1344,6 +1363,27 @@ func statusCodeFromError(err error) int {
 	return 0
 }
 
+// OverageCooldownHorizon is how long a credential's per-model quota stays
+// exceeded after an overage (spend-cap) rejection. Overage is an account cap
+// without a wait hint, so a long, fixed horizon keeps the credential out of
+// rotation for this model while other credentials (different org!) remain
+// eligible.
+const OverageCooldownHorizon = 7 * 24 * time.Hour
+
+// overageErrorCode is the stable code pinned on result errors and quota
+// states that stem from an overage/spend-cap rejection.
+const overageErrorCode = "overage"
+
+// overageRejectedFromError reports whether the executor marked this failure
+// as an overage/spend-cap rejection rather than ordinary throttling.
+func overageRejectedFromError(err error) bool {
+	type overageMarker interface {
+		OverageRejected() bool
+	}
+	var m overageMarker
+	return errors.As(err, &m) && m != nil && m.OverageRejected()
+}
+
 func isRequestScopedError(err error) bool {
 	if err == nil {
 		return false
@@ -1377,6 +1417,11 @@ func resultErrorFromError(err error) *Error {
 		if resultErr.Code == "" || resultErr.Code == connectionLifecycleErrorCode {
 			resultErr.Code = connectionLifecycleErrorCode
 		}
+	}
+	// Overage rejections pin the stable overage code unless the error already
+	// carries a request-scoped classification (request faults always win).
+	if resultErr.Code != requestScopedErrorCode && overageRejectedFromError(err) {
+		resultErr.Code = overageErrorCode
 	}
 	return resultErr
 }
