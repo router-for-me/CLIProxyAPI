@@ -324,6 +324,7 @@ function withGlobSuffix(entries) {
       entry('GET', '/antigravity-auth-url'),
       entry('GET', '/kimi-auth-url'),
       entry('GET', '/xai-auth-url'),
+      entry('GET', '/meta-auth-url'),
       entry('GET', '/get-auth-status'),
       entry('DELETE', '/oauth-session'),
     ],

@@ -79,6 +79,7 @@ const SECTION_DEFINITIONS = [
     title: 'Providers',
     match: (k) => (
       k === 'xai'
+      || k === 'meta'
       || k === 'codex'
       || k === 'codex-header-defaults'
       || k === 'claude-header-defaults'

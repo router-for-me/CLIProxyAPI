@@ -1583,7 +1583,7 @@ export async function deleteProviderKey(provider, criteria) {
 // completes auth in their own browser tab. After the flow, the operator
 // clicks Refresh in the providers table to see the new auth file.
 
-const OAUTH_PROVIDERS = ['anthropic', 'codex', 'antigravity', 'kimi', 'xai'];
+const OAUTH_PROVIDERS = ['anthropic', 'codex', 'antigravity', 'kimi', 'xai', 'meta'];
 
 export function listOAuthProviders() {
   return [...OAUTH_PROVIDERS];
@@ -1622,6 +1622,7 @@ export function oauthChannelToAuthProvider(channel) {
     kimi: 'kimi',
     xai: 'xai',
     antigravity: 'antigravity',
+    meta: 'meta',
   };
   return map[channel] || '';
 }

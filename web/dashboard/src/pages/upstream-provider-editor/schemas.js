@@ -17,6 +17,7 @@ export const API_KEY_TYPES = [
   { value: 'interactions-api-key', label: 'Interactions (API Key)', simple: 'interactions' },
   { value: 'codex-api-key', label: 'Codex (API Key)', simple: 'codex' },
   { value: 'xai-api-key', label: 'xAI (API Key)', simple: 'xai' },
+  { value: 'meta-api-key', label: 'Meta (API Key)', simple: 'meta' },
   { value: 'claude-api-key', label: 'Claude (API Key)', simple: 'claude' },
   { value: 'vertex-api-key', label: 'Vertex (API Key)', simple: 'vertex' },
   { value: 'openai-compatibility', label: 'OpenAI Compatibility', simple: 'openai' },
@@ -30,6 +31,7 @@ export const OAUTH_TYPES = [
   { value: 'oauth:vertex', label: 'Vertex (OAuth)', simple: 'vertex' },
   { value: 'oauth:aistudio', label: 'AI Studio (OAuth)', simple: 'aistudio' },
   { value: 'oauth:antigravity', label: 'Antigravity (OAuth)', simple: 'antigravity' },
+  { value: 'oauth:meta', label: 'Meta (OAuth)', simple: 'meta' },
 ];
 const ALL_TYPES = [...API_KEY_TYPES, ...OAUTH_TYPES];
 export const TYPE_LABEL = Object.fromEntries(ALL_TYPES.map((t) => [t.value, t.label]));
@@ -216,6 +218,7 @@ export function buildSchemas() {
       { name: 'websockets', label: 'WebSockets', type: 'toggle',
         hint: 'Use the Responses API websocket transport for this entry.' },
     ], [], [identifierField]),
+    'meta-api-key': apiKeyBase([], [], [identifierField]),
     'claude-api-key': {
       sections: [
         { title: 'Identity', fields: [
