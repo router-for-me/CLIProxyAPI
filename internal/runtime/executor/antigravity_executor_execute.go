@@ -189,6 +189,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 	cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, bodyBytes)
 	bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
+	reporter.ObserveResponseModel(bodyBytes)
 	reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
 	var param any
 	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
@@ -425,6 +426,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			if payload == nil {
 				continue
 			}
+			reporter.ObserveResponseModel(payload)
 
 			if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
 				reporter.Publish(ctx, detail)
@@ -457,6 +459,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
 
 	resp.Payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, resp.Payload)
+	reporter.ObserveResponseModel(resp.Payload)
 	reporter.Publish(ctx, helps.ParseAntigravityUsage(resp.Payload))
 	var param any
 	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, resp.Payload, &param)

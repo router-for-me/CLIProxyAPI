@@ -12,6 +12,8 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 type sessionAliasCaptureDispatcher struct {
@@ -640,5 +642,179 @@ func TestHomeDispatchSessionIDsNestedRequestSubagent(t *testing.T) {
 	}
 	if subParentID != "session:root" {
 		t.Fatalf("subParentID = %q, want session:root", subParentID)
+	}
+}
+
+func TestHomeDispatchSessionIDsMatchesLCPCompaction(t *testing.T) {
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+
+	compactedOpts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatGemini,
+		OriginalRequest: []byte(`{"contents":[
+			{"role":"user","parts":[{"text":"summary of turns 1-2"}]},
+			{"role":"model","parts":[{"text":"ack 2"}]},
+			{"role":"user","parts":[{"text":"turn 3"}]},
+			{"role":"user","parts":[{"text":"turn 4"}]}
+		]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey:             "caller-home-1",
+			cliproxyexecutor.SessionAffinityProviderMetadataKey: "google",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    "gemini-2.5-pro",
+		},
+	}
+
+	namespace := lcpAffinityNamespace("google", "gemini-2.5-pro", compactedOpts.Metadata)
+	initialTurns := []cliproxysession.CanonicalTurn{
+		{Role: "user", Parts: []cliproxysession.CanonicalPart{{Kind: "text", Value: "turn 1"}}},
+		{Role: "assistant", Parts: []cliproxysession.CanonicalPart{{Kind: "text", Value: "ack 1"}}},
+		{Role: "user", Parts: []cliproxysession.CanonicalPart{{Kind: "text", Value: "turn 2"}}},
+		{Role: "assistant", Parts: []cliproxysession.CanonicalPart{{Kind: "text", Value: "ack 2"}}},
+		{Role: "user", Parts: []cliproxysession.CanonicalPart{{Kind: "text", Value: "turn 3"}}},
+	}
+	initialRes := selector.matcher.BindWithResult(namespace, initialTurns, "auth-home-parent")
+
+	sessionID, parentSessionID := manager.homeDispatchSessionIDs(compactedOpts)
+	if sessionID == "" {
+		t.Fatal("homeDispatchSessionIDs returned empty sessionID for LCP compaction continuation")
+	}
+	if parentSessionID != initialRes.SessionID {
+		t.Fatalf("parentSessionID = %q, want %q", parentSessionID, initialRes.SessionID)
+	}
+	if nodeKind, ok := compactedOpts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); !ok || nodeKind != "compaction" {
+		t.Fatalf("expected node_kind=compaction in metadata, got %v", compactedOpts.Metadata[cliproxyexecutor.NodeKindMetadataKey])
+	}
+	if isCompaction, ok := compactedOpts.Metadata[cliproxyexecutor.IsCompactionMetadataKey].(bool); !ok || !isCompaction {
+		t.Fatalf("expected is_compaction=true in metadata, got %v", compactedOpts.Metadata[cliproxyexecutor.IsCompactionMetadataKey])
+	}
+}
+
+func TestHomeDispatchSessionIDsMatchesLCPCompactionViaReportHomeResult(t *testing.T) {
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+
+	// 1. Initial request in Home mode (without explicit session IDs).
+	initialOpts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatGemini,
+		OriginalRequest: []byte(`{"contents":[
+			{"role":"user","parts":[{"text":"step 1"}]},
+			{"role":"model","parts":[{"text":"ack 1"}]},
+			{"role":"user","parts":[{"text":"step 2"}]},
+			{"role":"model","parts":[{"text":"ack 2"}]},
+			{"role":"user","parts":[{"text":"step 3"}]}
+		]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey:             "caller-home-live",
+			cliproxyexecutor.SessionAffinityProviderMetadataKey: "google",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    "gemini-2.5-pro",
+		},
+	}
+	initialAuth := &Auth{ID: "auth-home-live-1"}
+	initialSessionID, _ := manager.homeDispatchSessionIDs(initialOpts)
+
+	// 2. Report execution result via reportHomeResult (ephemeral Home dispatch result, not manual BindWithResult).
+	manager.reportHomeResult(context.Background(), Result{
+		AuthID:   initialAuth.ID,
+		Provider: "google",
+		Model:    "gemini-2.5-pro",
+		Options:  initialOpts,
+		Success:  true,
+	}, initialAuth)
+
+	// 3. Post-compaction request in Home mode.
+	compactedOpts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatGemini,
+		OriginalRequest: []byte(`{"contents":[
+			{"role":"user","parts":[{"text":"<summary>Steps 1-2 compacted</summary>"}]},
+			{"role":"model","parts":[{"text":"ack 2"}]},
+			{"role":"user","parts":[{"text":"step 3"}]},
+			{"role":"user","parts":[{"text":"step 4"}]}
+		]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey:             "caller-home-live",
+			cliproxyexecutor.SessionAffinityProviderMetadataKey: "google",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    "gemini-2.5-pro",
+		},
+	}
+
+	sessionID, parentSessionID := manager.homeDispatchSessionIDs(compactedOpts)
+	if sessionID == "" {
+		t.Fatal("homeDispatchSessionIDs returned empty sessionID for live Home compaction")
+	}
+	if initialSessionID != "" && parentSessionID != initialSessionID {
+		t.Fatalf("parentSessionID = %q, want %q", parentSessionID, initialSessionID)
+	}
+	if nodeKind, ok := compactedOpts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); !ok || nodeKind != "compaction" {
+		t.Fatalf("expected node_kind=compaction in metadata, got %v", compactedOpts.Metadata[cliproxyexecutor.NodeKindMetadataKey])
+	}
+	if isCompaction, ok := compactedOpts.Metadata[cliproxyexecutor.IsCompactionMetadataKey].(bool); !ok || !isCompaction {
+		t.Fatalf("expected is_compaction=true in metadata, got %v", compactedOpts.Metadata[cliproxyexecutor.IsCompactionMetadataKey])
+	}
+
+	// Verify that the initial placeholder "home-pending" was successfully updated to the real AuthID in the LCP matcher
+	boundAuths, _, okLookup := selector.matcher.LookupSession(initialSessionID)
+	if !okLookup || len(boundAuths) == 0 || boundAuths[0] != "auth-home-live-1" {
+		t.Fatalf("expected initial session bound to auth-home-live-1 after reportHomeResult, got ok=%v auths=%v", okLookup, boundAuths)
+	}
+}
+
+func TestHomeDispatchSessionIDsWithoutPresetProviderMetadata(t *testing.T) {
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+
+	// 1. Initial request in Home mode without preset SessionAffinityProviderMetadataKey
+	initialOpts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatGemini,
+		OriginalRequest: []byte(`{"contents":[
+			{"role":"user","parts":[{"text":"step A"}]},
+			{"role":"model","parts":[{"text":"ack A"}]},
+			{"role":"user","parts":[{"text":"step B"}]},
+			{"role":"model","parts":[{"text":"ack B"}]},
+			{"role":"user","parts":[{"text":"step C"}]}
+		]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey:    "caller-home-inferred",
+			cliproxyexecutor.RequestedModelMetadataKey: "gemini-2.5-pro",
+		},
+	}
+	initialAuth := &Auth{ID: "auth-gemini-inferred-1"}
+	initialSessionID, _ := manager.homeDispatchSessionIDs(initialOpts)
+
+	// 2. Report result using the actual execution provider "gemini" (which canonicalizes to "google")
+	manager.reportHomeResult(context.Background(), Result{
+		AuthID:   initialAuth.ID,
+		Provider: "gemini",
+		Model:    "gemini-2.5-pro",
+		Options:  initialOpts,
+		Success:  true,
+	}, initialAuth)
+
+	// 3. Compacted continuation request without preset provider metadata
+	compactedOpts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatGemini,
+		OriginalRequest: []byte(`{"contents":[
+			{"role":"user","parts":[{"text":"<summary>Steps A-B compacted</summary>"}]},
+			{"role":"model","parts":[{"text":"ack B"}]},
+			{"role":"user","parts":[{"text":"step C"}]},
+			{"role":"user","parts":[{"text":"step D"}]}
+		]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey:    "caller-home-inferred",
+			cliproxyexecutor.RequestedModelMetadataKey: "gemini-2.5-pro",
+		},
+	}
+
+	sessionID, parentSessionID := manager.homeDispatchSessionIDs(compactedOpts)
+	if sessionID == "" {
+		t.Fatal("homeDispatchSessionIDs returned empty sessionID")
+	}
+	if initialSessionID != "" && parentSessionID != initialSessionID {
+		t.Fatalf("parentSessionID = %q, want %q", parentSessionID, initialSessionID)
+	}
+	if nodeKind, ok := compactedOpts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); !ok || nodeKind != "compaction" {
+		t.Fatalf("expected node_kind=compaction, got %v", compactedOpts.Metadata[cliproxyexecutor.NodeKindMetadataKey])
 	}
 }

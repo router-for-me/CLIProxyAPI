@@ -1,6 +1,8 @@
 package claude
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -490,5 +492,217 @@ func TestConvertClaudeRequestToGemini_ToolResultWithTrailingSystemReminderReorde
 	}
 	if gotID := userParts[1].Get("functionResponse.id").String(); gotID != "toolu_01_read" {
 		t.Fatalf("unexpected functionResponse.id in parts[1]: %q", gotID)
+	}
+}
+
+func TestConvertClaudeRequestToGemini_ToolStrictMapsToValidatedMode(t *testing.T) {
+	tests := []struct {
+		name         string
+		toolChoice   string
+		expectedMode string
+		allowedNames []string
+	}{
+		{
+			name:         "absent tool_choice maps to VALIDATED",
+			toolChoice:   "",
+			expectedMode: "VALIDATED",
+		},
+		{
+			name:         "explicit auto tool_choice maps to VALIDATED",
+			toolChoice:   `"tool_choice": {"type": "auto"},`,
+			expectedMode: "VALIDATED",
+		},
+		{
+			name:         "null tool_choice maps to VALIDATED",
+			toolChoice:   `"tool_choice": null,`,
+			expectedMode: "VALIDATED",
+		},
+		{
+			name:         "none tool_choice maps to NONE",
+			toolChoice:   `"tool_choice": {"type": "none"},`,
+			expectedMode: "NONE",
+		},
+		{
+			name:         "any tool_choice maps to ANY",
+			toolChoice:   `"tool_choice": {"type": "any"},`,
+			expectedMode: "ANY",
+		},
+		{
+			name:         "specific tool maps to ANY with allowedFunctionNames",
+			toolChoice:   `"tool_choice": {"type": "tool", "name": "tool_a"},`,
+			expectedMode: "ANY",
+			allowedNames: []string{"tool_a"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := fmt.Sprintf(`{
+				"model": "gemini-3.8-flash",
+				"messages": [{"role": "user", "content": "hi"}],
+				%s
+				"tools": [
+					{
+						"name": "tool_a",
+						"description": "Controlled tool.",
+						"strict": true,
+						"input_schema": {"type": "object", "properties": {}}
+					}
+				]
+			}`, tt.toolChoice)
+
+			result := ConvertClaudeRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
+			if gjson.GetBytes(result, "tools.0.functionDeclarations.0.strict").Exists() {
+				t.Fatalf("strict must be removed from functionDeclarations: %s", result)
+			}
+			mode := gjson.GetBytes(result, "toolConfig.functionCallingConfig.mode").String()
+			if mode != tt.expectedMode {
+				t.Fatalf("expected toolConfig.functionCallingConfig.mode = %q, got %q. Output: %s", tt.expectedMode, mode, result)
+			}
+			if len(tt.allowedNames) > 0 {
+				allowed := gjson.GetBytes(result, "toolConfig.functionCallingConfig.allowedFunctionNames").Array()
+				if len(allowed) != len(tt.allowedNames) {
+					t.Fatalf("expected %d allowedFunctionNames, got %d", len(tt.allowedNames), len(allowed))
+				}
+				for i, name := range tt.allowedNames {
+					if allowed[i].String() != name {
+						t.Fatalf("allowedFunctionNames[%d] = %q, want %q", i, allowed[i].String(), name)
+					}
+				}
+			}
+		})
+	}
+
+	t.Run("mixed tools where one is strict maps to VALIDATED", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.8-flash",
+			"messages": [{"role": "user", "content": "hi"}],
+			"tools": [
+				{
+					"name": "tool_a",
+					"description": "Loose tool.",
+					"strict": false,
+					"input_schema": {"type": "object", "properties": {}}
+				},
+				{
+					"name": "tool_b",
+					"description": "Strict tool.",
+					"strict": true,
+					"input_schema": {"type": "object", "properties": {}}
+				}
+			]
+		}`)
+		result := ConvertClaudeRequestToGemini("gemini-3.8-flash", inputJSON, false)
+		mode := gjson.GetBytes(result, "toolConfig.functionCallingConfig.mode").String()
+		if mode != "VALIDATED" {
+			t.Fatalf("expected mode = 'VALIDATED' for mixed tools, got %q", mode)
+		}
+	})
+
+	t.Run("non-strict tools omit toolConfig mode", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.8-flash",
+			"messages": [{"role": "user", "content": "hi"}],
+			"tools": [
+				{
+					"name": "tool_a",
+					"description": "Loose tool.",
+					"strict": false,
+					"input_schema": {"type": "object", "properties": {}}
+				},
+				{
+					"name": "tool_b",
+					"description": "Unspecified tool.",
+					"input_schema": {"type": "object", "properties": {}}
+				}
+			]
+		}`)
+		result := ConvertClaudeRequestToGemini("gemini-3.8-flash", inputJSON, false)
+		if gjson.GetBytes(result, "toolConfig").Exists() {
+			t.Fatalf("expected toolConfig not to be set when no strict tools and no tool_choice, got: %s", result)
+		}
+	})
+}
+
+func TestConvertClaudeRequestToGemini_ParametersJsonSchema_PreservesAdditionalPropertiesAndPattern_Issue5959(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-2.5-flash",
+		"messages": [{"role": "user", "content": "Use the submit tool."}],
+		"tools": [
+			{
+				"name": "submit",
+				"description": "Submit a bounded schema test value.",
+				"input_schema": {
+					"$schema": "https://json-schema.org/draft/2020-12/schema",
+					"type": "object",
+					"additionalProperties": false,
+					"properties": {
+						"recipient": {
+							"type": "string",
+							"pattern": "^(alice|bob)$"
+						},
+						"amount": {
+							"type": "number"
+						}
+					},
+					"required": ["recipient", "amount"]
+				}
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-2.5-flash", inputJSON, false)
+	schema := gjson.GetBytes(output, "tools.0.functionDeclarations.0.parametersJsonSchema")
+	if !schema.Exists() {
+		t.Fatalf("parametersJsonSchema missing. Output: %s", output)
+	}
+	if got := schema.Get("additionalProperties"); !got.Exists() || got.Type != gjson.False {
+		t.Fatalf("additionalProperties should be preserved as false, got: %v. Schema: %s", got, schema.Raw)
+	}
+	if got := schema.Get("properties.recipient.pattern"); !got.Exists() || got.String() != "^(alice|bob)$" {
+		t.Fatalf("pattern should be preserved, got: %v. Schema: %s", got, schema.Raw)
+	}
+	if schema.Get("description").Exists() && schema.Get("description").String() == "No extra properties allowed" {
+		t.Fatalf("additionalProperties: false should not be converted to description hint. Schema: %s", schema.Raw)
+	}
+	if got := schema.Get("properties.recipient.description"); got.Exists() && strings.Contains(got.String(), "pattern:") {
+		t.Fatalf("pattern should not be converted to description hint. Schema: %s", schema.Raw)
+	}
+}
+
+func TestConvertClaudeRequestToGemini_FunctionResponseJSONRef(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3.8-flash",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_schema_1", "name": "get_schema", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "toolu_schema_1",
+						"content": {
+							"schema": {
+								"$ref": "#/components/schemas/ErrorModel"
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3.8-flash", inputJSON, false)
+	result := gjson.GetBytes(output, "contents.1.parts.0.functionResponse.response.result")
+	if result.Type != gjson.String {
+		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", result.Type, result.Raw)
+	}
+	if !strings.Contains(result.String(), "#/components/schemas/ErrorModel") {
+		t.Fatalf("expected result to contain ref target, got %q", result.String())
 	}
 }

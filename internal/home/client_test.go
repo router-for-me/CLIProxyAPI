@@ -209,6 +209,26 @@ func TestAuthDispatchRequestIncludesParentSessionID(t *testing.T) {
 	}
 }
 
+func TestAuthDispatchRequestIncludesNodeKind(t *testing.T) {
+	headers := http.Header{"X-Node-Kind": []string{"compaction"}}
+	req := newAuthDispatchRequest("gpt-5.4", "lcp:v1:child", "lcp:v1:parent", headers, 1, "", nil, "")
+	if req.NodeKind != "compaction" {
+		t.Fatalf("node_kind = %q, want compaction", req.NodeKind)
+	}
+
+	raw, errMarshal := json.Marshal(&req)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", errUnmarshal)
+	}
+	if got := payload["node_kind"]; got != "compaction" {
+		t.Fatalf("payload node_kind = %#v, want compaction", got)
+	}
+}
+
 func TestRedisOptionsHomeTLSDisabled(t *testing.T) {
 	client := New(config.HomeConfig{
 		Enabled: true,

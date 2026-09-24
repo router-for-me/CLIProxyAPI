@@ -390,6 +390,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	if len(data.Attributes) == 0 {
 		data.Attributes = cloneStringMap(auth.Attributes)
 	}
+	preserveFileAuthPriority(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
 	}
@@ -406,6 +407,37 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	next.CreatedAt = auth.CreatedAt
 	next.UpdatedAt = auth.UpdatedAt
 	return next, true, nil
+}
+
+func preserveFileAuthPriority(data *pluginapi.AuthData, auth *coreauth.Auth) {
+	if data == nil || auth == nil || auth.Attributes[coreauth.AttributeSourceBackend] != coreauth.AuthSourceFile {
+		return
+	}
+	if data.Attributes == nil {
+		data.Attributes = make(map[string]string)
+	}
+	for _, key := range []string{coreauth.AttributePath, coreauth.AttributeSource, coreauth.AttributeSourceBackend, coreauth.AttributeFilePriority} {
+		if value, ok := auth.Attributes[key]; ok {
+			data.Attributes[key] = value
+		}
+	}
+	if auth.Attributes[coreauth.AttributeFilePriority] != "true" {
+		delete(data.Attributes, coreauth.AttributeFilePriority)
+		return
+	}
+	if priority, ok := auth.Attributes["priority"]; ok {
+		data.Attributes["priority"] = priority
+	} else {
+		delete(data.Attributes, "priority")
+	}
+	if data.Metadata == nil {
+		data.Metadata = make(map[string]any)
+	}
+	if priority, ok := auth.Metadata["priority"]; ok {
+		data.Metadata["priority"] = priority
+	} else {
+		delete(data.Metadata, "priority")
+	}
 }
 
 func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string) *coreauth.Auth {
@@ -425,6 +457,17 @@ type pluginTokenStorage struct {
 func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	if s == nil {
 		return
+	}
+	if _, hadPriority := s.meta["priority"]; hadPriority {
+		if _, hasPriority := meta["priority"]; !hasPriority {
+			var raw map[string]any
+			if errUnmarshal := json.Unmarshal(s.rawJSON, &raw); errUnmarshal == nil {
+				delete(raw, "priority")
+				if cleaned, errMarshal := json.Marshal(raw); errMarshal == nil {
+					s.rawJSON = cleaned
+				}
+			}
+		}
 	}
 	s.meta = cloneAnyMap(meta)
 }

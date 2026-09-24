@@ -236,6 +236,9 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 			copyNodeShallow(dst, src)
 		}
 		mergeMappingPreserve(dst, src, currentPath)
+		if shouldPruneNestedMappingKeys(currentPath) {
+			pruneMissingMapKeys(dst, src)
+		}
 	case yaml.SequenceNode:
 		// Preserve explicit null style if dst was null and src is empty sequence
 		if dst.Kind == yaml.ScalarNode && dst.Tag == "!!null" && len(src.Content) == 0 {
@@ -330,6 +333,11 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 
 	// Weight is pointer-backed, so an explicit zero is meaningful and must be preserved.
 	if len(path) > 0 && path[len(path)-1] == "weight" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
+		return false
+	}
+
+	// Pointer-backed booleans (such as cache-user-id and disable-cooling): explicit false is meaningful and must be preserved.
+	if len(path) > 0 && (path[len(path)-1] == "cache-user-id" || path[len(path)-1] == "disable-cooling") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
 		return false
 	}
 
@@ -762,6 +770,26 @@ func pruneMissingMapKeys(dstMap, srcMap *yaml.Node) {
 			continue
 		}
 		i += 2
+	}
+}
+
+// shouldPruneNestedMappingKeys reports whether keys missing from src should be pruned from dst.
+// This is strictly scoped to credential-nested mappings such as "cloak" and "headers" under
+// known credential sequence paths to prevent stale deleted keys from persisting while leaving
+// all other mappings and root sections unaffected.
+func shouldPruneNestedMappingKeys(path []string) bool {
+	if len(path) < 2 {
+		return false
+	}
+	parent := path[len(path)-2]
+	last := path[len(path)-1]
+	switch parent {
+	case "claude-api-key":
+		return last == "cloak" || last == "headers"
+	case "codex-api-key", "gemini-api-key", "interactions-api-key", "xai-api-key", "meta-api-key", "vertex-api-key", "openai-compatibility":
+		return last == "headers"
+	default:
+		return false
 	}
 }
 

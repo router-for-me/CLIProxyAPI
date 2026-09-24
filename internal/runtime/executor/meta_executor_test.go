@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,7 +22,10 @@ import (
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 )
 
@@ -963,5 +967,75 @@ func TestMetaExecutor_CompactNotSupported(t *testing.T) {
 	}
 	if !errors.As(err, &se) || se.StatusCode() != http.StatusNotImplemented {
 		t.Fatalf("ExecuteStream compact error = %v, want 501 statusErr", err)
+	}
+}
+
+func TestMetaExecutor_ExecuteNonStreamMultiEventSSE_RecordsModelAndWarnsOnSubstitution(t *testing.T) {
+	multiEventSSE := "event: response.output_item.added\n" +
+		"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"item_0\",\"type\":\"message\",\"role\":\"assistant\"}}\n\n" +
+		"event: response.output_item.done\n" +
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"item_0\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"substituted-meta-model\",\"usage\":{\"total_tokens\":10}}}\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(multiEventSSE))
+	}))
+	defer server.Close()
+
+	const alias = "meta-multi-event-sse-test"
+	capture := &multiProviderUsageCapture{alias: alias, records: make(chan coreusage.Record, 4)}
+	coreusage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{})
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	ctx := coreusage.WithRequestedModelAlias(context.Background(), alias)
+	resp, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("expected non-empty translated payload")
+	}
+
+	record := capture.await(t)
+	if record.Model != "muse-spark-1.3" {
+		t.Fatalf("record.Model = %q, want muse-spark-1.3", record.Model)
+	}
+	if record.ResponseModel != "substituted-meta-model" {
+		t.Fatalf("record.ResponseModel = %q, want substituted-meta-model", record.ResponseModel)
+	}
+
+	var foundWarning bool
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model") && strings.Contains(entry.Message, "substituted-meta-model") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("expected substitution warning in logs for substituted-meta-model")
 	}
 }

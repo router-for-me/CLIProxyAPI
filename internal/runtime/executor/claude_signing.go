@@ -151,12 +151,16 @@ func isKimiAPIEndpoint(endpoint string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(parsed.Hostname(), "api.kimi.com")
+	host := parsed.Hostname()
+	return strings.EqualFold(host, "api.kimi.com") || strings.EqualFold(host, "api.kimi.ai")
 }
 
 func isKimiMessagesUpstream(auth *cliproxyauth.Auth, endpoint string) bool {
-	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "kimi") {
-		return true
+	if auth != nil {
+		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if provider == "kimi" || provider == "kimi-ai" || provider == "kimi.ai" || provider == "kimi.com" {
+			return true
+		}
 	}
 	return isKimiAPIEndpoint(endpoint)
 }
