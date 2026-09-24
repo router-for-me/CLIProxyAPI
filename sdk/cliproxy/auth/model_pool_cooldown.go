@@ -28,7 +28,10 @@ type modelPoolCooldowns struct {
 
 // modelPoolCooldownEntry is one (provider, model) aggregate. contributions
 // mirrors the per-auth cooling-until values observed at the last record() so
-// dropAuth can retire a removed credential's contribution.
+// dropAuth can retire a removed credential's contribution. Auth IDs are
+// expected to be non-empty: an ID-less auth still counts toward the cooling
+// tally but is invisible to dropAuth (no behavior change is planned for
+// ID-less auths, which the manager does not produce).
 type modelPoolCooldownEntry struct {
 	deadline      time.Time
 	updatedAt     time.Time
@@ -56,7 +59,7 @@ func (m *modelPoolCooldowns) record(auths []*Auth, provider, model string, now t
 	if provider == "" || modelKey == "" {
 		return
 	}
-	key := provider + "\x00" + modelKey
+	key := modelPoolCooldownKey(provider, modelKey)
 
 	var total, cooling int
 	var deadline time.Time
@@ -111,7 +114,7 @@ func (m *modelPoolCooldowns) block(providers []string, model string, now time.Ti
 		if provider == "" {
 			continue
 		}
-		key := provider + "\x00" + modelKey
+		key := modelPoolCooldownKey(provider, modelKey)
 		entry, ok := m.entries[key]
 		if !ok {
 			continue

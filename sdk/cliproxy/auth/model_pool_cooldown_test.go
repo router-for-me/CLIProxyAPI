@@ -110,6 +110,39 @@ func TestModelPoolCooldownsLazyExpiry(t *testing.T) {
 	}
 }
 
+func TestModelPoolCooldownsStaleExceededNotCooling(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	model := "claude-opus-4-1"
+	past := now.Add(-5 * time.Minute)
+
+	// 2 of 4 nominal: one contributor carrying a STALE exceeded flag (retry
+	// time already passed) must not count as cooling — 1 of 4 is nowhere near
+	// the threshold, so no block.
+	auths := []*Auth{
+		mpAuth("a", "claude", false, model, true, now.Add(10*time.Minute)),
+		mpAuth("b", "claude", false, model, true, past), // stale: not cooling
+		mpAuth("c", "claude", false, model, false, time.Time{}),
+		mpAuth("d", "claude", false, model, false, time.Time{}),
+	}
+	agg := newModelPoolCooldowns()
+	agg.record(auths, "claude", model, now)
+	if _, ok := agg.block([]string{"claude"}, model, now); ok {
+		t.Fatalf("block() counted a stale exceeded auth, want false")
+	}
+
+	// Degenerate variant: BOTH would-be contributors are stale — even a pool
+	// where they are the majority stays open.
+	majorityStale := []*Auth{
+		mpAuth("a", "claude", false, model, true, past),
+		mpAuth("b", "claude", false, model, true, past),
+		mpAuth("c", "claude", false, model, false, time.Time{}),
+	}
+	agg.record(majorityStale, "claude", model, now)
+	if _, ok := agg.block([]string{"claude"}, model, now); ok {
+		t.Fatalf("block() with majority-stale exceeded = true, want false")
+	}
+}
+
 func TestModelPoolCooldownsRecoveryOnSuccess(t *testing.T) {
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	model := "claude-opus-4-1"
