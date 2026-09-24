@@ -22,6 +22,23 @@ import (
 
 var quotaCooldownDisabled atomic.Bool
 
+// poolModelCooldownEnabled gates the pool-wide per-model cooldown aggregate
+// (recording in MarkResult and fail-fast in selection). It defaults ON;
+// routing.pool-model-cooldown: false restores legacy rotation through
+// cooling credentials.
+var poolModelCooldownEnabled atomic.Bool = func() atomic.Bool {
+	var v atomic.Bool
+	v.Store(true)
+	return v
+}()
+
+// SetPoolModelCooldownEnabled toggles the pool-wide per-model cooldown
+// behavior. When disabled, MarkResult stops creating pool entries and
+// selection skips the fail-fast check entirely.
+func SetPoolModelCooldownEnabled(v bool) {
+	poolModelCooldownEnabled.Store(v)
+}
+
 var transientErrorCooldownSeconds atomic.Int64
 
 const (
@@ -595,6 +612,17 @@ func (m *Manager) cooldownStateRecordsSnapshot() []CooldownStateRecord {
 	}
 	m.mu.RUnlock()
 
+	// Pool-wide per-model cooldown aggregates (Phase 2 F2) surface as
+	// auth-less records: AuthID is empty, the Provider names the executor
+	// channel whose credential majority is cooling, and Reason is
+	// "pool_quota" so the dashboard/alert detector can tell a pool-level
+	// aggregate from a per-credential cooldown. The file store skips
+	// AuthID-less records on save, which is intended — pool state is
+	// in-memory by design and a restart starts every pool clean.
+	if m.modelPoolCooldowns != nil {
+		records = append(records, m.modelPoolCooldowns.snapshotRecords(now)...)
+	}
+
 	sort.Slice(records, func(i, j int) bool {
 		if records[i].Provider != records[j].Provider {
 			return records[i].Provider < records[j].Provider
@@ -997,6 +1025,24 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			cooldownRecordsAfter := m.cooldownStateRecordsForAuthLocked(auth, now)
 			cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, cooldownRecordsAfter)
 		}
+
+		// Pool-wide per-model cooldown aggregate (Phase 2 F2): re-evaluate
+		// the (provider, model) tally now that this result's model-state
+		// update is committed. Both failure cooldowns and successes funnel
+		// through the same record() call — a success drops the recording
+		// auth's cooling contribution and the count falls below the
+		// threshold, which deletes the entry (implicit clear). The auth
+		// slice is captured HERE, inside m.mu, because every model-state
+		// writer holds the same lock; the lock serializes this read against
+		// concurrent MarkResult/Update writes, so a fresh slice of live
+		// pointers is a consistent set of non-disabled same-provider auths.
+		// Provider follows the pool breaker's contribution identity: the
+		// executor-channel key the auth actually serves under (compound
+		// provider_key rows collapse onto their channel), so grouping and
+		// selection-side lookups agree.
+		if m.modelPoolCooldowns != nil && poolModelCooldownEnabled.Load() && modelKey != "" {
+			m.modelPoolCooldowns.record(m.modelPoolCooldownAuthsLocked(auth.Provider), auth.Provider, result.Model, now)
+		}
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
@@ -1028,6 +1074,86 @@ func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth
 		return
 	}
 	m.reportHomeResult(ctx, result, auth)
+}
+
+// modelPoolCooldownAuthsLocked returns the live non-disabled auths serving
+// provider (the executor channel), in manager map order. Caller must hold
+// m.mu (write or read); the slice holds the live pointers, never clones, so
+// record() observes committed model states.
+func (m *Manager) modelPoolCooldownAuthsLocked(provider string) []*Auth {
+	if m == nil || provider == "" {
+		return nil
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil
+	}
+	auths := make([]*Auth, 0, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil || auth.Disabled {
+			continue
+		}
+		// Group by executor channel so compound per-row provider_key
+		// entries count toward their channel's aggregate.
+		if executorKeyFromAuth(auth) != provider {
+			continue
+		}
+		auths = append(auths, auth)
+	}
+	return auths
+}
+
+// poolModelCooldownBlock reports the pool-wide fail-fast deadline for a model
+// across the given provider keys, honoring the poolModelCooldownEnabled
+// toggle. Providers are checked independently (per-provider-AND is applied by
+// the selection callers): a single blocked provider key is enough for this
+// helper to report a block. Returns (deadline, true) when the model is
+// pool-blocked for any of the providers.
+func (m *Manager) poolModelCooldownBlock(providers []string, model string, now time.Time) (time.Time, bool) {
+	if m == nil || m.modelPoolCooldowns == nil {
+		return time.Time{}, false
+	}
+	if !poolModelCooldownEnabled.Load() {
+		return time.Time{}, false
+	}
+	return m.modelPoolCooldowns.block(providers, model, now)
+}
+
+// poolCooldownCandidateProvidersLocked returns the subset of provider keys
+// (from providerSet) that still have at least one non-disabled, eligible,
+// untried manager auth matching them. Caller must hold m.mu (read or write).
+// Selection uses this so the pool fail-fast only fires when every provider
+// with a live candidate is blocked — one open provider keeps rotation going.
+func (m *Manager) poolCooldownCandidateProvidersLocked(providerSet map[string]struct{}, eligibility authSelectionEligibility, tried map[string]struct{}, model string) []string {
+	if m == nil || len(providerSet) == 0 {
+		return nil
+	}
+	covered := make(map[string]struct{}, len(providerSet))
+	providers := make([]string, 0, len(providerSet))
+	for _, candidate := range m.auths {
+		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		if !eligibility.allows(candidate) {
+			continue
+		}
+		if _, used := tried[candidate.ID]; used {
+			continue
+		}
+		if !authMatchesAnyProvider(candidate, providerSet) {
+			continue
+		}
+		providerKey := executorKeyFromAuth(candidate)
+		if providerKey == "" {
+			continue
+		}
+		if _, seen := covered[providerKey]; seen {
+			continue
+		}
+		covered[providerKey] = struct{}{}
+		providers = append(providers, providerKey)
+	}
+	return providers
 }
 
 // reportHomeResult only observes a Home dispatch result and never updates local auth state.

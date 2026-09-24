@@ -309,6 +309,14 @@ type RoutingConfig struct {
 	// reclassification. See CooldownWaitConfig for defaults.
 	CooldownWait CooldownWaitConfig `yaml:"cooldown-wait,omitempty" json:"cooldown-wait,omitempty"`
 
+	// PoolModelCooldown enables the pool-wide per-model cooldown fail-fast:
+	// when at least two AND at least half of a provider's non-disabled
+	// credentials are cooling for the same canonical model, further requests
+	// for that model fail fast with the model-cooldown error instead of
+	// rotating through every cooling credential. nil or true = enabled;
+	// false = legacy rotation-through-cooling behavior.
+	PoolModelCooldown *bool `yaml:"pool-model-cooldown,omitempty" json:"pool-model-cooldown,omitempty"`
+
 	// Retry configures per-entry auto-retry on transient upstream failures
 	// (zero-downtime routing design 2026-09-18). The conductor wraps the
 	// existing single-attempt path with RunInnerLoop when this block is

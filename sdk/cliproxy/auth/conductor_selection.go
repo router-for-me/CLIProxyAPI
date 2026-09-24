@@ -1769,6 +1769,30 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	// Pool-wide per-model cooldown fail-fast (Phase 2 F2), mirroring the
+	// pickNextMixed insertion. Per-provider-AND semantics: fires only when
+	// EVERY provider represented among the eligible candidates is blocked
+	// for the model; an empty eligible set never blocks (preserved above).
+	if modelKey != "" {
+		keyed := make(map[string]struct{}, len(candidates))
+		for _, candidate := range candidates {
+			providerKey := executorKeyFromAuth(candidate)
+			if providerKey == "" {
+				continue
+			}
+			keyed[providerKey] = struct{}{}
+		}
+		if len(keyed) > 0 {
+			providersWithCandidates := make([]string, 0, len(keyed))
+			for providerKey := range keyed {
+				providersWithCandidates = append(providersWithCandidates, providerKey)
+			}
+			if deadline, blocked := m.poolModelCooldownBlock(providersWithCandidates, model, time.Now()); blocked {
+				m.mu.RUnlock()
+				return nil, nil, "", newModelCooldownError(canonicalModelKey(model), providersWithCandidates[0], time.Until(deadline))
+			}
+		}
+	}
 	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, time.Now())
 	if errAvailable != nil {
 		m.mu.RUnlock()
@@ -1918,12 +1942,28 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	poolCooldown := false
+	var poolDeadline time.Time
 	if strings.TrimSpace(model) != "" {
 		providerSet := make(map[string]struct{}, len(eligibleProviders))
 		for _, providerKey := range eligibleProviders {
 			providerSet[providerKey] = struct{}{}
 		}
 		m.mu.RLock()
+		// Pool-wide per-model cooldown fail-fast (Phase 2 F2): with every
+		// candidate provider blocked for this model, further rotation would
+		// only round-trip cooling credentials — surface the model cooldown
+		// error up front. Per-provider-AND semantics: the fail-fast fires
+		// only when EVERY provider that still has an eligible candidate is
+		// blocked for the model, so one open provider keeps rotation alive.
+		// An empty eligible-candidate union never triggers a spurious
+		// fail-fast (the empty behavior below is preserved).
+		if providersWithCandidates := m.poolCooldownCandidateProvidersLocked(providerSet, eligibility, tried, model); len(providersWithCandidates) > 0 {
+			if deadline, blocked := m.poolModelCooldownBlock(providersWithCandidates, model, time.Now()); blocked {
+				poolCooldown = true
+				poolDeadline = deadline
+			}
+		}
 		for _, candidate := range m.auths {
 			if candidate == nil || candidate.Disabled {
 				continue
@@ -1943,6 +1983,11 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			}
 		}
 		m.mu.RUnlock()
+		if poolCooldown {
+			// Canonical model key for the error body so per-model thinking
+			// suffixes collapse onto the aggregate's key.
+			return nil, nil, "", newModelCooldownError(canonicalModelKey(model), eligibleProviders[0], time.Until(poolDeadline))
+		}
 	}
 
 	disallowFreeAuth := disallowFreeAuthFromMetadata(opts.Metadata)

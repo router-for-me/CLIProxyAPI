@@ -299,6 +299,12 @@ routing:
   #   max-attempts: 3
   #   max-time-ms: 5000
   #   backoff-ms: 200
+  # Pool-wide per-model cooldown fail-fast: when at least two AND at least
+  # half of a provider's non-disabled credentials are cooling for the same
+  # model, further requests for that model fail fast with the model-cooldown
+  # error instead of rotating through every cooling credential. Unset or true
+  # = enabled; false restores legacy rotation-through-cooling behavior.
+  # pool-model-cooldown: true
 
 # Codex provider behavior.
 codex:

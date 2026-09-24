@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -147,4 +148,40 @@ func (m *modelPoolCooldowns) dropAuth(authID string) {
 			delete(m.entries, key)
 		}
 	}
+}
+
+// snapshotRecords projects every non-expired aggregate into a
+// CooldownStateRecord with an empty AuthID: the Manager appends these to its
+// cooldown snapshot so the dashboard can show the pool-level block without
+// pretending an individual credential is cooling. Provider is preserved on
+// the record even though the map key carries it; lazily expired entries are
+// dropped here too.
+func (m *modelPoolCooldowns) snapshotRecords(now time.Time) []CooldownStateRecord {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	records := make([]CooldownStateRecord, 0, len(m.entries))
+	for key, entry := range m.entries {
+		if !entry.deadline.After(now) {
+			delete(m.entries, key)
+			continue
+		}
+		provider, modelKey, _ := strings.Cut(key, "\x00")
+		records = append(records, CooldownStateRecord{
+			Provider:       provider,
+			AuthID:         "",
+			Model:          modelKey,
+			Status:         "cooling",
+			NextRetryAfter: entry.deadline,
+			Reason:         "pool_quota",
+			Quota:          QuotaState{Exceeded: true, NextRecoverAt: entry.deadline, Reason: "pool_quota"},
+			UpdatedAt:      time.Now(),
+		})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Provider != records[j].Provider {
+			return records[i].Provider < records[j].Provider
+		}
+		return records[i].Model < records[j].Model
+	})
+	return records
 }

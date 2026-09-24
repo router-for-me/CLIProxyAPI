@@ -156,6 +156,12 @@ type Manager struct {
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
 
+	// modelPoolCooldowns is the pool-wide per-model cooldown aggregate
+	// (Phase 2 F2): when enough of a provider's credentials are cooling for
+	// the same canonical model, selection for that model fails fast instead
+	// of rotating through every cooling credential. Populated in NewManager.
+	modelPoolCooldowns *modelPoolCooldowns
+
 	// pendingAffinityMigrations carries recently removed auths' session
 	// bindings so a re-render that changes an auth's identity (same logical
 	// credential, new ID) can rebind them. Entries expire after the window
@@ -204,6 +210,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		homeSessionSelections: make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
 		providerOffsets:       make(map[string]int),
 		modelPoolOffsets:      make(map[string]int),
+		modelPoolCooldowns:    newModelPoolCooldowns(),
 
 		pendingAffinityMigrations: make(map[string]pendingAffinityMigration),
 	}

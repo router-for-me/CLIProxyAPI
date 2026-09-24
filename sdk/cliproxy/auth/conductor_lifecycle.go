@@ -175,6 +175,14 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	if m.modelPoolOffsets != nil {
 		delete(m.modelPoolOffsets, id)
 	}
+	// Retire the removed credential's contribution from the pool-wide
+	// per-model cooldown aggregate. Unconditional and cheap: entries whose
+	// contributions fall below the aggregate's own cooldown minimum are
+	// dropped inside dropAuth, and a nil aggregate (Manager built outside
+	// NewManager) is a no-op.
+	if m.modelPoolCooldowns != nil {
+		m.modelPoolCooldowns.dropAuth(id)
+	}
 	for sessionID, sessionAuths := range m.homeRuntimeAuths {
 		if sessionAuths == nil {
 			continue
