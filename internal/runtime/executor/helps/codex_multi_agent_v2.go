@@ -89,6 +89,16 @@ func sameByteSlice(a, b []byte) bool {
 	return &a[0] == &b[0]
 }
 
+// TranslateRequestPairWithAPIKeyModelCompatibility avoids translating identical
+// inputs twice while retaining separate buffers and stateful plugin invocations.
+func TranslateRequestPairWithAPIKeyModelCompatibility(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, originalPayload, requestPayload []byte, stream, isCompat bool) (original, working []byte) {
+	original = TranslateRequestWithAPIKeyModelCompatibility(ctx, headers, cfg, from, to, model, originalPayload, stream, isCompat)
+	if sameByteSlice(originalPayload, requestPayload) && !sdktranslator.HasPluginHooks() {
+		return original, append([]byte(nil), original...)
+	}
+	return original, TranslateRequestWithAPIKeyModelCompatibility(ctx, headers, cfg, from, to, model, requestPayload, stream, isCompat)
+}
+
 // TranslateRequestWithAPIKeyModelCompatibility applies compatibility-aware
 // request translators when a configured API-key model enables compatibility mode.
 func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream, isCompat bool) []byte {

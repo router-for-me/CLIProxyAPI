@@ -101,3 +101,33 @@ func TestCallPluginPreservesStatusFromNewErrorEnvelope(t *testing.T) {
 		t.Fatalf("status = %d, want %d", got, http.StatusForbidden)
 	}
 }
+
+func TestMarshalRPCErrorPreservesHTTPStatus(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		raw := marshalRPCError("host_call_failed", "synthetic", status)
+		var env pluginabi.Envelope
+		if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal != nil {
+			t.Fatalf("unmarshal envelope: %v", errUnmarshal)
+		}
+		if env.OK {
+			t.Fatal("expected envelope OK=false")
+		}
+		if env.Error == nil {
+			t.Fatal("expected non-nil Error in envelope")
+		}
+		if env.Error.HTTPStatus != status {
+			t.Fatalf("HTTPStatus = %d, want %d", env.Error.HTTPStatus, status)
+		}
+		_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](env)
+		if errDecode == nil {
+			t.Fatal("expected decode error")
+		}
+		statusProvider, ok := errDecode.(interface{ StatusCode() int })
+		if !ok {
+			t.Fatalf("decoded error does not expose StatusCode: %T", errDecode)
+		}
+		if got := statusProvider.StatusCode(); got != status {
+			t.Fatalf("StatusCode = %d, want %d", got, status)
+		}
+	}
+}

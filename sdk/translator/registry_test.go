@@ -467,3 +467,36 @@ func TestPluginNormalizersChainAfterNative(t *testing.T) {
 		t.Fatalf("plugin translators should not run when native transformers exist, calls=%v", hooks.calls)
 	}
 }
+
+func TestUnregisterRestoresFormatPair(t *testing.T) {
+	from := Format("unregister-default-from")
+	to := Format("unregister-default-to")
+	other := Format("unregister-default-other")
+	if HasRequestTransformer(from, to) || HasRequestTransformer(from, other) {
+		t.Fatal("test formats are already registered")
+	}
+	identity := func(_ string, rawJSON []byte, _ bool) []byte {
+		return append([]byte(nil), rawJSON...)
+	}
+	Register(from, to, identity, ResponseTransform{
+		NonStream: func(context.Context, string, []byte, []byte, []byte, *any) []byte {
+			return []byte(`{"removed":true}`)
+		},
+	})
+	Register(from, other, identity, ResponseTransform{})
+	t.Cleanup(func() {
+		Unregister(from, to)
+		Unregister(from, other)
+	})
+
+	if !HasRequestTransformer(from, to) || !HasNonStreamResponseTransformer(from, to) || !HasRequestTransformer(from, other) {
+		t.Fatal("register did not store transforms")
+	}
+	Unregister(from, to)
+	if HasRequestTransformer(from, to) || HasNonStreamResponseTransformer(from, to) || HasResponseTransformer(from, to) {
+		t.Fatal("unregister left transforms behind")
+	}
+	if !HasRequestTransformer(from, other) {
+		t.Fatal("unregister removed a different format pair")
+	}
+}

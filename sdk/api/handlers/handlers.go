@@ -193,6 +193,12 @@ func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
 	return cfg != nil && cfg.PassthroughHeaders
 }
 
+// executionPassthroughHeaders keeps client responses behind passthrough-headers while
+// plugin-host internal executions always receive filtered upstream headers.
+func executionPassthroughHeaders(cfg *config.SDKConfig, internal bool) bool {
+	return internal || PassthroughHeadersEnabled(cfg)
+}
+
 func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// Only include it if the client explicitly provides it.
@@ -510,11 +516,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	if c != nil && c.Request != nil {
 		sessionID, parentSessionID := extractSessionIDsFromRequest(c.Request)
 		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ClientRequestMetadata{
-			ClientIP:        requestClientIP(c.Request),
-			XForwardedFor:   strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
-			UserAgent:       strings.TrimSpace(c.Request.UserAgent()),
-			SessionID:       sessionID,
-			ParentSessionID: parentSessionID,
+			ClientIP:         requestClientIP(c.Request),
+			ResolvedClientIP: strings.TrimSpace(c.ClientIP()),
+			XForwardedFor:    strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
+			UserAgent:        strings.TrimSpace(c.Request.UserAgent()),
+			SessionID:        sessionID,
+			ParentSessionID:  parentSessionID,
 		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)

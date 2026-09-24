@@ -23,6 +23,7 @@ import (
 
 type responsesWebsocketForwardOptions struct {
 	preserveCompletionOutput func() bool
+	duplexStream             func() bool
 	toolCacheTurn            *responsesWebsocketToolCacheTurn
 	suppressError            func(*interfaces.ErrorMessage) bool
 	keepAliveInterval        *time.Duration
@@ -44,6 +45,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	}
 	toolCacheTurn := opts.toolCacheTurn
 	completed := false
+	responseStarted := false
 	completedOutput := []byte("[]")
 	completedResponseID := ""
 	outputItemsByIndex := make(map[int64][]byte)
@@ -117,6 +119,16 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, errTerminate
 		case chunk, ok := <-data:
 			if !ok {
+				if opts.duplexStream != nil && opts.duplexStream() {
+					// A duplex stream ends with its socket, not an individual response.
+					// The data channel may close before select observes its final error.
+					_, errClose := writer.closeWithoutError()
+					cancel(nil)
+					if errClose != nil {
+						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errClose
+					}
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, websocket.ErrCloseSent
+				}
 				if !completed {
 					errMsg := &interfaces.ErrorMessage{
 						StatusCode: http.StatusRequestTimeout,
@@ -140,6 +152,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
+				if gjson.GetBytes(payloads[i], "type").String() == "response.created" {
+					responseStarted = true
+					completed = false
+					outputItemsByIndex = make(map[int64][]byte)
+					outputItemsFallback = nil
+					pendingToolCallIDs = make(map[string]struct{})
+				}
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				eventType := gjson.GetBytes(payloads[i], "type").String()
 				if isResponsesWebsocketCompletionEvent(eventType) && (opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
@@ -152,7 +171,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				recordPendingToolCallIDsFromPayload(pendingToolCallIDs, payloads[i])
 				var payloadErrMsg *interfaces.ErrorMessage
-				if eventType == wsEventTypeError {
+				// In Codex duplex mode the executor owns connection termination:
+				// payload errors after response.created are recoverable events;
+				// StreamChunk.Err still arrives through errs and closes the socket.
+				preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream()
+				if eventType == wsEventTypeError && !preserveErrorEvent {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
 					if h != nil {
 						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)

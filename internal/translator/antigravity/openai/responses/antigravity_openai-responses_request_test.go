@@ -1313,3 +1313,497 @@ func TestConvertOpenAIResponsesRequestEnvelopeToAntigravity(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToAntigravity_AudioAndVideoInput(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_text", "text": "Analyze audio and video"},
+					{"type": "input_audio", "input_audio": {"data": "SUQzBA==", "format": "mp3"}},
+					{"type": "audio", "audio": {"data": "SUQzBA==", "format": "mp3"}},
+					{"type": "audio", "audio": {"data": "UklGRg==", "format": "wav"}},
+					{"type": "input_video", "video_url": "data:video/mp4;base64,AAAAIGZ0eXA="},
+					{"type": "video", "video": {"data": "GkXfo59ChoEBQveBAULygQ8=", "format": "webm"}}
+				]
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) == 0 {
+		t.Fatalf("expected at least 1 content, got 0. Output: %s", out)
+	}
+
+	parts := contents[0].Get("parts").Array()
+	if len(parts) < 6 {
+		t.Fatalf("expected at least 6 parts, got %d. Output: %s", len(parts), out)
+	}
+
+	var foundAudio, foundAudioAliasMp3, foundWavAudio, foundVideo, foundWebm bool
+	var audioCount int
+	for _, part := range parts {
+		inline := part.Get("inline_data")
+		if !inline.Exists() {
+			inline = part.Get("inlineData")
+		}
+		if !inline.Exists() {
+			continue
+		}
+		mime := inline.Get("mime_type").String()
+		if mime == "" {
+			mime = inline.Get("mimeType").String()
+		}
+		data := inline.Get("data").String()
+		if mime == "audio/mpeg" && data == "SUQzBA==" {
+			audioCount++
+			if audioCount == 1 {
+				foundAudio = true
+			} else {
+				foundAudioAliasMp3 = true
+			}
+		}
+		if mime == "audio/wav" && data == "UklGRg==" {
+			foundWavAudio = true
+		}
+		if mime == "video/mp4" && data == "AAAAIGZ0eXA=" {
+			foundVideo = true
+		}
+		if mime == "video/webm" && data == "GkXfo59ChoEBQveBAULygQ8=" {
+			foundWebm = true
+		}
+	}
+
+	if !foundAudio {
+		t.Fatalf("expected audio part with mime audio/mpeg, not found. Output: %s", out)
+	}
+	if !foundAudioAliasMp3 {
+		t.Fatalf("expected audio alias part with mime audio/mpeg, not found. Output: %s", out)
+	}
+	if !foundWavAudio {
+		t.Fatalf("expected audio alias part with mime audio/wav, not found. Output: %s", out)
+	}
+	if !foundVideo {
+		t.Fatalf("expected video part with mime video/mp4, not found. Output: %s", out)
+	}
+	if !foundWebm {
+		t.Fatalf("expected video part with mime video/webm, not found. Output: %s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_InvalidDataURLsRejected(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_audio", "data": " DATA:audio/wav;base64,!!!"},
+					{"type": "input_image", "source": {"type": "base64", "data": " DATA:image/png;base64,!!!"}},
+					{"type": "input_video", "video_url": "data:text/plain,hello"}
+				]
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	for _, content := range contents {
+		for _, part := range content.Get("parts").Array() {
+			if part.Get("inline_data").Exists() || part.Get("inlineData").Exists() {
+				t.Fatalf("expected no inlineData/inline_data for invalid data URLs, got: %s", part.Raw)
+			}
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_FallbackMIME(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_image", "image_url": "data:;base64,AAAA", "filename": "photo.jpeg"},
+					{"type": "input_file", "file_data": "data:;base64,BBBB", "format": "pdf"},
+					{"type": "input_image", "image_url": "data:;base64,CCCC", "filename": "photo"},
+					{"type": "input_image", "image_url": "data:;base64,DDDD", "filename": "photo.unknownext"},
+					{"type": "input_image", "image_url": "data:binary/octet-stream;base64,EEEE", "filename": "photo.jpeg"},
+					{"type": "input_file", "file_data": "QUJD", "filename": "report.pdf", "mime_type": "binary/octet-stream"}
+				]
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(parts) < 6 {
+		t.Fatalf("expected at least 6 parts, got %d. Output: %s", len(parts), out)
+	}
+
+	getMime := func(part gjson.Result) string {
+		if inline := part.Get("inline_data"); inline.Exists() {
+			if m := inline.Get("mime_type").String(); m != "" {
+				return m
+			}
+			return inline.Get("mimeType").String()
+		}
+		if inline := part.Get("inlineData"); inline.Exists() {
+			if m := inline.Get("mimeType").String(); m != "" {
+				return m
+			}
+			return inline.Get("mime_type").String()
+		}
+		return ""
+	}
+
+	if got := getMime(parts[0]); got != "image/jpeg" {
+		t.Errorf("parts[0] mime = %q, want image/jpeg. Output: %s", got, out)
+	}
+	if got := getMime(parts[1]); got != "application/pdf" {
+		t.Errorf("parts[1] mime = %q, want application/pdf. Output: %s", got, out)
+	}
+	if got := getMime(parts[2]); got != "image/png" {
+		t.Errorf("parts[2] (photo no ext) mime = %q, want image/png. Output: %s", got, out)
+	}
+	if got := getMime(parts[3]); got != "image/png" {
+		t.Errorf("parts[3] (photo.unknownext) mime = %q, want image/png. Output: %s", got, out)
+	}
+	if got := getMime(parts[4]); got != "image/jpeg" {
+		t.Errorf("parts[4] (binary/octet-stream fallback) mime = %q, want image/jpeg. Output: %s", got, out)
+	}
+	if got := getMime(parts[5]); got != "application/pdf" {
+		t.Errorf("parts[5] (file binary/octet-stream fallback) mime = %q, want application/pdf. Output: %s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_RemoteAudioAndVideo(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_audio", "audio_url": "https://example.com/audio.wav"},
+					{"type": "input_video", "video_url": "https://example.com/video.mp4"},
+					{"type": "input_image", "image_url": "https://example.com/photo.jpeg"},
+					{"type": "input_video", "video_url": "https://example.com/clip.webm", "format": "binary/octet-stream"},
+					{"type": "input_audio", "audio_url": "https://example.com/recording.mp3", "mime_type": "application/octet-stream"}
+				]
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) == 0 {
+		t.Fatalf("expected at least 1 content, got 0. Output: %s", out)
+	}
+
+	parts := contents[0].Get("parts").Array()
+	if len(parts) < 5 {
+		t.Fatalf("expected at least 5 parts, got %d. Output: %s", len(parts), out)
+	}
+
+	var foundAudio, foundVideo, foundImage, foundWebm, foundMp3 bool
+	for _, part := range parts {
+		fileData := part.Get("file_data")
+		if !fileData.Exists() {
+			fileData = part.Get("fileData")
+		}
+		if !fileData.Exists() {
+			continue
+		}
+		mime := fileData.Get("mime_type").String()
+		if mime == "" {
+			mime = fileData.Get("mimeType").String()
+		}
+		uri := fileData.Get("file_uri").String()
+		if uri == "" {
+			uri = fileData.Get("fileUri").String()
+		}
+		if mime == "audio/wav" && uri == "https://example.com/audio.wav" {
+			foundAudio = true
+		}
+		if mime == "video/mp4" && uri == "https://example.com/video.mp4" {
+			foundVideo = true
+		}
+		if mime == "image/jpeg" && uri == "https://example.com/photo.jpeg" {
+			foundImage = true
+		}
+		if mime == "video/webm" && uri == "https://example.com/clip.webm" {
+			foundWebm = true
+		}
+		if mime == "audio/mpeg" && uri == "https://example.com/recording.mp3" {
+			foundMp3 = true
+		}
+	}
+
+	if !foundAudio {
+		t.Fatalf("expected remote audio part with mime audio/wav, not found. Output: %s", out)
+	}
+	if !foundVideo {
+		t.Fatalf("expected remote video part with mime video/mp4, not found. Output: %s", out)
+	}
+	if !foundImage {
+		t.Fatalf("expected remote image part with mime image/jpeg, not found. Output: %s", out)
+	}
+	if !foundWebm {
+		t.Fatalf("expected remote video part with mime video/webm, not found. Output: %s", out)
+	}
+	if !foundMp3 {
+		t.Fatalf("expected remote audio part with mime audio/mpeg, not found. Output: %s", out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_InlineExplicitFormatNotOverriddenByFilename(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_audio", "data": "UklGRg==", "format": "wav", "filename": "download.bin"},
+					{"type": "input_video", "data": "AAAAIGZ0eXA=", "format": "mp4", "filename": "download.bin"}
+				]
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(parts) < 2 {
+		t.Fatalf("expected at least 2 parts, got %d. Output: %s", len(parts), out)
+	}
+
+	getMime := func(part gjson.Result) string {
+		if inline := part.Get("inline_data"); inline.Exists() {
+			if m := inline.Get("mime_type").String(); m != "" {
+				return m
+			}
+			return inline.Get("mimeType").String()
+		}
+		if inline := part.Get("inlineData"); inline.Exists() {
+			if m := inline.Get("mimeType").String(); m != "" {
+				return m
+			}
+			return inline.Get("mime_type").String()
+		}
+		return ""
+	}
+
+	if got := getMime(parts[0]); got != "audio/wav" {
+		t.Errorf("audio inline mime = %q, want audio/wav. Output: %s", got, out)
+	}
+	if got := getMime(parts[1]); got != "video/mp4" {
+		t.Errorf("video inline mime = %q, want video/mp4. Output: %s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_RemoteNestedFormatNotOverriddenByFilename(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_video", "video_url": "https://example.com/download.bin", "input_video": {"format": "mp4"}},
+					{"type": "input_audio", "audio_url": "https://example.com/download.bin", "input_audio": {"mime_type": "audio/wav"}},
+					{"type": "input_file", "file_url": "https://example.com/download.bin", "file": {"format": "pdf"}},
+					{"type": "input_file", "file_url": "https://example.com/download.bin", "file": {"format": "jpeg"}},
+					{"type": "input_image", "image_url": "https://example.com/download.bin", "image": {"format": "jpeg"}}
+				]
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(parts) < 5 {
+		t.Fatalf("expected at least 5 parts, got %d. Output: %s", len(parts), out)
+	}
+
+	getFileMime := func(part gjson.Result) string {
+		if fileData := part.Get("file_data"); fileData.Exists() {
+			if m := fileData.Get("mime_type").String(); m != "" {
+				return m
+			}
+			return fileData.Get("mimeType").String()
+		}
+		if fileData := part.Get("fileData"); fileData.Exists() {
+			if m := fileData.Get("mimeType").String(); m != "" {
+				return m
+			}
+			return fileData.Get("mime_type").String()
+		}
+		return ""
+	}
+
+	if got := getFileMime(parts[0]); got != "video/mp4" {
+		t.Errorf("video file_data mime = %q, want video/mp4. Output: %s", got, out)
+	}
+	if got := getFileMime(parts[1]); got != "audio/wav" {
+		t.Errorf("audio file_data mime = %q, want audio/wav. Output: %s", got, out)
+	}
+	if got := getFileMime(parts[2]); got != "application/pdf" {
+		t.Errorf("file file_data mime = %q, want application/pdf. Output: %s", got, out)
+	}
+	if got := getFileMime(parts[3]); got != "image/jpeg" {
+		t.Errorf("jpeg file file_data mime = %q, want image/jpeg. Output: %s", got, out)
+	}
+	if got := getFileMime(parts[4]); got != "image/jpeg" {
+		t.Errorf("image.format jpeg file_data mime = %q, want image/jpeg. Output: %s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_GenericMIMEWithNestedFormatNotOverriddenByFilename(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_video", "video_url": "https://example.com/download.bin", "mime_type": "application/octet-stream", "input_video": {"format": "mp4"}},
+					{"type": "input_audio", "audio_url": "https://example.com/download.bin", "mime_type": "binary/octet-stream", "input_audio": {"format": "wav"}},
+					{"type": "input_file", "file_url": "https://example.com/download.bin", "mime_type": "application/octet-stream", "file": {"format": "pdf"}}
+				]
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(parts) < 3 {
+		t.Fatalf("expected at least 3 parts, got %d. Output: %s", len(parts), out)
+	}
+
+	getFileMime := func(part gjson.Result) string {
+		if fileData := part.Get("file_data"); fileData.Exists() {
+			if m := fileData.Get("mime_type").String(); m != "" {
+				return m
+			}
+			return fileData.Get("mimeType").String()
+		}
+		if fileData := part.Get("fileData"); fileData.Exists() {
+			if m := fileData.Get("mimeType").String(); m != "" {
+				return m
+			}
+			return fileData.Get("mime_type").String()
+		}
+		return ""
+	}
+
+	if got := getFileMime(parts[0]); got != "video/mp4" {
+		t.Errorf("video file_data mime = %q, want video/mp4. Output: %s", got, out)
+	}
+	if got := getFileMime(parts[1]); got != "audio/wav" {
+		t.Errorf("audio file_data mime = %q, want audio/wav. Output: %s", got, out)
+	}
+	if got := getFileMime(parts[2]); got != "application/pdf" {
+		t.Errorf("file file_data mime = %q, want application/pdf. Output: %s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_UnknownExtensionFallsBackToDefaults(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_audio", "audio_url": "https://example.com/download.bin", "mime_type": "application/octet-stream"},
+					{"type": "input_video", "video_url": "https://example.com/download.bin", "mime_type": "application/octet-stream"}
+				]
+			}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	parts := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	if len(parts) < 2 {
+		t.Fatalf("expected at least 2 parts, got %d. Output: %s", len(parts), out)
+	}
+
+	getFileMime := func(part gjson.Result) string {
+		if fileData := part.Get("file_data"); fileData.Exists() {
+			if m := fileData.Get("mime_type").String(); m != "" {
+				return m
+			}
+			return fileData.Get("mimeType").String()
+		}
+		if fileData := part.Get("fileData"); fileData.Exists() {
+			if m := fileData.Get("mimeType").String(); m != "" {
+				return m
+			}
+			return fileData.Get("mime_type").String()
+		}
+		return ""
+	}
+
+	if got := getFileMime(parts[0]); got != "audio/wav" {
+		t.Errorf("audio file_data mime = %q, want audio/wav. Output: %s", got, out)
+	}
+	if got := getFileMime(parts[1]); got != "video/mp4" {
+		t.Errorf("video file_data mime = %q, want video/mp4. Output: %s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToAntigravity_TopLevelMedia(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{"type": "input_text", "text": "Describe video and audio"},
+			{"type": "input_video", "video_url": "data:video/mp4;base64,AAAAIGZ0eXA="},
+			{"type": "input_audio", "input_audio": {"data": "SUQzBA==", "format": "mp3"}}
+		]
+	}`
+
+	out := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) == 0 {
+		t.Fatalf("expected at least 1 content, got 0. Output: %s", out)
+	}
+
+	parts := contents[0].Get("parts").Array()
+	if len(parts) < 3 {
+		t.Fatalf("expected at least 3 parts, got %d. Output: %s", len(parts), out)
+	}
+
+	var foundText, foundVideo, foundAudio bool
+	for _, part := range parts {
+		if part.Get("text").String() == "Describe video and audio" {
+			foundText = true
+		}
+		inline := part.Get("inline_data")
+		if !inline.Exists() {
+			inline = part.Get("inlineData")
+		}
+		if !inline.Exists() {
+			continue
+		}
+		mime := inline.Get("mime_type").String()
+		if mime == "" {
+			mime = inline.Get("mimeType").String()
+		}
+		data := inline.Get("data").String()
+		if mime == "video/mp4" && data == "AAAAIGZ0eXA=" {
+			foundVideo = true
+		}
+		if mime == "audio/mpeg" && data == "SUQzBA==" {
+			foundAudio = true
+		}
+	}
+
+	if !foundText {
+		t.Errorf("expected text part in output: %s", out)
+	}
+	if !foundVideo {
+		t.Errorf("expected video inline part in output: %s", out)
+	}
+	if !foundAudio {
+		t.Errorf("expected audio inline part in output: %s", out)
+	}
+}

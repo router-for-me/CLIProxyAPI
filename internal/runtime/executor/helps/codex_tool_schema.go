@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"math/big"
-	"strconv"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -28,50 +27,58 @@ const (
 // Only unions mathematically proven to be semantically equivalent to enum definitions
 // are modified; all other structures, property names, types, and constraints remain untouched.
 func NormalizeCodexToolSchemas(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() || len(tools.Array()) == 0 {
+	updatedTools, changed := normalizeCodexToolList(gjson.GetBytes(body, "tools"))
+	if !changed {
 		return body
 	}
+	out, errSet := sjson.SetRawBytes(body, "tools", updatedTools)
+	if errSet != nil {
+		return body
+	}
+	log.Debugf("codex: normalized tool schemas to prevent upstream failure")
+	return out
+}
 
-	toolsArray := tools.Array()
-	changed := false
-	for i, tool := range toolsArray {
-		updatedTool, toolChanged := normalizeCodexTool(tool)
-		if toolChanged {
-			var errSet error
-			body, errSet = sjson.SetRawBytes(body, "tools."+strconv.Itoa(i), updatedTool)
-			if errSet == nil {
-				changed = true
-			}
+// normalizeCodexToolList batches changed elements so a long request (or a wide
+// namespace) is copied once rather than once per tool. Copy the gaps verbatim
+// to retain array formatting and unchanged declarations.
+func normalizeCodexToolList(tools gjson.Result) ([]byte, bool) {
+	if !tools.IsArray() {
+		return nil, false
+	}
+	var out []byte
+	offset := 0
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		updated, changed := normalizeCodexTool(tool)
+		if !changed {
+			return true
 		}
+		if out == nil {
+			out = make([]byte, 0, len(tools.Raw))
+		}
+		// ForEach indexes share the source of the containing array's index.
+		start := tool.Index - tools.Index
+		out = append(out, tools.Raw[offset:start]...)
+		out = append(out, updated...)
+		offset = start + len(tool.Raw)
+		return true
+	})
+	if out == nil {
+		return nil, false
 	}
-	if changed {
-		log.Debugf("codex: normalized tool schemas to prevent upstream failure")
-	}
-	return body
+	return append(out, tools.Raw[offset:]...), true
 }
 
 func normalizeCodexTool(tool gjson.Result) ([]byte, bool) {
 	toolType := tool.Get("type").String()
 	// Handle namespace tools (e.g. multi-agent nested tools)
 	if toolType == "namespace" {
-		nestedTools := tool.Get("tools")
-		if nestedTools.IsArray() && len(nestedTools.Array()) > 0 {
-			changed := false
-			raw := []byte(tool.Raw)
-			for j, nestedTool := range nestedTools.Array() {
-				updatedNested, nestedChanged := normalizeCodexTool(nestedTool)
-				if nestedChanged {
-					var errSet error
-					raw, errSet = sjson.SetRawBytes(raw, "tools."+strconv.Itoa(j), updatedNested)
-					if errSet == nil {
-						changed = true
-					}
-				}
-			}
-			return raw, changed
+		updatedTools, changed := normalizeCodexToolList(tool.Get("tools"))
+		if !changed {
+			return nil, false
 		}
-		return nil, false
+		updated, errSet := sjson.SetRawBytes([]byte(tool.Raw), "tools", updatedTools)
+		return updated, errSet == nil
 	}
 
 	if toolType != "function" && toolType != "custom" {
@@ -126,13 +133,18 @@ func normalizeCodexParameters(params gjson.Result) ([]byte, bool) {
 	return rawParams, changed
 }
 
-// stripIncompatiblePatternsFromJSON recursively removes pattern attributes containing
-// unsupported Unicode property escapes (\p{...} / \P{...}) from parameter schemas.
+// stripIncompatiblePatternsFromJSON recursively removes pattern attributes that strict
+// upstream validators reject: unsupported Unicode property escapes (\p{...} / \P{...})
+// and the octal NUL escape (\0). See util.HasUnsupportedUnicodePropertyEscape for the
+// predicate and the upstream errors behind each one.
 // It is schema-aware: only subschemas under known JSON Schema keyword locations are visited,
 // preventing accidental deletion of 'pattern' keys inside user data (e.g. description, default, enum).
 func stripIncompatiblePatternsFromJSON(raw []byte) ([]byte, bool) {
 	rawStr := string(raw)
-	if !strings.Contains(rawStr, `\p{`) && !strings.Contains(rawStr, `\P{`) && !strings.Contains(rawStr, `\u`) {
+	// The fast path avoids parsing when no candidate escape is present. Patterns
+	// arrive JSON-escaped, so a literal backslash before '0' is `\\0` in the raw bytes.
+	if !strings.Contains(rawStr, `\p{`) && !strings.Contains(rawStr, `\P{`) && !strings.Contains(rawStr, `\u`) &&
+		!strings.Contains(rawStr, `\\0`) {
 		return raw, false
 	}
 	var root any

@@ -2,6 +2,7 @@
 package models
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -68,6 +69,18 @@ func BuildResponseForClientWithCPACapabilities(availableModels []map[string]any,
 	return map[string]any{
 		"models": buildCodexClientModels(availableModels, providersForModel, webSearchCapabilityForModel, optimizeMultiAgentV2, clientVersion),
 	}
+}
+
+// MarshalCompact serializes a Codex client catalog as a single JSON line.
+// HTML escaping is disabled so instruction text is not expanded into \u003c sequences.
+func MarshalCompact(payload any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if errEncode := encoder.Encode(payload); errEncode != nil {
+		return nil, errEncode
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
@@ -525,13 +538,36 @@ func applyCodexClientProviderCapabilities(entry map[string]any, id string, isTem
 	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
 		entry["supports_search_tool"] = false
 		entry["prefer_websockets"] = false
-		delete(entry, "apply_patch_tool_type")
 		entry["service_tiers"] = []any{}
-		delete(entry, "upgrade")
-		delete(entry, "availability_nux")
+		nullCodexClientRequiredOptions(entry)
 		return
 	}
 	applyCodexClientSearchToolSupport(entry, id, isTemplate, providersForModel)
+}
+
+// nullCodexClientRequiredOptions clears capabilities that non-Codex models must not advertise.
+// Codex requires these keys to be present; omitting them rejects the entire catalog.
+func nullCodexClientRequiredOptions(entry map[string]any) {
+	entry["apply_patch_tool_type"] = nil
+	entry["upgrade"] = nil
+	entry["availability_nux"] = nil
+}
+
+const codexClientFallbackInstructions = "You are Codex, a coding agent. You and the user share one workspace."
+
+// useCompactCodexClientInstructions replaces cloned template prompts with a short literal.
+// Both the legacy and canonical instruction fields must be present for catalog decoding.
+func useCompactCodexClientInstructions(entry map[string]any) {
+	entry["base_instructions"] = codexClientFallbackInstructions
+	entry["model_messages"] = map[string]any{
+		"instructions_template":  codexClientFallbackInstructions,
+		"instructions_variables": nil,
+		"approvals":              nil,
+		"collaboration_modes":    nil,
+		"auto_review":            nil,
+		"permissions":            nil,
+		"multi_agent":            nil,
+	}
 }
 
 func isPureCodexProvider(id string, providersForModel ProvidersForModelFunc) bool {
@@ -638,21 +674,20 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		entry["multi_agent_version"] = "v2"
 	}
 	entry["service_tiers"] = []any{}
-	delete(entry, "apply_patch_tool_type")
-	delete(entry, "upgrade")
-	delete(entry, "availability_nux")
+	nullCodexClientRequiredOptions(entry)
 
 	if contextWindow > 0 {
 		entry["context_window"] = contextWindow
 		entry["max_context_window"] = contextWindow
 	}
 
-	if baseInstructions := stringModelValue(model, "base_instructions"); baseInstructions != "" {
-		entry["base_instructions"] = baseInstructions
-	}
 	if plans, ok := model["available_in_plans"]; ok {
 		entry["available_in_plans"] = cloneCodexClientModelValue(plans)
 	}
+	// Codex 0.156+ caps an explicit model_catalog_url body at 1MiB. Cloning the
+	// full template instructions onto every non-template model exceeds that limit
+	// and the client keeps its bundled catalog.
+	useCompactCodexClientInstructions(entry)
 }
 
 func codexClientThinkingSupport(model map[string]any) *registry.ThinkingSupport {

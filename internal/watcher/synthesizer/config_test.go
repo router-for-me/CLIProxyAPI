@@ -310,13 +310,14 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 		Config: &config.Config{
 			CodexKey: []config.CodexKey{
 				{
-					APIKey:         "codex-key-123",
-					Prefix:         "dev",
-					BaseURL:        "https://api.openai.com",
-					ProxyURL:       "http://proxy.local",
-					Websockets:     true,
-					AlphaSearch:    true,
-					DisableCooling: boolPointer(true),
+					APIKey:               "codex-key-123",
+					Prefix:               "dev",
+					BaseURL:              "https://api.openai.com",
+					ProxyURL:             "http://proxy.local",
+					Websockets:           true,
+					AlphaSearch:          true,
+					DisableCooling:       boolPointer(true),
+					DisableCodexCloaking: boolPointer(true),
 				},
 			},
 		},
@@ -346,6 +347,9 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 	if auths[0].Attributes[coreauth.AttributeCodexAlphaSearch] != "true" {
 		t.Errorf("expected codex_alpha_search=true, got %s", auths[0].Attributes[coreauth.AttributeCodexAlphaSearch])
+	}
+	if auths[0].Attributes[coreauth.AttributeCodexDisableCloaking] != "true" {
+		t.Errorf("expected codex_disable_cloaking=true, got %s", auths[0].Attributes[coreauth.AttributeCodexDisableCloaking])
 	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])

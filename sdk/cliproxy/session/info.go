@@ -23,7 +23,9 @@ type SessionInfo struct {
 	AuthID          string         `json:"auth_id,omitempty"`
 	Provider        string         `json:"provider,omitempty"`
 	Model           string         `json:"model,omitempty"`
+	NodeKind        string         `json:"node_kind,omitempty"`
 	IsFork          bool           `json:"is_fork,omitempty"`
+	IsCompaction    bool           `json:"is_compaction,omitempty"`
 	IsSubagent      bool           `json:"is_subagent,omitempty"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
 }
@@ -828,8 +830,16 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			if parentID, okParent := metadata[cliproxyexecutor.ParentSessionIDMetadataKey].(string); okParent {
 				if parentID = normalizedSessionCandidate(parentID); parentID != "" && parentID != lcpID {
 					info.ParentSessionID = parentID
-					info.AgentName = "subagent"
-					info.IsFork = true
+					if isCompaction, _ := metadata[cliproxyexecutor.IsCompactionMetadataKey].(bool); isCompaction {
+						info.IsCompaction = true
+						info.IsFork = false
+						info.NodeKind = "compaction"
+						info.AgentName = "main"
+					} else {
+						info.AgentName = "subagent"
+						info.IsFork = true
+						info.NodeKind = "fork"
+					}
 				} else {
 					info.AgentName = "main"
 				}

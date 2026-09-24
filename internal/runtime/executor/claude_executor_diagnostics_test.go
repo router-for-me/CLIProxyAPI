@@ -193,7 +193,7 @@ func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *
 
 	// Verify Turn 1:
 	h1 := capturedBillingHeaders[0]
-	if !strings.Contains(h1, "cc_version=2.1.258.") || !strings.Contains(h1, "cc_entrypoint=cli;") || !strings.Contains(h1, "cch=") {
+	if !strings.Contains(h1, "cc_version=2.1.280.") || !strings.Contains(h1, "cc_entrypoint=cli;") || !strings.Contains(h1, "cch=") {
 		t.Fatalf("h1 invalid: %s", h1)
 	}
 	if strings.Contains(h1, "cc_prev_req=") {
