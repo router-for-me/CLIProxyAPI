@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -385,6 +387,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	// failure carries no auth to report.
 	var lastAuth *Auth
 	pinnedPool := ""
+	// innerOpts projects routing.retry into the per-entry retry loop. The
+	// loop is only entered when MaxAttempts >= 2; below that the inline
+	// single-attempt path runs untouched, so a default config never
+	// stamps the EntryBudget deadline onto execCtx (AGENTS.md: no timeouts
+	// after the upstream connection).
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	innerOpts := innerLoopOptsFromConfig(cfg)
 	// releaseInFlight releases the current attempt's in-flight hold exactly
 	// once: at the top of the next loop iteration when the attempt rotates to
 	// another auth, or at function exit via the deferred closure (covers
@@ -475,20 +484,67 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if !restoreExecutionModel {
 				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
 			}
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			var resp cliproxyexecutor.Response
+			var errExec error
+			// runAttempt performs one upstream attempt, including the
+			// unauthorized-refresh retry exactly as the inline path did.
+			// The final error of the attempt lands in the captured errExec
+			// and the response in resp; auth / didRefreshOnUnauthorized are
+			// mutated across attempts just as they were before. execCtx is
+			// threaded through on the inline path and the budget-bounded
+			// child from RunInnerLoop on the retry path.
+			runAttempt := func(attemptCtx context.Context) {
+				attemptResp, attemptErr := executor.Execute(attemptCtx, auth, execReq, execOpts)
+				if attemptErr != nil {
+					if errCtx := attemptCtx.Err(); errCtx != nil {
+						resp, errExec = attemptResp, attemptErr
+						return
+					}
+					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(attemptCtx, auth, attemptErr, didRefreshOnUnauthorized); okRefresh {
+						auth = refreshed
+						didRefreshOnUnauthorized = true
+						attemptResp, attemptErr = executor.Execute(attemptCtx, auth, execReq, execOpts)
+						if attemptErr != nil {
+							if errCtx := attemptCtx.Err(); errCtx != nil {
+								resp, errExec = attemptResp, attemptErr
+								return
+							}
+						}
+					}
+				}
+				resp, errExec = attemptResp, attemptErr
+			}
+			if innerOpts.MaxAttempts >= 2 {
+				// The retry loop writes resp/errExec from the FINAL attempt,
+				// so MarkResult below still runs exactly once per credential
+				// iteration. A success must carry an explicit 2xx status:
+				// RunInnerLoop counts success only as Err==nil plus a 2xx
+				// status, and a zero Status would be misread as a failure.
+				loopStart := time.Now()
+				outcome := RunInnerLoop(execCtx, innerOpts, func(attemptCtx context.Context) InnerAttemptResult {
+					runAttempt(attemptCtx)
+					if errExec == nil {
+						return InnerAttemptResult{Status: http.StatusOK}
+					}
+					return InnerAttemptResult{Status: statusCodeFromError(errExec), Err: errExec}
+				})
+				if outcome.Attempts == 0 {
+					// The budget expired before any attempt ran; surface it
+					// as a failed attempt rather than a false success.
+					errExec = &Error{Code: "entry_budget_exhausted", Message: "per-entry retry budget expired before the first attempt"}
+				} else if outcome.Attempts > 1 && log.IsLevelEnabled(log.DebugLevel) {
+					LogInnerLoopResult(logEntryWithRequestID(execCtx), upstreamModel, auth.ID, outcome, time.Since(loopStart), innerOpts.MaxAttempts, innerOpts.MaxTimeMS)
+				}
+			} else {
+				runAttempt(execCtx)
+			}
+			// Parent-context check once after both branches, matching
+			// today's placement semantics: only a failed attempt surfaces a
+			// canceled execCtx, and budget expiry (deadline on the loop's
+			// child context) never masquerades as client cancellation.
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx, lastAuth
-				}
-				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
-					auth = refreshed
-					didRefreshOnUnauthorized = true
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
-					if errExec != nil {
-						if errCtx := execCtx.Err(); errCtx != nil {
-							return cliproxyexecutor.Response{}, errCtx, lastAuth
-						}
-					}
 				}
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
@@ -544,6 +600,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	// See executeMixedOnce for the rationale behind tracking lastAuth here.
 	var lastAuth *Auth
 	pinnedPool := ""
+	// innerOpts: see executeMixedOnce for the retry-loop rationale (only
+	// MaxAttempts >= 2 enters RunInnerLoop; below that the inline path runs
+	// untouched with no added deadline).
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	innerOpts := innerLoopOptsFromConfig(cfg)
 	// releaseInFlight releases the current attempt's in-flight hold exactly
 	// once (see executeMixedOnce for the full rationale).
 	var releaseInFlight func()
@@ -632,20 +693,62 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if !restoreExecutionModel {
 				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
 			}
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			var resp cliproxyexecutor.Response
+			var errExec error
+			// runAttempt: see executeMixedOnce for the full rationale. The
+			// final error lands in the captured errExec and the response in
+			// resp; auth / didRefreshOnUnauthorized mutate across attempts.
+			runAttempt := func(attemptCtx context.Context) {
+				attemptResp, attemptErr := executor.CountTokens(attemptCtx, auth, execReq, execOpts)
+				if attemptErr != nil {
+					if errCtx := attemptCtx.Err(); errCtx != nil {
+						resp, errExec = attemptResp, attemptErr
+						return
+					}
+					if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(attemptCtx, auth, attemptErr, didRefreshOnUnauthorized); okRefresh {
+						auth = refreshed
+						didRefreshOnUnauthorized = true
+						attemptResp, attemptErr = executor.CountTokens(attemptCtx, auth, execReq, execOpts)
+						if attemptErr != nil {
+							if errCtx := attemptCtx.Err(); errCtx != nil {
+								resp, errExec = attemptResp, attemptErr
+								return
+							}
+						}
+					}
+				}
+				resp, errExec = attemptResp, attemptErr
+			}
+			if innerOpts.MaxAttempts >= 2 {
+				// The retry loop writes resp/errExec from the FINAL attempt,
+				// so the single result marking below still runs exactly once
+				// per credential iteration. Success must carry an explicit
+				// 2xx status for RunInnerLoop classification.
+				loopStart := time.Now()
+				outcome := RunInnerLoop(execCtx, innerOpts, func(attemptCtx context.Context) InnerAttemptResult {
+					runAttempt(attemptCtx)
+					if errExec == nil {
+						return InnerAttemptResult{Status: http.StatusOK}
+					}
+					return InnerAttemptResult{Status: statusCodeFromError(errExec), Err: errExec}
+				})
+				if outcome.Attempts == 0 {
+					// The budget expired before any attempt ran; surface it
+					// as a failed attempt rather than a false success.
+					errExec = &Error{Code: "entry_budget_exhausted", Message: "per-entry retry budget expired before the first attempt"}
+				} else if outcome.Attempts > 1 && log.IsLevelEnabled(log.DebugLevel) {
+					LogInnerLoopResult(logEntryWithRequestID(execCtx), upstreamModel, auth.ID, outcome, time.Since(loopStart), innerOpts.MaxAttempts, innerOpts.MaxTimeMS)
+				}
+			} else {
+				runAttempt(execCtx)
+			}
+			// Parent-context check once after both branches, matching
+			// today's placement semantics: only a failed attempt surfaces a
+			// canceled execCtx, and budget expiry (deadline on the loop's
+			// child context) never masquerades as client cancellation.
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx, lastAuth
-				}
-				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(execCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
-					auth = refreshed
-					didRefreshOnUnauthorized = true
-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
-					if errExec != nil {
-						if errCtx := execCtx.Err(); errCtx != nil {
-							return cliproxyexecutor.Response{}, errCtx, lastAuth
-						}
-					}
 				}
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {

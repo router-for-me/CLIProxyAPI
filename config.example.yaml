@@ -289,6 +289,16 @@ routing:
   #   max-wait-ms: 15000
   #   max-attempts: 3
   #   reclassify-403: false
+  # Per-entry retry on transient upstream failures (408/429/500/502/503/504).
+  # Disabled unless max-attempts is at least 2; below that the conductor runs
+  # exactly one attempt per entry with no added deadline — the behavior before
+  # this option existed. The wall-time budget (max-time-ms, default 5000 when
+  # unset) only ever applies to retrying requests. retry-on is parsed but not
+  # yet wired; the built-in status set applies.
+  # retry:
+  #   max-attempts: 3
+  #   max-time-ms: 5000
+  #   backoff-ms: 200
 
 # Codex provider behavior.
 codex:

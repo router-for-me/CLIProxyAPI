@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/sirupsen/logrus"
 )
 
@@ -91,6 +92,24 @@ type InnerLoopResult struct {
 	Attempts int32
 }
 
+// innerLoopOptsFromConfig projects the global routing.retry config into
+// InnerLoopOpts. A zero MaxAttempts disables retry so the conductor
+// degrades to exactly one attempt per entry — the behavior before this
+// wiring existed; enabling retry is an explicit operator decision. The
+// conductor only enters RunInnerLoop when the result has MaxAttempts >= 2
+// (see executeMixedOnce), so a disabled config never wraps attempts in the
+// per-entry deadline that EntryBudget would otherwise stamp.
+func innerLoopOptsFromConfig(cfg *internalconfig.Config) InnerLoopOpts {
+	if cfg == nil || cfg.Routing.Retry.MaxAttempts == 0 {
+		return InnerLoopOpts{}
+	}
+	return InnerLoopOpts{
+		MaxAttempts: cfg.Routing.Retry.MaxAttempts,
+		MaxTimeMS:   cfg.Routing.Retry.MaxTimeMS,
+		BackoffMS:   cfg.Routing.Retry.BackoffMS,
+	}
+}
+
 // RunInnerLoop drives per-entry retry with bounded attempts + wall-time
 // budget. The contract:
 //
@@ -110,20 +129,21 @@ type InnerLoopResult struct {
 //     ReasonNonTransient respectively. The caller distinguishes 2xx from
 //     hard-fail by inspecting Result.Last.Status and Result.Last.Err.
 //
-// Conductor integration shape (deferred to a follow-up PR — the helper is
-// shipped in isolation first so the hot-path diff can be reviewed against
-// the unit tests): the AttemptFn for executeMixedOnce / executeCountMixedOnce
-// wraps the existing single executor.Execute(...) call (and the
-// tryRefreshAfterUnauthorized retry block). MarkResult is invoked per
-// attempt exactly as today, so cooldown accounting is preserved. For
-// streaming, the AttemptFn wraps executeStreamWithModelPool; FirstByte
-// is set to true once the stream's first read returns any byte. When
-// cfg.Routing.Retry.MaxAttempts == 0 the helper degrades to one attempt
-// (today's behavior), so default config = zero production risk.
+// Conductor integration: executeMixedOnce and executeCountMixedOnce build
+// an InnerLoopOpts from routing.retry (innerLoopOptsFromConfig) and enter
+// this loop only when MaxAttempts >= 2, so a default config keeps the
+// single-attempt inline path (and never wraps execCtx in the EntryBudget
+// deadline). The AttemptFn wraps the executor.Execute / CountTokens call
+// plus the unauthorized-refresh retry, and MarkResult still runs exactly
+// once per credential iteration with the final attempt's outcome. Streaming
+// loops are intentionally unwired: pre-first-byte failover is handled by
+// credential rotation in the outer loop, and post-first-byte retry is
+// forbidden (FirstByte / ReasonStreamStarted stays reserved for a future
+// stream-aware wrapper).
 //
 // Concurrency: RunInnerLoop is single-goroutine by design; the caller
 // invokes it from the per-attempt loop in executeMixedOnce /
-// executeStreamMixedOnce (one RunInnerLoop per picked auth, in series).
+// executeCountMixedOnce (one RunInnerLoop per picked auth, in series).
 func RunInnerLoop(parent context.Context, opts InnerLoopOpts, attempt AttemptFn) InnerLoopResult {
 	maxAttempts := opts.MaxAttempts
 	if maxAttempts == 0 {
