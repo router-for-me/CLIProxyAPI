@@ -63,8 +63,8 @@ func TestApplyClaudeHeaders_DirectMessagesPreservesCallerFingerprint(t *testing.
 	if got := req.Header.Get("User-Agent"); got != incoming.Get("User-Agent") {
 		t.Fatalf("User-Agent = %q, want caller value %q", got, incoming.Get("User-Agent"))
 	}
-	if got := req.Header.Get("Anthropic-Beta"); got != incoming.Get("Anthropic-Beta") {
-		t.Fatalf("Anthropic-Beta = %q, want caller value %q", got, incoming.Get("Anthropic-Beta"))
+	if got := req.Header.Get("Anthropic-Beta"); got != "oauth-2025-04-20,"+incoming.Get("Anthropic-Beta") {
+		t.Fatalf("Anthropic-Beta = %q, want OAuth credential beta with caller value %q", got, "oauth-2025-04-20,"+incoming.Get("Anthropic-Beta"))
 	}
 	if got := req.Header.Get("X-App"); got != "" {
 		t.Fatalf("X-App = %q, want absent in direct Messages passthrough", got)
@@ -103,8 +103,8 @@ func TestClaudeExecutor_DirectMessagesOfficialUpstreamPreservesCallerShape(t *te
 	if got := seenHeaders.Get("User-Agent"); got != incoming.Get("User-Agent") {
 		t.Fatalf("User-Agent = %q, want %q; headers=%v", got, incoming.Get("User-Agent"), seenHeaders)
 	}
-	if got := helps.HeaderValueCaseInsensitive(seenHeaders, "Anthropic-Beta"); got != incoming.Get("Anthropic-Beta") {
-		t.Fatalf("Anthropic-Beta = %q, want %q; headers=%v", got, incoming.Get("Anthropic-Beta"), seenHeaders)
+	if got := helps.HeaderValueCaseInsensitive(seenHeaders, "Anthropic-Beta"); got != "oauth-2025-04-20,"+incoming.Get("Anthropic-Beta") {
+		t.Fatalf("Anthropic-Beta = %q, want %q; headers=%v", got, "oauth-2025-04-20,"+incoming.Get("Anthropic-Beta"), seenHeaders)
 	}
 	if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 1 {
 		t.Fatalf("system block count = %d, want the caller block only", got)
@@ -120,6 +120,108 @@ func TestClaudeExecutor_DirectMessagesOfficialUpstreamPreservesCallerShape(t *te
 	}
 	if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
 		t.Fatal("direct Messages request gained a synthetic cache breakpoint")
+	}
+}
+
+func directClaudeAPIKeyAuth() *cliproxyauth.Auth {
+	return &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key": "sk-ant-api03-direct-messages-test",
+		},
+	}
+}
+
+func TestApplyClaudeHeaders_DirectMessagesAPIKeyPreservesExactCallerBetas(t *testing.T) {
+	ctx := directClaudeMessagesContext()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := http.Header{
+		"User-Agent":     {"pi (darwin; arm64)"},
+		"Anthropic-Beta": {"caller-beta-2099-01-01"},
+	}
+	body := []byte(`{"model":"claude-opus-5-5","thinking":{"type":"adaptive","display":"summarized"}}`)
+
+	if err := applyClaudeHeaders(req, directClaudeAPIKeyAuth(), "sk-ant-api03-direct-messages-test", false, nil, body, &config.Config{}, incoming, false); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+	if got := req.Header.Get("Anthropic-Beta"); got != "caller-beta-2099-01-01" {
+		t.Fatalf("Anthropic-Beta = %q, want caller value %q (no oauth beta for api key)", got, "caller-beta-2099-01-01")
+	}
+}
+
+func TestApplyClaudeHeaders_DirectMessagesOAuthInjectsOAuthBetaWhenEmpty(t *testing.T) {
+	ctx := directClaudeMessagesContext()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := http.Header{
+		"User-Agent": {"pi (darwin; arm64)"},
+	}
+	body := []byte(`{"model":"claude-opus-5-5","thinking":{"type":"adaptive","display":"summarized"}}`)
+
+	if err := applyClaudeHeaders(req, directClaudeOAuthAuth(), "sk-ant-oat-direct-messages-test", false, nil, body, &config.Config{}, incoming, false); err != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", err)
+	}
+	if got := req.Header.Get("Anthropic-Beta"); got != "oauth-2025-04-20" {
+		t.Fatalf("Anthropic-Beta = %q, want oauth-2025-04-20 for empty caller betas on OAuth", got)
+	}
+}
+
+func TestClaudeExecutor_PreserveCallerFingerprintAlignsSessionIDWithBody(t *testing.T) {
+	var seenBody []byte
+	var seenHeaders http.Header
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		seenBody, _ = io.ReadAll(req.Body)
+		seenHeaders = req.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"msg_direct","type":"message","model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	incoming := http.Header{
+		"User-Agent":                  {"pi (darwin; arm64)"},
+		"X-Claude-Code-Session-Id":    {"forged-session-a"},
+		"X-Claude-Code-Request-Class": {"forged-class"},
+	}
+	auth := directClaudeOAuthAuth()
+	auth.Attributes["base_url"] = "https://api.anthropic.com"
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hello"}],"max_tokens":32}`)
+
+	_, err := NewClaudeExecutor(&config.Config{}).Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Headers:      incoming,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	headerSession := seenHeaders.Get("X-Claude-Code-Session-Id")
+	if headerSession == "forged-session-a" {
+		t.Fatalf("X-Claude-Code-Session-Id forwarded forged unconfirmed session %q", headerSession)
+	}
+	if headerSession == "" {
+		t.Fatal("X-Claude-Code-Session-Id is empty, want authoritative session ID")
+	}
+
+	// Verify header session matches session_id embedded in metadata.user_id:
+	rawUserID := gjson.GetBytes(seenBody, "metadata.user_id").String()
+	bodySession := gjson.Get(rawUserID, "session_id").String()
+	if bodySession == "" {
+		t.Fatalf("metadata.user_id has no session_id: %s", rawUserID)
+	}
+	if headerSession != bodySession {
+		t.Fatalf("header session %q != body session %q", headerSession, bodySession)
+	}
+
+	// Verify unconfirmed caller's X-Claude-Code-Request-Class was not leaked:
+	if got := seenHeaders.Get("X-Claude-Code-Request-Class"); got != "" {
+		t.Fatalf("X-Claude-Code-Request-Class = %q, want stripped for unconfirmed caller", got)
 	}
 }
 
