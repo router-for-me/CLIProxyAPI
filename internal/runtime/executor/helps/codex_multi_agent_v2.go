@@ -130,7 +130,7 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 		return TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream)
 	}
 
-	summaryConfig := thinking.ExtractSummaryConfig(payload, from.String())
+	summaryConfig := thinking.ExtractTranslatedSummaryConfig(payload, from.String(), to.String())
 	translated = thinking.ApplySummaryConfigForModel(translated, to.String(), model, summaryConfig)
 	return sdktranslator.NormalizeRequest(ctx, from, to, model, translated, stream)
 }

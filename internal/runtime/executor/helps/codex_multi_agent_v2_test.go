@@ -232,7 +232,7 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t
 	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
 
 	cfg := &config.Config{}
-	payload := []byte(`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high"}`)
+	payload := []byte(`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high","include_reasoning":true}`)
 
 	out := TranslateRequestWithAPIKeyModelCompatibility(
 		context.Background(),

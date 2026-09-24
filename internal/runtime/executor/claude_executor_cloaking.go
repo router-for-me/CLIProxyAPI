@@ -1068,7 +1068,11 @@ func reconcileClaudeCodeFableModelAfterPayload(
 	if isClaudeOpus55Model(currentModel) && !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
 		body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
 	}
-	if fableState.injectedDisplay && !payloadTouchedDisplay && !claudeModelUsesProgressDisplay(currentModel) {
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	thinkingActive := thinkingType == "adaptive" || thinkingType == "enabled"
+	// Payload rules can disable thinking without touching display. Remove only
+	// CPA's injected value; explicit caller and operator choices remain owned.
+	if fableState.injectedDisplay && !payloadTouchedDisplay && (!thinkingActive || !claudeModelUsesProgressDisplay(currentModel)) {
 		body, _ = sjson.DeleteBytes(body, "thinking.display")
 	}
 	if !isProbeOrHelper {
