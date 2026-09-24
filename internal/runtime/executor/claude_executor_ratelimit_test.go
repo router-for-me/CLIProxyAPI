@@ -210,6 +210,30 @@ func TestClassifyClaudeUpstreamError_RetryAfterBeatsBodyKeyword(t *testing.T) {
 	}
 }
 
+// The body-keyword fallback applies to overage statuses only (403/429): a 400
+// mentioning a usage limit is an ordinary request failure and must stay
+// unmarked, pinning the status gate in overageIndicated.
+func TestClassifyClaudeUpstreamError_StatusGateExcludesNonOverageStatus(t *testing.T) {
+	body := []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"Your usage limit has been reached."}}`)
+	err := classifyClaudeUpstreamError(http.StatusBadRequest, http.Header{}, body)
+
+	if overage, ok := err.(interface{ OverageRejected() bool }); ok && overage.OverageRejected() {
+		t.Fatalf("400 with a usage-limit body was misclassified as overage")
+	}
+}
+
+// The credit-balance keyword is part of the body fallback: a 429 carrying it
+// without any Retry-After header marks an overage cap.
+func TestClassifyClaudeUpstreamError_CreditBalanceKeywordMarksOverage(t *testing.T) {
+	body := []byte(`{"type":"error","error":{"type":"billing_error","message":"Insufficient credit balance for this request."}}`)
+	err := classifyClaudeUpstreamError(http.StatusTooManyRequests, http.Header{}, body)
+
+	overage, ok := err.(interface{ OverageRejected() bool })
+	if !ok || !overage.OverageRejected() {
+		t.Fatalf("429 credit-balance refusal = %T, want an error marked OverageRejected", err)
+	}
+}
+
 // The fast-mode credits entitlement path returns before the overage check and
 // must remain unmarked: it is request-scoped, never a credential cooldown.
 func TestClassifyClaudeUpstreamError_FastModeEntitlementNeverOverage(t *testing.T) {

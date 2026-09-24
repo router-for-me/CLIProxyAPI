@@ -11,7 +11,10 @@ import (
 // claudeOverageError marks an upstream rejection caused by the account's
 // overage/spend-cap state rather than ordinary throttling. It wraps the
 // classified status error so consumers can distinguish "wait" (throttle) from
-// "cap reached" (overage) when deciding credential cooldown policy.
+// "cap reached" (overage) when deciding credential cooldown policy. The
+// conductor detects it via errors.As on the OverageRejected() bool interface,
+// so the method must stay exported and unconditionally reachable through
+// Unwrap.
 type claudeOverageError struct {
 	statusErr
 }
