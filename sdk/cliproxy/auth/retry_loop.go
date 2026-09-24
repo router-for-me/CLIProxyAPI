@@ -110,6 +110,14 @@ func innerLoopOptsFromConfig(cfg *internalconfig.Config) InnerLoopOpts {
 	}
 }
 
+// runInnerLoopFn is the seam through which the conductor drives per-entry
+// retry; tests swap it to pin degenerate-loop outcomes that are otherwise
+// only reachable through a context-deadline race: RunInnerLoop reports
+// zero attempts only when the wall clock has crossed the (parent-clamped)
+// entry deadline while execCtx.Err() is still nil, which cannot be
+// constructed deterministically from outside.
+var runInnerLoopFn = RunInnerLoop
+
 // RunInnerLoop drives per-entry retry with bounded attempts + wall-time
 // budget. The contract:
 //

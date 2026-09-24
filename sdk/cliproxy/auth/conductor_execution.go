@@ -520,8 +520,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				// iteration. A success must carry an explicit 2xx status:
 				// RunInnerLoop counts success only as Err==nil plus a 2xx
 				// status, and a zero Status would be misread as a failure.
+				// The loop is driven through runInnerLoopFn (seam: see
+				// retry_loop.go) so tests can pin degenerate outcomes.
 				loopStart := time.Now()
-				outcome := RunInnerLoop(execCtx, innerOpts, func(attemptCtx context.Context) InnerAttemptResult {
+				outcome := runInnerLoopFn(execCtx, innerOpts, func(attemptCtx context.Context) InnerAttemptResult {
 					runAttempt(attemptCtx)
 					if errExec == nil {
 						return InnerAttemptResult{Status: http.StatusOK}
@@ -723,9 +725,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				// The retry loop writes resp/errExec from the FINAL attempt,
 				// so the single result marking below still runs exactly once
 				// per credential iteration. Success must carry an explicit
-				// 2xx status for RunInnerLoop classification.
+				// 2xx status for RunInnerLoop classification. The loop is
+				// driven through runInnerLoopFn (seam: see retry_loop.go) so
+				// tests can pin degenerate outcomes.
 				loopStart := time.Now()
-				outcome := RunInnerLoop(execCtx, innerOpts, func(attemptCtx context.Context) InnerAttemptResult {
+				outcome := runInnerLoopFn(execCtx, innerOpts, func(attemptCtx context.Context) InnerAttemptResult {
 					runAttempt(attemptCtx)
 					if errExec == nil {
 						return InnerAttemptResult{Status: http.StatusOK}

@@ -363,3 +363,164 @@ func TestRetryWiringExecuteCountRetriesTransientStatus(t *testing.T) {
 		t.Fatalf("CountTokens calls = %d, want 2 (fail once, then succeed)", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Seam-pinned degenerate loop outcomes. RunInnerLoop can report zero
+// attempts only when the wall clock crosses the (parent-clamped) entry
+// deadline while the parent context's timer has not yet flipped
+// execCtx.Err() (the time.Until(deadline) pre-check in RunInnerLoop, plus
+// EntryBudget clamping the child deadline onto the parent's). That race
+// cannot be constructed
+// deterministically from outside, so the conductor's zero-attempt guards
+// (conductor_execution.go, both mixed loops) are driven through the
+// runInnerLoopFn seam instead.
+// ---------------------------------------------------------------------------
+
+// swapRunInnerLoopSeam installs fn as the conductor's inner-loop driver for
+// the duration of the test and restores the real RunInnerLoop afterwards.
+// Only non-parallel tests may use it: the seam is a package-level variable.
+func swapRunInnerLoopSeam(t *testing.T, fn func(context.Context, InnerLoopOpts, AttemptFn) InnerLoopResult) {
+	t.Helper()
+	prev := runInnerLoopFn
+	runInnerLoopFn = fn
+	t.Cleanup(func() { runInnerLoopFn = prev })
+}
+
+// assertBudgetExhaustedOutcome checks the conductor surfaced the degenerate
+// zero-attempt loop exit as a failed dispatch: a non-nil *Error with code
+// entry_budget_exhausted, no request-invalid hard-stop classification, and
+// exactly one failed MarkResult for the credential.
+func assertBudgetExhaustedOutcome(t *testing.T, errExecute error, hook *resultCaptureHook, authID string) {
+	t.Helper()
+	if errExecute == nil {
+		t.Fatal("returned error = nil, want entry_budget_exhausted (a zero-attempt loop exit must not look like a success)")
+	}
+	var budgetErr *Error
+	if !errors.As(errExecute, &budgetErr) || budgetErr == nil || budgetErr.Code != "entry_budget_exhausted" {
+		t.Fatalf("returned error = %v (%T), want *Error with code entry_budget_exhausted", errExecute, errExecute)
+	}
+	// The synthesized error carries no HTTP status. If classification ever
+	// turned it into a request fault, the conductor's hard-stop branch
+	// (isRequestInvalidError) would surface it without credential rotation;
+	// pin that it does not.
+	if isRequestInvalidError(errExecute) {
+		t.Fatal("entry_budget_exhausted classified as a request-invalid error; the hard-stop branch would fire on it")
+	}
+	results := hook.Results()
+	if len(results) != 1 {
+		t.Fatalf("hook results = %d (%#v), want exactly 1 failed MarkResult", len(results), results)
+	}
+	if results[0].Success {
+		t.Fatalf("hook result = %#v, want Success=false for a zero-attempt budget exit", results[0])
+	}
+	if results[0].Error == nil || results[0].Error.Code != "entry_budget_exhausted" {
+		t.Fatalf("hook result error = %#v, want code entry_budget_exhausted", results[0].Error)
+	}
+	if results[0].AuthID != authID {
+		t.Fatalf("hook result AuthID = %q, want %q", results[0].AuthID, authID)
+	}
+}
+
+// TestRetryWiringZeroAttemptBudgetMarksFailure pins the executeMixedOnce
+// zero-attempt guard: a loop that exits before any attempt ran must mark a
+// failure, not a false success. The stub never invokes the attempt closure,
+// so resp/errExec keep their zero values — without the guard the conductor
+// would MarkResult(Success: true) and return an empty response with nil
+// error.
+func TestRetryWiringZeroAttemptBudgetMarksFailure(t *testing.T) {
+	executor := &retryTestExecutor{
+		executeFn: func(context.Context, *Auth) (cliproxyexecutor.Response, error) {
+			t.Error("real executor invoked despite a zero-attempt stub loop")
+			return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+		},
+	}
+	hook := &resultCaptureHook{}
+	retry := internalconfig.RetryConfig{MaxAttempts: 3, MaxTimeMS: 5000, BackoffMS: 1}
+	manager, auth, model := newRetryIntegrationManager(t, executor, hook, retry)
+
+	swapRunInnerLoopSeam(t, func(context.Context, InnerLoopOpts, AttemptFn) InnerLoopResult {
+		// Degenerate budget exit: deadline crossed before attempt one, so
+		// Attempts is 0 and Last is the zero value.
+		return InnerLoopResult{Reason: ReasonBudgetOut}
+	})
+
+	_, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	assertBudgetExhaustedOutcome(t, errExecute, hook, auth.ID)
+	if got := executor.executeCalls.Load(); got != 0 {
+		t.Fatalf("Execute calls = %d, want 0 (the stub must not run the real attempt body)", got)
+	}
+}
+
+// TestRetryWiringExecuteCountZeroAttemptBudgetMarksFailure is the count-path
+// mirror (executeCountMixedOnce guard).
+func TestRetryWiringExecuteCountZeroAttemptBudgetMarksFailure(t *testing.T) {
+	executor := &retryTestExecutor{
+		countFn: func(context.Context, *Auth) (cliproxyexecutor.Response, error) {
+			t.Error("real CountTokens invoked despite a zero-attempt stub loop")
+			return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+		},
+	}
+	hook := &resultCaptureHook{}
+	retry := internalconfig.RetryConfig{MaxAttempts: 3, MaxTimeMS: 5000, BackoffMS: 1}
+	manager, auth, model := newRetryIntegrationManager(t, executor, hook, retry)
+
+	swapRunInnerLoopSeam(t, func(context.Context, InnerLoopOpts, AttemptFn) InnerLoopResult {
+		return InnerLoopResult{Reason: ReasonBudgetOut}
+	})
+
+	_, errCount := manager.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	assertBudgetExhaustedOutcome(t, errCount, hook, auth.ID)
+	if got := executor.countCalls.Load(); got != 0 {
+		t.Fatalf("CountTokens calls = %d, want 0 (the stub must not run the real attempt body)", got)
+	}
+	if got := executor.executeCalls.Load(); got != 0 {
+		t.Fatalf("Execute calls = %d, want 0 on the count path", got)
+	}
+}
+
+// TestRetryWiringLoopReasonSurfacesStillFailClosed pins the non-degenerate
+// exit: a loop that ran attempts and gave up on a retryable failure must
+// surface the LAST attempt's error as a failed MarkResult, never a false
+// success. The stub honors the loop's side-effect contract (the conductor
+// reads the final outcome through resp/errExec written by AttemptFn, not
+// through InnerLoopResult.Last), so it drives the real attempt closure
+// twice against an always-503 executor.
+func TestRetryWiringLoopReasonSurfacesStillFailClosed(t *testing.T) {
+	executor := &retryTestExecutor{
+		executeFn: func(context.Context, *Auth) (cliproxyexecutor.Response, error) {
+			return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "upstream down"}
+		},
+	}
+	hook := &resultCaptureHook{}
+	retry := internalconfig.RetryConfig{MaxAttempts: 3, MaxTimeMS: 5000, BackoffMS: 1}
+	manager, auth, model := newRetryIntegrationManager(t, executor, hook, retry)
+
+	swapRunInnerLoopSeam(t, func(ctx context.Context, _ InnerLoopOpts, attempt AttemptFn) InnerLoopResult {
+		var last InnerAttemptResult
+		for i := 0; i < 2; i++ {
+			last = attempt(ctx)
+		}
+		return InnerLoopResult{Attempts: 2, Last: last, Reason: ReasonAttemptsOut}
+	})
+
+	_, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if statusCodeFromError(errExecute) != http.StatusServiceUnavailable {
+		t.Fatalf("returned error = %v, want the last attempt's HTTP 503 surfaced", errExecute)
+	}
+	results := hook.Results()
+	if len(results) != 1 {
+		t.Fatalf("hook results = %d (%#v), want exactly 1 failed MarkResult", len(results), results)
+	}
+	if results[0].Success {
+		t.Fatalf("hook result = %#v, want Success=false for an attempts-out exit", results[0])
+	}
+	if results[0].Error == nil || results[0].Error.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("hook result error = %#v, want HTTP 503 from the last attempt", results[0].Error)
+	}
+	if results[0].AuthID != auth.ID {
+		t.Fatalf("hook result AuthID = %q, want %q", results[0].AuthID, auth.ID)
+	}
+	if got := executor.executeCalls.Load(); got != 2 {
+		t.Fatalf("Execute calls = %d, want 2 (stub loop ran the closure twice)", got)
+	}
+}
