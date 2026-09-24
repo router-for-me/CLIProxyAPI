@@ -3,6 +3,7 @@ package chat_completions
 import (
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 )
 
@@ -854,7 +855,7 @@ func TestCustomToolNameShortening(t *testing.T) {
 	if got := items[2].Get("type").String(); got != "custom_tool_call_output" {
 		t.Fatalf("expected custom_tool_call_output, got %s", items[2].Raw)
 	}
-	if got := buildReverseMapFromOriginalOpenAI(input)[shortName]; got != longName {
+	if got := util.DisambiguatedToolNameMap(input)[shortName]; got != longName {
 		t.Fatalf("expected reverse name mapping to %q, got %q", longName, got)
 	}
 }

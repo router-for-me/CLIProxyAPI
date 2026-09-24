@@ -345,7 +345,7 @@ func codexStreamErrorToClaudeError(rootResult gjson.Result) []byte {
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the Claude Code API format.
 func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, _ *any) []byte {
-	revNames := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
+	revNames := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 
 	rootResult := gjson.ParseBytes(rawJSON)
 	typeStr := rootResult.Get("type").String()
@@ -782,7 +782,7 @@ func clearCodexFunctionCalls(params *ConvertCodexResponseToClaudeParams) {
 }
 
 func resolveCodexClaudeToolUseName(originalRequestRawJSON []byte, name string) string {
-	rev := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
+	rev := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	if orig, ok := rev[name]; ok {
 		return orig
 	}
@@ -807,30 +807,6 @@ func extractResponsesUsage(usage gjson.Result) (int64, int64, int64) {
 	}
 
 	return inputTokens, outputTokens, cachedTokens
-}
-
-// buildReverseMapFromClaudeOriginalShortToOriginal builds a map[short]original from original Claude request tools.
-func buildReverseMapFromClaudeOriginalShortToOriginal(original []byte) map[string]string {
-	tools := gjson.GetBytes(original, "tools")
-	rev := map[string]string{}
-	if !tools.IsArray() {
-		return rev
-	}
-	var names []string
-	arr := tools.Array()
-	for i := 0; i < len(arr); i++ {
-		n := arr[i].Get("name").String()
-		if n != "" {
-			names = append(names, n)
-		}
-	}
-	if len(names) > 0 {
-		m := buildShortNameMap(names)
-		for orig, short := range m {
-			rev[short] = orig
-		}
-	}
-	return rev
 }
 
 func ClaudeTokenCount(_ context.Context, count int64) []byte {

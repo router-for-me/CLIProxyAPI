@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strconv"
 	"strings"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
@@ -54,7 +53,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	template := []byte(`{"model":"","instructions":"","input":[]}`)
 
 	rootResult := gjson.ParseBytes(rawJSON)
-	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
+	nameMap := util.SanitizedFunctionNameMap(rawJSON)
 	template, _ = sjson.SetBytes(template, "model", modelName)
 	inputItems := translatorcommon.NewRawArrayItems(rootResult.Get("messages.#").Int())
 
@@ -224,7 +223,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 						functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("id").String()))
 						{
 							name := messageContentResult.Get("name").String()
-							if short, ok := toolNameMap[name]; ok {
+							if short, ok := nameMap[name]; ok {
 								name = short
 							} else {
 								name = shortenNameIfNeeded(name)
@@ -298,7 +297,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	var toolItems [][]byte
 	if toolsResult.IsArray() {
 		webSearchToolNames := buildClaudeWebSearchToolNameSet(toolsResult)
-		template, _ = sjson.SetRawBytes(template, "tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolNameMap, webSearchToolNames))
+		template, _ = sjson.SetRawBytes(template, "tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), nameMap, webSearchToolNames))
 		toolResults := toolsResult.Array()
 		toolItems = make([][]byte, 0, len(toolResults))
 		for i := 0; i < len(toolResults); i++ {
@@ -316,7 +315,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 			if v := toolResult.Get("name"); v.Exists() {
 				originalName := v.String()
 				name := originalName
-				if short, ok := toolNameMap[name]; ok {
+				if short, ok := nameMap[name]; ok {
 					name = short
 				} else {
 					name = shortenNameIfNeeded(name)
@@ -458,7 +457,7 @@ func buildClaudeWebSearchToolNameSet(tools gjson.Result) map[string]struct{} {
 	return names
 }
 
-func convertClaudeToolChoiceToCodex(toolChoice gjson.Result, toolNameMap map[string]string, webSearchToolNames map[string]struct{}) []byte {
+func convertClaudeToolChoiceToCodex(toolChoice gjson.Result, nameMap map[string]string, webSearchToolNames map[string]struct{}) []byte {
 	if !toolChoice.Exists() || toolChoice.Type == gjson.Null {
 		return []byte(`"auto"`)
 	}
@@ -480,7 +479,7 @@ func convertClaudeToolChoiceToCodex(toolChoice gjson.Result, toolNameMap map[str
 		if _, ok := webSearchToolNames[name]; ok {
 			return []byte(`{"type":"web_search"}`)
 		}
-		if short, ok := toolNameMap[name]; ok {
+		if short, ok := nameMap[name]; ok {
 			name = short
 		} else {
 			name = shortenNameIfNeeded(name)
@@ -525,81 +524,6 @@ func shortenNameIfNeeded(name string) string {
 		}
 	}
 	return name[:limit]
-}
-
-// buildShortNameMap ensures uniqueness of shortened names within a request.
-func buildShortNameMap(names []string) map[string]string {
-	const limit = 64
-	used := map[string]struct{}{}
-	m := map[string]string{}
-
-	baseCandidate := func(n string) string {
-		if len(n) <= limit {
-			return n
-		}
-		if strings.HasPrefix(n, "mcp__") {
-			idx := strings.LastIndex(n, "__")
-			if idx > 0 {
-				cand := "mcp__" + n[idx+2:]
-				if len(cand) > limit {
-					cand = cand[:limit]
-				}
-				return cand
-			}
-		}
-		return n[:limit]
-	}
-
-	makeUnique := func(cand string) string {
-		if _, ok := used[cand]; !ok {
-			return cand
-		}
-		base := cand
-		for i := 1; ; i++ {
-			suffix := "_" + strconv.Itoa(i)
-			allowed := limit - len(suffix)
-			if allowed < 0 {
-				allowed = 0
-			}
-			tmp := base
-			if len(tmp) > allowed {
-				tmp = tmp[:allowed]
-			}
-			tmp = tmp + suffix
-			if _, ok := used[tmp]; !ok {
-				return tmp
-			}
-		}
-	}
-
-	for _, n := range names {
-		cand := baseCandidate(n)
-		uniq := makeUnique(cand)
-		used[uniq] = struct{}{}
-		m[n] = uniq
-	}
-	return m
-}
-
-// buildReverseMapFromClaudeOriginalToShort builds original->short map, used to map tool_use names to short.
-func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string {
-	tools := gjson.GetBytes(original, "tools")
-	m := map[string]string{}
-	if !tools.IsArray() {
-		return m
-	}
-	var names []string
-	arr := tools.Array()
-	for i := 0; i < len(arr); i++ {
-		n := arr[i].Get("name").String()
-		if n != "" {
-			names = append(names, n)
-		}
-	}
-	if len(names) > 0 {
-		m = buildShortNameMap(names)
-	}
-	return m
 }
 
 // normalizeToolParameters ensures object schemas contain at least an empty properties map.

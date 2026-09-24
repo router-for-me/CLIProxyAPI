@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -103,6 +104,9 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	root := gjson.ParseBytes(rawJSON)
 	eventType := root.Get("type").String()
 
+	// Build reverse name map from the original request to restore capped tool names.
+	revNameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
+
 	// Base OpenAI streaming response template
 	template := []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}`)
 
@@ -150,6 +154,10 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				// Start of tool call - initialize accumulator to track arguments
 				toolCallID := contentBlock.Get("id").String()
 				toolName := contentBlock.Get("name").String()
+				// Restore original name if it was capped in the request.
+				if restored, ok := revNameMap[toolName]; ok {
+					toolName = restored
+				}
 				index := int(root.Get("index").Int())
 
 				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
@@ -305,6 +313,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+	revNameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	chunks := make([][]byte, 0)
 
 	lines := bytes.Split(rawJSON, []byte("\n"))
@@ -352,8 +361,14 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 					// Initialize tool call accumulator for this index
 					index := int(root.Get("index").Int())
 					toolCallsAccumulator[index] = &ToolCallAccumulator{
-						ID:   contentBlock.Get("id").String(),
-						Name: contentBlock.Get("name").String(),
+						ID: contentBlock.Get("id").String(),
+						Name: func() string {
+							n := contentBlock.Get("name").String()
+							if r, ok := revNameMap[n]; ok {
+								return r
+							}
+							return n
+						}(),
 					}
 				}
 			}

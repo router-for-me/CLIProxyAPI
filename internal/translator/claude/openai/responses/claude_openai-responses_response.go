@@ -8,6 +8,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -251,6 +252,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 	root := gjson.ParseBytes(rawJSON)
+	// Build reverse name map to restore capped tool names from Claude responses.
+	requestRevNameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	requestForToolMetadata := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 	customToolNames := responsesCustomToolNames(requestForToolMetadata)
 	ev := root.Get("type").String()
@@ -346,6 +349,10 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.InFuncBlock = true
 			st.CurrentFCID = cb.Get("id").String()
 			name := cb.Get("name").String()
+			// Restore original name if it was capped in the request.
+			if restored, ok := requestRevNameMap[name]; ok {
+				name = restored
+			}
 			_, isCustomTool := customToolNames[name]
 			if st.FuncCustom == nil {
 				st.FuncCustom = make(map[int]bool)
@@ -740,6 +747,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	reqBytes := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
+	revNameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	customToolNames := responsesCustomToolNames(reqBytes)
 
 	// Base OpenAI Responses (non-stream) object
@@ -818,8 +826,12 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				activeMessageItem = item
 			case "tool_use":
 				activeMessageItem = nil
+				nameFromClaude := cb.Get("name").String()
+				if restored, ok := revNameMap[nameFromClaude]; ok {
+					nameFromClaude = restored
+				}
 				itemType := "function_call"
-				if _, isCustomTool := customToolNames[cb.Get("name").String()]; isCustomTool {
+				if _, isCustomTool := customToolNames[nameFromClaude]; isCustomTool {
 					itemType = "custom_tool_call"
 				}
 				item := newOutputItem(itemType, idx)
@@ -829,7 +841,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				} else {
 					item.id = fmt.Sprintf("fc_%s", item.callID)
 				}
-				item.name = cb.Get("name").String()
+				item.name = nameFromClaude
 			case "thinking", "redacted_thinking":
 				activeMessageItem = nil
 				item := newOutputItem("reasoning", idx)

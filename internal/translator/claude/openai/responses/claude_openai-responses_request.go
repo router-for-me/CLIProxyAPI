@@ -456,6 +456,10 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	includedToolNames := map[string]struct{}{}
 	toolNameMap := map[string]string{}
 
+	// Build forward name map from the original request so that all tool names
+	// sent to Claude are consistently capped at 64 bytes.
+	openAIToolNameMap := util.SanitizedFunctionNameMap(rawJSON)
+
 	// Responses Lite puts tool definitions in input[].additional_tools. Select
 	// one winner for each final name, while keeping the original order for the
 	// tools that survive conversion.
@@ -469,6 +473,11 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		tJSON, ok := convertResponsesToolDescriptorToClaude(descriptor)
 		if !ok {
 			continue
+		}
+		// Cap the tool name so it fits within Claude's 64-byte limit.
+		nameField := gjson.GetBytes(tJSON, "name").String()
+		if capped := util.MapSanitizedFunctionName(openAIToolNameMap, nameField); capped != nameField {
+			tJSON, _ = sjson.SetBytes(tJSON, "name", capped)
 		}
 		toolName := gjson.GetBytes(tJSON, "name").String()
 		if toolName != "" {

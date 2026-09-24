@@ -12,6 +12,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -141,7 +142,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 			{
 				// Restore original tool name if shortened
 				n := itemResult.Get("name").String()
-				rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
+				rev := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 				if orig, ok := rev[n]; ok {
 					n = orig
 				}
@@ -353,7 +354,7 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 					functionCall := []byte(`{"functionCall":{"args":{},"name":""}}`)
 					{
 						n := value.Get("name").String()
-						rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
+						rev := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 						if orig, ok := rev[n]; ok {
 							n = orig
 						}
@@ -379,35 +380,6 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 		}
 	}
 	return template
-}
-
-// buildReverseMapFromGeminiOriginal builds a map[short]original from original Gemini request tools.
-func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
-	tools := gjson.GetBytes(original, "tools")
-	rev := map[string]string{}
-	if !tools.IsArray() {
-		return rev
-	}
-	var names []string
-	tarr := tools.Array()
-	for i := 0; i < len(tarr); i++ {
-		fns := tarr[i].Get("functionDeclarations")
-		if !fns.IsArray() {
-			continue
-		}
-		for _, fn := range fns.Array() {
-			if v := fn.Get("name"); v.Exists() {
-				names = append(names, v.String())
-			}
-		}
-	}
-	if len(names) > 0 {
-		m := buildShortNameMap(names)
-		for orig, short := range m {
-			rev[short] = orig
-		}
-	}
-	return rev
 }
 
 func setGeminiFunctionCallID(functionCall []byte, item gjson.Result) []byte {

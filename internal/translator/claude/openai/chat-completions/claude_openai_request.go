@@ -75,6 +75,10 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 
 	root := gjson.ParseBytes(rawJSON)
 
+	// Build forward name map from the original request's tool definitions
+	// so that all tool names sent to Claude are consistently capped at 64 bytes.
+	openAIToolNameMap := util.SanitizedFunctionNameMap(rawJSON)
+
 	// Convert OpenAI reasoning_effort to Claude thinking config.
 	if v := root.Get("reasoning_effort"); v.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(v.String()))
@@ -246,7 +250,8 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 							function := toolCall.Get("function")
 							toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 							toolUse, _ = sjson.SetBytes(toolUse, "id", toolCallID)
-							toolUse, _ = sjson.SetBytes(toolUse, "name", function.Get("name").String())
+							toolName := util.MapSanitizedFunctionName(openAIToolNameMap, function.Get("name").String())
+							toolUse, _ = sjson.SetBytes(toolUse, "name", toolName)
 
 							// Parse arguments for the tool call
 							if args := function.Get("arguments"); args.Exists() {
@@ -333,7 +338,8 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
 				anthropicTool := []byte(`{"name":"","description":""}`)
-				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", function.Get("name").String())
+				toolName := util.MapSanitizedFunctionName(openAIToolNameMap, function.Get("name").String())
+				anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", toolName)
 				anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", function.Get("description").String())
 
 				// Convert parameters schema for the tool
@@ -375,7 +381,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		case gjson.JSON:
 			// Specific tool choice mapping
 			if toolChoice.Get("type").String() == "function" {
-				functionName := toolChoice.Get("function.name").String()
+				functionName := util.MapSanitizedFunctionName(openAIToolNameMap, toolChoice.Get("function.name").String())
 				toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
 				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)

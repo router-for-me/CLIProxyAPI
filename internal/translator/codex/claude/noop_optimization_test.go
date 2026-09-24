@@ -12,7 +12,8 @@ func TestConvertClaudeRequestToCodexNormalizesNonStringToolName(t *testing.T) {
 	output := ConvertClaudeRequestToCodex("gpt-test", input, false)
 
 	name := gjson.GetBytes(output, "tools.0.name")
-	if name.Type != gjson.String || name.String() != "123" {
-		t.Fatalf("tools.0.name = %s, want string 123", name.Raw)
+	// SanitizedFunctionNameMap runs SanitizeFunction which prepends _ for digit-starting names
+	if name.Type != gjson.String || name.String() != "_123" {
+		t.Fatalf("tools.0.name = %s, want string _123", name.Raw)
 	}
 }
