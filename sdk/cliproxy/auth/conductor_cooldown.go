@@ -1147,7 +1147,7 @@ func (m *Manager) poolModelCooldownBlock(providers []string, model string, now t
 // untried manager auth matching them. Caller must hold m.mu (read or write).
 // Selection uses this so the pool fail-fast only fires when every provider
 // with a live candidate is blocked — one open provider keeps rotation going.
-func (m *Manager) poolCooldownCandidateProvidersLocked(providerSet map[string]struct{}, eligibility authSelectionEligibility, tried map[string]struct{}, model string) []string {
+func (m *Manager) poolCooldownCandidateProvidersLocked(providerSet map[string]struct{}, eligibility authSelectionEligibility, tried map[string]struct{}) []string {
 	if m == nil || len(providerSet) == 0 {
 		return nil
 	}

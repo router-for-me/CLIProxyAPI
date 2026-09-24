@@ -174,7 +174,7 @@ func (m *modelPoolCooldowns) snapshotRecords(now time.Time) []CooldownStateRecor
 			NextRetryAfter: entry.deadline,
 			Reason:         "pool_quota",
 			Quota:          QuotaState{Exceeded: true, NextRecoverAt: entry.deadline, Reason: "pool_quota"},
-			UpdatedAt:      time.Now(),
+			UpdatedAt:      now,
 		})
 	}
 	sort.Slice(records, func(i, j int) bool {

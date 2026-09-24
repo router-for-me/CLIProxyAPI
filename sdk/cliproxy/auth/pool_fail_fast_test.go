@@ -423,8 +423,8 @@ func TestPoolFailFastMultiChannelAllBlockedFailsFast(t *testing.T) {
 			if !errors.As(errExecute, &cooldownErr) {
 				t.Fatalf("Execute() error = %v, want *modelCooldownError fail-fast", errExecute)
 			}
-			if cooldownErr.provider != "alpha" && cooldownErr.provider != "beta" {
-				t.Fatalf("cooldown provider = %q, want a blocked channel (alpha or beta)", cooldownErr.provider)
+			if cooldownErr.provider != "alpha" {
+				t.Fatalf("cooldown provider = %q, want exactly \"alpha\" (lexicographically-first blocked channel)", cooldownErr.provider)
 			}
 			if cooldownErr.resetIn <= 4*time.Minute || cooldownErr.resetIn > 5*time.Minute {
 				t.Fatalf("resetIn = %v, want ~= 5m", cooldownErr.resetIn)

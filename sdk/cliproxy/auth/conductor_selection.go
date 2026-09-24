@@ -1964,7 +1964,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		// blocked for the model, so one open provider keeps rotation alive.
 		// An empty eligible-candidate union never triggers a spurious
 		// fail-fast (the empty behavior below is preserved).
-		if providersWithCandidates := m.poolCooldownCandidateProvidersLocked(providerSet, eligibility, tried, model); len(providersWithCandidates) > 0 {
+		if providersWithCandidates := m.poolCooldownCandidateProvidersLocked(providerSet, eligibility, tried); len(providersWithCandidates) > 0 {
 			if deadline, blockedKey, blocked := m.poolModelCooldownBlock(providersWithCandidates, model, time.Now()); blocked {
 				poolCooldown = true
 				poolDeadline = deadline
