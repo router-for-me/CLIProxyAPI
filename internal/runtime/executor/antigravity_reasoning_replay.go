@@ -329,6 +329,12 @@ func applyAntigravityReasoningReplayItems(payload []byte, items [][]byte, toolSc
 	updated := payload
 	changed := false
 	index := newAntigravityReplayRequestIndex(payload)
+	defer func() {
+		if index != nil && index.contextHashRejections > 1 {
+			log.Debugf("antigravity replay: suppressed %d repeated context-hash rejections across %d parts in same request",
+				index.contextHashRejections-1, len(index.loggedContextHashRejections))
+		}
+	}()
 	for len(items) > 0 {
 		batch := newAntigravityReplayBatch(index)
 		handled := 0
@@ -960,8 +966,15 @@ func (i *antigravityReplayRequestIndex) functionCallPartLocationForReplayWithSch
 		// The candidate ID matched exactly, so callID+name+args are already proven
 		// identical. Only the surrounding context drifted, which invalidates the
 		// cached signature but not the tool identity.
-		log.Debugf("antigravity replay: exact tool ID match for %q at contents[%d].parts[%d] rejected by context hash (opaque_id=%t)",
-			name, location.contentIndex, location.partIndex, util.IsGeminiClaudeToolUseID(candidateID))
+		key := antigravityReplayPartKey{contentIndex: location.contentIndex, partIndex: location.partIndex}
+		i.contextHashRejections++
+		if !i.loggedContextHashRejections[key] {
+			if len(i.loggedContextHashRejections) == 0 {
+				log.Debugf("antigravity replay: exact tool ID match for %q at contents[%d].parts[%d] rejected by context hash (opaque_id=%t)",
+					name, location.contentIndex, location.partIndex, util.IsGeminiClaudeToolUseID(candidateID))
+			}
+			i.loggedContextHashRejections[key] = true
+		}
 		return antigravityReplayIndexedPart{}, false
 	}
 
@@ -1295,6 +1308,8 @@ type antigravityReplayRequestIndex struct {
 	functionResponseContentByID map[string]int
 	functionResponsePartsByID   map[string][]antigravityReplayPartKey
 	contextFingerprints         *antigravityReplayContextFingerprints
+	contextHashRejections       int
+	loggedContextHashRejections map[antigravityReplayPartKey]bool
 }
 
 func newAntigravityReplayRequestIndex(payload []byte) *antigravityReplayRequestIndex {
@@ -1303,6 +1318,7 @@ func newAntigravityReplayRequestIndex(payload []byte) *antigravityReplayRequestI
 		functionCallCountsByID:      make(map[string]int),
 		functionResponseContentByID: make(map[string]int),
 		functionResponsePartsByID:   make(map[string][]antigravityReplayPartKey),
+		loggedContextHashRejections: make(map[antigravityReplayPartKey]bool),
 	}
 	contentsResult := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	index.validContents = contentsResult.IsArray()
