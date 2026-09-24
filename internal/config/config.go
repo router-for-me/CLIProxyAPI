@@ -79,6 +79,10 @@ type Config struct {
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
+	// ShutdownTimeoutSeconds bounds how long a stop waits for open requests to finish.
+	// 0 or a negative value keeps the default of 30 seconds.
+	ShutdownTimeoutSeconds int `yaml:"shutdown-timeout-seconds" json:"shutdown-timeout-seconds"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh and manual refresh-all worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
