@@ -176,6 +176,11 @@ func queryFromContext(ctx context.Context) url.Values {
 	return nil
 }
 
+// PinnedAuthIDFromContext reports the auth ID stamped by WithPinnedAuthID.
+func PinnedAuthIDFromContext(ctx context.Context) string {
+	return pinnedAuthIDFromContext(ctx)
+}
+
 func pinnedAuthIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
