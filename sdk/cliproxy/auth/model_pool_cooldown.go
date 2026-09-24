@@ -34,7 +34,6 @@ type modelPoolCooldowns struct {
 // ID-less auths, which the manager does not produce).
 type modelPoolCooldownEntry struct {
 	deadline      time.Time
-	updatedAt     time.Time
 	contributions map[string]time.Time // authID -> cooling-until for this provider+model
 }
 
@@ -63,7 +62,7 @@ func (m *modelPoolCooldowns) record(auths []*Auth, provider, model string, now t
 
 	var total, cooling int
 	var deadline time.Time
-	contributions := make(map[string]time.Time)
+	var contributions map[string]time.Time // lazily built on the first contributor
 	for _, auth := range auths {
 		if auth == nil || auth.Provider != provider || auth.Disabled {
 			continue
@@ -79,6 +78,9 @@ func (m *modelPoolCooldowns) record(auths []*Auth, provider, model string, now t
 		}
 		cooling++
 		if auth.ID != "" {
+			if contributions == nil {
+				contributions = make(map[string]time.Time)
+			}
 			contributions[auth.ID] = state.NextRetryAfter
 		}
 		if state.NextRetryAfter.After(deadline) {
@@ -95,7 +97,6 @@ func (m *modelPoolCooldowns) record(auths []*Auth, provider, model string, now t
 	}
 	m.entries[key] = modelPoolCooldownEntry{
 		deadline:      deadline,
-		updatedAt:     now,
 		contributions: contributions,
 	}
 }

@@ -221,6 +221,46 @@ func TestModelPoolCooldownsDropAuth(t *testing.T) {
 	}
 }
 
+func TestModelPoolCooldownsDropAuthAcrossProviders(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	model := "claude-opus-4-1"
+	until := now.Add(10 * time.Minute)
+
+	// The same authID contributes to two providers' aggregates for the same
+	// model; one dropAuth must shed the contribution from BOTH entries.
+	providerA := []*Auth{
+		mpAuth("shared", "claude", false, model, true, until),
+		mpAuth("a2", "claude", false, model, true, until),
+	}
+	providerB := []*Auth{
+		mpAuth("shared", "codex", false, model, true, until),
+		mpAuth("b2", "codex", false, model, true, until),
+	}
+	agg := newModelPoolCooldowns()
+	agg.record(providerA, "claude", model, now)
+	agg.record(providerB, "codex", model, now)
+	if _, ok := agg.block([]string{"claude"}, model, now); !ok {
+		t.Fatalf("block(claude) before drop = false, want true")
+	}
+	if _, ok := agg.block([]string{"codex"}, model, now); !ok {
+		t.Fatalf("block(codex) before drop = false, want true")
+	}
+
+	agg.dropAuth("shared")
+	if _, ok := agg.block([]string{"claude"}, model, now); ok {
+		t.Fatalf("block(claude) after drop = true, want false")
+	}
+	if _, ok := agg.block([]string{"codex"}, model, now); ok {
+		t.Fatalf("block(codex) after drop = true, want false")
+	}
+	agg.mu.Lock()
+	remaining := len(agg.entries)
+	agg.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("entries after dropAuth = %d, want 0 (both providers shed)", remaining)
+	}
+}
+
 func TestModelPoolCooldownsModelIsolation(t *testing.T) {
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	blocked := "claude-opus-4-1"
