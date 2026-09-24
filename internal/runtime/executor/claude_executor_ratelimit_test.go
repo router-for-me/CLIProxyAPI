@@ -1,10 +1,18 @@
 package executor
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 )
 
 // The classifier must surface Anthropic's retry-at hints (unified rate-limit
@@ -69,5 +77,41 @@ func TestClassifyClaudeUpstreamError_RetryAfterOnNon429(t *testing.T) {
 	}
 	if got := status.RetryAfter(); got == nil || *got != 5*time.Second {
 		t.Fatalf("RetryAfter() = %v, want 5s", got)
+	}
+}
+
+// The count-tokens path builds its status errors directly; when the upstream
+// *http.Response is in scope there, the retry-at hint must survive just as it
+// does on the execute and stream paths. Direct call: the CountTokens gate only
+// selects the upstream path for https://api.anthropic.com, which a test
+// transport stubs instead.
+func TestClaudeCountTokensUpstreamErrorCarriesRetryAfterHint(t *testing.T) {
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Retry-After": []string{"12"}, "Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`)),
+			Request:    req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-api03-count-tokens-retry-after"}}
+	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	_, err := NewClaudeExecutor(&config.Config{}).countTokensUpstream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err == nil {
+		t.Fatal("countTokensUpstream() error = nil, want the upstream 429")
+	}
+	if got, want := err.Error(), "rate_limit_error"; !strings.Contains(got, want) {
+		t.Fatalf("error body missing upstream message sentinel %q: %s", want, got)
+	}
+	var status interface{ RetryAfter() *time.Duration }
+	if !errors.As(err, &status) {
+		t.Fatalf("countTokensUpstream() error = %T, want an error with RetryAfter()", err)
+	}
+	if got := status.RetryAfter(); got == nil || *got != 12*time.Second {
+		t.Fatalf("RetryAfter() = %v, want 12s from the upstream header", got)
 	}
 }
