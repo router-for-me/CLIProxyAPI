@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
@@ -271,10 +272,13 @@ func (claudeEntitlementError) IsRequestScoped() bool {
 // next one, which returns the same 429. A single speed:"fast" request would walk
 // the whole Claude pool and cool down every credential, all of which remain
 // perfectly healthy for ordinary traffic. The refusal belongs to the request.
-func classifyClaudeUpstreamError(statusCode int, body []byte) error {
+func classifyClaudeUpstreamError(statusCode int, headers http.Header, body []byte) error {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests && claudeBodyIndicatesFastModeCredits(body) {
 		return claudeEntitlementError{err}
+	}
+	if ra := helps.ParseClaudeRetryAfterHeaders(headers, time.Now()); ra != nil {
+		err.retryAfter = ra
 	}
 	return err
 }
