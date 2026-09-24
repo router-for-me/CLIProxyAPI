@@ -2729,3 +2729,246 @@ func TestCleanJSONSchemaForGeminiJSONSchema_PreservesSchemaValuedAdditionalPrope
 		t.Fatalf("legacy CleanJSONSchemaForGemini should strip additionalProperties schema: %s", legacyCleaned)
 	}
 }
+
+// TestCleanJSONSchema_ArrayItemsRequireArrayType_Issue6011 covers Issue #6011:
+// Gemini rejects tool schemas where a property declares "items" but its type is not "array"
+// (e.g. type is omitted or flattened to a non-array type), returning:
+// "field predicate failed: $type == Type.ARRAY".
+func TestCleanJSONSchema_ArrayItemsRequireArrayType_Issue6011(t *testing.T) {
+	// Case 1: property declares "items" but omits "type": "array" (relying on JSON Schema inference)
+	// Reproduces the error path reported in Issue #6011: properties.revision_reasons.items.properties.evidence_reference
+	inputMissingType := `{
+		"type": "object",
+		"properties": {
+			"revision_reasons": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"evidence_reference": {
+							"description": "references to evidence",
+							"items": {
+								"type": "string"
+							}
+						}
+					}
+				}
+			}
+		}
+	}`
+
+	cleaners := map[string]func(string) string{
+		"gemini":            CleanJSONSchemaForGemini,
+		"geminiJSONSchema":  CleanJSONSchemaForGeminiJSONSchema,
+		"antigravity":       CleanJSONSchemaForAntigravity,
+		"antigravityLegacy": func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name+"_missing_type", func(t *testing.T) {
+			cleaned := clean(inputMissingType)
+			parsed := gjson.Parse(cleaned)
+			target := parsed.Get("properties.revision_reasons.items.properties.evidence_reference")
+			if !target.Exists() {
+				t.Fatalf("evidence_reference property missing in %s: %s", name, cleaned)
+			}
+			if gotType := target.Get("type").String(); gotType != "array" {
+				t.Fatalf("%s: evidence_reference.type = %q, want 'array'; cleaned schema: %s", name, gotType, cleaned)
+			}
+			if gotItemsType := target.Get("items.type").String(); gotItemsType != "string" {
+				t.Fatalf("%s: evidence_reference.items.type = %q, want 'string'; cleaned schema: %s", name, gotItemsType, cleaned)
+			}
+		})
+	}
+
+	// Case 2: property declares union type: ["string", "array"] with items
+	inputUnionType := `{
+		"type": "object",
+		"properties": {
+			"revision_reasons": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"evidence_reference": {
+							"type": ["string", "array"],
+							"items": {
+								"type": "string"
+							}
+						}
+					}
+				}
+			}
+		}
+	}`
+
+	for name, clean := range cleaners {
+		t.Run(name+"_union_type_with_items", func(t *testing.T) {
+			cleaned := clean(inputUnionType)
+			parsed := gjson.Parse(cleaned)
+			target := parsed.Get("properties.revision_reasons.items.properties.evidence_reference")
+			if gotType := target.Get("type").String(); gotType != "array" {
+				t.Fatalf("%s: evidence_reference.type = %q, want 'array' when items is defined; cleaned schema: %s", name, gotType, cleaned)
+			}
+		})
+	}
+
+	// Case 3: property has explicit non-array type (e.g. "string") with extraneous items
+	inputNonArrayWithItems := `{
+		"type": "object",
+		"properties": {
+			"label": {
+				"type": "string",
+				"items": { "type": "string" }
+			},
+			"config": {
+				"type": "object",
+				"properties": { "key": { "type": "string" } },
+				"items": { "type": "string" }
+			}
+		}
+	}`
+
+	for name, clean := range cleaners {
+		t.Run(name+"_non_array_strips_items", func(t *testing.T) {
+			cleaned := clean(inputNonArrayWithItems)
+			parsed := gjson.Parse(cleaned)
+			if parsed.Get("properties.label.items").Exists() {
+				t.Fatalf("%s: properties.label should not retain items on string type: %s", name, cleaned)
+			}
+			if parsed.Get("properties.config.items").Exists() {
+				t.Fatalf("%s: properties.config should not retain items on object type: %s", name, cleaned)
+			}
+			if parsed.Get("properties.label.type").String() != "string" {
+				t.Fatalf("%s: properties.label.type should remain string: %s", name, cleaned)
+			}
+		})
+	}
+
+	// Case 4: property literally named "items" should be preserved and not treated as array items
+	inputPropertyNamedItems := `{
+		"type": "object",
+		"properties": {
+			"items": {
+				"type": "string",
+				"description": "a field named items"
+			}
+		}
+	}`
+
+	for name, clean := range cleaners {
+		t.Run(name+"_property_named_items_preserved", func(t *testing.T) {
+			cleaned := clean(inputPropertyNamedItems)
+			parsed := gjson.Parse(cleaned)
+			itemProp := parsed.Get("properties.items")
+			if !itemProp.Exists() {
+				t.Fatalf("%s: property named 'items' was removed: %s", name, cleaned)
+			}
+			if itemProp.Get("type").String() != "string" {
+				t.Fatalf("%s: property named 'items' type changed: %s", name, cleaned)
+			}
+		})
+	}
+
+	// Case 5: Root array with items missing type
+	inputRootArrayMissingType := `{
+		"items": {
+			"type": "string"
+		}
+	}`
+
+	for name, clean := range cleaners {
+		t.Run(name+"_root_array_missing_type", func(t *testing.T) {
+			cleaned := clean(inputRootArrayMissingType)
+			parsed := gjson.Parse(cleaned)
+			if parsed.Get("type").String() != "array" {
+				t.Fatalf("%s: root schema type should be inferred as 'array': %s", name, cleaned)
+			}
+			if parsed.Get("items.type").String() != "string" {
+				t.Fatalf("%s: root schema items.type should remain 'string': %s", name, cleaned)
+			}
+		})
+	}
+
+	// Case 6: Cleaning is idempotent across all cleaners
+	for name, clean := range cleaners {
+		t.Run(name+"_idempotent", func(t *testing.T) {
+			cleaned1 := clean(inputMissingType)
+			cleaned2 := clean(cleaned1)
+			if cleaned1 != cleaned2 {
+				t.Fatalf("%s: cleaner is not idempotent.\nFirst:\n%s\nSecond:\n%s", name, cleaned1, cleaned2)
+			}
+		})
+	}
+
+	// Case 7: Response schema regression check
+	t.Run("antigravity_response_schema", func(t *testing.T) {
+		// Response schema declaring items without type infers array type
+		respInput := `{"type":"object","properties":{"names":{"items":{"type":"string"}}}}`
+		cleaned := CleanJSONSchemaForAntigravityResponse(respInput)
+		parsed := gjson.Parse(cleaned)
+		if parsed.Get("properties.names.type").String() != "array" {
+			t.Fatalf("response schema should infer type 'array' when items is defined: %s", cleaned)
+		}
+		// Response array missing items still remains untouched
+		respNoItems := `{"type":"object","properties":{"values":{"type":"array"}}}`
+		cleanedNoItems := CleanJSONSchemaForAntigravityResponse(respNoItems)
+		parsedNoItems := gjson.Parse(cleanedNoItems)
+		if parsedNoItems.Get("properties.values.items").Exists() {
+			t.Fatalf("response array missing items should not gain placeholder items: %s", cleanedNoItems)
+		}
+	})
+}
+
+func TestSanitizeArrayItems_PreservesItemsForUppercaseArrayType(t *testing.T) {
+	input := `{
+		"type": "OBJECT",
+		"properties": {
+			"summary": {"type": "STRING"},
+			"brands": {
+				"type": "ARRAY",
+				"items": {"type": "STRING"}
+			},
+			"catalog": {
+				"type": "OBJECT",
+				"properties": {
+					"items": {
+						"type": "ARRAY",
+						"items": {
+							"type": "OBJECT",
+							"properties": {"id": {"type": "STRING"}}
+						}
+					}
+				}
+			}
+		}
+	}`
+
+	cleaners := map[string]func(string) string{
+		"AntigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		"Antigravity":         CleanJSONSchemaForAntigravity,
+		"Gemini":              CleanJSONSchemaForGemini,
+		"AntigravityTool":     func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			parsed := gjson.Parse(got)
+
+			brandsItems := parsed.Get("properties.brands.items")
+			if !brandsItems.Exists() {
+				t.Fatalf("[%s] properties.brands.items was stripped from uppercase ARRAY: %s", name, got)
+			}
+			typeStr := parsed.Get("properties.brands.type").String()
+			if !strings.EqualFold(typeStr, "array") {
+				t.Fatalf("[%s] properties.brands.type corrupted: %s", name, got)
+			}
+
+			nestedItems := parsed.Get("properties.catalog.properties.items.items")
+			if !nestedItems.Exists() {
+				t.Fatalf("[%s] properties.catalog.properties.items.items was stripped: %s", name, got)
+			}
+		})
+	}
+}

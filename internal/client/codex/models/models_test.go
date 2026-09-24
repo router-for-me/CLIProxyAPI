@@ -1,7 +1,9 @@
 package models
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -907,18 +909,12 @@ func TestCodexClientModelsResponse_UnrelatedProviderCannotWidenSearchTool(t *tes
 	if got, _ := entry["prefer_websockets"].(bool); got {
 		t.Errorf("prefer_websockets = %v, want false for non-Codex provider", got)
 	}
-	if _, exists := entry["apply_patch_tool_type"]; exists {
-		t.Errorf("apply_patch_tool_type should be deleted for non-Codex provider, got %#v", entry["apply_patch_tool_type"])
-	}
+	assertCodexNullableFieldCleared(t, entry, "apply_patch_tool_type")
 	if tiers, okTiers := entry["service_tiers"].([]any); !okTiers || len(tiers) != 0 {
 		t.Errorf("service_tiers = %#v, want empty array for non-Codex provider", entry["service_tiers"])
 	}
-	if _, exists := entry["upgrade"]; exists {
-		t.Errorf("upgrade should be deleted for non-Codex provider")
-	}
-	if _, exists := entry["availability_nux"]; exists {
-		t.Errorf("availability_nux should be deleted for non-Codex provider")
-	}
+	assertCodexNullableFieldCleared(t, entry, "upgrade")
+	assertCodexNullableFieldCleared(t, entry, "availability_nux")
 	// Reasoning levels must NOT be widened beyond provider's registered capabilities
 	levels, okLevels := entry["supported_reasoning_levels"].([]any)
 	if !okLevels || len(levels) != 3 {
@@ -1007,18 +1003,12 @@ func TestCodexClientModelsResponse_MixedProvidersRestrictProtocolCapabilities(t 
 			if got, _ := entry["prefer_websockets"].(bool); got {
 				t.Errorf("prefer_websockets = %v, want false for mixed provider", got)
 			}
-			if _, exists := entry["apply_patch_tool_type"]; exists {
-				t.Errorf("apply_patch_tool_type should be deleted for mixed provider")
-			}
+			assertCodexNullableFieldCleared(t, entry, "apply_patch_tool_type")
 			if tiers, okTiers := entry["service_tiers"].([]any); !okTiers || len(tiers) != 0 {
 				t.Errorf("service_tiers = %#v, want empty array for mixed provider", entry["service_tiers"])
 			}
-			if _, exists := entry["upgrade"]; exists {
-				t.Errorf("upgrade should be deleted for mixed provider")
-			}
-			if _, exists := entry["availability_nux"]; exists {
-				t.Errorf("availability_nux should be deleted for mixed provider")
-			}
+			assertCodexNullableFieldCleared(t, entry, "upgrade")
+			assertCodexNullableFieldCleared(t, entry, "availability_nux")
 			// Reasoning levels must NOT be widened to ultra/max/xhigh regardless of registration order
 			levels, okLevels := entry["supported_reasoning_levels"].([]any)
 			if !okLevels || len(levels) != 3 {
@@ -1565,5 +1555,90 @@ func TestCodexClientModelsResponse_DevinDisplayName(t *testing.T) {
 		if got != tc.wantDisplayName {
 			t.Errorf("model %q display_name = %q, want %q", tc.slug, got, tc.wantDisplayName)
 		}
+	}
+}
+
+func TestMarshalCompactJSONIsSingleLine(t *testing.T) {
+	body, errMarshal := MarshalCompact(map[string]any{
+		"models": []any{
+			map[string]any{"slug": "demo", "description": "line1\nline2 <tag>"},
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("MarshalCompact: %v", errMarshal)
+	}
+	if bytes.Contains(body, []byte("\n")) {
+		t.Fatalf("expected one JSON line, got %s", body)
+	}
+	if !bytes.Contains(body, []byte("<tag>")) {
+		t.Fatalf("expected unescaped tag, got %s", body)
+	}
+	if !bytes.Contains(body, []byte(`line1\nline2`)) {
+		t.Fatalf("expected escaped newline inside the string, got %s", body)
+	}
+}
+
+func TestCodexClientModelsResponse_NonTemplateCatalogStaysWithinOneMiB(t *testing.T) {
+	ids := []string{
+		"gpt-6-astra",
+		"gpt-6-sol",
+		"gpt-6-luna",
+		"gpt-reserve",
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
+		"gpt-5.6-luna",
+		"gpt-5.5",
+		"codex-auto-review",
+	}
+	for index := 0; index < 120; index++ {
+		ids = append(ids, fmt.Sprintf("custom-model-%d", index))
+	}
+	available := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		available = append(available, map[string]any{"id": id})
+	}
+
+	resp := BuildResponseForClient(available, nil, false, "")
+	body, errMarshal := MarshalCompact(resp)
+	if errMarshal != nil {
+		t.Fatalf("marshal catalog: %v", errMarshal)
+	}
+	if bytes.Contains(body, []byte("\n")) {
+		t.Fatal("expected Codex client catalog JSON to be a single line")
+	}
+	if len(body) >= 1<<20 {
+		t.Fatalf("catalog size = %d bytes, want < 1MiB", len(body))
+	}
+
+	entries, _ := resp["models"].([]map[string]any)
+	var templateModel, customModel map[string]any
+	for _, entry := range entries {
+		switch stringModelValue(entry, "slug") {
+		case "gpt-5.5":
+			templateModel = entry
+		case "custom-model-0":
+			customModel = entry
+		}
+	}
+	if templateModel == nil || customModel == nil {
+		t.Fatal("expected both template and custom models")
+	}
+	if len(stringModelValue(templateModel, "base_instructions")) < 1000 {
+		t.Fatal("expected official template models to keep their full instructions")
+	}
+	if stringModelValue(customModel, "base_instructions") != codexClientFallbackInstructions {
+		t.Fatalf("custom base_instructions = %q", stringModelValue(customModel, "base_instructions"))
+	}
+}
+
+func assertCodexNullableFieldCleared(t *testing.T, entry map[string]any, key string) {
+	t.Helper()
+	value, exists := entry[key]
+	if !exists {
+		t.Errorf("%s must be present and null so Codex can decode the catalog", key)
+		return
+	}
+	if value != nil {
+		t.Errorf("%s = %#v, want null", key, value)
 	}
 }

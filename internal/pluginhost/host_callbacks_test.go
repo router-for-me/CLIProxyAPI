@@ -202,6 +202,631 @@ func TestHostHTTPDoStreamCallbackReturnsBeforeUpstreamCompletes(t *testing.T) {
 	}
 }
 
+func TestHostHTTPStreamReadIsPluginScoped(t *testing.T) {
+	host := New()
+	chunks := make(chan pluginapi.HTTPStreamChunk, 1)
+	chunks <- pluginapi.HTTPStreamChunk{Payload: []byte("plugin-a data")}
+	streamID := host.httpStreams.open("plugin-a", nil, chunks, nil, nil)
+	request, errMarshal := json.Marshal(rpcHostHTTPStreamReadRequest{StreamID: streamID})
+	if errMarshal != nil {
+		t.Fatalf("marshal stream read request: %v", errMarshal)
+	}
+
+	pluginBContext := withHostCallbackPluginID(context.Background(), "plugin-b")
+	if _, errRead := host.callFromPlugin(pluginBContext, pluginabi.MethodHostHTTPStreamRead, request); errRead == nil {
+		t.Fatal("plugin-b read plugin-a's HTTP stream")
+	}
+
+	pluginAContext := withHostCallbackPluginID(context.Background(), "plugin-a")
+	rawResponse, errRead := host.callFromPlugin(pluginAContext, pluginabi.MethodHostHTTPStreamRead, request)
+	if errRead != nil {
+		t.Fatalf("plugin-a stream read error = %v", errRead)
+	}
+	response, errDecode := decodeRPCEnvelope[rpcHostHTTPStreamReadResponse](rawResponse)
+	if errDecode != nil {
+		t.Fatalf("decode stream read response: %v", errDecode)
+	}
+	if string(response.Payload) != "plugin-a data" {
+		t.Fatalf("plugin-a stream payload = %q, want plugin-a data", response.Payload)
+	}
+}
+
+func TestHostHTTPStreamsAreCallbackInstanceScoped(t *testing.T) {
+	host := New()
+	owner := &hostCallbackInstance{}
+	otherOwner := &hostCallbackInstance{}
+	chunks := make(chan pluginapi.HTTPStreamChunk, 1)
+	chunks <- pluginapi.HTTPStreamChunk{Payload: []byte("owner data")}
+	streamID := host.httpStreams.open("plugin", owner, chunks, nil, nil)
+	readRequest, errMarshal := json.Marshal(rpcHostHTTPStreamReadRequest{StreamID: streamID})
+	if errMarshal != nil {
+		t.Fatalf("marshal stream read request: %v", errMarshal)
+	}
+	otherContext := withHostCallbackIdentity(context.Background(), "plugin", otherOwner)
+	if _, errRead := host.callFromPlugin(otherContext, pluginabi.MethodHostHTTPStreamRead, readRequest); errRead == nil {
+		t.Fatal("new callback instance read an old instance's HTTP stream")
+	}
+	closeRequest, errMarshal := json.Marshal(rpcHostHTTPStreamCloseRequest{StreamID: streamID})
+	if errMarshal != nil {
+		t.Fatalf("marshal stream close request: %v", errMarshal)
+	}
+	if _, errClose := host.callFromPlugin(otherContext, pluginabi.MethodHostHTTPStreamClose, closeRequest); errClose != nil {
+		t.Fatalf("foreign instance close callback error = %v", errClose)
+	}
+
+	ownerContext := withHostCallbackIdentity(context.Background(), "plugin", owner)
+	rawResponse, errRead := host.callFromPlugin(ownerContext, pluginabi.MethodHostHTTPStreamRead, readRequest)
+	if errRead != nil {
+		t.Fatalf("owner stream read error = %v", errRead)
+	}
+	response, errDecode := decodeRPCEnvelope[rpcHostHTTPStreamReadResponse](rawResponse)
+	if errDecode != nil {
+		t.Fatalf("decode stream read response: %v", errDecode)
+	}
+	if string(response.Payload) != "owner data" {
+		t.Fatalf("owner stream payload = %q, want owner data", response.Payload)
+	}
+	host.httpStreams.close("plugin", owner, streamID)
+}
+
+func TestHostHTTPStreamCloseIsPluginScoped(t *testing.T) {
+	host := New()
+	chunks := make(chan pluginapi.HTTPStreamChunk, 1)
+	chunks <- pluginapi.HTTPStreamChunk{Payload: []byte("plugin-a data")}
+	streamID := host.httpStreams.open("plugin-a", nil, chunks, nil, nil)
+	request, errMarshal := json.Marshal(rpcHostHTTPStreamCloseRequest{StreamID: streamID})
+	if errMarshal != nil {
+		t.Fatalf("marshal stream close request: %v", errMarshal)
+	}
+
+	pluginBContext := withHostCallbackPluginID(context.Background(), "plugin-b")
+	if _, errClose := host.callFromPlugin(pluginBContext, pluginabi.MethodHostHTTPStreamClose, request); errClose != nil {
+		t.Fatalf("plugin-b stream close callback error = %v", errClose)
+	}
+
+	pluginAContext := withHostCallbackPluginID(context.Background(), "plugin-a")
+	readRequest, errMarshal := json.Marshal(rpcHostHTTPStreamReadRequest{StreamID: streamID})
+	if errMarshal != nil {
+		t.Fatalf("marshal stream read request: %v", errMarshal)
+	}
+	rawResponse, errRead := host.callFromPlugin(pluginAContext, pluginabi.MethodHostHTTPStreamRead, readRequest)
+	if errRead != nil {
+		t.Fatalf("plugin-a stream read after foreign close error = %v", errRead)
+	}
+	response, errDecode := decodeRPCEnvelope[rpcHostHTTPStreamReadResponse](rawResponse)
+	if errDecode != nil {
+		t.Fatalf("decode stream read response: %v", errDecode)
+	}
+	if string(response.Payload) != "plugin-a data" {
+		t.Fatalf("plugin-a stream payload = %q, want plugin-a data", response.Payload)
+	}
+	host.httpStreams.close("plugin-a", nil, streamID)
+}
+
+func openHostHTTPOperation(t *testing.T, host *Host, ctx context.Context, callbackID string) string {
+	t.Helper()
+	rawRequest, errMarshal := json.Marshal(map[string]string{"host_callback_id": callbackID})
+	if errMarshal != nil {
+		t.Fatalf("marshal operation open request: %v", errMarshal)
+	}
+	rawResponse, errOpen := host.callFromPlugin(ctx, pluginabi.MethodHostHTTPOperationOpen, rawRequest)
+	if errOpen != nil {
+		t.Fatalf("host.http.operation_open error = %v", errOpen)
+	}
+	opened, errDecode := decodeRPCEnvelope[rpcHostHTTPOperationOpenResponse](rawResponse)
+	if errDecode != nil {
+		t.Fatalf("decode operation open response: %v", errDecode)
+	}
+	if opened.OperationID == "" {
+		t.Fatal("operation_id is empty")
+	}
+	return opened.OperationID
+}
+
+func TestHostHTTPCallbacksCanBeCanceledBeforeResponse(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		method string
+	}{
+		{name: "do", method: pluginabi.MethodHostHTTPDo},
+		{name: "do_stream", method: pluginabi.MethodHostHTTPDoStream},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			requestStarted := make(chan struct{})
+			requestCanceled := make(chan struct{})
+			release := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				close(requestStarted)
+				select {
+				case <-r.Context().Done():
+					close(requestCanceled)
+				case <-release:
+				}
+				_, _ = w.Write([]byte("response"))
+			}))
+			defer server.Close()
+
+			host := New()
+			operationID := openHostHTTPOperation(t, host, context.Background(), "")
+			rawRequest, errMarshal := json.Marshal(map[string]any{
+				"operation_id": operationID,
+				"request": map[string]any{
+					"method": http.MethodGet,
+					"url":    server.URL,
+				},
+			})
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+			type callResult struct {
+				raw []byte
+				err error
+			}
+			done := make(chan callResult, 1)
+			var result callResult
+			var resultReceived bool
+			defer func() {
+				close(release)
+				if !resultReceived {
+					select {
+					case result = <-done:
+						resultReceived = true
+					case <-time.After(2 * time.Second):
+					}
+				}
+				if resultReceived && result.err == nil {
+					streamResp, errDecode := decodeRPCEnvelope[rpcHostHTTPStreamResponse](result.raw)
+					if errDecode == nil && streamResp.StreamID != "" {
+						host.httpStreams.close("", nil, streamResp.StreamID)
+					}
+				}
+			}()
+
+			go func() {
+				rawResp, errCall := host.callFromPlugin(context.Background(), testCase.method, rawRequest)
+				done <- callResult{raw: rawResp, err: errCall}
+			}()
+			select {
+			case <-requestStarted:
+			case <-time.After(2 * time.Second):
+				t.Fatal("upstream request did not start")
+			}
+
+			rawCancel, errMarshalCancel := json.Marshal(map[string]string{"operation_id": operationID})
+			if errMarshalCancel != nil {
+				t.Fatalf("marshal cancel request: %v", errMarshalCancel)
+			}
+			if _, errCancel := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPCancel, rawCancel); errCancel != nil {
+				t.Fatalf("host.http.cancel error = %v", errCancel)
+			}
+			select {
+			case <-requestCanceled:
+			case <-time.After(2 * time.Second):
+				t.Fatal("upstream request context was not canceled")
+			}
+			select {
+			case result = <-done:
+				resultReceived = true
+			case <-time.After(2 * time.Second):
+				t.Fatal("HTTP callback did not return after cancellation")
+			}
+			if !errors.Is(result.err, context.Canceled) {
+				t.Fatalf("HTTP callback error = %v, want context.Canceled", result.err)
+			}
+		})
+	}
+}
+
+func TestHostHTTPDoWithoutOperationIDIsCanceledWithPluginInstance(t *testing.T) {
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		select {
+		case <-r.Context().Done():
+			close(requestCanceled)
+		case <-release:
+		}
+		_, _ = w.Write([]byte("response"))
+	}))
+	defer server.Close()
+	defer close(release)
+
+	host := New()
+	instance := &hostCallbackInstance{}
+	callerContext := withHostCallbackIdentity(context.Background(), "plugin", instance)
+	rawRequest, errMarshal := json.Marshal(map[string]string{
+		"method": http.MethodGet,
+		"url":    server.URL,
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, errCall := host.callFromPlugin(callerContext, pluginabi.MethodHostHTTPDo, rawRequest)
+		done <- errCall
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream request did not start")
+	}
+
+	host.closeHostHTTPCallbackInstance("plugin", instance)
+	select {
+	case <-requestCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("plugin instance shutdown did not cancel the upstream request")
+	}
+	select {
+	case errCall := <-done:
+		if !errors.Is(errCall, context.Canceled) {
+			t.Fatalf("host.http.do error = %v, want context.Canceled", errCall)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("host.http.do did not return after plugin shutdown")
+	}
+}
+
+func TestHostHTTPDoCanBeCanceledWhileReadingBody(t *testing.T) {
+	headersSent := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(headersSent)
+		select {
+		case <-r.Context().Done():
+			close(requestCanceled)
+		case <-release:
+		}
+		_, _ = w.Write([]byte("last"))
+	}))
+	defer server.Close()
+	defer close(release)
+
+	host := New()
+	operationID := openHostHTTPOperation(t, host, context.Background(), "")
+	rawRequest, errMarshal := json.Marshal(map[string]any{
+		"operation_id": operationID,
+		"request": map[string]any{
+			"method": http.MethodGet,
+			"url":    server.URL,
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	type callResult struct {
+		err error
+	}
+	done := make(chan callResult, 1)
+	go func() {
+		_, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDo, rawRequest)
+		done <- callResult{err: errCall}
+	}()
+	select {
+	case <-headersSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream response headers were not sent")
+	}
+
+	rawCancel, errMarshalCancel := json.Marshal(map[string]string{"operation_id": operationID})
+	if errMarshalCancel != nil {
+		t.Fatalf("marshal cancel request: %v", errMarshalCancel)
+	}
+	if _, errCancel := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPCancel, rawCancel); errCancel != nil {
+		t.Fatalf("host.http.cancel error = %v", errCancel)
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream request context was not canceled while reading the body")
+	}
+	select {
+	case result := <-done:
+		if !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("host.http.do error = %v, want context.Canceled", result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("host.http.do did not return after body-read cancellation")
+	}
+}
+
+func TestHostHTTPCancelBeforeDoPreventsRequest(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestStarted <- struct{}{}
+		_, _ = w.Write([]byte("unexpected response"))
+	}))
+	defer server.Close()
+
+	host := New()
+	operationID := openHostHTTPOperation(t, host, context.Background(), "")
+	rawCancel, errMarshal := json.Marshal(map[string]string{"operation_id": operationID})
+	if errMarshal != nil {
+		t.Fatalf("marshal cancel request: %v", errMarshal)
+	}
+	if _, errCancel := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPCancel, rawCancel); errCancel != nil {
+		t.Fatalf("host.http.cancel error = %v", errCancel)
+	}
+
+	rawRequest, errMarshalRequest := json.Marshal(map[string]any{
+		"operation_id": operationID,
+		"request": map[string]any{
+			"method": http.MethodGet,
+			"url":    server.URL,
+		},
+	})
+	if errMarshalRequest != nil {
+		t.Fatalf("marshal request: %v", errMarshalRequest)
+	}
+	if _, errDo := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDo, rawRequest); errDo == nil {
+		t.Fatal("host.http.do succeeded after its operation was canceled")
+	}
+	select {
+	case <-requestStarted:
+		t.Fatal("upstream request started after operation cancellation")
+	default:
+	}
+}
+
+func TestHostHTTPStreamOperationCanBeCanceledAfterHeaders(t *testing.T) {
+	headersSent := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(headersSent)
+		select {
+		case <-r.Context().Done():
+			close(requestCanceled)
+		case <-release:
+		}
+		_, _ = w.Write([]byte("last"))
+	}))
+	defer server.Close()
+
+	host := New()
+	var streamID string
+	defer func() {
+		close(release)
+		if streamID != "" {
+			host.httpStreams.close("", nil, streamID)
+		}
+	}()
+	operationID := openHostHTTPOperation(t, host, context.Background(), "")
+	rawRequest, errMarshal := json.Marshal(map[string]any{
+		"operation_id": operationID,
+		"request": map[string]any{
+			"method": http.MethodGet,
+			"url":    server.URL,
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResponse, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPDoStream, rawRequest)
+	if errCall != nil {
+		t.Fatalf("host.http.do_stream error = %v", errCall)
+	}
+	streamResp, errDecode := decodeRPCEnvelope[rpcHostHTTPStreamResponse](rawResponse)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	streamID = streamResp.StreamID
+	if streamID == "" {
+		t.Fatal("stream_id is empty")
+	}
+	select {
+	case <-headersSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream response headers were not sent")
+	}
+	rawCancel, errMarshalCancel := json.Marshal(map[string]string{"operation_id": operationID})
+	if errMarshalCancel != nil {
+		t.Fatalf("marshal cancel request: %v", errMarshalCancel)
+	}
+	if _, errCancel := host.callFromPlugin(context.Background(), pluginabi.MethodHostHTTPCancel, rawCancel); errCancel != nil {
+		t.Fatalf("host.http.cancel error = %v", errCancel)
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream stream context was not canceled")
+	}
+	host.httpStreams.mu.Lock()
+	_, streamOpen := host.httpStreams.streams[hostHTTPStreamKey{streamID: streamID}]
+	host.httpStreams.mu.Unlock()
+	if streamOpen {
+		t.Fatal("canceled HTTP stream remains registered")
+	}
+}
+
+func TestHostHTTPDoRejectsInvalidOrForeignCallbackContext(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		callerID    string
+		closeBefore bool
+	}{
+		{name: "closed callback ID", callerID: "plugin-a", closeBefore: true},
+		{name: "foreign callback ID", callerID: "plugin-b"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			requestStarted := make(chan struct{}, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestStarted <- struct{}{}
+				_, _ = w.Write([]byte("unexpected response"))
+			}))
+			defer server.Close()
+
+			host := New()
+			callbackID, closeCallback := host.openCallbackContextForPlugin(context.Background(), "plugin-a")
+			defer closeCallback()
+			if testCase.closeBefore {
+				closeCallback()
+			}
+			callerContext := withHostCallbackPluginID(context.Background(), testCase.callerID)
+			rawRequest, errMarshal := json.Marshal(map[string]string{
+				"host_callback_id": callbackID,
+				"method":           http.MethodGet,
+				"url":              server.URL,
+			})
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+			if _, errDo := host.callFromPlugin(callerContext, pluginabi.MethodHostHTTPDo, rawRequest); errDo == nil {
+				t.Fatal("host.http.do accepted an invalid or foreign callback ID")
+			}
+			select {
+			case <-requestStarted:
+				t.Fatal("upstream request started with an invalid or foreign callback ID")
+			default:
+			}
+		})
+	}
+}
+
+func TestHostHTTPOperationRejectsForeignCallbackContext(t *testing.T) {
+	host := New()
+	callbackID, closeCallback := host.openCallbackContextForPlugin(context.Background(), "plugin-a")
+	defer closeCallback()
+	callerContextB := withHostCallbackPluginID(context.Background(), "plugin-b")
+	rawRequest, errMarshal := json.Marshal(map[string]string{"host_callback_id": callbackID})
+	if errMarshal != nil {
+		t.Fatalf("marshal operation open request: %v", errMarshal)
+	}
+	if _, errOpen := host.callFromPlugin(callerContextB, pluginabi.MethodHostHTTPOperationOpen, rawRequest); errOpen == nil {
+		t.Fatal("plugin-b opened an HTTP operation in plugin-a's callback context")
+	}
+}
+
+func TestHostHTTPOperationRejectsClosedCallbackContext(t *testing.T) {
+	host := New()
+	callbackID, closeCallback := host.openCallbackContextForPlugin(context.Background(), "plugin-a")
+	closeCallback()
+	callerContext := withHostCallbackPluginID(context.Background(), "plugin-a")
+	rawRequest, errMarshal := json.Marshal(map[string]string{"host_callback_id": callbackID})
+	if errMarshal != nil {
+		t.Fatalf("marshal operation open request: %v", errMarshal)
+	}
+	if _, errOpen := host.callFromPlugin(callerContext, pluginabi.MethodHostHTTPOperationOpen, rawRequest); errOpen == nil {
+		t.Fatal("opened an HTTP operation with a closed callback context")
+	}
+}
+
+func TestHostHTTPOperationRejectsUnboundCallbackContext(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestStarted <- struct{}{}
+		_, _ = w.Write([]byte("unexpected response"))
+	}))
+	defer server.Close()
+
+	host := New()
+	callerContext := withHostCallbackPluginID(context.Background(), "plugin")
+	operationID := openHostHTTPOperation(t, host, callerContext, "")
+	callbackID, closeCallback := host.openCallbackContextForPlugin(context.Background(), "plugin")
+	defer closeCallback()
+	rawRequest, errMarshal := json.Marshal(map[string]any{
+		"host_callback_id": callbackID,
+		"operation_id":     operationID,
+		"request": map[string]any{
+			"method": http.MethodGet,
+			"url":    server.URL,
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	if _, errDo := host.callFromPlugin(callerContext, pluginabi.MethodHostHTTPDo, rawRequest); errDo == nil {
+		t.Fatal("host.http.do accepted a callback context not bound at operation open")
+	}
+	select {
+	case <-requestStarted:
+		t.Fatal("upstream request started with an unbound callback context")
+	default:
+	}
+}
+
+func TestHostHTTPOperationRequiresMatchingCallbackID(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestStarted <- struct{}{}
+		_, _ = w.Write([]byte("response"))
+	}))
+	defer server.Close()
+
+	host := New()
+	callerContext := withHostCallbackPluginID(context.Background(), "plugin")
+	callbackID, closeCallback := host.openCallbackContextForPlugin(context.Background(), "plugin")
+	defer closeCallback()
+	otherCallbackID, closeOtherCallback := host.openCallbackContextForPlugin(context.Background(), "plugin")
+	defer closeOtherCallback()
+	operationID := openHostHTTPOperation(t, host, callerContext, callbackID)
+
+	for _, mismatchedCallbackID := range []string{"", otherCallbackID} {
+		rawRequest, errMarshal := json.Marshal(map[string]any{
+			"host_callback_id": mismatchedCallbackID,
+			"operation_id":     operationID,
+			"method":           http.MethodGet,
+			"url":              server.URL,
+		})
+		if errMarshal != nil {
+			t.Fatalf("marshal mismatched request: %v", errMarshal)
+		}
+		if _, errDo := host.callFromPlugin(callerContext, pluginabi.MethodHostHTTPDo, rawRequest); errDo == nil {
+			t.Fatalf("host.http.do accepted mismatched callback ID %q", mismatchedCallbackID)
+		}
+		select {
+		case <-requestStarted:
+			t.Fatalf("upstream request started with mismatched callback ID %q", mismatchedCallbackID)
+		default:
+		}
+	}
+
+	rawRequest, errMarshal := json.Marshal(map[string]any{
+		"host_callback_id": callbackID,
+		"operation_id":     operationID,
+		"method":           http.MethodGet,
+		"url":              server.URL,
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal matching request: %v", errMarshal)
+	}
+	if _, errDo := host.callFromPlugin(callerContext, pluginabi.MethodHostHTTPDo, rawRequest); errDo != nil {
+		t.Fatalf("host.http.do with matching callback ID error = %v", errDo)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("upstream request did not start with matching callback ID")
+	}
+}
+
+func TestHostHTTPOperationClosesWithCallbackScope(t *testing.T) {
+	host := New()
+	callbackID, closeCallback := host.openCallbackContextForPlugin(context.Background(), "plugin-a")
+	callerContext := withHostCallbackPluginID(context.Background(), "plugin-a")
+	operationID := openHostHTTPOperation(t, host, callerContext, callbackID)
+	closeCallback()
+
+	host.httpOperations.mu.Lock()
+	_, operationOpen := host.httpOperations.operations[hostHTTPOperationKey{pluginID: "plugin-a", operationID: operationID}]
+	host.httpOperations.mu.Unlock()
+	if operationOpen {
+		t.Fatal("HTTP operation remained open after its callback scope closed")
+	}
+}
+
 func TestHostStreamCallbacksEmitAndClose(t *testing.T) {
 	host := New()
 	streamID, chunks, cleanup := host.streams.open(context.Background())
@@ -232,6 +857,90 @@ func TestHostStreamCallbacksEmitAndClose(t *testing.T) {
 	}
 	if _, ok = <-chunks; ok {
 		t.Fatalf("stream remains open after close")
+	}
+}
+
+func TestHostModelExecuteRejectsInvalidProxyURL(t *testing.T) {
+	host := New()
+	called := false
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			called = true
+			return handlers.ModelExecutionResponse{StatusCode: http.StatusOK}, nil
+		},
+		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			called = true
+			chunks := make(chan handlers.ModelExecutionChunk)
+			close(chunks)
+			return handlers.ModelExecutionStream{StatusCode: http.StatusOK, Chunks: chunks}, nil
+		},
+	})
+	for _, proxyURL := range []string{"direct", "socks4://127.0.0.1:1080", "http://", "http://:8080", "http://proxy.example:99999", "not a url"} {
+		for _, method := range []string{pluginabi.MethodHostModelExecute, pluginabi.MethodHostModelExecuteStream} {
+			stream := method == pluginabi.MethodHostModelExecuteStream
+			rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+				HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+					EntryProtocol: "openai",
+					ExitProtocol:  "openai",
+					Model:         "model-1",
+					Stream:        stream,
+					ProxyURL:      proxyURL,
+					Body:          []byte(`{"request":true}`),
+				},
+			})
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+			_, errCall := host.callFromPlugin(context.Background(), method, rawReq)
+			if errCall == nil {
+				t.Fatalf("%s proxy %q error = nil, want HTTP 400", method, proxyURL)
+			}
+			if clienterror.HTTPStatusFromError(errCall) != http.StatusBadRequest {
+				t.Fatalf("%s proxy %q status = %d, want 400: %v", method, proxyURL, clienterror.HTTPStatusFromError(errCall), errCall)
+			}
+		}
+	}
+	if called {
+		t.Fatal("model executor ran for an invalid proxy_url")
+	}
+}
+
+func TestHostModelExecuteForwardsProxyURL(t *testing.T) {
+	host := New()
+	var got handlers.ModelExecutionRequest
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			got = req
+			return handlers.ModelExecutionResponse{StatusCode: http.StatusOK, Body: []byte(`{"ok":true}`)}, nil
+		},
+		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			got = req
+			chunks := make(chan handlers.ModelExecutionChunk)
+			close(chunks)
+			return handlers.ModelExecutionStream{StatusCode: http.StatusOK, Chunks: chunks}, nil
+		},
+	})
+	for _, method := range []string{pluginabi.MethodHostModelExecute, pluginabi.MethodHostModelExecuteStream} {
+		stream := method == pluginabi.MethodHostModelExecuteStream
+		rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+				EntryProtocol: "openai",
+				ExitProtocol:  "openai",
+				Model:         "model-1",
+				Stream:        stream,
+				ProxyURL:      "socks5h://user:pass@127.0.0.1:1080",
+				Body:          []byte(`{"request":true}`),
+			},
+		})
+		if errMarshal != nil {
+			t.Fatalf("marshal request: %v", errMarshal)
+		}
+		if _, errCall := host.callFromPlugin(context.Background(), method, rawReq); errCall != nil {
+			t.Fatalf("%s error = %v", method, errCall)
+		}
+		if got.ProxyURL != "socks5h://user:pass@127.0.0.1:1080" {
+			t.Fatalf("%s proxy_url = %q", method, got.ProxyURL)
+		}
 	}
 }
 

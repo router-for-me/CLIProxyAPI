@@ -287,7 +287,10 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				} else {
 					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 				}
-				msg = common.AttachMessageCacheControl(msg, targetMsg)
+				// Anthropic rejects cache_control inside tool_result.content, so
+				// part-level or message-level cache_control is hoisted onto the
+				// tool_result block itself.
+				msg = common.AttachToolMessageCacheControl(msg, targetMsg)
 				messageAccumulator.Append(msg)
 			}
 			return true
@@ -452,16 +455,15 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	return out
 }
 
-func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
-	var claudePart []byte
+func convertOpenAIContentPartToClaudePartRaw(part gjson.Result) []byte {
 	switch part.Get("type").String() {
 	case "text":
 		textPart := []byte(`{"type":"text","text":""}`)
 		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-		claudePart = textPart
+		return textPart
 
 	case "image_url":
-		claudePart = []byte(convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String()))
+		return []byte(convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String()))
 
 	case "file":
 		fileData := part.Get("file.file_data").String()
@@ -474,11 +476,15 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 				docPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
 				docPart, _ = sjson.SetBytes(docPart, "source.media_type", mediaType)
 				docPart, _ = sjson.SetBytes(docPart, "source.data", data)
-				claudePart = docPart
+				return docPart
 			}
 		}
 	}
+	return nil
+}
 
+func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
+	claudePart := convertOpenAIContentPartToClaudePartRaw(part)
 	if len(claudePart) == 0 {
 		return ""
 	}
@@ -532,9 +538,8 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 				return true
 			}
 
-			claudePart := convertOpenAIContentPartToClaudePart(part)
-			if claudePart != "" {
-				claudeParts = append(claudeParts, []byte(claudePart))
+			if claudePart := convertOpenAIContentPartToClaudePartRaw(part); len(claudePart) > 0 {
+				claudeParts = append(claudeParts, claudePart)
 			}
 			return true
 		})
@@ -547,9 +552,8 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 	}
 
 	if content.IsObject() {
-		claudePart := convertOpenAIContentPartToClaudePart(content)
-		if claudePart != "" {
-			return string(common.JoinRawArray([][]byte{[]byte(claudePart)})), true
+		if claudePart := convertOpenAIContentPartToClaudePartRaw(content); len(claudePart) > 0 {
+			return string(common.JoinRawArray([][]byte{claudePart})), true
 		}
 		return content.Raw, false
 	}

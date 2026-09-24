@@ -3372,3 +3372,155 @@ func TestConvertOpenAIResponsesRequestToGemini_InvalidDataURLsRejected(t *testin
 		})
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_FunctionResponseJSONRef(t *testing.T) {
+	t.Run("nested $ref object output is serialized as string result", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gemini-3.8-flash",
+			"input": [
+				{
+					"type": "function_call",
+					"call_id": "call_1",
+					"name": "get_openapi_operation",
+					"arguments": "{}"
+				},
+				{
+					"type": "function_call_output",
+					"call_id": "call_1",
+					"output": {
+						"responses": {
+							"400": {
+								"content": {
+									"application/json": {
+										"schema": {
+											"$ref": "#/components/schemas/ErrorModel"
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			]
+		}`
+		output := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
+		result := gjson.GetBytes(output, "contents.1.parts.0.functionResponse.response.result")
+		if result.Type != gjson.String {
+			t.Fatalf("expected functionResponse.response.result to be string, got type %s (raw: %s)", result.Type, result.Raw)
+		}
+		if !strings.Contains(result.String(), "#/components/schemas/ErrorModel") {
+			t.Fatalf("expected string result to contain ref target, got %q", result.String())
+		}
+	})
+
+	t.Run("array with nested $ref object is serialized as string result", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gemini-3.8-flash",
+			"input": [
+				{
+					"type": "function_call",
+					"call_id": "call_1",
+					"name": "get_openapi_schemas",
+					"arguments": "{}"
+				},
+				{
+					"type": "function_call_output",
+					"call_id": "call_1",
+					"output": [
+						{
+							"schema": {
+								"$ref": "#/components/schemas/ErrorModel"
+							}
+						}
+					]
+				}
+			]
+		}`
+		output := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
+		result := gjson.GetBytes(output, "contents.1.parts.0.functionResponse.response.result")
+		if result.Type != gjson.String {
+			t.Fatalf("expected functionResponse.response.result to be string, got type %s (raw: %s)", result.Type, result.Raw)
+		}
+		if !strings.Contains(result.String(), "#/components/schemas/ErrorModel") {
+			t.Fatalf("expected string result to contain ref target, got %q", result.String())
+		}
+	})
+
+	t.Run("ordinary structured object without $ref remains raw JSON object", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gemini-3.8-flash",
+			"input": [
+				{
+					"type": "function_call",
+					"call_id": "call_1",
+					"name": "get_weather",
+					"arguments": "{}"
+				},
+				{
+					"type": "function_call_output",
+					"call_id": "call_1",
+					"output": {
+						"temperature": 72,
+						"condition": "sunny"
+					}
+				}
+			]
+		}`
+		output := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
+		result := gjson.GetBytes(output, "contents.1.parts.0.functionResponse.response.result")
+		if !result.IsObject() {
+			t.Fatalf("expected functionResponse.response.result to remain JSON object, got type %s (raw: %s)", result.Type, result.Raw)
+		}
+		if result.Get("temperature").Int() != 72 {
+			t.Fatalf("expected temperature 72, got %v", result.Get("temperature"))
+		}
+	})
+
+	t.Run("array with $ref object and media block preserves inlineData and stringifies result", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gemini-3.8-flash",
+			"input": [
+				{
+					"type": "function_call",
+					"call_id": "call_1",
+					"name": "render_schema_diagram",
+					"arguments": "{}"
+				},
+				{
+					"type": "function_call_output",
+					"call_id": "call_1",
+					"output": [
+						{
+							"type": "input_image",
+							"image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+						},
+						{
+							"schema": {
+								"$ref": "#/components/schemas/ErrorModel"
+							}
+						}
+					]
+				}
+			]
+		}`
+		output := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
+		fr := gjson.GetBytes(output, "contents.1.parts.0.functionResponse")
+		if !fr.Exists() {
+			t.Fatalf("expected functionResponse part, got %s", output)
+		}
+		img := fr.Get("parts.0.inlineData")
+		if !img.Exists() {
+			t.Fatalf("expected functionResponse.parts.0 to have inlineData, got %s", fr.Raw)
+		}
+		if got := img.Get("mimeType").String(); got != "image/png" {
+			t.Fatalf("expected mimeType 'image/png', got %q", got)
+		}
+		result := fr.Get("response.result")
+		if result.Type != gjson.String {
+			t.Fatalf("expected string result, got %s (raw: %s)", result.Type, result.Raw)
+		}
+		if !strings.Contains(result.String(), "#/components/schemas/ErrorModel") {
+			t.Fatalf("expected string result to contain ref target, got %q", result.String())
+		}
+	})
+}

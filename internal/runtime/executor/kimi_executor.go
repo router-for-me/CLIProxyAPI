@@ -603,7 +603,9 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 		emitTranslatedLine := func(line []byte) bool {
 			if responseFormat == sdktranslator.FormatOpenAIResponse {
-				chunkPayload := append(bytes.Clone(line), '\n')
+				chunkPayload := make([]byte, len(line)+1)
+				copy(chunkPayload, line)
+				chunkPayload[len(line)] = '\n'
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunkPayload}:
 					return true

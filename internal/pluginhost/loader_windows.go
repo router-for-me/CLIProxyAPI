@@ -64,6 +64,9 @@ type dynamicLibraryClient struct {
 	hostAPI  *windowsHostAPI
 	hostCtx  *uintptr
 	api      windowsPluginAPI
+	host     *Host
+	pluginID string
+	instance *hostCallbackInstance
 }
 
 func defaultPluginLoader() pluginLoader {
@@ -87,13 +90,18 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 		return nil, errProc
 	}
 	id := windowsHostCallbackID.Add(1)
+	instance := &hostCallbackInstance{}
+	host.registerHostCallbackInstance(file.ID, instance)
 	hostCtx := new(uintptr)
 	*hostCtx = id
-	windowsHostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID})
+	windowsHostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID, instance: instance})
 	client := &dynamicLibraryClient{
 		dll:      dll,
 		tempPath: loadPath,
 		hostCtx:  hostCtx,
+		host:     host,
+		pluginID: file.ID,
+		instance: instance,
 		hostAPI: &windowsHostAPI{
 			abiVersion: pluginHostABIVersion,
 			hostCtx:    uintptr(unsafe.Pointer(hostCtx)),
@@ -252,6 +260,13 @@ func shadowPluginMatches(path string, size int64, digest string) bool {
 	return hex.EncodeToString(hasher.Sum(nil)) == digest
 }
 
+func (c *dynamicLibraryClient) callbackInstance() *hostCallbackInstance {
+	if c == nil {
+		return nil
+	}
+	return c.instance
+}
+
 func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
 	if c == nil || c.api.call == 0 {
 		return nil, fmt.Errorf("plugin client is closed")
@@ -326,6 +341,10 @@ func (c *dynamicLibraryClient) close(releaseDLL bool) {
 	if c == nil {
 		return
 	}
+	if c.host != nil {
+		c.host.closeHostHTTPCallbackInstance(c.pluginID, c.instance)
+		c.host = nil
+	}
 	if c.api.shutdown != 0 {
 		_, _, _ = syscall.SyscallN(c.api.shutdown)
 		c.api.shutdown = 0
@@ -367,7 +386,7 @@ func windowsHostCall(hostCtx uintptr, methodPtr uintptr, requestPtr uintptr, req
 		request = unsafe.Slice((*byte)(unsafe.Pointer(requestPtr)), requestLen)
 		request = append([]byte(nil), request...)
 	}
-	ctx := withHostCallbackPluginID(context.Background(), entry.pluginID)
+	ctx := withHostCallbackIdentity(context.Background(), entry.pluginID, entry.instance)
 	resp, errCall := entry.host.callFromPlugin(ctx, windowsString(methodPtr), request)
 	if errCall != nil {
 		resp = marshalRPCError("host_call_failed", errCall.Error(), clienterror.HTTPStatusFromError(errCall))

@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -20,6 +22,10 @@ const AutoServiceTier = "auto"
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
+	// RequestID uniquely identifies this specific model execution instance (UUID v4).
+	RequestID string
+	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
+	TraceID  string
 	Provider string
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
@@ -87,6 +93,46 @@ type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
 type streamContextKey struct{}
+type executionRequestIDContextKey struct{}
+type executionTraceIDContextKey struct{}
+
+// WithExecutionRequestID attaches a specific execution instance request ID to the context.
+func WithExecutionRequestID(ctx context.Context, requestID string) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithValue(ctx, executionRequestIDContextKey{}, strings.TrimSpace(requestID))
+}
+
+// ExecutionRequestIDFromContext retrieves the execution instance request ID from the context.
+func ExecutionRequestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(executionRequestIDContextKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// WithTraceID attaches the parent inbound HTTP request ID to the context.
+func WithTraceID(ctx context.Context, traceID string) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithValue(ctx, executionTraceIDContextKey{}, strings.TrimSpace(traceID))
+}
+
+// TraceIDFromContext retrieves the parent inbound HTTP request ID from the context.
+func TraceIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(executionTraceIDContextKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -344,6 +390,20 @@ func (m *Manager) RegisterNamed(name string, plugin Plugin) {
 func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
+	}
+	if strings.TrimSpace(record.RequestID) == "" {
+		if reqID := ExecutionRequestIDFromContext(ctx); reqID != "" {
+			record.RequestID = reqID
+		} else {
+			record.RequestID = uuid.NewString()
+		}
+	}
+	if strings.TrimSpace(record.TraceID) == "" {
+		if trID := TraceIDFromContext(ctx); trID != "" {
+			record.TraceID = trID
+		} else if trID := internallogging.GetRequestID(ctx); trID != "" {
+			record.TraceID = trID
+		}
 	}
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())

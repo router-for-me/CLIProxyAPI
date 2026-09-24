@@ -33,6 +33,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	out := []byte(`{"model":"","messages":[],"stream":false}`)
 
 	root := gjson.ParseBytes(rawJSON)
+	toolIndex := newResponsesToolIndex(root)
 
 	messages := make([][]byte, 0)
 	appendMessage := func(message []byte) {
@@ -267,6 +268,20 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							contentPart := []byte(`{"type":"text","text":""}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "text", text)
 							contentItems = append(contentItems, contentPart)
+						case "input_video", "video_url":
+							contentPart := []byte(`{"type":"video_url","video_url":{}}`)
+							videoURL := contentItem.Get("video_url")
+							if videoURL.IsObject() {
+								contentPart, _ = sjson.SetRawBytes(contentPart, "video_url", []byte(videoURL.Raw))
+							} else if videoURL.Exists() {
+								contentPart, _ = sjson.SetRawBytes(contentPart, "video_url.url", []byte(videoURL.Raw))
+							}
+							if processing := contentItem.Get("processing"); processing.Exists() {
+								contentPart, _ = sjson.SetRawBytes(contentPart, "video_url.processing", []byte(processing.Raw))
+							}
+							// Preserve malformed video parts for upstream validation instead of
+							// silently turning a video request into a text-only request.
+							contentItems = append(contentItems, contentPart)
 						case "input_image":
 							imageURL := contentItem.Get("image_url").String()
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
@@ -321,9 +336,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if name := item.Get("name"); name.Exists() {
 					functionName := name.String()
 					if namespace := strings.TrimSpace(item.Get("namespace").String()); namespace != "" {
-						functionName = chatNameForResponsesNamespaceToolCall(inputRawJSON, namespace, functionName)
+						functionName = toolIndex.namespaceName(namespace, functionName)
 					} else {
-						functionName = canonicalResponsesToolName(inputRawJSON, functionName)
+						functionName = toolIndex.canonicalName(functionName)
 					}
 					toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionName)
 				}
@@ -373,9 +388,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				toolCall, _ = sjson.SetBytes(toolCall, "id", translatorcommon.ExtractResponsesCallID(item))
 				functionName := item.Get("name").String()
 				if namespace := item.Get("namespace").String(); namespace != "" {
-					functionName = chatNameForResponsesNamespaceToolCall(inputRawJSON, namespace, functionName)
+					functionName = toolIndex.namespaceName(namespace, functionName)
 				} else {
-					functionName = canonicalResponsesToolName(inputRawJSON, functionName)
+					functionName = toolIndex.canonicalName(functionName)
 				}
 				toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionName)
 				wrappedArgs, _ := sjson.SetBytes([]byte(`{"input":""}`), "input", item.Get("input").String())
@@ -434,7 +449,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// "additional_tools" input item instead of the top-level "tools" field,
 	// so merge both sources.
 	var chatCompletionsTools []interface{}
-	for _, chatTool := range mergeResponsesRequestChatTools(root) {
+	for _, chatTool := range toolIndex.chatTools() {
 		chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 	}
 	if len(chatCompletionsTools) > 0 {
@@ -443,7 +458,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			out, _ = sjson.SetBytes(out, "parallel_tool_calls", parallelToolCalls.Bool())
 		}
 		if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-			out, _ = sjson.SetRawBytes(out, "tool_choice", convertResponsesToolChoiceToChatCompletions(toolChoice, inputRawJSON))
+			out, _ = sjson.SetRawBytes(out, "tool_choice", convertResponsesToolChoiceWithIndex(toolChoice, toolIndex))
 		}
 	}
 
@@ -458,6 +473,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 }
 
 func convertResponsesToolChoiceToChatCompletions(toolChoice gjson.Result, inputRawJSON []byte) []byte {
+	return convertResponsesToolChoiceWithIndex(toolChoice, newResponsesToolIndex(gjson.ParseBytes(inputRawJSON)))
+}
+
+func convertResponsesToolChoiceWithIndex(toolChoice gjson.Result, toolIndex *responsesToolIndex) []byte {
 	if !toolChoice.IsObject() {
 		return []byte(toolChoice.Raw)
 	}
@@ -486,9 +505,9 @@ func convertResponsesToolChoiceToChatCompletions(toolChoice gjson.Result, inputR
 		namespace = strings.TrimSpace(toolChoice.Get("custom.namespace").String())
 	}
 	if namespace != "" {
-		name = chatNameForResponsesNamespaceToolCall(inputRawJSON, namespace, name)
+		name = toolIndex.namespaceName(namespace, name)
 	} else {
-		name = canonicalResponsesToolName(inputRawJSON, name)
+		name = toolIndex.canonicalName(name)
 	}
 
 	converted := []byte(`{"type":"function","function":{"name":""}}`)

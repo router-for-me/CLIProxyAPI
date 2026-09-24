@@ -526,3 +526,177 @@ func TestResponsesStreamErrorTextPreservesTokenCountersAndLargeInts(t *testing.T
 		t.Fatalf("token_limit should remain number 8192, got %v", parsed.Error["token_limit"])
 	}
 }
+
+func TestResponsesSSEFramer_FiltersUpstreamPrivateEvents(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{failureEvent: "error"}
+
+	rateLimitsFrame := []byte("event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
+	framer.WriteChunk(&output, rateLimitsFrame)
+
+	metadataFrame := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
+	framer.WriteChunk(&output, metadataFrame)
+
+	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	framer.WriteChunk(&output, createdFrame)
+
+	timingFrame := []byte("event: responsesapi.websocket_timing\ndata: {\"type\":\"responsesapi.websocket_timing\",\"timing\":{\"duration_ms\":100}}\n\n")
+	framer.WriteChunk(&output, timingFrame)
+
+	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	framer.WriteChunk(&output, completedFrame)
+
+	got := output.String()
+	if strings.Contains(got, "codex.rate_limits") {
+		t.Fatalf("expected codex.rate_limits to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "responsesapi.websocket_timing") {
+		t.Fatalf("expected responsesapi.websocket_timing to be stripped, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in output, got: %q", got)
+	}
+}
+
+func TestForwardResponsesStream_FiltersUpstreamPrivateEvents(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 5)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
+	data <- []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
+	data <- []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	data <- []byte("event: responsesapi.websocket_timing\ndata: {\"type\":\"responsesapi.websocket_timing\",\"timing\":{\"duration_ms\":100}}\n\n")
+	data <- []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	got := recorder.Body.String()
+	if strings.Contains(got, "codex.rate_limits") {
+		t.Fatalf("expected codex.rate_limits to be stripped in stream, got: %q", got)
+	}
+	if strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be stripped in stream, got: %q", got)
+	}
+	if strings.Contains(got, "responsesapi.websocket_timing") {
+		t.Fatalf("expected responsesapi.websocket_timing to be stripped in stream, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in stream output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in stream output, got: %q", got)
+	}
+}
+
+func TestResponsesSSEFramer_PreservesMetadataForCodexClient(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{failureEvent: "response.failed", isCodexClient: true}
+
+	metadataFrame := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
+	framer.WriteChunk(&output, metadataFrame)
+
+	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	framer.WriteChunk(&output, createdFrame)
+
+	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	framer.WriteChunk(&output, completedFrame)
+
+	got := output.String()
+	if !strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be preserved for official Codex client, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in output, got: %q", got)
+	}
+}
+
+func TestResponsesSSEFramer_FiltersDataOnlyPrivateEventsAndNonJSON(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{failureEvent: "error"}
+
+	// Data-only frame with private type
+	dataOnlyPrivateFrame := []byte("data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
+	framer.WriteChunk(&output, dataOnlyPrivateFrame)
+
+	// Non-JSON payload with private event line
+	nonJSONPrivateFrame := []byte("event: codex.rate_limits\ndata: not-json-data\n\n")
+	framer.WriteChunk(&output, nonJSONPrivateFrame)
+
+	// Event-only frame without data
+	eventOnlyPrivateFrame := []byte("event: codex.response.metadata\n\n")
+	framer.WriteChunk(&output, eventOnlyPrivateFrame)
+
+	// Standard response.created
+	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	framer.WriteChunk(&output, createdFrame)
+
+	// Standard response.completed
+	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	framer.WriteChunk(&output, completedFrame)
+
+	got := output.String()
+	if strings.Contains(got, "codex.rate_limits") {
+		t.Fatalf("expected codex.rate_limits to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "not-json-data") {
+		t.Fatalf("expected not-json-data to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be stripped, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in output, got: %q", got)
+	}
+}
+
+func TestResponsesSSEFramer_CodexClientFiltersRateLimitsAndTiming(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{failureEvent: "response.failed", isCodexClient: true}
+
+	rateLimitsFrame := []byte("event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
+	framer.WriteChunk(&output, rateLimitsFrame)
+
+	metadataFrame := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
+	framer.WriteChunk(&output, metadataFrame)
+
+	timingFrame := []byte("event: responsesapi.websocket_timing\ndata: {\"type\":\"responsesapi.websocket_timing\",\"timing\":{\"duration_ms\":100}}\n\n")
+	framer.WriteChunk(&output, timingFrame)
+
+	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	framer.WriteChunk(&output, createdFrame)
+
+	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	framer.WriteChunk(&output, completedFrame)
+
+	got := output.String()
+	if strings.Contains(got, "codex.rate_limits") {
+		t.Fatalf("expected codex.rate_limits to be stripped for Codex client, got: %q", got)
+	}
+	if strings.Contains(got, "responsesapi.websocket_timing") {
+		t.Fatalf("expected responsesapi.websocket_timing to be stripped for Codex client, got: %q", got)
+	}
+	if !strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be preserved for official Codex client, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in output, got: %q", got)
+	}
+}
