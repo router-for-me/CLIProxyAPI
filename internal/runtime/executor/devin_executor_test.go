@@ -21,6 +21,8 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -3642,4 +3644,1030 @@ func TestDevinExecutor_FunctionResult_Regression_Issue5911(t *testing.T) {
 			t.Errorf("user message should have 1 image, got %d", len(prompts6[1].Images))
 		}
 	})
+}
+
+func TestDevinExecutor_NoModelSubstitutionWarningForIntentionalMapping_NonStream(t *testing.T) {
+	// Build a Devin Connect-RPC response containing Usage with ModelName = "swe-2-high"
+	var f7 []byte
+	f7 = protowire.AppendTag(f7, 2, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 10)
+	f7 = protowire.AppendTag(f7, 3, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 20)
+	f7 = protowire.AppendTag(f7, 9, protowire.BytesType)
+	f7 = protowire.AppendString(f7, "swe-2-high")
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 7, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, f7)
+
+	var buf bytes.Buffer
+	buf.Write(helps.WrapConnectEnvelope(f1))
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	mockRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
+			Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+		}, nil
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:         "devin-auth-map-nonstream",
+		Provider:   "devin",
+		Attributes: map[string]string{"api_key": "test-key"},
+	}
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", mockRT)
+	req := cliproxyexecutor.Request{
+		Model:   "devin/swe-2",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	}
+
+	_, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model") {
+			t.Fatalf("unexpected model substitution warning for intentional mapping: %s", entry.Message)
+		}
+	}
+}
+
+func TestDevinExecutor_NoModelSubstitutionWarningForIntentionalMapping_Stream(t *testing.T) {
+	var f7 []byte
+	f7 = protowire.AppendTag(f7, 2, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 10)
+	f7 = protowire.AppendTag(f7, 3, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 20)
+	f7 = protowire.AppendTag(f7, 9, protowire.BytesType)
+	f7 = protowire.AppendString(f7, "swe-2-high")
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 7, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, f7)
+
+	var buf bytes.Buffer
+	buf.Write(helps.WrapConnectEnvelope(f1))
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	mockRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
+			Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+		}, nil
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:         "devin-auth-map-stream",
+		Provider:   "devin",
+		Attributes: map[string]string{"api_key": "test-key"},
+	}
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", mockRT)
+	req := cliproxyexecutor.Request{
+		Model:   "devin/swe-2",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	}
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream failed: %v", err)
+	}
+	for range result.Chunks {
+	}
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model") {
+			t.Fatalf("unexpected model substitution warning for intentional mapping: %s", entry.Message)
+		}
+	}
+}
+
+func TestDevinExecutor_WarnsWhenUpstreamServesUnexpectedModel(t *testing.T) {
+	var f7 []byte
+	f7 = protowire.AppendTag(f7, 2, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 10)
+	f7 = protowire.AppendTag(f7, 3, protowire.VarintType)
+	f7 = protowire.AppendVarint(f7, 20)
+	f7 = protowire.AppendTag(f7, 9, protowire.BytesType)
+	f7 = protowire.AppendString(f7, "unexpected-model-xyz")
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 7, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, f7)
+
+	var buf bytes.Buffer
+	buf.Write(helps.WrapConnectEnvelope(f1))
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	mockRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
+			Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+		}, nil
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:         "devin-auth-unexpected",
+		Provider:   "devin",
+		Attributes: map[string]string{"api_key": "test-key"},
+	}
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", mockRT)
+	req := cliproxyexecutor.Request{
+		Model:   "devin/swe-2",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	}
+
+	_, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	found := false
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model \"unexpected-model-xyz\"") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected model substitution warning for unexpected model, got none")
+	}
+}
+
+func TestRegressionIssue5951_DevinToolActivityOrderedBeforeAssistantMessage(t *testing.T) {
+	// Frame 1: tool call 1
+	var tc1 []byte
+	tc1 = protowire.AppendTag(tc1, 1, protowire.BytesType)
+	tc1 = protowire.AppendString(tc1, "call_1")
+	tc1 = protowire.AppendTag(tc1, 2, protowire.BytesType)
+	tc1 = protowire.AppendString(tc1, "exec_command")
+	tc1 = protowire.AppendTag(tc1, 3, protowire.BytesType)
+	tc1 = protowire.AppendString(tc1, `{"cmd":"git status"}`)
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 6, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, tc1)
+
+	// Frame 2: tool call 2
+	var tc2 []byte
+	tc2 = protowire.AppendTag(tc2, 1, protowire.BytesType)
+	tc2 = protowire.AppendString(tc2, "call_2")
+	tc2 = protowire.AppendTag(tc2, 2, protowire.BytesType)
+	tc2 = protowire.AppendString(tc2, "exec_command")
+	tc2 = protowire.AppendTag(tc2, 3, protowire.BytesType)
+	tc2 = protowire.AppendString(tc2, `{"cmd":"ls -la"}`)
+
+	var f2 []byte
+	f2 = protowire.AppendTag(f2, 6, protowire.BytesType)
+	f2 = protowire.AppendBytes(f2, tc2)
+
+	// Frame 3: assistant final message content text
+	var f3 []byte
+	f3 = protowire.AppendTag(f3, 3, protowire.BytesType)
+	f3 = protowire.AppendString(f3, "Task completed. 要我盯 DAV-1085 结果吗？")
+
+	// 1. Test Streaming in OpenAI Responses wire format (used by Codex Desktop)
+	var streamBuf bytes.Buffer
+	streamBuf.Write(helps.WrapConnectEnvelope(f1))
+	streamBuf.Write(helps.WrapConnectEnvelope(f2))
+	streamBuf.Write(helps.WrapConnectEnvelope(f3))
+	streamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	exec := NewDevinExecutor(&config.Config{})
+	out := make(chan cliproxyexecutor.StreamChunk, 100)
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	go func() {
+		defer close(out)
+		exec.streamDevinFrames(
+			context.Background(),
+			&streamBuf,
+			cliproxyexecutor.Request{Model: "devin/swe-2"},
+			opts,
+			"swe-2-high",
+			sdktranslator.FormatOpenAIResponse,
+			nil,
+			out,
+		)
+	}()
+
+	var chunks []cliproxyexecutor.StreamChunk
+	for chunk := range out {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		chunks = append(chunks, chunk)
+	}
+
+	var doneItemTypes []string
+	for _, chunk := range chunks {
+		lines := strings.Split(string(chunk.Payload), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				if strings.TrimSpace(data) == "[DONE]" {
+					continue
+				}
+				ev := gjson.Parse(data)
+				if ev.Get("type").String() == "response.output_item.done" {
+					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
+				}
+			}
+		}
+	}
+
+	// In Codex Desktop / OpenAI Responses, tool call items must be finalized before the assistant final message
+	expectedOrder := []string{"function_call", "function_call", "message"}
+	if len(doneItemTypes) != len(expectedOrder) {
+		t.Fatalf("doneItemTypes len = %d (%v), want %d (%v)", len(doneItemTypes), doneItemTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if doneItemTypes[i] != want {
+			t.Fatalf("doneItemTypes[%d] = %q, want %q; full order = %v", i, doneItemTypes[i], want, doneItemTypes)
+		}
+	}
+
+	// Also verify the output array in response.completed
+	var completedOutputTypes []string
+	for _, chunk := range chunks {
+		lines := strings.Split(string(chunk.Payload), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				if strings.TrimSpace(data) == "[DONE]" {
+					continue
+				}
+				ev := gjson.Parse(data)
+				if ev.Get("type").String() == "response.completed" {
+					ev.Get("response.output").ForEach(func(_, item gjson.Result) bool {
+						completedOutputTypes = append(completedOutputTypes, item.Get("type").String())
+						return true
+					})
+				}
+			}
+		}
+	}
+	if len(completedOutputTypes) != len(expectedOrder) {
+		t.Fatalf("completedOutputTypes len = %d (%v), want %d (%v)", len(completedOutputTypes), completedOutputTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if completedOutputTypes[i] != want {
+			t.Fatalf("completedOutputTypes[%d] = %q, want %q", i, completedOutputTypes[i], want)
+		}
+	}
+
+	// 2. Test Non-streaming output order
+	var nonStreamBuf bytes.Buffer
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f1))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f2))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f3))
+	nonStreamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	interactionsJSON, _, err := consumeDevinFramesToInteractions(&nonStreamBuf, "devin/swe-2", "swe-2-high")
+	if err != nil {
+		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
+	}
+	root := gjson.ParseBytes(interactionsJSON)
+	var stepTypes []string
+	root.Get("steps").ForEach(func(_, step gjson.Result) bool {
+		stepTypes = append(stepTypes, step.Get("type").String())
+		return true
+	})
+	expectedSteps := []string{"function_call", "function_call", "model_output"}
+	if len(stepTypes) != len(expectedSteps) {
+		t.Fatalf("stepTypes len = %d (%v), want %d (%v)", len(stepTypes), stepTypes, len(expectedSteps), expectedSteps)
+	}
+	for i, want := range expectedSteps {
+		if stepTypes[i] != want {
+			t.Fatalf("stepTypes[%d] = %q, want %q; full order = %v", i, stepTypes[i], want, stepTypes)
+		}
+	}
+}
+
+func TestRegressionIssue5951_InterleavedToolArgumentsAndText(t *testing.T) {
+	// Frame 1: call_1 partial args
+	var tc1Part1 []byte
+	tc1Part1 = protowire.AppendTag(tc1Part1, 1, protowire.BytesType)
+	tc1Part1 = protowire.AppendString(tc1Part1, "call_1")
+	tc1Part1 = protowire.AppendTag(tc1Part1, 2, protowire.BytesType)
+	tc1Part1 = protowire.AppendString(tc1Part1, "exec_command")
+	tc1Part1 = protowire.AppendTag(tc1Part1, 3, protowire.BytesType)
+	tc1Part1 = protowire.AppendString(tc1Part1, `{"cmd":"git `)
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 6, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, tc1Part1)
+
+	// Frame 2: text arrival while call_1 is active
+	var f2 []byte
+	f2 = protowire.AppendTag(f2, 3, protowire.BytesType)
+	f2 = protowire.AppendString(f2, "Working on it... ")
+
+	// Frame 3: call_1 continuation args
+	var tc1Part2 []byte
+	tc1Part2 = protowire.AppendTag(tc1Part2, 1, protowire.BytesType)
+	tc1Part2 = protowire.AppendString(tc1Part2, "call_1")
+	tc1Part2 = protowire.AppendTag(tc1Part2, 3, protowire.BytesType)
+	tc1Part2 = protowire.AppendString(tc1Part2, `status"}`)
+
+	var f3 []byte
+	f3 = protowire.AppendTag(f3, 6, protowire.BytesType)
+	f3 = protowire.AppendBytes(f3, tc1Part2)
+
+	// Frame 4: more final text
+	var f4 []byte
+	f4 = protowire.AppendTag(f4, 3, protowire.BytesType)
+	f4 = protowire.AppendString(f4, "Done.")
+
+	// Test streaming
+	var streamBuf bytes.Buffer
+	streamBuf.Write(helps.WrapConnectEnvelope(f1))
+	streamBuf.Write(helps.WrapConnectEnvelope(f2))
+	streamBuf.Write(helps.WrapConnectEnvelope(f3))
+	streamBuf.Write(helps.WrapConnectEnvelope(f4))
+	streamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	exec := NewDevinExecutor(&config.Config{})
+	out := make(chan cliproxyexecutor.StreamChunk, 100)
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	go func() {
+		defer close(out)
+		exec.streamDevinFrames(
+			context.Background(),
+			&streamBuf,
+			cliproxyexecutor.Request{Model: "devin/swe-2"},
+			opts,
+			"swe-2-high",
+			sdktranslator.FormatOpenAIResponse,
+			nil,
+			out,
+		)
+	}()
+
+	var chunks []cliproxyexecutor.StreamChunk
+	for chunk := range out {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		chunks = append(chunks, chunk)
+	}
+
+	var doneItemTypes []string
+	var callCount int
+	var completedCallArgs string
+	for _, chunk := range chunks {
+		lines := strings.Split(string(chunk.Payload), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				if strings.TrimSpace(data) == "[DONE]" {
+					continue
+				}
+				ev := gjson.Parse(data)
+				if ev.Get("type").String() == "response.output_item.added" && ev.Get("item.type").String() == "function_call" {
+					callCount++
+				}
+				if ev.Get("type").String() == "response.output_item.done" {
+					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
+					if ev.Get("item.type").String() == "function_call" {
+						completedCallArgs = ev.Get("item.arguments").String()
+					}
+				}
+			}
+		}
+	}
+
+	if callCount != 1 {
+		t.Fatalf("callCount = %d, want 1 (should not duplicate call_1)", callCount)
+	}
+	if completedCallArgs != `{"cmd":"git status"}` {
+		t.Fatalf("completedCallArgs = %q, want %q", completedCallArgs, `{"cmd":"git status"}`)
+	}
+	expectedOrder := []string{"function_call", "message"}
+	if len(doneItemTypes) != len(expectedOrder) {
+		t.Fatalf("doneItemTypes len = %d (%v), want %d (%v)", len(doneItemTypes), doneItemTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if doneItemTypes[i] != want {
+			t.Fatalf("doneItemTypes[%d] = %q, want %q", i, doneItemTypes[i], want)
+		}
+	}
+
+	// 2. Test Non-streaming: tool arguments must be intact and assistant message must NOT be split
+	var nonStreamBuf bytes.Buffer
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f1))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f2))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f3))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f4))
+	nonStreamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	interactionsJSON, _, err := consumeDevinFramesToInteractions(&nonStreamBuf, "devin/swe-2", "swe-2-high")
+	if err != nil {
+		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
+	}
+	root := gjson.ParseBytes(interactionsJSON)
+	steps := root.Get("steps").Array()
+	if len(steps) != 2 {
+		t.Fatalf("steps count = %d, want 2 [function_call, model_output]. Steps: %s", len(steps), string(interactionsJSON))
+	}
+	if steps[0].Get("type").String() != "function_call" || steps[0].Get("id").String() != "call_1" {
+		t.Fatalf("step[0] = %+v, want function_call call_1", steps[0].Raw)
+	}
+	if steps[0].Get("arguments").String() != `{"cmd":"git status"}` {
+		t.Fatalf("step[0] arguments = %q, want %q", steps[0].Get("arguments").String(), `{"cmd":"git status"}`)
+	}
+	if steps[1].Get("type").String() != "model_output" {
+		t.Fatalf("step[1] type = %q, want model_output", steps[1].Get("type").String())
+	}
+	if steps[1].Get("content.0.text").String() != "Working on it... Done." {
+		t.Fatalf("step[1] text = %q, want 'Working on it... Done.'", steps[1].Get("content.0.text").String())
+	}
+}
+
+func TestRegressionIssue5951_SameFrameToolAndContent(t *testing.T) {
+	// A single frame carrying BOTH tool call delta and content text
+	var tc []byte
+	tc = protowire.AppendTag(tc, 1, protowire.BytesType)
+	tc = protowire.AppendString(tc, "call_same_frame")
+	tc = protowire.AppendTag(tc, 2, protowire.BytesType)
+	tc = protowire.AppendString(tc, "exec_command")
+	tc = protowire.AppendTag(tc, 3, protowire.BytesType)
+	tc = protowire.AppendString(tc, `{"cmd":"pwd"}`)
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 6, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, tc)
+	f1 = protowire.AppendTag(f1, 3, protowire.BytesType)
+	f1 = protowire.AppendString(f1, "Finished pwd execution.")
+
+	// 1. Streaming test
+	var streamBuf bytes.Buffer
+	streamBuf.Write(helps.WrapConnectEnvelope(f1))
+	streamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	exec := NewDevinExecutor(&config.Config{})
+	out := make(chan cliproxyexecutor.StreamChunk, 100)
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	go func() {
+		defer close(out)
+		exec.streamDevinFrames(
+			context.Background(),
+			&streamBuf,
+			cliproxyexecutor.Request{Model: "devin/swe-2"},
+			opts,
+			"swe-2-high",
+			sdktranslator.FormatOpenAIResponse,
+			nil,
+			out,
+		)
+	}()
+
+	var doneItemTypes []string
+	var completedOutputTypes []string
+	for chunk := range out {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		lines := strings.Split(string(chunk.Payload), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				if strings.TrimSpace(data) == "[DONE]" {
+					continue
+				}
+				ev := gjson.Parse(data)
+				if ev.Get("type").String() == "response.output_item.done" {
+					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
+				}
+				if ev.Get("type").String() == "response.completed" {
+					ev.Get("response.output").ForEach(func(_, item gjson.Result) bool {
+						completedOutputTypes = append(completedOutputTypes, item.Get("type").String())
+						return true
+					})
+				}
+			}
+		}
+	}
+
+	expectedOrder := []string{"function_call", "message"}
+	if len(doneItemTypes) != len(expectedOrder) {
+		t.Fatalf("doneItemTypes len = %d (%v), want %d (%v)", len(doneItemTypes), doneItemTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if doneItemTypes[i] != want {
+			t.Fatalf("doneItemTypes[%d] = %q, want %q", i, doneItemTypes[i], want)
+		}
+	}
+	if len(completedOutputTypes) != len(expectedOrder) {
+		t.Fatalf("completedOutputTypes len = %d (%v), want %d (%v)", len(completedOutputTypes), completedOutputTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if completedOutputTypes[i] != want {
+			t.Fatalf("completedOutputTypes[%d] = %q, want %q", i, completedOutputTypes[i], want)
+		}
+	}
+
+	// 2. Non-streaming test
+	var nonStreamBuf bytes.Buffer
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f1))
+	nonStreamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	interactionsJSON, _, err := consumeDevinFramesToInteractions(&nonStreamBuf, "devin/swe-2", "swe-2-high")
+	if err != nil {
+		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
+	}
+	root := gjson.ParseBytes(interactionsJSON)
+	var stepTypes []string
+	root.Get("steps").ForEach(func(_, step gjson.Result) bool {
+		stepTypes = append(stepTypes, step.Get("type").String())
+		return true
+	})
+	expectedSteps := []string{"function_call", "model_output"}
+	if len(stepTypes) != len(expectedSteps) {
+		t.Fatalf("stepTypes len = %d (%v), want %d (%v)", len(stepTypes), stepTypes, len(expectedSteps), expectedSteps)
+	}
+	for i, want := range expectedSteps {
+		if stepTypes[i] != want {
+			t.Fatalf("stepTypes[%d] = %q, want %q", i, stepTypes[i], want)
+		}
+	}
+}
+
+func TestRegressionIssue5951_PreToolExplanationAndPostToolAnswer(t *testing.T) {
+	// Frame 1: pre-tool explanation text
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 3, protowire.BytesType)
+	f1 = protowire.AppendString(f1, "I will inspect the repository:")
+
+	// Frame 2: tool call
+	var tc1 []byte
+	tc1 = protowire.AppendTag(tc1, 1, protowire.BytesType)
+	tc1 = protowire.AppendString(tc1, "call_ls")
+	tc1 = protowire.AppendTag(tc1, 2, protowire.BytesType)
+	tc1 = protowire.AppendString(tc1, "exec_command")
+	tc1 = protowire.AppendTag(tc1, 3, protowire.BytesType)
+	tc1 = protowire.AppendString(tc1, `{"cmd":"ls -la"}`)
+
+	var f2 []byte
+	f2 = protowire.AppendTag(f2, 6, protowire.BytesType)
+	f2 = protowire.AppendBytes(f2, tc1)
+
+	// Frame 3: post-tool final answer text
+	var f3 []byte
+	f3 = protowire.AppendTag(f3, 3, protowire.BytesType)
+	f3 = protowire.AppendString(f3, "Inspection completed. All files in order.")
+
+	// 1. Test Streaming: output_item.done and completed.output must be [message, function_call, message]
+	var streamBuf bytes.Buffer
+	streamBuf.Write(helps.WrapConnectEnvelope(f1))
+	streamBuf.Write(helps.WrapConnectEnvelope(f2))
+	streamBuf.Write(helps.WrapConnectEnvelope(f3))
+	streamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	exec := NewDevinExecutor(&config.Config{})
+	out := make(chan cliproxyexecutor.StreamChunk, 100)
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	go func() {
+		defer close(out)
+		exec.streamDevinFrames(
+			context.Background(),
+			&streamBuf,
+			cliproxyexecutor.Request{Model: "devin/swe-2"},
+			opts,
+			"swe-2-high",
+			sdktranslator.FormatOpenAIResponse,
+			nil,
+			out,
+		)
+	}()
+
+	var chunks []cliproxyexecutor.StreamChunk
+	for chunk := range out {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		chunks = append(chunks, chunk)
+	}
+
+	var doneItemTypes []string
+	var completedOutputTypes []string
+	for _, chunk := range chunks {
+		lines := strings.Split(string(chunk.Payload), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				if strings.TrimSpace(data) == "[DONE]" {
+					continue
+				}
+				ev := gjson.Parse(data)
+				if ev.Get("type").String() == "response.output_item.done" {
+					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
+				}
+				if ev.Get("type").String() == "response.completed" {
+					ev.Get("response.output").ForEach(func(_, item gjson.Result) bool {
+						completedOutputTypes = append(completedOutputTypes, item.Get("type").String())
+						return true
+					})
+				}
+			}
+		}
+	}
+
+	expectedOrder := []string{"message", "function_call", "message"}
+	if len(doneItemTypes) != len(expectedOrder) {
+		t.Fatalf("doneItemTypes len = %d (%v), want %d (%v)", len(doneItemTypes), doneItemTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if doneItemTypes[i] != want {
+			t.Fatalf("doneItemTypes[%d] = %q, want %q", i, doneItemTypes[i], want)
+		}
+	}
+	if len(completedOutputTypes) != len(expectedOrder) {
+		t.Fatalf("completedOutputTypes len = %d (%v), want %d (%v)", len(completedOutputTypes), completedOutputTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if completedOutputTypes[i] != want {
+			t.Fatalf("completedOutputTypes[%d] = %q, want %q", i, completedOutputTypes[i], want)
+		}
+	}
+
+	// 2. Test Non-streaming: steps must preserve [model_output, function_call, model_output]
+	var nonStreamBuf bytes.Buffer
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f1))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f2))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f3))
+	nonStreamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	interactionsJSON, _, err := consumeDevinFramesToInteractions(&nonStreamBuf, "devin/swe-2", "swe-2-high")
+	if err != nil {
+		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
+	}
+	root := gjson.ParseBytes(interactionsJSON)
+	var stepTypes []string
+	root.Get("steps").ForEach(func(_, step gjson.Result) bool {
+		stepTypes = append(stepTypes, step.Get("type").String())
+		return true
+	})
+	expectedSteps := []string{"model_output", "function_call", "model_output"}
+	if len(stepTypes) != len(expectedSteps) {
+		t.Fatalf("stepTypes len = %d (%v), want %d (%v)", len(stepTypes), stepTypes, len(expectedSteps), expectedSteps)
+	}
+	for i, want := range expectedSteps {
+		if stepTypes[i] != want {
+			t.Fatalf("stepTypes[%d] = %q, want %q", i, stepTypes[i], want)
+		}
+	}
+}
+
+func TestRegressionIssue5951_MultiStageToolAndIntermediateExplanation(t *testing.T) {
+	// Frame 1: Tool A
+	var tcA []byte
+	tcA = protowire.AppendTag(tcA, 1, protowire.BytesType)
+	tcA = protowire.AppendString(tcA, "call_A")
+	tcA = protowire.AppendTag(tcA, 2, protowire.BytesType)
+	tcA = protowire.AppendString(tcA, "exec_command")
+	tcA = protowire.AppendTag(tcA, 3, protowire.BytesType)
+	tcA = protowire.AppendString(tcA, `{"cmd":"pwd"}`)
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 6, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, tcA)
+
+	// Frame 2: Intermediate explanation
+	var f2 []byte
+	f2 = protowire.AppendTag(f2, 3, protowire.BytesType)
+	f2 = protowire.AppendString(f2, "Directory checked, now listing files.")
+
+	// Frame 3: Tool B
+	var tcB []byte
+	tcB = protowire.AppendTag(tcB, 1, protowire.BytesType)
+	tcB = protowire.AppendString(tcB, "call_B")
+	tcB = protowire.AppendTag(tcB, 2, protowire.BytesType)
+	tcB = protowire.AppendString(tcB, "exec_command")
+	tcB = protowire.AppendTag(tcB, 3, protowire.BytesType)
+	tcB = protowire.AppendString(tcB, `{"cmd":"ls"}`)
+
+	var f3 []byte
+	f3 = protowire.AppendTag(f3, 6, protowire.BytesType)
+	f3 = protowire.AppendBytes(f3, tcB)
+
+	// Frame 4: Final answer
+	var f4 []byte
+	f4 = protowire.AppendTag(f4, 3, protowire.BytesType)
+	f4 = protowire.AppendString(f4, "All tasks finished successfully.")
+
+	// 1. Test Streaming
+	var streamBuf bytes.Buffer
+	streamBuf.Write(helps.WrapConnectEnvelope(f1))
+	streamBuf.Write(helps.WrapConnectEnvelope(f2))
+	streamBuf.Write(helps.WrapConnectEnvelope(f3))
+	streamBuf.Write(helps.WrapConnectEnvelope(f4))
+	streamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	exec := NewDevinExecutor(&config.Config{})
+	out := make(chan cliproxyexecutor.StreamChunk, 100)
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	go func() {
+		defer close(out)
+		exec.streamDevinFrames(
+			context.Background(),
+			&streamBuf,
+			cliproxyexecutor.Request{Model: "devin/swe-2"},
+			opts,
+			"swe-2-high",
+			sdktranslator.FormatOpenAIResponse,
+			nil,
+			out,
+		)
+	}()
+
+	var chunks []cliproxyexecutor.StreamChunk
+	for chunk := range out {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		chunks = append(chunks, chunk)
+	}
+
+	var doneItemTypes []string
+	var completedOutputTypes []string
+	for _, chunk := range chunks {
+		lines := strings.Split(string(chunk.Payload), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				if strings.TrimSpace(data) == "[DONE]" {
+					continue
+				}
+				ev := gjson.Parse(data)
+				if ev.Get("type").String() == "response.output_item.done" {
+					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
+				}
+				if ev.Get("type").String() == "response.completed" {
+					ev.Get("response.output").ForEach(func(_, item gjson.Result) bool {
+						completedOutputTypes = append(completedOutputTypes, item.Get("type").String())
+						return true
+					})
+				}
+			}
+		}
+	}
+
+	expectedOrder := []string{"function_call", "function_call", "message"}
+	if len(doneItemTypes) != len(expectedOrder) {
+		t.Fatalf("doneItemTypes len = %d (%v), want %d (%v)", len(doneItemTypes), doneItemTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if doneItemTypes[i] != want {
+			t.Fatalf("doneItemTypes[%d] = %q, want %q; full = %v", i, doneItemTypes[i], want, doneItemTypes)
+		}
+	}
+	if len(completedOutputTypes) != len(expectedOrder) {
+		t.Fatalf("completedOutputTypes len = %d (%v), want %d (%v)", len(completedOutputTypes), completedOutputTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if completedOutputTypes[i] != want {
+			t.Fatalf("completedOutputTypes[%d] = %q, want %q; full = %v", i, completedOutputTypes[i], want, completedOutputTypes)
+		}
+	}
+
+	// 2. Test Non-streaming
+	var nonStreamBuf bytes.Buffer
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f1))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f2))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f3))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f4))
+	nonStreamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	interactionsJSON, _, err := consumeDevinFramesToInteractions(&nonStreamBuf, "devin/swe-2", "swe-2-high")
+	if err != nil {
+		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
+	}
+	root := gjson.ParseBytes(interactionsJSON)
+	var stepTypes []string
+	root.Get("steps").ForEach(func(_, step gjson.Result) bool {
+		stepTypes = append(stepTypes, step.Get("type").String())
+		return true
+	})
+	expectedSteps := []string{"function_call", "function_call", "model_output"}
+	if len(stepTypes) != len(expectedSteps) {
+		t.Fatalf("stepTypes len = %d (%v), want %d (%v)", len(stepTypes), stepTypes, len(expectedSteps), expectedSteps)
+	}
+	for i, want := range expectedSteps {
+		if stepTypes[i] != want {
+			t.Fatalf("stepTypes[%d] = %q, want %q; full = %v", i, stepTypes[i], want, stepTypes)
+		}
+	}
+}
+
+func TestRegressionIssue5951_InterleavedToolsWithTextAndContinuation(t *testing.T) {
+	// Frame 1: call_1 start + partial args
+	var tc1Part1 []byte
+	tc1Part1 = protowire.AppendTag(tc1Part1, 1, protowire.BytesType)
+	tc1Part1 = protowire.AppendString(tc1Part1, "call_1")
+	tc1Part1 = protowire.AppendTag(tc1Part1, 2, protowire.BytesType)
+	tc1Part1 = protowire.AppendString(tc1Part1, "tool_1")
+	tc1Part1 = protowire.AppendTag(tc1Part1, 3, protowire.BytesType)
+	tc1Part1 = protowire.AppendString(tc1Part1, `{"a":`)
+
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 6, protowire.BytesType)
+	f1 = protowire.AppendBytes(f1, tc1Part1)
+
+	// Frame 2: text arrival
+	var f2 []byte
+	f2 = protowire.AppendTag(f2, 3, protowire.BytesType)
+	f2 = protowire.AppendString(f2, "Working on step 1... ")
+
+	// Frame 3: call_2 start + full args
+	var tc2 []byte
+	tc2 = protowire.AppendTag(tc2, 1, protowire.BytesType)
+	tc2 = protowire.AppendString(tc2, "call_2")
+	tc2 = protowire.AppendTag(tc2, 2, protowire.BytesType)
+	tc2 = protowire.AppendString(tc2, "tool_2")
+	tc2 = protowire.AppendTag(tc2, 3, protowire.BytesType)
+	tc2 = protowire.AppendString(tc2, `{"b":2}`)
+
+	var f3 []byte
+	f3 = protowire.AppendTag(f3, 6, protowire.BytesType)
+	f3 = protowire.AppendBytes(f3, tc2)
+
+	// Frame 4: call_1 continuation args
+	var tc1Part2 []byte
+	tc1Part2 = protowire.AppendTag(tc1Part2, 1, protowire.BytesType)
+	tc1Part2 = protowire.AppendString(tc1Part2, "call_1")
+	tc1Part2 = protowire.AppendTag(tc1Part2, 3, protowire.BytesType)
+	tc1Part2 = protowire.AppendString(tc1Part2, `1}`)
+
+	var f4 []byte
+	f4 = protowire.AppendTag(f4, 6, protowire.BytesType)
+	f4 = protowire.AppendBytes(f4, tc1Part2)
+
+	// Frame 5: final text
+	var f5 []byte
+	f5 = protowire.AppendTag(f5, 3, protowire.BytesType)
+	f5 = protowire.AppendString(f5, "All done.")
+
+	// 1. Streaming test
+	var streamBuf bytes.Buffer
+	streamBuf.Write(helps.WrapConnectEnvelope(f1))
+	streamBuf.Write(helps.WrapConnectEnvelope(f2))
+	streamBuf.Write(helps.WrapConnectEnvelope(f3))
+	streamBuf.Write(helps.WrapConnectEnvelope(f4))
+	streamBuf.Write(helps.WrapConnectEnvelope(f5))
+	streamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	exec := NewDevinExecutor(&config.Config{})
+	out := make(chan cliproxyexecutor.StreamChunk, 100)
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	go func() {
+		defer close(out)
+		exec.streamDevinFrames(
+			context.Background(),
+			&streamBuf,
+			cliproxyexecutor.Request{Model: "devin/swe-2"},
+			opts,
+			"swe-2-high",
+			sdktranslator.FormatOpenAIResponse,
+			nil,
+			out,
+		)
+	}()
+
+	var chunks []cliproxyexecutor.StreamChunk
+	for chunk := range out {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		chunks = append(chunks, chunk)
+	}
+
+	var doneItemTypes []string
+	callCount := 0
+	callArgs := make(map[string]string)
+	for _, chunk := range chunks {
+		lines := strings.Split(string(chunk.Payload), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "data: ") {
+				data := strings.TrimPrefix(line, "data: ")
+				if strings.TrimSpace(data) == "[DONE]" {
+					continue
+				}
+				ev := gjson.Parse(data)
+				if ev.Get("type").String() == "response.output_item.added" && ev.Get("item.type").String() == "function_call" {
+					callCount++
+				}
+				if ev.Get("type").String() == "response.output_item.done" {
+					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
+					if ev.Get("item.type").String() == "function_call" {
+						callArgs[ev.Get("item.id").String()] = ev.Get("item.arguments").String()
+					}
+				}
+			}
+		}
+	}
+
+	if callCount != 2 {
+		t.Fatalf("callCount = %d, want 2 (no duplicate calls)", callCount)
+	}
+	if callArgs["call_1"] != `{"a":1}` {
+		t.Fatalf("call_1 args = %q, want %q", callArgs["call_1"], `{"a":1}`)
+	}
+	if callArgs["call_2"] != `{"b":2}` {
+		t.Fatalf("call_2 args = %q, want %q", callArgs["call_2"], `{"b":2}`)
+	}
+	expectedOrder := []string{"function_call", "function_call", "message"}
+	if len(doneItemTypes) != len(expectedOrder) {
+		t.Fatalf("doneItemTypes len = %d (%v), want %d (%v)", len(doneItemTypes), doneItemTypes, len(expectedOrder), expectedOrder)
+	}
+	for i, want := range expectedOrder {
+		if doneItemTypes[i] != want {
+			t.Fatalf("doneItemTypes[%d] = %q, want %q", i, doneItemTypes[i], want)
+		}
+	}
+
+	// 2. Non-streaming test
+	var nonStreamBuf bytes.Buffer
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f1))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f2))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f3))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f4))
+	nonStreamBuf.Write(helps.WrapConnectEnvelope(f5))
+	nonStreamBuf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+	interactionsJSON, _, err := consumeDevinFramesToInteractions(&nonStreamBuf, "devin/swe-2", "swe-2-high")
+	if err != nil {
+		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
+	}
+	root := gjson.ParseBytes(interactionsJSON)
+	steps := root.Get("steps").Array()
+	if len(steps) != 3 {
+		t.Fatalf("steps count = %d, want 3 [call_1, call_2, text]. Steps: %s", len(steps), string(interactionsJSON))
+	}
+	if steps[0].Get("id").String() != "call_1" || steps[0].Get("arguments").String() != `{"a":1}` {
+		t.Fatalf("step[0] = %+v, want call_1 with {\"a\":1}", steps[0].Raw)
+	}
+	if steps[1].Get("id").String() != "call_2" || steps[1].Get("arguments").String() != `{"b":2}` {
+		t.Fatalf("step[1] = %+v, want call_2 with {\"b\":2}", steps[1].Raw)
+	}
+	if steps[2].Get("type").String() != "model_output" {
+		t.Fatalf("step[2] type = %q, want model_output", steps[2].Get("type").String())
+	}
+	if steps[2].Get("content.0.text").String() != "Working on step 1... All done." {
+		t.Fatalf("step[2] text = %q, want 'Working on step 1... All done.'", steps[2].Get("content.0.text").String())
+	}
 }

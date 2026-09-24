@@ -5,6 +5,14 @@ host: ""
 # Server port
 port: 8317
 
+# IP addresses or CIDRs of proxies allowed to supply forwarded client IP headers.
+# An empty list (the default) does not trust forwarded headers. Restart after changing this setting.
+trusted-proxies: []
+# Example:
+# trusted-proxies:
+#   - 127.0.0.1
+#   - 192.0.2.0/24
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
@@ -264,6 +272,10 @@ routing:
 
 # Codex provider behavior.
 codex:
+  # Experimental full-duplex Codex Responses WebSocket steering (default: false).
+  # Keeps one upstream account/model per socket; accepted input is never replayed.
+  # See STEERING.md for limitations.
+  response-steering: false
   # When true, and routing.strategy is fill-first or routing.session-affinity is true,
   # remap Codex prompt_cache_key and installation identity per selected auth.
   # Some superstitious users believe request tracking identifiers can be used
@@ -496,6 +508,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
+#     disable-codex-cloaking: false # optional override: true disables cloaking, false enables it; omit to inherit global
 #     request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #       - status: 400
@@ -704,14 +717,15 @@ nonstream-keepalive-interval: 0
 #
 # Default headers for Claude API requests. Update only after measuring a new Claude Code release.
 # Unconfirmed clients use this CLI baseline. Verified native Claude Code CLI, sdk-cli,
-# and VSCode requests preserve their measured entrypoint and software shape only when the
-# Claude Code version, package version, and runtime version exactly match this configured
-# baseline; unmeasured versions fall back to it. In legacy mode, timeout is a fallback and
+# and VSCode requests preserve their measured entrypoint when the Claude Code version is a
+# patch release in the configured major/minor line at or above this baseline. Older versions
+# and newer major/minor lines fall back to the baseline until measured. In legacy mode,
+# timeout is a fallback and
 # verified native OS/arch values remain client-supplied. When stabilize-device-profile is
 # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
 # the same exact software baseline rather than learning newer client versions.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.258 (external, cli)"
+#   user-agent: "claude-cli/2.1.280 (external, cli)"
 #   package-version: "0.112.1"
 #   runtime-version: "v26.3.0"
 #   os: "MacOS"
@@ -766,6 +780,7 @@ nonstream-keepalive-interval: 0
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known
 #         is-compat: false                # optional: preserve Claude thinking blocks for compatible upstreams
+#         use-max-completion-tokens: false # optional: default false (uses max_tokens); set true to use max_completion_tokens
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]. Exceeding levels (e.g. "max", "xhigh") are clamped to "high"; explicitly declare levels here if the upstream supports them
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.

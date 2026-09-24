@@ -331,6 +331,54 @@ func TestFileTokenStoreListExpandsPluginMultiAuths(t *testing.T) {
 	}
 }
 
+func TestFileTokenStoreListAppliesSourcePriorityToPluginAuths(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		raw          string
+		want         string
+		wantMetadata any
+	}{
+		{name: "number", raw: `{"type":"plugin","priority":1}`, want: "1", wantMetadata: float64(1)},
+		{name: "string", raw: `{"type":"plugin","priority":" 2 "}`, want: "2", wantMetadata: " 2 "},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			baseDir := t.TempDir()
+			path := filepath.Join(baseDir, "plugin.json")
+			if errWrite := os.WriteFile(path, []byte(testCase.raw), 0o600); errWrite != nil {
+				t.Fatalf("write auth file: %v", errWrite)
+			}
+			RegisterPluginAuthParser(fileStoreMultiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
+				return []*cliproxyauth.Auth{
+					{ID: "first", Provider: "plugin", Metadata: map[string]any{"project_id": "first"}},
+					{ID: "second", Provider: "plugin", Metadata: map[string]any{"project_id": "second"}},
+				}, true, nil
+			}))
+			t.Cleanup(func() { RegisterPluginAuthParser(nil) })
+
+			store := NewFileTokenStore()
+			store.SetBaseDir(baseDir)
+			auths, errList := store.List(context.Background())
+			if errList != nil {
+				t.Fatalf("List() error = %v", errList)
+			}
+			if len(auths) != 2 {
+				t.Fatalf("List() len = %d, want 2", len(auths))
+			}
+			for _, auth := range auths {
+				if got := auth.Attributes["priority"]; got != testCase.want {
+					t.Errorf("auth %s priority attribute = %q, want %q", auth.ID, got, testCase.want)
+				}
+				if got := auth.Attributes[cliproxyauth.AttributeFilePriority]; got != "true" {
+					t.Errorf("auth %s file priority marker = %q, want true", auth.ID, got)
+				}
+				if got := auth.Metadata["priority"]; got != testCase.wantMetadata {
+					t.Errorf("auth %s priority metadata = %v, want %v", auth.ID, got, testCase.wantMetadata)
+				}
+			}
+		})
+	}
+}
+
 func TestFileTokenStoreListAppliesSourceDisabledToPluginMultiAuths(t *testing.T) {
 	baseDir := t.TempDir()
 	path := filepath.Join(baseDir, "geminicli.json")

@@ -16,6 +16,9 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	if !req.Stream {
 		return nil, fmt.Errorf("host.model.execute_stream requires stream=true")
 	}
+	if errProxy := validateHostModelProxy(req.ProxyURL); errProxy != nil {
+		return nil, errProxy
+	}
 	executor := h.currentModelExecutor()
 	if executor == nil {
 		return nil, fmt.Errorf("host model executor is unavailable")

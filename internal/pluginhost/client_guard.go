@@ -10,15 +10,37 @@ type guardedPluginClient struct {
 	mu           sync.Mutex
 	cond         *sync.Cond
 	inner        pluginClient
+	instance     *hostCallbackInstance
 	calls        int
 	closed       bool
 	shutdownDone chan struct{}
 }
 
 func newGuardedPluginClient(inner pluginClient) *guardedPluginClient {
-	client := &guardedPluginClient{inner: inner, shutdownDone: make(chan struct{})}
+	instance := pluginCallbackInstance(inner)
+	if instance == nil {
+		instance = &hostCallbackInstance{}
+	}
+	client := &guardedPluginClient{inner: inner, instance: instance, shutdownDone: make(chan struct{})}
 	client.cond = sync.NewCond(&client.mu)
 	return client
+}
+
+func (c *guardedPluginClient) callbackInstance() *hostCallbackInstance {
+	if c == nil {
+		return nil
+	}
+	return c.instance
+}
+
+func pluginCallbackInstance(client pluginClient) *hostCallbackInstance {
+	if client == nil {
+		return nil
+	}
+	if provider, ok := client.(interface{ callbackInstance() *hostCallbackInstance }); ok {
+		return provider.callbackInstance()
+	}
+	return nil
 }
 
 func (c *guardedPluginClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {

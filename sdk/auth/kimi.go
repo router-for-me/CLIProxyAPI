@@ -17,15 +17,34 @@ import (
 var kimiRefreshLead = 5 * time.Minute
 
 // KimiAuthenticator implements the OAuth device flow login for Kimi (Moonshot AI).
-type KimiAuthenticator struct{}
+type KimiAuthenticator struct {
+	domain   string
+	provider string
+}
 
-// NewKimiAuthenticator constructs a new Kimi authenticator.
+// NewKimiAuthenticator constructs a new Kimi authenticator for kimi.com.
 func NewKimiAuthenticator() Authenticator {
-	return &KimiAuthenticator{}
+	return &KimiAuthenticator{domain: kimi.KimiDefaultDomain, provider: "kimi"}
+}
+
+// NewKimiAIAuthenticator constructs a new Kimi authenticator for kimi.ai with provider "kimi-ai".
+func NewKimiAIAuthenticator() Authenticator {
+	return &KimiAuthenticator{domain: kimi.KimiAIDomain, provider: "kimi-ai"}
+}
+
+// NewKimiAIDotAuthenticator constructs a new Kimi authenticator for kimi.ai with provider "kimi.ai".
+func NewKimiAIDotAuthenticator() Authenticator {
+	return &KimiAuthenticator{domain: kimi.KimiAIDomain, provider: "kimi.ai"}
 }
 
 // Provider returns the provider key for kimi.
-func (KimiAuthenticator) Provider() string {
+func (a KimiAuthenticator) Provider() string {
+	if a.provider != "" {
+		return a.provider
+	}
+	if kimi.IsKimiAIDomain(a.domain) {
+		return "kimi-ai"
+	}
 	return "kimi"
 }
 
@@ -44,10 +63,25 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		opts = &LoginOptions{}
 	}
 
-	authSvc := kimi.NewKimiAuth(cfg)
+	domain := a.domain
+	if domain == "" {
+		domain = kimi.KimiDefaultDomain
+	}
+	isAI := kimi.IsKimiAIDomain(domain)
+	displayName := "Kimi"
+	providerKey := a.Provider()
+	filePrefix := "kimi"
+	baseURL := kimi.KimiAPIBaseURL
+	if isAI {
+		displayName = "Kimi.ai"
+		filePrefix = "kimi-ai"
+		baseURL = kimi.KimiAIAPIBaseURL
+	}
+
+	authSvc := kimi.NewKimiAuthWithDomain(cfg, domain)
 
 	// Start the device flow
-	fmt.Println("Starting Kimi authentication...")
+	fmt.Printf("Starting %s authentication...\n", displayName)
 	deviceCode, err := authSvc.StartDeviceFlow(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("kimi: failed to start device flow: %w", err)
@@ -88,15 +122,20 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 
 	// Create the token storage
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
+	if isAI {
+		tokenStorage.Type = providerKey
+	}
 
 	// Build metadata with token information
 	metadata := map[string]any{
-		"type":          "kimi",
+		"type":          providerKey,
 		"access_token":  authBundle.TokenData.AccessToken,
 		"refresh_token": authBundle.TokenData.RefreshToken,
 		"token_type":    authBundle.TokenData.TokenType,
 		"scope":         authBundle.TokenData.Scope,
 		"timestamp":     time.Now().UnixMilli(),
+		"domain":        domain,
+		"base_url":      baseURL,
 	}
 
 	if authBundle.TokenData.ExpiresAt > 0 {
@@ -108,16 +147,20 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 	}
 
 	// Generate a unique filename
-	fileName := fmt.Sprintf("kimi-%d.json", time.Now().UnixMilli())
+	fileName := fmt.Sprintf("%s-%d.json", filePrefix, time.Now().UnixMilli())
 
-	fmt.Println("\nKimi authentication successful!")
+	fmt.Printf("\n%s authentication successful!\n", displayName)
 
 	return &coreauth.Auth{
 		ID:       fileName,
-		Provider: a.Provider(),
+		Provider: providerKey,
 		FileName: fileName,
-		Label:    "Kimi User",
+		Label:    fmt.Sprintf("%s User", displayName),
 		Storage:  tokenStorage,
 		Metadata: metadata,
+		Attributes: map[string]string{
+			"base_url": baseURL,
+			"domain":   domain,
+		},
 	}, nil
 }

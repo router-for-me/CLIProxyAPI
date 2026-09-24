@@ -132,7 +132,9 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(body)
 	body = normalizeCodexInstructions(body)
-	body = sanitizeXAIResponsesBody(body, baseModel)
+	// stop is supported by Chat Completions but not by xAI's Responses API.
+	// Thinking was handled before payload overrides and must not be revalidated here.
+	body, _ = sjson.DeleteBytes(body, "stop")
 	body = normalizeXAIImageRefs(body)
 
 	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
@@ -633,21 +635,6 @@ func xaiCompareGrokVersion(a, b xaiGrokVersion) int {
 		return 1
 	}
 	return 0
-}
-
-func sanitizeXAIResponsesBody(body []byte, model string) []byte {
-	// stop is supported by Chat Completions but not by xAI's Responses API.
-	body, _ = sjson.DeleteBytes(body, "stop")
-	if !xaiSupportsReasoningEffort(model) {
-		if gjson.GetBytes(body, "reasoning.effort").Exists() {
-			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
-		}
-		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
-		if reasoning := gjson.GetBytes(body, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
-			body, _ = sjson.DeleteBytes(body, "reasoning")
-		}
-	}
-	return body
 }
 
 // ensureXAINativeXSearchTool appends {"type":"x_search"} when the final tools

@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -71,16 +73,31 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {
-	if auth == nil || e.cfg == nil {
+	if e == nil {
+		return nil
+	}
+	return resolveCodexKeyConfig(e.cfg, auth)
+}
+
+func resolveCodexKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CodexKey {
+	if auth == nil || cfg == nil {
 		return nil
 	}
 	var attrKey, attrBase string
 	if auth.Attributes != nil {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		if index, errIndex := strconv.Atoi(strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeConfigIndex])); errIndex == nil && index >= 0 && index < len(cfg.CodexKey) {
+			entry := &cfg.CodexKey[index]
+			cfgKey := strings.TrimSpace(entry.APIKey)
+			cfgBase := strings.TrimSpace(entry.BaseURL)
+			if (attrKey == "" || strings.EqualFold(cfgKey, attrKey)) && (attrBase == "" || strings.EqualFold(cfgBase, attrBase)) {
+				return entry
+			}
+		}
 	}
-	for i := range e.cfg.CodexKey {
-		entry := &e.cfg.CodexKey[i]
+	for i := range cfg.CodexKey {
+		entry := &cfg.CodexKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && attrBase != "" {
@@ -99,12 +116,36 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 		}
 	}
 	if attrKey != "" {
-		for i := range e.cfg.CodexKey {
-			entry := &e.cfg.CodexKey[i]
+		for i := range cfg.CodexKey {
+			entry := &cfg.CodexKey[i]
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
 				return entry
 			}
 		}
 	}
 	return nil
+}
+
+func (e *CodexExecutor) resolveCodexModelIsCompat(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, baseModel string) bool {
+	if modelInfo, ok := cliproxyauth.ResolvedModelInfo(req); ok && modelInfo != nil {
+		return modelInfo.IsCompat
+	}
+	entry := e.resolveCodexConfig(auth)
+	if entry != nil && len(entry.Models) > 0 {
+		requested := strings.TrimSpace(req.Model)
+		target := strings.TrimSpace(baseModel)
+		for i := range entry.Models {
+			name := strings.TrimSpace(entry.Models[i].Name)
+			alias := strings.TrimSpace(entry.Models[i].Alias)
+			if (target != "" && (strings.EqualFold(name, target) || strings.EqualFold(alias, target))) ||
+				(requested != "" && (strings.EqualFold(name, requested) || strings.EqualFold(alias, requested))) {
+				return entry.Models[i].IsCompat
+			}
+		}
+		return false
+	}
+	if cliproxyauth.CodexAPIKeyModelIsCompat(e.cfg, auth, baseModel) || cliproxyauth.CodexAPIKeyModelIsCompat(e.cfg, auth, req.Model) {
+		return true
+	}
+	return false
 }

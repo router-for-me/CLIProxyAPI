@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -961,16 +962,31 @@ func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64, int64) {
 	outputTokens := usage.Get("completion_tokens").Int()
 	cachedTokens := usage.Get("prompt_tokens_details.cached_tokens").Int()
 	cacheWriteTokens := usage.Get("prompt_tokens_details.cache_write_tokens").Int()
-	if cacheWriteTokens == 0 {
+	if cacheWriteTokens <= 0 {
 		cacheWriteTokens = usage.Get("prompt_tokens_details.cache_creation_tokens").Int()
 	}
 
+	deductTokens := int64(0)
 	if cachedTokens > 0 {
-		if inputTokens >= cachedTokens {
-			inputTokens -= cachedTokens
+		deductTokens += cachedTokens
+	}
+	if cacheWriteTokens > 0 {
+		if math.MaxInt64-deductTokens < cacheWriteTokens {
+			deductTokens = math.MaxInt64
+		} else {
+			deductTokens += cacheWriteTokens
+		}
+	}
+
+	if deductTokens > 0 {
+		if inputTokens >= deductTokens {
+			inputTokens -= deductTokens
 		} else {
 			inputTokens = 0
 		}
+	}
+	if inputTokens < 0 {
+		inputTokens = 0
 	}
 
 	return inputTokens, outputTokens, cachedTokens, cacheWriteTokens

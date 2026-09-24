@@ -226,8 +226,29 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 	if !h.PluginLoaded("alpha") {
 		t.Fatal("PluginLoaded(alpha) = false, want true while library remains loaded")
 	}
+	h.mu.Lock()
+	instance := h.loaded["alpha"].callbackInstance
+	h.mu.Unlock()
+	operationID, operation, openedOperation := h.httpOperations.open("alpha", instance, "", context.Background())
+	if !openedOperation {
+		t.Fatal("failed to open alpha HTTP operation before shutdown")
+	}
 
 	h.ShutdownAll()
+	lateOpenContext := withHostCallbackIdentity(context.Background(), "alpha", instance)
+	if lateOperationID, errOpen := h.openHostHTTPOperation(lateOpenContext, ""); errOpen == nil {
+		h.httpOperations.cancel("alpha", instance, lateOperationID)
+		t.Fatal("opened an HTTP operation after host shutdown")
+	}
+	if operation.ctx.Err() != context.Canceled {
+		t.Fatalf("HTTP operation context error = %v, want context.Canceled after shutdown", operation.ctx.Err())
+	}
+	h.httpOperations.mu.Lock()
+	_, operationOpen := h.httpOperations.operations[hostHTTPOperationKey{pluginID: "alpha", operationID: operationID}]
+	h.httpOperations.mu.Unlock()
+	if operationOpen {
+		t.Fatal("HTTP operation remained registered after shutdown")
+	}
 	if h.PluginLoaded("alpha") {
 		t.Fatal("PluginLoaded(alpha) = true, want false after ShutdownAll")
 	}
@@ -259,14 +280,57 @@ func TestHostUnloadPluginTargetsOnlyRequestedPlugin(t *testing.T) {
 
 	h.ApplyConfig(context.Background(), cfg)
 
+	h.mu.Lock()
+	alphaInstance := h.loaded["alpha"].callbackInstance
+	bravoInstance := h.loaded["bravo"].callbackInstance
+	h.mu.Unlock()
+	alphaOperationID, alphaOperation, openedAlphaOperation := h.httpOperations.open("alpha", alphaInstance, "", context.Background())
+	if !openedAlphaOperation {
+		t.Fatal("failed to open alpha HTTP operation")
+	}
+	alphaCleanupDone := make(chan struct{})
+	if !h.httpOperations.setCleanup("alpha", alphaOperationID, alphaOperation, func() { close(alphaCleanupDone) }) {
+		t.Fatal("failed to attach alpha HTTP operation cleanup")
+	}
+	bravoOperationID, bravoOperation, openedBravoOperation := h.httpOperations.open("bravo", bravoInstance, "", context.Background())
+	if !openedBravoOperation {
+		t.Fatal("failed to open bravo HTTP operation")
+	}
+
 	if !h.UnloadPlugin("alpha") {
 		t.Fatal("UnloadPlugin(alpha) = false, want true")
+	}
+	lateOpenContext := withHostCallbackIdentity(context.Background(), "alpha", alphaInstance)
+	if lateOperationID, errOpen := h.openHostHTTPOperation(lateOpenContext, ""); errOpen == nil {
+		h.httpOperations.cancel("alpha", alphaInstance, lateOperationID)
+		t.Fatal("opened an HTTP operation after plugin unload started")
 	}
 	if h.PluginLoaded("alpha") {
 		t.Fatal("PluginLoaded(alpha) = true, want false after targeted unload")
 	}
 	if !h.PluginLoaded("bravo") {
 		t.Fatal("PluginLoaded(bravo) = false, want true after alpha unload")
+	}
+	if alphaOperation.ctx.Err() != context.Canceled {
+		t.Fatalf("alpha HTTP operation context error = %v, want context.Canceled after unload", alphaOperation.ctx.Err())
+	}
+	select {
+	case <-alphaCleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("alpha HTTP operation cleanup did not run after unload")
+	}
+	h.httpOperations.mu.Lock()
+	_, alphaOperationOpen := h.httpOperations.operations[hostHTTPOperationKey{pluginID: "alpha", operationID: alphaOperationID}]
+	_, bravoOperationOpen := h.httpOperations.operations[hostHTTPOperationKey{pluginID: "bravo", operationID: bravoOperationID}]
+	h.httpOperations.mu.Unlock()
+	if alphaOperationOpen {
+		t.Fatal("alpha HTTP operation remained registered after plugin unload")
+	}
+	if bravoOperation.ctx.Err() != nil {
+		t.Fatalf("unloading alpha canceled bravo's HTTP operation: %v", bravoOperation.ctx.Err())
+	}
+	if !bravoOperationOpen {
+		t.Fatal("bravo HTTP operation was removed while unloading alpha")
 	}
 	if alphaLookup.shutdownCalls != 1 {
 		t.Fatalf("alpha shutdown calls = %d, want 1", alphaLookup.shutdownCalls)
@@ -2200,6 +2264,82 @@ func (l *countingPluginLoader) Open(pluginFile, *Host) (pluginClient, error) {
 		return l.client, nil
 	}
 	return l.replacement, nil
+}
+
+type callbackInstanceCleanupClient struct {
+	shutdown chan struct{}
+	once     sync.Once
+}
+
+func (c *callbackInstanceCleanupClient) Call(context.Context, string, []byte) ([]byte, error) {
+	return nil, nil
+}
+
+func (c *callbackInstanceCleanupClient) Shutdown() {
+	c.once.Do(func() { close(c.shutdown) })
+}
+
+func finishPendingPluginLoadForTest(t *testing.T, request *pluginLoadRequest, instance *hostCallbackInstance) {
+	t.Helper()
+	client := &callbackInstanceCleanupClient{shutdown: make(chan struct{})}
+	request.result <- pluginLoadResult{loaded: &loadedPlugin{id: "alpha", client: client, callbackInstance: instance}}
+	waitForHostTestSignal(t, client.shutdown, "pending plugin client shutdown")
+}
+
+func TestHostCanceledLoadRejectsLateCallbackInstance(t *testing.T) {
+	h := New()
+	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+	h.mu.Lock()
+	h.loading["alpha"] = request
+	h.mu.Unlock()
+	var instance *hostCallbackInstance
+	defer func() { finishPendingPluginLoadForTest(t, request, instance) }()
+
+	h.cleanupCanceledPluginLoad("alpha", request)
+	instance = &hostCallbackInstance{}
+	h.registerHostCallbackInstance("alpha", instance)
+	ctx := withHostCallbackIdentity(context.Background(), "alpha", instance)
+	if _, errOpen := h.openHostHTTPOperation(ctx, ""); errOpen == nil {
+		t.Fatal("canceled load allowed a late callback instance to open an HTTP operation")
+	}
+}
+
+func TestHostShutdownAllRejectsLateCallbackInstanceFromPendingLoad(t *testing.T) {
+	h := New()
+	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+	h.mu.Lock()
+	h.loading["alpha"] = request
+	h.mu.Unlock()
+	var instance *hostCallbackInstance
+	defer func() { finishPendingPluginLoadForTest(t, request, instance) }()
+
+	h.ShutdownAll()
+	instance = &hostCallbackInstance{}
+	h.registerHostCallbackInstance("alpha", instance)
+	ctx := withHostCallbackIdentity(context.Background(), "alpha", instance)
+	if _, errOpen := h.openHostHTTPOperation(ctx, ""); errOpen == nil {
+		t.Fatal("shutdown allowed a late callback instance to open an HTTP operation")
+	}
+}
+
+func TestHostUnloadRejectsLateCallbackInstanceFromPendingLoad(t *testing.T) {
+	h := New()
+	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+	h.mu.Lock()
+	h.loading["alpha"] = request
+	h.mu.Unlock()
+	var instance *hostCallbackInstance
+	defer func() { finishPendingPluginLoadForTest(t, request, instance) }()
+
+	if !h.UnloadPlugin("alpha") {
+		t.Fatal("UnloadPlugin(alpha) = false, want true for a pending load")
+	}
+	instance = &hostCallbackInstance{}
+	h.registerHostCallbackInstance("alpha", instance)
+	ctx := withHostCallbackIdentity(context.Background(), "alpha", instance)
+	if _, errOpen := h.openHostHTTPOperation(ctx, ""); errOpen == nil {
+		t.Fatal("unload allowed a late callback instance to open an HTTP operation")
+	}
 }
 
 func TestHostShutdownAllRetainsBlockedLoadTokenUntilCleanup(t *testing.T) {

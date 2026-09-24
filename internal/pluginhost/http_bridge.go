@@ -28,17 +28,34 @@ import (
 )
 
 type hostHTTPClient struct {
-	host     *Host
-	auth     *coreauth.Auth
-	provider string
+	host            *Host
+	auth            *coreauth.Auth
+	provider        string
+	requestProxyURL string
 }
 
 func (h *Host) newHTTPClient(auth *coreauth.Auth, providers ...string) pluginapi.HostHTTPClient {
+	return h.newHTTPClientWithProxy(auth, "", providers...)
+}
+
+func (h *Host) newHTTPClientWithProxy(auth *coreauth.Auth, requestProxyURL string, providers ...string) pluginapi.HostHTTPClient {
 	provider := ""
 	if len(providers) > 0 {
 		provider = providers[0]
 	}
-	return &hostHTTPClient{host: h, auth: auth, provider: provider}
+	return &hostHTTPClient{
+		host:            h,
+		auth:            auth,
+		provider:        provider,
+		requestProxyURL: strings.TrimSpace(requestProxyURL),
+	}
+}
+
+func (c *hostHTTPClient) proxyContext(ctx context.Context) context.Context {
+	if c == nil {
+		return cliproxyexecutor.WithoutRequestProxyURL(ctx)
+	}
+	return cliproxyexecutor.WithRequestProxyURL(ctx, c.requestProxyURL)
 }
 
 func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
@@ -200,19 +217,18 @@ func (h *Host) currentRuntimeConfig() *config.Config {
 func (c *hostHTTPClient) newHTTPClientForRequest(ctx context.Context, cfg *config.Config, req pluginapi.HTTPRequest, httpReq *http.Request) (*http.Client, func(), error) {
 	profile := req.WireProfile
 	if profile == nil || (!profile.HTTP1Only && !profile.DisableAutoCompression && len(profile.HeaderProfile) == 0) {
-		client := helps.NewProxyAwareHTTPClient(ctx, cfg, c.auth, 0)
+		client := helps.NewProxyAwareHTTPClient(c.proxyContext(ctx), cfg, c.auth, 0)
 		if client == nil {
 			client = &http.Client{}
 		}
 		return client, nil, nil
 	}
 
-	// Priority 1: Auth proxy
-	var proxyStr string
-	if c.auth != nil {
+	// Priority: request override, then auth proxy, then config proxy.
+	proxyStr := strings.TrimSpace(c.requestProxyURL)
+	if proxyStr == "" && c.auth != nil {
 		proxyStr = strings.TrimSpace(c.auth.ProxyURL)
 	}
-	// Priority 2: Config proxy
 	if proxyStr == "" && cfg != nil {
 		proxyStr = strings.TrimSpace(cfg.ProxyURL)
 	}

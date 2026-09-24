@@ -60,6 +60,26 @@ func (r *Registry) RegisterRequestEnvelope(from, to Format, request RequestEnvel
 	}
 }
 
+// Unregister removes the request and response transforms for one format pair.
+// Empty parent maps are dropped so a temporary registration can be restored.
+func (r *Registry) Unregister(from, to Format) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if byTarget, ok := r.requests[from]; ok {
+		delete(byTarget, to)
+		if len(byTarget) == 0 {
+			delete(r.requests, from)
+		}
+	}
+	if byTarget, ok := r.responses[from]; ok {
+		delete(byTarget, to)
+		if len(byTarget) == 0 {
+			delete(r.responses, from)
+		}
+	}
+}
+
 // SetPluginHooks stores translator plugin hooks for this registry.
 func (r *Registry) SetPluginHooks(hooks PluginHooks) {
 	r.mu.Lock()
@@ -296,6 +316,11 @@ func Default() *Registry {
 // Register attaches transforms to the default registry.
 func Register(from, to Format, request RequestTransform, response ResponseTransform) {
 	defaultRegistry.Register(from, to, request, response)
+}
+
+// Unregister removes transforms for one format pair from the default registry.
+func Unregister(from, to Format) {
+	defaultRegistry.Unregister(from, to)
 }
 
 // RegisterRequestEnvelope stores an envelope-aware transform on the default registry.

@@ -17,6 +17,22 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func TestSyncAuthFilePriorityAttributeTracksFileSource(t *testing.T) {
+	auth := &coreauth.Auth{
+		Attributes: map[string]string{coreauth.AttributeSourceBackend: coreauth.AuthSourceFile},
+		Metadata:   map[string]any{"priority": float64(1)},
+	}
+	syncAuthFilePriorityAttribute(auth)
+	if auth.Attributes[coreauth.AttributeFilePriority] != "true" {
+		t.Fatal("added file priority not marked as inherited")
+	}
+	delete(auth.Metadata, "priority")
+	syncAuthFilePriorityAttribute(auth)
+	if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
+		t.Fatal("removed file priority still marked as inherited")
+	}
+}
+
 func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
