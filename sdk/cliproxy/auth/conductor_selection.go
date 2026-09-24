@@ -79,11 +79,54 @@ type authSelectionEligibility struct {
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
+	allowedAuthIDs   map[string]struct{}
+	excludedAuthIDs  map[string]struct{}
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
 	return context.WithValue(ctx, requiredAuthKindContextKey{}, requiredKind)
 }
+
+type allowedAuthIDsContextKey struct{}
+type excludedAuthIDsContextKey struct{}
+
+// WithAllowedAuthIDs restricts selection to the given auth IDs when non-empty.
+// Empty/nil does not restrict. Used by embedding hosts to replace local
+// enumerate-and-pick fallbacks (Compatible/allow-list seams).
+func WithAllowedAuthIDs(ctx context.Context, ids []string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	set := authIDSet(ids)
+	if len(set) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, allowedAuthIDsContextKey{}, set)
+}
+
+// WithExcludedAuthIDs skips the given auth IDs during selection.
+func WithExcludedAuthIDs(ctx context.Context, ids []string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	set := authIDSet(ids)
+	if len(set) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, excludedAuthIDsContextKey{}, set)
+}
+
+func authIDSet(ids []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			out[id] = struct{}{}
+		}
+	}
+	return out
+}
+
 
 func withCredentialPolicy(ctx context.Context, policy string) context.Context {
 	return context.WithValue(ctx, credentialPolicyContextKey{}, policy)
@@ -102,6 +145,12 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
+		if allowed, ok := ctx.Value(allowedAuthIDsContextKey{}).(map[string]struct{}); ok {
+			eligibility.allowedAuthIDs = allowed
+		}
+		if excluded, ok := ctx.Value(excludedAuthIDsContextKey{}).(map[string]struct{}); ok {
+			eligibility.excludedAuthIDs = excluded
+		}
 	}
 	return eligibility
 }
@@ -115,6 +164,16 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 	}
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
 		return false
+	}
+	if len(e.allowedAuthIDs) > 0 {
+		if _, ok := e.allowedAuthIDs[auth.ID]; !ok {
+			return false
+		}
+	}
+	if len(e.excludedAuthIDs) > 0 {
+		if _, ok := e.excludedAuthIDs[auth.ID]; ok {
+			return false
+		}
 	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
 }
