@@ -75,8 +75,8 @@ func fetchDevinModelsFromRemote(ctx context.Context) ([]byte, string) {
 		}
 
 		resp, err := client.Do(req)
-		cancel()
 		if err != nil {
+			cancel()
 			log.Warnf("devin models updater: fetch failed from %s: %v", sourceURL, err)
 			continue
 		}
@@ -84,11 +84,15 @@ func fetchDevinModelsFromRemote(ctx context.Context) ([]byte, string) {
 		if resp.StatusCode != http.StatusOK {
 			log.Warnf("devin models updater: unexpected status %d from %s", resp.StatusCode, sourceURL)
 			_ = resp.Body.Close()
+			cancel()
 			continue
 		}
 
+		// Cancel only after the body is read: canceling the request context
+		// aborts a body that has not fully arrived yet.
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxDevinModelsSize))
 		_ = resp.Body.Close()
+		cancel()
 		if err != nil {
 			log.Warnf("devin models updater: read failed from %s: %v", sourceURL, err)
 			continue
