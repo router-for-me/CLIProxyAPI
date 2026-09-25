@@ -152,8 +152,14 @@ func (u claudeResponsesUsageTokens) OpenAIResponsesUsage() (inputTokens, outputT
 }
 
 func claudeResponsesIncompleteDetails(stopReason string) ([]byte, bool) {
-	if strings.EqualFold(strings.TrimSpace(stopReason), "max_tokens") {
+	switch strings.ToLower(strings.TrimSpace(stopReason)) {
+	case "max_tokens":
 		return []byte(`{"reason":"max_output_tokens"}`), true
+	case "pause_turn":
+		// Anthropic's server-tool iteration pause is unfinished, not a token limit:
+		// https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons#pause_turn
+		// Responses has no matching incomplete reason, so keep its nullable details null.
+		return []byte(`null`), true
 	}
 	return nil, false
 }
