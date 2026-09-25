@@ -2378,6 +2378,31 @@ func TestConvertClaudeRequestToAntigravity_ToolResult(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_NonThinkingClaudePreservesToolResultAdjacency(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"file":"README.md"}}]},
+			{"role":"user","content":[
+				{"type":"text","text":"Continue after the tool result."},
+				{"type":"tool_result","tool_use_id":"call_1","content":"file contents"}
+			]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	contents := gjson.GetBytes(output, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected model turn, function response turn, and text turn; got %d: %s", len(contents), output)
+	}
+	if !gjson.GetBytes([]byte(contents[1].Raw), "parts.0.functionResponse").Exists() {
+		t.Fatalf("expected function response immediately after model turn: %s", output)
+	}
+	if got := gjson.GetBytes([]byte(contents[2].Raw), "parts.0.text").String(); got != "Continue after the tool result." {
+		t.Fatalf("text turn = %q, want reminder text", got)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolResultName_TouluFormat(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-haiku-4-5-20251001",
