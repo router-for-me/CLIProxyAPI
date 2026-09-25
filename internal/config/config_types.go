@@ -180,6 +180,9 @@ type AntigravityConnectionPoolConfig struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
+	// HTTP1 opts ChatGPT HTTP/SSE requests into verified HTTP/1.1 transport.
+	// Useful when the network path rejects the browser-profile HTTP/2 connection.
+	HTTP1           bool `yaml:"http1" json:"http1"`
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`

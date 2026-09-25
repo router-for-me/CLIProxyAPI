@@ -375,6 +375,9 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	}
 
 	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	if cfg != nil && cfg.Codex.HTTP1 {
+		chromeRT = newCodexHTTP1RoundTripper(proxyURL)
+	}
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
@@ -396,6 +399,17 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	}
 	if timeout > 0 {
 		client.Timeout = timeout
+	}
+	if cfg != nil && cfg.Codex.HTTP1 {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) > 0 && strings.EqualFold(via[0].URL.Hostname(), "chatgpt.com") {
+				return http.ErrUseLastResponse
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		}
 	}
 	return client
 }
