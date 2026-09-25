@@ -1970,6 +1970,21 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 			currentToolUse = newState
 			toolUses = append(toolUses, completedToolUses...)
 
+		case "content_block_stop":
+			// Finalize any in-progress tool use when Anthropic signals block completion
+			if currentToolUse != nil {
+				log.Infof("kiro: content_block_stop received, finalizing tool %s (ID: %s)", currentToolUse.Name, currentToolUse.ToolUseID)
+				// Inject synthetic stop signal to finalize the accumulated tool
+				syntheticStop := map[string]interface{}{
+					"toolUseId": currentToolUse.ToolUseID,
+					"name":      currentToolUse.Name,
+					"stop":      true,
+				}
+				completedToolUses, newState := kiroclaude.ProcessToolUseEvent(syntheticStop, currentToolUse, processedIDs)
+				currentToolUse = newState
+				toolUses = append(toolUses, completedToolUses...)
+			}
+
 		case "supplementaryWebLinksEvent":
 			if inputTokens, ok := event["inputTokens"].(float64); ok {
 				usageInfo.InputTokens = int64(inputTokens)
@@ -3327,6 +3342,68 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
 				for _, chunk := range sseData {
 					enqueueTranslatedSSE(out, chunk)
+				}
+			}
+
+		case "content_block_stop":
+			// Finalize any in-progress tool use when Anthropic signals block completion
+			if currentToolUse != nil {
+				log.Infof("kiro: content_block_stop received, finalizing tool %s (ID: %s)", currentToolUse.Name, currentToolUse.ToolUseID)
+				// Inject synthetic stop signal to finalize the accumulated tool
+				syntheticStop := map[string]interface{}{
+					"toolUseId": currentToolUse.ToolUseID,
+					"name":      currentToolUse.Name,
+					"stop":      true,
+				}
+				completedToolUses, newState := kiroclaude.ProcessToolUseEvent(syntheticStop, currentToolUse, processedIDs)
+				currentToolUse = newState
+
+				// Emit completed tool uses
+				for _, tu := range completedToolUses {
+					// Skip truncated tools - don't emit fake marker tool_use
+					if tu.IsTruncated {
+						log.Warnf("kiro: streamToChannel skipping truncated tool: %s (ID: %s)", tu.Name, tu.ToolUseID)
+						continue
+					}
+
+					hasToolUses = true
+
+					// Close text block if open
+					if isTextBlockOpen && contentBlockIndex >= 0 {
+						blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
+						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+						for _, chunk := range sseData {
+							enqueueTranslatedSSE(out, chunk)
+						}
+						isTextBlockOpen = false
+					}
+
+					contentBlockIndex++
+
+					blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "tool_use", tu.ToolUseID, tu.Name)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+					for _, chunk := range sseData {
+						enqueueTranslatedSSE(out, chunk)
+					}
+
+					if tu.Input != nil {
+						inputJSON, err := json.Marshal(tu.Input)
+						if err != nil {
+							log.Debugf("kiro: failed to marshal tool input in content_block_stop: %v", err)
+						} else {
+							inputDelta := kiroclaude.BuildClaudeInputJsonDeltaEvent(string(inputJSON), contentBlockIndex)
+							sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, inputDelta, &translatorParam)
+							for _, chunk := range sseData {
+								enqueueTranslatedSSE(out, chunk)
+							}
+						}
+					}
+
+					blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
+					sseData = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+					for _, chunk := range sseData {
+						enqueueTranslatedSSE(out, chunk)
+					}
 				}
 			}
 
