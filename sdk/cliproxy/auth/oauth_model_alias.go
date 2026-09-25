@@ -3,9 +3,12 @@ package auth
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	log "github.com/sirupsen/logrus"
 )
 
 const oauthModelAliasesAttributeKey = "model_aliases"
@@ -26,6 +29,16 @@ type oauthModelAliasEntry struct {
 type oauthModelAliasTable struct {
 	// reverse maps channel -> alias (lower) -> entry with upstream model and flags.
 	reverse map[string]map[string]oauthModelAliasEntry
+	// wildcards maps channel -> ordered alias patterns containing '*'. Patterns are
+	// consulted only after the exact lookup misses, so existing configurations that
+	// use plain aliases keep their behaviour unchanged.
+	wildcards map[string][]oauthModelAliasWildcard
+}
+
+// oauthModelAliasWildcard pairs a wildcard alias pattern with the entry it resolves to.
+type oauthModelAliasWildcard struct {
+	pattern string
+	entry   oauthModelAliasEntry
 }
 
 // OAuthModelAliasResult contains the resolved upstream model and mapping metadata.
@@ -40,7 +53,8 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 		return &oauthModelAliasTable{}
 	}
 	out := &oauthModelAliasTable{
-		reverse: make(map[string]map[string]oauthModelAliasEntry, len(aliases)),
+		reverse:   make(map[string]map[string]oauthModelAliasEntry, len(aliases)),
+		wildcards: make(map[string][]oauthModelAliasWildcard, len(aliases)),
 	}
 	for rawChannel, entries := range aliases {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
@@ -48,6 +62,8 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			continue
 		}
 		rev := make(map[string]oauthModelAliasEntry, len(entries))
+		var wild []oauthModelAliasWildcard
+		seenPattern := make(map[string]struct{})
 		for _, entry := range entries {
 			name := strings.TrimSpace(entry.Name)
 			alias := strings.TrimSpace(entry.Alias)
@@ -57,24 +73,70 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			if strings.EqualFold(name, alias) {
 				continue
 			}
-			aliasKey := strings.ToLower(alias)
-			if _, exists := rev[aliasKey]; exists {
-				continue
-			}
-			rev[aliasKey] = oauthModelAliasEntry{
+			resolved := oauthModelAliasEntry{
 				upstreamModel: name,
 				configAlias:   alias,
 				forceMapping:  entry.ForceMapping,
 			}
+			aliasKey := strings.ToLower(alias)
+			if strings.Contains(alias, "*") {
+				// Wildcard aliases keep configuration order: the first match wins.
+				if _, exists := seenPattern[aliasKey]; exists {
+					continue
+				}
+				seenPattern[aliasKey] = struct{}{}
+				wild = append(wild, oauthModelAliasWildcard{pattern: alias, entry: resolved})
+				continue
+			}
+			if _, exists := rev[aliasKey]; exists {
+				continue
+			}
+			rev[aliasKey] = resolved
 		}
 		if len(rev) > 0 {
 			out.reverse[channel] = rev
+		}
+		if len(wild) > 0 {
+			out.wildcards[channel] = wild
 		}
 	}
 	if len(out.reverse) == 0 {
 		out.reverse = nil
 	}
+	if len(out.wildcards) == 0 {
+		out.wildcards = nil
+	}
 	return out
+}
+
+// oauthModelAliasResultFor builds the alias result for a matched alias entry.
+//
+// The boolean reports whether the match is terminal. A matched alias always stops
+// the search, including the case where it deliberately resolves to no rewrite.
+func oauthModelAliasResultFor(upstreamModel, configAlias string, forceMapping bool, requestedModel, baseModel string, requestResult thinking.SuffixResult) (OAuthModelAliasResult, bool) {
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if upstreamModel == "" {
+		return OAuthModelAliasResult{}, false
+	}
+	if strings.EqualFold(upstreamModel, baseModel) {
+		if !forceMapping {
+			return OAuthModelAliasResult{}, true
+		}
+		return OAuthModelAliasResult{
+			UpstreamModel: preserveResolvedModelSuffix(upstreamModel, requestResult),
+			ForceMapping:  true,
+			OriginalAlias: oauthModelAliasForceMappingResponseModel(configAlias),
+		}, true
+	}
+	originalAlias := requestedModel
+	if forceMapping {
+		originalAlias = oauthModelAliasForceMappingResponseModel(configAlias)
+	}
+	return OAuthModelAliasResult{
+		UpstreamModel: preserveResolvedModelSuffix(upstreamModel, requestResult),
+		ForceMapping:  forceMapping,
+		OriginalAlias: originalAlias,
+	}, true
 }
 
 // SetOAuthModelAlias updates the OAuth model name alias table used during execution.
@@ -287,6 +349,7 @@ func SetOAuthModelAliasesAttribute(auth *Auth, aliases []internalconfig.OAuthMod
 	if len(aliases) == 0 {
 		return
 	}
+	warnUnroutablePerAuthWildcardAliases(auth, aliases)
 	data, errMarshal := json.Marshal(aliases)
 	if errMarshal != nil {
 		return
@@ -342,35 +405,40 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 	if baseModel == "" {
 		baseModel = strings.TrimSpace(requestedModel)
 	}
-	for _, candidate := range candidates {
-		key := strings.TrimSpace(candidate)
-		if key == "" {
-			continue
-		}
-		for _, entry := range aliases {
-			original := strings.TrimSpace(entry.Name)
-			alias := strings.TrimSpace(entry.Alias)
-			if original == "" || alias == "" || !strings.EqualFold(alias, key) {
+	// Exact aliases are resolved first; wildcard patterns are consulted only when no
+	// exact alias matched any candidate, so plain configurations are unaffected.
+	for _, exactPass := range []bool{true, false} {
+		for _, candidate := range candidates {
+			key := strings.TrimSpace(candidate)
+			if key == "" {
 				continue
 			}
-			if strings.EqualFold(original, baseModel) {
-				if !entry.ForceMapping {
-					return OAuthModelAliasResult{}
+			for _, entry := range aliases {
+				alias := strings.TrimSpace(entry.Alias)
+				if alias == "" {
+					continue
 				}
-				return OAuthModelAliasResult{
-					UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
-					ForceMapping:  entry.ForceMapping,
-					OriginalAlias: oauthModelAliasForceMappingResponseModel(alias),
+				if strings.Contains(alias, "*") == exactPass {
+					continue
 				}
-			}
-			originalAlias := requestedModel
-			if entry.ForceMapping {
-				originalAlias = oauthModelAliasForceMappingResponseModel(alias)
-			}
-			return OAuthModelAliasResult{
-				UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
-				ForceMapping:  entry.ForceMapping,
-				OriginalAlias: originalAlias,
+				if exactPass {
+					if !strings.EqualFold(alias, key) {
+						continue
+					}
+				} else if !registry.MatchModelPattern(alias, key) {
+					continue
+				}
+				// A wildcard alias is a pattern, not a client-visible model id, so a
+				// force-mapped response must echo the concrete model the client asked
+				// for rather than the configured pattern. The thinking suffix is
+				// dropped the same way an exact alias never carries one.
+				responseAlias := alias
+				if !exactPass {
+					responseAlias = baseModel
+				}
+				if result, stop := oauthModelAliasResultFor(entry.Name, responseAlias, entry.ForceMapping, requestedModel, baseModel, requestResult); stop {
+					return result
+				}
 			}
 		}
 	}
@@ -398,11 +466,18 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 
 	raw := m.oauthModelAlias.Load()
 	table, _ := raw.(*oauthModelAliasTable)
-	if table == nil || table.reverse == nil {
+	if table == nil {
 		return OAuthModelAliasResult{}
 	}
-	rev := table.reverse[channel]
-	if rev == nil {
+	var rev map[string]oauthModelAliasEntry
+	if table.reverse != nil {
+		rev = table.reverse[channel]
+	}
+	var wild []oauthModelAliasWildcard
+	if table.wildcards != nil {
+		wild = table.wildcards[channel]
+	}
+	if len(rev) == 0 && len(wild) == 0 {
 		return OAuthModelAliasResult{}
 	}
 
@@ -415,40 +490,28 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 		if !exists {
 			continue
 		}
+		if result, stop := oauthModelAliasResultFor(entry.upstreamModel, entry.configAlias, entry.forceMapping, requestedModel, baseModel, requestResult); stop {
+			return result
+		}
+	}
 
-		targetModel := entry.upstreamModel
-		if targetModel == "" {
+	// Wildcard patterns are consulted only after every exact candidate missed, which
+	// keeps an exact alias authoritative whenever both could match.
+	for _, candidate := range candidates {
+		value := strings.TrimSpace(candidate)
+		if value == "" {
 			continue
 		}
-
-		if strings.EqualFold(targetModel, baseModel) {
-			if !entry.forceMapping {
-				return OAuthModelAliasResult{}
+		for _, wildcard := range wild {
+			if !registry.MatchModelPattern(wildcard.pattern, value) {
+				continue
 			}
-			return OAuthModelAliasResult{
-				UpstreamModel: preserveResolvedModelSuffix(targetModel, requestResult),
-				ForceMapping:  entry.forceMapping,
-				OriginalAlias: oauthModelAliasForceMappingResponseModel(entry.configAlias),
+			// The configured alias is a pattern here, so a force-mapped response echoes
+			// the concrete requested model instead of the pattern itself. The thinking
+			// suffix is dropped the same way an exact alias never carries one.
+			if result, stop := oauthModelAliasResultFor(wildcard.entry.upstreamModel, baseModel, wildcard.entry.forceMapping, requestedModel, baseModel, requestResult); stop {
+				return result
 			}
-		}
-
-		var upstreamModel string
-		if thinking.ParseSuffix(targetModel).HasSuffix {
-			upstreamModel = targetModel
-		} else if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-			upstreamModel = targetModel + "(" + requestResult.RawSuffix + ")"
-		} else {
-			upstreamModel = targetModel
-		}
-
-		originalAlias := requestedModel
-		if entry.forceMapping {
-			originalAlias = oauthModelAliasForceMappingResponseModel(entry.configAlias)
-		}
-		return OAuthModelAliasResult{
-			UpstreamModel: upstreamModel,
-			ForceMapping:  entry.forceMapping,
-			OriginalAlias: originalAlias,
 		}
 	}
 
@@ -503,4 +566,39 @@ func normalizeOAuthModelAliasAuthKind(authKind string) string {
 	default:
 		return authKind
 	}
+}
+
+// warnedPerAuthWildcardAliases remembers the pattern list already reported for an
+// auth ID. Auth files are re-synthesized on every watcher event, including the
+// rewrite that follows a token refresh, so without this the warning would repeat on
+// every reload for the lifetime of the process.
+var warnedPerAuthWildcardAliases sync.Map // auth ID -> joined pattern list
+
+// warnUnroutablePerAuthWildcardAliases reports per-auth wildcard aliases that the
+// handler-level provider lookup cannot see.
+//
+// Only the global oauth-model-alias configuration feeds the registry pattern table,
+// so a wildcard declared in an auth file resolves once a credential is selected but
+// never makes the matching model routable on its own. Saying so keeps the gap
+// visible instead of surfacing as an opaque model_not_found.
+func warnUnroutablePerAuthWildcardAliases(auth *Auth, aliases []internalconfig.OAuthModelAlias) {
+	if auth == nil {
+		return
+	}
+	patterns := make([]string, 0, len(aliases))
+	for _, entry := range aliases {
+		alias := strings.TrimSpace(entry.Alias)
+		if alias != "" && strings.Contains(alias, "*") {
+			patterns = append(patterns, alias)
+		}
+	}
+	if len(patterns) == 0 {
+		return
+	}
+	joined := strings.Join(patterns, ",")
+	if previous, reported := warnedPerAuthWildcardAliases.Load(auth.ID); reported && previous == joined {
+		return
+	}
+	warnedPerAuthWildcardAliases.Store(auth.ID, joined)
+	log.Warnf("auth %s: per-auth wildcard model aliases %v are not published for routing; declare them under oauth-model-alias so requests matching the pattern can reach a provider", auth.ID, patterns)
 }
