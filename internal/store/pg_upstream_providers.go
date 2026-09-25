@@ -71,8 +71,17 @@ type UpstreamProvider struct {
 	TokenExpired            *bool          `json:"token_expired,omitempty"`
 	TokenScope              string         `json:"token_scope,omitempty"`
 	ExtraConfig             map[string]any `json:"extra_config,omitempty"`
-	CreatedAt               time.Time      `json:"created_at"`
-	UpdatedAt               time.Time      `json:"updated_at"`
+	// AutoDisableErrorCodes lists the upstream error codes that permanently
+	// auto-disable an entry (matched by the conductor and persisted via the
+	// server-side sink). Empty = feature off for the provider. Stored nullable
+	// TEXT[].
+	AutoDisableErrorCodes []string `json:"auto_disable_error_codes,omitempty"`
+	// AutoDisableCooldownSeconds is the auto-re-enable cooldown after an
+	// entry was auto-disabled. nil = manual re-enable only (no sweeper).
+	// Stored nullable INTEGER.
+	AutoDisableCooldownSeconds *int      `json:"auto_disable_cooldown_seconds,omitempty"`
+	CreatedAt                  time.Time `json:"created_at"`
+	UpdatedAt                  time.Time `json:"updated_at"`
 
 	// Child collections — hydrated from the child tables.
 	Models         []UpstreamProviderModel  `json:"models,omitempty"`
@@ -149,6 +158,27 @@ type UpstreamProviderAPIKey struct {
 	// in milliseconds. nil = fall back to global default. Stored nullable
 	// INTEGER.
 	RetryBackoffMS *uint32 `json:"retry_backoff_ms,omitempty"`
+	// MaxConcurrent is the per-entry in-flight hard cap. nil/0 = unlimited.
+	// The synthesizer stamps it onto auth.Attributes["max_parallel"], which
+	// the round-2 scheduler already reads, making a full entry non-eligible.
+	// Stored nullable INTEGER so "unlimited" stays distinct from an explicit 0.
+	MaxConcurrent *int `json:"max_concurrent,omitempty"`
+	// MaxWaitMs is the per-entry wait budget in milliseconds before an
+	// eligible-but-full entry fails over. nil/0 = default wait. Stored nullable
+	// INTEGER like MaxConcurrent.
+	MaxWaitMs *int `json:"max_wait_ms,omitempty"`
+
+	// AutoDisabled is the runtime-written (not operator input) auto-disable
+	// flag. The sink sets it when an upstream error matches the provider's
+	// auto_disable_error_codes; the renderer then skips the entry exactly like
+	// Disabled. Stored NOT NULL DEFAULT FALSE so legacy rows stay enabled.
+	AutoDisabled bool `json:"auto_disabled,omitempty"`
+	// AutoDisabledAt is when the entry was auto-disabled (used by the re-enable
+	// sweeper to decide when the cooldown elapsed). Nullable TIMESTAMPTZ.
+	AutoDisabledAt *time.Time `json:"auto_disabled_at,omitempty"`
+	// AutoDisabledReason is a short human-readable reason (e.g. the matched
+	// upstream error code). Nullable TEXT.
+	AutoDisabledReason string `json:"auto_disabled_reason,omitempty"`
 }
 
 // UpstreamProviderStore is the contract the management API consumes for the
@@ -249,6 +279,7 @@ func (s *pgUpstreamProviderStore) Get(ctx context.Context, id int64) (*UpstreamP
 		       cloak_strict_mode, cloak_sensitive_words, cloak_cache_user_id,
 		       token_access_token, token_refresh_token, token_token_type,
 		       token_expiry, token_expired, token_scope, extra_config,
+		       auto_disable_error_codes, auto_disable_cooldown_seconds,
 		       created_at, updated_at
 		FROM %s WHERE id = $1
 	`, s.table), id)
@@ -297,9 +328,10 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 			rebuild_mid_system_message, experimental_cch_signing, cloak_mode,
 			cloak_strict_mode, cloak_sensitive_words, cloak_cache_user_id,
 			token_access_token, token_refresh_token, token_token_type,
-			token_expiry, token_expired, token_scope, extra_config
+			token_expiry, token_expired, token_scope, extra_config,
+			auto_disable_error_codes, auto_disable_cooldown_seconds
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35
 		)
 		RETURNING id, provider_type, name, priority, disabled, routing_strategy, circuit_breaker, prefix, api_key,
 		          base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
@@ -308,6 +340,7 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 		          cloak_strict_mode, cloak_sensitive_words, cloak_cache_user_id,
 		          token_access_token, token_refresh_token, token_token_type,
 		          token_expiry, token_expired, token_scope, extra_config,
+		          auto_disable_error_codes, auto_disable_cooldown_seconds,
 		          created_at, updated_at
 	`, s.table),
 		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), p.CircuitBreaker, nullableString(p.Prefix),
@@ -319,7 +352,7 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 		p.CloakStrictMode, sensitive, nullableBool(p.CloakCacheUserID),
 		nullableString(p.TokenAccessToken), nullableString(p.TokenRefreshToken),
 		nullableString(p.TokenTokenType), nullableTime(p.TokenExpiry), nullableBool(p.TokenExpired),
-		nullableString(p.TokenScope), extra,
+		nullableString(p.TokenScope), extra, marshalTextArray(p.AutoDisableErrorCodes), nullableInt(p.AutoDisableCooldownSeconds),
 	)
 	var created UpstreamProvider
 	if err := scanUpstreamProvider(row, &created); err != nil {
@@ -399,8 +432,10 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 			token_expired = $31,
 			token_scope = $32,
 			extra_config = $33,
+			auto_disable_error_codes = $34,
+			auto_disable_cooldown_seconds = $35,
 			updated_at = NOW()
-		WHERE id = $34
+		WHERE id = $36
 		RETURNING id, provider_type, name, priority, disabled, routing_strategy, circuit_breaker, prefix, api_key,
 		          base_url, proxy_url, proxy_pool_id, label, email, file_name, source_backend,
 		          status, unavailable, last_error, last_error_at, websockets,
@@ -408,6 +443,7 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 		          cloak_strict_mode, cloak_sensitive_words, cloak_cache_user_id,
 		          token_access_token, token_refresh_token, token_token_type,
 		          token_expiry, token_expired, token_scope, extra_config,
+		          auto_disable_error_codes, auto_disable_cooldown_seconds,
 		          created_at, updated_at
 	`, s.table),
 		p.ProviderType, nullableString(p.Name), p.Priority, p.Disabled, nullableString(p.RoutingStrategy), p.CircuitBreaker, nullableString(p.Prefix),
@@ -419,7 +455,7 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 		p.CloakStrictMode, sensitive, nullableBool(p.CloakCacheUserID),
 		nullableString(p.TokenAccessToken), nullableString(p.TokenRefreshToken),
 		nullableString(p.TokenTokenType), nullableTime(p.TokenExpiry), nullableBool(p.TokenExpired),
-		nullableString(p.TokenScope), extra, p.ID,
+		nullableString(p.TokenScope), extra, marshalTextArray(p.AutoDisableErrorCodes), nullableInt(p.AutoDisableCooldownSeconds), p.ID,
 	)
 	var updated UpstreamProvider
 	if err := scanUpstreamProvider(row, &updated); err != nil {
@@ -548,7 +584,8 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 
 	// API-key entries (openai-compatibility only).
 	aRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled, retry_max_attempts, retry_max_time_ms, retry_backoff_ms
+		SELECT id, provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled, retry_max_attempts, retry_max_time_ms, retry_backoff_ms,
+		       max_concurrent, max_wait_ms, auto_disabled, auto_disabled_at, auto_disabled_reason
 		FROM %s WHERE provider_id = $1 ORDER BY sort_order, id
 	`, s.entries), p.ID)
 	if err != nil {
@@ -556,9 +593,11 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 	}
 	for aRows.Next() {
 		var e UpstreamProviderAPIKey
-		var entryName, proxyURL sql.NullString
-		var weight, priority, entryPoolID, retryMaxAttempts, retryMaxTimeMS, retryBackoffMS sql.NullInt64
-		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &entryPoolID, &e.SortOrder, &weight, &priority, &e.Disabled, &retryMaxAttempts, &retryMaxTimeMS, &retryBackoffMS); err != nil {
+		var entryName, proxyURL, autoDisabledReason sql.NullString
+		var weight, priority, entryPoolID, retryMaxAttempts, retryMaxTimeMS, retryBackoffMS, maxConcurrent, maxWaitMS sql.NullInt64
+		var autoDisabledAt sql.NullTime
+		if err = aRows.Scan(&e.ID, &e.ProviderID, &e.APIKey, &entryName, &proxyURL, &entryPoolID, &e.SortOrder, &weight, &priority, &e.Disabled, &retryMaxAttempts, &retryMaxTimeMS, &retryBackoffMS,
+			&maxConcurrent, &maxWaitMS, &e.AutoDisabled, &autoDisabledAt, &autoDisabledReason); err != nil {
 			aRows.Close()
 			return fmt.Errorf("postgres store: scan upstream provider api key entry: %w", err)
 		}
@@ -580,6 +619,21 @@ func (s *pgUpstreamProviderStore) loadChildren(ctx context.Context, p *UpstreamP
 		e.RetryMaxAttempts = nullableUint16FromScan(retryMaxAttempts)
 		e.RetryMaxTimeMS = nullableUint32FromScan(retryMaxTimeMS)
 		e.RetryBackoffMS = nullableUint32FromScan(retryBackoffMS)
+		if maxConcurrent.Valid {
+			mc := int(maxConcurrent.Int64)
+			e.MaxConcurrent = &mc
+		}
+		if maxWaitMS.Valid {
+			mw := int(maxWaitMS.Int64)
+			e.MaxWaitMs = &mw
+		}
+		if autoDisabledAt.Valid {
+			t := autoDisabledAt.Time
+			e.AutoDisabledAt = &t
+		}
+		if autoDisabledReason.Valid {
+			e.AutoDisabledReason = autoDisabledReason.String
+		}
 		p.APIKeyEntries = append(p.APIKeyEntries, e)
 	}
 	aRows.Close()
@@ -740,20 +794,29 @@ func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *s
 		entry.SortOrder = sortOrder
 		if entry.ID == 0 {
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-				INSERT INTO %s (provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled, retry_max_attempts, retry_max_time_ms, retry_backoff_ms)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+				INSERT INTO %s (provider_id, api_key, name, proxy_url, proxy_pool_id, sort_order, weight, priority, disabled, retry_max_attempts, retry_max_time_ms, retry_backoff_ms,
+				                max_concurrent, max_wait_ms, auto_disabled, auto_disabled_at, auto_disabled_reason)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 				RETURNING id
-			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, nullableUint16(entry.RetryMaxAttempts), nullableUint32(entry.RetryMaxTimeMS), nullableUint32(entry.RetryBackoffMS)).Scan(&entry.ID); err != nil {
+			`, s.entries), providerID, entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, nullableUint16(entry.RetryMaxAttempts), nullableUint32(entry.RetryMaxTimeMS), nullableUint32(entry.RetryBackoffMS),
+				nullableInt(entry.MaxConcurrent), nullableInt(entry.MaxWaitMs), entry.AutoDisabled, nullableTime(entry.AutoDisabledAt), nullableString(entry.AutoDisabledReason)).Scan(&entry.ID); err != nil {
 				return fmt.Errorf("postgres store: insert upstream provider api key entry: %w", err)
 			}
 		} else {
 			var persistedID int64
 			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 				UPDATE %s
-				SET api_key = $1, name = $2, proxy_url = $3, proxy_pool_id = $4, sort_order = $5, weight = $6, priority = $7, disabled = $8, retry_max_attempts = $9, retry_max_time_ms = $10, retry_backoff_ms = $11
-				WHERE id = $12 AND provider_id = $13
+				SET api_key = $1, name = $2, proxy_url = $3, proxy_pool_id = $4, sort_order = $5, weight = $6, priority = $7, disabled = $8, retry_max_attempts = $9, retry_max_time_ms = $10, retry_backoff_ms = $11,
+				    max_concurrent = $12, max_wait_ms = $13,
+				    auto_disabled = COALESCE($14::boolean, auto_disabled),
+				    auto_disabled_at = COALESCE($15::timestamptz, auto_disabled_at),
+				    auto_disabled_reason = COALESCE($16::text, auto_disabled_reason)
+				WHERE id = $17 AND provider_id = $18
 				RETURNING id
-			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, nullableUint16(entry.RetryMaxAttempts), nullableUint32(entry.RetryMaxTimeMS), nullableUint32(entry.RetryBackoffMS), entry.ID, providerID).Scan(&persistedID); err != nil {
+			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, nullableUint16(entry.RetryMaxAttempts), nullableUint32(entry.RetryMaxTimeMS), nullableUint32(entry.RetryBackoffMS),
+				nullableInt(entry.MaxConcurrent), nullableInt(entry.MaxWaitMs),
+				nullableBoolActive(entry.AutoDisabled), nullableTime(entry.AutoDisabledAt), nullableString(entry.AutoDisabledReason),
+				entry.ID, providerID).Scan(&persistedID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return fmt.Errorf("postgres store: upstream provider api key entry id %d is missing from upstream provider %d", entry.ID, providerID)
 				}
@@ -902,10 +965,11 @@ func scanUpstreamProvider(sc scanner, p *UpstreamProvider) error {
 		name, routingStrategy, prefix, apiKey, baseURL, proxyURL, label, email,
 		fileName, sourceBackend, status, lastError,
 		cloakMode, tokenAccess, tokenRefresh, tokenType, tokenScope sql.NullString
-		lastErrorAt, tokenExpiry       sql.NullTime
-		cloakCacheUserID, tokenExpired sql.NullBool
-		sensitiveBytes, extraBytes     []byte
-		proxyPoolID                    sql.NullInt64
+		lastErrorAt, tokenExpiry         sql.NullTime
+		cloakCacheUserID, tokenExpired   sql.NullBool
+		sensitiveBytes, extraBytes       []byte
+		proxyPoolID, autoDisableCooldown sql.NullInt64
+		autoDisableCodes                 []string
 	)
 	if err := sc.Scan(
 		&p.ID, &p.ProviderType, &name, &p.Priority, &p.Disabled, &routingStrategy, &p.CircuitBreaker, &prefix, &apiKey,
@@ -914,7 +978,8 @@ func scanUpstreamProvider(sc scanner, p *UpstreamProvider) error {
 		&p.RebuildMidSystemMessage, &p.ExperimentalCCHSigning, &cloakMode,
 		&p.CloakStrictMode, &sensitiveBytes, &cloakCacheUserID,
 		&tokenAccess, &tokenRefresh, &tokenType, &tokenExpiry, &tokenExpired,
-		&tokenScope, &extraBytes, &p.CreatedAt, &p.UpdatedAt,
+		&tokenScope, &extraBytes, textArrayScanner{dest: &autoDisableCodes}, &autoDisableCooldown,
+		&p.CreatedAt, &p.UpdatedAt,
 	); err != nil {
 		return err
 	}
@@ -966,6 +1031,11 @@ func scanUpstreamProvider(sc scanner, p *UpstreamProvider) error {
 	}
 	p.CloakSensitiveWords = decodeStringArray(sensitiveBytes)
 	p.ExtraConfig = decodeJSONObject(extraBytes)
+	p.AutoDisableErrorCodes = autoDisableCodes
+	if autoDisableCooldown.Valid {
+		c := int(autoDisableCooldown.Int64)
+		p.AutoDisableCooldownSeconds = &c
+	}
 	return nil
 }
 
@@ -1022,6 +1092,18 @@ func nullableBool(b *bool) any {
 		return nil
 	}
 	return *b
+}
+
+// nullableBoolActive binds a plain bool so that only TRUE is written; false
+// binds nil, letting COALESCE($n::boolean, col) preserve the existing row
+// state instead of force-clearing it. Used for runtime-written boolean columns
+// (e.g. auto_disabled) on update, where an operator PUT carrying zero values
+// must not wipe the runtime flag.
+func nullableBoolActive(b bool) any {
+	if !b {
+		return nil
+	}
+	return b
 }
 
 // nullableTime binds a *time.Time as nil when zero/unset.
@@ -1097,6 +1179,79 @@ func nullableUint32FromScan(n sql.NullInt64) *uint32 {
 	}
 	v := uint32(n.Int64)
 	return &v
+}
+
+// textArrayScanner implements sql.Scanner for a PG TEXT[] column. pgx's
+// stdlib driver materializes arrays as their brace-literal text form (e.g.
+// "{401,account_suspended}"), which database/sql cannot scan directly into a
+// Go []string; this adapter parses that literal back into a slice. A NULL
+// array scans to a nil slice.
+type textArrayScanner struct {
+	dest *[]string
+}
+
+func (s textArrayScanner) Scan(src any) error {
+	// Each branch replaces *s.dest with a freshly parsed slice (never appends
+	// to a caller-owned slice), so a reused scanner cannot leak an earlier
+	// row's elements into a shorter array.
+	switch v := src.(type) {
+	case nil:
+		*s.dest = nil
+		return nil
+	case string:
+		*s.dest = parsePGTextArrayLiteral(v)
+		return nil
+	case []byte:
+		*s.dest = parsePGTextArrayLiteral(string(v))
+		return nil
+	default:
+		*s.dest = nil
+		return fmt.Errorf("postgres store: unsupported TEXT[] value %T", src)
+	}
+}
+
+// parsePGTextArrayLiteral splits a PostgreSQL array literal ("{a,b,\"c,d\"}")
+// into its elements, unescaping quoted and backslash-escaped values. Used to
+// read TEXT[] columns through database/sql.
+func parsePGTextArrayLiteral(s string) []string {
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		return nil
+	}
+	inner := s[1 : len(s)-1]
+	if inner == "" {
+		return []string{}
+	}
+	var out []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		switch {
+		case c == '"':
+			inQuote = !inQuote
+		case c == '\\' && inQuote && i+1 < len(inner):
+			cur.WriteByte(inner[i+1])
+			i++
+		case c == ',' && !inQuote:
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	out = append(out, cur.String())
+	return out
+}
+
+// marshalTextArray binds a []string as a PG TEXT[] argument. A nil slice
+// writes SQL NULL (feature off); an empty slice writes the empty array '{}'.
+// pgx natively encodes a Go []string for a TEXT[] parameter, so no manual
+// literal building is needed.
+func marshalTextArray(in []string) any {
+	if in == nil {
+		return nil
+	}
+	return in
 }
 
 // Compile-time assertion that *pgUpstreamProviderStore implements the contract.

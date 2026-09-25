@@ -1125,3 +1125,325 @@ func TestUpstreamProviderStoreRetryColumnsRoundTrip(t *testing.T) {
 		t.Fatalf("after reload: cleared retry_max_time_ms/backoff should be nil, got max_time_ms=%#v backoff=%#v", reloaded.APIKeyEntries[0].RetryMaxTimeMS, reloaded.APIKeyEntries[0].RetryBackoffMS)
 	}
 }
+
+// TestUpstreamProviderStoreMaxConcurrentWaitRoundTrip pins the per-entry Max
+// Concurrent feature schema: nullable INTEGER max_concurrent + max_wait_ms on
+// upstream_provider_api_key_entries (NULL = unlimited / default wait budget).
+// Verifies the values round-trip through Create/Get/Update (entry ID retained)
+// and that omitted entries stay nil (feature off) distinct from an explicit
+// cap. Mirrors the retry-columns round-trip test shape.
+func TestUpstreamProviderStoreMaxConcurrentWaitRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_entry_max_concurrent")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Schema contract: nullable INTEGER max_concurrent/max_wait_ms with no
+	// DEFAULT so legacy rows survive the upgrade as unlimited/default-wait
+	// (feature off) and "user did not set a cap" stays distinct from "cap 0".
+	expected := []struct {
+		table, column, wantType, wantNullable string
+	}{
+		{pg.cfg.UpstreamProviderEntriesTable, "max_concurrent", "integer", "YES"},
+		{pg.cfg.UpstreamProviderEntriesTable, "max_wait_ms", "integer", "YES"},
+	}
+	for _, e := range expected {
+		var gotType, gotNullable, gotDefault string
+		if err := pg.DB().QueryRowContext(ctx, `
+			SELECT data_type, is_nullable, COALESCE(column_default, '')
+			FROM information_schema.columns
+			WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
+		`, pg.cfg.Schema, e.table, e.column).Scan(&gotType, &gotNullable, &gotDefault); err != nil {
+			t.Fatalf("query %s.%s column: %v", e.table, e.column, err)
+		}
+		if gotType != e.wantType || gotNullable != e.wantNullable {
+			t.Fatalf("%s.%s = %s/%s, want %s/%s", e.table, e.column, gotType, gotNullable, e.wantType, e.wantNullable)
+		}
+		if gotDefault != "" {
+			t.Fatalf("%s.%s default = %q, want empty (NULL default so 'unlimited' survives)", e.table, e.column, gotDefault)
+		}
+	}
+
+	maxConcurrent := 3
+	maxWait := 1500
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType: "openai-compatibility",
+		Name:         "max-concurrent-rt",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "mc-secret-a", Name: "alpha", MaxConcurrent: &maxConcurrent, MaxWaitMs: &maxWait},
+			{APIKey: "mc-secret-b", Name: "beta"}, // nil = unlimited / default wait
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatal("Create returned zero provider ID")
+	}
+	firstID := created.APIKeyEntries[0].ID
+
+	loaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(loaded.APIKeyEntries) != 2 {
+		t.Fatalf("Get returned %d entries, want 2", len(loaded.APIKeyEntries))
+	}
+	if loaded.APIKeyEntries[0].MaxConcurrent == nil || *loaded.APIKeyEntries[0].MaxConcurrent != maxConcurrent {
+		t.Fatalf("entry 0 MaxConcurrent = %#v, want pointer to %d", loaded.APIKeyEntries[0].MaxConcurrent, maxConcurrent)
+	}
+	if loaded.APIKeyEntries[0].MaxWaitMs == nil || *loaded.APIKeyEntries[0].MaxWaitMs != maxWait {
+		t.Fatalf("entry 0 MaxWaitMs = %#v, want pointer to %d", loaded.APIKeyEntries[0].MaxWaitMs, maxWait)
+	}
+	if loaded.APIKeyEntries[1].MaxConcurrent != nil || loaded.APIKeyEntries[1].MaxWaitMs != nil {
+		t.Fatalf("entry 1 (nil) MaxConcurrent/MaxWaitMs = %#v/%#v, want nil", loaded.APIKeyEntries[1].MaxConcurrent, loaded.APIKeyEntries[1].MaxWaitMs)
+	}
+
+	// Update round-trips the values with the entry ID retained and unchanged
+	// siblings deleted (mirrors the retry test's replace-children behavior).
+	newMax := 5
+	newWait := 2500
+	updated, err := src.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "openai-compatibility",
+		Name:         "max-concurrent-rt",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: firstID, APIKey: "mc-secret-a", Name: "alpha", MaxConcurrent: &newMax, MaxWaitMs: &newWait},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(updated.APIKeyEntries) != 1 || updated.APIKeyEntries[0].ID != firstID {
+		t.Fatalf("Update returned entries %#v, want single entry with retained ID %d", updated.APIKeyEntries, firstID)
+	}
+	if updated.APIKeyEntries[0].MaxConcurrent == nil || *updated.APIKeyEntries[0].MaxConcurrent != newMax {
+		t.Fatalf("updated MaxConcurrent = %#v, want pointer to %d", updated.APIKeyEntries[0].MaxConcurrent, newMax)
+	}
+	if updated.APIKeyEntries[0].MaxWaitMs == nil || *updated.APIKeyEntries[0].MaxWaitMs != newWait {
+		t.Fatalf("updated MaxWaitMs = %#v, want pointer to %d", updated.APIKeyEntries[0].MaxWaitMs, newWait)
+	}
+	reloaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after Update: %v", err)
+	}
+	if len(reloaded.APIKeyEntries) != 1 {
+		t.Fatalf("Get after Update returned %d entries, want 1", len(reloaded.APIKeyEntries))
+	}
+	if reloaded.APIKeyEntries[0].MaxConcurrent == nil || *reloaded.APIKeyEntries[0].MaxConcurrent != newMax {
+		t.Fatalf("after reload MaxConcurrent = %#v, want pointer to %d", reloaded.APIKeyEntries[0].MaxConcurrent, newMax)
+	}
+	if reloaded.APIKeyEntries[0].MaxWaitMs == nil || *reloaded.APIKeyEntries[0].MaxWaitMs != newWait {
+		t.Fatalf("after reload MaxWaitMs = %#v, want pointer to %d", reloaded.APIKeyEntries[0].MaxWaitMs, newWait)
+	}
+}
+
+// TestUpstreamProviderStoreAutoDisableColumnsRoundTrip pins the Auto-Disable
+// feature schema: nullable TEXT[] auto_disable_error_codes + nullable INTEGER
+// auto_disable_cooldown_seconds on the provider row, and the runtime-written
+// entry flags (auto_disabled BOOLEAN NOT NULL DEFAULT FALSE, auto_disabled_at
+// TIMESTAMPTZ, auto_disabled_reason TEXT). Verifies full Create/Get/Update
+// round-trips (entry IDs retained), that Migrate is idempotent for the new
+// columns, and that an operator PUT carrying zero value auto flags does NOT
+// wipe a currently auto-disabled entry's runtime flags (manual intent must not
+// clobber the system state).
+func TestUpstreamProviderStoreAutoDisableColumnsRoundTrip(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_auto_disable")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+	// Migrate must be idempotent: a second run is a no-op and the new columns
+	// still exist (mirrors TestMigrateIdempotent).
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Schema contract for the auto-disable columns.
+	expected := []struct {
+		table, column, wantType, wantNullable, wantDefault string
+	}{
+		{pg.cfg.UpstreamProviderEntriesTable, "auto_disabled", "boolean", "NO", "false"},
+		{pg.cfg.UpstreamProviderEntriesTable, "auto_disabled_at", "timestamp with time zone", "YES", ""},
+		{pg.cfg.UpstreamProviderEntriesTable, "auto_disabled_reason", "text", "YES", ""},
+		{pg.cfg.UpstreamProvidersTable, "auto_disable_error_codes", "ARRAY", "YES", ""},
+		{pg.cfg.UpstreamProvidersTable, "auto_disable_cooldown_seconds", "integer", "YES", ""},
+	}
+	for _, e := range expected {
+		var gotType, gotNullable, gotDefault string
+		if err := pg.DB().QueryRowContext(ctx, `
+			SELECT data_type, is_nullable, COALESCE(column_default, '')
+			FROM information_schema.columns
+			WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
+		`, pg.cfg.Schema, e.table, e.column).Scan(&gotType, &gotNullable, &gotDefault); err != nil {
+			t.Fatalf("query %s.%s column: %v", e.table, e.column, err)
+		}
+		if gotType != e.wantType || gotNullable != e.wantNullable || gotDefault != e.wantDefault {
+			t.Fatalf("%s.%s = %s/%s default %q, want %s/%s default %q", e.table, e.column,
+				gotType, gotNullable, gotDefault, e.wantType, e.wantNullable, e.wantDefault)
+		}
+	}
+	// auto_disable_error_codes must be a genuine TEXT[] (udt _text), not JSONB.
+	var udt string
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT udt_name FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'auto_disable_error_codes'
+	`, pg.cfg.Schema, pg.cfg.UpstreamProvidersTable).Scan(&udt); err != nil {
+		t.Fatalf("query auto_disable_error_codes udt: %v", err)
+	}
+	if udt != "_text" {
+		t.Fatalf("auto_disable_error_codes udt = %q, want _text (TEXT[])", udt)
+	}
+
+	codes := []string{"401", "account_suspended"}
+	cooldown := 3600
+	disabledAt := time.Now().UTC().Truncate(time.Second)
+	disabledReason := "matched 401 upstream"
+
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType:               "openai-compatibility",
+		Name:                       "auto-disable-rt",
+		AutoDisableErrorCodes:      codes,
+		AutoDisableCooldownSeconds: &cooldown,
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{
+				APIKey:             "ad-secret-a",
+				Name:               "alpha",
+				AutoDisabled:       true,
+				AutoDisabledAt:     &disabledAt,
+				AutoDisabledReason: disabledReason,
+			},
+			{APIKey: "ad-secret-b", Name: "beta"}, // pristine: not auto-disabled
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatal("Create returned zero provider ID")
+	}
+	firstID := created.APIKeyEntries[0].ID
+	secondID := created.APIKeyEntries[1].ID
+
+	loaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(loaded.APIKeyEntries) != 2 {
+		t.Fatalf("Get returned %d entries, want 2", len(loaded.APIKeyEntries))
+	}
+	// Provider-level config round-trips through Get.
+	if len(loaded.AutoDisableErrorCodes) != len(codes) {
+		t.Fatalf("Get AutoDisableErrorCodes = %#v, want %#v", loaded.AutoDisableErrorCodes, codes)
+	}
+	for i, c := range codes {
+		if loaded.AutoDisableErrorCodes[i] != c {
+			t.Fatalf("Get AutoDisableErrorCodes[%d] = %q, want %q", i, loaded.AutoDisableErrorCodes[i], c)
+		}
+	}
+	if loaded.AutoDisableCooldownSeconds == nil || *loaded.AutoDisableCooldownSeconds != cooldown {
+		t.Fatalf("Get AutoDisableCooldownSeconds = %#v, want pointer to %d", loaded.AutoDisableCooldownSeconds, cooldown)
+	}
+	// Entry A: runtime flags round-trip.
+	entryA := loaded.APIKeyEntries[0]
+	if !entryA.AutoDisabled {
+		t.Fatalf("entry A AutoDisabled = false, want true")
+	}
+	if entryA.AutoDisabledAt == nil || !entryA.AutoDisabledAt.Equal(disabledAt) {
+		t.Fatalf("entry A AutoDisabledAt = %#v, want %s", entryA.AutoDisabledAt, disabledAt)
+	}
+	if entryA.AutoDisabledReason != disabledReason {
+		t.Fatalf("entry A AutoDisabledReason = %q, want %q", entryA.AutoDisabledReason, disabledReason)
+	}
+	// Entry B: pristine, not auto-disabled.
+	if loaded.APIKeyEntries[1].AutoDisabled {
+		t.Fatalf("entry B AutoDisabled = true, want false")
+	}
+	if loaded.APIKeyEntries[1].AutoDisabledAt != nil || loaded.APIKeyEntries[1].AutoDisabledReason != "" {
+		t.Fatalf("entry B runtime flags = at %#v reason %q, want nil/empty", loaded.APIKeyEntries[1].AutoDisabledAt, loaded.APIKeyEntries[1].AutoDisabledReason)
+	}
+
+	// Update round-trips the provider codes/cooldown and the entry flags, with
+	// entry IDs retained. Entry A is PUT with zero value auto flags (as an
+	// operator edit to max_concurrent would carry): its runtime flags must be
+	// preserved, not wiped. Entry B is explicitly auto-disabled in the same
+	// PUT: the positive write must land.
+	secondDisabledAt := time.Now().UTC().Truncate(time.Second)
+	newMax := 3
+	newCodes := []string{"429", "upstream_error"}
+	newCooldown := 7200
+	updated, err := src.Update(ctx, UpstreamProvider{
+		ID:                         created.ID,
+		ProviderType:               "openai-compatibility",
+		Name:                       "auto-disable-rt",
+		AutoDisableErrorCodes:      newCodes,
+		AutoDisableCooldownSeconds: &newCooldown,
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			// Operator PUT: only max_concurrent changed; auto flags left zero.
+			{ID: firstID, APIKey: "ad-secret-a", Name: "alpha", MaxConcurrent: &newMax},
+			// Positive runtime write: auto-disable entry B.
+			{ID: secondID, APIKey: "ad-secret-b", Name: "beta",
+				AutoDisabled: true, AutoDisabledAt: &secondDisabledAt, AutoDisabledReason: "matched 429 upstream"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(updated.APIKeyEntries) != 2 {
+		t.Fatalf("Update returned %d entries, want 2", len(updated.APIKeyEntries))
+	}
+
+	reloaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after Update: %v", err)
+	}
+	// Provider codes/cooldown updated.
+	if len(reloaded.AutoDisableErrorCodes) != len(newCodes) || reloaded.AutoDisableErrorCodes[0] != newCodes[0] || reloaded.AutoDisableErrorCodes[1] != newCodes[1] {
+		t.Fatalf("Get after Update AutoDisableErrorCodes = %#v, want %#v", reloaded.AutoDisableErrorCodes, newCodes)
+	}
+	if reloaded.AutoDisableCooldownSeconds == nil || *reloaded.AutoDisableCooldownSeconds != newCooldown {
+		t.Fatalf("Get after Update AutoDisableCooldownSeconds = %#v, want pointer to %d", reloaded.AutoDisableCooldownSeconds, newCooldown)
+	}
+	var gotA, gotB UpstreamProviderAPIKey
+	for i := range reloaded.APIKeyEntries {
+		switch reloaded.APIKeyEntries[i].ID {
+		case firstID:
+			gotA = reloaded.APIKeyEntries[i]
+		case secondID:
+			gotB = reloaded.APIKeyEntries[i]
+		}
+	}
+	if gotA.ID == 0 {
+		t.Fatalf("entry A lost: %#v", reloaded.APIKeyEntries)
+	}
+	if gotB.ID == 0 {
+		t.Fatalf("entry B lost: %#v", reloaded.APIKeyEntries)
+	}
+	// Entry A: runtime flags preserved despite the zero-value auto PUT, and its
+	// operator-editable max_concurrent still written.
+	if !gotA.AutoDisabled {
+		t.Fatalf("entry A AutoDisabled wiped to false by zero-value PUT; want preserved true")
+	}
+	if gotA.AutoDisabledAt == nil || !gotA.AutoDisabledAt.Equal(disabledAt) {
+		t.Fatalf("entry A AutoDisabledAt = %#v, want preserved %s", gotA.AutoDisabledAt, disabledAt)
+	}
+	if gotA.AutoDisabledReason != disabledReason {
+		t.Fatalf("entry A AutoDisabledReason = %q, want preserved %q", gotA.AutoDisabledReason, disabledReason)
+	}
+	if gotA.MaxConcurrent == nil || *gotA.MaxConcurrent != newMax {
+		t.Fatalf("entry A MaxConcurrent = %#v, want pointer to %d", gotA.MaxConcurrent, newMax)
+	}
+	// Entry B: positive auto-disable write landed.
+	if !gotB.AutoDisabled {
+		t.Fatalf("entry B AutoDisabled = false, want true (positive write)")
+	}
+	if gotB.AutoDisabledAt == nil || !gotB.AutoDisabledAt.Equal(secondDisabledAt) {
+		t.Fatalf("entry B AutoDisabledAt = %#v, want %s", gotB.AutoDisabledAt, secondDisabledAt)
+	}
+	if gotB.AutoDisabledReason != "matched 429 upstream" {
+		t.Fatalf("entry B AutoDisabledReason = %q, want %q", gotB.AutoDisabledReason, "matched 429 upstream")
+	}
+}

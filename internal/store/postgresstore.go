@@ -962,6 +962,48 @@ func (s *PostgresStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("postgres store: migrate upstream entries retry columns: %w", err)
 	}
 
+	// upstream_provider_api_key_entries max_concurrent / max_wait_ms columns
+	// (Max Concurrent feature, design 2026-09-25). Per-entry in-flight hard
+	// cap + wait budget before failover. Both nullable: NULL means unlimited /
+	// default wait (feature off for that entry). No DEFAULT, mirroring the
+	// weight/priority contract so legacy rows survive the upgrade unchanged
+	// and "user did not set a cap" stays distinct from "cap 0".
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s
+			ADD COLUMN IF NOT EXISTS max_concurrent INTEGER,
+			ADD COLUMN IF NOT EXISTS max_wait_ms INTEGER`,
+		upstreamEntriesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream entries max concurrent columns: %w", err)
+	}
+	// upstream_provider_api_key_entries auto_disabled runtime flag + attribution
+	// (Auto-Disable feature). Runtime-written by the server-side sink on a
+	// matching upstream error, never operator input; the renderer skips the
+	// entry exactly like Disabled. NOT NULL DEFAULT FALSE so legacy rows stay
+	// enabled. auto_disabled_at / auto_disabled_reason are nullable; the
+	// sweeper uses them to auto re-enable after the provider cooldown.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s
+			ADD COLUMN IF NOT EXISTS auto_disabled BOOLEAN NOT NULL DEFAULT FALSE,
+			ADD COLUMN IF NOT EXISTS auto_disabled_at TIMESTAMPTZ,
+			ADD COLUMN IF NOT EXISTS auto_disabled_reason TEXT`,
+		upstreamEntriesTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream entries auto-disable columns: %w", err)
+	}
+	// upstream_providers auto-disable config (Auto-Disable feature). The error
+	// codes that permanently auto-disable an entry + the re-enable cooldown.
+	// Both nullable: NULL / empty = feature off for the provider, manual
+	// re-enable only. TEXT[] keeps the list native (no JSONB decode needed).
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s
+			ADD COLUMN IF NOT EXISTS auto_disable_error_codes TEXT[],
+			ADD COLUMN IF NOT EXISTS auto_disable_cooldown_seconds INTEGER`,
+		upstreamProvidersTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: migrate upstream providers auto-disable columns: %w", err)
+	}
+
 	// usage_stat_day is the pre-aggregated daily rollup of usage_events. It folds
 	// per-request rows into per-(day, user, api_key, model, provider, source)
 	// counters so daily aggregate queries (LiteLLM /spend/users, per-model/API-key
