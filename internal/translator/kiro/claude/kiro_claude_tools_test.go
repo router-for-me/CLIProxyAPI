@@ -146,11 +146,138 @@ func TestProcessToolUseEvent_RepairFailureRecoversPartial(t *testing.T) {
 		t.Errorf("name = %s, want Bash", tu.Name)
 	}
 	// The critical assertion: input MUST NOT be empty for a tool with required
-	 // fields, otherwise the downstream SDK rejects the call.
+	// fields, otherwise the downstream SDK rejects the call.
 	if tu.Input == nil {
 		t.Fatal("input is nil — should be empty map or partial fields")
 	}
 	if _, hasCmd := tu.Input["command"]; !hasCmd {
 		t.Fatalf("input missing 'command' field — SDK will reject the call. got=%v", tu.Input)
+	}
+}
+
+// TestProcessToolUseEvent_MergesFragmentsWithCompleteObject is the regression
+// test for the 7.5.6 fix: when a Kiro stream sends both accumulated input
+// fragments and a complete input object for the same tool use, the object
+// must be merged over the repaired fragments (object wins conflicts) instead
+// of resetting the buffer — the old reset dropped fragment-only fields and
+// tripped "TRUNCATION DETECTED" downstream.
+func TestProcessToolUseEvent_MergesFragmentsWithCompleteObject(t *testing.T) {
+	processed := map[string]bool{}
+
+	// Accumulate a fragment that dies mid-string-value.
+	startEvent := map[string]interface{}{
+		"toolUseEvent": map[string]interface{}{
+			"toolUseId": "tu_merge_1",
+			"name":      "Write",
+			"stop":      false,
+			"input":     `{"file_path": "/tmp/partial`,
+		},
+	}
+	_, state := ProcessToolUseEvent(startEvent, nil, processed)
+	if state == nil {
+		t.Fatal("expected non-nil state from tool use start")
+	}
+
+	// Complete object arrives on the stop event; it must be merged, not
+	// replace the buffer blindly (the pre-7.5.6 behavior that dropped
+	// fragment-only fields).
+	stopEvent := map[string]interface{}{
+		"toolUseEvent": map[string]interface{}{
+			"toolUseId": "tu_merge_1",
+			"name":      "Write",
+			"stop":      true,
+			"input": map[string]interface{}{
+				"file_path": "/tmp/final",
+				"content":   "body",
+			},
+		},
+	}
+	results, finalState := ProcessToolUseEvent(stopEvent, state, processed)
+	if finalState != nil {
+		t.Errorf("expected nil state after stop, got %+v", finalState)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+
+	tu := results[0]
+	if tu.IsTruncated {
+		t.Errorf("merged input must not be flagged truncated; input=%v", tu.Input)
+	}
+	if tu.Input["file_path"] != "/tmp/final" {
+		t.Errorf("object value must win on conflict, got file_path=%v", tu.Input["file_path"])
+	}
+	if tu.Input["content"] != "body" {
+		t.Errorf("object fields must survive the merge, got input=%v", tu.Input)
+	}
+}
+
+// TestProcessToolUseEvent_IgnoresFragmentAfterCompleteObject guards the
+// reverse event order: a fragment arriving AFTER the complete object must
+// not be appended raw onto the finalized buffer, or the stop-time parse
+// fails and the truncation symptom reappears through the other order.
+func TestProcessToolUseEvent_IgnoresFragmentAfterCompleteObject(t *testing.T) {
+	processed := map[string]bool{}
+
+	// The complete object arrives first (empty-buffer fast path).
+	startEvent := map[string]interface{}{
+		"toolUseEvent": map[string]interface{}{
+			"toolUseId": "tu_order_1",
+			"name":      "Write",
+			"stop":      false,
+			"input": map[string]interface{}{
+				"file_path": "/tmp/final",
+				"content":   "body",
+			},
+		},
+	}
+	_, state := ProcessToolUseEvent(startEvent, nil, processed)
+	if state == nil {
+		t.Fatal("expected non-nil state from tool use start")
+	}
+
+	// A trailing fragment shows up afterwards (stop-event fragmentation or
+	// client redelivery). It must be ignored, not appended onto the
+	// finalized JSON.
+	trailingEvent := map[string]interface{}{
+		"toolUseEvent": map[string]interface{}{
+			"toolUseId": "tu_order_1",
+			"name":      "Write",
+			"stop":      false,
+			"input":     `, "extra": "junk`,
+		},
+	}
+	_, state = ProcessToolUseEvent(trailingEvent, state, processed)
+	if state == nil {
+		t.Fatal("expected state to survive the trailing fragment")
+	}
+
+	stopEvent := map[string]interface{}{
+		"toolUseEvent": map[string]interface{}{
+			"toolUseId": "tu_order_1",
+			"name":      "Write",
+			"stop":      true,
+		},
+	}
+	results, finalState := ProcessToolUseEvent(stopEvent, state, processed)
+	if finalState != nil {
+		t.Errorf("expected nil state after stop, got %+v", finalState)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+
+	tu := results[0]
+	if tu.IsTruncated {
+		t.Errorf("input must not be flagged truncated; input=%v", tu.Input)
+	}
+	if tu.Input["file_path"] != "/tmp/final" {
+		t.Errorf("file_path corrupted by trailing fragment, got %v", tu.Input["file_path"])
+	}
+	if tu.Input["content"] != "body" {
+		t.Errorf("content corrupted by trailing fragment, got input=%v", tu.Input)
+	}
+	if _, hasExtra := tu.Input["extra"]; hasExtra {
+		t.Errorf("trailing fragment leaked into input: %v", tu.Input)
 	}
 }

@@ -19,6 +19,10 @@ type ToolUseState struct {
 	InputBuffer    strings.Builder
 	IsComplete     bool
 	TruncationInfo *TruncationInfo // Truncation detection result (set when complete)
+	// ObjectMerged is set once a complete input object was merged into the
+	// buffer; trailing fragment events must not be appended raw after it,
+	// or they would corrupt the finalized JSON.
+	ObjectMerged bool
 }
 
 // Pre-compiled regex patterns for performance
@@ -453,12 +457,17 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 
 	// Accumulate input fragments
 	if currentToolUse != nil && inputFragment != "" {
-		currentToolUse.InputBuffer.WriteString(inputFragment)
-		log.Debugf("kiro: accumulated input fragment, total length: %d", currentToolUse.InputBuffer.Len())
+		if currentToolUse.ObjectMerged {
+			log.Debugf("kiro: ignoring %d-byte fragment after complete input object", len(inputFragment))
+		} else {
+			currentToolUse.InputBuffer.WriteString(inputFragment)
+			log.Debugf("kiro: accumulated input fragment, total length: %d", currentToolUse.InputBuffer.Len())
+		}
 	}
 
 	// If complete input object provided directly, merge with accumulated fragments
 	if currentToolUse != nil && inputMap != nil {
+		currentToolUse.ObjectMerged = true
 		// If buffer is empty, this is the first/only input - use it directly
 		if currentToolUse.InputBuffer.Len() == 0 {
 			inputBytes, _ := json.Marshal(inputMap)
@@ -468,7 +477,7 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 			// Buffer has accumulated fragments - merge them with the new object
 			existingInput := currentToolUse.InputBuffer.String()
 			var merged map[string]interface{}
-			
+
 			// Try to parse existing fragments
 			repairedExisting := RepairJSON(existingInput)
 			if err := json.Unmarshal([]byte(repairedExisting), &merged); err != nil {
@@ -482,7 +491,7 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 					merged[k] = v
 				}
 			}
-			
+
 			// Write merged result back to buffer
 			mergedBytes, _ := json.Marshal(merged)
 			currentToolUse.InputBuffer.Reset()
