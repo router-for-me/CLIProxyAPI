@@ -336,23 +336,6 @@ func preserveHostOwnedAuthKeys(path string, data []byte) []byte {
 	return merged
 }
 
-// credentialPriorityAttribute renders an auth file's priority value the way the
-// synthesizer does: a decimal string, empty when the value is not a usable priority.
-func credentialPriorityAttribute(raw any) string {
-	switch value := raw.(type) {
-	case float64:
-		return strconv.Itoa(int(value))
-	case int:
-		return strconv.Itoa(value)
-	case string:
-		priority := strings.TrimSpace(value)
-		if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
-			return priority
-		}
-	}
-	return ""
-}
-
 func (h *Host) saveAuthFile(ctx context.Context, name string, data []byte) (string, error) {
 	authDir := h.resolvedAuthDir()
 	if authDir == "" {
@@ -430,13 +413,17 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 	}
 	// Mirror the file synthesizer for the routing keys it reads out of an auth file,
 	// so a plugin save does not leave the live record disagreeing with the disk copy
-	// until the next resync: priority drives selection order, note is operator
-	// labelling, and a disabled account must stay disabled.
-	if rawPriority, hasPriority := metadata["priority"]; hasPriority {
-		if priority := credentialPriorityAttribute(rawPriority); priority != "" {
-			auth.Attributes["priority"] = priority
-		}
+	// until the next resync: prefix drives the published model names (losing it
+	// republishes every model of this credential under its bare name), priority and
+	// weight drive selection order, note is operator labelling, and a disabled
+	// account must stay disabled.
+	if p, ok := metadata["proxy_url"].(string); ok && auth.ProxyURL == "" {
+		auth.ProxyURL = strings.TrimSpace(p)
 	}
+	if pref, ok := metadata["prefix"].(string); ok && auth.Prefix == "" {
+		auth.Prefix = strings.Trim(strings.TrimSpace(pref), "/")
+	}
+	coreauth.ApplyAuthPriorityMetadata(auth, metadata)
 	if rawNote, hasNote := metadata["note"]; hasNote {
 		if note, isString := rawNote.(string); isString {
 			if trimmed := strings.TrimSpace(note); trimmed != "" {
@@ -448,7 +435,7 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 		auth.Status = coreauth.StatusDisabled
 		auth.Disabled = true
 	}
-	if errWeight := coreauth.ValidateAuthWeight(auth); errWeight != nil {
+	if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
 		return nil, fmt.Errorf("invalid auth weight: %w", errWeight)
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(auth)

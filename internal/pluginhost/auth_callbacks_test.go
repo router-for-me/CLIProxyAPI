@@ -513,3 +513,34 @@ func TestHostAuthSaveOnFirstWriteKeepsPluginBytes(t *testing.T) {
 		t.Fatalf("payload was altered: %v", saved)
 	}
 }
+
+// The physical file is not the only consumer of these keys: the live record is
+// what applyModelPrefixes and the routing selectors read, so a credential saved
+// through this path must end up with the same prefix and priority the synthesizer
+// would have given it. Without this the published model names silently lose their
+// prefix (and the pool its routing order) until CPA restarts.
+func TestBuildAuthFromFileDataAppliesHostRoutingFields(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "demo-routing.json")
+	doc := `{"type":"demo","email":"r@example.com","prefix":"/px/","priority":7}`
+	if errWrite := os.WriteFile(path, []byte(doc), 0o600); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: authDir}
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+
+	auth, errBuild := host.buildAuthFromFileData(path, nil)
+	if errBuild != nil {
+		t.Fatalf("buildAuthFromFileData() error = %v", errBuild)
+	}
+	if auth.Prefix != "px" {
+		t.Fatalf("Prefix = %q, want %q (slashes trimmed like the file synthesizer does)", auth.Prefix, "px")
+	}
+	if got := auth.Attributes["priority"]; got != "7" {
+		t.Fatalf("Attributes[priority] = %q, want 7", got)
+	}
+	if got := auth.Attributes[coreauth.AttributeFilePriority]; got != "true" {
+		t.Fatalf("Attributes[%s] = %q, want true so refreshes preserve it", coreauth.AttributeFilePriority, got)
+	}
+}
