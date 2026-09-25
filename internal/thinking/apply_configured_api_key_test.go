@@ -62,6 +62,85 @@ func TestApplyThinkingWithModelInfoMapsOpenAICompatibilityHighIntent(t *testing.
 	}
 }
 
+// A model whose configuration declares no thinking support gets proxy-fabricated
+// default levels; those must not remap an explicitly requested effort (#5499).
+func TestApplyThinkingWithModelInfoKeepsAssumedLevelRequestsVerbatim(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "xhigh stays xhigh", source: "xhigh", want: "xhigh"},
+		{name: "high stays high", source: "high", want: "high"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			modelInfo := &registry.ModelInfo{
+				ID:   "compat-upstream",
+				Type: "openai-compatibility",
+				Thinking: &registry.ThinkingSupport{
+					Levels:        []string{"low", "medium", "high"},
+					LevelsAssumed: true,
+				},
+			}
+			body := []byte(`{"reasoning_effort":"` + tc.source + `"}`)
+			source := []byte(`{"reasoning":{"effort":"` + tc.source + `"}}`)
+			out, err := thinking.ApplyThinkingWithModelInfo(body, source, "compat-upstream", "openai-response", "openai", "compat-provider", modelInfo)
+			if err != nil {
+				t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
+			}
+			if got := gjson.GetBytes(out, "reasoning_effort").String(); got != tc.want {
+				t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, tc.want, out)
+			}
+		})
+	}
+}
+
+// Sentinel requests on assumed level sets reach the upstream unchanged:
+// an explicit disable must not become "low" and auto must be serialized as
+// "auto" rather than a fixed level or dropped (#5499 review).
+func TestApplyThinkingWithModelInfoKeepsAssumedSentinelsVerbatim(t *testing.T) {
+	modelInfo := &registry.ModelInfo{
+		ID:   "compat-upstream",
+		Type: "openai-compatibility",
+		Thinking: &registry.ThinkingSupport{
+			Levels:        []string{"low", "medium", "high"},
+			LevelsAssumed: true,
+		},
+	}
+
+	noneBody := []byte(`{}`)
+	noneSource := []byte(`{"reasoning":{"effort":"none"}}`)
+	out, err := thinking.ApplyThinkingWithModelInfo(noneBody, noneSource, "compat-upstream", "openai-response", "openai", "compat-provider", modelInfo)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithModelInfo(none) error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "none" {
+		t.Fatalf("reasoning_effort = %q, want none; body=%s", got, out)
+	}
+
+	autoBody := []byte(`{}`)
+	autoSource := []byte(`{"reasoning":{"effort":"auto"}}`)
+	out, err = thinking.ApplyThinkingWithModelInfo(autoBody, autoSource, "compat-upstream", "openai-response", "openai", "compat-provider", modelInfo)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithModelInfo(auto) error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "auto" {
+		t.Fatalf("reasoning_effort = %q, want auto; body=%s", got, out)
+	}
+
+	// The (auto) model suffix carries no body field to preserve; the request
+	// must still be serialized as an explicit auto effort.
+	suffixBody := []byte(`{}`)
+	out, err = thinking.ApplyThinkingWithModelInfo(suffixBody, suffixBody, "compat-upstream(auto)", "openai", "openai", "compat-provider", modelInfo)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithModelInfo(suffix auto) error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "auto" {
+		t.Fatalf("suffix auto reasoning_effort = %q, want auto; body=%s", got, out)
+	}
+}
+
 func TestApplyThinkingWithModelInfoMapsResponsesToCodexHighIntent(t *testing.T) {
 	modelInfo := &registry.ModelInfo{
 		ID:       "codex-upstream",
