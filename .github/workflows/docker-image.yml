@@ -8,6 +8,12 @@ on:
       # build is triggered for both naming schemes.
       - v*
       - '*.*.*-*.*.*'
+  # Allow a manual rebuild of any tag from the Actions tab without creating a
+  # new tag, e.g. to backfill an image for a tag pushed before this trigger
+  # existed, or to retry a build. workflow_dispatch runs fetch the default
+  # branch unless --ref is given; the Build Metadata step derives the image
+  # tag from GITHUB_REF_NAME, so always dispatch with the tag you want to build.
+  workflow_dispatch:
 
 permissions:
   contents: read
