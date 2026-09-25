@@ -2,7 +2,10 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -196,6 +199,14 @@ type Manager struct {
 	// without real 50ms/1200ms sleeps. It runs in the execution loop only,
 	// never under the scheduler lock.
 	capacityWaitFn func(context.Context, time.Duration) bool
+
+	// autoDisableSink is an optional callback fired when the conductor's
+	// classification path matches an upstream error against the auth's
+	// configured auto_disable_codes. The management layer attaches it so a
+	// later task can persist auto_disabled=true in PG + re-render; nil when
+	// PG is not configured (no-op). Read atomically via autoDisableSink.Load;
+	// set via SetAutoDisableSink so it survives runtime config reloads.
+	autoDisableSink atomic.Pointer[AutoDisableSink]
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -274,4 +285,134 @@ func (m *Manager) recordRefreshOutcome(o RefreshOutcome) {
 		}()
 		sink(context.Background(), outcome)
 	}(*sinkPtr, o)
+}
+
+// AutoDisableEvent captures a classified upstream failure that matched the
+// auth's configured auto_disable_codes. Provider + EntryID identify the
+// upstream_providers row to disable, Code is the matched configured code
+// (the string compare hit, or the numeric code matched via the HTTP status),
+// and Message is a bounded fragment of the upstream error for diagnostics.
+type AutoDisableEvent struct {
+	Provider string `json:"provider"`
+	EntryID  int64  `json:"entry_id"`
+	Code     string `json:"code"`
+	Message  string `json:"message,omitempty"`
+}
+
+// AutoDisableSink is invoked by the conductor when a classified upstream error
+// matches an auth's auto_disable_codes. It is the bridge that lets the
+// management layer persist auto_disabled=true + re-render without the auth
+// package (which sits in sdk/cliproxy) importing internal/store. Implementations
+// must be safe to call from arbitrary goroutines.
+type AutoDisableSink func(ctx context.Context, ev AutoDisableEvent)
+
+// SetAutoDisableSink wires an optional callback invoked when the conductor's
+// classification path matches an upstream error against an auth's configured
+// auto_disable_codes. Pass nil to detach an existing sink (e.g. when PG is
+// reconfigured off at runtime). The sink is stored atomically so a runtime
+// config reload can swap it without locking. Implementations must be safe for
+// concurrent use and must never block the classification pipeline
+// (fire-and-forget internally).
+func (m *Manager) SetAutoDisableSink(sink AutoDisableSink) {
+	if m == nil {
+		return
+	}
+	if sink == nil {
+		m.autoDisableSink.Store(nil)
+		return
+	}
+	m.autoDisableSink.Store(&sink)
+}
+
+// recordAutoDisable fires the configured AutoDisableSink (if any) with a
+// classified auto-disable event. No-op when no sink is attached. It never
+// panics and never blocks the caller: a panicking sink is recovered so a buggy
+// persistence adapter cannot stall request classification.
+func (m *Manager) recordAutoDisable(ev AutoDisableEvent) {
+	if m == nil {
+		return
+	}
+	sinkPtr := m.autoDisableSink.Load()
+	if sinkPtr == nil || *sinkPtr == nil {
+		return
+	}
+	// Fire the sink in its own goroutine with a recovered panic so a slow or
+	// buggy persistence adapter cannot block or crash the classification path.
+	go func(sink AutoDisableSink, event AutoDisableEvent) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.WithField("panic", r).Debug("auth: auto-disable sink panic recovered")
+			}
+		}()
+		sink(context.Background(), event)
+	}(*sinkPtr, ev)
+}
+
+// autoDisableMessageBound caps the diagnostic message carried in an
+// AutoDisableEvent so sink payloads stay bounded regardless of upstream noise.
+const autoDisableMessageBound = 512
+
+// authAutoDisableCodeMatch returns the matched configured code ("" = no match)
+// for a classified error against the auth's auto_disable_codes attribute. A
+// configured code matches exactly when it equals err.Code; failing that, a
+// configured code that is a pure number matches the error's HTTP status as a
+// decimal string (e.g. "401" ↔ 401) whether err.Code was absent or unrelated.
+func authAutoDisableCodeMatch(auth *Auth, resultErr *Error) string {
+	if auth == nil || resultErr == nil {
+		return ""
+	}
+	raw := authAttribute(auth, AttributeAutoDisableCodes)
+	if raw == "" {
+		return ""
+	}
+	var codes []string
+	if err := json.Unmarshal([]byte(raw), &codes); err != nil || len(codes) == 0 {
+		return ""
+	}
+	if resultErr.Code != "" {
+		for _, code := range codes {
+			if code == resultErr.Code {
+				return code
+			}
+		}
+	}
+	if resultErr.HTTPStatus <= 0 {
+		return ""
+	}
+	statusString := strconv.Itoa(resultErr.HTTPStatus)
+	for _, code := range codes {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			continue
+		}
+		if _, err := strconv.ParseUint(code, 10, 64); err == nil && code == statusString {
+			return code
+		}
+	}
+	return ""
+}
+
+// entryIDFromProviderKey parses the numeric entry child-row ID out of the
+// synthesizer-built entry_provider_key ("<providerKey>:key-<id>"). The provider
+// key part may itself contain colons (e.g. "claude:42" or an openai-compat
+// scheme), so the split anchors on the LAST ":key-" occurrence, mirroring how
+// the synthesizer concatenates providerKey + ":key-" + entryID. Non-numeric or
+// absent suffixes resolve to 0 (unattributable).
+func entryIDFromProviderKey(auth *Auth) int64 {
+	if auth == nil {
+		return 0
+	}
+	raw := authAttribute(auth, AttributeEntryProviderKey)
+	if raw == "" {
+		return 0
+	}
+	idx := strings.LastIndex(raw, ":key-")
+	if idx < 0 {
+		return 0
+	}
+	id, err := strconv.ParseInt(raw[idx+len(":key-"):], 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
 }

@@ -848,6 +848,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
+			// Auto-disable classification runs once per failed result before
+			// the cooldown branches, so both the per-model and blanket
+			// auth-failure paths observe it. Errors that must never cool
+			// credentials (request-scoped / connection-lifecycle) also never
+			// trigger auto-disable, and the sink only fires for an auth that
+			// resolves to a PG row id (> 0).
+			if resultErr := result.Error; resultErr != nil && !shouldSkipCredentialCooldown(resultErr) {
+				if code := authAutoDisableCodeMatch(auth, resultErr); code != "" {
+					if entryID := entryIDFromProviderKey(auth); entryID > 0 {
+						m.recordAutoDisable(AutoDisableEvent{
+							Provider: auth.Provider,
+							EntryID:  entryID,
+							Code:     code,
+							Message:  truncateString(strings.TrimSpace(resultErr.Message), autoDisableMessageBound),
+						})
+					}
+				}
+			}
+
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
