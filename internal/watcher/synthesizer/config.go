@@ -115,10 +115,10 @@ func addEntryConcurrencyAttrs(attrs map[string]string, maxConcurrent, maxWaitMs 
 		return
 	}
 	if maxConcurrent != nil && *maxConcurrent > 0 {
-		attrs["max_parallel"] = strconv.Itoa(*maxConcurrent)
+		attrs[coreauth.AttributeMaxParallel] = strconv.Itoa(*maxConcurrent)
 	}
 	if maxWaitMs != nil && *maxWaitMs > 0 {
-		attrs["max_wait_ms"] = strconv.Itoa(*maxWaitMs)
+		attrs[coreauth.AttributeMaxWaitMs] = strconv.Itoa(*maxWaitMs)
 	}
 }
 
@@ -133,10 +133,10 @@ func addAutoDisableAttrs(attrs map[string]string, codes []string, cooldownSecond
 	}
 	if len(codes) > 0 {
 		b, _ := json.Marshal(codes)
-		attrs["auto_disable_codes"] = string(b)
+		attrs[coreauth.AttributeAutoDisableCodes] = string(b)
 	}
 	if cooldownSeconds != nil && *cooldownSeconds > 0 {
-		attrs["auto_disable_cooldown_seconds"] = strconv.Itoa(*cooldownSeconds)
+		attrs[coreauth.AttributeAutoDisableCooldownSeconds] = strconv.Itoa(*cooldownSeconds)
 	}
 }
 
@@ -287,9 +287,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		// entry_provider_key attribute.
 		providerKey := attrs["provider_key"]
 		addClaudeEntryProviderKey(attrs, providerKey, ck)
-		// Stamp the per-entry concurrency cap and the provider-level
-		// auto-disable configuration. ClaudeKey carries the renderer's per-item
-		// copies, so the values are read straight off the entry.
+		// Stamp per-entry concurrency + provider auto-disable attrs.
 		addEntryConcurrencyAttrs(attrs, ck.MaxConcurrent, ck.MaxWaitMs)
 		addAutoDisableAttrs(attrs, ck.AutoDisableErrorCodes, ck.AutoDisableCooldownSeconds)
 		// Stamp the row-level pool routing strategy so the conductor can
@@ -480,10 +478,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			addOpenAICompatEntryProviderKey(attrs, internalProviderKey, *entry)
-			// Stamp the per-entry concurrency cap and the provider-level
-			// auto-disable configuration. The renderer copies the provider
-			// auto-disable values onto each item, so entry fields are read
-			// directly; they mirror the provider row (source of truth).
+			// Stamp per-entry concurrency + provider auto-disable attrs.
 			addEntryConcurrencyAttrs(attrs, entry.MaxConcurrent, entry.MaxWaitMs)
 			addAutoDisableAttrs(attrs, entry.AutoDisableErrorCodes, entry.AutoDisableCooldownSeconds)
 			a := &coreauth.Auth{
@@ -695,10 +690,7 @@ func (s *ConfigSynthesizer) synthesizeOpenCodeGo(ctx *SynthesisContext) []*corea
 			}
 			addConfigHeadersToAttrs(row.Headers, attrs)
 			addOpenCodeGoEntryProviderKey(attrs, providerKey, *entry)
-			// Stamp the per-entry concurrency cap and the provider-level
-			// auto-disable configuration. The renderer copies the provider
-			// auto-disable values onto each item, so entry fields are read
-			// directly; they mirror the provider row (source of truth).
+			// Stamp per-entry concurrency + provider auto-disable attrs.
 			addEntryConcurrencyAttrs(attrs, entry.MaxConcurrent, entry.MaxWaitMs)
 			addAutoDisableAttrs(attrs, entry.AutoDisableErrorCodes, entry.AutoDisableCooldownSeconds)
 			a := &coreauth.Auth{

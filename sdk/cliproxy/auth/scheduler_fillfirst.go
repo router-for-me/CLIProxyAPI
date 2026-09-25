@@ -19,7 +19,7 @@ func maxParallelForAuth(auth *Auth) int {
 	if auth == nil || len(auth.Attributes) == 0 {
 		return 0
 	}
-	raw := strings.TrimSpace(auth.Attributes["max_parallel"])
+	raw := strings.TrimSpace(auth.Attributes[AttributeMaxParallel])
 	if raw == "" {
 		return 0
 	}
