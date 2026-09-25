@@ -1193,7 +1193,9 @@ type textArrayScanner struct {
 func (s textArrayScanner) Scan(src any) error {
 	// Each branch replaces *s.dest with a freshly parsed slice (never appends
 	// to a caller-owned slice), so a reused scanner cannot leak an earlier
-	// row's elements into a shorter array.
+	// row's elements into a shorter array; that replacement semantics is safe
+	// because pgx's stdlib driver delivers the whole array literal in a single
+	// Scan call, never element-by-element.
 	switch v := src.(type) {
 	case nil:
 		*s.dest = nil

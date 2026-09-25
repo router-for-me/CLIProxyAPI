@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,77 @@ import (
 
 func uint16PtrForRetry(v uint16) *uint16 { return &v }
 func uint32PtrForRetry(v uint32) *uint32 { return &v }
+
+// TestParsePGTextArrayLiteral exercises the TEXT[] brace-literal parser used
+// to read auto_disable_error_codes through database/sql. It is a pure unit
+// test: it calls the helper directly and needs no live PG.
+func TestParsePGTextArrayLiteral(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "unquoted elements",
+			input: `{401,insufficient_quota}`,
+			want:  []string{"401", "insufficient_quota"},
+		},
+		{
+			name:  "empty array",
+			input: `{}`,
+			want:  []string{},
+		},
+		{
+			name:  "empty element",
+			input: `{,b}`,
+			want:  []string{"", "b"},
+		},
+		{
+			name:  "quoted comma in element",
+			input: `{"a,b","c d"}`,
+			want:  []string{"a,b", "c d"},
+		},
+		{
+			name:  "escaped quote and backslash in quoted element",
+			input: "{\"quote\\\"x\",\"back\\\\slash\"}",
+			want:  []string{"quote\"x", "back\\slash"},
+		},
+		{
+			name:  "SQL NULL text is not a literal",
+			input: `NULL`,
+			want:  nil,
+		},
+		{
+			name:  "empty string",
+			input: ``,
+			want:  nil,
+		},
+		{
+			name:  "unbalanced open brace",
+			input: `{401,insufficient_quota`,
+			want:  nil,
+		},
+		{
+			name:  "unbalanced close brace",
+			input: `401,insufficient_quota}`,
+			want:  nil,
+		},
+		{
+			name:  "stray closing brace",
+			input: `}`,
+			want:  nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parsePGTextArrayLiteral(tc.input)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parsePGTextArrayLiteral(%q) = %#v, want %#v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
 
 // TestValidateUpstreamProviderEntryNameRules exercises the validation rules for
 // per-entry identity on an OpenAI Compatibility provider. The suite covers the
@@ -1239,6 +1311,31 @@ func TestUpstreamProviderStoreMaxConcurrentWaitRoundTrip(t *testing.T) {
 	if reloaded.APIKeyEntries[0].MaxWaitMs == nil || *reloaded.APIKeyEntries[0].MaxWaitMs != newWait {
 		t.Fatalf("after reload MaxWaitMs = %#v, want pointer to %d", reloaded.APIKeyEntries[0].MaxWaitMs, newWait)
 	}
+
+	// Explicit cap 0 must survive write -> re-read as 0 (not normalized to
+	// nil): nullableInt binds a non-nil &0 as the integer 0, so "cap 0" stays
+	// distinct from NULL = unlimited.
+	zero := 0
+	zeroCap, err := src.Create(ctx, UpstreamProvider{
+		ProviderType: "openai-compatibility",
+		Name:         "max-concurrent-zero",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "mc-zero-secret", Name: "alpha", MaxConcurrent: &zero},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create zero cap: %v", err)
+	}
+	zeroLoaded, err := src.Get(ctx, zeroCap.ID)
+	if err != nil {
+		t.Fatalf("Get zero cap: %v", err)
+	}
+	if len(zeroLoaded.APIKeyEntries) != 1 {
+		t.Fatalf("Get zero cap returned %d entries, want 1", len(zeroLoaded.APIKeyEntries))
+	}
+	if zeroLoaded.APIKeyEntries[0].MaxConcurrent == nil || *zeroLoaded.APIKeyEntries[0].MaxConcurrent != 0 {
+		t.Fatalf("explicit MaxConcurrent 0 re-read as %#v, want pointer to 0", zeroLoaded.APIKeyEntries[0].MaxConcurrent)
+	}
 }
 
 // TestUpstreamProviderStoreAutoDisableColumnsRoundTrip pins the Auto-Disable
@@ -1445,5 +1542,29 @@ func TestUpstreamProviderStoreAutoDisableColumnsRoundTrip(t *testing.T) {
 	}
 	if gotB.AutoDisabledReason != "matched 429 upstream" {
 		t.Fatalf("entry B AutoDisabledReason = %q, want %q", gotB.AutoDisabledReason, "matched 429 upstream")
+	}
+
+	// Empty-but-present codes round-trip as an empty non-nil slice: '{}' must
+	// stay distinct from NULL at the SQL layer (nil slice = feature off, empty
+	// slice = feature on with no codes yet). marshalTextArray writes '{}' for
+	// an empty non-nil slice and SQL NULL for nil, so the re-read proves the
+	// distinction survives both the write and the TEXT[] scan.
+	emptyCodes, err := src.Create(ctx, UpstreamProvider{
+		ProviderType:          "openai-compatibility",
+		Name:                  "auto-disable-empty-codes",
+		AutoDisableErrorCodes: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create empty codes: %v", err)
+	}
+	emptyLoaded, err := src.Get(ctx, emptyCodes.ID)
+	if err != nil {
+		t.Fatalf("Get empty codes: %v", err)
+	}
+	if emptyLoaded.AutoDisableErrorCodes == nil {
+		t.Fatal("empty []string{} AutoDisableErrorCodes re-read as nil — '{}' collapsed to NULL")
+	}
+	if len(emptyLoaded.AutoDisableErrorCodes) != 0 {
+		t.Fatalf("empty codes re-read = %#v, want empty slice", emptyLoaded.AutoDisableErrorCodes)
 	}
 }
