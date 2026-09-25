@@ -3,12 +3,47 @@ package auth
 import (
 	"strconv"
 	"strings"
+	"time"
 )
 
 // maxParallelUnbounded is the cap used when no per-auth max_parallel_requests
 // attribute is set; matches the "no cap / unlimited" convention in
 // internal/policy/enforce.go (Zero means "no cap / unlimited").
 const maxParallelUnbounded = int(^uint(0) >> 1)
+
+// capacityWaitIncrement is the per-increment granularity of the execute-loop
+// capacity wait. A capacity pick waits at most this long before re-picking,
+// and the total wait across all capacity re-picks stays bounded by the entry's
+// max_wait_ms budget (default DefaultCapacityWaitMS).
+const capacityWaitIncrement = 50 * time.Millisecond
+
+// DefaultCapacityWaitMS is the capacity wait budget (in milliseconds) applied
+// when no candidate entry sets max_wait_ms. It is the "short default" the Task
+// 5 plan cites (e.g. 200ms): the execute loop re-picks on entry_capacity for at
+// most this long before falling through to the existing no-auth error, so an
+// operator who enables per-entry caps without pinning a wait still gets bounded
+// latency rather than an instant re-pick busy-spin or a long tail.
+const DefaultCapacityWaitMS = 200
+
+// maxWaitForAuth resolves the entry's per-entry concurrency wait budget in
+// order across the candidate auths: the FIRST auth carrying a positive
+// max_wait_ms attribute wins. nil auths, unset/zero/negative values, and
+// unparseable strings are skipped; when no candidate sets a positive budget,
+// the default (DefaultCapacityWaitMS) applies so the capacity wait is always
+// bounded (never an instant re-pick busy-spin).
+func maxWaitForAuth(auths ...*Auth) time.Duration {
+	for _, auth := range auths {
+		raw := strings.TrimSpace(authAttribute(auth, AttributeMaxWaitMs))
+		if raw == "" {
+			continue
+		}
+		parsed, errParse := strconv.Atoi(raw)
+		if errParse == nil && parsed > 0 {
+			return time.Duration(parsed) * time.Millisecond
+		}
+	}
+	return time.Duration(DefaultCapacityWaitMS) * time.Millisecond
+}
 
 // maxParallelForAuth returns the per-auth max_parallel_requests cap parsed
 // from auth.Attributes["max_parallel"], or 0 when unset / unparseable. The

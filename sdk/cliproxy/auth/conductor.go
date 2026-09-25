@@ -189,6 +189,13 @@ type Manager struct {
 	// PG is not configured (no-op). Read atomically via refreshSink.Load;
 	// set via SetRefreshSink so it survives runtime config reloads.
 	refreshSink atomic.Pointer[RefreshSink]
+
+	// capacityWaitFn overrides the execute-loop capacity wait (per-entry
+	// concurrency caps). nil in production: waitForCapacity uses the real
+	// bounded sleep honoring ctx. Tests install a seam to stay deterministic
+	// without real 50ms/1200ms sleeps. It runs in the execution loop only,
+	// never under the scheduler lock.
+	capacityWaitFn func(context.Context, time.Duration) bool
 }
 
 // NewManager constructs a manager with optional custom selector and hook.

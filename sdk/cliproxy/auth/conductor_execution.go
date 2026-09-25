@@ -325,6 +325,61 @@ func (m *Manager) releaseAuthInFlight(auth *Auth) {
 	m.scheduler.adjustInFlight(auth.ID, -1)
 }
 
+// waitForCapacity performs one bounded wait on the Task-5 capacity path. It
+// runs in the execution loop, never under the scheduler lock. Tests install
+// the capacityWaitFn seam to stay deterministic; production sleeps at most
+// min(budget, capacityWaitIncrement), honoring ctx cancellation. Returns true
+// when the loop should re-pick (a slot may have freed); false only when ctx is
+// canceled — the caller then falls through to the existing error return.
+func (m *Manager) waitForCapacity(ctx context.Context, budget time.Duration) bool {
+	if m != nil && m.capacityWaitFn != nil {
+		return m.capacityWaitFn(ctx, budget)
+	}
+	wait := capacityWaitIncrement
+	if budget > 0 && budget < wait {
+		wait = budget
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// resolveCapacityWaitBudget resolves the request's capacity wait budget from
+// the registered auths serving the requested providers: the first of them
+// carrying a positive max_wait_ms wins, else DefaultCapacityWaitMS. Called
+// lazily on the first ErrEntryCapacity pick of a request. Resolving from the
+// candidate auth set (rather than the pick result, which carries none) keeps
+// the budget sensible per request without scheduler changes.
+func (m *Manager) resolveCapacityWaitBudget(providers []string) time.Duration {
+	if m == nil {
+		return time.Duration(DefaultCapacityWaitMS) * time.Millisecond
+	}
+	wanted := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		key := strings.TrimSpace(strings.ToLower(provider))
+		if key != "" {
+			wanted[key] = struct{}{}
+		}
+	}
+	candidates := make([]*Auth, 0)
+	m.mu.RLock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if _, ok := wanted[strings.TrimSpace(strings.ToLower(auth.Provider))]; ok {
+			candidates = append(candidates, auth)
+		}
+	}
+	m.mu.RUnlock()
+	return maxWaitForAuth(candidates...)
+}
+
 // wrapStreamDrainRelease wraps a scheduler-picked stream so the attempt's
 // in-flight hold is released exactly once when the stream finishes draining.
 // On client cancellation it stops FORWARDING but keeps draining the wrapped
@@ -387,6 +442,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	// failure carries no auth to report.
 	var lastAuth *Auth
 	pinnedPool := ""
+	// capacityBudget is the Task-5 wait-then-failover budget: when the picker
+	// reports ErrEntryCapacity (every eligible candidate at/over its per-entry
+	// concurrency cap), the loop waits bounded increments then re-picks instead
+	// of failing immediately. The budget is resolved lazily on the first
+	// capacity pick (no cost on the common path) and decayed across picks so
+	// the TOTAL wait stays within the entry's max_wait_ms. On expiry the loop
+	// falls through to the existing error return unchanged (D6).
+	var capacityBudget time.Duration
+	capacityBudgetResolved := false
 	// innerOpts projects routing.retry into the per-entry retry loop. The
 	// loop is only entered when MaxAttempts >= 2; below that the inline
 	// single-attempt path runs untouched, so a default config never
@@ -421,6 +485,30 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, poolPickProviders(providers, pinnedPool), routeModel, pickOpts, tried)
 		if errPick != nil {
+			if isEntryCapacityError(errPick) {
+				if !capacityBudgetResolved {
+					capacityBudgetResolved = true
+					capacityBudget = m.resolveCapacityWaitBudget(providers)
+				}
+				if capacityBudget > 0 {
+					increment := capacityBudget
+					if increment > capacityWaitIncrement {
+						increment = capacityWaitIncrement
+					}
+					if !m.waitForCapacity(ctx, capacityBudget) {
+						// Context canceled during the bounded wait: fall
+						// through to the existing error return unchanged
+						// (D6 keeps the no-auth / 503 shape).
+						return cliproxyexecutor.Response{}, errPick, lastAuth
+					}
+					capacityBudget -= increment
+					// Budget remains: re-pick immediately. A slot may have
+					// freed while we waited.
+					continue
+				}
+				// Budget exhausted: fall through to the existing error return
+				// unchanged (D6).
+			}
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr, lastAuth
 			}
@@ -607,6 +695,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	// See executeMixedOnce for the rationale behind tracking lastAuth here.
 	var lastAuth *Auth
 	pinnedPool := ""
+	// capacityBudget: see executeMixedOnce. Bounded wait-then-failover on
+	// ErrEntryCapacity, decayed across picks within the entry's max_wait_ms.
+	var capacityBudget time.Duration
+	capacityBudgetResolved := false
 	// innerOpts: see executeMixedOnce for the retry-loop rationale (only
 	// MaxAttempts >= 2 enters RunInnerLoop; below that the inline path runs
 	// untouched with no added deadline).
@@ -637,6 +729,30 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, poolPickProviders(providers, pinnedPool), routeModel, pickOpts, tried)
 		if errPick != nil {
+			if isEntryCapacityError(errPick) {
+				if !capacityBudgetResolved {
+					capacityBudgetResolved = true
+					capacityBudget = m.resolveCapacityWaitBudget(providers)
+				}
+				if capacityBudget > 0 {
+					increment := capacityBudget
+					if increment > capacityWaitIncrement {
+						increment = capacityWaitIncrement
+					}
+					if !m.waitForCapacity(ctx, capacityBudget) {
+						// Context canceled during the bounded wait: fall
+						// through to the existing error return unchanged
+						// (D6 keeps the no-auth / 503 shape).
+						return cliproxyexecutor.Response{}, errPick, lastAuth
+					}
+					capacityBudget -= increment
+					// Budget remains: re-pick immediately. A slot may have
+					// freed while we waited.
+					continue
+				}
+				// Budget exhausted: fall through to the existing error return
+				// unchanged (D6).
+			}
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, lastErr, lastAuth
 			}
@@ -828,6 +944,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	// See executeMixedOnce for the rationale behind tracking lastAuth here.
 	var lastAuth *Auth
 	pinnedPool := ""
+	// capacityBudget: see executeMixedOnce. Bounded wait-then-failover on
+	// ErrEntryCapacity, decayed across picks within the entry's max_wait_ms.
+	var capacityBudget time.Duration
+	capacityBudgetResolved := false
 	// releaseInFlight releases the current attempt's in-flight hold exactly
 	// once: at the top of the next loop iteration, at function exit via the
 	// deferred closure, or — for a successfully started stream — by handing
@@ -871,6 +991,30 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, executor, provider, errPick = m.pickNextMixed(ctx, poolPickProviders(providers, pinnedPool), routeModel, pickOpts, tried)
 		}
 		if errPick != nil {
+			if isEntryCapacityError(errPick) {
+				if !capacityBudgetResolved {
+					capacityBudgetResolved = true
+					capacityBudget = m.resolveCapacityWaitBudget(providers)
+				}
+				if capacityBudget > 0 {
+					increment := capacityBudget
+					if increment > capacityWaitIncrement {
+						increment = capacityWaitIncrement
+					}
+					if !m.waitForCapacity(ctx, capacityBudget) {
+						// Context canceled during the bounded wait: fall
+						// through to the existing error return unchanged
+						// (D6 keeps the no-auth / 503 shape).
+						return nil, errPick, lastAuth
+					}
+					capacityBudget -= increment
+					// Budget remains: re-pick immediately. A slot may have
+					// freed while we waited.
+					continue
+				}
+				// Budget exhausted: fall through to the existing error return
+				// unchanged (D6).
+			}
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return nil, lastErr, lastAuth
 			}
