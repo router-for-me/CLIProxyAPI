@@ -1527,6 +1527,7 @@ function providerListEndpoint(provider) {
     claude: 'claude-api-key',
     codex: 'codex-api-key',
     xai: 'xai-api-key',
+    meta: 'meta-api-key',
     vertex: 'vertex-api-key',
     openai: 'openai-compatibility',
   }[provider];

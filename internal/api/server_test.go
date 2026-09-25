@@ -2261,3 +2261,21 @@ func TestInteractionsRouteRegistered(t *testing.T) {
 		t.Fatalf("status = %d, want route registered; body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestMetaAuthURLRouteRegistered pins that the /v0/management/meta-auth-url
+// route is registered behind the management secret. The device flow is never
+// started: an unauthenticated request is rejected by the management
+// middleware before the handler runs, so a 401 (not 404) proves the route
+// exists. Mirrors the xai-auth-url registration check.
+func TestMetaAuthURLRouteRegistered(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+
+	server := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/meta-auth-url", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d (route registered, auth required); body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+}

@@ -50,6 +50,11 @@ func SeedFromArtifacts(ctx context.Context, st store.UpstreamProviderStore, cfg 
 			log.WithError(err).Warn("upstreamsync: seed xai-api-key row failed")
 		}
 	}
+	for _, k := range cfg.MetaKey {
+		if _, err := st.Create(ctx, providerFromCodexKey(k, TypeMetaAPIKey)); err != nil {
+			log.WithError(err).Warn("upstreamsync: seed meta-api-key row failed")
+		}
+	}
 	for _, k := range cfg.ClaudeKey {
 		if _, err := st.Create(ctx, providerFromClaudeKey(k)); err != nil {
 			log.WithError(err).Warn("upstreamsync: seed claude-api-key row failed")

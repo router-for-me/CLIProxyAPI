@@ -61,6 +61,41 @@ func TestAPIKeyWeightParsingAndZeroPersistence(t *testing.T) {
 	}
 }
 
+// TestMetaAPIKeyWeightParsingAndZeroPersistence mirrors the xai weight test
+// for the meta-api-key family: an explicit weight: 0 must parse and survive
+// the YAML save/merge path.
+func TestMetaAPIKeyWeightParsingAndZeroPersistence(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`meta-api-key:
+  - api-key: key
+    base-url: https://api.meta.ai/v1
+    weight: 0
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if len(cfg.MetaKey) != 1 || cfg.MetaKey[0].Weight == nil || *cfg.MetaKey[0].Weight != 0 {
+		t.Fatalf("parsed weight = %#v, want explicit zero", cfg.MetaKey)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if errWrite := os.WriteFile(configPath, []byte(`meta-api-key:
+  - api-key: key
+    base-url: https://api.meta.ai/v1
+`), 0644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
+		t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+	}
+	saved, errRead := os.ReadFile(configPath)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	if !strings.Contains(string(saved), "weight: 0") {
+		t.Fatalf("saved meta config does not preserve explicit zero weight:\n%s", saved)
+	}
+}
+
 // TestOpenAICompatibilityEntryPriorityParsingAndZeroPersistence mirrors
 // TestAPIKeyWeightParsingAndZeroPersistence for the pointer-backed per-entry
 // priority: an explicit tier 0 must parse into *int 0 and survive the YAML

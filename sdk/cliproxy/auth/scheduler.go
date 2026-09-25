@@ -571,7 +571,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 
 func providerPrefersWebsocketTransport(providerKey string) bool {
 	switch strings.ToLower(strings.TrimSpace(providerKey)) {
-	case "codex", "xai":
+	case "codex", "xai", "meta":
 		return true
 	default:
 		return false

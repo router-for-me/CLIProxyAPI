@@ -30,6 +30,7 @@ const (
 	TypeInteractionsAPIKey  = "interactions-api-key"
 	TypeCodexAPIKey         = "codex-api-key"
 	TypeXAIAPIKey           = "xai-api-key"
+	TypeMetaAPIKey          = "meta-api-key"
 	TypeClaudeAPIKey        = "claude-api-key"
 	TypeOpenAICompatibility = "openai-compatibility"
 	TypeOpenCodeGo          = "opencode-go"
@@ -155,6 +156,8 @@ func RenderConfigWithPools(providers []store.UpstreamProvider, pools poolLookup)
 			cfg.CodexKey = append(cfg.CodexKey, codexKeyFromProvider(p))
 		case TypeXAIAPIKey:
 			cfg.XAIKey = append(cfg.XAIKey, codexKeyFromProvider(p))
+		case TypeMetaAPIKey:
+			cfg.MetaKey = append(cfg.MetaKey, codexKeyFromProvider(p))
 		case TypeClaudeAPIKey:
 			cfg.ClaudeKey = append(cfg.ClaudeKey, claudeKeyFromProviderWithPools(p, pools)...)
 		case TypeOpenAICompatibility:

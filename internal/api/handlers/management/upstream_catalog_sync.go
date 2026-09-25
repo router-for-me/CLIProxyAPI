@@ -109,6 +109,7 @@ func mirrorsCatalogByUpstreamName(providerType string) bool {
 		upstreamsync.TypeGeminiAPIKey,
 		upstreamsync.TypeCodexAPIKey,
 		upstreamsync.TypeXAIAPIKey,
+		upstreamsync.TypeMetaAPIKey,
 		upstreamsync.TypeClaudeAPIKey,
 		upstreamsync.TypeInteractionsAPIKey:
 		return true

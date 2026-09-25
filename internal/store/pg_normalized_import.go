@@ -752,6 +752,8 @@ func isSyntheticProviderName(providerType, name string) bool {
 		prefix = "codex-"
 	case "xai-api-key":
 		prefix = "xai-"
+	case "meta-api-key":
+		prefix = "meta-"
 	case "vertex-api-key":
 		prefix = "vertex-"
 	default:

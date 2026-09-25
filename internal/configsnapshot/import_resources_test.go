@@ -54,6 +54,9 @@ func TestBuildResourcePlanAllProviderSections(t *testing.T) {
 		XAIKey: []config.CodexKey{{
 			APIKey: "sk-xai", BaseURL: "https://xai.example",
 		}},
+		MetaKey: []config.CodexKey{{
+			APIKey: "sk-meta", BaseURL: "https://meta.example",
+		}},
 		VertexCompatAPIKey: []config.VertexCompatKey{{
 			APIKey: "sk-vertex", BaseURL: "https://vertex.example",
 		}},
@@ -84,7 +87,7 @@ func TestBuildResourcePlanAllProviderSections(t *testing.T) {
 	}
 	wantTypes := []string{
 		"claude-api-key", "interactions-api-key", "gemini-api-key", "codex-api-key",
-		"xai-api-key", "vertex-api-key", "openai-compatibility", "opencode-go",
+		"xai-api-key", "meta-api-key", "vertex-api-key", "openai-compatibility", "opencode-go",
 	}
 	for _, want := range wantTypes {
 		if len(byType[want]) != 1 {
@@ -118,6 +121,17 @@ func TestBuildResourcePlanAllProviderSections(t *testing.T) {
 	}
 	if codex.ExtraConfig[ecAlphaSearch] != true || codex.ExtraConfig[ecDisableCooling] != true {
 		t.Fatalf("codex ExtraConfig = %+v", codex.ExtraConfig)
+	}
+
+	meta := byType["meta-api-key"][0]
+	if meta.APIKey != "sk-meta" || meta.BaseURL != "https://meta.example" {
+		t.Fatalf("meta basics = %+v", meta)
+	}
+	if meta.Name != "meta-1" {
+		t.Fatalf("meta Name = %q; want positional meta-1", meta.Name)
+	}
+	if meta.ExtraConfig[ecDisableCooling] == true {
+		t.Fatalf("meta ExtraConfig = %+v; want no disable_cooling (unset)", meta.ExtraConfig)
 	}
 
 	oai := byType["openai-compatibility"][0]

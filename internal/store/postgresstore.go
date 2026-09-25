@@ -2893,7 +2893,7 @@ func (s *PostgresStore) syncUpstreamProviderToken(ctx context.Context, auth *cli
 // in config.yaml). The list mirrors the synthesizer's supported channels.
 func authIsOAuthProvider(provider string) bool {
 	switch provider {
-	case "claude", "codex", "kimi", "xai", "vertex", "aistudio", "antigravity":
+	case "claude", "codex", "kimi", "xai", "vertex", "aistudio", "antigravity", "meta":
 		return true
 	}
 	return false

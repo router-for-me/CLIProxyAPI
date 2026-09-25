@@ -66,3 +66,46 @@ func TestOpenAICompatEntryIdentityNameRoundTrip(t *testing.T) {
 		t.Fatalf("name did not survive seed/render round trip: %+v", rendered.APIKeyEntries)
 	}
 }
+
+// TestMetaAPIKeySeedRenderRoundTrip pins that a meta-api-key row seeds from
+// config.MetaKey (CodexKey alias) via providerFromCodexKey with the meta
+// provider type and renders back into cfg.MetaKey via RenderConfig — the
+// same one-item-to-one-row round trip the xai-api-key path guarantees.
+func TestMetaAPIKeySeedRenderRoundTrip(t *testing.T) {
+	seeded := providerFromCodexKey(config.CodexKey{
+		APIKey:         "meta-key",
+		BaseURL:        "https://api.meta.ai/v1",
+		Prefix:         "meta/",
+		Priority:       3,
+		Websockets:     false,
+		ProxyURL:       "http://proxy.example",
+		ExcludedModels: []string{"muse-code-old"},
+		Models: []config.CodexModel{
+			{Name: "muse-code", Alias: "meta-flash"},
+		},
+	}, TypeMetaAPIKey)
+	if seeded.ProviderType != TypeMetaAPIKey {
+		t.Fatalf("seeded provider type = %q, want %q", seeded.ProviderType, TypeMetaAPIKey)
+	}
+
+	rendered := RenderConfig([]store.UpstreamProvider{seeded})
+	if len(rendered.MetaKey) != 1 {
+		t.Fatalf("rendered %d meta keys, want 1", len(rendered.MetaKey))
+	}
+	got := rendered.MetaKey[0]
+	if got.APIKey != "meta-key" || got.BaseURL != "https://api.meta.ai/v1" {
+		t.Fatalf("rendered meta key = %+v", got)
+	}
+	if got.Prefix != "meta/" || got.Priority != 3 {
+		t.Fatalf("rendered prefix/priority = %q/%d, want meta//3", got.Prefix, got.Priority)
+	}
+	if got.ProxyURL != "http://proxy.example" {
+		t.Fatalf("rendered proxy URL = %q", got.ProxyURL)
+	}
+	if len(got.Models) != 1 || got.Models[0].Name != "muse-code" || got.Models[0].Alias != "meta-flash" {
+		t.Fatalf("rendered models = %+v", got.Models)
+	}
+	if len(got.ExcludedModels) != 1 || got.ExcludedModels[0] != "muse-code-old" {
+		t.Fatalf("rendered excluded models = %+v", got.ExcludedModels)
+	}
+}
