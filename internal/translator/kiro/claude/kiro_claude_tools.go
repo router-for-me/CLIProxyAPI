@@ -457,11 +457,38 @@ func ProcessToolUseEvent(event map[string]interface{}, currentToolUse *ToolUseSt
 		log.Debugf("kiro: accumulated input fragment, total length: %d", currentToolUse.InputBuffer.Len())
 	}
 
-	// If complete input object provided directly
+	// If complete input object provided directly, merge with accumulated fragments
 	if currentToolUse != nil && inputMap != nil {
-		inputBytes, _ := json.Marshal(inputMap)
-		currentToolUse.InputBuffer.Reset()
-		currentToolUse.InputBuffer.Write(inputBytes)
+		// If buffer is empty, this is the first/only input - use it directly
+		if currentToolUse.InputBuffer.Len() == 0 {
+			inputBytes, _ := json.Marshal(inputMap)
+			currentToolUse.InputBuffer.Write(inputBytes)
+			log.Debugf("kiro: using complete input object, length: %d", len(inputBytes))
+		} else {
+			// Buffer has accumulated fragments - merge them with the new object
+			existingInput := currentToolUse.InputBuffer.String()
+			var merged map[string]interface{}
+			
+			// Try to parse existing fragments
+			repairedExisting := RepairJSON(existingInput)
+			if err := json.Unmarshal([]byte(repairedExisting), &merged); err != nil {
+				// Existing is malformed - use inputMap as source of truth
+				log.Warnf("kiro: failed to parse accumulated fragments, using inputMap: %v", err)
+				merged = inputMap
+			} else {
+				// Merge inputMap into existing (inputMap takes precedence for conflicts)
+				log.Debugf("kiro: merging input object with accumulated fragments")
+				for k, v := range inputMap {
+					merged[k] = v
+				}
+			}
+			
+			// Write merged result back to buffer
+			mergedBytes, _ := json.Marshal(merged)
+			currentToolUse.InputBuffer.Reset()
+			currentToolUse.InputBuffer.Write(mergedBytes)
+			log.Debugf("kiro: merged input length: %d", len(mergedBytes))
+		}
 	}
 
 	// Tool use complete

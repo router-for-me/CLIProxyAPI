@@ -53,7 +53,7 @@ jobs:
           ASSET_ARCH: ${{ matrix.asset_arch }}
         run: |
           set -euo pipefail
-          RELEASE_VERSION="7.5.5"
+          RELEASE_VERSION="7.5.6"
           COMMIT="$(git rev-parse --short HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           mkdir -p dist/archive
