@@ -263,20 +263,24 @@ func buildClaudeKey(p store.UpstreamProvider, e store.UpstreamProviderAPIKey) co
 func buildClaudeKeyWithPools(p store.UpstreamProvider, e store.UpstreamProviderAPIKey, pools poolLookup) config.ClaudeKey {
 	proxyURL, relayBase := resolveBinding(pools, e.ProxyPoolID, p.ProxyPoolID, e.ProxyURL, p.ProxyURL)
 	k := config.ClaudeKey{
-		APIKey:                  e.APIKey,
-		Weight:                  e.Weight,
-		Priority:                p.Priority,
-		Prefix:                  p.Prefix,
-		BaseURL:                 p.BaseURL,
-		ProxyURL:                proxyURL,
-		RelayBaseURL:            relayBase,
-		ProxyPoolID:             e.ProxyPoolID,
-		Headers:                 p.Headers,
-		ExcludedModels:          p.ExcludedModels,
-		RebuildMidSystemMessage: p.RebuildMidSystemMessage,
-		ExperimentalCCHSigning:  p.ExperimentalCCHSigning,
-		UpstreamProviderID:      p.ID,
-		UpstreamProviderEntryID: e.ID,
+		APIKey:                     e.APIKey,
+		Weight:                     e.Weight,
+		Priority:                   p.Priority,
+		MaxConcurrent:              e.MaxConcurrent,
+		MaxWaitMs:                  e.MaxWaitMs,
+		AutoDisableErrorCodes:      p.AutoDisableErrorCodes,
+		AutoDisableCooldownSeconds: p.AutoDisableCooldownSeconds,
+		Prefix:                     p.Prefix,
+		BaseURL:                    p.BaseURL,
+		ProxyURL:                   proxyURL,
+		RelayBaseURL:               relayBase,
+		ProxyPoolID:                e.ProxyPoolID,
+		Headers:                    p.Headers,
+		ExcludedModels:             p.ExcludedModels,
+		RebuildMidSystemMessage:    p.RebuildMidSystemMessage,
+		ExperimentalCCHSigning:     p.ExperimentalCCHSigning,
+		UpstreamProviderID:         p.ID,
+		UpstreamProviderEntryID:    e.ID,
 	}
 	// A nil entry priority inherits the row-level default set in the literal
 	// above; a non-nil pointer overrides it with the entry's own tier.
@@ -326,15 +330,17 @@ func openAICompatFromProviderWithPools(p store.UpstreamProvider, pools poolLooku
 		// Raw store strategies are canonicalized here; blank stays blank
 		// (unset = follow the global routing strategy). The circuit-breaker
 		// opt-in rides alongside it (design G3).
-		Strategy:       config.NormalizePoolRoutingStrategy(p.RoutingStrategy),
-		CircuitBreaker: p.CircuitBreaker,
-		Disabled:       p.Disabled,
-		Prefix:         p.Prefix,
-		BaseURL:        p.BaseURL,
-		ProxyURL:       rowProxyURL,
-		RelayBaseURL:   rowRelayBase,
-		ProxyPoolID:    p.ProxyPoolID,
-		Headers:        p.Headers,
+		Strategy:                   config.NormalizePoolRoutingStrategy(p.RoutingStrategy),
+		CircuitBreaker:             p.CircuitBreaker,
+		Disabled:                   p.Disabled,
+		AutoDisableErrorCodes:      p.AutoDisableErrorCodes,
+		AutoDisableCooldownSeconds: p.AutoDisableCooldownSeconds,
+		Prefix:                     p.Prefix,
+		BaseURL:                    p.BaseURL,
+		ProxyURL:                   rowProxyURL,
+		RelayBaseURL:               rowRelayBase,
+		ProxyPoolID:                p.ProxyPoolID,
+		Headers:                    p.Headers,
 	}
 	for _, e := range p.APIKeyEntries {
 		if e.Disabled {
@@ -347,14 +353,18 @@ func openAICompatFromProviderWithPools(p store.UpstreamProvider, pools poolLooku
 		// pool binding overrides the row binding (resolveBinding precedence).
 		entryProxyURL, entryRelayBase := resolveBinding(pools, e.ProxyPoolID, p.ProxyPoolID, e.ProxyURL, "")
 		k.APIKeyEntries = append(k.APIKeyEntries, config.OpenAICompatibilityAPIKey{
-			APIKey:                  e.APIKey,
-			Name:                    e.Name,
-			UpstreamProviderEntryID: e.ID,
-			Weight:                  e.Weight,
-			Priority:                e.Priority,
-			ProxyURL:                entryProxyURL,
-			RelayBaseURL:            entryRelayBase,
-			ProxyPoolID:             e.ProxyPoolID,
+			APIKey:                     e.APIKey,
+			Name:                       e.Name,
+			UpstreamProviderEntryID:    e.ID,
+			Weight:                     e.Weight,
+			Priority:                   e.Priority,
+			MaxConcurrent:              e.MaxConcurrent,
+			MaxWaitMs:                  e.MaxWaitMs,
+			AutoDisableErrorCodes:      p.AutoDisableErrorCodes,
+			AutoDisableCooldownSeconds: p.AutoDisableCooldownSeconds,
+			ProxyURL:                   entryProxyURL,
+			RelayBaseURL:               entryRelayBase,
+			ProxyPoolID:                e.ProxyPoolID,
 		})
 	}
 	for _, m := range p.Models {
@@ -387,18 +397,20 @@ func openAICompatFromProviderWithPools(p store.UpstreamProvider, pools poolLooku
 func openCodeGoFromProviderWithPools(p store.UpstreamProvider, pools poolLookup) config.OpenCodeGo {
 	rowProxyURL, rowRelayBase := resolveBinding(pools, nil, p.ProxyPoolID, "", p.ProxyURL)
 	k := config.OpenCodeGo{
-		Name:               p.Name,
-		Priority:           p.Priority,
-		Strategy:           config.NormalizePoolRoutingStrategy(p.RoutingStrategy),
-		CircuitBreaker:     p.CircuitBreaker,
-		Disabled:           p.Disabled,
-		Prefix:             p.Prefix,
-		BaseURL:            p.BaseURL,
-		ProxyURL:           rowProxyURL,
-		RelayBaseURL:       rowRelayBase,
-		ProxyPoolID:        p.ProxyPoolID,
-		UpstreamProviderID: p.ID,
-		Headers:            p.Headers,
+		Name:                       p.Name,
+		Priority:                   p.Priority,
+		Strategy:                   config.NormalizePoolRoutingStrategy(p.RoutingStrategy),
+		CircuitBreaker:             p.CircuitBreaker,
+		Disabled:                   p.Disabled,
+		AutoDisableErrorCodes:      p.AutoDisableErrorCodes,
+		AutoDisableCooldownSeconds: p.AutoDisableCooldownSeconds,
+		Prefix:                     p.Prefix,
+		BaseURL:                    p.BaseURL,
+		ProxyURL:                   rowProxyURL,
+		RelayBaseURL:               rowRelayBase,
+		ProxyPoolID:                p.ProxyPoolID,
+		UpstreamProviderID:         p.ID,
+		Headers:                    p.Headers,
 	}
 	for _, e := range p.APIKeyEntries {
 		if e.Disabled {
@@ -408,14 +420,18 @@ func openCodeGoFromProviderWithPools(p store.UpstreamProvider, pools poolLookup)
 		}
 		entryProxyURL, entryRelayBase := resolveBinding(pools, e.ProxyPoolID, p.ProxyPoolID, e.ProxyURL, "")
 		k.APIKeyEntries = append(k.APIKeyEntries, config.OpenCodeGoKey{
-			APIKey:                  e.APIKey,
-			Name:                    e.Name,
-			UpstreamProviderEntryID: e.ID,
-			Weight:                  e.Weight,
-			Priority:                e.Priority,
-			ProxyURL:                entryProxyURL,
-			RelayBaseURL:            entryRelayBase,
-			ProxyPoolID:             e.ProxyPoolID,
+			APIKey:                     e.APIKey,
+			Name:                       e.Name,
+			UpstreamProviderEntryID:    e.ID,
+			Weight:                     e.Weight,
+			Priority:                   e.Priority,
+			MaxConcurrent:              e.MaxConcurrent,
+			MaxWaitMs:                  e.MaxWaitMs,
+			AutoDisableErrorCodes:      p.AutoDisableErrorCodes,
+			AutoDisableCooldownSeconds: p.AutoDisableCooldownSeconds,
+			ProxyURL:                   entryProxyURL,
+			RelayBaseURL:               entryRelayBase,
+			ProxyPoolID:                e.ProxyPoolID,
 		})
 	}
 	for _, m := range p.Models {

@@ -561,3 +561,157 @@ func TestRenderSkipsDisabledEntries(t *testing.T) {
 		t.Fatalf("wrong claude key rendered: %q", keys[0].APIKey)
 	}
 }
+
+// TestRenderClaudePerEntryMaxConcurrentAndAutoDisable verifies the Claude
+// fan-out copies each entry's per-entry concurrency fields
+// (MaxConcurrent/MaxWaitMs) verbatim — nil stays nil (unlimited) — and
+// stamps the provider's auto-disable fields onto every rendered item.
+func TestRenderClaudePerEntryMaxConcurrentAndAutoDisable(t *testing.T) {
+	mc, mw := ptrInt(3), ptrInt(1500)
+	cd := 3600
+	provider := store.UpstreamProvider{
+		ProviderType:               TypeClaudeAPIKey,
+		ID:                         42,
+		AutoDisableErrorCodes:      []string{"401", "account_suspended"},
+		AutoDisableCooldownSeconds: &cd,
+		APIKeyEntries: []store.UpstreamProviderAPIKey{
+			{ID: 7, APIKey: "entry-a-secret", MaxConcurrent: mc, MaxWaitMs: mw},
+			{ID: 9, APIKey: "entry-b-secret"}, // nil/0 → unlimited, stays nil
+		},
+	}
+	keys := claudeKeyFromProvider(provider)
+	if len(keys) != 2 {
+		t.Fatalf("rendered %d claude keys, want 2", len(keys))
+	}
+	if keys[0].MaxConcurrent == nil || *keys[0].MaxConcurrent != 3 {
+		t.Fatalf("entry 0 MaxConcurrent = %v, want 3", keys[0].MaxConcurrent)
+	}
+	if keys[0].MaxWaitMs == nil || *keys[0].MaxWaitMs != 1500 {
+		t.Fatalf("entry 0 MaxWaitMs = %v, want 1500", keys[0].MaxWaitMs)
+	}
+	if keys[1].MaxConcurrent != nil {
+		t.Fatalf("entry 1 MaxConcurrent = %v, want nil (unlimited)", keys[1].MaxConcurrent)
+	}
+	if keys[1].MaxWaitMs != nil {
+		t.Fatalf("entry 1 MaxWaitMs = %v, want nil", keys[1].MaxWaitMs)
+	}
+	for i, k := range keys {
+		if len(k.AutoDisableErrorCodes) != 2 || k.AutoDisableErrorCodes[0] != "401" {
+			t.Fatalf("item %d auto-disable codes = %v, want [401 account_suspended]", i, k.AutoDisableErrorCodes)
+		}
+		if k.AutoDisableCooldownSeconds == nil || *k.AutoDisableCooldownSeconds != 3600 {
+			t.Fatalf("item %d cooldown = %v, want 3600", i, k.AutoDisableCooldownSeconds)
+		}
+	}
+}
+
+// TestRenderOpenAICompatPerEntryMaxConcurrentAndAutoDisable covers the same
+// carry-through on the OpenAI-compat pool: entry concurrency fields land on
+// the entry item, and the provider auto-disable fields land on both the
+// pool item and every entry item.
+func TestRenderOpenAICompatPerEntryMaxConcurrentAndAutoDisable(t *testing.T) {
+	mc, mw := ptrInt(5), ptrInt(800)
+	cd := 120
+	provider := store.UpstreamProvider{
+		ProviderType:               TypeOpenAICompatibility,
+		ID:                         8,
+		Name:                       "compat",
+		AutoDisableErrorCodes:      []string{"429", "overload"},
+		AutoDisableCooldownSeconds: &cd,
+		APIKeyEntries: []store.UpstreamProviderAPIKey{
+			{ID: 21, APIKey: "compat-secret", MaxConcurrent: mc, MaxWaitMs: mw},
+		},
+	}
+	got := openAICompatFromProvider(provider)
+	if len(got.APIKeyEntries) != 1 {
+		t.Fatalf("rendered %d entries, want 1", len(got.APIKeyEntries))
+	}
+	if len(got.AutoDisableErrorCodes) != 2 || got.AutoDisableErrorCodes[0] != "429" {
+		t.Fatalf("pool auto-disable codes = %v, want [429 overload]", got.AutoDisableErrorCodes)
+	}
+	if got.AutoDisableCooldownSeconds == nil || *got.AutoDisableCooldownSeconds != 120 {
+		t.Fatalf("pool cooldown = %v, want 120", got.AutoDisableCooldownSeconds)
+	}
+	e := got.APIKeyEntries[0]
+	if e.MaxConcurrent == nil || *e.MaxConcurrent != 5 {
+		t.Fatalf("entry MaxConcurrent = %v, want 5", e.MaxConcurrent)
+	}
+	if e.MaxWaitMs == nil || *e.MaxWaitMs != 800 {
+		t.Fatalf("entry MaxWaitMs = %v, want 800", e.MaxWaitMs)
+	}
+	if len(e.AutoDisableErrorCodes) != 2 || e.AutoDisableErrorCodes[0] != "429" {
+		t.Fatalf("entry auto-disable codes = %v, want [429 overload]", e.AutoDisableErrorCodes)
+	}
+	if e.AutoDisableCooldownSeconds == nil || *e.AutoDisableCooldownSeconds != 120 {
+		t.Fatalf("entry cooldown = %v, want 120", e.AutoDisableCooldownSeconds)
+	}
+}
+
+// TestRenderOpenCodeGoPerEntryMaxConcurrentAndAutoDisable covers the
+// opencode-go path, which mirrors openAICompatFromProviderWithPools
+// field-for-field.
+func TestRenderOpenCodeGoPerEntryMaxConcurrentAndAutoDisable(t *testing.T) {
+	mc, mw := ptrInt(2), ptrInt(400)
+	cd := 60
+	provider := store.UpstreamProvider{
+		ProviderType:               TypeOpenCodeGo,
+		ID:                         12,
+		Name:                       "ocgo",
+		AutoDisableErrorCodes:      []string{"rate_limit"},
+		AutoDisableCooldownSeconds: &cd,
+		APIKeyEntries: []store.UpstreamProviderAPIKey{
+			{ID: 31, APIKey: "ocgo-secret", MaxConcurrent: mc, MaxWaitMs: mw},
+		},
+	}
+	cfg := RenderConfig([]store.UpstreamProvider{provider})
+	if len(cfg.OpenCodeGo) != 1 {
+		t.Fatalf("want 1 opencode-go row, got %d", len(cfg.OpenCodeGo))
+	}
+	row := cfg.OpenCodeGo[0]
+	if len(row.AutoDisableErrorCodes) != 1 || row.AutoDisableErrorCodes[0] != "rate_limit" {
+		t.Fatalf("row auto-disable codes = %v, want [rate_limit]", row.AutoDisableErrorCodes)
+	}
+	if row.AutoDisableCooldownSeconds == nil || *row.AutoDisableCooldownSeconds != 60 {
+		t.Fatalf("row cooldown = %v, want 60", row.AutoDisableCooldownSeconds)
+	}
+	if len(row.APIKeyEntries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(row.APIKeyEntries))
+	}
+	e := row.APIKeyEntries[0]
+	if e.MaxConcurrent == nil || *e.MaxConcurrent != 2 {
+		t.Fatalf("entry MaxConcurrent = %v, want 2", e.MaxConcurrent)
+	}
+	if e.MaxWaitMs == nil || *e.MaxWaitMs != 400 {
+		t.Fatalf("entry MaxWaitMs = %v, want 400", e.MaxWaitMs)
+	}
+	if len(e.AutoDisableErrorCodes) != 1 || e.AutoDisableErrorCodes[0] != "rate_limit" {
+		t.Fatalf("entry auto-disable codes = %v, want [rate_limit]", e.AutoDisableErrorCodes)
+	}
+	if e.AutoDisableCooldownSeconds == nil || *e.AutoDisableCooldownSeconds != 60 {
+		t.Fatalf("entry cooldown = %v, want 60", e.AutoDisableCooldownSeconds)
+	}
+}
+
+// TestRenderSkipsAutoDisabledEntries is the no-regression anchor for the
+// auto-disable persistence design (D1): the sink persists auto-disabled
+// entries as PG disabled=true (+ auto_disabled flag), so the renderer must
+// keep skipping them — both system-auto-disabled and operator-disabled
+// entries stay out of config.yaml while active siblings render unchanged.
+func TestRenderSkipsAutoDisabledEntries(t *testing.T) {
+	provider := store.UpstreamProvider{
+		ProviderType: TypeClaudeAPIKey,
+		ID:           10,
+		APIKeyEntries: []store.UpstreamProviderAPIKey{
+			{ID: 41, APIKey: "claude-live-secret", Name: "live"},
+			{ID: 42, APIKey: "claude-auto-off-secret", Name: "auto-off", Disabled: true, AutoDisabled: true},
+			{ID: 43, APIKey: "claude-manual-off-secret", Name: "manual-off", Disabled: true},
+		},
+	}
+	keys := claudeKeyFromProvider(provider)
+	if len(keys) != 1 {
+		t.Fatalf("rendered %d claude keys, want 1 (disabled entries skipped)", len(keys))
+	}
+	if keys[0].APIKey != "claude-live-secret" {
+		t.Fatalf("wrong claude key rendered: %q", keys[0].APIKey)
+	}
+}

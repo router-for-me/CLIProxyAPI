@@ -522,6 +522,26 @@ type ClaudeKey struct {
 	// CCH signing is automatic for Claude OAuth and supported direct upstreams.
 	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
 
+	// MaxConcurrent is the per-entry in-flight hard cap for this credential.
+	// nil/0 = unlimited (feature off for this entry). The synthesizer stamps
+	// it onto the auth's max_parallel attribute, which the scheduler already
+	// honors.
+	MaxConcurrent *int `yaml:"max-concurrent,omitempty" json:"max-concurrent,omitempty"`
+
+	// MaxWaitMs is the per-entry wait budget in milliseconds before an
+	// eligible-but-full credential fails over. nil/0 = default wait.
+	MaxWaitMs *int `yaml:"max-wait-ms,omitempty" json:"max-wait-ms,omitempty"`
+
+	// AutoDisableErrorCodes lists the upstream error codes that permanently
+	// auto-disable this credential's backing store entry when matched by the
+	// runtime. Copied from the provider row onto every fan-out item. Empty =
+	// feature off.
+	AutoDisableErrorCodes []string `yaml:"auto-disable-error-codes,omitempty" json:"auto-disable-error-codes,omitempty"`
+
+	// AutoDisableCooldownSeconds is the auto-re-enable cooldown after this
+	// credential's store entry was auto-disabled. nil = manual re-enable only.
+	AutoDisableCooldownSeconds *int `yaml:"auto-disable-cooldown-seconds,omitempty" json:"auto-disable-cooldown-seconds,omitempty"`
+
 	// UpstreamProviderID, when non-zero, carries the stable database id of
 	// the upstream_providers row this entry was rendered from. The
 	// synthesizer embeds it in the auth's `provider_key` attribute so the
@@ -861,6 +881,15 @@ type OpenAICompatibility struct {
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
+	// AutoDisableErrorCodes lists the upstream error codes that permanently
+	// auto-disable an auto-disabled credential of this provider. Copied onto
+	// every api-key-entry item. Empty = feature off.
+	AutoDisableErrorCodes []string `yaml:"auto-disable-error-codes,omitempty" json:"auto-disable-error-codes,omitempty"`
+
+	// AutoDisableCooldownSeconds is the auto-re-enable cooldown after an
+	// entry was auto-disabled. nil = manual re-enable only.
+	AutoDisableCooldownSeconds *int `yaml:"auto-disable-cooldown-seconds,omitempty" json:"auto-disable-cooldown-seconds,omitempty"`
+
 	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
 	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 }
@@ -890,6 +919,24 @@ type OpenAICompatibilityAPIKey struct {
 	// provider row into config.yaml, so the credential stays persisted and
 	// re-activates when toggled back.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// MaxConcurrent is the per-entry in-flight hard cap for this entry.
+	// nil/0 = unlimited. The synthesizer stamps it onto the auth's
+	// max_parallel attribute, which the scheduler already honors.
+	MaxConcurrent *int `yaml:"max-concurrent,omitempty" json:"max-concurrent,omitempty"`
+
+	// MaxWaitMs is the per-entry wait budget in milliseconds before an
+	// eligible-but-full entry fails over. nil/0 = default wait.
+	MaxWaitMs *int `yaml:"max-wait-ms,omitempty" json:"max-wait-ms,omitempty"`
+
+	// AutoDisableErrorCodes lists the upstream error codes that permanently
+	// auto-disable this entry's backing store row when matched by the runtime.
+	// Copied from the provider row onto every entry item. Empty = feature off.
+	AutoDisableErrorCodes []string `yaml:"auto-disable-error-codes,omitempty" json:"auto-disable-error-codes,omitempty"`
+
+	// AutoDisableCooldownSeconds is the auto-re-enable cooldown after this
+	// entry was auto-disabled. nil = manual re-enable only.
+	AutoDisableCooldownSeconds *int `yaml:"auto-disable-cooldown-seconds,omitempty" json:"auto-disable-cooldown-seconds,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
@@ -981,6 +1028,24 @@ type OpenCodeGoKey struct {
 	// re-activates when toggled back.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 
+	// MaxConcurrent is the per-entry in-flight hard cap for this entry.
+	// nil/0 = unlimited. The synthesizer stamps it onto the auth's
+	// max_parallel attribute, which the scheduler already honors.
+	MaxConcurrent *int `yaml:"max-concurrent,omitempty" json:"max-concurrent,omitempty"`
+
+	// MaxWaitMs is the per-entry wait budget in milliseconds before an
+	// eligible-but-full entry fails over. nil/0 = default wait.
+	MaxWaitMs *int `yaml:"max-wait-ms,omitempty" json:"max-wait-ms,omitempty"`
+
+	// AutoDisableErrorCodes lists the upstream error codes that permanently
+	// auto-disable this entry's backing store row when matched by the runtime.
+	// Copied from the provider row onto every entry item. Empty = feature off.
+	AutoDisableErrorCodes []string `yaml:"auto-disable-error-codes,omitempty" json:"auto-disable-error-codes,omitempty"`
+
+	// AutoDisableCooldownSeconds is the auto-re-enable cooldown after this
+	// entry was auto-disabled. nil = manual re-enable only.
+	AutoDisableCooldownSeconds *int `yaml:"auto-disable-cooldown-seconds,omitempty" json:"auto-disable-cooldown-seconds,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 
@@ -1061,6 +1126,15 @@ type OpenCodeGo struct {
 
 	// Disabled prevents this provider from being used for routing.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// AutoDisableErrorCodes lists the upstream error codes that permanently
+	// auto-disable an auto-disabled credential of this provider. Copied onto
+	// every api-key-entry item. Empty = feature off.
+	AutoDisableErrorCodes []string `yaml:"auto-disable-error-codes,omitempty" json:"auto-disable-error-codes,omitempty"`
+
+	// AutoDisableCooldownSeconds is the auto-re-enable cooldown after an
+	// entry was auto-disabled. nil = manual re-enable only.
+	AutoDisableCooldownSeconds *int `yaml:"auto-disable-cooldown-seconds,omitempty" json:"auto-disable-cooldown-seconds,omitempty"`
 
 	// Prefix optionally namespaces model aliases for this provider.
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
