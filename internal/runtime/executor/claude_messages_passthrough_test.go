@@ -17,8 +17,7 @@ import (
 )
 
 func directClaudeMessagesContext() context.Context {
-	ctx := withClaudeInboundFormat(context.Background(), "claude")
-	return withClaudeDirectMessagesPassthrough(ctx, true)
+	return context.Background()
 }
 
 func directClaudeOAuthAuth() *cliproxyauth.Auth {
@@ -33,12 +32,14 @@ func directClaudeOAuthAuth() *cliproxyauth.Auth {
 func TestApplyClaudeCloak_DirectMessagesPreservesCallerBody(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5-5","system":[{"type":"text","text":"caller system"}],"thinking":{"type":"adaptive","display":"summarized"},"tools":[{"name":"caller_tool"}],"messages":[{"role":"user","content":"hello"}]}`)
 
-	got, cloaked, err := applyCloaking(directClaudeMessagesContext(), &config.Config{}, directClaudeOAuthAuth(), payload, "sk-ant-oat-direct-messages-test", false, true)
+	authNever := directClaudeOAuthAuth()
+	authNever.Attributes["cloak_mode"] = "never"
+	got, cloaked, err := applyCloaking(directClaudeMessagesContext(), &config.Config{}, authNever, payload, "sk-ant-oat-direct-messages-test", false, true)
 	if err != nil {
 		t.Fatalf("applyCloaking() error = %v", err)
 	}
 	if cloaked {
-		t.Fatal("applyCloaking() cloaked = true, want direct Messages passthrough")
+		t.Fatal("applyCloaking() cloaked = true, want direct Messages passthrough when cloak_mode is never")
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("direct Messages body changed: got %s, want %s", got, payload)
@@ -57,17 +58,17 @@ func TestApplyClaudeHeaders_DirectMessagesPreservesCallerFingerprint(t *testing.
 	}
 	body := []byte(`{"model":"claude-opus-5-5","thinking":{"type":"adaptive","display":"summarized"}}`)
 
-	if err := applyClaudeHeaders(req, directClaudeOAuthAuth(), "sk-ant-oat-direct-messages-test", false, nil, body, &config.Config{}, incoming, false); err != nil {
+	if err := applyClaudeHeaders(req, directClaudeAPIKeyAuth(), "sk-ant-api03-direct-messages-test", false, nil, body, &config.Config{}, incoming, false); err != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", err)
 	}
 	if got := req.Header.Get("User-Agent"); got != incoming.Get("User-Agent") {
 		t.Fatalf("User-Agent = %q, want caller value %q", got, incoming.Get("User-Agent"))
 	}
-	if got := req.Header.Get("Anthropic-Beta"); got != "oauth-2025-04-20,"+incoming.Get("Anthropic-Beta") {
-		t.Fatalf("Anthropic-Beta = %q, want OAuth credential beta with caller value %q", got, "oauth-2025-04-20,"+incoming.Get("Anthropic-Beta"))
+	if got := req.Header.Get("Anthropic-Beta"); got != incoming.Get("Anthropic-Beta") {
+		t.Fatalf("Anthropic-Beta = %q, want caller value %q", got, incoming.Get("Anthropic-Beta"))
 	}
 	if got := req.Header.Get("X-App"); got != "" {
-		t.Fatalf("X-App = %q, want absent in direct Messages passthrough", got)
+		t.Fatalf("X-App = %q, want absent in direct Messages caller-owned API key mode", got)
 	}
 }
 
@@ -89,9 +90,9 @@ func TestClaudeExecutor_DirectMessagesOfficialUpstreamPreservesCallerShape(t *te
 		"User-Agent":     {"pi (darwin; arm64)"},
 		"Anthropic-Beta": {"caller-beta-2099-01-01"},
 	}
-	auth := directClaudeOAuthAuth()
+	auth := directClaudeAPIKeyAuth()
 	auth.Attributes["base_url"] = "https://api.anthropic.com"
-	payload := []byte(`{"model":"claude-opus-5-5","system":[{"type":"text","text":"caller system"}],"thinking":{"type":"adaptive","display":"summarized"},"tools":[{"name":"caller_tool","description":"caller tool","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}],"max_tokens":32}`)
+	payload := []byte(`{"model":"claude-opus-5-5","system":[{"type":"text","text":"caller system","cache_control":{"type":"ephemeral"}}],"thinking":{"type":"adaptive","display":"summarized"},"tools":[{"name":"caller_tool","description":"caller tool","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}],"max_tokens":32}`)
 
 	_, err := NewClaudeExecutor(&config.Config{}).Execute(ctx, auth, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatClaude,
@@ -103,8 +104,8 @@ func TestClaudeExecutor_DirectMessagesOfficialUpstreamPreservesCallerShape(t *te
 	if got := seenHeaders.Get("User-Agent"); got != incoming.Get("User-Agent") {
 		t.Fatalf("User-Agent = %q, want %q; headers=%v", got, incoming.Get("User-Agent"), seenHeaders)
 	}
-	if got := helps.HeaderValueCaseInsensitive(seenHeaders, "Anthropic-Beta"); got != "oauth-2025-04-20,"+incoming.Get("Anthropic-Beta") {
-		t.Fatalf("Anthropic-Beta = %q, want %q; headers=%v", got, "oauth-2025-04-20,"+incoming.Get("Anthropic-Beta"), seenHeaders)
+	if got := helps.HeaderValueCaseInsensitive(seenHeaders, "Anthropic-Beta"); got != incoming.Get("Anthropic-Beta") {
+		t.Fatalf("Anthropic-Beta = %q, want %q; headers=%v", got, incoming.Get("Anthropic-Beta"), seenHeaders)
 	}
 	if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 1 {
 		t.Fatalf("system block count = %d, want the caller block only", got)
@@ -162,11 +163,13 @@ func TestApplyClaudeHeaders_DirectMessagesOAuthInjectsOAuthBetaWhenEmpty(t *test
 	}
 	body := []byte(`{"model":"claude-opus-5-5","thinking":{"type":"adaptive","display":"summarized"}}`)
 
-	if err := applyClaudeHeaders(req, directClaudeOAuthAuth(), "sk-ant-oat-direct-messages-test", false, nil, body, &config.Config{}, incoming, false); err != nil {
+	auth := directClaudeOAuthAuth()
+	if err := applyClaudeHeaders(req, auth, "sk-ant-oat-direct-messages-test", false, nil, body, &config.Config{}, incoming, false); err != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", err)
 	}
-	if got := req.Header.Get("Anthropic-Beta"); got != "oauth-2025-04-20" {
-		t.Fatalf("Anthropic-Beta = %q, want oauth-2025-04-20 for empty caller betas on OAuth", got)
+	betas := req.Header.Get("Anthropic-Beta")
+	if !strings.Contains(betas, "oauth-2025-04-20") || !strings.Contains(betas, "claude-code-20250219") {
+		t.Fatalf("Anthropic-Beta = %q, want oauth-2025-04-20 and claude-code-20250219 for OAuth", betas)
 	}
 }
 

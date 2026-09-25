@@ -65,6 +65,11 @@ func measuredClaudeCodeStructuredHelperPayload() []byte {
 	return []byte(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"helper probe"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.258; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"Return a short title."}],"tools":[],"metadata":{"user_id":` + string(encodedUserID) + `},"max_tokens":32000,"thinking":{"type":"disabled"},"temperature":1,"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}`)
 }
 
+func measuredClaudeCodeTitle280HelperPayload() []byte {
+	encodedUserID, _ := json.Marshal(validClaudeCodeMetadataUserID)
+	return []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":80,"messages":[{"role":"user","content":"generate title"}],"metadata":{"user_id":` + string(encodedUserID) + `},"output_config":{"format":{"type":"json_schema","schema":{"type":"object"}}}}`)
+}
+
 func TestDetectClaudeCodeRequestRequiresAllFourMessageSignals(t *testing.T) {
 	payload := claudeCodeDetectionPayload(validClaudeCodeMetadataUserID)
 	detection := DetectClaudeCodeRequest(confirmedClaudeCodeHeaders(), payload, false)
@@ -218,7 +223,7 @@ func TestDetectClaudeCodeRequestRecognizesMeasuredHaikuHelpers(t *testing.T) {
 		{
 			name:    "structured title helper 2.1.280",
 			beta:    claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15", "server-side-fallback-2026-06-01", "fallback-credit-2026-06-01", "cache-diagnosis-2026-04-07"),
-			payload: measuredClaudeCodeStructuredHelperPayload(),
+			payload: measuredClaudeCodeTitle280HelperPayload(),
 		},
 	}
 	for _, test := range tests {
@@ -253,6 +258,36 @@ func TestDetectClaudeCodeRequestRejectsExtendedHaikuHelperBetas(t *testing.T) {
 	)
 	if detection.Confirmed || detection.HelperProfile {
 		t.Fatalf("detection = %#v, want an extra helper beta rejected", detection)
+	}
+}
+
+func TestDetectClaudeCodeRequestRejectsCrossMismatchedHaikuHelperBetaAndBody(t *testing.T) {
+	title280Beta := claudeCodeHelperBetaProfile(true,
+		"structured-outputs-2025-12-15",
+		"server-side-fallback-2026-06-01",
+		"fallback-credit-2026-06-01",
+		"cache-diagnosis-2026-04-07",
+	)
+	legacyStructuredBeta := claudeCodeHelperBetaProfile(true, "structured-outputs-2025-12-15")
+
+	// 1. Title 2.1.280 beta with 2.1.258 structured stream payload must be rejected
+	det1 := DetectClaudeCodeRequest(
+		measuredClaudeCodeHelperHeaders(title280Beta),
+		measuredClaudeCodeStructuredHelperPayload(),
+		false,
+	)
+	if det1.Confirmed || det1.HelperProfile {
+		t.Fatalf("det1 = %#v, want 2.1.280 beta with legacy structured payload rejected", det1)
+	}
+
+	// 2. Legacy structured beta with 2.1.280 title non-stream payload must be rejected
+	det2 := DetectClaudeCodeRequest(
+		measuredClaudeCodeHelperHeaders(legacyStructuredBeta),
+		measuredClaudeCodeTitle280HelperPayload(),
+		false,
+	)
+	if det2.Confirmed || det2.HelperProfile {
+		t.Fatalf("det2 = %#v, want legacy beta with 2.1.280 title payload rejected", det2)
 	}
 }
 
