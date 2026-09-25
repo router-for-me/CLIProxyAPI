@@ -2,7 +2,8 @@ import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import {
   listModelsCatalog, getModelsCatalogSummary, getModelsCatalogDistinct,
   getModelPricing, putModelPricing,
-  syncModelsFromV1, getModelsCatalogSyncStatus, ApiError,
+  syncModelsFromV1, getModelsCatalogSyncStatus, getStoredCallerKey, setStoredCallerKey,
+  ApiError,
 } from '../api/client.js';
 import { useAsync } from '../hooks/useAsync.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -69,6 +70,12 @@ export default function ModelsCatalogPage() {
   const [expandedId, setExpandedId] = useState(null);
   const [density, setDensity] = useState(() => readDensity());
   const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh());
+  // Sync caller key: PG-first deployments keep client keys hashed in the
+  // api_keys table, so the server can never auto-pick a plaintext key. The
+  // operator supplies one via the "Set sync key…" modal; it is remembered in
+  // localStorage (same mechanism as FetchModelsInline) and passed through the
+  // caller_key body field on every sync.
+  const [showSyncKey, setShowSyncKey] = useState(false);
   // lastSyncTsRef tracks the time of the most recent successful or attempted
   // sync so the availableOnly toggle can suppress redundant re-syncs.
   const lastSyncTsRef = useRef(0);
@@ -111,12 +118,17 @@ export default function ModelsCatalogPage() {
   // runSync fires the in-process /v1/models -> models_catalog sync.
   // When silent=true the spinner does not show (used for the initial
   // background sync on mount and the suppressed availableOnly re-sync).
-  const runSync = useCallback(async (silent = false) => {
+  // callerKey, when supplied, is used for THIS sync (e.g. just typed in the
+  // sync-key modal even if the operator chose not to remember it); otherwise
+  // the operator-stored key is used so PG-only deployments can sync even
+  // though cfg.APIKeys is always empty there.
+  const runSync = useCallback(async (silent = false, callerKey = '') => {
     if (!silent) setManualSyncing(true);
     setSyncError('');
     setSyncErrorType('');
     try {
-      const result = await syncModelsFromV1();
+      const key = callerKey || getStoredCallerKey();
+      const result = await syncModelsFromV1(key);
       lastSyncTsRef.current = Date.now();
       const n = result?.synced ?? 0;
       setSyncMessage(`Synced ${n} models from /v1/models`);
@@ -215,12 +227,19 @@ export default function ModelsCatalogPage() {
           <div className="main__subtitle">
             Catalog mirrored from the live caller-facing <code>GET /v1/models</code> endpoint.
             The server auto-uses the first <code>api-keys</code> entry from
-            config_store as the auth token.
+            config_store; PG-first deployments should use "Set sync key…" to
+            supply a plaintext key once (PG keys are stored hashed).
           </div>
         </div>
         <div className="row gap-sm" style={{ flexWrap: 'wrap' }}>
           <button className="primary" onClick={() => runSync(false)} disabled={manualSyncing}>
             {manualSyncing ? 'Syncing…' : 'Sync now'}
+          </button>
+          <button
+            onClick={() => setShowSyncKey(true)}
+            title="Optionally set a plaintext caller key to probe /v1/models as. Needed on PG-first deployments where client keys are stored hashed."
+          >
+            Set sync key…
           </button>
           <button onClick={() => setShowPricingSync(true)}>Sync pricing…</button>
           <button onClick={() => setShowPricingSources(true)}>Pricing sources…</button>
@@ -311,9 +330,29 @@ export default function ModelsCatalogPage() {
       </div>
 
       {syncError && (
-        <SyncErrorBanner type={syncErrorType} message={syncError} />
+        <SyncErrorBanner type={syncErrorType} message={syncError} onSetSyncKey={() => setShowSyncKey(true)} />
       )}
       <ErrorBanner error={error} onRetry={reload} />
+
+      {showSyncKey && (
+        <SyncKeyModal
+          initialKey={getStoredCallerKey()}
+          onClose={() => setShowSyncKey(false)}
+          onSave={(key, remember) => {
+            if (remember && key) setStoredCallerKey(key);
+            else if (remember && !key) setStoredCallerKey('');
+            setShowSyncKey(false);
+            // key is the typed plaintext, used for this sync even when not
+            // remembered (matches FetchModelsInline "fetch now, persist opt-in").
+            runSync(false, key);
+          }}
+          onClear={() => {
+            setStoredCallerKey('');
+            setShowSyncKey(false);
+            runSync(false, '');
+          }}
+        />
+      )}
 
       <div className="card" style={{ padding: 0 }}>
         {loading && (
@@ -770,10 +809,21 @@ function SyncStatusPill({ status, loading }) {
 
 // SyncErrorBanner renders a sync failure with an actionable hint derived
 // from the error type so operators know what to fix.
-function SyncErrorBanner({ type, message }) {
+function SyncErrorBanner({ type, message, onSetSyncKey }) {
   let hint = '';
+  let action = null;
   if (type === 'no_caller_key') {
-    hint = 'Add an entry under api-keys: in your config (or set a PG-managed key), then click "Sync now" again.';
+    // PG-first: cfg.APIKeys is always empty (api-keys never round-trips
+    // through the runtime_config snapshot) and PG-managed keys are stored
+    // hashed, so auto-pick cannot succeed. The operator must supply the
+    // plaintext once via the sync-key modal — the server passes it as the
+    // caller_key body field and re-validates the hash.
+    hint = 'PG-managed keys are stored hashed, so the server cannot auto-pick a caller key. Set one to continue — it will be remembered for future syncs.';
+    action = (
+      <button className="primary" style={{ marginTop: 8 }} onClick={onSetSyncKey}>
+        Set sync key…
+      </button>
+    );
   } else if (type === 'v1_models_probe_failed') {
     hint = 'The in-process /v1/models probe could not run. Check that a provider client is connected and the caller key is valid.';
   } else if (type === 'v1_models_decode_failed') {
@@ -783,7 +833,74 @@ function SyncErrorBanner({ type, message }) {
     <div className="error-banner">
       <strong>Sync failed:</strong> {message}
       {hint && <div className="dim" style={{ marginTop: 4, fontSize: 12 }}>{hint}</div>}
+      {action}
     </div>
+  );
+}
+
+// SyncKeyModal collects the plaintext caller key the /v1/models probe should
+// authenticate as. It mirrors the manage-cpa FetchModelsInline bearer-token
+// pattern: password input + optional "remember" checkbox persisted via
+// setStoredCallerKey (localStorage). onSave(key, shouldRemember) is invoked on
+// submit: key is the typed plaintext (used for the immediate sync even when
+// not remembered, matching FetchModelsInline); shouldRemember decides whether
+// it is persisted for future syncs. onClear() resets the stored key.
+function SyncKeyModal({ initialKey = '', onClose, onSave, onClear }) {
+  const [key, setKey] = useState(initialKey);
+  const [remember, setRemember] = useState(true);
+  const hasStored = !!initialKey;
+  const trimmed = key.trim();
+
+  function handleSave() {
+    onSave(trimmed, remember);
+  }
+
+  return (
+    <Modal title="Sync caller key" onClose={onClose} size="sm" footer={(
+      <div className="form__actions">
+        <button onClick={onClose}>Cancel</button>
+        <button className="primary" onClick={handleSave} disabled={!trimmed && !hasStored}>
+          Save &amp; sync
+        </button>
+      </div>
+    )}>
+      <div className="form__row">
+        <label className="form__label">Plaintext caller API key</label>
+        <input
+          type="password"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder="sk-…"
+          spellCheck={false}
+          autoComplete="off"
+        />
+        <div className="form__hint">
+          The key is used to probe <code>GET /v1/models</code> and is validated
+          against the <code>api_keys</code> table (hash match). It is never sent
+          to any third party — only to this server&apos;s management API as the
+          <code> caller_key</code> body field.
+        </div>
+      </div>
+      <label className="row gap-sm" style={{ fontSize: 12, color: 'var(--text-dim)' }}>
+        <input
+          type="checkbox"
+          checked={remember}
+          onChange={(e) => setRemember(e.target.checked)}
+          style={{ width: 'auto' }}
+        />
+        <span>Remember this key for future syncs (stored only in this browser).</span>
+      </label>
+      {hasStored && (
+        <button
+          type="button"
+          className="linklike"
+          style={{ marginTop: 10, fontSize: 12 }}
+          onClick={onClear}
+        >
+          Clear stored key
+        </button>
+      )}
+    </Modal>
   );
 }
 

@@ -357,6 +357,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/models-catalog/global/:id", s.mgmt.GetGlobalModel)
 		mgmt.PUT("/models-catalog/global/:id", s.mgmt.PutGlobalModel)
 
+		// Dashboard's dedicated caller key: ensures the internal client API key
+		// (unlimited, full catalog visibility) exists and returns a fresh
+		// plaintext, which the dashboard stores as its caller key so Models
+		// Catalog sync works on PG-first without manual input. 503 without
+		// PGSTORE_DSN, like the other PG-backed routes.
+		mgmt.POST("/internal/caller-key", s.mgmt.EnsureInternalCallerKey)
+
 		// Operator-managed external pricing catalogs (LiteLLM-format JSON
 		// URLs / uploaded files). Surface as suggestions in the dashboard's
 		// Sync Pricing modal alongside the bundled catalog.

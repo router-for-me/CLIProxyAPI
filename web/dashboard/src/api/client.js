@@ -942,6 +942,18 @@ export async function syncModelsFromV1(callerKey = '') {
   });
 }
 
+// ensureInternalCallerKey asks the server to ensure NixLLM's dedicated internal
+// client API key exists (creating it on first login) and to rotate its secret,
+// returning the fresh plaintext { key, key_prefix }. The dashboard stores that
+// plaintext as the caller key so Models Catalog sync works on PG-first without
+// operator input. The call sits behind the management token, so it only
+// succeeds when the dashboard session itself is valid. 503 (no PGSTORE_DSN) is
+// expected on legacy deployments and should be swallowed by callers — they can
+// keep syncing with a manually supplied key.
+export async function ensureInternalCallerKey() {
+  return fetchJSON('/internal/caller-key', { method: 'POST' });
+}
+
 // getModelsCatalogSyncStatus returns metadata about the most recent
 // /v1/models → models_catalog sync: last_synced_at (RFC3339 UTC, null when
 // never synced), last_synced_count, last_error + last_error_type (so the

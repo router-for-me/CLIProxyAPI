@@ -3,6 +3,7 @@ import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-
 import {
   getStoredToken, setStoredToken, clearStoredToken, verifyToken, ApiError,
   getUnreadAlertCount, getCpaLatestVersion,
+  ensureInternalCallerKey, setStoredCallerKey,
 } from './api/client.js';
 import Sidebar from './components/Sidebar.jsx';
 import LoginPage from './pages/LoginPage.jsx';
@@ -206,6 +207,16 @@ export default function App() {
   // tap-then-navigate-then-close flow without an extra dismiss click.
   useEffect(() => { setMobileOpen(false); }, [location.pathname]);
 
+  // Keep the app's dedicated caller key fresh after every successful login (and
+  // session restore below) so Models Catalog sync never depends on an operator
+  // pasting a key. Failures are silent: on non-PG deployments the endpoint
+  // 503s and the stored caller key (if any) is left untouched.
+  const refreshInternalCallerKey = useCallback(() => {
+    ensureInternalCallerKey()
+      .then((r) => { if (r?.key) setStoredCallerKey(r.key); })
+      .catch(() => { /* no PG / stale session: keep stored caller key */ });
+  }, []);
+
   // On first load, if a token is present in storage, verify it against the
   // server before trusting it. A stale token (e.g. server-side password
   // rotation) drops back to the login screen.
@@ -216,7 +227,11 @@ export default function App() {
       return;
     }
     verifyToken()
-      .then(() => { if (!cancelled) setAuthed(true); })
+      .then(() => {
+        if (cancelled) return;
+        setAuthed(true);
+        refreshInternalCallerKey();
+      })
       .catch(() => {
         if (cancelled) return;
         clearStoredToken();
@@ -245,6 +260,7 @@ export default function App() {
   const handleLogin = useCallback((password) => {
     setStoredToken(password);
     setAuthed(true);
+    refreshInternalCallerKey();
   }, []);
 
   const handleLogout = useCallback(() => {
