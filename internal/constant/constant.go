@@ -25,6 +25,9 @@ const (
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
 
+	// CommandCode represents the Command Code provider identifier.
+	CommandCode = "commandcode"
+
 	// Interactions represents the Google Interactions API format identifier.
 	Interactions = "interactions"
 )

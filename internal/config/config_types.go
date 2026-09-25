@@ -687,6 +687,12 @@ type XAIKey = CodexKey
 // XAIModel uses the Codex model mapping structure for xAI models.
 type XAIModel = CodexModel
 
+// CommandCodeKey uses the Codex API key structure for Command Code execution.
+type CommandCodeKey = CodexKey
+
+// CommandCodeModel uses the Codex model mapping structure for Command Code models.
+type CommandCodeModel = CodexModel
+
 // MetaKey uses the Codex API key structure for native Meta Muse execution.
 type MetaKey = CodexKey
 
