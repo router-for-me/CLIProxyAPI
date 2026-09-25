@@ -32,7 +32,7 @@ func setRefreshLeadFactory(t *testing.T, provider string, factory func() *time.D
 	})
 }
 
-func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
+func TestNextRefreshCheckAt_DisabledWithInvalidGrantUnschedule(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	expiry := now.Add(time.Hour)
 	lead := 10 * time.Minute
@@ -41,8 +41,9 @@ func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 		return &d
 	})
 
-	auth := &Auth{
-		ID:       "a1",
+	// Case 1: Normal disabled credential WITHOUT invalid_grant is scheduled for token refresh (expected behavior)
+	normalDisabledAuth := &Auth{
+		ID:       "normal-disabled",
 		Provider: "disabled-schedule",
 		Disabled: true,
 		Status:   StatusDisabled,
@@ -51,14 +52,32 @@ func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
 			"expires_at": expiry.Format(time.RFC3339),
 		},
 	}
-
-	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	got, ok := nextRefreshCheckAt(now, normalDisabledAuth, 15*time.Minute)
 	if !ok {
-		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
+		t.Fatalf("nextRefreshCheckAt() ok = false, want true for normal disabled auth")
 	}
 	want := expiry.Add(-lead)
 	if !got.Equal(want) {
 		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	}
+
+	// Case 2: Disabled credential WITH invalid_grant is permanently unscheduled (never refreshed)
+	invalidGrantDisabledAuth := &Auth{
+		ID:       "invalid-grant-disabled",
+		Provider: "disabled-schedule",
+		Disabled: true,
+		Status:   StatusDisabled,
+		LastError: &Error{
+			HTTPStatus: 400,
+			Message:    `{"error": "invalid_grant", "error_description": "Bad Request"}`,
+		},
+		Metadata: map[string]any{
+			"email":      "x@example.com",
+			"expires_at": expiry.Format(time.RFC3339),
+		},
+	}
+	if _, ok := nextRefreshCheckAt(now, invalidGrantDisabledAuth, 15*time.Minute); ok {
+		t.Fatalf("nextRefreshCheckAt() ok = true, want false for disabled auth with invalid_grant")
 	}
 }
 
