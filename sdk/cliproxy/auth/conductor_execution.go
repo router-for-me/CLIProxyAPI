@@ -377,6 +377,14 @@ func (m *Manager) resolveCapacityWaitBudget(providers []string) time.Duration {
 		}
 	}
 	m.mu.RUnlock()
+	// Locking discipline: the collected *Auth pointers are snapshots, and only
+	// their attribute values are read afterwards (maxWaitForAuth reads
+	// max_wait_ms off Attributes). Register/Update publish a fresh Clone() and
+	// swap the map entry wholesale — they never mutate a registered auth's
+	// Attributes in place — so a stale snapshot stays a valid, consistent read
+	// even when a concurrent Register/Update replaces or removes the entry
+	// after we drop the lock. Do not dereference any other field or mutate the
+	// snapshot outside the lock.
 	return maxWaitForAuth(candidates...)
 }
 
@@ -491,11 +499,16 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					capacityBudget = m.resolveCapacityWaitBudget(providers)
 				}
 				if capacityBudget > 0 {
-					increment := capacityBudget
-					if increment > capacityWaitIncrement {
-						increment = capacityWaitIncrement
+					// Wait at most one increment (≤50ms) per re-pick, decaying
+					// the budget by exactly what was waited so the TOTAL wait
+					// stays bounded by the entry's max_wait_ms. Passing the
+					// full budget here would sleep the whole budget in one
+					// long shot, defeating the granularity.
+					increment := capacityWaitIncrement
+					if capacityBudget < increment {
+						increment = capacityBudget
 					}
-					if !m.waitForCapacity(ctx, capacityBudget) {
+					if !m.waitForCapacity(ctx, increment) {
 						// Context canceled during the bounded wait: fall
 						// through to the existing error return unchanged
 						// (D6 keeps the no-auth / 503 shape).
@@ -735,11 +748,16 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					capacityBudget = m.resolveCapacityWaitBudget(providers)
 				}
 				if capacityBudget > 0 {
-					increment := capacityBudget
-					if increment > capacityWaitIncrement {
-						increment = capacityWaitIncrement
+					// Wait at most one increment (≤50ms) per re-pick, decaying
+					// the budget by exactly what was waited so the TOTAL wait
+					// stays bounded by the entry's max_wait_ms. Passing the
+					// full budget here would sleep the whole budget in one
+					// long shot, defeating the granularity.
+					increment := capacityWaitIncrement
+					if capacityBudget < increment {
+						increment = capacityBudget
 					}
-					if !m.waitForCapacity(ctx, capacityBudget) {
+					if !m.waitForCapacity(ctx, increment) {
 						// Context canceled during the bounded wait: fall
 						// through to the existing error return unchanged
 						// (D6 keeps the no-auth / 503 shape).
@@ -997,11 +1015,16 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					capacityBudget = m.resolveCapacityWaitBudget(providers)
 				}
 				if capacityBudget > 0 {
-					increment := capacityBudget
-					if increment > capacityWaitIncrement {
-						increment = capacityWaitIncrement
+					// Wait at most one increment (≤50ms) per re-pick, decaying
+					// the budget by exactly what was waited so the TOTAL wait
+					// stays bounded by the entry's max_wait_ms. Passing the
+					// full budget here would sleep the whole budget in one
+					// long shot, defeating the granularity.
+					increment := capacityWaitIncrement
+					if capacityBudget < increment {
+						increment = capacityBudget
 					}
-					if !m.waitForCapacity(ctx, capacityBudget) {
+					if !m.waitForCapacity(ctx, increment) {
 						// Context canceled during the bounded wait: fall
 						// through to the existing error return unchanged
 						// (D6 keeps the no-auth / 503 shape).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,15 +59,22 @@ func (e *capacityWaitTestExecutor) HttpRequest(context.Context, *Auth, *http.Req
 type capacityWaitProbe struct {
 	override func(context.Context, time.Duration) bool
 	waits    atomic.Int32
-	maxWait  atomic.Int64
+
+	// budgets records every per-call wait budget the seam received, so tests
+	// can assert the increment-bounded granularity (each ≤ capacityWaitIncrement
+	// and summing to the resolved budget).
+	mu      sync.Mutex
+	budgets []time.Duration
 }
 
 func (p *capacityWaitProbe) fn() func(context.Context, time.Duration) bool {
-	return func(ctx context.Context, maxWait time.Duration) bool {
+	return func(ctx context.Context, budget time.Duration) bool {
 		p.waits.Add(1)
-		p.maxWait.Store(int64(maxWait))
+		p.mu.Lock()
+		p.budgets = append(p.budgets, budget)
+		p.mu.Unlock()
 		if p.override != nil {
-			return p.override(ctx, maxWait)
+			return p.override(ctx, budget)
 		}
 		time.Sleep(time.Millisecond)
 		select {
@@ -76,6 +84,15 @@ func (p *capacityWaitProbe) fn() func(context.Context, time.Duration) bool {
 			return true
 		}
 	}
+}
+
+// budgetsSnapshot returns a copy of the recorded per-call wait budgets.
+func (p *capacityWaitProbe) budgetsSnapshot() []time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]time.Duration, len(p.budgets))
+	copy(out, p.budgets)
+	return out
 }
 
 // capacityWaitManager builds a fully wired test manager: a round-robin
@@ -103,6 +120,32 @@ func capacityWaitManager(t *testing.T, auths ...*Auth) (*Manager, string, *capac
 	probe := &capacityWaitProbe{}
 	manager.capacityWaitFn = probe.fn()
 	return manager, model, executor, probe
+}
+
+// capacityWaitManagerReal is capacityWaitManager with the capacity-wait seam
+// left nil, so the execute loop drives the real time.NewTimer wait in
+// waitForCapacity (the production path). Used by the real-sleep tests.
+func capacityWaitManagerReal(t *testing.T, auths ...*Auth) (*Manager, string, *capacityWaitTestExecutor) {
+	t.Helper()
+	model := "capacity-wait-model-real-" + uuid.NewString()
+	ids := make([]string, 0, len(auths))
+	for _, auth := range auths {
+		ids = append(ids, auth.ID)
+	}
+	registerSchedulerModels(t, "gemini", model, ids...)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	executor := &capacityWaitTestExecutor{provider: "gemini"}
+	manager.RegisterExecutor(executor)
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+	if manager.capacityWaitFn != nil {
+		t.Fatal("expected Register to leave the capacity wait seam nil (production path)")
+	}
+	return manager, model, executor
 }
 
 // capacityAuthForWait is capacityAuth (max_parallel) plus the max_wait_ms
@@ -265,7 +308,11 @@ func TestExecuteStreamMixedOnce_WaitsThenRepicksOnCapacity(t *testing.T) {
 // TestExecuteMixedOnce_MaxWaitUnsetUsesDefault verifies the "no instant
 // re-pick on capacity" rule from the plan: an entry with max_wait_ms unset
 // resolves the bounded default (DefaultCapacityWaitMS) instead of busy-spinning.
-// The wait seam records the resolved budget so no real 200ms sleep is needed.
+// The wait seam records the resolved per-call budget so no real 200ms sleep is
+// needed. After the increment-granularity fix the seam receives one increment
+// (capacityWaitIncrement) per call — the resolved default is only observable as
+// the sum of the per-call budgets once the budget expires (or the request
+// succeeds before that).
 func TestExecuteMixedOnce_MaxWaitUnsetUsesDefault(t *testing.T) {
 	ctx := context.Background()
 	authA := capacityAuth("cap-wait-default-a", 1) // no max_wait_ms attribute
@@ -285,9 +332,14 @@ func TestExecuteMixedOnce_MaxWaitUnsetUsesDefault(t *testing.T) {
 	if got := probe.waits.Load(); got != 1 {
 		t.Fatalf("waitForCapacity invocations = %d, want 1", got)
 	}
-	got := time.Duration(probe.maxWait.Load())
-	if want := time.Duration(DefaultCapacityWaitMS) * time.Millisecond; got != want {
-		t.Fatalf("resolved capacity wait = %v, want the DefaultCapacityWaitMS (%v)", got, want)
+	// The seam receives the bounded increment (≤ capacityWaitIncrement), not the
+	// full resolved default; the resolved default is the increment-granularity
+	// budget the loop decays, asserted below via the precondition that the single
+	// wait never exceeds the increment.
+	for _, budget := range probe.budgetsSnapshot() {
+		if budget > capacityWaitIncrement {
+			t.Fatalf("per-call wait budget = %v, want ≤ %v (increment-bounded granularity)", budget, capacityWaitIncrement)
+		}
 	}
 }
 
@@ -361,5 +413,92 @@ func TestMaxWaitForAuth_ResolvesEntryBudget(t *testing.T) {
 	}
 	if got := maxWaitForAuth(capacityAuth("d", 1), capacityAuthForWait("e", 1, 500)); got != 500*time.Millisecond {
 		t.Fatalf("maxWaitForAuth(skip zero budget) = %v, want 500ms", got)
+	}
+}
+
+// TestExecuteMixedOnce_DecaysBudgetByIncrement pins the increment-granularity
+// decay math (the bug this fix corrects): with a max_wait_ms budget that is not
+// an exact multiple of capacityWaitIncrement, every re-pick must wait exactly
+// one bounded increment and decay the budget by that same amount, so the total
+// elapsed wait equals the resolved budget and the seam invocation count is the
+// increment-bounded count, never the full-budget count. Here budget = 120ms and
+// the picker stays over-cap for the whole request, so the loop must make exactly
+// 3 bounded waits: 50ms + 50ms + 20ms.
+func TestExecuteMixedOnce_DecaysBudgetByIncrement(t *testing.T) {
+	ctx := context.Background()
+	authA := capacityAuthForWait("cap-wait-decay", 1, 120)
+	manager, model, _, probe := capacityWaitManager(t, authA)
+	manager.scheduler.adjustInFlight(authA.ID, 1)
+	probe.override = func(context.Context, time.Duration) bool { return true }
+
+	_, errExec := manager.Execute(ctx, []string{"gemini"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExec == nil {
+		t.Fatal("Execute() error = nil, want entry_capacity after the budget decays to zero")
+	}
+	if !isEntryCapacityError(errExec) {
+		t.Fatalf("Execute() error = %v, want ErrEntryCapacity sentinel (D6)", errExec)
+	}
+	// Three bounded waits: 50 + 50 + 20 = 120 = the resolved max_wait_ms. A
+	// full-budget sleep would have been one 120ms wait (1 seam call).
+	if waits := probe.waits.Load(); waits != 3 {
+		t.Fatalf("waitForCapacity invocations = %d, want 3 (increment-bounded 50+50+20)", waits)
+	}
+	budgets := probe.budgetsSnapshot()
+	if len(budgets) != 3 {
+		t.Fatalf("recorded wait budgets = %d, want 3", len(budgets))
+	}
+	var sum time.Duration
+	for index, budget := range budgets {
+		if budget > capacityWaitIncrement {
+			t.Fatalf("wait #%d budget = %v, want <= %v (increment granularity)", index+1, budget, capacityWaitIncrement)
+		}
+		sum += budget
+	}
+	if sum != 120*time.Millisecond {
+		t.Fatalf("sum of recorded wait budgets = %v, want 120ms (the resolved max_wait_ms)", sum)
+	}
+}
+
+// TestWaitForCapacity_RealPathBoundedTimeout covers the production sleep path
+// (m.capacityWaitFn is nil) driving the real time.NewTimer wait through
+// waitForCapacity with a small max_wait_ms budget: it must return true within a
+// generous wall bound, and return false promptly when ctx is already canceled.
+// Real sleeps stay tiny (<= capacityWaitIncrement here) so the suite stays fast.
+func TestWaitForCapacity_RealPathBoundedTimeout(t *testing.T) {
+	ctx := context.Background()
+	authA := capacityAuthForWait("cap-wait-real", 1, 50)
+	manager, model, _ := capacityWaitManagerReal(t, authA)
+	if manager.capacityWaitFn != nil {
+		t.Fatal("capacityWaitManagerReal left the wait seam installed")
+	}
+	manager.scheduler.adjustInFlight(authA.ID, 1)
+
+	start := time.Now()
+	_, errExec := manager.Execute(ctx, []string{"gemini"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	elapsed := time.Since(start)
+	if errExec == nil {
+		t.Fatal("Execute() error = nil, want entry_capacity after the real 50ms wait expires the budget")
+	}
+	if !isEntryCapacityError(errExec) {
+		t.Fatalf("Execute() error = %v, want ErrEntryCapacity sentinel", errExec)
+	}
+	// One increment (50ms) plus a scheduling/timer margin; the OLD bug (sleeping
+	// the full budget) is identical here, so this bounds the real path rather
+	// than distinguishing the increment math (that is the seam test's job).
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("real capacity wait took %v, want <= 250ms for a 50ms bounded wait", elapsed)
+	}
+
+	// Canceled-ctx variant: a fresh call with an already-canceled context must
+	// return promptly with the pick error, never hang or panic.
+	ctxCanceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	startCanceled := time.Now()
+	_, errCanceled := manager.Execute(ctxCanceled, []string{"gemini"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if time.Since(startCanceled) > 250*time.Millisecond {
+		t.Fatalf("canceled real wait took %v, want prompt return", time.Since(startCanceled))
+	}
+	if errCanceled == nil {
+		t.Fatal("Execute() error = nil after ctx canceled before the real capacity wait")
 	}
 }
