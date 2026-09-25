@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -101,6 +102,42 @@ func addClaudeEntryProviderKey(attrs map[string]string, providerKey string, entr
 		return
 	}
 	attrs[coreauth.AttributeEntryProviderKey] = providerKey + ":key-" + strconv.FormatInt(entry.UpstreamProviderEntryID, 10)
+}
+
+// addEntryConcurrencyAttrs stamps the per-entry concurrency cap onto the
+// auth's attributes when the entry (or its provider-level render copy) was
+// configured: `max_parallel` is the EXISTING scheduler attribute the round-2
+// pickers already honor via maxParallelForAuth; `max_wait_ms` is the bounded
+// wait budget before failover when every candidate is over cap. nil/0 values
+// keep the feature off and leave the attributes absent.
+func addEntryConcurrencyAttrs(attrs map[string]string, maxConcurrent, maxWaitMs *int) {
+	if attrs == nil {
+		return
+	}
+	if maxConcurrent != nil && *maxConcurrent > 0 {
+		attrs["max_parallel"] = strconv.Itoa(*maxConcurrent)
+	}
+	if maxWaitMs != nil && *maxWaitMs > 0 {
+		attrs["max_wait_ms"] = strconv.Itoa(*maxWaitMs)
+	}
+}
+
+// addAutoDisableAttrs stamps the provider-level auto-disable configuration on
+// every entry auth of that provider: `auto_disable_codes` is the JSON-encoded
+// error-code list the conductor's classification path matches on, and
+// `auto_disable_cooldown_seconds` is the auto-re-enable cooldown the server
+// sweeper honors. Empty list / nil cooldown = feature off, attributes absent.
+func addAutoDisableAttrs(attrs map[string]string, codes []string, cooldownSeconds *int) {
+	if attrs == nil {
+		return
+	}
+	if len(codes) > 0 {
+		b, _ := json.Marshal(codes)
+		attrs["auto_disable_codes"] = string(b)
+	}
+	if cooldownSeconds != nil && *cooldownSeconds > 0 {
+		attrs["auto_disable_cooldown_seconds"] = strconv.Itoa(*cooldownSeconds)
+	}
 }
 
 // Synthesize generates Auth entries from config API keys.
@@ -250,6 +287,11 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		// entry_provider_key attribute.
 		providerKey := attrs["provider_key"]
 		addClaudeEntryProviderKey(attrs, providerKey, ck)
+		// Stamp the per-entry concurrency cap and the provider-level
+		// auto-disable configuration. ClaudeKey carries the renderer's per-item
+		// copies, so the values are read straight off the entry.
+		addEntryConcurrencyAttrs(attrs, ck.MaxConcurrent, ck.MaxWaitMs)
+		addAutoDisableAttrs(attrs, ck.AutoDisableErrorCodes, ck.AutoDisableCooldownSeconds)
 		// Stamp the row-level pool routing strategy so the conductor can
 		// activate aggressive in-pool failover per auth. The renderer already
 		// canonicalizes the store value; re-normalizing here also guards
@@ -438,6 +480,12 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			addOpenAICompatEntryProviderKey(attrs, internalProviderKey, *entry)
+			// Stamp the per-entry concurrency cap and the provider-level
+			// auto-disable configuration. The renderer copies the provider
+			// auto-disable values onto each item, so entry fields are read
+			// directly; they mirror the provider row (source of truth).
+			addEntryConcurrencyAttrs(attrs, entry.MaxConcurrent, entry.MaxWaitMs)
+			addAutoDisableAttrs(attrs, entry.AutoDisableErrorCodes, entry.AutoDisableCooldownSeconds)
 			a := &coreauth.Auth{
 				ID:           id,
 				Provider:     internalProviderKey,
@@ -647,6 +695,12 @@ func (s *ConfigSynthesizer) synthesizeOpenCodeGo(ctx *SynthesisContext) []*corea
 			}
 			addConfigHeadersToAttrs(row.Headers, attrs)
 			addOpenCodeGoEntryProviderKey(attrs, providerKey, *entry)
+			// Stamp the per-entry concurrency cap and the provider-level
+			// auto-disable configuration. The renderer copies the provider
+			// auto-disable values onto each item, so entry fields are read
+			// directly; they mirror the provider row (source of truth).
+			addEntryConcurrencyAttrs(attrs, entry.MaxConcurrent, entry.MaxWaitMs)
+			addAutoDisableAttrs(attrs, entry.AutoDisableErrorCodes, entry.AutoDisableCooldownSeconds)
 			a := &coreauth.Auth{
 				ID:           id,
 				Provider:     "opencode-go",
