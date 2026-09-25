@@ -30,6 +30,52 @@ func maxParallelForAuth(auth *Auth) int {
 	return parsed
 }
 
+// entryOverCap reports whether an auth entry sits at/over its per-entry
+// concurrency cap: over cap iff the resolved cap is positive (maxParallel(id)
+// > 0) AND the current in-flight count is >= the cap. A nil entry, an entry
+// without an auth, an unset cap (maxParallel <= 0), or a nil in-flight lookup
+// is never over cap — unset caps mean unlimited.
+func entryOverCap(entry *scheduledAuth, inFlightCount func(string) int, maxParallel func(string) int) bool {
+	if entry == nil || entry.auth == nil {
+		return false
+	}
+	capVal := 0
+	if maxParallel != nil {
+		capVal = maxParallel(entry.auth.ID)
+	}
+	if capVal <= 0 {
+		return false
+	}
+	count := 0
+	if inFlightCount != nil {
+		count = inFlightCount(entry.auth.ID)
+	}
+	if count < 0 {
+		count = 0
+	}
+	return count >= capVal
+}
+
+// capacityAwarePredicate wraps base (typically scheduledAuthPredicate) so the
+// ready scan also excludes entries sitting at/over their per-entry concurrency
+// cap — the same eligibility rule the fill-first helper enforces internally,
+// applied uniformly to every strategy via the pickReadyAtPriorityLocked switch,
+// highestReadyPriorityLocked, and the mixed-provider scans. With no caps
+// configured (maxParallel returns <= 0 for everything) entryOverCap is always
+// false, so the wrapper degenerates to base with only a per-entry lookup.
+// base may be nil.
+func capacityAwarePredicate(base func(*scheduledAuth) bool, inFlightCount func(string) int, maxParallel func(string) int) func(*scheduledAuth) bool {
+	if base == nil && (inFlightCount == nil || maxParallel == nil) {
+		return func(*scheduledAuth) bool { return true }
+	}
+	return func(entry *scheduledAuth) bool {
+		if base != nil && !base(entry) {
+			return false
+		}
+		return !entryOverCap(entry, inFlightCount, maxParallel)
+	}
+}
+
 // pickFillFirst is the readyView-scoped variant of the global fill-first
 // selector: from the entries in the bucket, return the auth whose current
 // in-flight count is highest while still below its max_parallel_requests cap.

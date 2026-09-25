@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +14,43 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+// entryCapacityErrorCode marks the internal "every candidate is at/over its
+// per-entry max_parallel concurrency cap" signal surfaced by the pickers.
+// It is internal (Design D6): Task 5 translates it into a short wait before
+// the selection loop re-picks, and it must never reach a user-visible error
+// path as a distinct code. A plain auth_not_found / auth_unavailable remains
+// the user-facing shape when the higher routing layer exhausts providers.
+const entryCapacityErrorCode = "entry_capacity"
+
+// ErrEntryCapacity is the package-level sentinel the pickers return when every
+// eligible ready candidate across all priority buckets is at/over its per-entry
+// maxParallel concurrency cap. It is a distinct, code-detectable marker (never
+// a plain nil / auth_not_found) so Task 5 can identify it with
+// isEntryCapacityError and wait for a slot instead of treating the provider as
+// exhausted. Retryable=true: the condition is transient — releasing any in-
+// flight request frees a slot.
+//
+// D6 is preserved even in the interim window before Task 5 intercepts this
+// error: the HTTPStatus and Message mirror the pre-existing auth_unavailable
+// "no auth available" busy shape, so if the sentinel ever escapes to a
+// user-visible error path it presents identically to the old behavior rather
+// than as a new error.
+var ErrEntryCapacity = &Error{Code: entryCapacityErrorCode, Message: "no auth available", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
+
+// isEntryCapacityError reports whether err is the scheduler's per-entry
+// concurrency-cap signal (ErrEntryCapacity or any equal *Error). Task 5 calls
+// this to decide whether to wait for a slot before re-picking.
+func isEntryCapacityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	return authErr.Code == entryCapacityErrorCode
+}
 
 // schedulerStrategy identifies which built-in routing semantics the scheduler should apply.
 type schedulerStrategy int
@@ -514,7 +553,15 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
+	basePredicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
+	// Task 4: resolve the in-flight + per-entry max_parallel lookups once per
+	// pick cycle and wrap the request predicate so EVERY strategy treats an
+	// entry at/over its concurrency cap as non-eligible (same rule fill-first
+	// has always enforced internally). With no caps configured the wrapper
+	// degrades to basePredicate with only a per-entry lookup.
+	inFlightCount := s.pickReadyLookup(s.inFlightSnapshot())
+	maxParallel := s.maxParallelLookup()
+	predicate := capacityAwarePredicate(basePredicate, inFlightCount, maxParallel)
 	if strategy == schedulerStrategyHeadroom {
 		// Round-2 headroom picks live at the authScheduler level so the
 		// lastHeadroomExhausted flag can be set here (the per-shard pick path
@@ -526,11 +573,11 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		shard.promoteExpiredLocked(time.Now())
 		priorityReady, okPriority := shard.highestReadyPriorityLocked(preferWebsocket, predicate)
 		if !okPriority {
-			return nil, shard.unavailableErrorLocked(provider, model, predicate)
+			return nil, shard.unavailableErrorLocked(provider, model, basePredicate, inFlightCount, maxParallel)
 		}
 		bucket := shard.readyByPriority[priorityReady]
 		if bucket == nil {
-			return nil, shard.unavailableErrorLocked(provider, model, predicate)
+			return nil, shard.unavailableErrorLocked(provider, model, basePredicate, inFlightCount, maxParallel)
 		}
 		entries := make([]*scheduledAuth, 0, len(bucket.all.flat))
 		for _, entry := range bucket.all.flat {
@@ -556,17 +603,17 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 			}
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
-		picked, exhausted := pickHeadroom(entries, s.headroomLookup, s.pickReadyLookup(s.inFlightSnapshot()))
+		picked, exhausted := pickHeadroom(entries, s.headroomLookup, inFlightCount)
 		s.lastHeadroomExhausted = exhausted
 		if picked != nil {
 			return picked.auth, nil
 		}
-		return nil, shard.unavailableErrorLocked(provider, model, predicate)
+		return nil, shard.unavailableErrorLocked(provider, model, basePredicate, inFlightCount, maxParallel)
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup()); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, inFlightCount, maxParallel); picked != nil {
 		return picked, nil
 	}
-	return nil, shard.unavailableErrorLocked(provider, model, predicate)
+	return nil, shard.unavailableErrorLocked(provider, model, basePredicate, inFlightCount, maxParallel)
 }
 
 func providerPrefersWebsocketTransport(providerKey string) bool {
@@ -627,14 +674,24 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
-		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-		if picked := shard.pickReadyLocked(false, strategy, predicate, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup()); picked != nil {
+		basePredicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
+		// Task 4: wrap the request predicate with the per-entry cap check so
+		// the pinned-auth single-provider path honors over-cap entries too.
+		inFlightCount := s.pickReadyLookup(s.inFlightSnapshot())
+		maxParallel := s.maxParallelLookup()
+		predicate := capacityAwarePredicate(basePredicate, inFlightCount, maxParallel)
+		if picked := shard.pickReadyLocked(false, strategy, predicate, inFlightCount, maxParallel); picked != nil {
 			return picked, providerKey, nil
 		}
-		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
+		return nil, "", shard.unavailableErrorLocked("mixed", model, basePredicate, inFlightCount, maxParallel)
 	}
 
-	predicate := scheduledAuthPredicate(eligibility, tried, "", strategy == schedulerStrategyWeightedRoundRobin)
+	basePredicate := scheduledAuthPredicate(eligibility, tried, "", strategy == schedulerStrategyWeightedRoundRobin)
+	// Task 4: resolve the lookups once per pick cycle for both the eligibility
+	// predicate and the cap-aware scans below.
+	inFlightCount := s.pickReadyLookup(s.inFlightSnapshot())
+	maxParallel := s.maxParallelLookup()
+	predicate := capacityAwarePredicate(basePredicate, inFlightCount, maxParallel)
 	candidateShards := make([]*modelScheduler, len(normalized))
 	bestPriority := 0
 	hasCandidate := false
@@ -659,7 +716,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 	}
 	if !hasCandidate {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, basePredicate, inFlightCount, maxParallel)
 	}
 
 	if strategy == schedulerStrategyFillFirst {
@@ -696,11 +753,11 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			}
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
-		picked := pickFillFirst(entries, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup())
+		picked := pickFillFirst(entries, inFlightCount, maxParallel)
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, basePredicate, inFlightCount, maxParallel)
 	}
 
 	if strategy == schedulerStrategyWeighted {
@@ -741,7 +798,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, basePredicate, inFlightCount, maxParallel)
 	}
 
 	if strategy == schedulerStrategyHeadroom {
@@ -779,12 +836,12 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			}
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
-		picked, exhausted := pickHeadroom(entries, s.headroomLookup, s.pickReadyLookup(s.inFlightSnapshot()))
+		picked, exhausted := pickHeadroom(entries, s.headroomLookup, inFlightCount)
 		s.lastHeadroomExhausted = exhausted
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, basePredicate, inFlightCount, maxParallel)
 	}
 
 	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
@@ -821,7 +878,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, basePredicate, inFlightCount, maxParallel)
 	}
 
 	if strategy == schedulerStrategyP2C || strategy == schedulerStrategyLeastUsed {
@@ -849,14 +906,14 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		var picked *scheduledAuth
 		switch strategy {
 		case schedulerStrategyP2C:
-			picked = view.pickPowerOfTwo(predicate, s.pickReadyLookup(s.inFlightSnapshot()))
+			picked = view.pickPowerOfTwo(predicate, inFlightCount)
 		case schedulerStrategyLeastUsed:
-			picked = view.pickLeastUsed(predicate, s.pickReadyLookup(s.inFlightSnapshot()))
+			picked = view.pickLeastUsed(predicate, inFlightCount)
 		}
 		if picked != nil && picked.meta != nil {
 			return picked.auth, picked.meta.providerKey, nil
 		}
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, basePredicate, inFlightCount, maxParallel)
 	}
 
 	weights := make([]int, len(normalized))
@@ -872,7 +929,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		segmentEnds[providerIndex] = totalWeight
 	}
 	if totalWeight == 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, basePredicate, inFlightCount, maxParallel)
 	}
 
 	startSlot := s.mixedCursors[cursorKey] % totalWeight
@@ -887,7 +944,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 	}
 	if startProviderIndex < 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, basePredicate, inFlightCount, maxParallel)
 	}
 
 	slot := startSlot
@@ -904,22 +961,28 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate, s.pickReadyLookup(s.inFlightSnapshot()), s.maxParallelLookup())
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate, inFlightCount, maxParallel)
 		if picked == nil {
 			continue
 		}
 		s.mixedCursors[cursorKey] = slot + 1
 		return picked, providerKey, nil
 	}
-	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, basePredicate, inFlightCount, maxParallel)
 }
 
-// mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
-func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, predicate func(*scheduledAuth) bool) error {
+// mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or
+// unavailable error. When the only eligible ready candidates are all at/over
+// their per-entry concurrency cap, it returns ErrEntryCapacity so the caller
+// can distinguish "providers exhausted" (auth_not_found) / "cooling down"
+// (model_cooldown) from "entries busy, retry shortly" (entry_capacity,
+// Task 5's wait trigger).
+func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, basePredicate func(*scheduledAuth) bool, inFlightCount func(string) int, maxParallel func(string) int) error {
 	now := time.Now()
 	total := 0
 	cooldownCount := 0
 	earliest := time.Time{}
+	anyOverCap := false
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
@@ -929,9 +992,10 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if shard == nil {
 			continue
 		}
-		localTotal, localCooldownCount, localEarliest := shard.availabilitySummaryLocked(predicate)
+		localTotal, localCooldownCount, localEarliest, localOverCap := shard.availabilitySummaryLocked(basePredicate, inFlightCount, maxParallel)
 		total += localTotal
 		cooldownCount += localCooldownCount
+		anyOverCap = anyOverCap || localOverCap
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
@@ -945,6 +1009,9 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 			resetIn = 0
 		}
 		return newModelCooldownError(model, "", resetIn)
+	}
+	if anyOverCap {
+		return ErrEntryCapacity
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
@@ -1470,10 +1537,17 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 	return count
 }
 
-// unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
-func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
+// unavailableErrorLocked returns the correct unavailable or cooldown error for
+// the shard. When the only eligible ready candidates are all at/over their
+// per-entry concurrency cap, it returns ErrEntryCapacity so the caller can
+// distinguish "no auth" (auth_not_found) / "cooling down" (model_cooldown)
+// from "entries busy, retry shortly" (entry_capacity, Task 5's wait trigger).
+// basePredicate is the request predicate WITHOUT the cap check (the cap-aware
+// predicate would exclude over-cap entries from the summary); over-cap
+// eligibility is re-derived here from inFlightCount / maxParallel.
+func (m *modelScheduler) unavailableErrorLocked(provider, model string, basePredicate func(*scheduledAuth) bool, inFlightCount func(string) int, maxParallel func(string) int) error {
 	now := time.Now()
-	total, cooldownCount, earliest := m.availabilitySummaryLocked(predicate)
+	total, cooldownCount, earliest, anyOverCap := m.availabilitySummaryLocked(basePredicate, inFlightCount, maxParallel)
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -1488,22 +1562,41 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		}
 		return newModelCooldownError(model, providerForError, resetIn)
 	}
+	if anyOverCap {
+		return ErrEntryCapacity
+	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
-// availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.
-func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, time.Time) {
+// availabilitySummaryLocked summarizes total candidates, cooldown count, and
+// earliest retry time. It also reports whether ANY candidate passing the base
+// predicate is at/over its per-entry concurrency cap. Like the other
+// over-cap computations, basePredicate here is the request predicate WITHOUT
+// the cap check: the entries that pass it are exactly the set the pickers
+// rejected for capacity, so anyOverCap tells the caller whether that rejection
+// was because every candidate was busy (ErrEntryCapacity) versus a genuine
+// no-auth / cooldown-only condition.
+func (m *modelScheduler) availabilitySummaryLocked(basePredicate func(*scheduledAuth) bool, inFlightCount func(string) int, maxParallel func(string) int) (int, int, time.Time, bool) {
 	if m == nil {
-		return 0, 0, time.Time{}
+		return 0, 0, time.Time{}, false
 	}
 	total := 0
 	cooldownCount := 0
 	earliest := time.Time{}
+	anyOverCap := false
 	for _, entry := range m.entries {
-		if predicate != nil && !predicate(entry) {
+		if basePredicate != nil && !basePredicate(entry) {
 			continue
 		}
 		total++
+		// The capacity signal only makes sense for entries whose state is
+		// currently READY: a cooldown/blocked/disabled entry is unavailable for
+		// its state, not for capacity, even if it still holds in-flight
+		// requests. Restricting the flag to READY entries keeps
+		// entry_capacity meaning "every ready candidate is busy".
+		if entry != nil && entry.state == scheduledStateReady && entryOverCap(entry, inFlightCount, maxParallel) {
+			anyOverCap = true
+		}
 		if entry == nil || entry.auth == nil {
 			continue
 		}
@@ -1515,7 +1608,7 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 			earliest = entry.nextRetryAt
 		}
 	}
-	return total, cooldownCount, earliest
+	return total, cooldownCount, earliest, anyOverCap
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
