@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -95,6 +96,38 @@ func (f *fakeUpstreamProviderStore) Count(ctx context.Context) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return int64(len(f.rows)), f.fails
+}
+
+// SetEntryAutoDisabled stubs the auto-disable sink primitive. The management
+// routes that exercise the sink use a dedicated adapter stub (see
+// auto_disable_sink_test.go); this fake needs the method only to satisfy the
+// UpstreamProviderStore interface.
+func (f *fakeUpstreamProviderStore) SetEntryAutoDisabled(ctx context.Context, entryID int64, code string) (bool, error) {
+	if f == nil {
+		return false, nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fails != nil {
+		return false, f.fails
+	}
+	for _, p := range f.rows {
+		for i := range p.APIKeyEntries {
+			if p.APIKeyEntries[i].ID == entryID {
+				if p.APIKeyEntries[i].AutoDisabled || (p.APIKeyEntries[i].Disabled && !p.APIKeyEntries[i].AutoDisabled) {
+					return false, nil
+				}
+				p.APIKeyEntries[i].Disabled = true
+				p.APIKeyEntries[i].AutoDisabled = true
+				now := time.Now()
+				p.APIKeyEntries[i].AutoDisabledAt = &now
+				p.APIKeyEntries[i].AutoDisabledReason = code
+				f.rows[p.ID] = p
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // newSeedModelsHandler builds a Handler with the fake store wired, plus a

@@ -194,6 +194,14 @@ type UpstreamProviderStore interface {
 	// Count returns the total number of rows. Used by the first-boot seeder to
 	// decide whether migration from config.yaml/auth-dir is needed.
 	Count(ctx context.Context) (int64, error)
+	// SetEntryAutoDisabled is the server-side auto-disable sink's persistence
+	// primitive (Fitur 2): it flips one API-key entry to disabled+auto_disabled
+	// with the matched error code as the reason, returning true only when a row
+	// changed. Idempotent: re-firing on an already-auto-disabled entry or on an
+	// operator manually-disabled entry is a no-op (never clobbers manual
+	// disable). Entry IDs are globally unique across providers, so the entryID
+	// alone keys the update.
+	SetEntryAutoDisabled(ctx context.Context, entryID int64, code string) (bool, error)
 }
 
 // pgUpstreamProviderStore implements UpstreamProviderStore against the

@@ -286,6 +286,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		if s.handlers.AuthManager != nil {
 			s.handlers.AuthManager.SetRefreshSink(s.mgmt.SyncLogSink())
 		}
+		// Attach the auto-disable sink so the conductor's classified upstream
+		// error-code matches persist auto_disabled=true + re-render. No-op when
+		// PG is not configured (AutoDisableSink returns nil, SetAutoDisableSink
+		// detaches). Re-attached on config reload via server_reload.go.
+		if s.handlers.AuthManager != nil {
+			s.handlers.AuthManager.SetAutoDisableSink(s.mgmt.AutoDisableSink())
+		}
 		// Surface persisted official_provider values in auth-selection errors.
 		s.handlers.SetModelsCatalogStore(store.NewModelsCatalogResolver(handles.Models))
 		// Wire the per-model-id global routing override (pinned providers +

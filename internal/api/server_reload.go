@@ -198,6 +198,12 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		if s.handlers.AuthManager != nil {
 			s.handlers.AuthManager.SetRefreshSink(s.mgmt.SyncLogSink())
 		}
+		// Re-attach the auto-disable sink so a PG reconfiguration that flips
+		// the upstream-provider store on/off takes effect without a full
+		// restart. No-op when PG is not configured (AutoDisableSink returns nil).
+		if s.handlers.AuthManager != nil {
+			s.handlers.AuthManager.SetAutoDisableSink(s.mgmt.AutoDisableSink())
+		}
 	}
 	s.refreshPluginManagementRoutes()
 
