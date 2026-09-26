@@ -28,7 +28,7 @@ func TestReconcileClaudeCloakDisplayAfterThinkingOverride(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					body, _ := sjson.SetBytes([]byte(`{}`), "model", model)
 					body, _ = sjson.SetRawBytes(body, "thinking", []byte(tc.thinking))
-					out := reconcileClaudeCodeFableModelAfterPayload(body, claudeCodeFableState{injectedDisplay: tc.injected}, false, tc.touched, true, false)
+					out := reconcileClaudeCodeFableModelAfterPayload(body, claudeCodeFableState{injectedDisplay: tc.injected}, false, tc.touched, true, false, claudeCloakSettings{})
 					display := gjson.GetBytes(out, "thinking.display")
 					if display.String() != tc.want || (tc.want == "" && display.Exists()) {
 						t.Fatalf("display=%s, want %q; body=%s", display.Raw, tc.want, out)
@@ -41,7 +41,7 @@ func TestReconcileClaudeCloakDisplayAfterThinkingOverride(t *testing.T) {
 
 func TestReconcileClaudeCloakDisplayRemovesSyntheticDisplayForNonProgressModel(t *testing.T) {
 	body := []byte(`{"model":"claude-opus-4-8","thinking":{"type":"adaptive","display":"updates"}}`)
-	out := reconcileClaudeCodeFableModelAfterPayload(body, claudeCodeFableState{injectedDisplay: true}, false, false, true, false)
+	out := reconcileClaudeCodeFableModelAfterPayload(body, claudeCodeFableState{injectedDisplay: true}, false, false, true, false, claudeCloakSettings{})
 	if display := gjson.GetBytes(out, "thinking.display"); display.Exists() {
 		t.Fatalf("synthetic display survived for non-progress model: %s", out)
 	}
