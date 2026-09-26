@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -381,11 +382,13 @@ func buildWebSearchCitedTextBlocks(textContent string, supports []webSearchGroun
 			}
 		}
 		if citedText != "" && len(support.ChunkURLs) > 0 {
+			encryptedIndex := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%d-%d", support.ChunkURLs[0], support.StartIndex, support.EndIndex)))
 			citation := map[string]any{
-				"type":       "web_search_result_location",
-				"cited_text": citedText,
-				"url":        support.ChunkURLs[0],
-				"title":      support.ChunkTitle,
+				"type":            "web_search_result_location",
+				"cited_text":      citedText,
+				"url":             support.ChunkURLs[0],
+				"title":           support.ChunkTitle,
+				"encrypted_index": encryptedIndex,
 			}
 			blocks = append(blocks, webSearchCitedTextBlock{
 				Text:      citedText,

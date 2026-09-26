@@ -44,6 +44,9 @@ func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGrounding(t *testi
 	if got := gjson.GetBytes(output, "content.2.citations.0.url").String(); got != "https://example.com/weather" {
 		t.Fatalf("citation url = %q: %s", got, output)
 	}
+	if got := gjson.GetBytes(output, "content.2.citations.0.encrypted_index").String(); got == "" {
+		t.Fatalf("citation encrypted_index is empty: %s", output)
+	}
 }
 
 func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGroundingRequiresNativeGoogleSearch(t *testing.T) {
@@ -81,6 +84,7 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchGrounding(t *testing.
 		`"type":"web_search_tool_result"`,
 		`"web_search_requests":1`,
 		`"type":"citations_delta"`,
+		`"encrypted_index"`,
 		`event: message_stop`,
 	} {
 		if !strings.Contains(outputText, needle) {
