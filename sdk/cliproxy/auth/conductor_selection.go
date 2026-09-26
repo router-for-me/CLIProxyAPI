@@ -971,6 +971,17 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	if !handled || !resp.Handled {
 		return nil, false, nil
 	}
+	if resp.Reject {
+		rejectCode := strings.TrimSpace(resp.RejectCode)
+		if rejectCode == "" {
+			rejectCode = "auth_unavailable"
+		}
+		rejectMessage := strings.TrimSpace(resp.RejectReason)
+		if rejectMessage == "" {
+			rejectMessage = "scheduler rejected candidate selection"
+		}
+		return nil, true, &Error{Code: rejectCode, Message: rejectMessage}
+	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
 		return selected, true, nil
 	}
