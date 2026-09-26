@@ -496,7 +496,7 @@ nonstream-keepalive-interval: 0
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     priority: 10 # optional: selection tier when several credentials match; higher tiers are served first and descend on cooldown; 0 is the default
 #     max-concurrent: 3 # optional: per-entry in-flight hard cap for this credential; 0 or absent = unlimited (feature off)
-#     max-wait-ms: 1500 # optional: wait-before-failover budget in milliseconds while this credential is at its cap; 0 or absent = immediate failover
+#     max-wait-ms: 1500 # optional: wait budget before failover while this credential is at its cap; 0 or absent = default 200ms bounded wait
 #     auto-disable-error-codes: # optional: upstream error codes that permanently auto-disable this credential's backing store row when matched at runtime; empty = feature off
 #       - "401"
 #       - "billing_not_active"
@@ -614,7 +614,7 @@ nonstream-keepalive-interval: 0
 #                      # descend on cooldown; omitted = inherit the provider-level priority; 0 is a
 #                      # valid explicit tier, distinct from omitted
 #         max-concurrent: 3 # optional: per-entry in-flight hard cap for this entry; 0 or absent = unlimited
-#         max-wait-ms: 1500 # optional: wait-before-failover budget in milliseconds while this entry is at its cap; 0 or absent = immediate failover
+#         max-wait-ms: 1500 # optional: wait budget before failover while this entry is at its cap; 0 or absent = default 200ms bounded wait
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
 #         proxy-pool-id: 7 # renderer-managed: proxy_pools binding; overrides the row-level pool when set. Resolved into proxy-url / relay-base-url at render time. Not set manually.
