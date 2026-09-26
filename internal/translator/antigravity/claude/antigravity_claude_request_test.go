@@ -2378,6 +2378,144 @@ func TestConvertClaudeRequestToAntigravity_ToolResult(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_NonThinkingClaudePreservesToolResultAdjacency(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"file":"README.md"}}]},
+			{"role":"user","content":[
+				{"type":"text","text":"Continue after the tool result."},
+				{"type":"tool_result","tool_use_id":"call_1","content":"file contents"}
+			]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	contents := gjson.GetBytes(output, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected model turn, function response turn, and text turn; got %d: %s", len(contents), output)
+	}
+	if !gjson.GetBytes([]byte(contents[1].Raw), "parts.0.functionResponse").Exists() {
+		t.Fatalf("expected function response immediately after model turn: %s", output)
+	}
+	if got := gjson.GetBytes([]byte(contents[2].Raw), "parts.0.text").String(); got != "Continue after the tool result." {
+		t.Fatalf("text turn = %q, want reminder text", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_InterveningSystemReminderPreservesToolResultAdjacency(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"file":"README.md"}}]},
+			{"role":"system","content":"System reminder instruction."},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"file contents"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+	contents := gjson.GetBytes(output, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected model turn, function response turn, and reminder turn; got %d: %s", len(contents), output)
+	}
+	if !gjson.GetBytes([]byte(contents[1].Raw), "parts.0.functionResponse").Exists() {
+		t.Fatalf("expected function response immediately after model turn: %s", output)
+	}
+	if got := gjson.GetBytes([]byte(contents[2].Raw), "parts.0.text").String(); got != "<system-reminder>\nSystem reminder instruction.\n</system-reminder>" {
+		t.Fatalf("text turn = %q, want reminder text", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_InterveningDeveloperReminderPreservesToolResultAdjacency(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"file":"README.md"}}]},
+			{"role":"developer","content":"Developer reminder instruction."},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"file contents"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	contents := gjson.GetBytes(output, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected model turn, function response turn, and reminder turn; got %d: %s", len(contents), output)
+	}
+	if !gjson.GetBytes([]byte(contents[1].Raw), "parts.0.functionResponse").Exists() {
+		t.Fatalf("expected function response immediately after model turn: %s", output)
+	}
+	if got := gjson.GetBytes([]byte(contents[2].Raw), "parts.0.text").String(); got != "<system-reminder>\nDeveloper reminder instruction.\n</system-reminder>" {
+		t.Fatalf("text turn = %q, want reminder text", got)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ParallelToolResultsAcrossMessagesPreservesToolResultAdjacency(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_1","name":"Read","input":{"file":"README.md"}},
+				{"type":"tool_use","id":"call_2","name":"Write","input":{"file":"app.go"}}
+			]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"readme contents"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"write ok"}]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	contents := gjson.GetBytes(output, "request.contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("expected model turn and merged function response turn; got %d: %s", len(contents), output)
+	}
+	parts := gjson.GetBytes([]byte(contents[1].Raw), "parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 function response parts in single user turn, got %d: %s", len(parts), contents[1].Raw)
+	}
+	if !parts[0].Get("functionResponse").Exists() || !parts[1].Get("functionResponse").Exists() {
+		t.Fatalf("expected both parts to be functionResponse: %s", contents[1].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ClaudeThinkingPreservesToolResultAdjacency(t *testing.T) {
+	cache.ClearSignatureCache("")
+	nativeSignature, antigravitySignature := testAntigravityClaudeSignature(t)
+	thinkingText := "Let me check the file."
+	cache.CacheSignature("claude-opus-4-6-thinking", thinkingText, nativeSignature)
+
+	inputJSON := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"` + thinkingText + `","signature":"` + nativeSignature + `"},
+				{"type":"tool_use","id":"call_1","name":"Read","input":{"file":"README.md"}}
+			]},
+			{"role":"user","content":[
+				{"type":"text","text":"Check details."},
+				{"type":"tool_result","tool_use_id":"call_1","content":"file contents"}
+			]}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+	contents := gjson.GetBytes(output, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("expected model turn, function response turn, and text turn; got %d: %s", len(contents), output)
+	}
+	modelParts := gjson.GetBytes([]byte(contents[0].Raw), "parts").Array()
+	if len(modelParts) < 2 || !modelParts[0].Get("thought").Bool() {
+		t.Fatalf("expected thinking block in model turn: %s", contents[0].Raw)
+	}
+	if modelParts[0].Get("thoughtSignature").String() != antigravitySignature {
+		t.Fatalf("expected thoughtSignature %q, got %q", antigravitySignature, modelParts[0].Get("thoughtSignature").String())
+	}
+	if !gjson.GetBytes([]byte(contents[1].Raw), "parts.0.functionResponse").Exists() {
+		t.Fatalf("expected function response immediately after model turn: %s", output)
+	}
+	if got := gjson.GetBytes([]byte(contents[2].Raw), "parts.0.text").String(); got != "Check details." {
+		t.Fatalf("text turn = %q, want text", got)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolResultName_TouluFormat(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-haiku-4-5-20251001",
