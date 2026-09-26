@@ -334,8 +334,8 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 
 	if provider != "" {
 		if exec, ok := m.Executor(provider); ok && exec != nil {
-			if closer, okCloser := exec.(ExecutionSessionCloser); okCloser {
-				closer.CloseExecutionSession(CloseAllExecutionSessionsID)
+			if closer, okCloser := exec.(AuthExecutionSessionCloser); okCloser {
+				closer.CloseExecutionSessionsForAuth(id)
 			}
 		}
 	}

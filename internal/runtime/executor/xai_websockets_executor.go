@@ -1401,6 +1401,13 @@ func (e *XAIWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWebs
 	}
 }
 
+// CloseExecutionSessionsForAuth releases sessions belonging to a removed auth.
+func (e *XAIWebsocketsExecutor) CloseExecutionSessionsForAuth(authID string) {
+	if e != nil {
+		CloseXAIWebsocketSessionsForAuthID(authID, "auth_removed")
+	}
+}
+
 func (e *XAIWebsocketsExecutor) CloseExecutionSession(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if e == nil || sessionID == "" {
@@ -1764,6 +1771,13 @@ func (e *XAIAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Au
 		return cliproxyexecutor.Response{}, fmt.Errorf("xai auto executor: http executor is nil")
 	}
 	return e.httpExec.CountTokens(ctx, auth, req, opts)
+}
+
+// CloseExecutionSessionsForAuth releases sessions belonging to a removed auth.
+func (e *XAIAutoExecutor) CloseExecutionSessionsForAuth(authID string) {
+	if e != nil && e.wsExec != nil {
+		e.wsExec.CloseExecutionSessionsForAuth(authID)
+	}
 }
 
 func (e *XAIAutoExecutor) CloseExecutionSession(sessionID string) {
