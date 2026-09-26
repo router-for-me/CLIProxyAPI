@@ -58,6 +58,7 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -91,8 +92,26 @@ type envelope struct {
 }
 
 type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+func (e *envelopeError) Error() string {
+	if e == nil {
+		return "host callback failed"
+	}
+	if e.Code == "" {
+		return e.Message
+	}
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
+func (e *envelopeError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.HTTPStatus
 }
 
 type lifecycleRequest struct {
@@ -424,18 +443,22 @@ func callHost(method string, payload any) (json.RawMessage, error) {
 		return nil, fmt.Errorf("host callback %s returned no response, code=%d", method, int(callCode))
 	}
 
+	return decodeHostEnvelope(method, rawResponse, int(callCode))
+}
+
+func decodeHostEnvelope(method string, rawResponse []byte, callCode int) (json.RawMessage, error) {
 	var env envelope
 	if errUnmarshal := json.Unmarshal(rawResponse, &env); errUnmarshal != nil {
 		return nil, fmt.Errorf("decode host envelope %s: %w", method, errUnmarshal)
 	}
 	if !env.OK {
 		if env.Error != nil {
-			return nil, fmt.Errorf("%s: %s", env.Error.Code, env.Error.Message)
+			return nil, env.Error
 		}
 		return nil, fmt.Errorf("host callback %s failed", method)
 	}
 	if callCode != 0 {
-		return nil, fmt.Errorf("host callback %s returned code=%d", method, int(callCode))
+		return nil, fmt.Errorf("host callback %s returned code=%d", method, callCode)
 	}
 	return append(json.RawMessage(nil), env.Result...), nil
 }
@@ -443,6 +466,12 @@ func callHost(method string, payload any) (json.RawMessage, error) {
 func hostHTTPStatusFromError(err error) int {
 	if err == nil {
 		return 0
+	}
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) {
+		if code := statusErr.StatusCode(); code > 0 {
+			return code
+		}
 	}
 	msg := err.Error()
 	for _, code := range []int{429, 503, 502} {

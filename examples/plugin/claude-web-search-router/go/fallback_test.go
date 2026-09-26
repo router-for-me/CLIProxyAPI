@@ -31,6 +31,27 @@ func decodeModelRouteResponse(t *testing.T, raw []byte) pluginapi.ModelRouteResp
 	return resp
 }
 
+func TestDecodeHostEnvelopePreservesHTTPStatus(t *testing.T) {
+	raw, errMarshal := json.Marshal(envelope{
+		OK: false,
+		Error: &envelopeError{
+			Code:       "host_call_failed",
+			Message:    "quota exhausted",
+			HTTPStatus: 429,
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal host envelope: %v", errMarshal)
+	}
+	_, errDecode := decodeHostEnvelope("host.model.execute", raw, 0)
+	if errDecode == nil {
+		t.Fatal("decodeHostEnvelope returned nil error")
+	}
+	if got := hostHTTPStatusFromError(errDecode); got != 429 {
+		t.Fatalf("host status = %d, want 429", got)
+	}
+}
+
 func TestRouteWithFallbackAntigravityFirst(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	const clientID = "test-fallback-antigravity"
