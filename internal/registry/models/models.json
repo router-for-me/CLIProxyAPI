@@ -2797,7 +2797,8 @@
           "medium",
           "high",
           "xhigh",
-          "max"
+          "max",
+          "ultra"
         ]
       },
       "supportedInputModalities": [
@@ -3078,7 +3079,8 @@
           "medium",
           "high",
           "xhigh",
-          "max"
+          "max",
+          "ultra"
         ]
       },
       "supportedInputModalities": [
@@ -3359,7 +3361,8 @@
           "medium",
           "high",
           "xhigh",
-          "max"
+          "max",
+          "ultra"
         ]
       },
       "supportedInputModalities": [
