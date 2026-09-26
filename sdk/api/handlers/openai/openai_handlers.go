@@ -695,8 +695,22 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 	}
 }
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+	// A chat.completions stream that closes cleanly without any choice carrying
+	// finish_reason is truncated: clients accumulating tool_call arguments across
+	// deltas are left holding unparseable JSON. Track it so the close can be
+	// reported instead of being answered with [DONE] as if it had succeeded.
+	var sawChunk, sawFinishReason bool
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
+			sawChunk = true
+			if !sawFinishReason {
+				for _, choice := range gjson.GetBytes(chunk, "choices").Array() {
+					if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != gjson.Null {
+						sawFinishReason = true
+						break
+					}
+				}
+			}
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
@@ -713,6 +727,17 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			}
 			body := handlers.BuildErrorResponseBody(status, errText)
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(body))
+		},
+		CloseError: func() *interfaces.ErrorMessage {
+			// A stream that never emitted a chunk fails earlier on a different path;
+			// only flag one that produced output then stopped short of its terminator.
+			if !sawChunk || sawFinishReason {
+				return nil
+			}
+			return &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadGateway,
+				Error:      fmt.Errorf("upstream stream closed before any chunk carried finish_reason"),
+			}
 		},
 		WriteDone: func() {
 			_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
