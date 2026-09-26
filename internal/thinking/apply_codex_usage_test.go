@@ -7,6 +7,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codex"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 )
 
@@ -328,6 +330,65 @@ func suffixForTest(suffix string) string {
 		return ""
 	}
 	return "(" + suffix + ")"
+}
+
+func TestApplyThinkingLogsNativeResponsesBaseline(t *testing.T) {
+	logger := log.StandardLogger()
+	previousLevel := logger.GetLevel()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.DebugLevel)
+	t.Cleanup(func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+	})
+
+	body := []byte(`{"model":"gpt-6-sol","reasoning":{"effort":"max","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`)
+	for _, bound := range []bool{false, true} {
+		name := "registry lookup"
+		if bound {
+			name = "resolved model"
+		}
+		t.Run(name, func(t *testing.T) {
+			hook.Reset()
+			var applied []byte
+			var err error
+			if bound {
+				modelInfo := registry.LookupModelInfo("gpt-6-sol", "codex")
+				if modelInfo == nil || !modelInfo.SupportConfigurationUpdate {
+					t.Fatal("gpt-6-sol must support configuration updates")
+				}
+				applied, err = thinking.ApplyThinkingWithModelInfo(body, body, "gpt-6-sol", "codex", "codex", "codex", modelInfo)
+			} else {
+				applied, err = thinking.ApplyThinking(body, "gpt-6-sol", "codex", "codex", "codex")
+			}
+			if err != nil {
+				t.Fatalf("ApplyThinking() error = %v", err)
+			}
+			if !bytes.Equal(applied, body) {
+				t.Fatalf("native Responses body changed: got %s, want %s", applied, body)
+			}
+
+			for _, message := range []string{
+				"thinking: original config from request |",
+				"thinking: processed config to apply |",
+			} {
+				found := false
+				for _, entry := range hook.AllEntries() {
+					if entry.Level == log.DebugLevel && entry.Message == message &&
+						entry.Data["provider"] == "codex" && entry.Data["model"] == "gpt-6-sol" &&
+						entry.Data["mode"] == thinking.ModeLevel && entry.Data["budget"] == 0 &&
+						entry.Data["level"] == thinking.LevelMax {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("missing native Responses debug log %q with max baseline", message)
+				}
+			}
+		})
+	}
 }
 
 func TestApplyThinkingPreservesCodexTopLevelReasoningEffortBaseline(t *testing.T) {

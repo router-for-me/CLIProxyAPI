@@ -264,14 +264,26 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		// Do not rebuild a malformed target from a separate source update.
 		return body, nil
 	}
-	if IsUserDefinedModel(modelInfo) {
-		if nativeResponses && !suffixResult.HasSuffix {
-			return body, nil
-		}
-		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, providerKey, suffixResult, sourceConfig, nativeResponses, summaryConfig)
-	}
 	if nativeResponses && !suffixResult.HasSuffix {
+		// Native Responses keeps the top-level baseline and in-turn updates as-is.
+		// Report the unchanged baseline without validating or rewriting the payload.
+		if modelInfo.Thinking != nil || modelInfo.UserDefined {
+			if config := extractCodexConfig(body); hasThinkingConfig(config) {
+				entry := log.WithFields(log.Fields{
+					"provider": providerFormat,
+					"model":    modelInfo.ID,
+					"mode":     config.Mode,
+					"budget":   config.Budget,
+					"level":    config.Level,
+				})
+				entry.Debug("thinking: original config from request |")
+				entry.Debug("thinking: processed config to apply |")
+			}
+		}
 		return body, nil
+	}
+	if IsUserDefinedModel(modelInfo) {
+		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, providerKey, suffixResult, sourceConfig, nativeResponses, summaryConfig)
 	}
 	if modelInfo.Thinking == nil {
 		config := extractThinkingConfig(body, providerFormat)
