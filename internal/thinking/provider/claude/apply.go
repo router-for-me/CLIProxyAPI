@@ -40,7 +40,7 @@ func init() {
 //   - ModeBudget: manual thinking budget_tokens
 //   - ModeLevel: adaptive thinking effort (Claude 4.6)
 //   - ModeAuto: provider default adaptive/manual behavior
-//   - ModeNone: disabled
+//   - ModeNone: disabled, or lowest adaptive effort when the model cannot disable thinking
 //
 // Expected output format when enabled:
 //
@@ -85,6 +85,14 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	switch config.Mode {
 	case thinking.ModeNone:
+		// Models that cannot disable thinking (e.g. claude-opus-5-5) reject thinking.type="disabled".
+		// ValidateConfig sets a fallback level for them; send the lowest adaptive effort instead.
+		if supportsAdaptive && config.Level != "" && config.Level != thinking.LevelNone {
+			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
+			return result, nil
+		}
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		// Summary display only applies to an active thinking block.
