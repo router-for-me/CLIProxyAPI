@@ -147,6 +147,23 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		bootstrapStart = nowCodexBootstrap()
 	}
 
+	var diag codexIncompleteStreamDiagnostics
+	streamNow := codexStreamNowFunc()
+	lastActivity := streamNow() // headers are in; an upstream that never speaks is silent from here
+
+	// observeLine feeds the diagnostics ahead of the grok keepalive transform, so the counters
+	// follow what the upstream sent, not who read it. Loop below first, then only the goroutine.
+	observeLine := func(line []byte) (data []byte, eventType string, isData bool) {
+		lastActivity = streamNow()
+		if !bytes.HasPrefix(line, dataTag) {
+			return nil, "", false
+		}
+		data = helps.RestoreCodexMultiAgentV2Response(bytes.TrimSpace(line[5:]), optimizeMultiAgentV2)
+		eventType = gjson.GetBytes(data, "type").String()
+		diag.observeDataFrame(eventType)
+		return data, eventType, true
+	}
+
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(nil, 52_428_800) // 50MB
 	claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
@@ -186,6 +203,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if buffering {
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
+			data, eventType, isDataFrame := observeLine(line)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			isHandshake := false
@@ -194,12 +212,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
 				isHandshake = true
-			} else if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
-				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
+			} else if isDataFrame {
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
-				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -320,7 +335,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			streamErr := newCodexIncompleteStreamError()
+			streamErr := newCodexIncompleteStreamError(diag.withIdle(streamNow().Sub(lastActivity)))
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.PublishFailure(ctx, streamErr)
 			return nil, streamErr
@@ -360,18 +375,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}()
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
+			data, eventType, isDataFrame := observeLine(line)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			terminalSuccess := false
 
 			if transformed, ok := grokbuild.TransformKeepaliveSSELine(line, isGrokClient); ok {
 				translatedLine = transformed
-			} else if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
-				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
+			} else if isDataFrame {
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
-				eventType := gjson.GetBytes(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -446,7 +459,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 		}
-		streamErr := newCodexIncompleteStreamError()
+		streamErr := newCodexIncompleteStreamError(diag.withIdle(streamNow().Sub(lastActivity)))
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
 		select {

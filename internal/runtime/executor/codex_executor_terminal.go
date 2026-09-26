@@ -2,28 +2,100 @@ package executor
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
+// codexIncompleteStreamMessage is the invariant prefix; a downstream Contains match lives inside it, so diagnostics only append.
 const codexIncompleteStreamMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
+
+// codexIncompleteStreamDiagnostics records what an attempt saw before the stream ended: metadata, never content.
+type codexIncompleteStreamDiagnostics struct {
+	// lastEventType is the "type" of the last upstream event that carried one, else empty.
+	lastEventType string
+	// dataFrames counts "data:" frames only, keepalives included; the event:/blank lines do not.
+	dataFrames int
+	// idle is the interval since the executor last read a line, so time blocked on the downstream
+	// send counts: an observation window, not proof of wire silence.
+	idle time.Duration
+	// hasIdle is false on the non-stream path, which has no per-frame arrival times to measure.
+	hasIdle bool
+}
+
+// observeDataFrame counts one upstream "data:" frame and remembers its type when it carries one.
+func (d *codexIncompleteStreamDiagnostics) observeDataFrame(eventType string) {
+	d.dataFrames++
+	if eventType != "" {
+		d.lastEventType = eventType
+	}
+}
+
+// withIdle returns a copy that also reports how long the upstream was silent before it ended.
+func (d codexIncompleteStreamDiagnostics) withIdle(idle time.Duration) codexIncompleteStreamDiagnostics {
+	d.idle = idle
+	d.hasIdle = true
+	return d
+}
+
+// codexIncompleteStreamEventTypeRuneLimit bounds the upstream "type" copied into the error text, in
+// runes: gjson renders a non-string "type" as raw JSON, so its length is not bounded upstream.
+const codexIncompleteStreamEventTypeRuneLimit = 128
+
+// codexIncompleteStreamEventType renders the last observed event type: unprintable runes dropped
+// and whitespace collapsed so one failure stays one log line, cut at the limit, "none" if empty.
+func codexIncompleteStreamEventType(eventType string) string {
+	printable := strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, eventType)
+	cleaned := strings.Join(strings.Fields(printable), " ")
+	if runes := []rune(cleaned); len(runes) > codexIncompleteStreamEventTypeRuneLimit {
+		cleaned = string(runes[:codexIncompleteStreamEventTypeRuneLimit]) + "..."
+	}
+	if cleaned == "" {
+		return "none"
+	}
+	return cleaned
+}
+
+// message renders the diagnostics as a suffix of codexIncompleteStreamMessage.
+func (d codexIncompleteStreamDiagnostics) message() string {
+	suffix := fmt.Sprintf("last event: %s, data frames: %d",
+		codexIncompleteStreamEventType(d.lastEventType), d.dataFrames)
+	if d.hasIdle {
+		suffix += ", silent for " + codexIncompleteStreamIdle(d.idle)
+	}
+	return codexIncompleteStreamMessage + " (" + suffix + ")"
+}
+
+// codexIncompleteStreamIdle rounds an idle interval to whole seconds; under a second renders "<1s".
+func codexIncompleteStreamIdle(idle time.Duration) string {
+	if idle < time.Second {
+		return "<1s"
+	}
+	return idle.Round(time.Second).String()
+}
 
 type codexIncompleteStreamError struct {
 	statusErr
 }
 
-func newCodexIncompleteStreamError() codexIncompleteStreamError {
+func newCodexIncompleteStreamError(diag codexIncompleteStreamDiagnostics) codexIncompleteStreamError {
 	return codexIncompleteStreamError{statusErr: statusErr{
 		code: http.StatusRequestTimeout,
-		msg:  codexIncompleteStreamMessage,
+		msg:  diag.message(),
 	}}
 }
 
@@ -469,6 +541,35 @@ func setCodexBootstrapNowForTest(fn func() time.Time) func() {
 		codexBootstrapNowMu.Lock()
 		codexBootstrapNow = orig
 		codexBootstrapNowMu.Unlock()
+	}
+}
+
+// Second clock hook, separate from the bootstrap one: per-line callers resolve it once via
+// codexStreamNowFunc, and bootstrap tests that install a mock clock must not move this interval.
+var (
+	codexStreamNowMu sync.RWMutex
+	codexStreamNow   = time.Now
+)
+
+func codexStreamNowFunc() func() time.Time {
+	codexStreamNowMu.RLock()
+	fn := codexStreamNow
+	codexStreamNowMu.RUnlock()
+	if fn == nil {
+		return time.Now
+	}
+	return fn
+}
+
+func setCodexStreamNowForTest(fn func() time.Time) func() {
+	codexStreamNowMu.Lock()
+	orig := codexStreamNow
+	codexStreamNow = fn
+	codexStreamNowMu.Unlock()
+	return func() {
+		codexStreamNowMu.Lock()
+		codexStreamNow = orig
+		codexStreamNowMu.Unlock()
 	}
 }
 
