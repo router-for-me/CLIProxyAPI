@@ -147,13 +147,131 @@ func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.c
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	h.putStringList(c, func(v []string) {
 		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	}, func() { h.pruneAPIKeyCredentialGroups() })
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	h.patchStringList(c, &h.cfg.APIKeys, func() { h.pruneAPIKeyCredentialGroups() })
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.deleteFromStringList(c, &h.cfg.APIKeys, func() { h.pruneAPIKeyCredentialGroups() })
+}
+
+// api-key-credential-groups
+func (h *Handler) GetAPIKeyCredentialGroups(c *gin.Context) {
+	c.JSON(200, gin.H{"api-key-credential-groups": h.cfg.APIKeyCredentialGroups})
+}
+
+func (h *Handler) PutAPIKeyCredentialGroups(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var groups map[string][]string
+	if err = json.Unmarshal(data, &groups); err != nil {
+		var body struct {
+			Items  map[string][]string `json:"items"`
+			Groups map[string][]string `json:"api-key-credential-groups"`
+		}
+		if errBody := json.Unmarshal(data, &body); errBody != nil || (body.Items == nil && body.Groups == nil) {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		groups = body.Groups
+		if groups == nil {
+			groups = body.Items
+		}
+	}
+	h.cfg.APIKeyCredentialGroups = normalizeAPIKeyCredentialGroups(groups, h.cfg.APIKeys)
+	h.persist(c)
+}
+
+func (h *Handler) PatchAPIKeyCredentialGroups(c *gin.Context) {
+	var body struct {
+		Key    string   `json:"key"`
+		Groups []string `json:"groups"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Key) == "" {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	key := strings.TrimSpace(body.Key)
+	if !containsTrimmedString(h.cfg.APIKeys, key) {
+		c.JSON(400, gin.H{"error": "api key is not configured"})
+		return
+	}
+	if h.cfg.APIKeyCredentialGroups == nil {
+		h.cfg.APIKeyCredentialGroups = make(map[string][]string)
+	}
+	normalized := normalizeStringSet(body.Groups)
+	// An explicitly empty list is fail-closed. Use DELETE to remove the
+	// restriction and restore legacy unrestricted behavior for this key.
+	h.cfg.APIKeyCredentialGroups[key] = normalized
+	h.persist(c)
+}
+
+func (h *Handler) DeleteAPIKeyCredentialGroups(c *gin.Context) {
+	key := strings.TrimSpace(c.Query("key"))
+	if key == "" {
+		c.JSON(400, gin.H{"error": "missing key"})
+		return
+	}
+	delete(h.cfg.APIKeyCredentialGroups, key)
+	h.persist(c)
+}
+
+func (h *Handler) pruneAPIKeyCredentialGroups() {
+	h.cfg.APIKeyCredentialGroups = normalizeAPIKeyCredentialGroups(h.cfg.APIKeyCredentialGroups, h.cfg.APIKeys)
+}
+
+func normalizeAPIKeyCredentialGroups(groups map[string][]string, apiKeys []string) map[string][]string {
+	if len(groups) == 0 {
+		return nil
+	}
+	allowedKeys := make(map[string]struct{}, len(apiKeys))
+	for _, key := range apiKeys {
+		if key = strings.TrimSpace(key); key != "" {
+			allowedKeys[key] = struct{}{}
+		}
+	}
+	normalized := make(map[string][]string)
+	for key, values := range groups {
+		key = strings.TrimSpace(key)
+		if _, exists := allowedKeys[key]; !exists {
+			continue
+		}
+		normalized[key] = normalizeStringSet(values)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func normalizeStringSet(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized
+}
+
+func containsTrimmedString(values []string, target string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
 }
 
 // gemini-api-key: []GeminiKey

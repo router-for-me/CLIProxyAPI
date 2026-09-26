@@ -24,16 +24,17 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.APIKeyCredentialGroups),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name             string
+	keys             map[string]struct{}
+	credentialGroups map[string]string
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys []string, credentialGroups map[string][]string) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -42,7 +43,30 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	normalizedGroups := make(map[string]string)
+	for key, groups := range credentialGroups {
+		key = strings.TrimSpace(key)
+		if _, exists := keySet[key]; !exists {
+			continue
+		}
+		seenGroups := make(map[string]struct{}, len(groups))
+		cleanGroups := make([]string, 0, len(groups))
+		for _, group := range groups {
+			group = strings.TrimSpace(group)
+			if group == "" {
+				continue
+			}
+			if _, duplicate := seenGroups[group]; duplicate {
+				continue
+			}
+			seenGroups[group] = struct{}{}
+			cleanGroups = append(cleanGroups, group)
+		}
+		// Preserve explicitly configured empty groups. Their presence is a
+		// fail-closed restriction, while an omitted key retains legacy behavior.
+		normalizedGroups[key] = strings.Join(cleanGroups, ",")
+	}
+	return &provider{name: providerName, keys: keySet, credentialGroups: normalizedGroups}
 }
 
 func (p *provider) Identifier() string {
@@ -90,12 +114,14 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			continue
 		}
 		if _, ok := p.keys[candidate.value]; ok {
+			metadata := map[string]string{"source": candidate.source}
+			if groups, restricted := p.credentialGroups[candidate.value]; restricted {
+				metadata["credential-groups"] = groups
+			}
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
-				Metadata: map[string]string{
-					"source": candidate.source,
-				},
+				Metadata:  metadata,
 			}, nil
 		}
 	}

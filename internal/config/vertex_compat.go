@@ -17,6 +17,9 @@ type VertexCompatKey struct {
 	// Maps to the x-goog-api-key header.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// CredentialGroup restricts this credential to downstream keys assigned to the same group.
+	CredentialGroup string `yaml:"credential-group,omitempty" json:"credential-group,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
