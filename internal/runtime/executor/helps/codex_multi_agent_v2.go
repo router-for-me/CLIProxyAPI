@@ -92,11 +92,29 @@ func sameByteSlice(a, b []byte) bool {
 // TranslateRequestPairWithAPIKeyModelCompatibility avoids translating identical
 // inputs twice while retaining separate buffers and stateful plugin invocations.
 func TranslateRequestPairWithAPIKeyModelCompatibility(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, originalPayload, requestPayload []byte, stream, isCompat bool) (original, working []byte) {
-	original = TranslateRequestWithAPIKeyModelCompatibility(ctx, headers, cfg, from, to, model, originalPayload, stream, isCompat)
+	original, working, _ = TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, originalPayload, requestPayload, stream, isCompat)
+	return original, working
+}
+
+// TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent returns the
+// normalizer decision for the working payload, not for the baseline payload.
+func TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, originalPayload, requestPayload []byte, stream, isCompat bool) (original, working []byte, updatesChanged bool) {
+	original, _ = TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, originalPayload, stream, isCompat)
 	if sameByteSlice(originalPayload, requestPayload) && !sdktranslator.HasPluginHooks() {
-		return original, append([]byte(nil), original...)
+		return original, append([]byte(nil), original...), false
 	}
-	return original, TranslateRequestWithAPIKeyModelCompatibility(ctx, headers, cfg, from, to, model, requestPayload, stream, isCompat)
+	working, updatesChanged = TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, requestPayload, stream, isCompat)
+	return original, working, updatesChanged
+}
+
+// TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent returns the
+// plugin normalizer's request-scoped update decision for Responses targets.
+func TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream, isCompat bool) ([]byte, bool) {
+	if !isCompat || (to == sdktranslator.FormatCodex && from != sdktranslator.FormatClaude) {
+		translated := TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, headers, cfg, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: payload})
+		return translated.Body, translated.ConfigurationUpdatesChanged
+	}
+	return TranslateRequestWithAPIKeyModelCompatibility(ctx, headers, cfg, from, to, model, payload, stream, isCompat), false
 }
 
 // TranslateRequestWithAPIKeyModelCompatibility applies compatibility-aware

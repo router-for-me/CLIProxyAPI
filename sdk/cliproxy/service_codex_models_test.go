@@ -11,6 +11,98 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
+func TestRegisterModelsForAuthCodexConfigurationUpdate(t *testing.T) {
+	capableID := ""
+	for _, model := range internalregistry.GetCodexProModels() {
+		if model.SupportConfigurationUpdate {
+			capableID = model.ID
+			break
+		}
+	}
+	if capableID == "" {
+		t.Fatal("expected an OAuth Codex model supporting configuration_update")
+	}
+
+	for index, testCase := range []struct {
+		name       string
+		models     []internalconfig.CodexModel
+		wantModels map[string]bool
+	}{
+		{
+			name:       "defaults do not inherit OAuth capability",
+			wantModels: map[string]bool{capableID: false},
+		},
+		{
+			name: "explicit per-model capability overrides OAuth",
+			models: []internalconfig.CodexModel{
+				{Name: capableID, Alias: capableID},
+				{Name: capableID, Alias: "configured-enabled", SupportConfigurationUpdate: true},
+			},
+			wantModels: map[string]bool{capableID: false, "configured-enabled": true},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			modelRegistry := internalregistry.GetGlobalRegistry()
+			oauthID := fmt.Sprintf("codex-config-update-oauth-%d", index)
+			apiKeyID := fmt.Sprintf("codex-config-update-apikey-%d", index)
+			modelRegistry.UnregisterClient(oauthID)
+			modelRegistry.UnregisterClient(apiKeyID)
+			t.Cleanup(func() {
+				modelRegistry.UnregisterClient(apiKeyID)
+				modelRegistry.UnregisterClient(oauthID)
+			})
+
+			apiKey := fmt.Sprintf("config-update-key-%d", index)
+			service := &Service{cfg: &config.Config{CodexKey: []config.CodexKey{{APIKey: apiKey, Models: testCase.models}}}}
+			service.registerModelsForAuth(context.Background(), &coreauth.Auth{
+				ID: oauthID, Provider: "codex", Status: coreauth.StatusActive,
+				Attributes: map[string]string{"plan_type": "pro"},
+			})
+			service.registerModelsForAuth(context.Background(), &coreauth.Auth{
+				ID: apiKeyID, Provider: "codex", Status: coreauth.StatusActive,
+				Attributes: map[string]string{
+					coreauth.AttributeAPIKey: apiKey, coreauth.AttributeConfigIndex: "0",
+					coreauth.AttributeSource: "config:codex:test",
+				},
+			})
+
+			oauthModels := modelRegistry.GetModelsForClient(oauthID)
+			foundOAuth := false
+			for _, model := range oauthModels {
+				if model.ID == capableID {
+					foundOAuth = true
+					if !model.SupportConfigurationUpdate {
+						t.Fatalf("OAuth model %q lost configuration_update support", capableID)
+					}
+				}
+			}
+			if !foundOAuth {
+				t.Fatalf("OAuth model %q not registered", capableID)
+			}
+
+			seen := make(map[string]bool)
+			for _, model := range modelRegistry.GetModelsForClient(apiKeyID) {
+				if want, ok := testCase.wantModels[model.ID]; ok {
+					seen[model.ID] = true
+					if model.SupportConfigurationUpdate != want {
+						t.Errorf("API-key model %q configuration_update = %t, want %t", model.ID, model.SupportConfigurationUpdate, want)
+					}
+				}
+			}
+			for id := range testCase.wantModels {
+				if !seen[id] {
+					t.Errorf("API-key model %q not registered", id)
+				}
+			}
+			for _, model := range modelRegistry.GetAvailableModels("openai") {
+				if _, exposed := model["support_configuration_update"]; exposed {
+					t.Fatalf("public model list exposed configuration_update: %+v", model)
+				}
+			}
+		})
+	}
+}
+
 func TestRegisterModelsForAuthCodexAPIKeyModels(t *testing.T) {
 	defaultModels := internalregistry.GetCodexProModels()
 	if len(defaultModels) == 0 {

@@ -130,7 +130,9 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 		if hooks != nil {
 			// Request normalizers run after native translation and own the final
 			// provider payload, including any summary field they remove.
+			before := configurationUpdates(req.Body)
 			req.Body = hooks.NormalizeRequest(ctx, from, to, req.Model, req.Body, req.Stream)
+			req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || updatesChanged(before, configurationUpdates(req.Body))
 		}
 		req.Format = to
 		return req
@@ -153,13 +155,44 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	// Plugin request normalizers canonicalize the source before a plugin request
 	// translator gets a chance to handle a missing native route. Extract summary
 	// intent from that normalized source so a normalizer can remove or rewrite it.
+	before := configurationUpdates(req.Body)
 	req.Body = hooks.NormalizeRequest(ctx, from, to, req.Model, req.Body, req.Stream)
+	req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || updatesChanged(before, configurationUpdates(req.Body))
 	summaryConfig := thinking.ExtractTranslatedSummaryConfig(req.Body, from.String(), to.String())
 	if translated, ok := hooks.TranslateRequest(ctx, from, to, req.Model, req.Body, req.Stream); ok {
 		req.Body = thinking.ApplySummaryConfigForModel(translated, to.String(), req.Model, summaryConfig)
 	}
 	req.Format = to
 	return req
+}
+
+// configurationUpdates captures only Responses update items before and after a plugin
+// normalizer. A native cross-protocol translation removing updates is not a plugin edit.
+func configurationUpdates(body []byte) []string {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return nil
+	}
+	var updates []string
+	input.ForEach(func(_, item gjson.Result) bool {
+		if item.Get("type").String() == "configuration_update" {
+			updates = append(updates, item.Raw)
+		}
+		return true
+	})
+	return updates
+}
+
+func updatesChanged(before, after []string) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for i, item := range before {
+		if item != after[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // HasRequestTransformer indicates whether a request translator exists.

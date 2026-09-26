@@ -13,6 +13,8 @@ type RequestEnvelope struct {
 	Stream    bool
 	Body      []byte
 	ModelInfo *registry.ModelInfo
+	// ConfigurationUpdatesChanged reports that a plugin normalizer modified Responses updates.
+	ConfigurationUpdatesChanged bool
 }
 
 // ResponseEnvelope represents a response in the translation pipeline.

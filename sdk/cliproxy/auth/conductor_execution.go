@@ -570,9 +570,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if errIntercept != nil {
 				return cliproxyexecutor.Response{}, errIntercept
 			}
-			if !restoreExecutionModel {
-				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
-			}
+			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
@@ -783,9 +781,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if errIntercept != nil {
 				return cliproxyexecutor.Response{}, errIntercept
 			}
-			if !restoreExecutionModel {
-				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, upstreamModel)
-			}
+			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
@@ -1108,7 +1104,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
 		if selection != nil && !restoreExecutionModel {
-			execReq = attachResolvedHomeModelInfo(execReq, selection.modelInfo)
+			execReq = attachResolvedHomeModelInfo(execReq, selection.modelInfo, selection.configurationUpdateSupport)
 		}
 		streamExecutionModel := ""
 		if restoreExecutionModel {

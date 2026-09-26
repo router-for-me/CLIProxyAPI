@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	resolvedAPIKeyModelInfoMetadataKey = "cliproxy.resolved_api_key_model_info"
-	resolvedHomeModelInfoMetadataKey   = "cliproxy.resolved_home_model_info"
+	resolvedAPIKeyModelInfoMetadataKey     = "cliproxy.resolved_api_key_model_info"
+	resolvedCodexOAuthModelInfoMetadataKey = "cliproxy.resolved_codex_oauth_model_info"
+	resolvedHomeModelInfoMetadataKey       = "cliproxy.resolved_home_model_info"
 )
 
 type apiKeyModelCapabilityRoute struct {
@@ -65,6 +66,9 @@ func ResolvedModelInfo(req cliproxyexecutor.Request) (*registry.ModelInfo, bool)
 	if modelInfo, ok := req.Metadata[resolvedHomeModelInfoMetadataKey].(*registry.ModelInfo); ok && modelInfo != nil {
 		return modelInfo, true
 	}
+	if modelInfo, ok := req.Metadata[resolvedCodexOAuthModelInfoMetadataKey].(*registry.ModelInfo); ok && modelInfo != nil {
+		return modelInfo, true
+	}
 	return ResolvedAPIKeyModelInfo(req)
 }
 
@@ -112,25 +116,115 @@ func (m *Manager) attachResolvedAPIKeyModelInfo(req cliproxyexecutor.Request, au
 	return attachResolvedAPIKeyModelInfo(m.loadAPIKeyModelRouting(), req, auth, routeModel, upstreamModel)
 }
 
+func attachResolvedExecutionModelInfo(routing *apiKeyModelRoutingSnapshot, req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string, restoreExecutionModel bool) cliproxyexecutor.Request {
+	if restoreExecutionModel {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			return req
+		}
+		routeModel, upstreamModel = req.Model, req.Model
+	}
+	return attachResolvedAPIKeyModelInfo(routing, req, auth, routeModel, upstreamModel)
+}
+
 func attachResolvedAPIKeyModelInfo(routing *apiKeyModelRoutingSnapshot, req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string) cliproxyexecutor.Request {
 	modelInfo, ok := lookupAPIKeyModelCapability(routing, auth, routeModel, upstreamModel)
 	if !ok {
-		return req
+		modelInfo, ok = lookupUnlistedCodexAPIKeyModelCapability(routing, auth, upstreamModel)
+	}
+	metadataKey := resolvedAPIKeyModelInfoMetadataKey
+	if !ok {
+		modelInfo, ok = lookupCodexOAuthModelCapability(auth, upstreamModel)
+		metadataKey = resolvedCodexOAuthModelInfoMetadataKey
+	}
+	if !ok {
+		_, hadAPIKey := req.Metadata[resolvedAPIKeyModelInfoMetadataKey]
+		_, hadOAuth := req.Metadata[resolvedCodexOAuthModelInfoMetadataKey]
+		if !hadAPIKey && !hadOAuth {
+			return req
+		}
 	}
 	metadata := make(map[string]any, len(req.Metadata)+1)
 	maps.Copy(metadata, req.Metadata)
-	metadata[resolvedAPIKeyModelInfoMetadataKey] = modelInfo
+	delete(metadata, resolvedAPIKeyModelInfoMetadataKey)
+	delete(metadata, resolvedCodexOAuthModelInfoMetadataKey)
+	if ok {
+		metadata[metadataKey] = modelInfo
+	}
 	req.Metadata = metadata
 	return req
 }
 
-func attachResolvedHomeModelInfo(req cliproxyexecutor.Request, modelInfo *registry.ModelInfo) cliproxyexecutor.Request {
+func lookupUnlistedCodexAPIKeyModelCapability(routing *apiKeyModelRoutingSnapshot, auth *Auth, upstreamModel string) (*registry.ModelInfo, bool) {
+	if routing == nil || auth == nil || auth.AuthKind() != AuthKindAPIKey || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || strings.TrimSpace(upstreamModel) == "" {
+		return nil, false
+	}
+	entry := resolveCodexAPIKeyConfig(routing.config, auth)
+	if entry == nil || auth.Attributes == nil {
+		return nil, false
+	}
+	key := strings.TrimSpace(auth.Attributes[AttributeAPIKey])
+	baseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	if (key == "" && baseURL == "") || !strings.EqualFold(key, strings.TrimSpace(entry.APIKey)) ||
+		(strings.TrimSpace(entry.BaseURL) != "" && !strings.EqualFold(baseURL, strings.TrimSpace(entry.BaseURL))) {
+		return nil, false
+	}
+	for _, configured := range entry.Models {
+		if strings.EqualFold(strings.TrimSpace(configured.Name), strings.TrimSpace(upstreamModel)) || configuredUpstreamFallbackMatches(configured.Name, upstreamModel) {
+			info := modelconfig.ResolveModelInfo(upstreamModel, "codex", configured.Thinking)
+			info.SupportConfigurationUpdate = configured.SupportConfigurationUpdate
+			info.IsCompat = configured.IsCompat
+			return info, true
+		}
+	}
+	info := modelconfig.ResolveModelInfo(upstreamModel, "codex", nil)
+	info.SupportConfigurationUpdate = false
+	return info, true
+}
+
+func lookupCodexOAuthModelCapability(auth *Auth, upstreamModel string) (*registry.ModelInfo, bool) {
+	if auth == nil || auth.AuthKind() != AuthKindOAuth || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return nil, false
+	}
+	var models []*registry.ModelInfo
+	switch strings.ToLower(strings.TrimSpace(auth.Attributes["plan_type"])) {
+	case "plus":
+		models = registry.GetCodexPlusModels()
+	case "team", "business", "go":
+		models = registry.GetCodexTeamModels()
+	case "free":
+		models = registry.GetCodexFreeModels()
+	default:
+		models = registry.GetCodexProModels()
+	}
+	selected := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(upstreamModel)).ModelName)
+	for _, model := range models {
+		if model != nil && strings.EqualFold(model.ID, selected) {
+			return model, true
+		}
+	}
+	return nil, false
+}
+
+func attachResolvedHomeModelInfo(req cliproxyexecutor.Request, modelInfo *registry.ModelInfo, support ...*bool) cliproxyexecutor.Request {
 	if modelInfo == nil {
 		return req
 	}
+	selected := *modelInfo
+	if len(support) > 0 && support[0] != nil {
+		selected.SupportConfigurationUpdate = *support[0]
+	} else {
+		selected.SupportConfigurationUpdate = false
+		local, ok := ResolvedAPIKeyModelInfo(req)
+		if !ok {
+			local, ok = req.Metadata[resolvedCodexOAuthModelInfoMetadataKey].(*registry.ModelInfo)
+		}
+		if ok && local != nil && strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(local.ID).ModelName), strings.TrimSpace(thinking.ParseSuffix(selected.ID).ModelName)) {
+			selected.SupportConfigurationUpdate = local.SupportConfigurationUpdate
+		}
+	}
 	metadata := make(map[string]any, len(req.Metadata)+1)
 	maps.Copy(metadata, req.Metadata)
-	metadata[resolvedHomeModelInfoMetadataKey] = modelInfo
+	metadata[resolvedHomeModelInfoMetadataKey] = &selected
 	req.Metadata = metadata
 	return req
 }
@@ -192,7 +286,13 @@ func compileAPIKeyModelCapabilitiesForAuth(cfg *internalconfig.Config, auth *Aut
 		}
 	case "codex":
 		if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
-			compileConfiguredModelCapabilities(out, entry.Models, "codex")
+			for i := range entry.Models {
+				configured := entry.Models[i]
+				info := addConfiguredModelCapability(out, configured.Name, configured.Alias, "codex", configured.Thinking, configured.IsCompat)
+				if info != nil {
+					info.SupportConfigurationUpdate = configured.SupportConfigurationUpdate
+				}
+			}
 		}
 	case "xai":
 		if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
@@ -246,7 +346,7 @@ func compileOpenAICompatibleModelCapabilities(out map[string][]apiKeyModelCapabi
 	}
 }
 
-func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, name, alias, modelType string, support *registry.ThinkingSupport, isCompat bool) {
+func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, name, alias, modelType string, support *registry.ThinkingSupport, isCompat bool) *registry.ModelInfo {
 	name = strings.TrimSpace(name)
 	alias = strings.TrimSpace(alias)
 	if name == "" {
@@ -256,7 +356,7 @@ func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, n
 		alias = name
 	}
 	if name == "" {
-		return
+		return nil
 	}
 	modelInfo := modelconfig.ResolveModelInfo(name, modelType, support)
 	modelInfo.IsCompat = isCompat
@@ -285,4 +385,5 @@ func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, n
 			}
 		}
 	}
+	return modelInfo
 }
