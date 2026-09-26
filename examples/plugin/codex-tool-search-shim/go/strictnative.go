@@ -317,6 +317,13 @@ func normalizeStrictToolArrays(root map[string]any, config resolvedPluginConfig)
 		}
 	}
 	changed := false
+	if config.stripCustomTools {
+		historyChanged, errHistory := convertCustomToolHistory(root)
+		if errHistory != nil {
+			return false, errHistory
+		}
+		changed = historyChanged
+	}
 	if rawTools, exists := root["tools"]; exists {
 		tools, ok := rawTools.([]any)
 		if !ok {
@@ -384,24 +391,46 @@ func validateCustomToolRemoval(root map[string]any, stripCustomTools bool) error
 	if choice, ok := root["tool_choice"].(map[string]any); ok && customChoiceMatches(choice, customNames) {
 		return strictSchemaError("custom_tool_removal_forced_choice")
 	}
+	return nil
+}
+
+// convertCustomToolHistory keeps prior client-executed custom tool calls in the
+// conversation when their declarations are removed for a strict upstream.
+func convertCustomToolHistory(root map[string]any) (bool, error) {
+	input, ok := root["input"].([]any)
+	if !ok {
+		return false, nil
+	}
+	changed := false
 	for _, rawItem := range input {
 		item, okItem := rawItem.(map[string]any)
 		if !okItem {
 			continue
 		}
 		switch stringField(item, "type") {
-		case "function_call", "custom_tool_call":
-			name := stringField(item, "name")
-			if _, exists := customNames[name]; exists {
-				return strictSchemaError("custom_tool_removal_history")
+		case "custom_tool_call":
+			toolInput, okInput := item["input"].(string)
+			if !okInput {
+				return false, strictSchemaError("custom_tool_history_invalid_input")
 			}
-			namespace := stringField(item, "namespace")
-			if _, exists := customNames[rawQualifiedToolName(namespace, name)]; exists {
-				return strictSchemaError("custom_tool_removal_history")
+			arguments, errMarshal := json.Marshal(map[string]string{"input": toolInput})
+			if errMarshal != nil {
+				return false, strictSchemaError("custom_tool_history_encoding_failed")
 			}
+			item["type"] = "function_call"
+			item["arguments"] = string(arguments)
+			delete(item, "input")
+			if namespace := stringField(item, "namespace"); namespace != "" {
+				item["name"] = rawQualifiedToolName(namespace, stringField(item, "name"))
+				delete(item, "namespace")
+			}
+			changed = true
+		case "custom_tool_call_output":
+			item["type"] = "function_call_output"
+			changed = true
 		}
 	}
-	return nil
+	return changed, nil
 }
 
 func collectCustomToolNames(tools []any, namespace string, names map[string]struct{}) {

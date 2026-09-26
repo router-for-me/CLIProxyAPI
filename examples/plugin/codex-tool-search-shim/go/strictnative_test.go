@@ -307,21 +307,63 @@ func TestNormalizeStrictNativeBodyStripsCustomTools(t *testing.T) {
 	}
 }
 
-func TestStrictCustomToolRemovalRejectsForcedAndHistoricalCalls(t *testing.T) {
+func TestStrictCustomToolRemovalRejectsForcedChoice(t *testing.T) {
 	t.Cleanup(func() { _ = applyPluginConfig(nil) })
 	if errConfigure := applyPluginConfig([]byte("strip_custom_tools: true\n")); errConfigure != nil {
 		t.Fatalf("applyPluginConfig() error = %v", errConfigure)
 	}
-	for name, body := range map[string]string{
-		"forced choice": `{"tools":[{"type":"custom","name":"apply_patch"}],"tool_choice":{"type":"function","name":"apply_patch"}}`,
-		"history call":  `{"tools":[{"type":"custom","name":"apply_patch"}],"input":[{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"{}"}]}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, _, errNormalize := normalizeStrictNativeBody([]byte(body))
-			if errNormalize == nil || !strings.Contains(errNormalize.Error(), "custom_tool_removal") {
-				t.Fatalf("normalizeStrictNativeBody() error = %v, want custom removal rejection", errNormalize)
-			}
-		})
+	body := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}],"tool_choice":{"type":"function","name":"apply_patch"}}`)
+	_, _, errNormalize := normalizeStrictNativeBody(body)
+	if errNormalize == nil || !strings.Contains(errNormalize.Error(), "custom_tool_removal_forced_choice") {
+		t.Fatalf("normalizeStrictNativeBody() error = %v, want forced choice rejection", errNormalize)
+	}
+}
+
+func TestStrictCustomToolRemovalConvertsHistoricalCalls(t *testing.T) {
+	t.Cleanup(func() { _ = applyPluginConfig(nil) })
+	if errConfigure := applyPluginConfig([]byte("strip_custom_tools: true\n")); errConfigure != nil {
+		t.Fatalf("applyPluginConfig() error = %v", errConfigure)
+	}
+	const patch = "*** Begin Patch\n*** End Patch"
+	body := []byte(`{
+		"tools":[{"type":"custom","name":"apply_patch"}],
+		"input":[
+			{"type":"custom_tool_call","id":"item-1","call_id":"c1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},
+			{"type":"custom_tool_call_output","id":"item-2","call_id":"c1","output":"Patch applied."}
+		]
+	}`)
+	out, changed, errNormalize := normalizeStrictNativeBody(body)
+	if errNormalize != nil {
+		t.Fatalf("normalizeStrictNativeBody() error = %v", errNormalize)
+	}
+	if !changed {
+		t.Fatal("normalizeStrictNativeBody() changed = false, want true")
+	}
+	var root map[string]any
+	if errUnmarshal := json.Unmarshal(out, &root); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	if len(root["tools"].([]any)) != 0 {
+		t.Fatalf("custom tool declaration was retained: %s", out)
+	}
+	input := root["input"].([]any)
+	call := input[0].(map[string]any)
+	if call["type"] != "function_call" || call["name"] != "apply_patch" || call["call_id"] != "c1" || call["id"] != "item-1" {
+		t.Fatalf("historical call identity changed: %#v", call)
+	}
+	if _, exists := call["input"]; exists {
+		t.Fatalf("historical call still has custom input: %#v", call)
+	}
+	var arguments map[string]any
+	if errUnmarshal := json.Unmarshal([]byte(call["arguments"].(string)), &arguments); errUnmarshal != nil {
+		t.Fatalf("historical call arguments are not JSON: %v", errUnmarshal)
+	}
+	if arguments["input"] != patch {
+		t.Fatalf("historical call input = %#v, want patch", arguments["input"])
+	}
+	output := input[1].(map[string]any)
+	if output["type"] != "function_call_output" || output["call_id"] != "c1" || output["id"] != "item-2" || output["output"] != "Patch applied." {
+		t.Fatalf("historical output changed: %#v", output)
 	}
 }
 

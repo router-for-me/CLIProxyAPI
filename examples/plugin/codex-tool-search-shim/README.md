@@ -111,9 +111,12 @@ Request completion in all four terminal outcomes releases retained state.
 
 `strip_custom_tools` defaults to `false`, preserving custom tools on strict
 native routes. Setting it to `true` enables a lossy compatibility workaround:
-the plugin returns HTTP 422 if `tool_choice` names a custom tool that would be
-removed, or if history already contains a call to that tool. Enable it only for
-routes where custom-tool removal is acceptable.
+the plugin removes current custom-tool declarations and converts prior
+`custom_tool_call` / `custom_tool_call_output` items into equivalent function
+history. It returns HTTP 422 if `tool_choice` forces a removed custom tool or
+if a historical custom call has no string input. The model cannot make new
+custom-tool calls on that route. Enable it only where this loss of future
+custom-tool use is acceptable.
 
 ## Behaviour guarantees
 

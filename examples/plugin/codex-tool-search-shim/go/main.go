@@ -51,7 +51,7 @@ import (
 
 const (
 	pluginID           = "codex-tool-search-shim"
-	pluginVersion      = "0.4.0"
+	pluginVersion      = "0.4.1"
 	probeHeader        = "X-Codex-Tool-Search-Shim"
 	probeRequestHeader = "X-Codex-Tool-Search-Shim-Probe"
 )
