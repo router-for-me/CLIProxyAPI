@@ -1066,8 +1066,8 @@ func TestHandleSidebandDialErrorPreservesBodyReturnedWithReadError(t *testing.T)
 	}
 	rawTimeline, okTimeline := c.Get("API_WEBSOCKET_TIMELINE")
 	timeline, _ := rawTimeline.([]byte)
-	if !okTimeline || !strings.Contains(string(timeline), upstreamError) {
-		t.Fatalf("API_WEBSOCKET_TIMELINE = %q, want original upstream error", timeline)
+	if !okTimeline || strings.Contains(string(timeline), upstreamError) || !strings.Contains(string(timeline), "Details: redacted") {
+		t.Fatalf("API_WEBSOCKET_TIMELINE = %q, want redacted upstream error", timeline)
 	}
 }
 
@@ -1093,8 +1093,8 @@ func TestHandleSidebandDialErrorDoesNotForwardNonUnauthorizedBody(t *testing.T) 
 	}
 	rawTimeline, okTimeline := c.Get("API_WEBSOCKET_TIMELINE")
 	timeline, _ := rawTimeline.([]byte)
-	if !okTimeline || !strings.Contains(string(timeline), upstreamError) {
-		t.Fatalf("API_WEBSOCKET_TIMELINE = %q, want original upstream error", timeline)
+	if !okTimeline || strings.Contains(string(timeline), upstreamError) || !strings.Contains(string(timeline), "Details: redacted") {
+		t.Fatalf("API_WEBSOCKET_TIMELINE = %q, want redacted upstream error", timeline)
 	}
 }
 

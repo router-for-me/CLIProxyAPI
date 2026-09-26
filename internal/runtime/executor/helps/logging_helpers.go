@@ -298,22 +298,15 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
 	builder.WriteString("Event: api.websocket.request\n")
-	if info.URL != "" {
-		builder.WriteString(fmt.Sprintf("Upstream URL: %s\n", info.URL))
+	// WebSocket request details can contain credentials, session identifiers,
+	// URLs with query secrets, and user content. Keep only structural metadata.
+	if provider := strings.TrimSpace(info.Provider); provider != "" {
+		builder.WriteString(fmt.Sprintf("Provider: %s\n", provider))
 	}
-	if auth := formatAuthInfo(info); auth != "" {
-		builder.WriteString(fmt.Sprintf("Auth: %s\n", auth))
+	if method := strings.TrimSpace(info.Method); method != "" {
+		builder.WriteString(fmt.Sprintf("Method: %s\n", method))
 	}
-	builder.WriteString("Headers:\n")
-	writeHeaders(builder, info.Headers)
-	builder.WriteString("\nBody:\n")
-	if len(info.Body) > 0 {
-		builder.Write(info.Body)
-	} else {
-		builder.WriteString("<empty>")
-	}
-	builder.WriteString("\n")
-
+	builder.WriteString("Details: redacted\n")
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
 }
 
@@ -352,9 +345,13 @@ func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config,
 		return
 	}
 
-	RecordAPIRequest(ctx, cfg, info)
-	RecordAPIResponseMetadata(ctx, cfg, status, headers)
-	AppendAPIResponseChunk(ctx, cfg, body)
+	// Preserve a normal API request/response attempt, but strip every sensitive
+	// websocket field before handing it to the generic request logger.
+	safeInfo := UpstreamRequestLog{Method: http.MethodGet, Provider: info.Provider}
+	RecordAPIRequest(ctx, cfg, safeInfo)
+	RecordAPIResponseMetadata(ctx, cfg, status, nil)
+	_ = headers
+	_ = body
 }
 
 // WebsocketUpgradeRequestURL converts a websocket URL back to its HTTP handshake URL for logging.
@@ -394,8 +391,7 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
 	builder.WriteString("Event: api.websocket.response\n")
-	builder.Write(data)
-	builder.WriteString("\n")
+	builder.WriteString("Details: redacted\n")
 
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
 }
@@ -424,7 +420,7 @@ func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 	if trimmed := strings.TrimSpace(stage); trimmed != "" {
 		builder.WriteString(fmt.Sprintf("Stage: %s\n", trimmed))
 	}
-	builder.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
+	builder.WriteString("Error: upstream websocket operation failed\n")
 
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
 }
