@@ -17,8 +17,11 @@ The plugin addresses context growth without deleting unrelated request data:
 
 The byte budget is a serialization limit, not a token-count guarantee. This
 repository's integration test measured 500 deferred tool declarations shrinking
-from 1,009,807 bytes before the plugin to 33,819 bytes after it. No real token
-usage was measured, so the test does not claim a token reduction percentage.
+from 1,009,807 bytes before the plugin to 33,819 bytes after it. A separate
+real-provider A/B used the same 100 deferred schemas, prompt, model, and output
+limit through Antigravity OAuth: `input_tokens` changed from `19,660` to `612`
+(`19,048`, `96.8871%`) while both responses completed with `output_tokens=5`.
+This is a workload-specific measurement, not a universal token guarantee.
 
 ## Modes and protocol gates
 
@@ -141,7 +144,7 @@ tool arguments, tool results, credentials, or tokens.
 
 ## Validation status
 
-Verified by repository tests on 2026-09-26:
+Verified by repository tests on 2026-09-26 and runtime checks on 2026-09-27:
 
 - the plugin unit suite and race detector;
 - a multi-turn closed loop through the real OpenAI Chat, Claude, and Gemini
@@ -162,6 +165,8 @@ Verified by repository tests on 2026-09-26:
 - Windows DLL actual loading under Wine 10.0 (Debian trixie, `x86_64`),
   returning `abi=1 register_status=0 response_bytes=2803 has_name=1` with
   exit code 0;
+- real-provider `input_tokens` A/B for the same 100 deferred-tool workload:
+  Antigravity OAuth reported `19,660` before and `612` after the plugin;
 - host model-list capability metadata tests;
 - dynamic-library build and pluginhost load/interceptor/lifecycle validation.
 
@@ -169,7 +174,7 @@ Not yet verified by this review:
 
 - real provider/model search quality or upstream acceptance (the Codex runs
   used a local mock Chat upstream);
-- actual prompt-token or usage reduction.
+- generalization of the measured token reduction across providers and workloads.
 
 Unverified transports and platforms are not claimed as supported.
 
