@@ -808,7 +808,16 @@ type OpenAICompatibility struct {
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
 	// Models defines the model configurations including aliases for routing.
-	Models []OpenAICompatibilityModel `yaml:"models" json:"models"`
+	// It may be omitted when AutoDiscoverModels is enabled.
+	Models []OpenAICompatibilityModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// AutoDiscoverModels enables fetching the model list from the provider's
+	// /models endpoint instead of relying solely on Models. Discovered models are
+	// merged with Models, which keeps priority so explicit aliases and metadata win.
+	AutoDiscoverModels bool `yaml:"auto-discover-models,omitempty" json:"auto-discover-models,omitempty"`
+
+	// ExcludedModels lists model IDs or wildcard patterns to hide for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
