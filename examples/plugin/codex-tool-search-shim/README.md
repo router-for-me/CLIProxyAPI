@@ -5,6 +5,13 @@ This Go dynamic-library plugin adapts the Codex client-executed
 OpenAI Responses, and it repairs Codex tool declarations for native Responses
 upstreams that validate schemas more strictly than OpenAI does.
 
+The problem it removes: Codex advertises `supports_search_tool: true` only for
+models whose providers are all `codex`. On a translated route it therefore has
+to inline the whole deferred catalog into the first request. Server-side
+connectors keep growing that catalog (namespaced Codex app tools, MCP servers),
+so the first request pays that context cost on every session and can exceed the
+upstream context window.
+
 It has two modes:
 
 - **Bridge mode** (default) for Responses clients (`SourceFormat` of
