@@ -458,7 +458,10 @@ func (s *Service) buildAntigravityReverseAliasMap(auth *coreauth.Auth) map[strin
 		s.cfgMu.RUnlock()
 	}
 	channel := coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())
-	aliases := oauthModelAliasesForAuth(cfg, channel, auth.Attributes)
+	// The probe maps ids that are already registered back to their upstream, so it has no
+	// catalog or exclusion list of its own. A nil catalog keeps every global fork, which is
+	// what an id registered only by a fork needs to resolve.
+	aliases := oauthModelAliasesForAuth(cfg, channel, auth.Attributes, nil, nil)
 	if len(aliases) == 0 {
 		return nil
 	}
@@ -466,9 +469,15 @@ func (s *Service) buildAntigravityReverseAliasMap(auth *coreauth.Auth) map[strin
 	for _, entry := range aliases {
 		aliasName := strings.ToLower(strings.TrimSpace(entry.Alias))
 		upstreamName := strings.ToLower(strings.TrimSpace(entry.Name))
-		if aliasName != "" && upstreamName != "" {
-			aliasMap[aliasName] = upstreamName
+		if aliasName == "" || upstreamName == "" {
+			continue
 		}
+		// One alias can carry a per-auth rename and a global fork. Per-auth entries come
+		// first and decide what this credential sends upstream, so the first entry wins.
+		if _, exists := aliasMap[aliasName]; exists {
+			continue
+		}
+		aliasMap[aliasName] = upstreamName
 	}
 	return aliasMap
 }
