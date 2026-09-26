@@ -7041,3 +7041,40 @@ func TestXAIExecutorFoldsNamespaceNamedWebSearchWithoutAliasing(t *testing.T) {
 		t.Fatalf("output.0.namespace = %q, want web_search; payload=%s", got, resp.Payload)
 	}
 }
+
+func TestXAIExecutorComposerSessionStaysAgentScopedWithSharedPromptCache(t *testing.T) {
+	exec := NewXAIExecutor(&config.Config{Codex: config.CodexConfig{ClaudeCodeSharedPromptCache: true}})
+	auth := &cliproxyauth.Auth{Provider: "xai", Metadata: map[string]any{"access_token": "xai-token"}}
+	req := cliproxyexecutor.Request{
+		Model:   "grok-composer-2.5-fast",
+		Payload: []byte(`{"model":"grok-composer-2.5-fast","input":"hello"}`),
+	}
+
+	composerSession := func(agentID string) string {
+		t.Helper()
+		headers := http.Header{}
+		headers.Set("X-Claude-Code-Session-Id", "composer-shared-session")
+		headers.Set("X-Claude-Code-Agent-Id", agentID)
+		prepared, err := exec.prepareResponsesRequest(context.Background(), req, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Stream:       true,
+			Headers:      headers,
+		}, true)
+		if err != nil {
+			t.Fatalf("prepareResponsesRequest(%s) error = %v", agentID, err)
+		}
+		httpReq, errRequest := http.NewRequest(http.MethodPost, "https://example.test/responses", bytes.NewReader(prepared.body))
+		if errRequest != nil {
+			t.Fatalf("NewRequest() error = %v", errRequest)
+		}
+		applyXAIHeaders(httpReq, auth, "xai-token", true, prepared.sessionID)
+		if convID := httpReq.Header.Get("x-grok-conv-id"); prepared.sessionID == "" || convID != prepared.sessionID {
+			t.Fatalf("%s: sessionID=%q x-grok-conv-id=%q, want equal and non-empty", agentID, prepared.sessionID, convID)
+		}
+		return prepared.sessionID
+	}
+
+	if a, b := composerSession("agent-a"), composerSession("agent-b"); a == b {
+		t.Fatalf("sibling agents share Composer conversation %q", a)
+	}
+}

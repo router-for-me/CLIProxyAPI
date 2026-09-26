@@ -221,6 +221,14 @@ func TestBuildConfigChangeDetails_CodexOrphanDelegationCompatibility(t *testing.
 	expectContains(t, changes, "codex.orphan-delegation-compatibility: false -> true")
 }
 
+func TestBuildConfigChangeDetails_CodexClaudeCodeSharedPromptCache(t *testing.T) {
+	oldCfg := &config.Config{Codex: config.CodexConfig{ClaudeCodeSharedPromptCache: false}}
+	newCfg := &config.Config{Codex: config.CodexConfig{ClaudeCodeSharedPromptCache: true}}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "codex.claude-code-shared-prompt-cache: false -> true")
+}
+
 func TestBuildConfigChangeDetails_XAIKeys(t *testing.T) {
 	oldRetry := 1
 	newRetry := 0
