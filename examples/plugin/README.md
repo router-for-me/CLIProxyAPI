@@ -14,6 +14,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `request-translator/`: request translation capability only.
 - `request-normalizer/`: request normalization capability only.
 - `codex-service-tier/`: Go-only request normalizer that sets Codex `gpt-5.5` requests to the priority service tier when enabled.
+- `codex-tool-search-shim/`: Responses plugin that converts Codex client-executed tool search into ordinary function calling and promotes only tools returned by `tool_search_output`; it can also strict-complete `tool_search` schemas, inline local `$ref`s, and drop unsupported `custom` tools for native Responses models listed in `strict_responses_models`. See `codex-tool-search-shim/README.md`.
 - `request-lifecycle/`: Go-only request admission example with concurrency control, active HTTP termination, and terminal callbacks.
 - `scheduler/`: Go-only scheduler that can select a configured auth ID, delegate to a built-in scheduler, or deny picks.
 - `claude-web-search-router/`: ModelRouter + executor for Claude Code built-in `web_search` (antigravity / codex / xai / Tavily). See `claude-web-search-router/README.md`.
@@ -28,6 +29,13 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `host-model-callback/`: Go-only plugin resource that calls the host model execution callbacks.
 
 Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
+
+`codex-tool-search-shim` is part of the repository Makefile build and has a dedicated install target:
+
+```bash
+make -C examples/plugin build-codex-tool-search-shim
+make -C examples/plugin install-codex-tool-search-shim
+```
 
 ## Codex Service Tier
 
