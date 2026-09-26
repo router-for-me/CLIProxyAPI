@@ -495,6 +495,12 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..."
 #     weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #     priority: 10 # optional: selection tier when several credentials match; higher tiers are served first and descend on cooldown; 0 is the default
+#     max-concurrent: 3 # optional: per-entry in-flight hard cap for this credential; 0 or absent = unlimited (feature off)
+#     max-wait-ms: 1500 # optional: wait-before-failover budget in milliseconds while this credential is at its cap; 0 or absent = immediate failover
+#     auto-disable-error-codes: # optional: upstream error codes that permanently auto-disable this credential's backing store row when matched at runtime; empty = feature off
+#       - "401"
+#       - "billing_not_active"
+#     auto-disable-cooldown-seconds: 3600 # optional: auto-re-enable cooldown after auto-disable; 0 or absent = manual re-enable only
 #     upstream-provider-strategy: "fill-first" # renderer-managed: the upstream_providers row's routing strategy, stamped by the dashboard renderer. Not set manually.
 #     upstream-provider-circuit-breaker: false # renderer-managed: the upstream_providers row's circuit_breaker opt-in, managed via the row and settable through the management API; true feeds 408/5xx into the pool-wide breaker. Not set manually.
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
@@ -595,6 +601,10 @@ nonstream-keepalive-interval: 0
 #                            # failures into a pool-wide breaker that blocks the whole pool while open
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
 #     disable-cooling: false # optional: per-provider override for auth/model cooldown scheduling
+#     auto-disable-error-codes: # optional: upstream error codes that permanently auto-disable an entry's backing store row when matched at runtime; empty = feature off
+#       - "401"
+#       - "billing_not_active"
+#     auto-disable-cooldown-seconds: 3600 # optional: auto-re-enable cooldown after auto-disable; 0 or absent = manual re-enable only
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
@@ -603,6 +613,8 @@ nonstream-keepalive-interval: 0
 #         priority: 10 # optional: selection tier within the pool; higher tiers are served first and
 #                      # descend on cooldown; omitted = inherit the provider-level priority; 0 is a
 #                      # valid explicit tier, distinct from omitted
+#         max-concurrent: 3 # optional: per-entry in-flight hard cap for this entry; 0 or absent = unlimited
+#         max-wait-ms: 1500 # optional: wait-before-failover budget in milliseconds while this entry is at its cap; 0 or absent = immediate failover
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
 #         proxy-pool-id: 7 # renderer-managed: proxy_pools binding; overrides the row-level pool when set. Resolved into proxy-url / relay-base-url at render time. Not set manually.

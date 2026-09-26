@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/configsnapshot"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/configvalidation"
 )
@@ -221,6 +222,83 @@ func TestValidateDeterministicAcrossSettingsOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfgAB, cfgBA) {
 		t.Errorf("Validate is order-sensitive: cfgAB=%+v cfgBA=%+v", cfgAB, cfgBA)
+	}
+}
+
+// TestValidateCarriesConcurrencyAndAutoDisableFields pins the Task-9 claim
+// that "configvalidation needs zero new code" insofar as the per-entry
+// concurrency and provider-level auto-disable fields have correct yaml tags
+// on the config types, so a YAML payload carrying them parses into typed
+// Config fields through ParseConfigBytes without any new validation code.
+//
+// Provider sections are deliberately partitioned out of the Snapshot scalar
+// Settings projection (they travel through normalized resource tables), so
+// the typed round-trip is exercised at the parser layer — the same
+// ParseConfigBytes that parse.go and the runtime watcher use — with the
+// exact YAML shape a real config/render emits.
+func TestValidateCarriesConcurrencyAndAutoDisableFields(t *testing.T) {
+	// Ensure Validate itself stays tolerant of a Snapshot carrying the
+	// provider section in Extra (the configsnapshot partitioning channel):
+	// it must not reject the new fields.
+	snap := configsnapshot.NewEmpty()
+	snap.Extra["openai-compatibility"] = []any{
+		map[string]any{
+			"name":                     "provider-a",
+			"base-url":                 "https://openrouter.ai/api/v1",
+			"auto-disable-error-codes": []any{"401", "billing_not_active"},
+			"api-key-entries": []any{
+				map[string]any{
+					"api-key":        "sk-xxx",
+					"max-concurrent": 3,
+					"max-wait-ms":    1500,
+				},
+			},
+		},
+	}
+	if _, err := configvalidation.Validate(&snap); err != nil {
+		t.Fatalf("Validate(snapshot with concurrency/auto-disable fields) error = %v; want nil", err)
+	}
+
+	// The typed round-trip: the YAML shape the renderer/parser carries
+	// (the same hyphenated keys, base-url present so SanitizeOpenAICompatibility
+	// keeps the row) must land in the typed Config fields unchanged.
+	const yamlSnippet = `
+port: 8317
+openai-compatibility:
+  - name: "provider-a"
+    base-url: "https://openrouter.ai/api/v1"
+    auto-disable-error-codes:
+      - "401"
+      - billing_not_active
+    auto-disable-cooldown-seconds: 3600
+    api-key-entries:
+      - api-key: "sk-xxx"
+        max-concurrent: 3
+        max-wait-ms: 1500
+`
+	cfg, err := config.ParseConfigBytes([]byte(yamlSnippet))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes: %v", err)
+	}
+	if len(cfg.OpenAICompatibility) != 1 {
+		t.Fatalf("OpenAICompatibility providers = %d; want 1", len(cfg.OpenAICompatibility))
+	}
+	p := cfg.OpenAICompatibility[0]
+	if got := p.AutoDisableErrorCodes; len(got) != 2 || got[0] != "401" || got[1] != "billing_not_active" {
+		t.Errorf("provider auto-disable codes = %v; want [401 billing_not_active]", got)
+	}
+	if p.AutoDisableCooldownSeconds == nil || *p.AutoDisableCooldownSeconds != 3600 {
+		t.Errorf("provider auto-disable-cooldown-seconds = %v; want 3600", p.AutoDisableCooldownSeconds)
+	}
+	if len(p.APIKeyEntries) != 1 {
+		t.Fatalf("api-key-entries = %d; want 1", len(p.APIKeyEntries))
+	}
+	e := p.APIKeyEntries[0]
+	if e.MaxConcurrent == nil || *e.MaxConcurrent != 3 {
+		t.Errorf("entry max-concurrent = %v; want 3", e.MaxConcurrent)
+	}
+	if e.MaxWaitMs == nil || *e.MaxWaitMs != 1500 {
+		t.Errorf("entry max-wait-ms = %v; want 1500", e.MaxWaitMs)
 	}
 }
 
