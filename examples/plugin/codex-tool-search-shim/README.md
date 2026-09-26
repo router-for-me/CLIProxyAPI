@@ -147,13 +147,20 @@ Verified by repository tests on 2026-09-26:
 - a multi-turn closed loop through the real OpenAI Chat, Claude, and Gemini
   request/response translators, including response-to-Responses restoration;
 - a 500-deferred-tool first packet using all three translators;
+- a 50-round bridge loop with an 8 KiB active-tool budget, 100 preserved
+  historical `call_id` values, a functional final result, and request-state
+  release;
+- Codex CLI 0.156.1 against an isolated local CLIProxyAPI instance over both
+  HTTP/SSE and Responses WebSocket: the model catalog exposed
+  `supports_search_tool`, and each run performed two searches, called the
+  returned weather and service-status tools, and completed with both results;
 - host model-list capability metadata tests;
 - dynamic-library build and pluginhost load/interceptor/lifecycle validation.
 
 Not yet verified by this review:
 
-- a real Codex client over HTTP, SSE, or WebSocket;
-- real provider/model search quality or upstream acceptance;
+- real provider/model search quality or upstream acceptance (the Codex runs
+  used a local mock Chat upstream);
 - Linux and Windows dynamic-library loading;
 - actual prompt-token or usage reduction.
 
