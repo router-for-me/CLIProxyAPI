@@ -114,8 +114,11 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 //   - c: The Gin context containing the HTTP request and response
 func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	rawJSON, err := handlers.ReadRequestBody(c)
-	// If data retrieval fails, return a 400 Bad Request error.
+	// If data retrieval fails, return the appropriate client error.
 	if err != nil {
+		if handlers.WriteRequestBodyError(c, err) {
+			return
+		}
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
@@ -169,8 +172,11 @@ func shouldTreatAsResponsesFormat(rawJSON []byte) bool {
 //   - c: The Gin context containing the HTTP request and response
 func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 	rawJSON, err := handlers.ReadRequestBody(c)
-	// If data retrieval fails, return a 400 Bad Request error.
+	// If data retrieval fails, return the appropriate client error.
 	if err != nil {
+		if handlers.WriteRequestBodyError(c, err) {
+			return
+		}
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
