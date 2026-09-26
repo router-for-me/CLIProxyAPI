@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"unicode"
@@ -16,6 +19,7 @@ const (
 type toolIdentity struct {
 	Namespace string
 	Name      string
+	Kind      string
 }
 
 type toolSource uint8
@@ -30,12 +34,18 @@ type toolCatalog struct {
 	declarations    map[toolIdentity]json.RawMessage
 	discovered      map[toolIdentity]struct{}
 	clientSearch    bool
+	serverSearch    bool
+	searchBridge    bool
+	searchAlias     string
 	exact           map[string]toolIdentity
 	normalized      map[string]toolIdentity
 	local           map[string]toolIdentity
 	namespaces      map[string]toolIdentity
 	namespaceCounts map[string]int
 	topLevel        map[string]struct{}
+	deferred        map[toolIdentity]bool
+	aliasByID       map[toolIdentity]string
+	idByAlias       map[string]toolIdentity
 	finalizeOnce    sync.Once
 }
 
@@ -56,6 +66,9 @@ func newToolCatalog() *toolCatalog {
 		namespaces:      make(map[string]toolIdentity),
 		namespaceCounts: make(map[string]int),
 		topLevel:        make(map[string]struct{}),
+		deferred:        make(map[toolIdentity]bool),
+		aliasByID:       make(map[toolIdentity]string),
+		idByAlias:       make(map[string]toolIdentity),
 	}
 }
 
@@ -78,6 +91,10 @@ func isResponsesFormat(format string) bool {
 // not. Anything else is left byte-for-byte untouched, so unrelated clients hit
 // by this plugin cannot be rewritten.
 func requestPolicyFor(kind, sourceFormat, toFormat string) requestPolicy {
+	return requestPolicyForModels(kind, sourceFormat, toFormat, "", "")
+}
+
+func requestPolicyForModels(kind, sourceFormat, toFormat string, models ...string) requestPolicy {
 	kind = strings.TrimSpace(kind)
 	to := strings.ToLower(strings.TrimSpace(toFormat))
 
@@ -90,6 +107,9 @@ func requestPolicyFor(kind, sourceFormat, toFormat string) requestPolicy {
 		return requestPolicy{bridgeKnown: true}
 	}
 	if isResponsesFormat(toFormat) {
+		if bridgeNativeModelMatches(models...) {
+			return requestPolicy{bridge: true, prune: true, native: true, bridgeKnown: true}
+		}
 		return requestPolicy{native: true, bridgeKnown: true}
 	}
 	return requestPolicy{bridge: true, prune: true, bridgeKnown: true}
@@ -103,7 +123,8 @@ func extractToolCatalog(body []byte) *toolCatalog {
 	// Deferred tool metadata is the only thing this catalog describes, so skip
 	// the parse entirely for requests that cannot carry any.
 	if !bytes.Contains(trimmed, []byte(toolSearchName)) &&
-		!bytes.Contains(trimmed, []byte(namespaceToolType)) {
+		!bytes.Contains(trimmed, []byte(namespaceToolType)) &&
+		!bytes.Contains(trimmed, []byte("defer_loading")) {
 		return nil
 	}
 	value, okValue := decodeJSONValue(body)
@@ -135,7 +156,7 @@ func extractToolCatalog(body []byte) *toolCatalog {
 		catalog.collectToolArray(root, "", sourceDeclared)
 	}
 	catalog.finalize()
-	if len(catalog.identities) == 0 && len(catalog.topLevel) == 0 {
+	if len(catalog.identities) == 0 && len(catalog.topLevel) == 0 && !catalog.clientSearch && !catalog.serverSearch {
 		return nil
 	}
 	return catalog
@@ -182,7 +203,11 @@ func (c *toolCatalog) collectToolArray(value any, inheritedNamespace string, sou
 			c.collectToolArray(tool["tools"], namespace, source)
 			continue
 		case "tool_search":
-			c.markClientSearch(tool)
+			if isServerExecutedItem(tool) {
+				c.serverSearch = true
+			} else {
+				c.markClientSearch(tool)
+			}
 			continue
 		case "function", "custom", "":
 			name := strings.TrimSpace(stringField(tool, "name"))
@@ -194,9 +219,22 @@ func (c *toolCatalog) collectToolArray(value any, inheritedNamespace string, sou
 				namespace = inheritedNamespace
 			}
 			if namespace == "" {
-				c.topLevel[name] = struct{}{}
+				identity := toolIdentity{Namespace: "", Name: name, Kind: normalizeToolKind(stringField(tool, "type"))}
+				if source == sourceDiscovered {
+					c.addIdentityWithKind(namespace, name, identity.Kind)
+					c.addDiscoveredDeclaration(namespace, name, tool)
+				} else {
+					c.topLevel[name] = struct{}{}
+					c.addIdentityWithKind(namespace, name, identity.Kind)
+					c.deferred[identity] = deferredLoading(tool)
+				}
 			} else {
-				c.addIdentity(namespace, name)
+				kind := normalizeToolKind(stringField(tool, "type"))
+				identity := toolIdentity{Namespace: namespace, Name: name, Kind: kind}
+				c.addIdentityWithKind(namespace, name, kind)
+				if source == sourceDeclared {
+					c.deferred[identity] = deferredLoading(tool)
+				}
 				if source == sourceDiscovered {
 					c.addDiscoveredDeclaration(namespace, name, tool)
 				}
@@ -209,8 +247,9 @@ func (c *toolCatalog) addDiscoveredDeclaration(namespace, name string, tool map[
 	identity := toolIdentity{
 		Namespace: strings.TrimSpace(namespace),
 		Name:      strings.TrimSpace(name),
+		Kind:      normalizeToolKind(stringField(tool, "type")),
 	}
-	if identity.Namespace == "" || identity.Name == "" {
+	if identity.Name == "" {
 		return
 	}
 	raw, errMarshal := json.Marshal(tool)
@@ -234,7 +273,10 @@ func (c *toolCatalog) collectDeferredMetadata(tool map[string]any) {
 		switch entry := rawEntry.(type) {
 		case string:
 			if name := strings.TrimSpace(entry); name != "" && namespace != "" {
-				c.addIdentity(namespace, name)
+				kind := "function"
+				identity := toolIdentity{Namespace: namespace, Name: name, Kind: kind}
+				c.addIdentityWithKind(namespace, name, kind)
+				c.deferred[identity] = true
 			}
 		case map[string]any:
 			entryNamespace := strings.TrimSpace(stringField(entry, "namespace"))
@@ -242,24 +284,44 @@ func (c *toolCatalog) collectDeferredMetadata(tool map[string]any) {
 				entryNamespace = namespace
 			}
 			if name := strings.TrimSpace(stringField(entry, "name")); name != "" && entryNamespace != "" {
-				c.addIdentity(entryNamespace, name)
+				kind := normalizeToolKind(stringField(entry, "type"))
+				identity := toolIdentity{Namespace: entryNamespace, Name: name, Kind: kind}
+				c.addIdentityWithKind(entryNamespace, name, kind)
+				c.deferred[identity] = true
 			}
 		}
 	}
 }
 
 func (c *toolCatalog) addIdentity(namespace, name string) {
+	c.addIdentityWithKind(namespace, name, "function")
+}
+
+func (c *toolCatalog) addIdentityWithKind(namespace, name, kind string) {
 	namespace = strings.TrimSpace(namespace)
 	name = strings.TrimSpace(name)
-	if namespace == "" || name == "" {
+	kind = normalizeToolKind(kind)
+	if name == "" {
 		return
 	}
 	for _, existing := range c.identities {
-		if existing.Namespace == namespace && existing.Name == name {
+		if existing.Namespace == namespace && existing.Name == name && existing.Kind == kind {
 			return
 		}
 	}
-	c.identities = append(c.identities, toolIdentity{Namespace: namespace, Name: name})
+	c.identities = append(c.identities, toolIdentity{Namespace: namespace, Name: name, Kind: kind})
+}
+
+func normalizeToolKind(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "custom") {
+		return "custom"
+	}
+	return "function"
+}
+
+func deferredLoading(tool map[string]any) bool {
+	deferred, _ := tool["defer_loading"].(bool)
+	return deferred
 }
 
 func (c *toolCatalog) finalize() {
@@ -281,13 +343,37 @@ func (c *toolCatalog) finalize() {
 		if c.namespaceCounts == nil {
 			c.namespaceCounts = make(map[string]int)
 		}
+		exactAmbiguous := make(map[string]bool)
+		normalizedAmbiguous := make(map[string]bool)
 		localAmbiguous := make(map[string]bool)
+		registerExact := func(name string, identity toolIdentity) {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				return
+			}
+			if previous, exists := c.exact[name]; exists && previous != identity {
+				exactAmbiguous[name] = true
+				return
+			}
+			c.exact[name] = identity
+		}
+		registerNormalized := func(name string, identity toolIdentity) {
+			name = normalizeToolName(name)
+			if name == "" {
+				return
+			}
+			if previous, exists := c.normalized[name]; exists && previous != identity {
+				normalizedAmbiguous[name] = true
+				return
+			}
+			c.normalized[name] = identity
+		}
 		for _, identity := range c.identities {
 			raw := rawQualifiedToolName(identity.Namespace, identity.Name)
 			alias := capToolName(raw)
-			c.exact[raw] = identity
-			c.exact[alias] = identity
-			c.normalized[normalizeToolName(raw)] = identity
+			registerExact(raw, identity)
+			registerExact(alias, identity)
+			registerNormalized(raw, identity)
 			if previous, exists := c.local[identity.Name]; exists && previous != identity {
 				localAmbiguous[identity.Name] = true
 			} else {
@@ -301,12 +387,104 @@ func (c *toolCatalog) finalize() {
 				delete(c.local, name)
 			}
 		}
+		for name := range exactAmbiguous {
+			delete(c.exact, name)
+		}
+		for name := range normalizedAmbiguous {
+			delete(c.normalized, name)
+		}
 		for namespace, count := range c.namespaceCounts {
 			if count != 1 {
 				delete(c.namespaces, namespace)
 			}
 		}
+		_, ordinarySearchExists := c.topLevel[toolSearchName]
+		if c.clientSearch && ordinarySearchExists {
+			c.searchAlias = "cts_" + toolSearchName
+		} else {
+			c.searchAlias = toolSearchName
+		}
+		c.buildActivationAliases()
 	})
+}
+
+func (c *toolCatalog) buildActivationAliases() {
+	if len(c.declarations) == 0 {
+		return
+	}
+	identities := make([]toolIdentity, 0, len(c.declarations))
+	for identity := range c.declarations {
+		identities = append(identities, identity)
+	}
+	sort.Slice(identities, func(left, right int) bool {
+		if identities[left].Namespace != identities[right].Namespace {
+			return identities[left].Namespace < identities[right].Namespace
+		}
+		if identities[left].Name != identities[right].Name {
+			return identities[left].Name < identities[right].Name
+		}
+		return identities[left].Kind < identities[right].Kind
+	})
+
+	used := make(map[string]toolIdentity, len(identities)+len(c.topLevel))
+	for name := range c.topLevel {
+		used[name] = toolIdentity{}
+	}
+	if c.searchAlias != toolSearchName {
+		used[c.searchAlias] = toolIdentity{}
+	}
+	for _, identity := range identities {
+		raw := rawQualifiedToolName(identity.Namespace, identity.Name)
+		candidate := raw
+		if identity.Namespace != "" || !isValidFunctionName(candidate) {
+			candidate = hashedToolAlias(identity)
+		}
+		alias := candidate
+		for suffix := 1; ; suffix++ {
+			owner, exists := used[alias]
+			if !exists || owner == identity || (identity.Namespace == "" && owner == (toolIdentity{})) {
+				break
+			}
+			suffixText := fmt.Sprintf("_%d", suffix)
+			baseLimit := 64 - len(suffixText)
+			if len(candidate) > baseLimit {
+				candidate = hashedToolAlias(identity)
+				if len(candidate) > baseLimit {
+					candidate = candidate[:baseLimit]
+				}
+			}
+			alias = candidate + suffixText
+		}
+		if len(alias) > 64 {
+			alias = hashedToolAlias(identity)
+		}
+		used[alias] = identity
+		c.aliasByID[identity] = alias
+		c.idByAlias[alias] = identity
+	}
+}
+
+func hashedToolAlias(identity toolIdentity) string {
+	encoded, _ := json.Marshal([3]string{identity.Namespace, identity.Name, identity.Kind})
+	sum := sha256.Sum256(encoded)
+	return "cts_" + fmt.Sprintf("%x", sum[:24])
+}
+
+func isValidFunctionName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for index, char := range name {
+		switch {
+		case char >= 'a' && char <= 'z':
+		case char >= 'A' && char <= 'Z':
+		case char >= '0' && char <= '9':
+		case char == '_' && index > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (c *toolCatalog) resolve(name string) (toolIdentity, bool) {
@@ -320,6 +498,9 @@ func (c *toolCatalog) resolve(name string) (toolIdentity, bool) {
 	}
 	if _, exists := c.topLevel[name]; exists {
 		return toolIdentity{}, false
+	}
+	if identity, exists := c.idByAlias[name]; exists {
+		return identity, true
 	}
 	if identity, exists := c.exact[name]; exists {
 		return identity, true
@@ -352,6 +533,9 @@ func restoreFunctionCallIdentity(item map[string]any, catalog *toolCatalog) bool
 	if identity.Namespace != "" {
 		item["namespace"] = identity.Namespace
 	}
+	if identity.Kind == "custom" && stringField(item, "type") == "function_call" {
+		item["type"] = "custom_tool_call"
+	}
 	return true
 }
 
@@ -360,31 +544,31 @@ func restoreFunctionCallIdentity(item map[string]any, catalog *toolCatalog) bool
 // either the client already speaks the tool_search protocol or it declares
 // namespaced children that this rewrite is about to move into the index.
 func ensureTopLevelToolSearch(root map[string]any, catalog *toolCatalog) bool {
-	if catalog == nil {
-		return false
-	}
-	if !catalog.clientSearch && len(catalog.identities) == 0 {
+	if catalog == nil || !catalog.clientSearch {
 		return false
 	}
 	tools, ok := root["tools"].([]any)
 	if !ok {
-		return false
+		if _, exists := root["tools"]; exists {
+			return false
+		}
+		tools = make([]any, 0, 1)
 	}
 	for _, rawTool := range tools {
 		tool, ok := rawTool.(map[string]any)
 		if !ok {
 			continue
 		}
-		if toolType := stringField(tool, "type"); toolType == "tool_search" {
+		if toolType := stringField(tool, "type"); toolType == "tool_search" && !isServerExecutedItem(tool) {
 			return false
 		}
-		if toolType := stringField(tool, "type"); toolType == "function" && stringField(tool, "name") == toolSearchName {
+		if toolType := stringField(tool, "type"); toolType == "function" && stringField(tool, "name") == catalog.searchAlias {
 			return false
 		}
 	}
 	root["tools"] = append(tools, map[string]any{
 		"type":        "function",
-		"name":        toolSearchName,
+		"name":        catalog.searchAlias,
 		"description": "Search deferred tools by keyword before calling one.",
 		"parameters": map[string]any{
 			"type": "object",
@@ -420,16 +604,20 @@ func hasNamespaceChildren(value any) bool {
 	return false
 }
 
-func pruneDeferredNamespaceTools(value any) bool {
+func pruneDeferredNamespaceTools(value any, catalog *toolCatalog) bool {
 	switch typed := value.(type) {
 	case map[string]any:
 		changed := false
 		if stringField(typed, "type") == namespaceToolType {
 			if children, ok := typed["tools"].([]any); ok {
-				entries := deferredNamespaceEntries(children, strings.TrimSpace(stringField(typed, "name")))
+				retained, entries := pruneNamespaceChildren(children, strings.TrimSpace(stringField(typed, "name")), catalog)
 				if len(entries) > 0 {
-					typed[deferredToolsKey] = entries
-					delete(typed, "tools")
+					typed[deferredToolsKey] = appendExistingDeferredEntries(typed[deferredToolsKey], entries)
+					if len(retained) > 0 {
+						typed["tools"] = retained
+					} else {
+						delete(typed, "tools")
+					}
 					changed = true
 				}
 			}
@@ -438,7 +626,7 @@ func pruneDeferredNamespaceTools(value any) bool {
 			if key == deferredToolsKey {
 				continue
 			}
-			if pruneDeferredNamespaceTools(child) {
+			if pruneDeferredNamespaceTools(child, catalog) {
 				changed = true
 			}
 		}
@@ -446,7 +634,7 @@ func pruneDeferredNamespaceTools(value any) bool {
 	case []any:
 		changed := false
 		for _, child := range typed {
-			if pruneDeferredNamespaceTools(child) {
+			if pruneDeferredNamespaceTools(child, catalog) {
 				changed = true
 			}
 		}
@@ -456,22 +644,33 @@ func pruneDeferredNamespaceTools(value any) bool {
 	}
 }
 
-// deferredNamespaceEntries flattens a namespace's children into name-only index
-// entries. Nested namespaces join their parent prefix so every flattened tool
-// stays addressable by the same qualified name the upstream emits.
-func deferredNamespaceEntries(children []any, namespace string) []any {
-	entries := make([]any, 0, len(children))
+func pruneNamespaceChildren(children []any, namespace string, catalog *toolCatalog) ([]any, []any) {
+	retained := make([]any, 0, len(children))
+	entries := make([]any, 0)
 	for _, rawChild := range children {
 		child, ok := rawChild.(map[string]any)
 		if !ok {
+			retained = append(retained, rawChild)
 			continue
 		}
 		if stringField(child, "type") == namespaceToolType {
 			nested, okNested := child["tools"].([]any)
 			if !okNested {
+				retained = append(retained, rawChild)
 				continue
 			}
-			entries = append(entries, deferredNamespaceEntries(nested, joinNamespace(namespace, stringField(child, "name")))...)
+			nestedNamespace := joinNamespace(namespace, stringField(child, "name"))
+			nestedRetained, nestedEntries := pruneNamespaceChildren(nested, nestedNamespace, catalog)
+			entries = append(entries, nestedEntries...)
+			if len(nestedRetained) > 0 {
+				if len(nestedEntries) > 0 {
+					child["tools"] = nestedRetained
+					child[deferredToolsKey] = appendExistingDeferredEntries(child[deferredToolsKey], nestedEntries)
+				}
+				retained = append(retained, child)
+			} else if len(nestedEntries) == 0 {
+				retained = append(retained, child)
+			}
 			continue
 		}
 		switch childType := strings.TrimSpace(stringField(child, "type")); childType {
@@ -481,6 +680,11 @@ func deferredNamespaceEntries(children []any, namespace string) []any {
 		}
 		name := strings.TrimSpace(stringField(child, "name"))
 		if name == "" {
+			retained = append(retained, rawChild)
+			continue
+		}
+		if catalog == nil || !catalog.clientSearch || !deferredLoading(child) {
+			retained = append(retained, rawChild)
 			continue
 		}
 		entries = append(entries, map[string]any{
@@ -488,13 +692,40 @@ func deferredNamespaceEntries(children []any, namespace string) []any {
 			"name":      name,
 		})
 	}
-	return entries
+	return retained, entries
 }
 
-func pruneRequestDeclarations(root map[string]any) bool {
+func appendExistingDeferredEntries(existing any, additions []any) []any {
+	out := make([]any, 0)
+	if values, ok := existing.([]any); ok {
+		out = append(out, values...)
+	}
+	return append(out, additions...)
+}
+
+func pruneRequestDeclarations(root map[string]any, catalog *toolCatalog) bool {
+	if catalog == nil || !catalog.clientSearch {
+		return false
+	}
 	changed := false
-	if hasNamespaceChildren(root["tools"]) {
-		if pruneDeferredNamespaceTools(root["tools"]) {
+	if tools, ok := root["tools"].([]any); ok {
+		retained := make([]any, 0, len(tools))
+		for _, rawTool := range tools {
+			tool, okTool := rawTool.(map[string]any)
+			if okTool && deferredLoading(tool) && toolTypeIsCallable(stringField(tool, "type")) {
+				changed = true
+				continue
+			}
+			retained = append(retained, rawTool)
+		}
+		if len(retained) != len(tools) {
+			if len(retained) > 0 {
+				root["tools"] = retained
+			} else {
+				delete(root, "tools")
+			}
+		}
+		if pruneDeferredNamespaceTools(root["tools"], catalog) {
 			changed = true
 		}
 	}
@@ -504,7 +735,29 @@ func pruneRequestDeclarations(root map[string]any) bool {
 			if !ok || stringField(item, "type") != "additional_tools" {
 				continue
 			}
-			if hasNamespaceChildren(item["tools"]) && pruneDeferredNamespaceTools(item["tools"]) {
+			if tools, okTools := item["tools"].([]any); okTools {
+				retained := make([]any, 0, len(tools))
+				for _, rawTool := range tools {
+					tool, okTool := rawTool.(map[string]any)
+					if okTool && deferredLoading(tool) && toolTypeIsCallable(stringField(tool, "type")) {
+						changed = true
+						continue
+					}
+					if okTool && stringField(tool, "type") == "function" && stringField(tool, "name") == catalog.searchAlias {
+						changed = true
+						continue
+					}
+					retained = append(retained, rawTool)
+				}
+				if len(retained) != len(tools) {
+					if len(retained) > 0 {
+						item["tools"] = retained
+					} else {
+						delete(item, "tools")
+					}
+				}
+			}
+			if pruneDeferredNamespaceTools(item["tools"], catalog) {
 				changed = true
 			}
 		}
@@ -517,7 +770,7 @@ func applyDeferredToolPolicyWithCatalog(root map[string]any, catalog *toolCatalo
 		return false
 	}
 	changed := ensureTopLevelToolSearch(root, catalog)
-	if pruneRequestDeclarations(root) {
+	if pruneRequestDeclarations(root, catalog) {
 		changed = true
 	}
 	if injectDiscoveredTools(root, catalog) {
@@ -550,15 +803,24 @@ func injectDiscoveredTools(root map[string]any, catalog *toolCatalog) bool {
 		if !ok {
 			continue
 		}
-		name := rawQualifiedToolName(identity.Namespace, identity.Name)
+		name := catalog.aliasByID[identity]
+		if name == "" {
+			name = rawQualifiedToolName(identity.Namespace, identity.Name)
+		}
+		rawName := rawQualifiedToolName(identity.Namespace, identity.Name)
 		if name == "" || name == toolSearchName {
 			continue
 		}
 		if _, exists := existing[name]; exists {
 			continue
 		}
+		if _, exists := existing[rawName]; exists {
+			continue
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
 		var tool map[string]any
-		if errUnmarshal := json.Unmarshal(raw, &tool); errUnmarshal != nil {
+		if errDecode := decoder.Decode(&tool); errDecode != nil {
 			continue
 		}
 		if strings.TrimSpace(stringField(tool, "type")) == "" {
@@ -575,6 +837,15 @@ func injectDiscoveredTools(root map[string]any, catalog *toolCatalog) bool {
 		root["tools"] = tools
 	}
 	return changed
+}
+
+func toolTypeIsCallable(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "", "function", "custom":
+		return true
+	default:
+		return false
+	}
 }
 
 func rawQualifiedToolName(namespace, name string) string {

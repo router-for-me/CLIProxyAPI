@@ -96,9 +96,9 @@ func TestNestedNamespacePruningKeepsParentPrefix(t *testing.T) {
 		"tools":[
 			{"type":"tool_search","execution":"client","parameters":{"type":"object"}},
 			{"type":"namespace","name":"outer","tools":[
-				{"type":"function","name":"direct","parameters":{"type":"object"}},
+				{"type":"function","name":"direct","defer_loading":true,"parameters":{"type":"object"}},
 				{"type":"namespace","name":"inner","tools":[
-					{"type":"function","name":"deep","parameters":{"type":"object"}}
+					{"type":"function","name":"deep","defer_loading":true,"parameters":{"type":"object"}}
 				]}
 			]}
 		]

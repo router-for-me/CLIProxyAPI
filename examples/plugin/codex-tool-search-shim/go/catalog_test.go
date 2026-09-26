@@ -9,16 +9,17 @@ import (
 func TestRewriteRequestBodyPrunesConnectorSchemas(t *testing.T) {
 	input := []byte(`{
 		"tools": [
+			{"type":"tool_search","execution":"client","parameters":{"type":"object"}},
 			{"type":"function","name":"exec_command","parameters":{"type":"object"}},
 			{"type":"namespace","name":"mcp__codex_apps__github","tools":[
-				{"type":"function","name":"_get_user_login","parameters":{"type":"object","properties":{"username":{"type":"string"}}},"description":"connector schema marker"},
-				{"type":"function","name":"_get_repo","parameters":{"type":"object"}}
+				{"type":"function","name":"_get_user_login","defer_loading":true,"parameters":{"type":"object","properties":{"username":{"type":"string"}}},"description":"connector schema marker"},
+				{"type":"function","name":"_get_repo","defer_loading":true,"parameters":{"type":"object"}}
 			]}
 		],
 		"input": [
 			{"type":"additional_tools","tools":[
 				{"type":"namespace","name":"mcp__codex_apps__slack","tools":[
-					{"type":"function","name":"_slack_send_message","parameters":{"type":"object"}}
+					{"type":"function","name":"_slack_send_message","defer_loading":true,"parameters":{"type":"object"}}
 				]}
 			]}
 		]
@@ -73,10 +74,11 @@ func TestRewriteRequestBodyPrunesConnectorSchemas(t *testing.T) {
 func TestFirstRequestKeepsDeferredSchemasOutOfUpstreamTools(t *testing.T) {
 	input := []byte(`{
 		"tools":[
+			{"type":"tool_search","execution":"client","parameters":{"type":"object"}},
 			{"type":"function","name":"exec_command","parameters":{}},
 			{"type":"namespace","name":"mcp__codex_apps__github","tools":[
-				{"type":"function","name":"_get_user_login","description":"schema marker","parameters":{"type":"object","properties":{"username":{"type":"string"}}}},
-				{"type":"function","name":"_get_repo","parameters":{"type":"object"}}
+				{"type":"function","name":"_get_user_login","defer_loading":true,"description":"schema marker","parameters":{"type":"object","properties":{"username":{"type":"string"}}}},
+				{"type":"function","name":"_get_repo","defer_loading":true,"parameters":{"type":"object"}}
 			]}
 		]
 	}`)
@@ -131,18 +133,22 @@ func TestSearchOutputPromotesOnlyDiscoveredChild(t *testing.T) {
 	if errUnmarshal := json.Unmarshal(out, &root); errUnmarshal != nil {
 		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
 	}
-	if countTopLevelTool(root.Tools, "mcp__codex_apps__github___get_user_login") != 1 {
+	catalog := extractToolCatalog(input)
+	promotedAlias := catalog.aliasByID[toolIdentity{Namespace: "mcp__codex_apps__github", Name: "_get_user_login", Kind: "function"}]
+	if promotedAlias == "" || countTopLevelTool(root.Tools, promotedAlias) != 1 {
 		t.Fatalf("discovered child promotion = %#v", root.Tools)
 	}
-	if countTopLevelTool(root.Tools, "mcp__codex_apps__github___get_repo") != 0 ||
-		countTopLevelTool(root.Tools, "mcp__codex_apps__slack___slack_send_message") != 0 {
+	otherGitHub := catalog.aliasByID[toolIdentity{Namespace: "mcp__codex_apps__github", Name: "_get_repo", Kind: "function"}]
+	otherSlack := catalog.aliasByID[toolIdentity{Namespace: "mcp__codex_apps__slack", Name: "_slack_send_message", Kind: "function"}]
+	if countTopLevelTool(root.Tools, otherGitHub) != 0 ||
+		countTopLevelTool(root.Tools, otherSlack) != 0 {
 		t.Fatalf("undiscovered child was promoted: %#v", root.Tools)
 	}
 	if len(root.Input) != 1 || root.Input[0]["type"] != "function_call_output" {
 		t.Fatalf("search output history = %#v", root.Input)
 	}
 	manifest, ok := root.Input[0]["output"].(string)
-	if !ok || !strings.Contains(manifest, "mcp__codex_apps__github___get_user_login") {
+	if !ok || !strings.Contains(manifest, promotedAlias) {
 		t.Fatalf("search-output manifest = %#v", root.Input[0]["output"])
 	}
 	if strings.Contains(manifest, "username") || strings.Contains(manifest, `"parameters"`) {
@@ -180,7 +186,9 @@ func TestDiscoveredPromotionDeduplicatesAcrossSearchRounds(t *testing.T) {
 	if errUnmarshal := json.Unmarshal(out, &root); errUnmarshal != nil {
 		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
 	}
-	if countTopLevelTool(root.Tools, "mcp__github__get_me") != 1 {
+	catalog := extractToolCatalog(input)
+	deduplicatedAlias := catalog.aliasByID[toolIdentity{Namespace: "mcp__github", Name: "get_me", Kind: "function"}]
+	if deduplicatedAlias == "" || countTopLevelTool(root.Tools, deduplicatedAlias) != 1 {
 		t.Fatalf("discovered child was duplicated: %#v", root.Tools)
 	}
 }
@@ -351,8 +359,9 @@ func TestNativeResponsesRouteIsNotRewritten(t *testing.T) {
 func TestRequestStateRestoresIdentityAcrossInterceptors(t *testing.T) {
 	const requestID = "catalog-state-test"
 	fullBody := []byte(`{"tools":[
+		{"type":"tool_search","execution":"client","parameters":{}},
 		{"type":"namespace","name":"mcp__codex_apps__github","tools":[
-			{"type":"function","name":"_get_user_login","parameters":{}}
+			{"type":"function","name":"_get_user_login","defer_loading":true,"parameters":{}}
 		]}
 	]}`)
 	if _, errRequest := interceptRequest("request_after", mustJSON(t, map[string]any{
@@ -384,14 +393,23 @@ func TestRequestStateRestoresIdentityAcrossInterceptors(t *testing.T) {
 
 func TestStreamHeaderCatalogRestoresLaterPayload(t *testing.T) {
 	const requestID = "catalog-stream-test"
-	headerRaw, errHeader := interceptStreamChunk(mustJSON(t, map[string]any{
+	requestBody := []byte(`{"tools":[{"type":"tool_search","execution":"client","parameters":{}},{"type":"namespace","name":"mcp__github","tools":[
+		{"type":"function","name":"get_me","defer_loading":true,"parameters":{}}
+	]}]}`)
+	if _, errRequest := interceptRequest("request_after", mustJSON(t, map[string]any{
 		"RequestID":    requestID,
 		"SourceFormat": "openai-response",
-		"ChunkIndex":   -1,
-		"OriginalRequest": []byte(`{"tools":[{"type":"namespace","name":"mcp__github","tools":[
-			{"type":"function","name":"get_me","parameters":{}}
-		]}]}`),
-		"Body": []byte{},
+		"ToFormat":     "openai",
+		"Body":         requestBody,
+	})); errRequest != nil {
+		t.Fatalf("interceptRequest() error = %v", errRequest)
+	}
+	headerRaw, errHeader := interceptStreamChunk(mustJSON(t, map[string]any{
+		"RequestID":       requestID,
+		"SourceFormat":    "openai-response",
+		"ChunkIndex":      -1,
+		"OriginalRequest": requestBody,
+		"Body":            []byte{},
 	}))
 	if errHeader != nil {
 		t.Fatalf("interceptStreamChunk(header) error = %v", errHeader)

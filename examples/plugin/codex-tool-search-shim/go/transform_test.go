@@ -13,7 +13,7 @@ func TestRewriteRequestToolDeclarations(t *testing.T) {
 			{"type":"tool_search","execution":"client","description":"search deferred tools","parameters":{"type":"object","properties":{"query":{"type":"string"}}}},
 			{"type":"function","name":"exec_command","parameters":{}},
 			{"type":"namespace","name":"codex_apps","tools":[
-				{"type":"tool_search","execution":"client","description":"namespace search","parameters":{"type":"object"}}
+				{"type":"function","name":"namespace_lookup","defer_loading":true,"description":"deferred namespace tool","parameters":{"type":"object"}}
 			]}
 		],
 		"input": [
@@ -46,14 +46,12 @@ func TestRewriteRequestToolDeclarations(t *testing.T) {
 		t.Fatalf("namespace children were not pruned: %#v", request.Tools[2])
 	}
 	namespaceDeferred, ok := request.Tools[2][deferredToolsKey].([]any)
-	if !ok || len(namespaceDeferred) != 1 {
+	if !ok || len(namespaceDeferred) != 1 || stringField(namespaceDeferred[0].(map[string]any), "name") != "namespace_lookup" {
 		t.Fatalf("deferred namespace metadata = %#v", request.Tools[2][deferredToolsKey])
 	}
-	additionalTools, ok := request.Input[0]["tools"].([]any)
-	if !ok || len(additionalTools) != 1 {
-		t.Fatalf("additional tools = %#v", request.Input[0]["tools"])
+	if _, exists := request.Input[0]["tools"]; exists {
+		t.Fatalf("additional tool_search was not migrated out: %#v", request.Input[0])
 	}
-	validateUpstreamToolSearchDeclaration(t, additionalTools[0].(map[string]any), "additional")
 }
 
 func TestRewriteRequestSearchHistory(t *testing.T) {

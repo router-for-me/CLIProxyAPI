@@ -28,7 +28,8 @@ func rewriteRequestBodyWithPolicy(body []byte, policy requestPolicy, catalog *to
 	// Skip the parse for the common request that carries neither deferred tool
 	// metadata nor a namespaced tool list.
 	if !bytes.Contains(trimmed, []byte(toolSearchName)) &&
-		!bytes.Contains(trimmed, []byte(namespaceToolType)) {
+		!bytes.Contains(trimmed, []byte(namespaceToolType)) &&
+		!bytes.Contains(trimmed, []byte("defer_loading")) {
 		return body, false, nil
 	}
 
@@ -77,8 +78,8 @@ func rewriteResponseBodyWithPolicy(body []byte, catalog *toolCatalog, bridge boo
 }
 
 func rewriteJSONBodyWithPolicy(body []byte, catalog *toolCatalog, bridge bool) ([]byte, bool, error) {
-	var value any
-	if errUnmarshal := json.Unmarshal(body, &value); errUnmarshal != nil {
+	value, ok := decodeJSONValue(body)
+	if !ok {
 		return body, false, nil
 	}
 	if !rewriteValueWithPolicy(value, catalog, bridge) {
@@ -127,8 +128,8 @@ func rewriteSSEBodyWithPolicy(body []byte, catalog *toolCatalog, bridge bool) ([
 func rewriteRequestValue(value any, policy requestPolicy, catalog *toolCatalog) bool {
 	switch typed := value.(type) {
 	case map[string]any:
-		changed := rewriteToolList(typed["tools"], policy)
-		if policy.bridge && rewriteToolChoice(typed["tool_choice"]) {
+		changed := rewriteToolList(typed["tools"], policy, catalog)
+		if policy.bridge && rewriteToolChoice(typed["tool_choice"], catalog) {
 			changed = true
 		}
 		if input, ok := typed["input"].([]any); ok {
@@ -139,11 +140,11 @@ func rewriteRequestValue(value any, policy requestPolicy, catalog *toolCatalog) 
 				}
 				switch stringField(item, "type") {
 				case "additional_tools":
-					if rewriteToolList(item["tools"], policy) {
+					if rewriteToolList(item["tools"], policy, catalog) {
 						changed = true
 					}
 				case "tool_search_call":
-					if policy.bridge && rewriteToolSearchCallForRequest(item) {
+					if policy.bridge && rewriteToolSearchCallForRequest(item, catalog) {
 						changed = true
 					}
 				case "tool_search_output":
@@ -167,7 +168,7 @@ func rewriteRequestValue(value any, policy requestPolicy, catalog *toolCatalog) 
 	}
 }
 
-func rewriteToolList(value any, policy requestPolicy) bool {
+func rewriteToolList(value any, policy requestPolicy, catalog *toolCatalog) bool {
 	tools, ok := value.([]any)
 	if !ok {
 		return false
@@ -179,12 +180,12 @@ func rewriteToolList(value any, policy requestPolicy) bool {
 			continue
 		}
 		if stringField(tool, "type") == namespaceToolType {
-			if rewriteToolList(tool["tools"], policy) {
+			if rewriteToolList(tool["tools"], policy, catalog) {
 				changed = true
 			}
 			continue
 		}
-		if policy.bridge && rewriteToolSearchDeclaration(tool) {
+		if policy.bridge && rewriteToolSearchDeclaration(tool, catalog) {
 			changed = true
 		}
 	}
@@ -194,15 +195,16 @@ func rewriteToolList(value any, policy requestPolicy) bool {
 // rewriteToolChoice converts a tool_search choice into the ordinary function the
 // upstream receives. Both the dedicated choice type and the allowed_tools
 // entries are rejected by chat-shaped upstreams.
-func rewriteToolChoice(value any) bool {
+func rewriteToolChoice(value any, catalog *toolCatalog) bool {
 	choice, ok := value.(map[string]any)
-	if !ok {
+	if !ok || catalog == nil || !catalog.clientSearch {
 		return false
 	}
+	alias := catalog.searchAlias
 	changed := false
 	if stringField(choice, "type") == "tool_search" {
 		choice["type"] = "function"
-		choice["name"] = toolSearchName
+		choice["name"] = alias
 		changed = true
 	}
 	tools, okTools := choice["tools"].([]any)
@@ -215,18 +217,21 @@ func rewriteToolChoice(value any) bool {
 			continue
 		}
 		tool["type"] = "function"
-		tool["name"] = toolSearchName
+		tool["name"] = alias
 		changed = true
 	}
 	return changed
 }
 
-func rewriteToolSearchDeclaration(tool map[string]any) bool {
-	if stringField(tool, "type") != "tool_search" {
+func rewriteToolSearchDeclaration(tool map[string]any, catalog *toolCatalog) bool {
+	if stringField(tool, "type") != "tool_search" || isServerExecutedItem(tool) {
 		return false
 	}
 	tool["type"] = "function"
 	tool["name"] = toolSearchName
+	if catalog != nil && catalog.searchAlias != "" {
+		tool["name"] = catalog.searchAlias
+	}
 	if _, exists := tool["parameters"]; !exists {
 		tool["parameters"] = map[string]any{}
 	}
@@ -234,7 +239,7 @@ func rewriteToolSearchDeclaration(tool map[string]any) bool {
 	return true
 }
 
-func rewriteToolSearchCallForRequest(item map[string]any) bool {
+func rewriteToolSearchCallForRequest(item map[string]any, catalog *toolCatalog) bool {
 	if isServerExecutedItem(item) || stringField(item, "call_id") == "" {
 		return false
 	}
@@ -244,6 +249,9 @@ func rewriteToolSearchCallForRequest(item map[string]any) bool {
 	}
 	item["type"] = "function_call"
 	item["name"] = toolSearchName
+	if catalog != nil && catalog.searchAlias != "" {
+		item["name"] = catalog.searchAlias
+	}
 	item["arguments"] = arguments
 	delete(item, "execution")
 	return true
@@ -254,7 +262,7 @@ func rewriteToolSearchOutputForRequest(item map[string]any, catalog *toolCatalog
 		return false
 	}
 	tools := item["tools"]
-	manifest := compactToolSearchManifest(tools)
+	manifest := compactToolSearchManifest(tools, catalog)
 	encodedTools, errMarshal := json.Marshal(map[string]any{"tools": manifest})
 	if errMarshal != nil {
 		return false
@@ -267,7 +275,7 @@ func rewriteToolSearchOutputForRequest(item map[string]any, catalog *toolCatalog
 	return true
 }
 
-func compactToolSearchManifest(value any) []any {
+func compactToolSearchManifest(value any, catalog *toolCatalog) []any {
 	entries := make([]any, 0)
 	var collect func(any, string)
 	collect = func(current any, inheritedNamespace string) {
@@ -292,6 +300,12 @@ func compactToolSearchManifest(value any) []any {
 				flatName := rawQualifiedToolName(namespace, name)
 				if flatName == "" {
 					return
+				}
+				kind := normalizeToolKind(stringField(typed, "type"))
+				if catalog != nil {
+					if alias := catalog.aliasByID[toolIdentity{Namespace: namespace, Name: name, Kind: kind}]; alias != "" {
+						flatName = alias
+					}
 				}
 				entries = append(entries, map[string]any{"name": flatName})
 			}
@@ -336,7 +350,7 @@ func rewriteValueWithPolicy(value any, catalog *toolCatalog, bridge bool) bool {
 	changed := false
 	switch typed := value.(type) {
 	case map[string]any:
-		if bridge && isOrdinaryToolSearchCall(typed) {
+		if bridge && isOrdinaryToolSearchCall(typed, catalog) {
 			rewriteToolSearchItem(typed)
 			return true
 		}
@@ -358,12 +372,16 @@ func rewriteValueWithPolicy(value any, catalog *toolCatalog, bridge bool) bool {
 	return changed
 }
 
-func isOrdinaryToolSearchCall(item map[string]any) bool {
+func isOrdinaryToolSearchCall(item map[string]any, catalog *toolCatalog) bool {
 	if stringField(item, "type") != "function_call" {
 		return false
 	}
 	name, ok := item["name"].(string)
-	return ok && name == toolSearchName
+	expected := toolSearchName
+	if catalog != nil && catalog.searchAlias != "" {
+		expected = catalog.searchAlias
+	}
+	return ok && name == expected
 }
 
 func rewriteToolSearchItem(item map[string]any) {

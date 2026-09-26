@@ -35,9 +35,13 @@ func TestStrictCompleteToolSearchSchemasCompletesOptionalProperties(t *testing.T
 		t.Fatalf("required = %#v, want [limit query]", required)
 	}
 	properties := schema["properties"].(map[string]any)
-	limitType := properties["limit"].(map[string]any)["type"].([]any)
-	if len(limitType) != 2 || limitType[0] != "number" || limitType[1] != "null" {
-		t.Fatalf("limit type = %#v, want [number null]", limitType)
+	limitSchema := properties["limit"].(map[string]any)
+	limitAnyOf, ok := limitSchema["anyOf"].([]any)
+	if !ok || len(limitAnyOf) != 2 {
+		t.Fatalf("limit anyOf = %#v, want original and null", limitSchema["anyOf"])
+	}
+	if _, okNullable := limitAnyOf[1].(map[string]any); !okNullable {
+		t.Fatalf("nullable branch = %#v", limitAnyOf[1])
 	}
 	queryType := properties["query"].(map[string]any)["type"]
 	if queryType != "string" {
@@ -86,24 +90,9 @@ func TestInlineRecursiveSchemaRefsElidesReentrantRefs(t *testing.T) {
 		}}]}]
 	}`)
 	tools := decodeTools(t, request)
-	if !inlineRecursiveSchemaRefsForTools(tools) {
-		t.Fatal("inlineRecursiveSchemaRefsForTools() changed = false, want true")
-	}
-	blob, errMarshal := json.Marshal(tools)
-	if errMarshal != nil {
-		t.Fatalf("json.Marshal() error = %v", errMarshal)
-	}
-	text := string(blob)
-	for _, unexpected := range []string{`"$defs"`, `"$ref"`} {
-		if strings.Contains(text, unexpected) {
-			t.Fatalf("inlined schema still contains %s: %s", unexpected, text)
-		}
-	}
-	if !strings.Contains(text, "nested GmailMessagePartRequest; recursion elided") {
-		t.Fatalf("inlined schema lost the recursion marker: %s", text)
-	}
-	if !strings.Contains(text, `"partId"`) {
-		t.Fatalf("inlined schema lost the definition body: %s", text)
+	errInline := inlineToolSchemaRefsForTools(tools)
+	if errInline == nil || !strings.Contains(errInline.Error(), "recursive_schema_reference") {
+		t.Fatalf("inlineToolSchemaRefsForTools() error = %v, want recursive reference rejection", errInline)
 	}
 }
 
@@ -116,7 +105,7 @@ func TestNormalizeStrictNativeBodyAppliesBothWorkarounds(t *testing.T) {
 				"required":["query"],"additionalProperties":false}},
 			{"type":"namespace","name":"clock","tools":[{"type":"function","name":"now","parameters":{
 				"type":"object","properties":{"part":{"$ref":"#/definitions/Part"}},
-				"definitions":{"Part":{"type":"object","properties":{"next":{"$ref":"#/definitions/Part"}}}}}}]}
+		"definitions":{"Part":{"type":"object","properties":{"label":{"type":"string"}}}}}}]}
 		]
 	}`)
 	out, changed, errNormalize := normalizeStrictNativeBody(body)
@@ -138,6 +127,10 @@ func TestNormalizeStrictNativeBodyAppliesBothWorkarounds(t *testing.T) {
 }
 
 func TestNormalizeStrictNativeBodyStripsCustomTools(t *testing.T) {
+	t.Cleanup(func() { _ = applyPluginConfig(nil) })
+	if errConfigure := applyPluginConfig([]byte("strip_custom_tools: true\n")); errConfigure != nil {
+		t.Fatalf("applyPluginConfig() error = %v", errConfigure)
+	}
 	body := []byte(`{
 		"model":"opencode-go-muse-spark-1.3",
 		"tools":[
