@@ -228,6 +228,17 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 	return body, true
 }
 
+func codexSSETerminalFailureErrWithCooling(eventData []byte, sseEventType string, modelLevelCooling bool) (statusErr, []byte, bool) {
+	if gjson.GetBytes(eventData, "type").String() == "" && strings.EqualFold(strings.TrimSpace(sseEventType), "error") {
+		var errSet error
+		eventData, errSet = sjson.SetBytes(eventData, "type", "error")
+		if errSet != nil {
+			return statusErr{}, nil, false
+		}
+	}
+	return codexTerminalFailureErrWithCooling(eventData, modelLevelCooling)
+}
+
 func codexTerminalStreamErrShouldHandle(body []byte) bool {
 	if codexTerminalErrorIsContextLength(body) {
 		return true

@@ -183,9 +183,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	sawOutputDelta := false
+	var sseEventType string
 	if buffering {
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
+			if bytes.HasPrefix(line, []byte("event:")) {
+				sseEventType = strings.TrimSpace(string(line[len("event:"):]))
+			} else if len(bytes.TrimSpace(line)) == 0 {
+				sseEventType = ""
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			isHandshake := false
@@ -200,7 +206,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
-				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
+				if streamErr, terminalBody, ok := codexSSETerminalFailureErrWithCooling(data, sseEventType, e.modelLevelCooling()); ok {
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -360,6 +366,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}()
 		for scanner.Scan() {
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
+			if bytes.HasPrefix(line, []byte("event:")) {
+				sseEventType = strings.TrimSpace(string(line[len("event:"):]))
+			} else if len(bytes.TrimSpace(line)) == 0 {
+				sseEventType = ""
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			var translatedLine []byte
 			terminalSuccess := false
@@ -372,7 +383,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
 				eventType := gjson.GetBytes(data, "type").String()
-				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
+				if streamErr, terminalBody, ok := codexSSETerminalFailureErrWithCooling(data, sseEventType, e.modelLevelCooling()); ok {
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)

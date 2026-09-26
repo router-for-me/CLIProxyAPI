@@ -603,6 +603,26 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 	}
 }
 
+func TestCodexSSETerminalFailureErrUsesEventTypeForTypelessError(t *testing.T) {
+	streamErr, body, ok := codexSSETerminalFailureErrWithCooling([]byte(`{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Overloaded."},"sequence_number":2}`), "error", false)
+	if !ok {
+		t.Fatal("SSE event type error must classify a typeless error envelope")
+	}
+	if got := streamErr.StatusCode(); got != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", got, http.StatusBadGateway)
+	}
+	if got := gjson.GetBytes(body, "sequence_number").Int(); got != 2 {
+		t.Fatalf("sequence_number = %d, want 2", got)
+	}
+}
+
+func TestCodexSSETerminalFailureErrDoesNotInferErrorFromOtherEventType(t *testing.T) {
+	_, _, ok := codexSSETerminalFailureErrWithCooling([]byte(`{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Overloaded."},"sequence_number":2}`), "message", false)
+	if ok {
+		t.Fatal("typeless payload from a non-error SSE event must not be treated as terminal")
+	}
+}
+
 func TestCodexTerminalStreamErrHandlesUsageLimitErrorEvent(t *testing.T) {
 	streamErr, _, ok := codexTerminalStreamErr([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":300}}`))
 	if !ok {
