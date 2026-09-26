@@ -778,6 +778,102 @@ func TestHealthzAccessLogging(t *testing.T) {
 	}
 }
 
+func TestAPIHello(t *testing.T) {
+	server := newTestServer(t)
+
+	t.Run("GET", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/hello", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+
+		var resp struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+		}
+		if resp.Status != "ok" {
+			t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
+		}
+	})
+
+	t.Run("HEAD", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/api/hello", nil)
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
+		}
+	})
+}
+
+func TestAPIHelloAccessLogging(t *testing.T) {
+	server := newTestServer(t)
+	previousHome := home.Current()
+	home.ClearCurrent()
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.InfoLevel)
+	t.Cleanup(func() { logger.ReplaceHooks(previousHooks); logger.SetLevel(previousLevel) })
+	for _, tc := range []struct {
+		name        string
+		homeEnabled bool
+		status      int
+	}{
+		{"healthy", false, http.StatusOK},
+		{"home_unavailable", true, http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server.cfg.Home.Enabled = tc.homeEnabled
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				t.Run(method, func(t *testing.T) {
+					hook.Reset()
+					recorder := httptest.NewRecorder()
+					server.engine.ServeHTTP(recorder, httptest.NewRequest(method, "/api/hello", nil))
+					if recorder.Code != tc.status {
+						t.Fatalf("status = %d, want %d", recorder.Code, tc.status)
+					}
+					count := 0
+					for _, entry := range hook.AllEntries() {
+						if _, ok := entry.Data["request_id"]; ok && strings.Contains(entry.Message, `"/api/hello"`) {
+							count++
+							if tc.homeEnabled && entry.Level != log.ErrorLevel {
+								t.Errorf("failed probe log level = %v, want error", entry.Level)
+							}
+						}
+					}
+					wantCount := 0
+					if tc.homeEnabled {
+						wantCount = 1
+					}
+					if count != wantCount {
+						t.Errorf("probe access logs = %d, want %d", count, wantCount)
+					}
+					hook.Reset()
+					server.engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/hello-access-log-control", nil))
+					for _, entry := range hook.AllEntries() {
+						if _, ok := entry.Data["request_id"]; ok && strings.Contains(entry.Message, `"/api/hello-access-log-control"`) {
+							return
+						}
+					}
+					t.Error("ordinary request did not emit an access log after health probe")
+				})
+			}
+		})
+	}
+}
+
 func TestCodexLiveRoutesRequireAuthAndAreRegistered(t *testing.T) {
 	server := newTestServer(t)
 
