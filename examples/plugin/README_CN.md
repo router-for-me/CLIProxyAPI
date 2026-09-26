@@ -14,7 +14,7 @@
 - `request-translator/`：只演示请求转换能力。
 - `request-normalizer/`：只演示请求规整能力。
 - `codex-service-tier/`：仅 Go 实现的请求规整插件，启用后会将 Codex `gpt-5.5` 请求设置为 priority service tier。
-- `codex-tool-search-shim/`：将 Codex 客户端执行的 `tool_search` 转换为普通函数调用，并且只提升 `tool_search_output` 返回过的工具；此外可为 `strict_responses_models` 命中的原生 Responses 模型补全严格 schema、内联本地 `$ref` 并剥离上游不支持的 `custom` 工具。详见 `codex-tool-search-shim/README.md`。
+- `codex-tool-search-shim/`：避免非 `codex` 路由把整个延迟工具目录塞进首包——将 Codex 客户端执行的 `tool_search` 转换为普通函数调用，并且只提升 `tool_search_output` 返回过的工具；此外可为 `strict_responses_models` 命中的原生 Responses 模型补全严格 schema、内联本地 `$ref` 并剥离上游不支持的 `custom` 工具。详见 `codex-tool-search-shim/README.md`。
 - `request-lifecycle/`：仅 Go 实现的请求生命周期插件，演示并发控制、主动终止 HTTP 请求和终态回调。
 - `scheduler/`：仅 Go 实现的调度插件，可选择指定 auth ID、委托内置调度器或拒绝调度。
 - `response-translator/`：只演示响应转换能力。
