@@ -157,6 +157,8 @@ Verified by repository tests on 2026-09-26:
 - Linux `c-shared` build in `golang:1.26-bookworm` and actual `dlopen`/ABI
   registration (`abi=1`, `register_status=0`, response contained the plugin
   name);
+- Windows `c-shared` cross-build with `mingw-w64 14.0.0_3`, producing a
+  `PE32+ x86-64` DLL with the expected plugin entry points;
 - host model-list capability metadata tests;
 - dynamic-library build and pluginhost load/interceptor/lifecycle validation.
 
