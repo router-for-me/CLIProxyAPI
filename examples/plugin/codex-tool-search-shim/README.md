@@ -154,6 +154,9 @@ Verified by repository tests on 2026-09-26:
   HTTP/SSE and Responses WebSocket: the model catalog exposed
   `supports_search_tool`, and each run performed two searches, called the
   returned weather and service-status tools, and completed with both results;
+- Linux `c-shared` build in `golang:1.26-bookworm` and actual `dlopen`/ABI
+  registration (`abi=1`, `register_status=0`, response contained the plugin
+  name);
 - host model-list capability metadata tests;
 - dynamic-library build and pluginhost load/interceptor/lifecycle validation.
 
@@ -161,7 +164,7 @@ Not yet verified by this review:
 
 - real provider/model search quality or upstream acceptance (the Codex runs
   used a local mock Chat upstream);
-- Linux and Windows dynamic-library loading;
+- Windows dynamic-library loading;
 - actual prompt-token or usage reduction.
 
 Unverified transports and platforms are not claimed as supported.
