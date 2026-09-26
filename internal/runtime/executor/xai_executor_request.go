@@ -136,6 +136,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	// Thinking was handled before payload overrides and must not be revalidated here.
 	body, _ = sjson.DeleteBytes(body, "stop")
 	body = normalizeXAIImageRefs(body)
+	body = helps.SanitizeResponsesCallIDs(body)
 
 	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
 	if errSession != nil {
