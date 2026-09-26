@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/responsestools"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -496,6 +497,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			pinnedAuthID,
 			upstreamWebsocketAuthID,
 		)
+		// Core tool protocol boundary: a turn that needs tool rewriting must
+		// never take native duplex passthrough. Force tools-replay
+		// normalization so the same contract mapping applies as HTTP/SSE.
+		// Native passthrough stays available for turns without tool metadata
+		// and for routes outside the core policy.
+		toolsReplayTurn := false
+		if nativeWebsocketPassthrough {
+			toolsReplayTurn = h.responsesWebsocketRequiresToolsReplay(payload)
+			if toolsReplayTurn {
+				nativeWebsocketPassthrough = false
+			}
+		}
 		requestRequiresCurrentUpstreamWebsocket := responsesWebsocketRequestRequiresCurrentUpstream(payload)
 		if upstreamMode == responsesWebsocketUpstreamModeWS && !nativeWebsocketPassthrough {
 			if requestRequiresCurrentUpstreamWebsocket {
@@ -904,4 +917,17 @@ func responsesWebsocketPreviousResponseNotFoundError() *interfaces.ErrorMessage 
 			`{"error":{"message":"Previous response is not available on this websocket; resend the full conversation input without previous_response_id","type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id"}}`,
 		),
 	}
+}
+
+// responsesWebsocketRequiresToolsReplay reports whether one downstream turn
+// carries tool metadata that the core Responses tool protocol would rewrite.
+// Such turns run as tools-replay (HTTP replay normalization) instead of
+// native duplex passthrough, so request, history, response, and stream
+// recovery share one mapping. Turns without tool metadata, routes outside
+// the core policy, and a disabled feature never trigger replay here.
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketRequiresToolsReplay(payload []byte) bool {
+	if h == nil || h.AuthManager == nil || !h.AuthManager.ResponsesToolsEnabled() {
+		return false
+	}
+	return responsestools.ParseContract(payload) != nil
 }

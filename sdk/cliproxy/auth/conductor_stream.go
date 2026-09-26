@@ -239,7 +239,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 		startStream := time.Now()
-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+		streamResult, errStream := m.responsesToolsExecuteStream(ctx, auth, provider, executor, execReq, execOpts, func(callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+			return executor.ExecuteStream(ctx, auth, callReq, callOpts)
+		})
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
 			upstreamErr = errStream
@@ -259,7 +261,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = newUpstreamAttemptContext(ctx)
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					startRetry := time.Now()
-					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					streamResult, errStream = m.responsesToolsExecuteStream(ctx, auth, provider, executor, execReq, execOpts, func(callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+						return executor.ExecuteStream(ctx, auth, callReq, callOpts)
+					})
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
 						upstreamErr = errStream
@@ -335,7 +339,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					didRefreshOnUnauthorized = true
 					ctx = newUpstreamAttemptContext(ctx)
 					startRetry := time.Now()
-					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+					retryStream, retryErr := m.responsesToolsExecuteStream(ctx, auth, provider, executor, execReq, execOpts, func(callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+						return executor.ExecuteStream(ctx, auth, callReq, callOpts)
+					})
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)

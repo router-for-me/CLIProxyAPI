@@ -241,6 +241,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	if input := cliproxyexecutor.WebsocketInputFromContext(ctx); input != nil && e.cfg != nil && (e.cfg.Codex.ResponseSteering || e.cfg.CodexResponseSteering) {
+		// Core tool protocol boundary: a turn rewritten by the attempt must
+		// never hand raw follow-up frames to the native duplex path. Refuse
+		// explicitly so the caller replays the turn instead of silently
+		// degrading live steering into a queued next round.
+		if wire := cliproxyexecutor.WireContractFromContext(ctx); wire != nil {
+			return nil, statusErr{code: http.StatusUnprocessableEntity, msg: "responses tools rewrite requires replay; live duplex steering is not supported for this turn"}
+		}
 		return e.streamCodexDuplex(ctx, auth, req, opts, sess, conn, readCh, input, prepared, reporter, upstreamHeaders, unlockStreamSession), nil
 	}
 

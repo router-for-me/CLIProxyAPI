@@ -514,3 +514,16 @@ func (b *CustomBridge) RestoreCustomResponseItem(item map[string]any) bool {
 func jsonMarshal(value any) ([]byte, error) {
 	return json.Marshal(value)
 }
+
+// Aliases returns every wire alias minted by this bridge in stable order.
+func (b *CustomBridge) Aliases() []string {
+	if b == nil {
+		return nil
+	}
+	out := make([]string, 0, len(b.aliasByID))
+	for _, alias := range b.aliasByID {
+		out = append(out, alias)
+	}
+	sort.Strings(out)
+	return out
+}

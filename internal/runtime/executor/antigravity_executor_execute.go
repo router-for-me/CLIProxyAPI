@@ -123,6 +123,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}
 	requestPayload = ensureAntigravityGeminiBoundaryUserContent(baseModel, requestPayload)
+	if errGuard := helps.ValidateOutboundToolContract(ctx, requestPayload, helps.WireContractByteLimit(ctx)); errGuard != nil {
+		return resp, errGuard
+	}
 
 	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 	if errReq != nil {

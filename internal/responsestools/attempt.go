@@ -262,3 +262,18 @@ func scanCustomDeclarations(value any) bool {
 	}
 	return false
 }
+
+// WireAliases returns the bridged search and custom aliases of this attempt
+// for the outbound guard. Nil attempts yield empty lists.
+func (a *Attempt) WireAliases() (search []string, custom []string) {
+	if a == nil {
+		return nil, nil
+	}
+	if a.contract != nil && a.contract.SearchAlias != "" {
+		search = []string{a.contract.SearchAlias}
+	}
+	if a.bridge != nil {
+		custom = a.bridge.Aliases()
+	}
+	return search, custom
+}

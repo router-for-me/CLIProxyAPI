@@ -90,6 +90,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		return nil, err
 	}
+	if errGuard := helps.ValidateOutboundToolContract(ctx, upstreamBody, helps.WireContractByteLimit(ctx)); errGuard != nil {
+		return nil, errGuard
+	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 	applyCodexRoutingHint(ctx, httpReq.Header, auth, baseModel, upstreamBody, opts.Headers)
 	applyModelHeaderOverrides(httpReq.Header, baseModel)

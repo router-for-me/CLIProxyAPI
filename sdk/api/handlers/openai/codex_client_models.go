@@ -11,7 +11,12 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 		version = clientVersion[0]
 	}
 	optimizeMultiAgentV2 := h != nil && h.Cfg != nil && h.Cfg.CodexOptimizeMultiAgentV2
-	return codexmodels.BuildResponseForClient(h.Models(), registry.GetGlobalRegistry().GetModelProviders, optimizeMultiAgentV2, version)
+	var resolver codexmodels.SearchToolCapabilityForModelFunc
+	if h != nil && h.BaseAPIHandler != nil && h.AuthManager != nil {
+		manager := h.AuthManager
+		resolver = func(modelID string) *bool { return manager.ClientSearchSupported(modelID) }
+	}
+	return codexmodels.BuildResponseForClientWithToolCapabilities(h.Models(), registry.GetGlobalRegistry().GetModelProviders, registry.GetGlobalRegistry().GetResponsesWebSearchCapability, resolver, optimizeMultiAgentV2, version)
 }
 
 // CodexClientModelsResponse builds a Codex client model response.
@@ -29,4 +34,11 @@ func CodexClientModelsResponseWithMultiAgentV2(models []map[string]any, enabled 
 // tailored for a specific client version.
 func CodexClientModelsResponseForClient(models []map[string]any, clientVersion string, enabled bool) map[string]any {
 	return codexmodels.BuildResponseForClient(models, nil, enabled, clientVersion)
+}
+
+// CodexClientModelsResponseForClientWithSearchCapability builds a Codex client
+// model response with the core client-search capability resolver. A nil
+// resolver keeps legacy behavior.
+func CodexClientModelsResponseForClientWithSearchCapability(models []map[string]any, clientVersion string, enabled bool, resolver func(string) *bool) map[string]any {
+	return codexmodels.BuildResponseForClientWithToolCapabilities(models, registry.GetGlobalRegistry().GetModelProviders, registry.GetGlobalRegistry().GetResponsesWebSearchCapability, codexmodels.SearchToolCapabilityForModelFunc(resolver), enabled, clientVersion)
 }

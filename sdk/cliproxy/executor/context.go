@@ -77,3 +77,36 @@ func UpstreamAttempted(ctx context.Context) bool {
 	tracker, ok := ctx.Value(upstreamAttemptTrackerContextKey{}).(*upstreamAttemptTracker)
 	return ok && tracker != nil && tracker.attempted.Load()
 }
+
+type wireContractContextKey struct{}
+
+// WireContract is the read-only tool contract visible to the outbound guard.
+// It carries only alias lists and sizes: never the attempt, the original
+// client request, credentials, or payloads.
+type WireContract struct {
+	// SearchAliases lists bridged search aliases that must survive to the wire.
+	SearchAliases []string
+	// CustomAliases lists bridged custom aliases that must survive to the wire.
+	CustomAliases []string
+	// ActiveToolBytes is the normalized declaration size after adaptation.
+	ActiveToolBytes int
+}
+
+// WithWireContract attaches the read-only wire contract for the final send
+// guard. A nil contract leaves the context unchanged.
+func WithWireContract(ctx context.Context, wire *WireContract) context.Context {
+	if ctx == nil || wire == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, wireContractContextKey{}, wire)
+}
+
+// WireContractFromContext reads the guard contract back. Nil means the
+// attempt is inactive and guards are no-ops.
+func WireContractFromContext(ctx context.Context) *WireContract {
+	if ctx == nil {
+		return nil
+	}
+	wire, _ := ctx.Value(wireContractContextKey{}).(*WireContract)
+	return wire
+}

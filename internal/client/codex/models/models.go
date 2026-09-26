@@ -23,6 +23,12 @@ type ProvidersForModelFunc func(string) []string
 // metadata for an exact public model ID. nil means unknown.
 type WebSearchCapabilityForModelFunc func(string) *bool
 
+// SearchToolCapabilityForModelFunc returns whether every selectable route
+// behind one public model alias can complete the client tool_search loop.
+// nil means unknown and must never promote the alias. It is separate from
+// web search: supporting web search never implies deferred tool discovery.
+type SearchToolCapabilityForModelFunc func(string) *bool
+
 var (
 	codexClientModelTemplatesMu       sync.Mutex
 	codexClientModelTemplatesLoaded   bool
@@ -66,8 +72,16 @@ func BuildResponseForClient(availableModels []map[string]any, providersForModel 
 // BuildResponseForClientWithCPACapabilities builds a client response while
 // allowing Home to supply capability metadata independent of the local registry.
 func BuildResponseForClientWithCPACapabilities(availableModels []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) map[string]any {
+	return BuildResponseForClientWithToolCapabilities(availableModels, providersForModel, webSearchCapabilityForModel, nil, optimizeMultiAgentV2, clientVersion)
+}
+
+// BuildResponseForClientWithToolCapabilities builds a client response with an
+// injectable client-search capability resolver. A nil resolver keeps the
+// legacy provider-based behavior; a non-nil resolver overrides
+// supports_search_tool per public alias from effective route policies.
+func BuildResponseForClientWithToolCapabilities(availableModels []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, searchToolCapabilityForModel SearchToolCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) map[string]any {
 	return map[string]any{
-		"models": buildCodexClientModels(availableModels, providersForModel, webSearchCapabilityForModel, optimizeMultiAgentV2, clientVersion),
+		"models": buildCodexClientModels(availableModels, providersForModel, webSearchCapabilityForModel, searchToolCapabilityForModel, optimizeMultiAgentV2, clientVersion),
 	}
 }
 
@@ -83,7 +97,7 @@ func MarshalCompact(payload any) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
+func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, searchToolCapabilityForModel SearchToolCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
 	templates, defaultTemplate, err := loadCodexClientModelTemplates()
 	if err != nil || defaultTemplate == nil {
 		return nil
@@ -111,7 +125,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			if thinkingSupport := codexClientThinkingSupport(model); thinkingSupport != nil {
 				applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
 			}
-			applyCodexClientProviderCapabilities(entry, id, true, providersForModel)
+			applyCodexClientProviderCapabilitiesWithSearchResolver(entry, id, true, providersForModel, searchToolCapabilityForModel)
 			applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 			sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 			applyCodexClientVisibilityOverride(entry, id)
@@ -126,7 +140,7 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2, clientVersion)
 		applyCodexClientMaxTokens(entry, model)
-		applyCodexClientProviderCapabilities(entry, id, false, providersForModel)
+		applyCodexClientProviderCapabilitiesWithSearchResolver(entry, id, false, providersForModel, searchToolCapabilityForModel)
 		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 		applyCodexClientVisibilityOverride(entry, id)
@@ -531,6 +545,14 @@ func applyCPAWebSearchCapability(entry map[string]any, id string, capabilityForM
 }
 
 func applyCodexClientProviderCapabilities(entry map[string]any, id string, isTemplate bool, providersForModel ProvidersForModelFunc) {
+	applyCodexClientProviderCapabilitiesWithSearchResolver(entry, id, isTemplate, providersForModel, nil)
+}
+
+func applyCodexClientProviderCapabilitiesWithSearchResolver(entry map[string]any, id string, isTemplate bool, providersForModel ProvidersForModelFunc, searchToolCapabilityForModel SearchToolCapabilityForModelFunc) {
+	if searchToolCapabilityForModel != nil {
+		applyCoreSearchToolCapability(entry, id, searchToolCapabilityForModel)
+		return
+	}
 	if !isTemplate {
 		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
 		return
@@ -1010,4 +1032,16 @@ func cloneCodexClientModelValue(value any) any {
 	default:
 		return value
 	}
+}
+
+// applyCoreSearchToolCapability resolves supports_search_tool from the core
+// route policy instead of provider names. Unknown never promotes: only an
+// explicit true across every selectable route advertises the capability.
+func applyCoreSearchToolCapability(entry map[string]any, id string, resolver SearchToolCapabilityForModelFunc) {
+	supported := resolver(strings.TrimSpace(id))
+	if supported == nil || !*supported {
+		entry["supports_search_tool"] = false
+		return
+	}
+	entry["supports_search_tool"] = true
 }

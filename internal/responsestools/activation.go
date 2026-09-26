@@ -450,3 +450,21 @@ func toolTypeIsCallable(value string) bool {
 		return false
 	}
 }
+
+// ActiveToolArraysBytesOf measures the tool arrays of one raw wire body. It
+// decodes failures return 0 so the guard never blocks on unparseable frames.
+func ActiveToolArraysBytesOf(body []byte) int {
+	value, ok := decodeValue(body)
+	if !ok {
+		return 0
+	}
+	root, ok := value.(map[string]any)
+	if !ok {
+		return 0
+	}
+	size, err := ActiveToolArraysBytes(root)
+	if err != nil {
+		return 0
+	}
+	return size
+}
