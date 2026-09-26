@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,8 +15,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type refreshRecordExecutor struct {
@@ -163,4 +166,151 @@ func TestRefreshAuthFiles_AllAndSpecific(t *testing.T) {
 	if wBadJSON.Code != http.StatusBadRequest {
 		t.Fatalf("expected malformed JSON to return 400, got %d", wBadJSON.Code)
 	}
+}
+
+func TestRefreshAuthFiles_PreservesPathInList_Issue6119(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "custom-plugin.json")
+	_ = os.WriteFile(filePath, []byte(`{"type":"custom-plugin","token":"test"}`), 0o600)
+
+	host := pluginhost.New()
+	provider := &pluginRefreshSimProvider{
+		identifier: "custom-plugin",
+		refreshAuth: func(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+			// Plugin returns custom attributes without repeating path
+			return pluginapi.AuthRefreshResponse{
+				Auth: pluginapi.AuthData{
+					Metadata:   map[string]any{"type": "custom-plugin", "token": "refreshed-token"},
+					Attributes: map[string]string{"priority": "1"},
+				},
+			}, nil
+		},
+	}
+	host.RegisterPluginForTest("custom-plugin", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			AuthProvider: provider,
+		},
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	exec := &pluginRefreshHostExecutor{provider: "custom-plugin", host: host}
+	manager.RegisterExecutor(exec)
+
+	auth := &coreauth.Auth{
+		ID:       "custom-plugin.json",
+		FileName: "custom-plugin.json",
+		Provider: "custom-plugin",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			coreauth.AttributePath:          filePath,
+			coreauth.AttributeSource:        filePath,
+			coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+		},
+		Metadata: map[string]any{"type": "custom-plugin", "token": "test"},
+	}
+	_, _ = manager.Register(context.Background(), auth)
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	engine := gin.New()
+	engine.POST("/auth-files/refresh", h.RefreshAuthFiles)
+	engine.GET("/auth-files", h.ListAuthFiles)
+
+	// Refresh the auth file
+	reqRefresh := httptest.NewRequest(http.MethodPost, "/auth-files/refresh?name=custom-plugin.json", nil)
+	wRefresh := httptest.NewRecorder()
+	engine.ServeHTTP(wRefresh, reqRefresh)
+	if wRefresh.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", wRefresh.Code, wRefresh.Body.String())
+	}
+
+	// Verify it still appears in GET /auth-files
+	reqList := httptest.NewRequest(http.MethodGet, "/auth-files", nil)
+	wList := httptest.NewRecorder()
+	engine.ServeHTTP(wList, reqList)
+	if wList.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", wList.Code, wList.Body.String())
+	}
+	var listResp map[string]any
+	if err := json.Unmarshal(wList.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal list response: %v", err)
+	}
+	files, _ := listResp["files"].([]any)
+	found := false
+	for _, f := range files {
+		m, ok := f.(map[string]any)
+		if ok && m["name"] == "custom-plugin.json" {
+			found = true
+			if fmt.Sprint(m["priority"]) != "1" {
+				t.Errorf("expected priority '1' in auth file entry, got %v", m["priority"])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected custom-plugin.json to appear in /auth-files list, but got: %v", listResp)
+	}
+}
+
+type pluginRefreshSimProvider struct {
+	identifier  string
+	refreshAuth func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error)
+}
+
+func (p *pluginRefreshSimProvider) Identifier() string {
+	return p.identifier
+}
+
+func (p *pluginRefreshSimProvider) ParseAuth(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+	return pluginapi.AuthParseResponse{}, nil
+}
+
+func (p *pluginRefreshSimProvider) StartLogin(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+	return pluginapi.AuthLoginStartResponse{}, nil
+}
+
+func (p *pluginRefreshSimProvider) PollLogin(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+	return pluginapi.AuthLoginPollResponse{}, nil
+}
+
+func (p *pluginRefreshSimProvider) RefreshAuth(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+	if p.refreshAuth != nil {
+		return p.refreshAuth(ctx, req)
+	}
+	return pluginapi.AuthRefreshResponse{}, nil
+}
+
+type pluginRefreshHostExecutor struct {
+	provider string
+	host     *pluginhost.Host
+}
+
+func (e *pluginRefreshHostExecutor) Identifier() string {
+	return e.provider
+}
+
+func (e *pluginRefreshHostExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	if e.host != nil {
+		refreshed, handled, errRefresh := e.host.RefreshAuth(ctx, auth)
+		if handled {
+			return refreshed, errRefresh
+		}
+	}
+	return auth, nil
+}
+
+func (e *pluginRefreshHostExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *pluginRefreshHostExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *pluginRefreshHostExecutor) CountTokens(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *pluginRefreshHostExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, nil
 }

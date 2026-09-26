@@ -138,12 +138,13 @@ func (r *executionResources) Close() error {
 
 // HomeDispatchSelection keeps a Home execution scope separate from its auth.
 type HomeDispatchSelection struct {
-	Auth               *Auth
-	Executor           ProviderExecutor
-	Provider           string
-	CanonicalSessionID string
-	ParentSessionID    string
-	modelInfo          *registry.ModelInfo
+	Auth                       *Auth
+	Executor                   ProviderExecutor
+	Provider                   string
+	CanonicalSessionID         string
+	ParentSessionID            string
+	modelInfo                  *registry.ModelInfo
+	configurationUpdateSupport *bool
 
 	authMu           sync.RWMutex
 	scope            *executionregistry.Scope

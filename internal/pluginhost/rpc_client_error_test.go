@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type staticEnvelopePluginClient struct {
@@ -129,5 +130,96 @@ func TestMarshalRPCErrorPreservesHTTPStatus(t *testing.T) {
 		if got := statusProvider.StatusCode(); got != status {
 			t.Fatalf("StatusCode = %d, want %d", got, status)
 		}
+	}
+}
+
+func TestCallPluginSchedulerPickCompatibility(t *testing.T) {
+	tests := []struct {
+		name         string
+		resultJSON   string
+		wantAuthID   string
+		wantDelegate string
+		wantHandled  bool
+		wantReject   bool
+		wantCode     string
+		wantReason   string
+	}{
+		{
+			name:         "legacy pascal case auth id",
+			resultJSON:   `{"AuthID":"auth-1","DelegateBuiltin":"","Handled":true}`,
+			wantAuthID:   "auth-1",
+			wantDelegate: "",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:         "legacy pascal case delegate",
+			resultJSON:   `{"AuthID":"","DelegateBuiltin":"round-robin","Handled":true}`,
+			wantAuthID:   "",
+			wantDelegate: "round-robin",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:         "snake case auth id",
+			resultJSON:   `{"auth_id":"auth-2","delegate_builtin":"","handled":true}`,
+			wantAuthID:   "auth-2",
+			wantDelegate: "",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:         "snake case delegate",
+			resultJSON:   `{"auth_id":"","delegate_builtin":"fill-first","handled":true}`,
+			wantAuthID:   "",
+			wantDelegate: "fill-first",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:        "snake case terminal rejection",
+			resultJSON:  `{"handled":true,"reject":true,"reject_code":"quota_exceeded","reject_reason":"quota exhausted"}`,
+			wantHandled: true,
+			wantReject:  true,
+			wantCode:    "quota_exceeded",
+			wantReason:  "quota exhausted",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := pluginabi.Envelope{
+				OK:     true,
+				Result: json.RawMessage(tc.resultJSON),
+			}
+			raw, errMarshal := json.Marshal(env)
+			if errMarshal != nil {
+				t.Fatalf("marshal envelope: %v", errMarshal)
+			}
+
+			client := staticEnvelopePluginClient{raw: raw}
+			resp, errCall := callPlugin[pluginapi.SchedulerPickResponse](context.Background(), client, pluginabi.MethodSchedulerPick, pluginapi.SchedulerPickRequest{})
+			if errCall != nil {
+				t.Fatalf("callPlugin() error = %v", errCall)
+			}
+			if resp.AuthID != tc.wantAuthID {
+				t.Fatalf("AuthID = %q, want %q", resp.AuthID, tc.wantAuthID)
+			}
+			if resp.DelegateBuiltin != tc.wantDelegate {
+				t.Fatalf("DelegateBuiltin = %q, want %q", resp.DelegateBuiltin, tc.wantDelegate)
+			}
+			if resp.Handled != tc.wantHandled {
+				t.Fatalf("Handled = %v, want %v", resp.Handled, tc.wantHandled)
+			}
+			if resp.Reject != tc.wantReject {
+				t.Fatalf("Reject = %v, want %v", resp.Reject, tc.wantReject)
+			}
+			if resp.RejectCode != tc.wantCode {
+				t.Fatalf("RejectCode = %q, want %q", resp.RejectCode, tc.wantCode)
+			}
+			if resp.RejectReason != tc.wantReason {
+				t.Fatalf("RejectReason = %q, want %q", resp.RejectReason, tc.wantReason)
+			}
+		})
 	}
 }

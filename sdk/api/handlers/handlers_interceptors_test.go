@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
@@ -56,7 +57,6 @@ func (h *handlerInterceptorTestHost) InterceptRequestBeforeAuth(ctx context.Cont
 	}
 	return pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
-		Body:    cloneBytes(req.Body),
 	}
 }
 
@@ -66,7 +66,6 @@ func (h *handlerInterceptorTestHost) InterceptRequestAfterAuth(ctx context.Conte
 	}
 	return pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
-		Body:    cloneBytes(req.Body),
 	}
 }
 
@@ -1693,5 +1692,65 @@ func TestWriteModelListResponse_ExposesResponseToPluginInterceptors(t *testing.T
 	}
 	if apiResp, ok := ctx.Get("API_RESPONSE"); !ok || !strings.Contains(string(apiResp.([]byte)), "intercepted-model") {
 		t.Fatalf("API_RESPONSE not recorded properly: %#v", apiResp)
+	}
+}
+
+func TestRequestAfterAuthCapture_ReadOnlyInterceptorDoesNotReallocatePayload_Issue6101(t *testing.T) {
+	capture := &requestAfterAuthCapture{}
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	req := coreexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}
+	opts := coreexecutor.Options{
+		OriginalRequest: payload,
+	}
+
+	// Read-only after-auth response: Body is empty
+	capture.record(coreexecutor.RequestAfterAuthInterceptRequest{
+		Body: payload,
+	}, coreexecutor.RequestAfterAuthInterceptResponse{
+		Body: nil,
+	})
+
+	appliedReq, appliedOpts := capture.apply(req, opts)
+	if unsafe.SliceData(appliedReq.Payload) != unsafe.SliceData(req.Payload) {
+		t.Fatal("requestAfterAuthCapture.apply reallocated req.Payload when interceptor did not mutate body")
+	}
+	if unsafe.SliceData(appliedOpts.OriginalRequest) != unsafe.SliceData(opts.OriginalRequest) {
+		t.Fatal("requestAfterAuthCapture.apply reallocated opts.OriginalRequest when interceptor did not mutate body")
+	}
+}
+
+func TestApplyRequestInterceptors_ReadOnlyInterceptorDoesNotReallocatePayload_Issue6101(t *testing.T) {
+	// A read-only interceptor returns an empty/nil Body.
+	host := &handlerInterceptorTestHost{
+		interceptRequestBeforeAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			return pluginapi.RequestInterceptResponse{
+				Headers: req.Headers,
+			}
+		},
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetPluginHost(host)
+
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	req := coreexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}
+	opts := coreexecutor.Options{
+		OriginalRequest: payload,
+	}
+
+	gotReq, gotOpts, err := handler.applyRequestInterceptorsBeforeAuth(context.Background(), "openai", "gpt-5.4", "req-1", req, opts, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if unsafe.SliceData(gotReq.Payload) != unsafe.SliceData(req.Payload) {
+		t.Fatal("applyRequestInterceptorsBeforeAuth reallocated req.Payload when interceptor did not mutate body")
+	}
+	if unsafe.SliceData(gotOpts.OriginalRequest) != unsafe.SliceData(opts.OriginalRequest) {
+		t.Fatal("applyRequestInterceptorsBeforeAuth reallocated opts.OriginalRequest when interceptor did not mutate body")
 	}
 }

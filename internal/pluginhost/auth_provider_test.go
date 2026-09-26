@@ -646,3 +646,67 @@ func TestPluginTokenStorageRejectsEmptyPayload(t *testing.T) {
 		t.Fatal("SaveTokenToFile() error = nil, want empty payload error")
 	}
 }
+
+func TestRefreshAuth_MergesAttributesAndPreservesPath_Issue6119(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "plugin.json")
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-plugin",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			AuthProvider: fakeAuthProvider{
+				identifier: "plugin-provider",
+				refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+					return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{
+						Metadata:   map[string]any{"access_token": "new-token"},
+						Attributes: map[string]string{"priority": "1"},
+					}}, nil
+				},
+			},
+		}},
+	})
+
+	testCases := []struct {
+		name          string
+		sourceBackend string
+	}{
+		{name: "file_backend", sourceBackend: coreauth.AuthSourceFile},
+		{name: "postgres_backend", sourceBackend: "postgres"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &coreauth.Auth{
+				ID:       "auth-1",
+				Provider: "plugin-provider",
+				FileName: "plugin.json",
+				Attributes: map[string]string{
+					coreauth.AttributeSourceBackend: tc.sourceBackend,
+					coreauth.AttributePath:          filePath,
+					coreauth.AttributeSource:        filePath,
+					"custom_env":                    "production",
+				},
+				Metadata: map[string]any{"access_token": "old-token"},
+			}
+
+			refreshed, handled, errRefresh := host.RefreshAuth(context.Background(), auth)
+			if errRefresh != nil || !handled || refreshed == nil {
+				t.Fatalf("RefreshAuth() auth = %#v, handled = %t, error = %v", refreshed, handled, errRefresh)
+			}
+
+			if got := refreshed.Attributes[coreauth.AttributePath]; got != filePath {
+				t.Errorf("refreshed path attribute = %q, want %q", got, filePath)
+			}
+			if got := refreshed.Attributes[coreauth.AttributeSource]; got != filePath {
+				t.Errorf("refreshed source attribute = %q, want %q", got, filePath)
+			}
+			if got := refreshed.Attributes[coreauth.AttributeSourceBackend]; got != tc.sourceBackend {
+				t.Errorf("refreshed source_backend attribute = %q, want %q", got, tc.sourceBackend)
+			}
+			if got := refreshed.Attributes["custom_env"]; got != "production" {
+				t.Errorf("refreshed custom_env attribute = %q, want production", got)
+			}
+			if got := refreshed.Attributes["priority"]; got != "1" {
+				t.Errorf("refreshed priority attribute = %q, want 1", got)
+			}
+		})
+	}
+}

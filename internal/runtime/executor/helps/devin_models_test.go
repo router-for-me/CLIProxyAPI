@@ -439,6 +439,132 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			thinkingLevel: "",
 			want:          "claude-sonnet-4-6",
 		},
+		{
+			name:          "claude-opus-4-6 with high maps to claude-opus-4-6-thinking",
+			rawModel:      "devin/claude-opus-4-6",
+			thinkingLevel: "high",
+			want:          "claude-opus-4-6-thinking",
+		},
+		{
+			name:          "claude-sonnet-4-6 with high maps to claude-sonnet-4-6-thinking",
+			rawModel:      "devin/claude-sonnet-4-6",
+			thinkingLevel: "high",
+			want:          "claude-sonnet-4-6-thinking",
+		},
+		{
+			name:          "claude-opus-4-6-1m default maps to claude-opus-4-6-1m",
+			rawModel:      "devin/claude-opus-4-6-1m",
+			thinkingLevel: "",
+			want:          "claude-opus-4-6-1m",
+		},
+		{
+			name:          "claude-opus-4-6-1m with high maps to claude-opus-4-6-thinking-1m",
+			rawModel:      "devin/claude-opus-4-6-1m",
+			thinkingLevel: "high",
+			want:          "claude-opus-4-6-thinking-1m",
+		},
+		{
+			name:          "claude-sonnet-4-6-1m default maps to claude-sonnet-4-6-1m",
+			rawModel:      "devin/claude-sonnet-4-6-1m",
+			thinkingLevel: "",
+			want:          "claude-sonnet-4-6-1m",
+		},
+		{
+			name:          "claude-sonnet-4-6-1m with high maps to claude-sonnet-4-6-thinking-1m",
+			rawModel:      "devin/claude-sonnet-4-6-1m",
+			thinkingLevel: "high",
+			want:          "claude-sonnet-4-6-thinking-1m",
+		},
+		{
+			name:          "glm-5-2-1m default maps to glm-5-2-1m",
+			rawModel:      "devin/glm-5-2-1m",
+			thinkingLevel: "",
+			want:          "glm-5-2-1m",
+		},
+		{
+			name:          "glm-5-2-1m with none maps to glm-5-2-none-1m",
+			rawModel:      "devin/glm-5-2-1m",
+			thinkingLevel: "none",
+			want:          "glm-5-2-none-1m",
+		},
+		{
+			name:          "glm-5-2-1m with max maps to glm-5-2-max-1m",
+			rawModel:      "devin/glm-5-2-1m",
+			thinkingLevel: "max",
+			want:          "glm-5-2-max-1m",
+		},
+		{
+			name:          "MODEL_GPT_5_2 default maps to MODEL_GPT_5_2_LOW",
+			rawModel:      "devin/MODEL_GPT_5_2",
+			thinkingLevel: "",
+			want:          "MODEL_GPT_5_2_LOW",
+		},
+		{
+			name:          "MODEL_GPT_5_2 with none maps to MODEL_GPT_5_2_NONE",
+			rawModel:      "devin/MODEL_GPT_5_2",
+			thinkingLevel: "none",
+			want:          "MODEL_GPT_5_2_NONE",
+		},
+		{
+			name:          "MODEL_GPT_5_2 with medium maps to MODEL_GPT_5_2_MEDIUM",
+			rawModel:      "devin/MODEL_GPT_5_2",
+			thinkingLevel: "medium",
+			want:          "MODEL_GPT_5_2_MEDIUM",
+		},
+		{
+			name:          "MODEL_GPT_5_2 with high maps to MODEL_GPT_5_2_HIGH",
+			rawModel:      "devin/MODEL_GPT_5_2",
+			thinkingLevel: "high",
+			want:          "MODEL_GPT_5_2_HIGH",
+		},
+		{
+			name:          "MODEL_GPT_5_2 with xhigh maps to MODEL_GPT_5_2_XHIGH",
+			rawModel:      "devin/MODEL_GPT_5_2",
+			thinkingLevel: "xhigh",
+			want:          "MODEL_GPT_5_2_XHIGH",
+		},
+		{
+			name:          "MODEL_GOOGLE_GEMINI_3_0_FLASH default maps to HIGH",
+			rawModel:      "devin/MODEL_GOOGLE_GEMINI_3_0_FLASH",
+			thinkingLevel: "",
+			want:          "MODEL_GOOGLE_GEMINI_3_0_FLASH_HIGH",
+		},
+		{
+			name:          "MODEL_GOOGLE_GEMINI_3_0_FLASH with minimal maps to MINIMAL",
+			rawModel:      "devin/MODEL_GOOGLE_GEMINI_3_0_FLASH",
+			thinkingLevel: "minimal",
+			want:          "MODEL_GOOGLE_GEMINI_3_0_FLASH_MINIMAL",
+		},
+		{
+			name:          "MODEL_GOOGLE_GEMINI_3_0_FLASH with low maps to LOW",
+			rawModel:      "devin/MODEL_GOOGLE_GEMINI_3_0_FLASH",
+			thinkingLevel: "low",
+			want:          "MODEL_GOOGLE_GEMINI_3_0_FLASH_LOW",
+		},
+		{
+			name:          "MODEL_GOOGLE_GEMINI_3_0_FLASH with medium maps to MEDIUM",
+			rawModel:      "devin/MODEL_GOOGLE_GEMINI_3_0_FLASH",
+			thinkingLevel: "medium",
+			want:          "MODEL_GOOGLE_GEMINI_3_0_FLASH_MEDIUM",
+		},
+		{
+			name:          "MODEL_GOOGLE_GEMINI_3_0_FLASH with high maps to HIGH",
+			rawModel:      "devin/MODEL_GOOGLE_GEMINI_3_0_FLASH",
+			thinkingLevel: "high",
+			want:          "MODEL_GOOGLE_GEMINI_3_0_FLASH_HIGH",
+		},
+		{
+			name:          "MODEL_CLAUDE_4_5_OPUS default maps to MODEL_CLAUDE_4_5_OPUS",
+			rawModel:      "devin/MODEL_CLAUDE_4_5_OPUS",
+			thinkingLevel: "",
+			want:          "MODEL_CLAUDE_4_5_OPUS",
+		},
+		{
+			name:          "MODEL_CLAUDE_4_5_OPUS with high maps to MODEL_CLAUDE_4_5_OPUS_THINKING",
+			rawModel:      "devin/MODEL_CLAUDE_4_5_OPUS",
+			thinkingLevel: "high",
+			want:          "MODEL_CLAUDE_4_5_OPUS_THINKING",
+		},
 	}
 
 	for _, tt := range tests {
@@ -467,7 +593,7 @@ func TestResolveDevinChatModelUID_AllCatalogModels(t *testing.T) {
 			}
 			// If model defines thinking levels, resolved UID must have an effort suffix
 			if m.Thinking != nil && len(m.Thinking.Levels) > 0 {
-				if !HasDevinEffortSuffix(resolved) && baseID != "swe-1-7" && baseID != "glm-5-2" && baseID != "swe-1-6-slow" {
+				if !HasDevinEffortSuffix(resolved) && baseID != "swe-1-7" && baseID != "glm-5-2" && baseID != "glm-5-2-1m" && baseID != "swe-1-6-slow" && baseID != "model_claude_4_5_opus" {
 					t.Errorf("thinking model %q with effort %q resolved to bare UID %q without effort suffix", baseID, eff, resolved)
 				}
 			}

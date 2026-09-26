@@ -252,8 +252,10 @@ func modelSectionChanged(a, b []*ModelInfo) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != nil && b[i] != nil && !reflect.DeepEqual(a[i].NativeCapabilities, b[i].NativeCapabilities) {
-			return true
+		if a[i] != nil && b[i] != nil {
+			if !reflect.DeepEqual(a[i].NativeCapabilities, b[i].NativeCapabilities) || a[i].SupportConfigurationUpdate != b[i].SupportConfigurationUpdate {
+				return true
+			}
 		}
 	}
 	aj, err1 := json.Marshal(a)

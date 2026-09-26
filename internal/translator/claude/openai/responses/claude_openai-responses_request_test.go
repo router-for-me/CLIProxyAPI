@@ -285,6 +285,32 @@ func TestConvertOpenAIResponsesRequestToClaude_ReasoningContentTextRebuildsThink
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaude_SummarySetsThinkingDisplay(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary string
+		want    string
+	}{
+		{name: "auto", summary: `"summary":"auto"`, want: "summarized"},
+		{name: "concise", summary: `"summary":"concise"`, want: "summarized"},
+		{name: "none", summary: `"summary":"none"`, want: "omitted"},
+		{name: "absent", summary: "", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reasoning := `"effort":"high"`
+			if test.summary != "" {
+				reasoning += "," + test.summary
+			}
+			raw := []byte(`{"model":"claude-opus-5-5","reasoning":{` + reasoning + `},"input":"hi"}`)
+			out := ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", raw, false)
+			if got := gjson.GetBytes(out, "thinking.display").String(); got != test.want {
+				t.Fatalf("thinking.display = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_SummaryWinsOverDuplicatedReasoningContent(t *testing.T) {
 	rawSignature, _ := testClaudeResponsesThinkingSignature(t)
 	raw := []byte(`{

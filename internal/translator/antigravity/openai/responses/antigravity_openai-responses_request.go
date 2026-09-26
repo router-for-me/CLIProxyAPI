@@ -194,15 +194,16 @@ func enableAntigravityResponsesThinkingSummary(inputRawJSON, translated []byte) 
 	if effortVal == "" || effortVal == "none" {
 		return translated
 	}
-	for _, path := range []string{"reasoning.summary", "reasoning.generate_summary"} {
-		if value := gjson.GetBytes(inputRawJSON, path); value.Raw != "" {
-			return translated
+	summaryConfig := thinking.ExtractSummaryConfig(inputRawJSON, "openai-response")
+	if summaryConfig.Mode == thinking.SummaryUnspecified {
+		// When effort is set but summary visibility is omitted, enable summaries
+		// by default so Antigravity emits visible thought parts (#5508).
+		summaryConfig = thinking.SummaryConfig{
+			Mode:   thinking.SummaryEnabled,
+			Detail: "auto",
 		}
 	}
-	return thinking.ApplySummaryConfig(translated, "antigravity", thinking.SummaryConfig{
-		Mode:   thinking.SummaryEnabled,
-		Detail: "auto",
-	})
+	return thinking.ApplySummaryConfig(translated, "antigravity", summaryConfig)
 }
 
 type antigravityClaudeReasoningSignature struct {

@@ -14,6 +14,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codex"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -863,6 +866,39 @@ func TestUsageReporterSetTranslatedReasoningEffortCodexConfigurationUpdate(t *te
 	record := reporter.buildRecord(usage.Detail{TotalTokens: 10}, false)
 	if record.ReasoningEffort != "low" {
 		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "low")
+	}
+}
+
+func TestUsageReporterSetTranslatedReasoningEffortConfigurationUpdateAfterCleanup(t *testing.T) {
+	const source = `{"reasoning":{"effort":"xhigh"},"input":[{"type":"configuration_update","reasoning":{"effort":"medium"}},{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`
+	for _, tc := range []struct {
+		name      string
+		supported bool
+		want      string
+	}{
+		{name: "supported target reports effective update", supported: true, want: "low"},
+		{name: "unsupported target reports cleaned suffix", want: "high"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := "opaque-route(high)"
+			requestEffort := thinking.ExtractReasoningEffort([]byte(source), "openai-response", model)
+			if requestEffort != "low" {
+				t.Fatalf("request effort = %q, want low", requestEffort)
+			}
+			info := &registry.ModelInfo{
+				ID: "opaque-route", Type: "codex", SupportConfigurationUpdate: tc.supported,
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+			}
+			body, err := thinking.ApplyThinkingWithModelInfoAndSummary([]byte(source), []byte(source), model, "openai-response", "codex", "codex", info, thinking.SummaryConfig{})
+			if err != nil {
+				t.Fatalf("ApplyThinkingWithModelInfoAndSummary() error = %v", err)
+			}
+			reporter := NewUsageReporter(usage.WithReasoningEffort(context.Background(), requestEffort), "codex", model, nil)
+			reporter.SetTranslatedReasoningEffort(body, "codex")
+			if got := reporter.buildRecord(usage.Detail{TotalTokens: 10}, false).ReasoningEffort; got != tc.want {
+				t.Fatalf("final usage effort = %q, want %q; body=%s", got, tc.want, body)
+			}
+		})
 	}
 }
 

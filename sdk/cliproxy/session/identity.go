@@ -2,7 +2,6 @@
 package session
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -227,10 +226,13 @@ func DerivedID(metadata map[string]any) string {
 }
 
 // Enrich derives a session identity once and places it in both request and option metadata.
+// When opts.OriginalRequest is unset, it shares req.Payload as the read-only original request
+// baseline to avoid multi-megabyte allocations on large payloads. Callers that mutate req.Payload
+// in-place after Enrich must explicitly provide an independent opts.OriginalRequest.
 func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	payload := opts.OriginalRequest
 	if len(payload) == 0 && len(req.Payload) > 0 {
-		opts.OriginalRequest = bytes.Clone(req.Payload)
+		opts.OriginalRequest = req.Payload
 		payload = opts.OriginalRequest
 	}
 	executionID := firstNormalizedMetadataID(cliproxyexecutor.ExecutionSessionMetadataKey, opts.Metadata, req.Metadata)
@@ -385,12 +387,12 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 	}
 	// Parsing without copying matters here: this runs on every request and the
 	// payload can be multiple megabytes.
-	root := util.ParseGJSONBytesNoCopy(payload)
+	root := newSessionObject(util.ParseGJSONBytesNoCopy(payload))
 	reqRoot := root
 	req := root.Get("request")
 	hasNestedReq := req.Exists() && !root.Get("contents").Exists()
 	if hasNestedReq {
-		reqRoot = req
+		reqRoot = newSessionObject(req)
 	}
 	for _, path := range []string{
 		"session_id",
