@@ -1524,7 +1524,7 @@ func isConnectionLifecycleError(err error) bool {
 	var closeErr *websocket.CloseError
 	if errors.As(err, &closeErr) && closeErr != nil {
 		switch closeErr.Code {
-		case websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure:
+		case websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseServiceRestart:
 			return true
 		}
 	}
@@ -1567,6 +1567,11 @@ func isConnectionLifecycleMessage(message string) bool {
 	if strings.Contains(lower, "websocket: close 1000") ||
 		strings.Contains(lower, "websocket: close 1001") ||
 		strings.Contains(lower, "websocket: close 1006") {
+		return true
+	}
+	// A service restart closes a connection; it does not invalidate the credential.
+	// Match the numeric token rather than a prefix such as 10120.
+	if _, tail, found := strings.Cut(lower, "websocket: close 1012"); found && (tail == "" || strings.ContainsRune(" ():;\t\r\n", rune(tail[0]))) {
 		return true
 	}
 	// Wrapped transport EOF phrasing (e.g. "read tcp ...: unexpected EOF").

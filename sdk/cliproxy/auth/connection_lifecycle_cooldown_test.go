@@ -28,6 +28,7 @@ func TestManager_MarkResult_ConnectionLifecycleDoesNotCooldown(t *testing.T) {
 	}{
 		{name: "websocket 1000", err: &Error{Message: "websocket: close 1000 (normal)"}},
 		{name: "websocket 1001", err: &Error{Message: "websocket: close 1001 (going away)"}},
+		{name: "websocket 1012", err: &Error{Message: "websocket: close 1012"}},
 		{name: "websocket 1006", err: &Error{Message: "websocket: close 1006 (abnormal closure): unexpected EOF"}},
 		{name: "context canceled", err: &Error{Message: "context canceled"}},
 		{name: "context deadline exceeded", err: &Error{Message: "context deadline exceeded"}},
@@ -215,6 +216,9 @@ func TestResultErrorFromError_ConnectionLifecycleDoesNotBecomeRequestScoped(t *t
 		&url.Error{Op: "Post", URL: "https://example.com", Err: context.DeadlineExceeded},
 		&websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "normal"},
 		&websocket.CloseError{Code: websocket.CloseGoingAway, Text: "bye"},
+		&websocket.CloseError{Code: websocket.CloseServiceRestart},
+		fmt.Errorf("wrapped: %w", &websocket.CloseError{Code: websocket.CloseServiceRestart}),
+		errors.New("websocket: close 1012"),
 		&websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"},
 		fmt.Errorf("upstream read: %w", &websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "unexpected EOF"}),
 		fmt.Errorf("wrap: %w", io.ErrUnexpectedEOF),
