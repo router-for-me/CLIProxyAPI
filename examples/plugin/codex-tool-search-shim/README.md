@@ -159,6 +159,9 @@ Verified by repository tests on 2026-09-26:
   name);
 - Windows `c-shared` cross-build with `mingw-w64 14.0.0_3`, producing a
   `PE32+ x86-64` DLL with the expected plugin entry points;
+- Windows DLL actual loading under Wine 10.0 (Debian trixie, `x86_64`),
+  returning `abi=1 register_status=0 response_bytes=2803 has_name=1` with
+  exit code 0;
 - host model-list capability metadata tests;
 - dynamic-library build and pluginhost load/interceptor/lifecycle validation.
 
@@ -166,7 +169,6 @@ Not yet verified by this review:
 
 - real provider/model search quality or upstream acceptance (the Codex runs
   used a local mock Chat upstream);
-- Windows dynamic-library loading;
 - actual prompt-token or usage reduction.
 
 Unverified transports and platforms are not claimed as supported.
