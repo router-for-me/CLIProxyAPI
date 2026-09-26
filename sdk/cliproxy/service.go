@@ -72,6 +72,12 @@ type Service struct {
 	// discoveryManager manages local network mDNS / DNS-SD service advertising.
 	discoveryManager *discoveryAdvertiserManager
 
+	// compatDiscoveryOnce guards lazy creation of compatDiscoveryState.
+	compatDiscoveryOnce sync.Once
+
+	// compatDiscoveryState caches models discovered from OpenAI-compatible providers.
+	compatDiscoveryState *compatDiscoveryState
+
 	// serverErr channel for server startup/shutdown errors.
 	serverErr chan error
 

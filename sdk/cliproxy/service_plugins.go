@@ -206,7 +206,7 @@ func (s *Service) runModelRegistrationTasks(ctx context.Context, tasks []modelRe
 		otherTasks = append(otherTasks, task)
 	}
 
-	compatCache := s.newOpenAICompatibilityRegistrationCache()
+	compatCache := s.newOpenAICompatibilityRegistrationCache(ctx)
 	s.runModelRegistrationTaskPhase(ctx, configAPIKeyTasks, compatCache)
 	s.runModelRegistrationTaskPhase(ctx, otherTasks, compatCache)
 }

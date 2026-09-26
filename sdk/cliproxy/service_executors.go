@@ -28,7 +28,7 @@ type openAICompatibilityRegistrationEntry struct {
 	models      []*ModelInfo
 }
 
-func (s *Service) newOpenAICompatibilityRegistrationCache() *openAICompatibilityRegistrationCache {
+func (s *Service) newOpenAICompatibilityRegistrationCache(ctx context.Context) *openAICompatibilityRegistrationCache {
 	if s == nil {
 		return nil
 	}
@@ -56,7 +56,7 @@ func (s *Service) newOpenAICompatibilityRegistrationCache() *openAICompatibility
 		}
 		entry := &openAICompatibilityRegistrationEntry{
 			providerKey: util.OpenAICompatibleProviderKey(providerName),
-			models:      buildOpenAICompatibilityConfigModels(compat),
+			models:      s.compatModelsWithDiscovery(ctx, compat),
 		}
 		cache.byIndex[i] = entry
 		if _, exists := cache.byName[key]; !exists {

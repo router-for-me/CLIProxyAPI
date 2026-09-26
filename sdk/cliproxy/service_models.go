@@ -222,7 +222,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 					return false
 				}
 				isCompatAuth = true
-				ms := buildOpenAICompatibilityConfigModels(compat)
+				ms := s.compatModelsWithDiscovery(ctx, compat)
 				if providerKey == "" {
 					providerKey = "openai-compatibility"
 				}

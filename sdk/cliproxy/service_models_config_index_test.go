@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"context"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -12,7 +13,7 @@ func TestOpenAICompatibilityRegistrationCacheUsesConfigIndex(t *testing.T) {
 		{Name: "shared", Models: []config.OpenAICompatibilityModel{{Name: "first"}}},
 		{Name: "shared", Models: []config.OpenAICompatibilityModel{{Name: "second"}}},
 	}}}
-	cache := service.newOpenAICompatibilityRegistrationCache()
+	cache := service.newOpenAICompatibilityRegistrationCache(context.Background())
 	auth := &coreauth.Auth{Attributes: map[string]string{
 		coreauth.AttributeSource:      "config:shared[token-1]",
 		coreauth.AttributeConfigIndex: "1",
