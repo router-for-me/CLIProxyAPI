@@ -310,6 +310,10 @@ func TestValidateUpstreamProviderRequestRoutingStrategy(t *testing.T) {
 	}
 }
 
+// intPtr is a small package-level helper for pointer-to-int literals in DTO
+// tests (distinct from the local closures inside individual test functions).
+func intPtr(v int) *int { return &v }
+
 func TestUpstreamProviderErrorResponseEntryNameConflictIsSafe(t *testing.T) {
 	const secretValue = "entry-secret-must-not-appear"
 	recorder := httptest.NewRecorder()
@@ -564,14 +568,15 @@ func TestToUpstreamProviderCarriesAutoDisableFields(t *testing.T) {
 	}
 
 	// Provider-level auto-disable config decodes and maps into the store row.
-	if len(req.AutoDisableErrorCodes) != 2 || req.AutoDisableErrorCodes[0] != "401" || req.AutoDisableErrorCodes[1] != "account_suspended" {
+	if req.AutoDisableErrorCodes == nil || len(*req.AutoDisableErrorCodes) != 2 ||
+		(*req.AutoDisableErrorCodes)[0] != "401" || (*req.AutoDisableErrorCodes)[1] != "account_suspended" {
 		t.Fatalf("decoded AutoDisableErrorCodes = %#v, want [401 account_suspended]", req.AutoDisableErrorCodes)
 	}
 	if req.AutoDisableCooldownSeconds == nil || *req.AutoDisableCooldownSeconds != 3600 {
 		t.Fatalf("decoded AutoDisableCooldownSeconds = %#v, want pointer to 3600", req.AutoDisableCooldownSeconds)
 	}
 	row := toUpstreamProvider(&req)
-	if len(row.AutoDisableErrorCodes) != len(req.AutoDisableErrorCodes) || row.AutoDisableErrorCodes[0] != "401" {
+	if len(row.AutoDisableErrorCodes) != len(*req.AutoDisableErrorCodes) || row.AutoDisableErrorCodes[0] != "401" {
 		t.Fatalf("store row AutoDisableErrorCodes = %#v, want [401 account_suspended]", row.AutoDisableErrorCodes)
 	}
 	if row.AutoDisableCooldownSeconds == nil || *row.AutoDisableCooldownSeconds != 3600 {
@@ -641,24 +646,34 @@ func TestToUpstreamProviderCarriesAutoDisableFields(t *testing.T) {
 }
 
 // TestToUpstreamProviderOmitsAutoDisableFieldsWhenAbsent verifies the absent
-// fields decode as nil/false (not zero pointers) so the store's COALESCE
-// preserve-on-absent stays intact for legacy PUT bodies that never mention the
-// auto-disable feature.
+// provider-level auto-disable fields decode to nil (PRESERVE path) so a legacy
+// PUT that never mentions the feature cannot wipe configured codes/cooldown —
+// including a legacy PUT that DOES carry api_key_entries (the reviewer-flagged
+// regression: entry-bearing providers are exactly the ones with configured
+// codes). A no-entry claude-only body is too shallow; the entries path must
+// also preserve nil.
 func TestToUpstreamProviderOmitsAutoDisableFieldsWhenAbsent(t *testing.T) {
-	req := upstreamProviderReq{ProviderType: "claude-api-key"}
+	// Legacy PUT with entries but NO auto provider keys: codes/cooldown must be
+	// nil on the store row (PRESERVE), not zero/empty (which would wipe).
+	req := upstreamProviderReq{
+		ProviderType:  "openai-compatibility",
+		APIKeyEntries: []upstreamProviderEntryReq{{ID: 1, APIKey: "k", MaxConcurrent: intPtr(2)}},
+	}
 	row := toUpstreamProvider(&req)
 	if row.AutoDisableCooldownSeconds != nil {
-		t.Fatalf("absent AutoDisableCooldownSeconds = %#v, want nil", row.AutoDisableCooldownSeconds)
+		t.Fatalf("absent AutoDisableCooldownSeconds = %#v, want nil (preserve)", row.AutoDisableCooldownSeconds)
 	}
-	if len(row.AutoDisableErrorCodes) != 0 {
-		t.Fatalf("absent AutoDisableErrorCodes = %#v, want empty", row.AutoDisableErrorCodes)
+	if row.AutoDisableErrorCodes != nil {
+		t.Fatalf("absent AutoDisableErrorCodes = %#v, want nil (preserve)", row.AutoDisableErrorCodes)
 	}
-	entry := row.APIKeyEntries // empty: no entry decode path
-	if entry != nil && len(entry) != 0 {
-		t.Fatalf("absent entries = %#v, want empty", entry)
+	if len(row.APIKeyEntries) != 1 {
+		t.Fatalf("absent-field entries = %d, want 1", len(row.APIKeyEntries))
 	}
-	// An entry present without the new fields must decode nil concurrency and
-	// zero auto flags (never stale values).
+	if row.APIKeyEntries[0].MaxConcurrent == nil || *row.APIKeyEntries[0].MaxConcurrent != 2 {
+		t.Fatalf("entry concurrency not mapped alongside absent provider codes: %#v", row.APIKeyEntries[0].MaxConcurrent)
+	}
+	// An entry present without the NEW entry-level fields must decode nil
+	// concurrency and zero auto flags (never stale values).
 	req2 := upstreamProviderReq{ProviderType: "openai-compatibility", APIKeyEntries: []upstreamProviderEntryReq{{APIKey: "k"}}}
 	row2 := toUpstreamProvider(&req2)
 	e := row2.APIKeyEntries[0]
@@ -667,5 +682,39 @@ func TestToUpstreamProviderOmitsAutoDisableFieldsWhenAbsent(t *testing.T) {
 	}
 	if e.AutoDisabled || e.AutoDisabledReason != "" || e.AutoDisabledAt != nil {
 		t.Fatalf("entry with absent fields auto flags = %#v, want zero", e)
+	}
+}
+
+// TestToUpstreamProviderExplicitEmptyCodesIsClearPath pins the pointer DTO
+// semantics that make "cleared" distinguishable from "absent": a PUT carrying
+// auto_disable_error_codes: [] (the dashboard after the operator removed every
+// code) must decode to a NON-NIL empty slice and map to a non-nil store slice
+// (=> binds '{}' => store COALESCE clears), NOT nil (=> binds NULL => store
+// preserves). Same for an explicit 0 cooldown.
+func TestToUpstreamProviderExplicitEmptyCodesIsClearPath(t *testing.T) {
+	clearPayload := `{"provider_type":"openai-compatibility","api_key_entries":[{"id":1,"api_key":"k"}],
+		"auto_disable_error_codes": [],"auto_disable_cooldown_seconds": 0}`
+	var req upstreamProviderReq
+	if err := json.Unmarshal([]byte(clearPayload), &req); err != nil {
+		t.Fatalf("decode clear-path request: %v", err)
+	}
+	if req.AutoDisableErrorCodes == nil {
+		t.Fatal("auto_disable_error_codes: [] decoded to nil; want non-nil empty slice (clear path)")
+	}
+	if len(*req.AutoDisableErrorCodes) != 0 {
+		t.Fatalf("decoded empty codes = %#v, want length 0", *req.AutoDisableErrorCodes)
+	}
+	if req.AutoDisableCooldownSeconds == nil || *req.AutoDisableCooldownSeconds != 0 {
+		t.Fatalf("decoded cooldown = %#v, want pointer to 0", req.AutoDisableCooldownSeconds)
+	}
+	row := toUpstreamProvider(&req)
+	if row.AutoDisableErrorCodes == nil {
+		t.Fatal("store row AutoDisableErrorCodes nil from explicit []; want non-nil empty (clears via '{}')")
+	}
+	if len(row.AutoDisableErrorCodes) != 0 {
+		t.Fatalf("store row empty codes = %#v, want length 0", row.AutoDisableErrorCodes)
+	}
+	if row.AutoDisableCooldownSeconds == nil || *row.AutoDisableCooldownSeconds != 0 {
+		t.Fatalf("store row cooldown = %#v, want pointer to 0", row.AutoDisableCooldownSeconds)
 	}
 }

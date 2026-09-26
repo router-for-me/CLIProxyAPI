@@ -1575,3 +1575,100 @@ func TestUpstreamProviderStoreAutoDisableColumnsRoundTrip(t *testing.T) {
 		t.Fatalf("empty codes re-read = %#v, want empty slice", emptyLoaded.AutoDisableErrorCodes)
 	}
 }
+
+// TestUpstreamProviderStoreAutoDisableProviderCoalesce pins the Update-path
+// preserve/clear contract for the provider-level auto-disable config (the
+// reviewer-flagged defect: a sparse/legacy PUT must not wipe codes/cooldown,
+// while an explicit clear must). The DTO pointer (nil=absent) + COALESCE on
+// the Update SQL mean:
+//
+//   - codes/cooldown nil on the store struct → binds NULL → COALESCE preserves
+//   - codes empty-but-present ([]string{}) → marshalTextArray binds '{}' →
+//     COALESCE passes it through → clears; cooldown 0 → binds 0 → clears
+//
+// This is exactly the dashboard round-trip: a save carries the current codes
+// (non-nil), and an operator clearing every code sends []. A legacy PUT omits
+// the keys and must be a no-op.
+func TestUpstreamProviderStoreAutoDisableProviderCoalesce(t *testing.T) {
+	pg := newTestPostgresStore(t, "upstream_auto_disable_provider_coalesce")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+
+	src := NewUpstreamProviderStore(pg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	codes := []string{"401", "403"}
+	cooldown := 3600
+	created, err := src.Create(ctx, UpstreamProvider{
+		ProviderType:               "openai-compatibility",
+		Name:                       "coalesce-rt",
+		AutoDisableErrorCodes:      codes,
+		AutoDisableCooldownSeconds: &cooldown,
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{APIKey: "coalesce-secret", Name: "alpha"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	entryID := created.APIKeyEntries[0].ID
+
+	// Sparse PUT (legacy/non-dashboard): provider-level codes/cooldown omitted
+	// (nil on the store struct — the DTO pointer is nil), but entries present.
+	// The stored config must be PRESERVED, not wiped.
+	sparse, err := src.Update(ctx, UpstreamProvider{
+		ID:           created.ID,
+		ProviderType: "openai-compatibility",
+		Name:         "coalesce-rt",
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: entryID, APIKey: "coalesce-secret", Name: "alpha"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("sparse Update: %v", err)
+	}
+	if sparse.AutoDisableErrorCodes == nil || len(sparse.AutoDisableErrorCodes) != len(codes) ||
+		sparse.AutoDisableErrorCodes[0] != codes[0] || sparse.AutoDisableErrorCodes[1] != codes[1] {
+		t.Fatalf("sparse Update wiped codes: got %#v, want %#v preserved", sparse.AutoDisableErrorCodes, codes)
+	}
+	if sparse.AutoDisableCooldownSeconds == nil || *sparse.AutoDisableCooldownSeconds != cooldown {
+		t.Fatalf("sparse Update wiped cooldown: got %#v, want pointer to %d preserved", sparse.AutoDisableCooldownSeconds, cooldown)
+	}
+
+	// Explicit clear: PUT carrying an empty-but-present codes slice + cooldown 0
+	// (the operator removed every code / set 0) must CLEAR the stored config.
+	cleared, err := src.Update(ctx, UpstreamProvider{
+		ID:                         created.ID,
+		ProviderType:               "openai-compatibility",
+		Name:                       "coalesce-rt",
+		AutoDisableErrorCodes:      []string{},
+		AutoDisableCooldownSeconds: intPtr(0),
+		APIKeyEntries: []UpstreamProviderAPIKey{
+			{ID: entryID, APIKey: "coalesce-secret", Name: "alpha"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("clear Update: %v", err)
+	}
+	if cleared.AutoDisableErrorCodes == nil || len(cleared.AutoDisableErrorCodes) != 0 {
+		t.Fatalf("explicit [] did not clear codes: got %#v, want non-nil empty", cleared.AutoDisableErrorCodes)
+	}
+	if cleared.AutoDisableCooldownSeconds == nil || *cleared.AutoDisableCooldownSeconds != 0 {
+		t.Fatalf("explicit 0 did not clear cooldown: got %#v, want pointer to 0", cleared.AutoDisableCooldownSeconds)
+	}
+
+	// Re-read from the DB to prove the clear actually persisted (the Update
+	// RETURNING row already reflects it, but the raw scan is the authoritative
+	// check that '{}'/0 landed, not a COALESCE-masked projection).
+	reloaded, err := src.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get after clear: %v", err)
+	}
+	if reloaded.AutoDisableErrorCodes == nil || len(reloaded.AutoDisableErrorCodes) != 0 {
+		t.Fatalf("Get after clear codes = %#v, want non-nil empty", reloaded.AutoDisableErrorCodes)
+	}
+	if reloaded.AutoDisableCooldownSeconds == nil || *reloaded.AutoDisableCooldownSeconds != 0 {
+		t.Fatalf("Get after clear cooldown = %#v, want pointer to 0", reloaded.AutoDisableCooldownSeconds)
+	}
+}

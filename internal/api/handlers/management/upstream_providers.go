@@ -123,8 +123,18 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 		ExtraConfig:                body.ExtraConfig,
 		Headers:                    body.Headers,
 		ExcludedModels:             body.ExcludedModels,
-		AutoDisableErrorCodes:      body.AutoDisableErrorCodes,
 		AutoDisableCooldownSeconds: body.AutoDisableCooldownSeconds,
+	}
+	if body.AutoDisableErrorCodes != nil {
+		// Copy so the store struct owns its slice. nil DTO pointer => store nil
+		// (absent => preserve); non-nil (incl. empty []string{}) => store non-nil
+		// slice (explicit clear / write path binds '{}'). append onto nil would
+		// keep an empty source nil, so build a length-0 non-nil slice for the
+		// empty case to keep "cleared" distinct from "absent".
+		src := *body.AutoDisableErrorCodes
+		codes := make([]string, len(src))
+		copy(codes, src)
+		p.AutoDisableErrorCodes = codes
 	}
 	if body.CloakCacheUserID != nil {
 		v := *body.CloakCacheUserID

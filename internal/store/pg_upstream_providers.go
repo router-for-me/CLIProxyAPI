@@ -385,6 +385,18 @@ func (s *pgUpstreamProviderStore) Create(ctx context.Context, p UpstreamProvider
 
 // Update replaces the mutable fields and child collections of an existing
 // row within one tx.
+//
+// auto_disable_error_codes / auto_disable_cooldown_seconds are written through
+// COALESCE so an ABSENT value (nil on the store struct => marshalTextArray(nil)
+// binds SQL NULL, nullableInt(nil) binds NULL) preserves the configured config,
+// while an EXPLICITLY CLEARED value (empty-but-present []string{} binds '{}',
+// or an explicit 0) passes through COALESCE and clears. The management DTO
+// carries a pointer for the codes so "omitted from the PUT" stays distinct
+// from "sent as []" — a legacy/non-dashboard PUT never wipes provider-level
+// auto-disable config, and a dashboard save always round-trips exactly what is
+// shown. The per-entry auto columns in syncAPIKeyEntriesTx are always-written
+// (false/nil/empty clears) for the Re-enable contract — do not reintroduce
+// COALESCE there.
 func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider) (*UpstreamProvider, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store: upstream providers store not initialized")
@@ -446,8 +458,8 @@ func (s *pgUpstreamProviderStore) Update(ctx context.Context, p UpstreamProvider
 			token_expired = $31,
 			token_scope = $32,
 			extra_config = $33,
-			auto_disable_error_codes = $34,
-			auto_disable_cooldown_seconds = $35,
+			auto_disable_error_codes = COALESCE($34::text[], auto_disable_error_codes),
+			auto_disable_cooldown_seconds = COALESCE($35::integer, auto_disable_cooldown_seconds),
 			updated_at = NOW()
 		WHERE id = $36
 		RETURNING id, provider_type, name, priority, disabled, routing_strategy, circuit_breaker, prefix, api_key,

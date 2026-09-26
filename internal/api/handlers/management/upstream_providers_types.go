@@ -49,8 +49,11 @@ type upstreamProviderReq struct {
 	TokenScope              string         `json:"token_scope,omitempty"`
 	ExtraConfig             map[string]any `json:"extra_config,omitempty"`
 	// AutoDisableErrorCodes lists the upstream error codes that auto-disable an
-	// entry (rendered onto the provider row). Empty = feature off.
-	AutoDisableErrorCodes []string `json:"auto_disable_error_codes,omitempty"`
+	// entry (rendered onto the provider row). A pointer with omitempty keeps
+	// "absent from the PUT" (nil → store preserves existing codes) distinct
+	// from "explicitly cleared" (non-nil, possibly empty slice → store clears).
+	// Empty-but-present = feature on with no codes yet.
+	AutoDisableErrorCodes *[]string `json:"auto_disable_error_codes,omitempty"`
 	// AutoDisableCooldownSeconds is the auto-re-enable cooldown. nil = manual
 	// re-enable only.
 	AutoDisableCooldownSeconds *int `json:"auto_disable_cooldown_seconds,omitempty"`
