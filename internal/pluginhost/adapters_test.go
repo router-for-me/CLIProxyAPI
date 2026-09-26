@@ -64,6 +64,16 @@ func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T)
 	if got.Thinking == nil {
 		t.Fatal("Thinking = nil, want converted thinking support")
 	}
+	if !got.ExplicitThinking || !got.ExplicitInputModalities {
+		t.Fatal("plugin declarations must constrain matching Codex templates")
+	}
+	if got.MaxContextLength != int(model.ContextLength) {
+		t.Fatal("plugin context must override a matching Codex template")
+	}
+	unknown := pluginModelInfoToRegistryModelInfo(pluginapi.ModelInfo{ID: "unknown"})
+	if unknown.ExplicitThinking || unknown.ExplicitInputModalities {
+		t.Fatal("absent plugin metadata must remain unspecified")
+	}
 	if got.Thinking.Min != 1 || got.Thinking.Max != 2 || !got.Thinking.ZeroAllowed || !got.Thinking.DynamicAllowed || fmt.Sprint(got.Thinking.Levels) != "[low high]" {
 		t.Fatalf("Thinking = %#v, want copied thinking support", got.Thinking)
 	}
