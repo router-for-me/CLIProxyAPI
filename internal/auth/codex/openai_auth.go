@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
@@ -33,6 +34,7 @@ const (
 // It manages the HTTP client and provides methods for generating authorization URLs,
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
+	cfg        *config.Config
 	httpClient *http.Client
 }
 
@@ -57,8 +59,18 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
 	return &CodexAuth{
+		cfg:        cfg,
 		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
 	}
+}
+
+func (o *CodexAuth) effectiveUserAgent() string {
+	if o != nil && o.cfg != nil && o.cfg.Codex.DisableCodexCloaking {
+		if ua := strings.TrimSpace(o.cfg.CodexHeaderDefaults.UserAgent); ua != "" {
+			return ua
+		}
+	}
+	return constant.DefaultCodexUserAgent
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).
@@ -120,6 +132,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", o.effectiveUserAgent())
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
@@ -225,6 +238,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", o.effectiveUserAgent())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {

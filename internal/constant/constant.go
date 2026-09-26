@@ -27,4 +27,7 @@ const (
 
 	// Interactions represents the Google Interactions API format identifier.
 	Interactions = "interactions"
+
+	// DefaultCodexUserAgent represents the canonical User-Agent for official Codex clients.
+	DefaultCodexUserAgent = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
 )

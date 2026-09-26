@@ -128,7 +128,7 @@ func main() {
 
 	fmt.Printf("Using auth: id=%s label=%s\n", chosen.ID, chosen.Label)
 
-	accessToken, refreshed, err := ensureAccessToken(ctx, fileStore, chosen)
+	accessToken, refreshed, err := ensureAccessToken(ctx, cfg, fileStore, chosen)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to prepare codex access token: %v\n", err)
 		os.Exit(1)
@@ -178,7 +178,7 @@ func findCodexAuth(auths []*coreauth.Auth) *coreauth.Auth {
 	return nil
 }
 
-func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth *coreauth.Auth) (string, bool, error) {
+func ensureAccessToken(ctx context.Context, cfg *config.Config, store *sdkauth.FileTokenStore, auth *coreauth.Auth) (string, bool, error) {
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	if accessToken != "" {
 		if expiresAt, ok := auth.ExpirationTime(); !ok || time.Now().Add(accessTokenRefreshLeeway).Before(expiresAt) {
@@ -194,7 +194,7 @@ func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth 
 		return "", false, fmt.Errorf("missing access_token and refresh_token")
 	}
 
-	svc := codexauth.NewCodexAuthWithProxyURL(nil, auth.ProxyURL)
+	svc := codexauth.NewCodexAuthWithProxyURL(cfg, auth.ProxyURL)
 	tokenData, errRefresh := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if errRefresh != nil {
 		return "", false, errRefresh
