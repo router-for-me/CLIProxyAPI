@@ -130,6 +130,49 @@ func (f *fakeUpstreamProviderStore) SetEntryAutoDisabled(ctx context.Context, en
 	return false, nil
 }
 
+// ReenableExpiredAutoDisabled stubs the auto-re-enable sweeper primitive. The
+// sweeper has its own dedicated stub (auto_disable_sweeper_test.go); this fake
+// needs the method only to satisfy the UpstreamProviderStore interface. It
+// re-enables a real auto-disabled (auto_disabled=true, not manually disabled)
+// entry whose cooldown has elapsed, mirroring the store's sweep semantics.
+func (f *fakeUpstreamProviderStore) ReenableExpiredAutoDisabled(ctx context.Context) (int64, error) {
+	if f == nil {
+		return 0, nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fails != nil {
+		return 0, f.fails
+	}
+	var reenabled int64
+	for id, p := range f.rows {
+		changed := false
+		for i := range p.APIKeyEntries {
+			e := &p.APIKeyEntries[i]
+			if !e.AutoDisabled {
+				continue
+			}
+			cd := p.AutoDisableCooldownSeconds
+			if cd == nil || *cd <= 0 {
+				continue // manual re-enable only
+			}
+			if e.AutoDisabledAt == nil || !e.AutoDisabledAt.Before(time.Now().Add(-time.Duration(*cd)*time.Second)) {
+				continue // cooldown not yet elapsed
+			}
+			e.AutoDisabled = false
+			e.Disabled = false
+			e.AutoDisabledAt = nil
+			e.AutoDisabledReason = ""
+			changed = true
+			reenabled++
+		}
+		if changed {
+			f.rows[id] = p
+		}
+	}
+	return reenabled, nil
+}
+
 // newSeedModelsHandler builds a Handler with the fake store wired, plus a
 // POST helper targeting /upstream-providers/:id/<action>.
 func newSeedModelsHandler(t *testing.T, st *fakeUpstreamProviderStore) *Handler {

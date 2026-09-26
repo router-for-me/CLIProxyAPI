@@ -202,6 +202,12 @@ type UpstreamProviderStore interface {
 	// disable). Entry IDs are globally unique across providers, so the entryID
 	// alone keys the update.
 	SetEntryAutoDisabled(ctx context.Context, entryID int64, code string) (bool, error)
+	// ReenableExpiredAutoDisabled is the auto-re-enable sweeper's persistence
+	// primitive (Fitur 2 re-enable side): it clears the auto-disabled runtime
+	// flags on every entry whose auto_disabled_at has passed the provider-
+	// configured cooldown, returning the number of rows re-enabled. Manually
+	// disabled entries (disabled=true, auto_disabled=false) are never touched.
+	ReenableExpiredAutoDisabled(ctx context.Context) (int64, error)
 }
 
 // pgUpstreamProviderStore implements UpstreamProviderStore against the

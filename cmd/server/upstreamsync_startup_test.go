@@ -31,6 +31,17 @@ func (s startupUpstreamProviderStore) Count(context.Context) (int64, error) {
 	return int64(len(s.providers)), nil
 }
 
+// SetEntryAutoDisabled / ReenableExpiredAutoDisabled satisfy the
+// UpstreamProviderStore interface for the startup-render unit test; the
+// auto-disable/auto-re-enable primitives are exercised against live PG in the
+// store package's own round-trips.
+func (startupUpstreamProviderStore) SetEntryAutoDisabled(context.Context, int64, string) (bool, error) {
+	return false, nil
+}
+func (startupUpstreamProviderStore) ReenableExpiredAutoDisabled(context.Context) (int64, error) {
+	return 0, nil
+}
+
 func TestApplyPersistedUpstreamProvidersRendersClaudeRowIdentity(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if errWrite := os.WriteFile(configPath, []byte("{}\n"), 0o600); errWrite != nil {

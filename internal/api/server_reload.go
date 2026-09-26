@@ -204,6 +204,11 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		if s.handlers.AuthManager != nil {
 			s.handlers.AuthManager.SetAutoDisableSink(s.mgmt.AutoDisableSink())
 		}
+		// The auto-re-enable sweeper is deliberately NOT re-attached here: it is
+		// started once at boot (server.go) against the same Handler and store
+		// instance, and a reload never replaces either — its tick reads the live
+		// PG store and renders through the same Handler, so a reload needs no
+		// sweeper restart. Re-attaching would risk stacking a second goroutine.
 	}
 	s.refreshPluginManagementRoutes()
 

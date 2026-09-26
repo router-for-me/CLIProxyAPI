@@ -42,7 +42,11 @@ func newAutoDisableSink(persist autoDisablePersister, render renderUpstreamProvi
 			return
 		}
 		go func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.WithField("panic", r).Error("auto-disable: sink panicked")
+				}
+			}()
 			wctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			changed, err := persist.SetEntryAutoDisabled(wctx, ev.EntryID, ev.Code)
@@ -83,6 +87,24 @@ func (h *Handler) AutoDisableSink() coreauth.AutoDisableSink {
 	return newAutoDisableSink(upstream, func() {
 		// Fire-and-forget beyond the write: the re-render takes its own path
 		// and must NOT hold h.mu (applyUpstreamProviders re-acquires it).
+		h.applyUpstreamProviders(context.Background())
+	})
+}
+
+// ReenableSweeper returns a production auto-re-enable sweeper wired to the
+// configured PG upstream-provider store, or a nil-pg sweeper when PG is absent
+// (the caller may construct/start it unconditionally — its ticks then no-op).
+// The render step re-renders config from PG so a re-enabled entry drops back
+// into routing; it is Handler.applyUpstreamProviders, which must NOT be called
+// while h.mu is held — the sweeper goroutine never acquires h.mu.
+func (h *Handler) ReenableSweeper() *AutoDisableSweeper {
+	if h == nil {
+		return NewAutoDisableSweeper(nil, nil)
+	}
+	h.mu.Lock()
+	pg := h.pgUpstreamProviders
+	h.mu.Unlock()
+	return NewAutoDisableSweeper(pg, func() {
 		h.applyUpstreamProviders(context.Background())
 	})
 }

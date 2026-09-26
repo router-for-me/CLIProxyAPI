@@ -112,6 +112,13 @@ type Server struct {
 	// pgStores, when non-nil, exposes the PG-backed stores to the management
 	// API handlers so /api-keys-pg, /usage-stats, and /models-catalog work.
 	pgStores *PgStoreHandles
+
+	// autoDisableSweeper is the background auto-re-enable sweeper for
+	// auto-disabled upstream-provider API-key entries whose cooldown elapsed.
+	// Constructed and started at boot (server.go) alongside the auto-disable
+	// sink; its ticks are a no-op when PG is not configured. Stopped during
+	// shutdown (Stop) so the goroutine cannot outlive the server.
+	autoDisableSweeper *managementHandlers.AutoDisableSweeper
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -293,6 +300,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		if s.handlers.AuthManager != nil {
 			s.handlers.AuthManager.SetAutoDisableSink(s.mgmt.AutoDisableSink())
 		}
+		// Start the auto-re-enable sweeper: it periodically clears the runtime
+		// auto-disable flags on entries whose provider cooldown elapsed so they
+		// drop back into routing. Constructed here (like AutoDisableSink) so it
+		// tracks the same store; its ticks are a harmless no-op when PG is
+		// absent. It is stopped on server shutdown (see Stop).
+		s.autoDisableSweeper = s.mgmt.ReenableSweeper()
+		s.autoDisableSweeper.Start()
 		// Surface persisted official_provider values in auth-selection errors.
 		s.handlers.SetModelsCatalogStore(store.NewModelsCatalogResolver(handles.Models))
 		// Wire the per-model-id global routing override (pinned providers +
@@ -499,6 +513,13 @@ func (s *Server) Start() error {
 //   - error: An error if the server fails to stop
 func (s *Server) Stop(ctx context.Context) error {
 	log.Debug("Stopping API server...")
+
+	// Stop the auto-re-enable sweeper first so an in-flight re-enable sweep +
+	// re-render cannot race the config/clients teardown below. Idempotent and
+	// safe when the sweeper was never started (no PG).
+	if s.autoDisableSweeper != nil {
+		s.autoDisableSweeper.Stop()
+	}
 
 	if s.keepAliveEnabled {
 		select {
