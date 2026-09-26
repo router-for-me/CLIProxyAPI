@@ -33,14 +33,14 @@ func TestExtractClaudeCodeSessionIDFromHeader(t *testing.T) {
 func TestClaudeCodePromptCacheStableAcrossRequests(t *testing.T) {
 	ctx := context.Background()
 	payload := []byte(`{"metadata":{"user_id":"{\"session_id\":\"cache-session-2\"}"}}`)
-	first, ok, err := ClaudeCodePromptCache(ctx, "grok-composer-2.5-fast", payload, nil)
+	first, ok, err := ClaudeCodePromptCache(ctx, "grok-composer-2.5-fast", payload, nil, false)
 	if err != nil {
 		t.Fatalf("ClaudeCodePromptCache first error: %v", err)
 	}
 	if !ok || first.ID == "" {
 		t.Fatalf("ClaudeCodePromptCache first = %#v, ok=%v, want cached id", first, ok)
 	}
-	second, ok, err := ClaudeCodePromptCache(ctx, "grok-composer-2.5-fast", payload, nil)
+	second, ok, err := ClaudeCodePromptCache(ctx, "grok-composer-2.5-fast", payload, nil, false)
 	if err != nil {
 		t.Fatalf("ClaudeCodePromptCache second error: %v", err)
 	}
@@ -103,20 +103,54 @@ func TestClaudeCodePromptCacheDeterministicAndAgentScoped(t *testing.T) {
 	childHeaders := rootHeaders.Clone()
 	childHeaders.Set(ClaudeCodeAgentHeader, "agent-a")
 
-	rootFirst, ok, errFirst := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, rootHeaders)
+	rootFirst, ok, errFirst := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, rootHeaders, false)
 	if errFirst != nil || !ok {
 		t.Fatalf("root first cache = %#v, %v, %v", rootFirst, ok, errFirst)
 	}
-	rootSecond, ok, errSecond := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, rootHeaders)
+	rootSecond, ok, errSecond := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, rootHeaders, false)
 	if errSecond != nil || !ok || rootSecond.ID != rootFirst.ID {
 		t.Fatalf("root second cache = %#v, %v, %v; want ID %q", rootSecond, ok, errSecond, rootFirst.ID)
 	}
-	child, ok, errChild := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, childHeaders)
+	child, ok, errChild := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, childHeaders, false)
 	if errChild != nil || !ok || child.ID == rootFirst.ID {
 		t.Fatalf("child cache = %#v, %v, %v; root ID %q", child, ok, errChild, rootFirst.ID)
 	}
-	otherModel, ok, errModel := ClaudeCodePromptCache(context.Background(), "gpt-5.5", nil, rootHeaders)
+	otherModel, ok, errModel := ClaudeCodePromptCache(context.Background(), "gpt-5.5", nil, rootHeaders, false)
 	if errModel != nil || !ok || otherModel.ID == rootFirst.ID {
 		t.Fatalf("other model cache = %#v, %v, %v; root ID %q", otherModel, ok, errModel, rootFirst.ID)
+	}
+}
+
+func TestClaudeCodePromptCacheSharedAcrossAgents(t *testing.T) {
+	agentHeaders := func(sessionID, agentID string) http.Header {
+		headers := http.Header{}
+		headers.Set(ClaudeCodeSessionHeader, sessionID)
+		headers.Set(ClaudeCodeAgentHeader, agentID)
+		return headers
+	}
+	cacheID := func(headers http.Header, shared bool) string {
+		t.Helper()
+		cache, ok, err := ClaudeCodePromptCache(context.Background(), "gpt-5.4", nil, headers, shared)
+		if err != nil || !ok || cache.ID == "" {
+			t.Fatalf("ClaudeCodePromptCache(shared=%v) = %#v, %v, %v", shared, cache, ok, err)
+		}
+		return cache.ID
+	}
+	agentA := agentHeaders("session-shared", "agent-a")
+	agentB := agentHeaders("session-shared", "agent-b")
+
+	for _, shared := range []bool{true, false} {
+		a, b := cacheID(agentA, shared), cacheID(agentB, shared)
+		if (a == b) != shared {
+			t.Fatalf("shared=%v: agent-a=%q agent-b=%q, want equal=%v", shared, a, b, shared)
+		}
+	}
+	if a, other := cacheID(agentA, true), cacheID(agentHeaders("session-other", "agent-a"), true); a == other {
+		t.Fatalf("different sessions share a cache ID %q", a)
+	}
+	scopeA, _ := ClaudeCodeExecutionScope(context.Background(), nil, agentA)
+	scopeB, _ := ClaudeCodeExecutionScope(context.Background(), nil, agentB)
+	if scopeA != "claude:session-shared:agent:agent-a" || scopeA == scopeB {
+		t.Fatalf("execution scopes must stay agent-qualified: a=%q b=%q", scopeA, scopeB)
 	}
 }

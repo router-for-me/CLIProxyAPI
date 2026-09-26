@@ -115,7 +115,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		if modelName == "" {
 			modelName = thinking.ParseSuffix(req.Model).ModelName
 		}
-		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, headers)
+		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, headers, codexClaudeCodeSharedPromptCache(e.cfg))
 		if errCache != nil {
 			return nil, nil, codexIdentityConfuseState{}, errCache
 		}
@@ -278,6 +278,10 @@ func codexIdentityConfuseEnabled(cfg *config.Config) bool {
 	}
 	strategy := strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy))
 	return cfg.Routing.SessionAffinity || strategy == "fill-first" || strategy == "fillfirst" || strategy == "ff"
+}
+
+func codexClaudeCodeSharedPromptCache(cfg *config.Config) bool {
+	return cfg != nil && cfg.Codex.ClaudeCodeSharedPromptCache
 }
 
 func codexIdentityConfuseUUID(authID string, kind string, value string) string {

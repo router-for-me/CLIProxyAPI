@@ -384,11 +384,45 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 		t.Fatalf("resolved model key fragmented by request alias: first=%q alias=%q", childKey, aliasKey)
 	}
 
-	websocketBody, _, errWebsocket := applyCodexPromptCacheHeadersWithContext(context.Background(), sdktranslator.FromString("claude"), aliasReq, rawJSON, childHeaders)
+	websocketBody, _, errWebsocket := applyCodexPromptCacheHeadersWithContext(context.Background(), sdktranslator.FromString("claude"), aliasReq, rawJSON, false, childHeaders)
 	if errWebsocket != nil {
 		t.Fatalf("websocket prompt cache error: %v", errWebsocket)
 	}
 	if websocketKey := gjson.GetBytes(websocketBody, "prompt_cache_key").String(); websocketKey != childKey {
 		t.Fatalf("HTTP/WebSocket prompt keys differ: http=%q websocket=%q", childKey, websocketKey)
+	}
+}
+
+func TestCodexExecutorCacheHelper_ClaudeCodeSharedPromptCacheAcrossAgents(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}]}`),
+	}
+	rawJSON := []byte(`{"model":"gpt-5.4","stream":true}`)
+
+	for _, shared := range []bool{true, false} {
+		executor := NewCodexExecutor(&config.Config{Codex: config.CodexConfig{ClaudeCodeSharedPromptCache: shared}})
+		keys := map[string]string{}
+		for _, agentID := range []string{"agent-a", "agent-b"} {
+			headers := http.Header{}
+			headers.Set(helps.ClaudeCodeSessionHeader, "shared-cache-session")
+			headers.Set(helps.ClaudeCodeAgentHeader, agentID)
+			httpReq, _, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("claude"), "https://example.com/responses", nil, req, req.Payload, rawJSON, headers)
+			if err != nil {
+				t.Fatalf("shared=%v %s: cacheHelper error: %v", shared, agentID, err)
+			}
+			body, errRead := io.ReadAll(httpReq.Body)
+			if errRead != nil {
+				t.Fatalf("read body: %v", errRead)
+			}
+			key := gjson.GetBytes(body, "prompt_cache_key").String()
+			if key == "" || httpReq.Header.Get("Session-Id") != key {
+				t.Fatalf("shared=%v %s: prompt_cache_key=%q Session-Id=%q, want equal and non-empty", shared, agentID, key, httpReq.Header.Get("Session-Id"))
+			}
+			keys[agentID] = key
+		}
+		if (keys["agent-a"] == keys["agent-b"]) != shared {
+			t.Fatalf("shared=%v: agent-a=%q agent-b=%q, want equal=%v", shared, keys["agent-a"], keys["agent-b"], shared)
+		}
 	}
 }

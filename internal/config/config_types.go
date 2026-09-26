@@ -215,6 +215,12 @@ type CodexConfig struct {
 	// ModelLevelCooling scopes Codex usage_limit_reached quota cooldowns to the requested model
 	// rather than cooling down the entire credential across all sibling models.
 	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
+	// ClaudeCodeSharedPromptCache keys the prompt_cache_key derived for Claude Code requests on the
+	// session instead of the session and agent. Subagents send a byte-identical system and tools
+	// prefix, so they can reuse the prefix their siblings warmed; the key is only a routing hint,
+	// so a prefix that differs just misses. It pays off only when siblings land on the same
+	// credential, i.e. with routing session affinity.
+	ClaudeCodeSharedPromptCache bool `yaml:"claude-code-shared-prompt-cache" json:"claude-code-shared-prompt-cache"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one

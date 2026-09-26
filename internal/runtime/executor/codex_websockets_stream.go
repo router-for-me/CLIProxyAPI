@@ -808,7 +808,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 		return nil, err
 	}
 
-	body, wsHeaders, errPromptCache := applyCodexPromptCacheHeadersWithContext(ctx, from, req, body, opts.Headers)
+	body, wsHeaders, errPromptCache := applyCodexPromptCacheHeadersWithContext(ctx, from, req, body, codexClaudeCodeSharedPromptCache(e.cfg), opts.Headers)
 	if errPromptCache != nil {
 		return nil, errPromptCache
 	}

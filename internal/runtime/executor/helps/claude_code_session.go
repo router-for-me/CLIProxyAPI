@@ -116,13 +116,21 @@ func extractClaudeCodeSessionIDFromPayload(payload []byte) string {
 	return ""
 }
 
-// ClaudeCodePromptCache derives a deterministic upstream prompt_cache_key for one Claude Code agent.
-func ClaudeCodePromptCache(ctx context.Context, modelName string, payload []byte, headers http.Header) (CodexCache, bool, error) {
+// ClaudeCodePromptCache derives a deterministic upstream prompt_cache_key for one Claude Code agent,
+// or for the whole session when sharedAcrossAgents is set.
+func ClaudeCodePromptCache(ctx context.Context, modelName string, payload []byte, headers http.Header, sharedAcrossAgents bool) (CodexCache, bool, error) {
 	modelName = strings.TrimSpace(modelName)
-	executionScope, ok := ClaudeCodeExecutionScope(ctx, payload, headers)
+	var scope string
+	var ok bool
+	if sharedAcrossAgents {
+		sessionID := ExtractClaudeCodeSessionID(ctx, payload, headers)
+		scope, ok = "claude:"+sessionID, sessionID != ""
+	} else {
+		scope, ok = ClaudeCodeExecutionScope(ctx, payload, headers)
+	}
 	if modelName == "" || !ok {
 		return CodexCache{}, false, nil
 	}
-	identity := strings.Join([]string{"cli-proxy-api:codex:claude-code", modelName, executionScope}, "\x00")
+	identity := strings.Join([]string{"cli-proxy-api:codex:claude-code", modelName, scope}, "\x00")
 	return CodexCache{ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()}, true, nil
 }

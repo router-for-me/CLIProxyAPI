@@ -19,6 +19,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -3402,5 +3403,84 @@ func TestCodexWebsockets_SendErrorLogsSessionObject(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "reason=send_error") {
 		t.Fatalf("expected reason=send_error in log output, got: %s", logOutput)
+	}
+}
+
+func TestCodexWebsocketsClaudeCodeSharedPromptCacheAcrossAgents(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		shared bool
+		stream bool
+	}{
+		{name: "execute_shared", shared: true},
+		{name: "stream_shared", shared: true, stream: true},
+		{name: "execute_per_agent"},
+		{name: "stream_per_agent", stream: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			type captured struct{ key, sessionID, conversationID string }
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			captures := make(chan captured, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+				if errUpgrade != nil {
+					t.Errorf("upgrade websocket: %v", errUpgrade)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_, payload, errRead := conn.ReadMessage()
+				if errRead != nil {
+					t.Errorf("read upstream websocket message: %v", errRead)
+					return
+				}
+				captures <- captured{
+					key:            gjson.GetBytes(payload, "prompt_cache_key").String(),
+					sessionID:      helps.HeaderValueCaseInsensitive(r.Header, "session_id"),
+					conversationID: helps.HeaderValueCaseInsensitive(r.Header, "Conversation_id"),
+				}
+				completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+				if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+					t.Errorf("write completed websocket message: %v", errWrite)
+				}
+			}))
+			defer server.Close()
+
+			exec := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ClaudeCodeSharedPromptCache: tc.shared}})
+			auth := &cliproxyauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+			req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}]}`)}
+
+			var got []captured
+			for _, agentID := range []string{"agent-a", "agent-b"} {
+				headers := http.Header{}
+				headers.Set(helps.ClaudeCodeSessionHeader, "ws-shared-cache-session")
+				headers.Set(helps.ClaudeCodeAgentHeader, agentID)
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude"), Headers: headers}
+				if tc.stream {
+					result, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream(%s) error = %v", agentID, errStream)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("ExecuteStream(%s) chunk error = %v", agentID, chunk.Err)
+						}
+					}
+				} else if _, errExecute := exec.Execute(context.Background(), auth, req, opts); errExecute != nil {
+					t.Fatalf("Execute(%s) error = %v", agentID, errExecute)
+				}
+				select {
+				case c := <-captures:
+					if c.key == "" || c.sessionID != c.key || c.conversationID != c.key {
+						t.Fatalf("%s: prompt_cache_key=%q session_id=%q Conversation_id=%q, want equal and non-empty", agentID, c.key, c.sessionID, c.conversationID)
+					}
+					got = append(got, c)
+				case <-time.After(5 * time.Second):
+					t.Fatalf("timed out waiting for %s upstream websocket payload", agentID)
+				}
+			}
+			if (got[0].key == got[1].key) != tc.shared {
+				t.Fatalf("agent-a=%q agent-b=%q, want equal=%v", got[0].key, got[1].key, tc.shared)
+			}
+		})
 	}
 }
