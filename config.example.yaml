@@ -113,6 +113,34 @@ discovery:
 # Existing native flags/routes and higher-priority plugin flags/routes cannot be replaced.
 # Plugin list Management API reads Logo and ConfigFields from plugin metadata for management UI display.
 # Per-plugin enabled only controls plugins.configs.<pluginID>.enabled and does not implicitly change global plugins.enabled.
+# Core Responses client tool protocol handling (tool_search discovery and custom
+# tools). Disabled by default; enabling with no routes keeps legacy behavior
+# everywhere. Each route binds strategies to one exact upstream route (no
+# wildcards). The core and the legacy codex-tool-search-shim example plugin
+# must not be enabled together.
+#responses-tools:
+#  enabled: false
+#  limits:
+#    max-active-tool-bytes: 262144
+#    max-active-attempts: 512
+#    max-state-bytes: 33554432
+#    max-attempt-bytes: 1048576
+#    max-schema-expansion-bytes: 65536
+#    max-schema-expansion-nodes: 10000
+#    max-depth: 64
+#  routes:
+#    - match:
+#        provider: "codex"
+#        auth-kind: "oauth"
+#        upstream-model: "gpt-5.6"
+#        upstream-format: "codex"
+#      client-search: "bridge" # inherit | native | bridge | disabled
+#      custom-tools: "function" # inherit | native | function | strip | reject
+#      custom-grammar: "reject" # reject | describe (function mode only)
+#      schema:
+#        complete-search-required: false
+#        local-refs: "preserve" # preserve | inline
+
 plugins:
   enabled: false
   dir: "plugins"

@@ -1,0 +1,135 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/responsestools"
+)
+
+func TestResponsesToolsDefaultsKeepLegacyBehavior(t *testing.T) {
+	cfg := &Config{}
+	cfg.NormalizeResponsesToolsConfig()
+	if cfg.ResponsesTools.Enabled {
+		t.Fatalf("default must stay disabled")
+	}
+	limits := cfg.ResponsesTools.Limits
+	defaults := responsestools.DefaultLimits()
+	if limits.MaxActiveToolBytes != defaults.MaxActiveToolBytes ||
+		limits.MaxActiveAttempts != defaults.MaxActiveAttempts ||
+		limits.MaxStateBytes != defaults.MaxStateBytes ||
+		limits.MaxAttemptBytes != defaults.MaxAttemptBytes ||
+		limits.MaxSchemaExpansionBytes != defaults.MaxSchemaExpansionBytes ||
+		limits.MaxSchemaExpansionNodes != defaults.MaxSchemaExpansionNodes ||
+		limits.MaxDepth != defaults.MaxDepth {
+		t.Fatalf("limits not defaulted: %+v", limits)
+	}
+	if err := cfg.ValidateResponsesToolsConfig(); err != nil {
+		t.Fatalf("empty policy must validate: %v", err)
+	}
+	policy, err := cfg.ResponsesTools.Compile()
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if policy.Enabled || len(policy.Routes) != 0 {
+		t.Fatalf("empty policy must stay off")
+	}
+}
+
+func TestResponsesToolsInvalidEnumRejected(t *testing.T) {
+	cfg := &Config{}
+	cfg.ResponsesTools.Enabled = true
+	cfg.ResponsesTools.Routes = []ResponsesToolsRoute{{
+		Match:        ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"},
+		ClientSearch: "sometimes",
+		CustomTools:  "inherit",
+	}}
+	cfg.NormalizeResponsesToolsConfig()
+	if err := cfg.ValidateResponsesToolsConfig(); err == nil {
+		t.Fatalf("expected enum rejection")
+	}
+}
+
+func TestResponsesToolsOverlapRejected(t *testing.T) {
+	match := ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"}
+	cfg := &Config{}
+	cfg.ResponsesTools.Enabled = true
+	cfg.ResponsesTools.Routes = []ResponsesToolsRoute{
+		{Match: match, ClientSearch: "bridge", CustomTools: "function"},
+		{Match: match, ClientSearch: "bridge", CustomTools: "strip"},
+	}
+	cfg.NormalizeResponsesToolsConfig()
+	if err := cfg.ValidateResponsesToolsConfig(); err == nil {
+		t.Fatalf("expected overlap rejection")
+	}
+}
+
+func TestResponsesToolsLegacyShimMutuallyExclusive(t *testing.T) {
+	enabled := true
+	cfg := &Config{}
+	cfg.ResponsesTools.Enabled = true
+	cfg.ResponsesTools.Routes = []ResponsesToolsRoute{{
+		Match:        ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"},
+		ClientSearch: "bridge",
+		CustomTools:  "inherit",
+	}}
+	cfg.Plugins.Enabled = true
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"codex-tool-search-shim": {Enabled: &enabled},
+	}
+	cfg.NormalizeResponsesToolsConfig()
+	cfg.NormalizePluginsConfig()
+	if err := cfg.ValidateResponsesToolsConfig(); err == nil {
+		t.Fatalf("expected shim mutual exclusion")
+	}
+	disabled := false
+	cfg.Plugins.Configs["codex-tool-search-shim"] = PluginInstanceConfig{Enabled: &disabled}
+	if err := cfg.ValidateResponsesToolsConfig(); err != nil {
+		t.Fatalf("disabled shim must pass: %v", err)
+	}
+}
+
+func TestResponsesToolsYAMLRoundTrip(t *testing.T) {
+	document := "responses-tools:\n" +
+		"  enabled: true\n" +
+		"  limits:\n" +
+		"    max-active-tool-bytes: 100\n" +
+		"  routes:\n" +
+		"    - match:\n" +
+		"        provider: codex\n" +
+		"        auth-kind: oauth\n" +
+		"        upstream-model: m-x\n" +
+		"        upstream-format: codex\n" +
+		"      client-search: bridge\n" +
+		"      custom-tools: function\n"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.ResponsesTools.Enabled {
+		t.Fatalf("enabled lost")
+	}
+	if len(cfg.ResponsesTools.Routes) != 1 {
+		t.Fatalf("routes lost")
+	}
+	route := cfg.ResponsesTools.Routes[0]
+	if route.ClientSearch != "bridge" || route.CustomTools != "function" {
+		t.Fatalf("strategies lost: %+v", route)
+	}
+	if route.CustomGrammar != "reject" || route.Schema.LocalRefs != "preserve" {
+		t.Fatalf("strategy defaults lost: %+v", route)
+	}
+	cloned := cfg.CloneForRuntime()
+	if len(cloned.ResponsesTools.Routes) != 1 || !cloned.ResponsesTools.Enabled {
+		t.Fatalf("clone lost responses-tools")
+	}
+	cloned.ResponsesTools.Routes[0].ClientSearch = "native"
+	if cfg.ResponsesTools.Routes[0].ClientSearch != "bridge" {
+		t.Fatalf("clone shares route memory")
+	}
+}

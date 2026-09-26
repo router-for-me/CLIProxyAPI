@@ -1,0 +1,108 @@
+package responsestools
+
+import (
+	"sync"
+	"testing"
+)
+
+func TestLimiterAcquireAndRelease(t *testing.T) {
+	limiter := NewLimiter(Limits{MaxActiveToolBytes: 1024, MaxActiveAttempts: 2, MaxStateBytes: 2048, MaxAttemptBytes: 1024, MaxSchemaExpansionBytes: 512, MaxSchemaExpansionNodes: 100, MaxDepth: 8})
+	first, err := limiter.Acquire(100)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	second, err := limiter.Acquire(100)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if _, err := limiter.Acquire(100); err == nil {
+		t.Fatalf("expected capacity refusal at max attempts")
+	}
+	first.Close()
+	first.Close()
+	if _, err := limiter.Acquire(100); err != nil {
+		t.Fatalf("release must free a slot: %v", err)
+	}
+	second.Close()
+	if attempts, _ := limiter.Usage(); attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
+	}
+}
+
+func TestLimiterHotUpdateKeepsUsage(t *testing.T) {
+	limiter := NewLimiter(Limits{MaxActiveToolBytes: 1024, MaxActiveAttempts: 8, MaxStateBytes: 4096, MaxAttemptBytes: 2048, MaxSchemaExpansionBytes: 512, MaxSchemaExpansionNodes: 100, MaxDepth: 8})
+	lease, err := limiter.Acquire(1024)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer lease.Close()
+	lowered := DefaultLimits()
+	lowered.MaxActiveAttempts = 8
+	lowered.MaxStateBytes = 1025
+	limiter.UpdateLimits(lowered)
+	if _, bytes := limiter.Usage(); bytes != 1024 {
+		t.Fatalf("usage reset by hot update: %d", bytes)
+	}
+	if err := lease.Grow(1); err != nil {
+		t.Fatalf("existing lease must keep counting, got %v", err)
+	}
+	if err := lease.Grow(1024); err == nil {
+		t.Fatalf("growth past lowered quota must fail")
+	}
+}
+
+func TestLeaseConcurrentClose(t *testing.T) {
+	limiter := NewLimiter(DefaultLimits())
+	lease, err := limiter.Acquire(64)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lease.Close()
+		}()
+	}
+	wg.Wait()
+	if attempts, bytes := limiter.Usage(); attempts != 0 || bytes != 0 {
+		t.Fatalf("double close leaked: attempts=%d bytes=%d", attempts, bytes)
+	}
+}
+
+func TestValidateLimitsRejectsNonPositive(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxDepth = 0
+	if err := ValidateLimits(limits); err == nil {
+		t.Fatalf("expected rejection for zero limit")
+	}
+	limits = DefaultLimits()
+	limits.MaxStateBytes = -1
+	if err := ValidateLimits(limits); err == nil {
+		t.Fatalf("negative must never mean unlimited")
+	}
+	if err := ValidateLimits(DefaultLimits()); err != nil {
+		t.Fatalf("defaults must validate: %v", err)
+	}
+}
+
+func TestCompactContractDropsDeclarations(t *testing.T) {
+	contract := ParseContract([]byte("{\"tools\": [{\"type\": \"tool_search\"}], \"input\": [{\"type\": \"tool_search_output\", \"call_id\": \"c\", \"tools\": [{\"type\": \"function\", \"name\": \"big\"}]}]}"))
+	if contract == nil {
+		t.Fatalf("no contract")
+	}
+	if len(contract.Declarations) == 0 {
+		t.Fatalf("expected declarations")
+	}
+	compact := CompactContract(contract)
+	if len(compact.Declarations) != 0 {
+		t.Fatalf("compact must drop declaration payloads")
+	}
+	if len(compact.Identities) != len(contract.Identities) {
+		t.Fatalf("compact must keep identities")
+	}
+	if _, ok := compact.Resolve("big"); !ok {
+		t.Fatalf("compact must keep resolving")
+	}
+}

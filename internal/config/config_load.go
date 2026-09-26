@@ -201,6 +201,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// Normalize core Responses tools policy and reject invalid combinations,
+	// including simultaneous use with the legacy shim plugin.
+	cfg.NormalizeResponsesToolsConfig()
+	if errResponsesTools := cfg.ValidateResponsesToolsConfig(); errResponsesTools != nil {
+		return nil, errResponsesTools
+	}
+
 	// Return the populated configuration struct.
 	return &cfg, nil
 }
