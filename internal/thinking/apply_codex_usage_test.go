@@ -332,7 +332,7 @@ func suffixForTest(suffix string) string {
 	return "(" + suffix + ")"
 }
 
-func TestApplyThinkingLogsNativeResponsesBaseline(t *testing.T) {
+func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 	logger := log.StandardLogger()
 	previousLevel := logger.GetLevel()
 	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
@@ -343,49 +343,100 @@ func TestApplyThinkingLogsNativeResponsesBaseline(t *testing.T) {
 		logger.SetLevel(previousLevel)
 	})
 
-	body := []byte(`{"model":"gpt-6-sol","reasoning":{"effort":"max","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`)
-	for _, bound := range []bool{false, true} {
-		name := "registry lookup"
-		if bound {
-			name = "resolved model"
-		}
-		t.Run(name, func(t *testing.T) {
-			hook.Reset()
-			var applied []byte
-			var err error
-			if bound {
-				modelInfo := registry.LookupModelInfo("gpt-6-sol", "codex")
-				if modelInfo == nil || !modelInfo.SupportConfigurationUpdate {
-					t.Fatal("gpt-6-sol must support configuration updates")
+	tests := []struct {
+		name         string
+		body         string
+		wantEffort   string
+		wantLevel    thinking.ThinkingLevel
+		wantMode     thinking.ThinkingMode
+		wantBaseline thinking.ThinkingLevel
+	}{
+		{
+			name:       "update overrides top-level baseline",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"xhigh"}},{"role":"user","content":"ok"}]}`,
+			wantEffort: "xhigh", wantLevel: thinking.LevelXHigh, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
+		},
+		{
+			name:       "latest update wins",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"xhigh"}},{"type":"configuration_update","reasoning":{"effort":"max"}}]}`,
+			wantEffort: "max", wantLevel: thinking.LevelMax, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
+		},
+		{
+			name:       "trailing empty and nonstring updates keep last effective effort",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"xhigh"}},{"type":"configuration_update","reasoning":{"effort":null}},{"type":"configuration_update","reasoning":{"effort":42}},{"type":"configuration_update","reasoning":{"effort":"  "}}]}`,
+			wantEffort: "xhigh", wantLevel: thinking.LevelXHigh, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
+		},
+		{
+			name:       "top-level fallback without update",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"role":"user","content":"ok"}]}`,
+			wantEffort: "high", wantLevel: thinking.LevelHigh, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
+		},
+		{
+			name:       "update without top-level effort",
+			body:       `{"model":"gpt-6-sol","input":[{"type":"configuration_update","reasoning":{"effort":"xhigh"}}]}`,
+			wantEffort: "xhigh", wantLevel: thinking.LevelXHigh, wantMode: thinking.ModeLevel,
+		},
+		{
+			name:       "update disables thinking",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}}]}`,
+			wantEffort: "none", wantMode: thinking.ModeNone, wantBaseline: thinking.LevelHigh,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, bound := range []bool{false, true} {
+				name := "registry lookup"
+				if bound {
+					name = "resolved model"
 				}
-				applied, err = thinking.ApplyThinkingWithModelInfo(body, body, "gpt-6-sol", "codex", "codex", "codex", modelInfo)
-			} else {
-				applied, err = thinking.ApplyThinking(body, "gpt-6-sol", "codex", "codex", "codex")
-			}
-			if err != nil {
-				t.Fatalf("ApplyThinking() error = %v", err)
-			}
-			if !bytes.Equal(applied, body) {
-				t.Fatalf("native Responses body changed: got %s, want %s", applied, body)
-			}
-
-			for _, message := range []string{
-				"thinking: original config from request |",
-				"thinking: processed config to apply |",
-			} {
-				found := false
-				for _, entry := range hook.AllEntries() {
-					if entry.Level == log.DebugLevel && entry.Message == message &&
-						entry.Data["provider"] == "codex" && entry.Data["model"] == "gpt-6-sol" &&
-						entry.Data["mode"] == thinking.ModeLevel && entry.Data["budget"] == 0 &&
-						entry.Data["level"] == thinking.LevelMax {
-						found = true
-						break
+				t.Run(name, func(t *testing.T) {
+					hook.Reset()
+					body := []byte(tc.body)
+					var applied []byte
+					var err error
+					if bound {
+						modelInfo := registry.LookupModelInfo("gpt-6-sol", "codex")
+						if modelInfo == nil || !modelInfo.SupportConfigurationUpdate {
+							t.Fatal("gpt-6-sol must support configuration updates")
+						}
+						applied, err = thinking.ApplyThinkingWithModelInfo(body, body, "gpt-6-sol", "codex", "codex", "codex", modelInfo)
+					} else {
+						applied, err = thinking.ApplyThinking(body, "gpt-6-sol", "codex", "codex", "codex")
 					}
-				}
-				if !found {
-					t.Errorf("missing native Responses debug log %q with max baseline", message)
-				}
+					if err != nil {
+						t.Fatalf("ApplyThinking() error = %v", err)
+					}
+					if !bytes.Equal(applied, body) {
+						t.Fatalf("native Responses body changed: got %s, want %s", applied, body)
+					}
+					if got := thinking.ExtractTranslatedReasoningEffort(applied, "codex"); got != tc.wantEffort {
+						t.Errorf("effective effort = %q, want %q", got, tc.wantEffort)
+					}
+
+					for _, message := range []string{
+						"thinking: original config from request |",
+						"thinking: processed config to apply |",
+					} {
+						found := false
+						for _, entry := range hook.AllEntries() {
+							if entry.Message != message {
+								continue
+							}
+							found = true
+							if entry.Level != log.DebugLevel || entry.Data["provider"] != "codex" || entry.Data["model"] != "gpt-6-sol" ||
+								entry.Data["mode"] != tc.wantMode || entry.Data["budget"] != 0 || entry.Data["level"] != tc.wantLevel {
+								t.Errorf("unexpected native Responses log %q fields: %v", message, entry.Data)
+							}
+							baseline, hasBaseline := entry.Data["baseline_level"]
+							if tc.wantBaseline == "" && hasBaseline || tc.wantBaseline != "" && baseline != tc.wantBaseline {
+								t.Errorf("baseline_level = %v (present: %t), want %q", baseline, hasBaseline, tc.wantBaseline)
+							}
+						}
+						if !found {
+							t.Errorf("missing native Responses debug log %q", message)
+						}
+					}
+				})
 			}
 		})
 	}

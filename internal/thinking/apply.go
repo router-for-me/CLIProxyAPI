@@ -266,16 +266,20 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	}
 	if nativeResponses && !suffixResult.HasSuffix {
 		// Native Responses keeps the top-level baseline and in-turn updates as-is.
-		// Report the unchanged baseline without validating or rewriting the payload.
-		if modelInfo.Thinking != nil || modelInfo.UserDefined {
-			if config := extractCodexConfig(body); hasThinkingConfig(config) {
-				entry := log.WithFields(log.Fields{
+		// Log the effective effort without validating or rewriting the payload.
+		if log.IsLevelEnabled(log.DebugLevel) && (modelInfo.Thinking != nil || modelInfo.UserDefined) {
+			if config := extractCodexUsageConfig(body); hasThinkingConfig(config) {
+				fields := log.Fields{
 					"provider": providerFormat,
 					"model":    modelInfo.ID,
 					"mode":     config.Mode,
 					"budget":   config.Budget,
 					"level":    config.Level,
-				})
+				}
+				if baseline := extractCodexConfig(body); baseline.Mode == ModeLevel {
+					fields["baseline_level"] = baseline.Level
+				}
+				entry := log.WithFields(fields)
 				entry.Debug("thinking: original config from request |")
 				entry.Debug("thinking: processed config to apply |")
 			}
