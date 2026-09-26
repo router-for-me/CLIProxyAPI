@@ -12,7 +12,6 @@ import (
 
 func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *testing.T) {
 	now := time.Now()
-	sevenDayReset := now.Add(7 * 24 * time.Hour)
 
 	manager := NewManager(nil, nil, nil)
 
@@ -50,6 +49,18 @@ func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *te
 		Error:           &Error{HTTPStatus: http.StatusTooManyRequests, Message: "7d limit rejected"},
 	})
 
+	// The recorded deadline may be shorter than the advertised one, because an
+	// upstream hint is bounded locally. What must hold is that the concurrent
+	// success below neither clears it nor brings it forward.
+	recordedAuth, ok := manager.GetByID(auth.ID)
+	if !ok || recordedAuth == nil {
+		t.Fatal("auth not found after the quota failure")
+	}
+	recordedDeadline := recordedAuth.Quota.NextRecoverAt
+	if !recordedAuth.Quota.Exceeded || !recordedDeadline.After(now) {
+		t.Fatalf("quota failure did not record a live cooldown: quota=%+v", recordedAuth.Quota)
+	}
+
 	// 2. An earlier in-flight request on opus returns 200 OK after the 429
 	manager.MarkResult(context.Background(), Result{
 		AuthID:   auth.ID,
@@ -63,8 +74,8 @@ func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *te
 	if !ok || updatedAuth == nil {
 		t.Fatal("auth not found")
 	}
-	if !updatedAuth.Quota.Exceeded || !updatedAuth.Quota.NextRecoverAt.After(now.Add(6*24*time.Hour)) {
-		t.Fatalf("auth quota was cleared or shortened by concurrent success: quota=%+v", updatedAuth.Quota)
+	if !updatedAuth.Quota.Exceeded || updatedAuth.Quota.NextRecoverAt.Before(recordedDeadline) {
+		t.Fatalf("auth quota was cleared or shortened by concurrent success: quota=%+v want deadline >= %s", updatedAuth.Quota, recordedDeadline)
 	}
 
 	// Selecting any model on this credential must be blocked locally
@@ -73,8 +84,8 @@ func TestAuthManager_ConcurrentSuccessDoesNotClearActiveCredentialCooldown(t *te
 		if !blocked {
 			t.Fatalf("model %q was unblocked despite active 7d credential cooldown", m)
 		}
-		if reason != blockReasonCooldown || next.Before(sevenDayReset.Add(-time.Minute)) {
-			t.Fatalf("model %q block reason=%v next=%v, want cooldown ~7d", m, reason, next)
+		if reason != blockReasonCooldown || next.Before(recordedDeadline) {
+			t.Fatalf("model %q block reason=%v next=%v, want a cooldown no earlier than %s", m, reason, next, recordedDeadline)
 		}
 	}
 }
@@ -115,6 +126,17 @@ func TestAuthManager_UpdatePreservesActiveCredentialCooldown(t *testing.T) {
 		Error:           &Error{HTTPStatus: http.StatusTooManyRequests, Message: "7d limit rejected"},
 	})
 
+	// The recorded deadline may be shorter than the advertised hint, because an
+	// upstream hint is bounded locally. Update must preserve whatever was recorded.
+	beforeUpdate, ok := manager.GetByID(auth.ID)
+	if !ok || beforeUpdate == nil {
+		t.Fatal("auth not found after the quota failure")
+	}
+	recordedDeadline := beforeUpdate.Quota.NextRecoverAt
+	if !recordedDeadline.After(now) {
+		t.Fatalf("quota failure did not record a live cooldown: quota=%+v", beforeUpdate.Quota)
+	}
+
 	// Reload/update auth (e.g. config reload or token refresh)
 	updatedAuth := &Auth{
 		ID:       auth.ID,
@@ -131,8 +153,8 @@ func TestAuthManager_UpdatePreservesActiveCredentialCooldown(t *testing.T) {
 	if !ok || persistedAuth == nil {
 		t.Fatal("auth not found after update")
 	}
-	if !persistedAuth.Quota.Exceeded || persistedAuth.Quota.Reason != "credential_quota" || !persistedAuth.Quota.NextRecoverAt.After(now.Add(6*24*time.Hour)) {
-		t.Fatalf("credential cooldown was lost after Update: quota=%+v", persistedAuth.Quota)
+	if !persistedAuth.Quota.Exceeded || persistedAuth.Quota.Reason != "credential_quota" || persistedAuth.Quota.NextRecoverAt.Before(recordedDeadline) {
+		t.Fatalf("credential cooldown was lost after Update: quota=%+v want deadline >= %s", persistedAuth.Quota, recordedDeadline)
 	}
 
 	blocked, reason, _ := isAuthBlockedForModel(persistedAuth, "claude-3-5-sonnet-20241022", time.Now())
@@ -297,8 +319,19 @@ func TestAuthManager_CooldownPersistenceAcrossRestore(t *testing.T) {
 	if !ok || restoredAuth == nil {
 		t.Fatal("restored auth not found")
 	}
-	if !restoredAuth.Quota.Exceeded || restoredAuth.Quota.NextRecoverAt.Before(time.Now().Add(6*24*time.Hour)) {
-		t.Fatalf("restored auth quota was not preserved: quota=%+v", restoredAuth.Quota)
+	// Restore must reproduce whatever was persisted, whether or not the recorded
+	// deadline was bounded below the advertised hint.
+	var persistedDeadline time.Time
+	for _, record := range records {
+		if record.AuthID == auth.ID && record.NextRetryAfter.After(persistedDeadline) {
+			persistedDeadline = record.NextRetryAfter
+		}
+	}
+	if persistedDeadline.IsZero() {
+		t.Fatal("no persisted cooldown record for the auth")
+	}
+	if !restoredAuth.Quota.Exceeded || restoredAuth.Quota.NextRecoverAt.Before(persistedDeadline) {
+		t.Fatalf("restored auth quota was not preserved: quota=%+v want deadline >= %s", restoredAuth.Quota, persistedDeadline)
 	}
 }
 
