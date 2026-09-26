@@ -1630,3 +1630,89 @@ func TestHistoricalToolCallCollisionWithDeclaredTool(t *testing.T) {
 		t.Fatalf("expected reverse map for historical %q to be %q, got %q", histCallName, historicalName, got)
 	}
 }
+
+func TestConvertOpenAIRequestToCodexServiceTier(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantTier   string
+		wantExists bool
+		wantEffort string
+	}{
+		{
+			name:       "priority service tier preserved",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high","service_tier":"priority"}`,
+			wantTier:   "priority",
+			wantExists: true,
+			wantEffort: "high",
+		},
+		{
+			name:       "priority case-insensitive and trimmed",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low","service_tier":"  PRIORITY  "}`,
+			wantTier:   "priority",
+			wantExists: true,
+			wantEffort: "low",
+		},
+		{
+			name:       "fast service tier normalized to priority",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"fast"}`,
+			wantTier:   "priority",
+			wantExists: true,
+			wantEffort: "medium",
+		},
+		{
+			name:       "fast case-insensitive and trimmed",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"  Fast  "}`,
+			wantTier:   "priority",
+			wantExists: true,
+			wantEffort: "medium",
+		},
+		{
+			name:       "ultrafast service tier preserved",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"ultrafast"}`,
+			wantTier:   "ultrafast",
+			wantExists: true,
+			wantEffort: "medium",
+		},
+		{
+			name:       "default service tier omitted",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"default"}`,
+			wantExists: false,
+			wantEffort: "medium",
+		},
+		{
+			name:       "auto service tier omitted",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":"auto"}`,
+			wantExists: false,
+			wantEffort: "medium",
+		},
+		{
+			name:       "non-string service tier omitted",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}],"service_tier":1}`,
+			wantExists: false,
+			wantEffort: "medium",
+		},
+		{
+			name:       "absent service tier omitted",
+			body:       `{"model":"gpt-6-sol","messages":[{"role":"user","content":"hi"}]}`,
+			wantExists: false,
+			wantEffort: "medium",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertOpenAIRequestToCodex("gpt-6-sol", []byte(tt.body), true)
+			tierRes := gjson.GetBytes(out, "service_tier")
+			if tierRes.Exists() != tt.wantExists {
+				t.Fatalf("service_tier exists = %v, want %v; payload=%s", tierRes.Exists(), tt.wantExists, out)
+			}
+			if tt.wantExists && tierRes.String() != tt.wantTier {
+				t.Fatalf("service_tier = %q, want %q; payload=%s", tierRes.String(), tt.wantTier, out)
+			}
+			if gotEffort := gjson.GetBytes(out, "reasoning.effort").String(); gotEffort != tt.wantEffort {
+				t.Fatalf("reasoning.effort = %q, want %q; payload=%s", gotEffort, tt.wantEffort, out)
+			}
+		})
+	}
+}
