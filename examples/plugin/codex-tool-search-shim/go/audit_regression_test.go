@@ -165,6 +165,34 @@ func TestAuditAmbiguousAliasDoesNotResolveToAnotherTool(t *testing.T) {
 	}
 }
 
+func TestAuditPromotionCleanupPreservesLookalikeEagerTool(t *testing.T) {
+	body := []byte(`{
+		"tools":[{"type":"tool_search","execution":"client","parameters":{"type":"object"}}],
+		"input":[{"type":"tool_search_output","call_id":"s1","execution":"client","tools":[
+			{"type":"function","name":"discovered","parameters":{"type":"object"}}
+		]}]
+	}`)
+	catalog := extractToolCatalog(body)
+	if catalog == nil {
+		t.Fatal("extractToolCatalog() = nil")
+	}
+	root := map[string]any{
+		"tools": []any{
+			map[string]any{"type": "function", "name": "cts_" + strings.Repeat("0", 48), "parameters": map[string]any{"type": "object"}},
+		},
+	}
+	if _, errInject := injectDiscoveredTools(root, catalog); errInject != nil {
+		t.Fatalf("injectDiscoveredTools() error = %v", errInject)
+	}
+	tools := root["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("tools = %#v, want eager lookalike and discovered alias", tools)
+	}
+	if name := tools[0].(map[string]any)["name"]; name != "cts_"+strings.Repeat("0", 48) {
+		t.Fatalf("lookalike eager tool = %#v", name)
+	}
+}
+
 func TestAuditStrictAdditionalToolsAndExpansionBudget(t *testing.T) {
 	input := []byte(`{"input":[{"type":"additional_tools","tools":[
 		{"type":"tool_search","execution":"client","parameters":{

@@ -33,6 +33,9 @@ type toolCatalog struct {
 	identities      []toolIdentity
 	declarations    map[toolIdentity]json.RawMessage
 	discovered      map[toolIdentity]struct{}
+	discoveredRound map[toolIdentity]int
+	latestRound     int
+	pendingRound    int
 	clientSearch    bool
 	serverSearch    bool
 	searchBridge    bool
@@ -54,12 +57,14 @@ type requestPolicy struct {
 	prune       bool
 	native      bool
 	bridgeKnown bool
+	config      resolvedPluginConfig
 }
 
 func newToolCatalog() *toolCatalog {
 	return &toolCatalog{
 		declarations:    make(map[toolIdentity]json.RawMessage),
 		discovered:      make(map[toolIdentity]struct{}),
+		discoveredRound: make(map[toolIdentity]int),
 		exact:           make(map[string]toolIdentity),
 		normalized:      make(map[string]toolIdentity),
 		local:           make(map[string]toolIdentity),
@@ -77,11 +82,24 @@ func newToolCatalog() *toolCatalog {
 // client-executed tool_search declarations, tool_search_call items and
 // tool_search_output items.
 func isResponsesFormat(format string) bool {
+	return isResponsesFormatWithConfig(format, configuredPluginConfig())
+}
+
+func isResponsesFormatWithConfig(format string, config resolvedPluginConfig) bool {
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "openai-response", "openai-responses", "responses", "response", "codex":
 		return true
 	}
-	return configuredExtraSourceFormat(format)
+	trimmed := strings.ToLower(strings.TrimSpace(format))
+	if trimmed == "" {
+		return false
+	}
+	for _, value := range config.extraSourceFormats {
+		if strings.EqualFold(value, trimmed) {
+			return true
+		}
+	}
+	return false
 }
 
 // requestPolicyFor decides how one interception phase treats a request.
@@ -97,22 +115,23 @@ func requestPolicyFor(kind, sourceFormat, toFormat string) requestPolicy {
 func requestPolicyForModels(kind, sourceFormat, toFormat string, models ...string) requestPolicy {
 	kind = strings.TrimSpace(kind)
 	to := strings.ToLower(strings.TrimSpace(toFormat))
+	config := configuredPluginConfig()
 
 	// Before-auth has no selected upstream format. Do not rewrite until the
 	// after-auth hook has identified a non-Responses upstream.
 	if kind == "request_before" && to == "" {
-		return requestPolicy{bridgeKnown: false}
+		return requestPolicy{bridgeKnown: false, config: config}
 	}
-	if !isResponsesFormat(sourceFormat) {
-		return requestPolicy{bridgeKnown: true}
+	if !isResponsesFormatWithConfig(sourceFormat, config) {
+		return requestPolicy{bridgeKnown: true, config: config}
 	}
-	if isResponsesFormat(toFormat) {
-		if bridgeNativeModelMatches(models...) {
-			return requestPolicy{bridge: true, prune: true, native: true, bridgeKnown: true}
+	if isResponsesFormatWithConfig(toFormat, config) {
+		if exactModelMatches(config.bridgeNativeModels, models...) {
+			return requestPolicy{bridge: true, prune: true, native: true, bridgeKnown: true, config: config}
 		}
-		return requestPolicy{native: true, bridgeKnown: true}
+		return requestPolicy{native: true, bridgeKnown: true, config: config}
 	}
-	return requestPolicy{bridge: true, prune: true, bridgeKnown: true}
+	return requestPolicy{bridge: true, prune: true, bridgeKnown: true, config: config}
 }
 
 func extractToolCatalog(body []byte) *toolCatalog {
@@ -136,7 +155,7 @@ func extractToolCatalog(body []byte) *toolCatalog {
 	case map[string]any:
 		catalog.collectToolArray(root["tools"], "", sourceDeclared)
 		if input, ok := root["input"].([]any); ok {
-			for _, raw := range input {
+			for inputIndex, raw := range input {
 				item, ok := raw.(map[string]any)
 				if !ok {
 					continue
@@ -145,6 +164,7 @@ func extractToolCatalog(body []byte) *toolCatalog {
 				case "additional_tools":
 					catalog.collectToolArray(item["tools"], "", sourceDeclared)
 				case "tool_search_output":
+					catalog.pendingRound = inputIndex + 1
 					catalog.collectToolArray(item["tools"], "", sourceDiscovered)
 					catalog.markClientSearch(item)
 				case "tool_search_call":
@@ -258,6 +278,12 @@ func (c *toolCatalog) addDiscoveredDeclaration(namespace, name string, tool map[
 	}
 	c.declarations[identity] = raw
 	c.discovered[identity] = struct{}{}
+	if c.pendingRound > 0 {
+		c.discoveredRound[identity] = c.pendingRound
+		if c.pendingRound > c.latestRound {
+			c.latestRound = c.pendingRound
+		}
+	}
 }
 
 func (c *toolCatalog) collectDeferredMetadata(tool map[string]any) {
@@ -518,7 +544,8 @@ func (c *toolCatalog) resolve(name string) (toolIdentity, bool) {
 }
 
 func restoreFunctionCallIdentity(item map[string]any, catalog *toolCatalog) bool {
-	if stringField(item, "type") != "function_call" || catalog == nil {
+	itemType := stringField(item, "type")
+	if itemType != "function_call" && itemType != "custom_tool_call" || catalog == nil {
 		return false
 	}
 	if strings.TrimSpace(stringField(item, "namespace")) != "" {
@@ -533,8 +560,10 @@ func restoreFunctionCallIdentity(item map[string]any, catalog *toolCatalog) bool
 	if identity.Namespace != "" {
 		item["namespace"] = identity.Namespace
 	}
-	if identity.Kind == "custom" && stringField(item, "type") == "function_call" {
+	if identity.Kind == "custom" {
 		item["type"] = "custom_tool_call"
+	} else {
+		item["type"] = "function_call"
 	}
 	return true
 }
@@ -673,7 +702,8 @@ func pruneNamespaceChildren(children []any, namespace string, catalog *toolCatal
 			}
 			continue
 		}
-		switch childType := strings.TrimSpace(stringField(child, "type")); childType {
+		childType := strings.TrimSpace(stringField(child, "type"))
+		switch childType {
 		case "function", "custom", "":
 		default:
 			continue
@@ -690,6 +720,7 @@ func pruneNamespaceChildren(children []any, namespace string, catalog *toolCatal
 		entries = append(entries, map[string]any{
 			"namespace": namespace,
 			"name":      name,
+			"type":      childType,
 		})
 	}
 	return retained, entries
@@ -765,24 +796,33 @@ func pruneRequestDeclarations(root map[string]any, catalog *toolCatalog) bool {
 	return changed
 }
 
-func applyDeferredToolPolicyWithCatalog(root map[string]any, catalog *toolCatalog) bool {
+func applyDeferredToolPolicyWithCatalog(root map[string]any, catalog *toolCatalog, budget pluginBudget) (bool, error) {
 	if catalog == nil {
-		return false
+		return false, nil
 	}
 	changed := ensureTopLevelToolSearch(root, catalog)
 	if pruneRequestDeclarations(root, catalog) {
 		changed = true
 	}
-	if injectDiscoveredTools(root, catalog) {
+	injected, errInject := injectDiscoveredToolsWithBudget(root, catalog, budget)
+	if errInject != nil {
+		return changed, errInject
+	}
+	if injected {
 		changed = true
 	}
-	return changed
+	return changed, nil
 }
 
-func injectDiscoveredTools(root map[string]any, catalog *toolCatalog) bool {
+func injectDiscoveredTools(root map[string]any, catalog *toolCatalog) (bool, error) {
+	return injectDiscoveredToolsWithBudget(root, catalog, configuredToolBudget())
+}
+
+func injectDiscoveredToolsWithBudget(root map[string]any, catalog *toolCatalog, budget pluginBudget) (bool, error) {
 	if catalog == nil || len(catalog.discovered) == 0 {
-		return false
+		return false, nil
 	}
+	removePromotedDiscoveries(root, catalog)
 	tools, _ := root["tools"].([]any)
 	existing := make(map[string]struct{}, len(tools))
 	for _, rawTool := range tools {
@@ -798,7 +838,25 @@ func injectDiscoveredTools(root map[string]any, catalog *toolCatalog) bool {
 		}
 	}
 	changed := false
-	for _, identity := range catalog.identities {
+	identities := make([]toolIdentity, 0, len(catalog.declarations))
+	for identity := range catalog.declarations {
+		identities = append(identities, identity)
+	}
+	sort.Slice(identities, func(left, right int) bool {
+		leftRound := catalog.discoveredRound[identities[left]]
+		rightRound := catalog.discoveredRound[identities[right]]
+		if leftRound != rightRound {
+			return leftRound > rightRound
+		}
+		if identities[left].Namespace != identities[right].Namespace {
+			return identities[left].Namespace < identities[right].Namespace
+		}
+		if identities[left].Name != identities[right].Name {
+			return identities[left].Name < identities[right].Name
+		}
+		return identities[left].Kind < identities[right].Kind
+	})
+	for _, identity := range identities {
 		raw, ok := catalog.declarations[identity]
 		if !ok {
 			continue
@@ -826,17 +884,35 @@ func injectDiscoveredTools(root map[string]any, catalog *toolCatalog) bool {
 		if strings.TrimSpace(stringField(tool, "type")) == "" {
 			tool["type"] = "function"
 		}
+		changedBeforeAppend := changed
 		tool["name"] = name
 		delete(tool, "namespace")
 		delete(tool, "defer_loading")
 		tools = append(tools, tool)
 		existing[name] = struct{}{}
 		changed = true
-	}
-	if changed {
 		root["tools"] = tools
+		size, errSize := activeToolArraysBytes(root)
+		if errSize != nil {
+			return changed, errSize
+		}
+		if size > budget.MaxToolBytes {
+			tools = tools[:len(tools)-1]
+			root["tools"] = tools
+			delete(existing, name)
+			if catalog.discoveredRound[identity] == catalog.latestRound {
+				return changed, fmt.Errorf("%w: latest discovery does not fit", errActiveToolBudget)
+			}
+			changed = changedBeforeAppend
+			continue
+		}
 	}
-	return changed
+	if size, errSize := activeToolArraysBytes(root); errSize != nil {
+		return changed, errSize
+	} else if size > budget.MaxToolBytes {
+		return changed, fmt.Errorf("%w: eager declarations do not fit", errActiveToolBudget)
+	}
+	return changed, nil
 }
 
 func toolTypeIsCallable(value string) bool {

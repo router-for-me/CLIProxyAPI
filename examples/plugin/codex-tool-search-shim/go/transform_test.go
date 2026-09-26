@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -104,6 +105,50 @@ func TestRewriteRequestSearchHistory(t *testing.T) {
 	}
 }
 
+func TestRewriteToolChoiceUsesBridgeAlias(t *testing.T) {
+	base := `{
+		"tools":[
+			{"type":"function","name":"tool_search","parameters":{"type":"object"}},
+			{"type":"tool_search","execution":"client","parameters":{"type":"object"}}
+		],
+		"tool_choice":%s
+	}`
+	cases := map[string]struct {
+		choice    string
+		outerType string
+	}{
+		"dedicated":     {choice: `{"type":"tool_search"}`, outerType: "function"},
+		"allowed_tools": {choice: `{"type":"allowed_tools","tools":[{"type":"tool_search"}]}`, outerType: "allowed_tools"},
+	}
+	for name, testCase := range cases {
+		t.Run(name, func(t *testing.T) {
+			input := []byte(fmt.Sprintf(base, testCase.choice))
+			out, changed, errRewrite := rewriteRequestBody(input)
+			if errRewrite != nil || !changed {
+				t.Fatalf("rewriteRequestBody() = (_, %v, %v), want changed", changed, errRewrite)
+			}
+			var root struct {
+				ToolChoice map[string]any `json:"tool_choice"`
+			}
+			if errUnmarshal := json.Unmarshal(out, &root); errUnmarshal != nil {
+				t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+			}
+			if root.ToolChoice["type"] != testCase.outerType {
+				t.Fatalf("tool_choice = %#v", root.ToolChoice)
+			}
+			if testCase.outerType == "function" && root.ToolChoice["name"] != "cts_tool_search" {
+				t.Fatalf("tool_choice name = %#v", root.ToolChoice)
+			}
+			if tools, ok := root.ToolChoice["tools"].([]any); ok {
+				tool := tools[0].(map[string]any)
+				if tool["type"] != "function" || tool["name"] != "cts_tool_search" {
+					t.Fatalf("allowed tool = %#v", tool)
+				}
+			}
+		})
+	}
+}
+
 func TestRewriteRequestBodyIsIdempotent(t *testing.T) {
 	input := []byte(`{
 		"tools":[{"type":"tool_search","execution":"client","description":"search","parameters":{"type":"object"}}],
@@ -188,6 +233,43 @@ func TestRewriteStreamingOutputItemDone(t *testing.T) {
 	}
 }
 
+func TestBridgeStreamingSequenceKeepsArgumentEventsStable(t *testing.T) {
+	input := []byte(strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"id":"search-1","type":"function_call","name":"tool_search","arguments":""}}`,
+		``,
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"search-1","output_index":0,"delta":"{\"query\":"}`,
+		``,
+		`event: response.function_call_arguments.done`,
+		`data: {"type":"response.function_call_arguments.done","item_id":"search-1","output_index":0,"arguments":"{\"query\":\"weather\"}"}`,
+		``,
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"search-1","type":"function_call","name":"tool_search","arguments":"{\"query\":\"weather\"}"}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n"))
+	out, changed, errRewrite := rewriteResponseBodyWithPolicy(input, nil, true)
+	if errRewrite != nil {
+		t.Fatalf("rewriteResponseBodyWithPolicy() error = %v", errRewrite)
+	}
+	if !changed {
+		t.Fatal("stream sequence was not rewritten")
+	}
+	text := string(out)
+	if strings.Count(text, `"type":"tool_search_call"`) != 2 {
+		t.Fatalf("added/done item conversion count = %d, want 2: %s", strings.Count(text, `"type":"tool_search_call"`), text)
+	}
+	if !strings.Contains(text, `"type":"response.function_call_arguments.delta"`) ||
+		!strings.Contains(text, `"type":"response.function_call_arguments.done"`) {
+		t.Fatalf("argument events changed: %s", text)
+	}
+	if !strings.Contains(text, `data: [DONE]`) {
+		t.Fatalf("SSE terminator changed: %s", text)
+	}
+}
+
 func TestRewritePreservesNativeToolSearchCall(t *testing.T) {
 	input := []byte(`{"type":"tool_search_call","call_id":"native","execution":"client","arguments":{"query":"slack"}}`)
 	out, changed, errRewrite := rewriteResponseBody(input)
@@ -199,6 +281,60 @@ func TestRewritePreservesNativeToolSearchCall(t *testing.T) {
 	}
 	if string(out) != string(input) {
 		t.Fatalf("native body changed: %s", out)
+	}
+}
+
+func TestResponseRestoresActivatedCustomToolCallIdentity(t *testing.T) {
+	request := []byte(`{
+		"tools":[
+			{"type":"tool_search","execution":"client","parameters":{"type":"object"}},
+			{"type":"namespace","name":"mcp__editor","tools":[
+				{"type":"custom","name":"apply_patch","defer_loading":true,"parameters":{"type":"object"}}
+			]}
+		],
+		"input":[{"type":"tool_search_output","call_id":"search-custom","execution":"client","tools":[
+			{"type":"namespace","name":"mcp__editor","tools":[
+				{"type":"custom","name":"apply_patch","parameters":{"type":"object"}}
+			]}
+		]}]
+	}`)
+	catalog := extractToolCatalog(request)
+	rewritten, changed, errRewrite := rewriteRequestBody(request)
+	if errRewrite != nil || !changed {
+		t.Fatalf("rewriteRequestBody() = (_, %v, %v), want changed", changed, errRewrite)
+	}
+	var rewrittenRoot struct {
+		Tools []map[string]any `json:"tools"`
+	}
+	if errUnmarshal := json.Unmarshal(rewritten, &rewrittenRoot); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	namespace := rewrittenRoot.Tools[1]
+	deferred := namespace[deferredToolsKey].([]any)
+	if deferredEntry := deferred[0].(map[string]any); deferredEntry["type"] != "custom" {
+		t.Fatalf("deferred custom entry = %#v", deferredEntry)
+	}
+	identity := toolIdentity{Namespace: "mcp__editor", Name: "apply_patch", Kind: "custom"}
+	alias := catalog.aliasByID[identity]
+	if alias == "" {
+		t.Fatalf("custom alias = %q", alias)
+	}
+	response := []byte(fmt.Sprintf(`{"output":[{"type":"custom_tool_call","call_id":"custom-1","name":%q,"input":"patch"}]}`, alias))
+	out, responseChanged, errResponse := rewriteResponseBodyWithPolicy(response, catalog, true)
+	if errResponse != nil || !responseChanged {
+		t.Fatalf("rewriteResponseBodyWithPolicy() = (_, %v, %v), want changed", responseChanged, errResponse)
+	}
+	var root struct {
+		Output []map[string]any `json:"output"`
+	}
+	if errUnmarshal := json.Unmarshal(out, &root); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	call := root.Output[0]
+	if call["type"] != "custom_tool_call" ||
+		call["name"] != "apply_patch" ||
+		call["namespace"] != "mcp__editor" {
+		t.Fatalf("restored custom call = %#v", call)
 	}
 }
 
@@ -216,6 +352,20 @@ func TestRewriteLeavesUnrelatedAndMalformedBodiesUnchanged(t *testing.T) {
 		if changed || string(out) != string(input) {
 			t.Fatalf("rewriteResponseBody(%q) = (%q, %v), want unchanged", input, out, changed)
 		}
+	}
+}
+
+func TestResponseRewriteDoesNotTraverseBusinessJSON(t *testing.T) {
+	input := []byte(`{
+		"metadata":{"payload":{"type":"function_call","name":"tool_search","arguments":"{\"query\":\"business\"}"}},
+		"output":[]
+	}`)
+	out, changed, errRewrite := rewriteResponseBodyWithPolicy(input, nil, true)
+	if errRewrite != nil {
+		t.Fatalf("rewriteResponseBodyWithPolicy() error = %v", errRewrite)
+	}
+	if changed || string(out) != string(input) {
+		t.Fatalf("business JSON was rewritten: (%v, %s)", changed, out)
 	}
 }
 

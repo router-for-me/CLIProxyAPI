@@ -63,27 +63,31 @@ type pluginConfigRequest struct {
 }
 
 var (
-	strictNativeModels atomic.Value
-	extraSourceFormats atomic.Value
-	diagnosticsPath    atomic.Value
-	bridgeModels       atomic.Value
-	bridgeNativeModels atomic.Value
-	toolBudget         atomic.Value
-	stateBudget        atomic.Value
-	schemaBudget       atomic.Value
-	stripCustomTools   atomic.Value
+	activePluginConfig atomic.Value
 )
 
 func init() {
-	strictNativeModels.Store([]string(nil))
-	extraSourceFormats.Store([]string(nil))
-	diagnosticsPath.Store("")
-	bridgeModels.Store([]string(nil))
-	bridgeNativeModels.Store([]string(nil))
-	toolBudget.Store(pluginBudget{MaxToolBytes: 262144})
-	stateBudget.Store(pluginStateBudget{MaxStates: 512, MaxBytes: 33554432})
-	schemaBudget.Store(pluginSchemaBudget{MaxBytes: 65536, MaxNodes: 10000, MaxDepth: 64})
-	stripCustomTools.Store(false)
+	activePluginConfig.Store(defaultResolvedPluginConfig())
+}
+
+type resolvedPluginConfig struct {
+	strictNativeModels []string
+	extraSourceFormats []string
+	diagnosticsPath    string
+	bridgeModels       []string
+	bridgeNativeModels []string
+	toolBudget         pluginBudget
+	stateBudget        pluginStateBudget
+	schemaBudget       pluginSchemaBudget
+	stripCustomTools   bool
+}
+
+func defaultResolvedPluginConfig() resolvedPluginConfig {
+	return resolvedPluginConfig{
+		toolBudget:   pluginBudget{MaxToolBytes: 262144},
+		stateBudget:  pluginStateBudget{MaxStates: 512, MaxBytes: 33554432},
+		schemaBudget: pluginSchemaBudget{MaxBytes: 65536, MaxNodes: 10000, MaxDepth: 64},
+	}
 }
 
 // configurePlugin decodes the host envelope and applies the plugin config.
@@ -107,22 +111,27 @@ func applyPluginConfig(configYAML []byte) error {
 			return fmt.Errorf("decode plugin config: %w", errUnmarshal)
 		}
 	}
-	strictNativeModels.Store(trimmedList(config.StrictResponsesModels))
-	extraSourceFormats.Store(trimmedList(config.ExtraSourceFormats))
-	diagnosticsPath.Store(strings.TrimSpace(config.DiagnosticsLogPath))
-	bridgeModels.Store(trimmedList(config.BridgeModels))
-	bridgeNativeModels.Store(trimmedList(config.BridgeNativeModels))
-	toolBudget.Store(pluginBudget{MaxToolBytes: positiveOrDefault(config.MaxActiveToolBytes, 262144)})
-	stateBudget.Store(pluginStateBudget{
-		MaxStates: positiveOrDefault(config.MaxRequestStates, 512),
-		MaxBytes:  positiveOrDefault(config.MaxStateBytes, 33554432),
-	})
-	schemaBudget.Store(pluginSchemaBudget{
-		MaxBytes: positiveOrDefault(config.MaxSchemaExpansionBytes, 65536),
-		MaxNodes: positiveOrDefault(config.MaxSchemaExpansionNodes, 10000),
-		MaxDepth: positiveOrDefault(config.MaxSchemaDepth, 64),
-	})
-	stripCustomTools.Store(config.StripCustomTools)
+	next := resolvedPluginConfig{
+		strictNativeModels: trimmedList(config.StrictResponsesModels),
+		extraSourceFormats: trimmedList(config.ExtraSourceFormats),
+		diagnosticsPath:    strings.TrimSpace(config.DiagnosticsLogPath),
+		bridgeModels:       trimmedList(config.BridgeModels),
+		bridgeNativeModels: trimmedList(config.BridgeNativeModels),
+		toolBudget: pluginBudget{
+			MaxToolBytes: positiveOrDefault(config.MaxActiveToolBytes, 262144),
+		},
+		stateBudget: pluginStateBudget{
+			MaxStates: positiveOrDefault(config.MaxRequestStates, 512),
+			MaxBytes:  positiveOrDefault(config.MaxStateBytes, 33554432),
+		},
+		schemaBudget: pluginSchemaBudget{
+			MaxBytes: positiveOrDefault(config.MaxSchemaExpansionBytes, 65536),
+			MaxNodes: positiveOrDefault(config.MaxSchemaExpansionNodes, 10000),
+			MaxDepth: positiveOrDefault(config.MaxSchemaDepth, 64),
+		},
+		stripCustomTools: config.StripCustomTools,
+	}
+	activePluginConfig.Store(next)
 	return nil
 }
 
@@ -148,19 +157,21 @@ func positiveOrDefault(value, fallback int) int {
 	return fallback
 }
 
+func configuredPluginConfig() resolvedPluginConfig {
+	config, _ := activePluginConfig.Load().(resolvedPluginConfig)
+	return config
+}
+
 func configuredToolBudget() pluginBudget {
-	budget, _ := toolBudget.Load().(pluginBudget)
-	return budget
+	return configuredPluginConfig().toolBudget
 }
 
 func configuredStateBudget() pluginStateBudget {
-	budget, _ := stateBudget.Load().(pluginStateBudget)
-	return budget
+	return configuredPluginConfig().stateBudget
 }
 
 func configuredSchemaBudget() pluginSchemaBudget {
-	budget, _ := schemaBudget.Load().(pluginSchemaBudget)
-	return budget
+	return configuredPluginConfig().schemaBudget
 }
 
 func exactModelMatches(values []string, candidates ...string) bool {
@@ -179,18 +190,14 @@ func exactModelMatches(values []string, candidates ...string) bool {
 }
 
 func bridgeModelMatches(candidates ...string) bool {
-	values, _ := bridgeModels.Load().([]string)
+	values := configuredPluginConfig().bridgeModels
+	if len(values) == 0 {
+		return false
+	}
+	if len(candidates) == 0 {
+		return true
+	}
 	return exactModelMatches(values, candidates...)
-}
-
-func bridgeNativeModelMatches(candidates ...string) bool {
-	values, _ := bridgeNativeModels.Load().([]string)
-	return exactModelMatches(values, candidates...)
-}
-
-func shouldStripCustomTools() bool {
-	enabled, _ := stripCustomTools.Load().(bool)
-	return enabled
 }
 
 // trimmedList drops blank entries and surrounding whitespace.
@@ -204,29 +211,10 @@ func trimmedList(values []string) []string {
 	return out
 }
 
-// configuredExtraSourceFormat reports whether a client protocol was explicitly
-// opted into the Responses family by configuration.
-func configuredExtraSourceFormat(format string) bool {
-	values, _ := extraSourceFormats.Load().([]string)
-	if len(values) == 0 {
-		return false
-	}
-	trimmed := strings.ToLower(strings.TrimSpace(format))
-	if trimmed == "" {
-		return false
-	}
-	for _, value := range values {
-		if strings.ToLower(value) == trimmed {
-			return true
-		}
-	}
-	return false
-}
-
 // diagnosticsLogPath returns the configured probe log path, or the platform
 // temporary directory when none is configured.
 func diagnosticsLogPath() string {
-	if configured, _ := diagnosticsPath.Load().(string); configured != "" {
+	if configured := configuredPluginConfig().diagnosticsPath; configured != "" {
 		return configured
 	}
 	return filepath.Join(os.TempDir(), "codex-tool-search-shim-structure.jsonl")
@@ -236,7 +224,11 @@ func diagnosticsLogPath() string {
 // entry. Matching is case-insensitive; "*" is a wildcard, so `muse-spark-*`
 // matches a prefix and `*muse-spark*` matches a substring.
 func strictNativeModelMatches(candidates ...string) bool {
-	models, _ := strictNativeModels.Load().([]string)
+	return strictNativeModelMatchesWithConfig(configuredPluginConfig(), candidates...)
+}
+
+func strictNativeModelMatchesWithConfig(config resolvedPluginConfig, candidates ...string) bool {
+	models := config.strictNativeModels
 	if len(models) == 0 {
 		return false
 	}
@@ -290,6 +282,10 @@ func matchModelPattern(pattern, value string) bool {
 // normalizeStrictNativeBody strict-completes `tool_search` declarations and
 // inlines local schema references. It reports false when nothing changed.
 func normalizeStrictNativeBody(body []byte) ([]byte, bool, error) {
+	return normalizeStrictNativeBodyWithConfig(body, configuredPluginConfig())
+}
+
+func normalizeStrictNativeBodyWithConfig(body []byte, config resolvedPluginConfig) ([]byte, bool, error) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return body, false, nil
@@ -300,7 +296,7 @@ func normalizeStrictNativeBody(body []byte) ([]byte, bool, error) {
 	if errDecode := decoder.Decode(&root); errDecode != nil {
 		return body, false, nil
 	}
-	changed, errNormalize := normalizeStrictToolArrays(root)
+	changed, errNormalize := normalizeStrictToolArrays(root, config)
 	if errNormalize != nil {
 		return body, false, errNormalize
 	}
@@ -314,14 +310,19 @@ func normalizeStrictNativeBody(body []byte) ([]byte, bool, error) {
 	return out, true, nil
 }
 
-func normalizeStrictToolArrays(root map[string]any) (bool, error) {
+func normalizeStrictToolArrays(root map[string]any, config resolvedPluginConfig) (bool, error) {
+	if config.stripCustomTools {
+		if errCustom := validateCustomToolRemoval(root, config.stripCustomTools); errCustom != nil {
+			return false, errCustom
+		}
+	}
 	changed := false
 	if rawTools, exists := root["tools"]; exists {
 		tools, ok := rawTools.([]any)
 		if !ok {
 			return false, fmt.Errorf("strict tools field is not an array")
 		}
-		normalized, toolChanged, errNormalize := normalizeStrictToolArray(tools)
+		normalized, toolChanged, errNormalize := normalizeStrictToolArray(tools, config)
 		if errNormalize != nil {
 			return false, errNormalize
 		}
@@ -347,7 +348,7 @@ func normalizeStrictToolArrays(root map[string]any) (bool, error) {
 		if !okTools {
 			return false, fmt.Errorf("strict additional_tools field is not an array")
 		}
-		normalized, toolChanged, errNormalize := normalizeStrictToolArray(tools)
+		normalized, toolChanged, errNormalize := normalizeStrictToolArray(tools, config)
 		if errNormalize != nil {
 			return false, errNormalize
 		}
@@ -359,15 +360,111 @@ func normalizeStrictToolArrays(root map[string]any) (bool, error) {
 	return changed, nil
 }
 
-func normalizeStrictToolArray(tools []any) ([]any, bool, error) {
-	if errDepth := validateToolArrayDepth(tools, 1); errDepth != nil {
+func validateCustomToolRemoval(root map[string]any, stripCustomTools bool) error {
+	if !stripCustomTools {
+		return nil
+	}
+	customNames := make(map[string]struct{})
+	if tools, ok := root["tools"].([]any); ok {
+		collectCustomToolNames(tools, "", customNames)
+	}
+	input, _ := root["input"].([]any)
+	for _, rawItem := range input {
+		item, okItem := rawItem.(map[string]any)
+		if !okItem || stringField(item, "type") != "additional_tools" {
+			continue
+		}
+		if tools, okTools := item["tools"].([]any); okTools {
+			collectCustomToolNames(tools, "", customNames)
+		}
+	}
+	if len(customNames) == 0 {
+		return nil
+	}
+	if choice, ok := root["tool_choice"].(map[string]any); ok && customChoiceMatches(choice, customNames) {
+		return strictSchemaError("custom_tool_removal_forced_choice")
+	}
+	for _, rawItem := range input {
+		item, okItem := rawItem.(map[string]any)
+		if !okItem {
+			continue
+		}
+		switch stringField(item, "type") {
+		case "function_call", "custom_tool_call":
+			name := stringField(item, "name")
+			if _, exists := customNames[name]; exists {
+				return strictSchemaError("custom_tool_removal_history")
+			}
+			namespace := stringField(item, "namespace")
+			if _, exists := customNames[rawQualifiedToolName(namespace, name)]; exists {
+				return strictSchemaError("custom_tool_removal_history")
+			}
+		}
+	}
+	return nil
+}
+
+func collectCustomToolNames(tools []any, namespace string, names map[string]struct{}) {
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(stringField(tool, "type")), namespaceToolType) {
+			childNamespace := joinNamespace(namespace, stringField(tool, "name"))
+			if children, okChildren := tool["tools"].([]any); okChildren {
+				collectCustomToolNames(children, childNamespace, names)
+			}
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(stringField(tool, "type")), "custom") {
+			continue
+		}
+		name := stringField(tool, "name")
+		if name == "" {
+			continue
+		}
+		names[name] = struct{}{}
+		names[rawQualifiedToolName(namespace, name)] = struct{}{}
+	}
+}
+
+func customChoiceMatches(choice map[string]any, names map[string]struct{}) bool {
+	if strings.EqualFold(strings.TrimSpace(stringField(choice, "type")), "custom") {
+		return true
+	}
+	name := stringField(choice, "name")
+	if _, exists := names[name]; exists {
+		return true
+	}
+	if forced, ok := choice["tools"].([]any); ok {
+		for _, rawTool := range forced {
+			tool, okTool := rawTool.(map[string]any)
+			if !okTool {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(stringField(tool, "type")), "custom") {
+				return true
+			}
+			if _, exists := names[stringField(tool, "name")]; exists {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeStrictToolArray(tools []any, config resolvedPluginConfig) ([]any, bool, error) {
+	if errDepth := validateToolArrayDepth(tools, 1, config.schemaBudget.MaxDepth); errDepth != nil {
 		return tools, false, errDepth
 	}
 	changed := strictCompleteToolSearchSchemas(tools)
-	if errInline := inlineToolSchemaRefsForTools(tools); errInline != nil {
+	inlineChanged, errInline := inlineToolSchemaRefsForToolsWithBudget(tools, config.schemaBudget)
+	if errInline != nil {
 		return tools, false, errInline
 	}
-	if shouldStripCustomTools() {
+	changed = changed || inlineChanged
+	if config.stripCustomTools {
 		if filtered, stripped := stripUnsupportedCustomTools(tools); stripped {
 			tools = filtered
 			changed = true
@@ -376,8 +473,8 @@ func normalizeStrictToolArray(tools []any) ([]any, bool, error) {
 	return tools, changed, nil
 }
 
-func validateToolArrayDepth(tools []any, depth int) error {
-	if depth > configuredSchemaBudget().MaxDepth {
+func validateToolArrayDepth(tools []any, depth int, maxDepth int) error {
+	if depth > maxDepth {
 		return strictSchemaError("schema_depth_exceeded")
 	}
 	for _, rawTool := range tools {
@@ -390,7 +487,7 @@ func validateToolArrayDepth(tools []any, depth int) error {
 			if !okChildren {
 				continue
 			}
-			if errChild := validateToolArrayDepth(children, depth+1); errChild != nil {
+			if errChild := validateToolArrayDepth(children, depth+1, maxDepth); errChild != nil {
 				return errChild
 			}
 		}
@@ -426,55 +523,76 @@ func strictCompleteToolSearchSchemas(tools []any) bool {
 		if !ok {
 			continue
 		}
-		properties, ok := schema["properties"].(map[string]any)
-		if !ok || len(properties) == 0 {
-			continue
+		if strictCompleteToolSearchSchema(schema) {
+			changed = true
 		}
-		required := stringSet(schema["required"])
-		keys := make([]string, 0, len(properties))
-		for key := range properties {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		completionNeeded := false
-		for _, key := range keys {
-			if !required[key] {
-				completionNeeded = true
-				break
-			}
-		}
-		if !completionNeeded && strictAdditionalPropertiesFalse(schema) {
-			continue
-		}
-		for _, key := range keys {
-			if required[key] {
-				continue
-			}
-			property, ok := properties[key].(map[string]any)
-			if !ok {
-				continue
-			}
-			if _, alreadyNullable := nullableSchema(property); !alreadyNullable {
-				original := make(map[string]any, len(property)+1)
-				for key, value := range property {
-					original[key] = value
-				}
-				replacement := map[string]any{"anyOf": []any{original, map[string]any{"type": "null"}}}
-				if description, exists := property["description"]; exists {
-					replacement["description"] = description
-				}
-				properties[key] = replacement
-			}
-		}
-		ordered := make([]any, 0, len(keys))
-		for _, key := range keys {
-			ordered = append(ordered, key)
-		}
-		schema["required"] = ordered
-		schema["additionalProperties"] = false
-		changed = true
 	}
 	return changed
+}
+
+func strictCompleteToolSearchSchema(schema map[string]any) bool {
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok || len(properties) == 0 {
+		return false
+	}
+	required := stringSet(schema["required"])
+	keys := make([]string, 0, len(properties))
+	for key := range properties {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	completionNeeded := false
+	for _, key := range keys {
+		if !required[key] {
+			completionNeeded = true
+			break
+		}
+	}
+	nestedChanged := false
+	for _, key := range keys {
+		propertyValue, okProperty := properties[key]
+		if !okProperty {
+			continue
+		}
+		property, isObjectSchema := propertyValue.(map[string]any)
+		if isObjectSchema {
+			if _, hasNestedProperties := property["properties"].(map[string]any); hasNestedProperties {
+				if strictCompleteToolSearchSchema(property) {
+					nestedChanged = true
+				}
+			}
+		}
+		if required[key] {
+			continue
+		}
+		if !isObjectSchema {
+			properties[key] = map[string]any{
+				"anyOf": []any{propertyValue, map[string]any{"type": "null"}},
+			}
+			continue
+		}
+		if _, alreadyNullable := nullableSchema(property); !alreadyNullable {
+			original := make(map[string]any, len(property)+1)
+			for nestedKey, value := range property {
+				original[nestedKey] = value
+			}
+			replacement := map[string]any{"anyOf": []any{original, map[string]any{"type": "null"}}}
+			if description, exists := property["description"]; exists {
+				replacement["description"] = description
+			}
+			properties[key] = replacement
+		}
+	}
+	if !completionNeeded && strictAdditionalPropertiesFalse(schema) && !nestedChanged {
+		return false
+	}
+	ordered := make([]any, 0, len(keys))
+	for _, key := range keys {
+		ordered = append(ordered, key)
+	}
+	schema["required"] = ordered
+	schema["additionalProperties"] = false
+	return true
 }
 
 func nullableSchema(schema map[string]any) (any, bool) {
@@ -541,75 +659,38 @@ func strictAdditionalPropertiesFalse(schema map[string]any) bool {
 	return ok && !flag
 }
 
-// widenTypeWithNull returns a type that also accepts null, which is OpenAI's
-// documented way to spell an optional strict-mode field.
-func widenTypeWithNull(value any) (any, bool) {
-	switch typed := value.(type) {
-	case string:
-		trimmed := strings.TrimSpace(typed)
-		if trimmed == "" || trimmed == "null" {
-			return nil, false
-		}
-		return []any{typed, "null"}, true
-	case []any:
-		for _, entry := range typed {
-			if name, ok := entry.(string); ok && strings.TrimSpace(name) == "null" {
-				return nil, false
-			}
-		}
-		widened := make([]any, 0, len(typed)+1)
-		widened = append(widened, typed...)
-		widened = append(widened, "null")
-		return widened, true
-	default:
-		return nil, false
-	}
-}
-
 var localRefPattern = regexp.MustCompile(`^#/(\$defs|definitions)/([^/]+)$`)
 
 // inlineToolSchemaRefsForTools applies strict reference policy to every tool
 // array without silently deleting unresolved or recursive constraints.
-func inlineToolSchemaRefsForTools(tools []any) error {
-	for _, rawTool := range tools {
-		if _, errInline := inlineToolSchemaRefWithPolicy(rawTool, 1); errInline != nil {
-			return errInline
-		}
-	}
-	return nil
+func inlineToolSchemaRefsForTools(tools []any) (bool, error) {
+	return inlineToolSchemaRefsForToolsWithBudget(tools, configuredSchemaBudget())
 }
 
-func inlineRecursiveSchemaRefsForTools(tools []any) bool {
-	return inlineToolSchemaRefsForTools(tools) == nil && inlineAnyToolSchemaRefs(tools)
-}
-
-func inlineAnyToolSchemaRefs(tools []any) bool {
+func inlineToolSchemaRefsForToolsWithBudget(tools []any, budget pluginSchemaBudget) (bool, error) {
 	changed := false
 	for _, rawTool := range tools {
-		if inlineToolSchemaRefs(rawTool) {
-			changed = true
+		toolChanged, errInline := inlineToolSchemaRefWithPolicy(rawTool, 1, budget)
+		if errInline != nil {
+			return changed, errInline
 		}
+		changed = changed || toolChanged
 	}
-	return changed
+	return changed, nil
 }
 
-func inlineToolSchemaRefs(rawTool any) bool {
-	resolved, errInline := inlineToolSchemaRefWithPolicy(rawTool, 1)
-	return errInline == nil && resolved
-}
-
-func inlineToolSchemaRefWithPolicy(rawTool any, depth int) (bool, error) {
+func inlineToolSchemaRefWithPolicy(rawTool any, depth int, budget pluginSchemaBudget) (bool, error) {
 	tool, ok := rawTool.(map[string]any)
 	if !ok {
 		return false, nil
 	}
-	if depth > configuredSchemaBudget().MaxDepth {
+	if depth > budget.MaxDepth {
 		return false, strictSchemaError("schema_depth_exceeded")
 	}
 	changed := false
 	if function, okFunction := tool["function"].(map[string]any); okFunction {
 		if parameters, exists := function["parameters"]; exists {
-			resolved, didChange, errInline := inlineRecursiveSchemaRefsWithPolicy(parameters, depth)
+			resolved, didChange, errInline := inlineRecursiveSchemaRefsWithBudget(parameters, depth, budget)
 			if errInline != nil {
 				return false, errInline
 			}
@@ -619,7 +700,7 @@ func inlineToolSchemaRefWithPolicy(rawTool any, depth int) (bool, error) {
 			}
 		}
 	} else if parameters, exists := tool["parameters"]; exists {
-		resolved, didChange, errInline := inlineRecursiveSchemaRefsWithPolicy(parameters, depth)
+		resolved, didChange, errInline := inlineRecursiveSchemaRefsWithBudget(parameters, depth, budget)
 		if errInline != nil {
 			return false, errInline
 		}
@@ -631,7 +712,7 @@ func inlineToolSchemaRefWithPolicy(rawTool any, depth int) (bool, error) {
 	if toolType, _ := tool["type"].(string); strings.EqualFold(strings.TrimSpace(toolType), namespaceToolType) {
 		if children, okChildren := tool["tools"].([]any); okChildren {
 			for _, child := range children {
-				childChanged, errInline := inlineToolSchemaRefWithPolicy(child, depth+1)
+				childChanged, errInline := inlineToolSchemaRefWithPolicy(child, depth+1, budget)
 				if errInline != nil {
 					return false, errInline
 				}
@@ -651,11 +732,21 @@ func inlineRecursiveSchemaRefs(schema any) (any, bool) {
 }
 
 func inlineRecursiveSchemaRefsWithPolicy(schema any, depth int) (any, bool, error) {
+	return inlineRecursiveSchemaRefsWithBudget(schema, depth, configuredSchemaBudget())
+}
+
+func inlineRecursiveSchemaRefsWithBudget(schema any, depth int, budget pluginSchemaBudget) (any, bool, error) {
 	root, ok := schema.(map[string]any)
 	if !ok || !schemaContainsLocalRef(root) {
 		return schema, false, nil
 	}
-	budget := configuredSchemaBudget()
+	encodedRoot, errRoot := json.Marshal(root)
+	if errRoot != nil {
+		return schema, false, strictSchemaError("schema_encoding_failed")
+	}
+	if len(encodedRoot) > budget.MaxBytes {
+		return schema, false, strictSchemaError("schema_bytes_exceeded")
+	}
 	state := refExpansionState{budget: budget}
 	resolved, errInline := inlineLocalRefs(root, root, nil, depth, &state)
 	if errInline != nil {
@@ -674,6 +765,7 @@ func inlineRecursiveSchemaRefsWithPolicy(schema any, depth int) (any, bool, erro
 type refExpansionState struct {
 	budget pluginSchemaBudget
 	nodes  int
+	bytes  int
 }
 
 func (state *refExpansionState) consume() error {
@@ -687,7 +779,7 @@ func (state *refExpansionState) consume() error {
 func schemaContainsLocalRef(node any) bool {
 	switch typed := node.(type) {
 	case map[string]any:
-		if ref, ok := typed["$ref"].(string); ok && localRefPattern.MatchString(ref) {
+		if _, ok := typed["$ref"].(string); ok {
 			return true
 		}
 		for _, value := range typed {
@@ -736,6 +828,14 @@ func inlineLocalRefs(node any, root map[string]any, stack []string, depth int, s
 			if target == nil {
 				return nil, strictSchemaError("missing_schema_reference")
 			}
+			encodedTarget, errTarget := json.Marshal(target)
+			if errTarget != nil {
+				return nil, strictSchemaError("schema_encoding_failed")
+			}
+			if len(encodedTarget) > state.budget.MaxBytes-state.bytes {
+				return nil, strictSchemaError("schema_bytes_exceeded")
+			}
+			state.bytes += len(encodedTarget)
 			rest := copyWithoutKey(typed, "$ref")
 			expanded, errExpand := inlineLocalRefs(target, root, append(append([]string(nil), stack...), ref), depth+1, state)
 			if errExpand != nil {

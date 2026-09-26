@@ -76,6 +76,35 @@ func TestStrictCompleteToolSearchSchemasIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestStrictCompleteToolSearchSchemasWidensNonObjectOptionalProperty(t *testing.T) {
+	request := []byte(`{
+		"tools":[{"type":"tool_search","execution":"client","parameters":{
+			"type":"object",
+			"properties":{"enabled":true,"query":{"type":"string"}},
+			"required":["query"],
+			"additionalProperties":false
+		}}]
+	}`)
+	tools := decodeTools(t, request)
+	if !strictCompleteToolSearchSchemas(tools) {
+		t.Fatal("strictCompleteToolSearchSchemas() changed = false, want true")
+	}
+	schema := tools[0].(map[string]any)["parameters"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	enabledSchema, ok := properties["enabled"].(map[string]any)
+	if !ok {
+		t.Fatalf("enabled schema = %#v, want nullable anyOf object", properties["enabled"])
+	}
+	anyOf, ok := enabledSchema["anyOf"].([]any)
+	if !ok || len(anyOf) != 2 || anyOf[0] != true {
+		t.Fatalf("enabled anyOf = %#v, want original true and null", enabledSchema["anyOf"])
+	}
+	nullable, ok := anyOf[1].(map[string]any)
+	if !ok || nullable["type"] != "null" {
+		t.Fatalf("nullable branch = %#v", anyOf[1])
+	}
+}
+
 func TestInlineRecursiveSchemaRefsElidesReentrantRefs(t *testing.T) {
 	request := []byte(`{
 		"tools":[{"type":"namespace","name":"gmail","tools":[{"type":"function","name":"_create_draft","parameters":{
@@ -90,9 +119,120 @@ func TestInlineRecursiveSchemaRefsElidesReentrantRefs(t *testing.T) {
 		}}]}]
 	}`)
 	tools := decodeTools(t, request)
-	errInline := inlineToolSchemaRefsForTools(tools)
+	_, errInline := inlineToolSchemaRefsForTools(tools)
 	if errInline == nil || !strings.Contains(errInline.Error(), "recursive_schema_reference") {
 		t.Fatalf("inlineToolSchemaRefsForTools() error = %v, want recursive reference rejection", errInline)
+	}
+}
+
+func TestStrictSchemaReferencePolicyHandlesEscapeAndMissingTargets(t *testing.T) {
+	escaped := []byte(`{"tools":[{"type":"function","name":"escaped","parameters":{
+		"type":"object",
+		"properties":{"value":{"$ref":"#/$defs/foo~1bar"}},
+		"$defs":{"foo/bar":{"type":"string","minLength":1}}
+	}}]}`)
+	out, changed, errEscape := normalizeStrictNativeBody(escaped)
+	if errEscape != nil {
+		t.Fatalf("normalizeStrictNativeBody() escaped pointer error = %v", errEscape)
+	}
+	if !changed || strings.Contains(string(out), `"$ref"`) || !strings.Contains(string(out), `"minLength":1`) {
+		t.Fatalf("escaped pointer was not resolved: (%v, %s)", changed, out)
+	}
+
+	for name, body := range map[string]string{
+		"missing local target": `{"tools":[{"type":"function","name":"missing","parameters":{
+			"properties":{"value":{"$ref":"#/$defs/Missing"}}
+		}}]}`,
+		"unsupported external target": `{"tools":[{"type":"function","name":"external","parameters":{
+			"properties":{"value":{"$ref":"https://example.com/schema.json"}}
+		}}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, errNormalize := normalizeStrictNativeBody([]byte(body))
+			if errNormalize == nil {
+				t.Fatal("normalizeStrictNativeBody() error = nil")
+			}
+		})
+	}
+}
+
+func TestStrictSchemaExpansionBudgetsRejectBeforeUnboundedCopy(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"value": map[string]any{"$ref": "#/$defs/Node"},
+			"next":  map[string]any{"$ref": "#/$defs/Node"},
+		},
+		"$defs": map[string]any{
+			"Node": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"child": map[string]any{"$ref": "#/$defs/Leaf"},
+				},
+			},
+			"Leaf": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"value": map[string]any{"type": "string"},
+				},
+			},
+		},
+	}
+	cases := []struct {
+		name          string
+		config        string
+		expectedError string
+	}{
+		{"bytes", "max_schema_expansion_bytes: 8\n", "schema_bytes_exceeded"},
+		{"nodes", "max_schema_expansion_nodes: 1\n", "schema_nodes_exceeded"},
+		{"depth", "max_schema_depth: 1\n", "schema_depth_exceeded"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Cleanup(func() { _ = applyPluginConfig(nil) })
+			if errConfigure := applyPluginConfig([]byte(testCase.config)); errConfigure != nil {
+				t.Fatalf("applyPluginConfig() error = %v", errConfigure)
+			}
+			_, _, errExpand := inlineRecursiveSchemaRefsWithPolicy(schema, 1)
+			if errExpand == nil || !strings.Contains(errExpand.Error(), testCase.expectedError) {
+				t.Fatalf("inlineRecursiveSchemaRefsWithPolicy() error = %v, want %s", errExpand, testCase.expectedError)
+			}
+		})
+	}
+}
+
+func TestStrictCompletesNestedObjectSchemaWithoutLosingConstraints(t *testing.T) {
+	request := []byte(`{
+		"tools":[{"type":"tool_search","execution":"client","parameters":{
+			"type":"object",
+			"properties":{"filter":{
+				"type":"object",
+				"properties":{"mode":{"enum":["a","b"]},"limit":{"type":"integer","const":7}},
+				"required":[]
+			}},
+			"required":["filter"]
+		}}]
+	}`)
+	tools := decodeTools(t, request)
+	if !strictCompleteToolSearchSchemas(tools) {
+		t.Fatal("strictCompleteToolSearchSchemas() changed = false, want true")
+	}
+	schema := tools[0].(map[string]any)["parameters"].(map[string]any)
+	filter := schema["properties"].(map[string]any)["filter"].(map[string]any)
+	nestedRequired := filter["required"].([]any)
+	if len(nestedRequired) != 2 || nestedRequired[0] != "limit" || nestedRequired[1] != "mode" {
+		t.Fatalf("nested required = %#v", nestedRequired)
+	}
+	nestedProperties := filter["properties"].(map[string]any)
+	modeSchema := nestedProperties["mode"].(map[string]any)
+	modeAnyOf := modeSchema["anyOf"].([]any)
+	if original, ok := modeAnyOf[0].(map[string]any); !ok || original["enum"] == nil {
+		t.Fatalf("nested enum constraint lost: %#v", modeSchema)
+	}
+	limitSchema := nestedProperties["limit"].(map[string]any)
+	limitAnyOf := limitSchema["anyOf"].([]any)
+	if original, ok := limitAnyOf[0].(map[string]any); !ok || original["const"] != float64(7) {
+		t.Fatalf("nested const constraint lost: %#v", limitSchema)
 	}
 }
 
@@ -164,6 +304,36 @@ func TestNormalizeStrictNativeBodyStripsCustomTools(t *testing.T) {
 	children := namespace["tools"].([]any)
 	if len(children) != 1 || children[0].(map[string]any)["name"] != "kept_child" {
 		t.Fatalf("namespace children = %#v, want only kept_child", children)
+	}
+}
+
+func TestStrictCustomToolRemovalRejectsForcedAndHistoricalCalls(t *testing.T) {
+	t.Cleanup(func() { _ = applyPluginConfig(nil) })
+	if errConfigure := applyPluginConfig([]byte("strip_custom_tools: true\n")); errConfigure != nil {
+		t.Fatalf("applyPluginConfig() error = %v", errConfigure)
+	}
+	for name, body := range map[string]string{
+		"forced choice": `{"tools":[{"type":"custom","name":"apply_patch"}],"tool_choice":{"type":"function","name":"apply_patch"}}`,
+		"history call":  `{"tools":[{"type":"custom","name":"apply_patch"}],"input":[{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"{}"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, errNormalize := normalizeStrictNativeBody([]byte(body))
+			if errNormalize == nil || !strings.Contains(errNormalize.Error(), "custom_tool_removal") {
+				t.Fatalf("normalizeStrictNativeBody() error = %v, want custom removal rejection", errNormalize)
+			}
+		})
+	}
+}
+
+func TestStrictNativeBodyPreservesCustomToolsByDefault(t *testing.T) {
+	t.Cleanup(func() { _ = applyPluginConfig(nil) })
+	body := []byte(`{"tools":[{"type":"custom","name":"apply_patch","description":"freeform"}]}`)
+	out, changed, errNormalize := normalizeStrictNativeBody(body)
+	if errNormalize != nil {
+		t.Fatalf("normalizeStrictNativeBody() error = %v", errNormalize)
+	}
+	if changed || string(out) != string(body) {
+		t.Fatalf("default custom tool changed: %s", out)
 	}
 }
 

@@ -18,6 +18,9 @@ func rewriteRequestBody(body []byte) ([]byte, bool, error) {
 }
 
 func rewriteRequestBodyWithPolicy(body []byte, policy requestPolicy, catalog *toolCatalog) ([]byte, bool, error) {
+	if policy.config.toolBudget.MaxToolBytes == 0 {
+		policy.config = configuredPluginConfig()
+	}
 	if !policy.bridge {
 		return body, false, nil
 	}
@@ -39,7 +42,11 @@ func rewriteRequestBodyWithPolicy(body []byte, policy requestPolicy, catalog *to
 	}
 	changed := rewriteRequestValue(value, policy, catalog)
 	if root, ok := value.(map[string]any); ok && policy.prune {
-		if applyDeferredToolPolicyWithCatalog(root, catalog) {
+		policyChanged, errPolicy := applyDeferredToolPolicyWithCatalog(root, catalog, policy.config.toolBudget)
+		if errPolicy != nil {
+			return body, false, errPolicy
+		}
+		if policyChanged {
 			changed = true
 		}
 	}
@@ -64,7 +71,8 @@ func rewriteResponseBodyWithPolicy(body []byte, catalog *toolCatalog, bridge boo
 	}
 	// Every rewriteable response item is a function_call, so text deltas and
 	// other hot stream chunks leave without a JSON parse.
-	if !bytes.Contains(trimmed, []byte("function_call")) {
+	if !bytes.Contains(trimmed, []byte("function_call")) &&
+		!bytes.Contains(trimmed, []byte("custom_tool_call")) {
 		return body, false, nil
 	}
 
@@ -82,7 +90,7 @@ func rewriteJSONBodyWithPolicy(body []byte, catalog *toolCatalog, bridge bool) (
 	if !ok {
 		return body, false, nil
 	}
-	if !rewriteValueWithPolicy(value, catalog, bridge) {
+	if !rewriteResponseLocation(value, catalog, bridge) {
 		return body, false, nil
 	}
 	out, errMarshal := json.Marshal(value)
@@ -149,6 +157,10 @@ func rewriteRequestValue(value any, policy requestPolicy, catalog *toolCatalog) 
 					}
 				case "tool_search_output":
 					if policy.bridge && rewriteToolSearchOutputForRequest(item, catalog) {
+						changed = true
+					}
+				case "function_call", "custom_tool_call":
+					if policy.bridge && rewriteActivatedToolCallForRequest(item, catalog) {
 						changed = true
 					}
 				}
@@ -275,6 +287,43 @@ func rewriteToolSearchOutputForRequest(item map[string]any, catalog *toolCatalog
 	return true
 }
 
+// rewriteActivatedToolCallForRequest aligns replayed tool history with the
+// flat alias used by the active declaration. It only touches identities that
+// were explicitly deferred or discovered in this request, so eager tools and
+// unknown calls keep their original names.
+func rewriteActivatedToolCallForRequest(item map[string]any, catalog *toolCatalog) bool {
+	if catalog == nil {
+		return false
+	}
+	itemType := strings.TrimSpace(stringField(item, "type"))
+	if itemType != "function_call" && itemType != "custom_tool_call" {
+		return false
+	}
+	name := strings.TrimSpace(stringField(item, "name"))
+	namespace := strings.TrimSpace(stringField(item, "namespace"))
+	if name == "" {
+		return false
+	}
+	identity := toolIdentity{
+		Namespace: namespace,
+		Name:      name,
+		Kind:      normalizeToolKind(itemType),
+	}
+	_, discovered := catalog.discovered[identity]
+	if !catalog.deferred[identity] && !discovered {
+		return false
+	}
+	alias := catalog.aliasByID[identity]
+	if alias == "" || alias == name {
+		return false
+	}
+	item["name"] = alias
+	if namespace != "" {
+		delete(item, "namespace")
+	}
+	return true
+}
+
 func compactToolSearchManifest(value any, catalog *toolCatalog) []any {
 	entries := make([]any, 0)
 	var collect func(any, string)
@@ -342,34 +391,52 @@ func jsonArgumentsString(value any) (string, bool) {
 	}
 }
 
-func rewriteValue(value any) bool {
-	return rewriteValueWithPolicy(value, nil, true)
-}
-
-func rewriteValueWithPolicy(value any, catalog *toolCatalog, bridge bool) bool {
-	changed := false
+// rewriteResponseLocation limits semantic rewrites to confirmed Responses
+// payload locations. Business objects elsewhere in the payload are data, even
+// when they happen to contain protocol-shaped keys.
+func rewriteResponseLocation(value any, catalog *toolCatalog, bridge bool) bool {
 	switch typed := value.(type) {
 	case map[string]any:
-		if bridge && isOrdinaryToolSearchCall(typed, catalog) {
-			rewriteToolSearchItem(typed)
-			return true
+		itemType := stringField(typed, "type")
+		if itemType == "function_call" || itemType == "custom_tool_call" || itemType == "tool_search_call" {
+			return rewriteResponseItem(typed, catalog, bridge)
 		}
-		if bridge && restoreFunctionCallIdentity(typed, catalog) {
-			changed = true
-		}
-		for _, child := range typed {
-			if rewriteValueWithPolicy(child, catalog, bridge) {
-				changed = true
+		if strings.HasPrefix(itemType, "response.") {
+			if item, ok := typed["item"].(map[string]any); ok {
+				return rewriteResponseItem(item, catalog, bridge)
 			}
+		}
+		if response, ok := typed["response"].(map[string]any); ok {
+			return rewriteResponseLocation(response, catalog, bridge)
+		}
+		if output, ok := typed["output"].([]any); ok {
+			return rewriteResponseItems(output, catalog, bridge)
 		}
 	case []any:
-		for _, child := range typed {
-			if rewriteValueWithPolicy(child, catalog, bridge) {
-				changed = true
-			}
+		return rewriteResponseItems(typed, catalog, bridge)
+	}
+	return false
+}
+
+func rewriteResponseItems(items []any, catalog *toolCatalog, bridge bool) bool {
+	changed := false
+	for _, rawItem := range items {
+		if item, ok := rawItem.(map[string]any); ok && rewriteResponseItem(item, catalog, bridge) {
+			changed = true
 		}
 	}
 	return changed
+}
+
+func rewriteResponseItem(item map[string]any, catalog *toolCatalog, bridge bool) bool {
+	if !bridge {
+		return false
+	}
+	if isOrdinaryToolSearchCall(item, catalog) {
+		rewriteToolSearchItem(item)
+		return true
+	}
+	return restoreFunctionCallIdentity(item, catalog)
 }
 
 func isOrdinaryToolSearchCall(item map[string]any, catalog *toolCatalog) bool {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -51,6 +52,103 @@ func TestActiveStateCapacityRejectsNewRequest(t *testing.T) {
 	response := decodeRequestInterceptResult(t, raw)
 	if !response.Terminate || response.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("capacity response = %#v, want terminate 429", response)
+	}
+}
+
+func TestActiveStateByteCapacityRejectsNewRequest(t *testing.T) {
+	t.Cleanup(clearRequestStates)
+	t.Cleanup(func() { _ = applyPluginConfig(nil) })
+	if errConfigure := applyPluginConfig([]byte("max_state_bytes: 1\n")); errConfigure != nil {
+		t.Fatalf("applyPluginConfig() error = %v", errConfigure)
+	}
+	raw, errIntercept := interceptRequest("request_after", mustJSON(t, map[string]any{
+		"RequestID":    "state-byte-capacity",
+		"SourceFormat": "openai-response",
+		"ToFormat":     "openai",
+		"Body":         []byte(stateSearchRequest),
+	}))
+	if errIntercept != nil {
+		t.Fatalf("interceptRequest() error = %v", errIntercept)
+	}
+	response := decodeRequestInterceptResult(t, raw)
+	if !response.Terminate || response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("byte capacity response = %#v, want terminate 429", response)
+	}
+}
+
+func TestNonResponsesRequestDoesNotRetainState(t *testing.T) {
+	t.Cleanup(clearRequestStates)
+	raw, errIntercept := interceptRequest("request_after", mustJSON(t, map[string]any{
+		"RequestID":    "non-responses-state",
+		"SourceFormat": "openai",
+		"ToFormat":     "openai",
+		"Body":         []byte(`{"tools":[{"type":"function","name":"lookup","parameters":{}}]}`),
+	}))
+	if errIntercept != nil {
+		t.Fatalf("interceptRequest() error = %v", errIntercept)
+	}
+	if response := decodeRequestInterceptResult(t, raw); response.Terminate {
+		t.Fatalf("non-responses request terminated: %#v", response)
+	}
+	if _, exists := loadRequestState("non-responses-state"); exists {
+		t.Fatal("non-responses request retained state")
+	}
+}
+
+func TestNonResponsesStreamDoesNotCacheCatalog(t *testing.T) {
+	t.Cleanup(clearRequestStates)
+	_, errIntercept := interceptStreamChunk(mustJSON(t, map[string]any{
+		"RequestID":    "non-responses-stream-state",
+		"SourceFormat": "openai",
+		"ChunkIndex":   -1,
+		"OriginalRequest": []byte(`{"tools":[{"type":"namespace","name":"mcp__x","tools":[
+			{"type":"function","name":"lookup","parameters":{}}
+		]}]}`),
+		"Body": []byte{},
+	}))
+	if errIntercept != nil {
+		t.Fatalf("interceptStreamChunk() error = %v", errIntercept)
+	}
+	if _, exists := loadRequestState("non-responses-stream-state"); exists {
+		t.Fatal("non Responses stream cached catalog state")
+	}
+}
+
+func TestResponseRetainsRequestSourceFormatAcrossReconfigure(t *testing.T) {
+	t.Cleanup(clearRequestStates)
+	t.Cleanup(func() { _ = applyPluginConfig(nil) })
+	if errConfigure := applyPluginConfig([]byte("extra_source_formats:\n  - custom-responses\n")); errConfigure != nil {
+		t.Fatalf("applyPluginConfig() error = %v", errConfigure)
+	}
+	const requestID = "state-custom-source"
+	interceptStateRequest(t, requestID, "custom-responses", "openai")
+	if errReset := applyPluginConfig(nil); errReset != nil {
+		t.Fatalf("applyPluginConfig(nil) error = %v", errReset)
+	}
+
+	upstream := []byte(`{"output":[{"type":"function_call","call_id":"c1","name":"tool_search","arguments":"{}"}]}`)
+	raw, errResponse := interceptResponse(mustJSON(t, map[string]any{
+		"RequestID":    requestID,
+		"SourceFormat": "custom-responses",
+		"Body":         upstream,
+	}))
+	if errResponse != nil {
+		t.Fatalf("interceptResponse() error = %v", errResponse)
+	}
+	if body := decodeResponseBodyResult(t, raw); !strings.Contains(string(body), `"tool_search_call"`) {
+		t.Fatalf("response body = %s, want tool_search_call after reconfigure", body)
+	}
+
+	rawOtherProtocol, errOther := interceptResponse(mustJSON(t, map[string]any{
+		"RequestID":    requestID,
+		"SourceFormat": "openai",
+		"Body":         upstream,
+	}))
+	if errOther != nil {
+		t.Fatalf("interceptResponse(openai) error = %v", errOther)
+	}
+	if body := decodeResponseBodyResult(t, rawOtherProtocol); len(body) != 0 {
+		t.Fatalf("non Responses protocol used request snapshot: %s", body)
 	}
 }
 

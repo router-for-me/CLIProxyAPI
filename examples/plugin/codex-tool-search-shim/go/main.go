@@ -34,6 +34,7 @@ extern void cliproxyPluginShutdown(void);
 import "C"
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,185 +57,6 @@ const (
 )
 
 var structureLogMu sync.Mutex
-
-type requestState struct {
-	bridge      bool
-	bridgeKnown bool
-	catalog     *toolCatalog
-	bytes       int
-}
-
-var errRequestStateCapacity = errors.New("request state capacity exceeded")
-
-var (
-	requestStateMu    sync.RWMutex
-	requestStates     = make(map[string]requestState)
-	requestStateOrder []string
-)
-
-func rememberRequestState(requestID string, state requestState) error {
-	if strings.TrimSpace(requestID) == "" {
-		return nil
-	}
-	if state.catalog != nil {
-		state.catalog = compactResponseCatalog(state.catalog)
-		if state.bytes == 0 {
-			state.bytes = requestStateSize(state.catalog)
-		}
-	}
-	requestStateMu.Lock()
-	defer requestStateMu.Unlock()
-	previous, exists := requestStates[requestID]
-	if exists && !state.bridgeKnown {
-		if state.catalog == nil {
-			state.catalog = previous.catalog
-			state.bytes = previous.bytes
-		}
-		state.bridge = previous.bridge
-		state.bridgeKnown = previous.bridgeKnown
-	}
-	if !exists {
-		requestStateOrder = append(requestStateOrder, requestID)
-	}
-	if errCapacity := enforceStateCapacityLocked(requestID, previous, exists, state); errCapacity != nil {
-		if !exists {
-			requestStateOrder = requestStateOrder[:len(requestStateOrder)-1]
-		}
-		return errCapacity
-	}
-	requestStates[requestID] = state
-	return nil
-}
-
-func enforceStateCapacityLocked(requestID string, previous requestState, existed bool, next requestState) error {
-	budget := configuredStateBudget()
-	activeBefore := 0
-	bytesBefore := 0
-	for _, state := range requestStates {
-		if state.catalog != nil {
-			activeBefore++
-			bytesBefore += state.bytes
-		}
-	}
-	activeAfter := activeBefore
-	bytesAfter := bytesBefore
-	if existed && previous.catalog != nil {
-		activeAfter--
-		bytesAfter -= previous.bytes
-	}
-	if next.catalog != nil {
-		activeAfter++
-		bytesAfter += next.bytes
-	}
-	if activeAfter > budget.MaxStates || bytesAfter > budget.MaxBytes {
-		return errRequestStateCapacity
-	}
-	return nil
-}
-
-func loadRequestState(requestID string) (requestState, bool) {
-	requestStateMu.RLock()
-	defer requestStateMu.RUnlock()
-	state, ok := requestStates[requestID]
-	return state, ok
-}
-
-func releaseRequestState(requestID string) {
-	if strings.TrimSpace(requestID) == "" {
-		return
-	}
-	requestStateMu.Lock()
-	defer requestStateMu.Unlock()
-	if _, exists := requestStates[requestID]; !exists {
-		return
-	}
-	delete(requestStates, requestID)
-	for index, candidate := range requestStateOrder {
-		if candidate == requestID {
-			requestStateOrder = append(requestStateOrder[:index], requestStateOrder[index+1:]...)
-			break
-		}
-	}
-}
-
-func clearRequestStates() {
-	requestStateMu.Lock()
-	defer requestStateMu.Unlock()
-	requestStates = make(map[string]requestState)
-	requestStateOrder = nil
-}
-
-func compactResponseCatalog(catalog *toolCatalog) *toolCatalog {
-	if catalog == nil {
-		return nil
-	}
-	catalog.finalize()
-	compact := newToolCatalog()
-	compact.identities = append([]toolIdentity(nil), catalog.identities...)
-	compact.clientSearch = catalog.clientSearch
-	compact.serverSearch = catalog.serverSearch
-	compact.searchBridge = catalog.searchBridge
-	compact.searchAlias = catalog.searchAlias
-	compact.deferred = make(map[toolIdentity]bool, len(catalog.deferred))
-	for identity, deferred := range catalog.deferred {
-		compact.deferred[identity] = deferred
-	}
-	compact.aliasByID = make(map[toolIdentity]string, len(catalog.aliasByID))
-	for identity, alias := range catalog.aliasByID {
-		compact.aliasByID[identity] = alias
-	}
-	compact.idByAlias = make(map[string]toolIdentity, len(catalog.idByAlias))
-	for alias, identity := range catalog.idByAlias {
-		compact.idByAlias[alias] = identity
-	}
-	compact.exact = make(map[string]toolIdentity, len(catalog.exact))
-	for name, identity := range catalog.exact {
-		compact.exact[name] = identity
-	}
-	compact.normalized = make(map[string]toolIdentity, len(catalog.normalized))
-	for name, identity := range catalog.normalized {
-		compact.normalized[name] = identity
-	}
-	compact.local = make(map[string]toolIdentity, len(catalog.local))
-	for name, identity := range catalog.local {
-		compact.local[name] = identity
-	}
-	compact.namespaces = make(map[string]toolIdentity, len(catalog.namespaces))
-	for name, identity := range catalog.namespaces {
-		compact.namespaces[name] = identity
-	}
-	compact.namespaceCounts = make(map[string]int, len(catalog.namespaceCounts))
-	for name, count := range catalog.namespaceCounts {
-		compact.namespaceCounts[name] = count
-	}
-	for name := range catalog.topLevel {
-		compact.topLevel[name] = struct{}{}
-	}
-	return compact
-}
-
-func requestStateSize(catalog *toolCatalog) int {
-	if catalog == nil {
-		return 0
-	}
-	summary := struct {
-		Identities []toolIdentity    `json:"identities"`
-		Aliases    map[string]string `json:"aliases"`
-		Search     string            `json:"search"`
-	}{
-		Identities: catalog.identities,
-		Aliases:    make(map[string]string, len(catalog.idByAlias)),
-		Search:     catalog.searchAlias,
-	}
-	for alias := range catalog.idByAlias {
-		summary.Aliases[alias] = ""
-	}
-	encoded, errMarshal := json.Marshal(summary)
-	if errMarshal != nil {
-		return 1 << 30
-	}
-	return len(encoded)
-}
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -399,6 +221,51 @@ func currentRegistration() registration {
 					Description: "Native Responses models (exact names or prefix*) that need strict tool_search schemas and local $ref inlining, for example OpenCode Go Muse.",
 				},
 				{
+					Name:        "bridge_models",
+					Type:        pluginapi.ConfigFieldTypeArray,
+					Description: "Exact model IDs allowed to advertise the client-executed search bridge in the Codex model catalog. Empty by default.",
+				},
+				{
+					Name:        "bridge_native_models",
+					Type:        pluginapi.ConfigFieldTypeArray,
+					Description: "Exact native Responses model IDs that use the ordinary-function search bridge instead of native passthrough.",
+				},
+				{
+					Name:        "max_active_tool_bytes",
+					Type:        pluginapi.ConfigFieldTypeInteger,
+					Description: "Maximum serialized bytes for active tool declarations in one Responses request.",
+				},
+				{
+					Name:        "max_request_states",
+					Type:        pluginapi.ConfigFieldTypeInteger,
+					Description: "Maximum concurrently retained bridge request states; full capacity returns 429 instead of evicting active streams.",
+				},
+				{
+					Name:        "max_state_bytes",
+					Type:        pluginapi.ConfigFieldTypeInteger,
+					Description: "Maximum combined billed bytes for retained compact request states.",
+				},
+				{
+					Name:        "max_schema_expansion_bytes",
+					Type:        pluginapi.ConfigFieldTypeInteger,
+					Description: "Maximum serialized bytes for one strict local-reference schema expansion.",
+				},
+				{
+					Name:        "max_schema_expansion_nodes",
+					Type:        pluginapi.ConfigFieldTypeInteger,
+					Description: "Maximum nodes visited while expanding strict local schema references.",
+				},
+				{
+					Name:        "max_schema_depth",
+					Type:        pluginapi.ConfigFieldTypeInteger,
+					Description: "Maximum namespace and schema expansion depth.",
+				},
+				{
+					Name:        "strip_custom_tools",
+					Type:        pluginapi.ConfigFieldTypeBoolean,
+					Description: "Explicitly enables the lossy custom-tool removal workaround for strict native routes.",
+				},
+				{
 					Name:        "extra_source_formats",
 					Type:        pluginapi.ConfigFieldTypeArray,
 					Description: "Additional client protocol identifiers to treat as Responses-family when deciding whether to bridge tool_search. Built-in values are openai-response, openai-responses, responses, response and codex.",
@@ -443,17 +310,29 @@ func interceptRequest(kind string, request []byte) ([]byte, error) {
 	}
 	body, changed, errRewrite := rewriteRequestBodyWithPolicy(req.Body, policy, catalog)
 	if errRewrite != nil {
+		if errors.Is(errRewrite, errActiveToolBudget) {
+			if probeRequested(req.Headers) {
+				appendStructureLog(kind+":active_tool_budget_exceeded", req.Body)
+			}
+			return terminatedRequest(http.StatusRequestEntityTooLarge, "active_tool_budget_exceeded", "active tool declarations exceed the configured request budget")
+		}
 		return nil, errRewrite
 	}
 	if policy.bridge && catalog != nil && catalog.clientSearch && changed {
 		catalog.searchBridge = true
 	}
 	if policy.bridge && catalog != nil && catalog.serverSearch {
+		if probeRequested(req.Headers) {
+			appendStructureLog(kind+":unsupported_search_execution", req.Body)
+		}
 		return terminatedRequest(http.StatusUnprocessableEntity, "unsupported_search_execution", "server-executed tool_search is not supported by this upstream route")
 	}
-	if policy.native && strictNativeModelMatches(req.Model, req.RequestedModel) {
-		normalized, normalizedChanged, errNormalize := normalizeStrictNativeBody(body)
+	if policy.native && strictNativeModelMatchesWithConfig(policy.config, req.Model, req.RequestedModel) {
+		normalized, normalizedChanged, errNormalize := normalizeStrictNativeBodyWithConfig(body, policy.config)
 		if errNormalize != nil {
+			if probeRequested(req.Headers) {
+				appendStructureLog(kind+":invalid_strict_schema", body)
+			}
 			return terminatedRequest(http.StatusUnprocessableEntity, "invalid_strict_schema", "the tool schema cannot be represented safely for this upstream")
 		}
 		if normalizedChanged {
@@ -461,8 +340,16 @@ func interceptRequest(kind string, request []byte) ([]byte, error) {
 			changed = true
 		}
 	}
-	if changed && probeRequested(req.Headers) {
-		appendStructureLog(kind+"_upstream", body)
+	if isResponsesFormatWithConfig(req.SourceFormat, policy.config) {
+		if errBudget := enforceActiveToolBudget(body, policy.config.toolBudget); errBudget != nil {
+			if errors.Is(errBudget, errActiveToolBudget) {
+				if probeRequested(req.Headers) {
+					appendStructureLog(kind+":active_tool_budget_exceeded", body)
+				}
+				return terminatedRequest(http.StatusRequestEntityTooLarge, "active_tool_budget_exceeded", "active tool declarations exceed the configured request budget")
+			}
+			return nil, errBudget
+		}
 	}
 	var activeCatalog *toolCatalog
 	if policy.bridge && catalog != nil && catalog.searchBridge {
@@ -472,11 +359,18 @@ func interceptRequest(kind string, request []byte) ([]byte, error) {
 		bridge:      policy.bridge,
 		bridgeKnown: true,
 		catalog:     activeCatalog,
-	}); errState != nil {
+		config:      policy.config,
+	}, policy.config.stateBudget); errState != nil {
 		if errors.Is(errState, errRequestStateCapacity) {
+			if probeRequested(req.Headers) {
+				appendStructureLog(kind+":request_state_capacity", body)
+			}
 			return terminatedRequest(http.StatusTooManyRequests, "request_state_capacity", "too many active tool-search requests")
 		}
 		return nil, errState
+	}
+	if changed && probeRequested(req.Headers) {
+		appendStructureLog(kind+"_upstream", body)
 	}
 	response := pluginapi.RequestInterceptResponse{}
 	if changed {
@@ -512,7 +406,10 @@ func interceptResponse(request []byte) ([]byte, error) {
 		appendStructureLog("response", req.Body)
 	}
 	response := pluginapi.ResponseInterceptResponse{}
-	bridge, catalog := responseBridgeState(req.RequestID, req.SourceFormat, req.OriginalRequest, req.RequestBody)
+	if body, changed := rewriteCodexModelCatalog(req.Metadata, req.Body); changed {
+		response.Body = body
+	}
+	bridge, catalog := responseBridgeState(req.RequestID, req.SourceFormat)
 	if bridge {
 		body, changed, errRewrite := rewriteResponseBodyWithPolicy(req.Body, catalog, bridge)
 		if errRewrite != nil {
@@ -528,6 +425,52 @@ func interceptResponse(request []byte) ([]byte, error) {
 	return okEnvelope(response)
 }
 
+func rewriteCodexModelCatalog(metadata map[string]any, body []byte) ([]byte, bool) {
+	if metadata == nil || metadata["response_kind"] != "codex_client_models" {
+		return nil, false
+	}
+	if !bridgeModelMatches() {
+		return nil, false
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var root map[string]any
+	if errDecode := decoder.Decode(&root); errDecode != nil {
+		return nil, false
+	}
+	models, ok := root["models"].([]any)
+	if !ok {
+		return nil, false
+	}
+	changed := false
+	for _, rawModel := range models {
+		model, okModel := rawModel.(map[string]any)
+		if !okModel {
+			continue
+		}
+		slug := stringField(model, "slug")
+		if slug == "" || !bridgeModelMatches(slug) {
+			continue
+		}
+		if supported, _ := model["supports_search_tool"].(bool); !supported {
+			model["supports_search_tool"] = true
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	encoded, errMarshal := json.Marshal(root)
+	if errMarshal != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
 func interceptStreamChunk(request []byte) ([]byte, error) {
 	var req pluginapi.StreamChunkInterceptRequest
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
@@ -537,8 +480,11 @@ func interceptStreamChunk(request []byte) ([]byte, error) {
 		appendStructureLog("stream", req.Body)
 	}
 	// Payload chunks omit OriginalRequest, so the header-init call or the
-	// request interceptors must have cached the catalog by now.
-	cacheRequestCatalog(req.RequestID, req.OriginalRequest, req.RequestBody)
+	// request interceptors must have cached the catalog by now. Only Responses
+	// clients can use that mapping; unrelated protocols must not consume state.
+	if isResponsesFormat(req.SourceFormat) {
+		cacheRequestCatalog(req.RequestID, req.OriginalRequest, req.RequestBody)
+	}
 	response := pluginapi.StreamChunkInterceptResponse{}
 	bridge, catalog := responseBridgeState(req.RequestID, req.SourceFormat)
 	if bridge {
@@ -563,7 +509,7 @@ func cacheRequestCatalog(requestID string, bodies ...[]byte) {
 	if strings.TrimSpace(requestID) == "" {
 		return
 	}
-	if state, exists := loadRequestState(requestID); exists && state.catalog != nil {
+	if _, exists := loadRequestState(requestID); exists {
 		return
 	}
 	for _, body := range bodies {
@@ -571,7 +517,10 @@ func cacheRequestCatalog(requestID string, bodies ...[]byte) {
 		if catalog == nil {
 			continue
 		}
-		rememberRequestState(requestID, requestState{catalog: catalog})
+		rememberRequestState(requestID, requestState{
+			catalog: catalog,
+			config:  configuredPluginConfig(),
+		}, configuredStateBudget())
 		return
 	}
 }
@@ -580,29 +529,43 @@ func cacheRequestCatalog(requestID string, bodies ...[]byte) {
 // back into the Responses protocol and which tool catalog restores namespaced
 // identities. Only a Responses client can consume tool_search_call items, so
 // every other client protocol is left alone even when request state is missing.
-func responseBridgeState(requestID, sourceFormat string, fallbackBodies ...[]byte) (bool, *toolCatalog) {
+func responseBridgeState(requestID, sourceFormat string) (bool, *toolCatalog) {
 	// The client protocol is authoritative: only a Responses client can consume
 	// tool_search_call items and namespaced function calls, so a stale or
 	// mismatched request state must never widen the rewrite to another protocol.
-	if !isResponsesFormat(sourceFormat) {
+	state, exists := loadRequestState(requestID)
+	if !exists {
 		return false, nil
 	}
-	state, exists := loadRequestState(requestID)
-	if !exists || !state.bridgeKnown || !state.bridge || state.catalog == nil || !state.catalog.searchBridge {
+	config := state.config
+	if config.toolBudget.MaxToolBytes == 0 {
+		config = configuredPluginConfig()
+	}
+	if !isResponsesFormatWithConfig(sourceFormat, config) ||
+		!state.bridgeKnown || !state.bridge || state.catalog == nil || !state.catalog.searchBridge {
 		return false, nil
 	}
 	return true, state.catalog
 }
 
 type structureLog struct {
-	Kind       string          `json:"kind"`
-	Time       string          `json:"ts"`
-	Model      string          `json:"model,omitempty"`
-	ToolBytes  int             `json:"tool_bytes,omitempty"`
-	InputBytes int             `json:"input_bytes,omitempty"`
-	Tools      []structureRef  `json:"tools,omitempty"`
-	Input      []structureItem `json:"input,omitempty"`
-	Output     []structureItem `json:"output,omitempty"`
+	Kind            string          `json:"kind"`
+	Time            string          `json:"ts"`
+	Model           string          `json:"model,omitempty"`
+	ToolBytes       int             `json:"tool_bytes,omitempty"`
+	InputBytes      int             `json:"input_bytes,omitempty"`
+	DeclaredTools   int             `json:"declared_tools,omitempty"`
+	EagerTools      int             `json:"eager_tools,omitempty"`
+	DeferredTools   int             `json:"deferred_tools,omitempty"`
+	DiscoveredTools int             `json:"discovered_tools,omitempty"`
+	ActiveTools     int             `json:"active_tools,omitempty"`
+	StateEntries    int             `json:"state_entries,omitempty"`
+	StateBytes      int             `json:"state_bytes,omitempty"`
+	BudgetBytes     int             `json:"budget_bytes,omitempty"`
+	Rejection       string          `json:"rejection,omitempty"`
+	Tools           []structureRef  `json:"tools,omitempty"`
+	Input           []structureItem `json:"input,omitempty"`
+	Output          []structureItem `json:"output,omitempty"`
 }
 
 type structureRef struct {
@@ -651,6 +614,33 @@ func appendStructureLog(kind string, body []byte) {
 	record.Tools = structureRefs(root["tools"])
 	record.Input = structureItems(root["input"])
 	record.Output = structureItems(root["output"])
+	if separator := strings.Index(kind, ":"); separator >= 0 {
+		record.Rejection = kind[separator+1:]
+		record.Kind = kind[:separator]
+	}
+	record.DeclaredTools, record.EagerTools, record.ActiveTools = countStructureTools(root["tools"])
+	if input, ok := root["input"].([]any); ok {
+		for _, rawItem := range input {
+			item, okItem := rawItem.(map[string]any)
+			if !okItem || stringField(item, "type") != "additional_tools" {
+				continue
+			}
+			declared, eager, active := countStructureTools(item["tools"])
+			record.DeclaredTools += declared
+			record.EagerTools += eager
+			record.ActiveTools += active
+		}
+	}
+	if catalog := extractToolCatalog(body); catalog != nil {
+		for _, deferred := range catalog.deferred {
+			if deferred {
+				record.DeferredTools++
+			}
+		}
+		record.DiscoveredTools = len(catalog.discovered)
+	}
+	record.StateEntries, record.StateBytes = requestStateUsage()
+	record.BudgetBytes = configuredToolBudget().MaxToolBytes
 	if len(record.Tools) == 0 && len(record.Input) == 0 && len(record.Output) == 0 {
 		return
 	}
@@ -666,6 +656,41 @@ func appendStructureLog(kind string, body []byte) {
 	}
 	defer file.Close()
 	_, _ = file.Write(append(encoded, '\n'))
+}
+
+func countStructureTools(value any) (declared, eager, active int) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if strings.EqualFold(strings.TrimSpace(stringField(typed, "type")), namespaceToolType) {
+			children, ok := typed["tools"].([]any)
+			if !ok {
+				return
+			}
+			for _, child := range children {
+				childDeclared, childEager, childActive := countStructureTools(child)
+				declared += childDeclared
+				eager += childEager
+				active += childActive
+			}
+			return
+		}
+		if !toolTypeIsCallable(stringField(typed, "type")) || stringField(typed, "name") == toolSearchName {
+			return
+		}
+		declared = 1
+		if deferredLoading(typed) {
+			return declared, 0, 0
+		}
+		return 1, 1, 1
+	case []any:
+		for _, child := range typed {
+			childDeclared, childEager, childActive := countStructureTools(child)
+			declared += childDeclared
+			eager += childEager
+			active += childActive
+		}
+	}
+	return
 }
 
 func responseBodyPayload(body []byte) ([]byte, bool) {

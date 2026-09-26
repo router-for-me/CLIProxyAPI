@@ -1,68 +1,52 @@
 # Codex Tool Search Shim
 
-This Go dynamic-library plugin adapts the Codex client-executed
-`tool_search` protocol for CLIProxyAPI routes whose upstream does not speak
-OpenAI Responses, and it repairs Codex tool declarations for native Responses
-upstreams that validate schemas more strictly than OpenAI does.
+This Go dynamic-library plugin adapts the Codex client-executed `tool_search`
+protocol for routes that do not expose OpenAI Responses upstream, and it repairs
+selected native Responses tool declarations for upstreams with stricter schema
+validation.
 
-The problem it removes: Codex advertises `supports_search_tool: true` only for
-models whose providers are all `codex`. On a translated route it therefore has
-to inline the whole deferred catalog into the first request. Server-side
-connectors keep growing that catalog (namespaced Codex app tools, MCP servers),
-so the first request pays that context cost on every session and can exceed the
-upstream context window.
+The plugin addresses context growth without deleting unrelated request data:
 
-It has two modes:
+- eager tools stay present and are counted against the active-tool byte budget;
+- only tools explicitly marked `defer_loading: true` are removed after a
+  Responses client advertises a search contract;
+- a flat `tool_search_output` activates only the returned tools;
+- activated declarations use deterministic aliases, while response translation
+  restores the original names and namespaces;
+- discovery history is bounded by `max_active_tool_bytes`, newest round first.
 
-- **Bridge mode** (default) for Responses clients (`SourceFormat` of
-  `openai-response`) whose selected `ToFormat` is a translated upstream format
-  such as `openai`. Native Responses/Codex targets are left untouched, and so is
-  every other client protocol.
-- **Strict native mode** for opted-in native Responses models that reject
-  Codex declarations. Nothing changes until a model is listed in
-  `strict_responses_models`.
+The byte budget is a serialization limit, not a token-count guarantee. This
+repository's integration test measured 500 deferred tool declarations shrinking
+from 1,009,807 bytes before the plugin to 33,819 bytes after it. No real token
+usage was measured, so the test does not claim a token reduction percentage.
 
-Both modes are protocol-gated. Requests, responses and stream chunks that did
-not come from a Responses client are never rewritten, so chat-completions,
-Claude and Gemini traffic that shares the proxy keeps its own tool declarations
-and payload bytes.
+## Modes and protocol gates
 
-It keeps the first request bounded by:
+There are two independent modes:
 
-- the ordinary non-deferred tools;
-- one small ordinary `tool_search` function declaration;
-- a name-only index for namespace children.
+- **Bridge mode** applies to Responses-family clients when the selected
+  upstream is not Responses. The plugin converts Codex search declarations and
+  history to ordinary function tools, then converts upstream calls back into
+  `tool_search_call` and namespaced Responses items.
+- **Strict native mode** applies only to models explicitly listed in
+  `strict_responses_models`. It normalizes selected `tool_search` schemas and
+  local schema references without converting the route to ordinary function
+  tools.
 
-Namespace child schemas are not sent until the conversation returns a
-`tool_search_output` containing those tools. The plugin then promotes only the
-discovered children as flat function declarations. Search calls and outputs are
-converted into ordinary function-call history, and provider responses are
-converted back into native Responses `tool_search_call` and namespaced
-`function_call` items for Codex.
+`bridge_native_models` is a third, independent switch. It makes an explicitly
+listed native Responses route use ordinary-function bridging. It does not
+activate strict schema normalization, and `strict_responses_models` does not
+activate native bridging.
 
-The ordinary `tool_search` declaration is only added when the request actually
-has something to search: a client-executed `tool_search` declaration, tool
-search history, or namespaced children that are about to move into the index.
-A request that declares neither is forwarded untouched.
+Only Responses-family clients are bridge candidates. Built-in source formats are
+`openai-response`, `openai-responses`, `responses`, `response`, and `codex`;
+additional identifiers can be configured through `extra_source_formats`.
+Requests and responses from other client protocols are not rewritten.
 
-## Behaviour guarantees
-
-- Client protocol wins over cached request state. A response is only translated
-  for a Responses client, even if a request ID was reused.
-- Nested namespaces keep their qualified name, so `outer` > `inner` > `deep`
-  stays addressable as `outer__inner__deep`.
-- Tool search history items that omit `execution` are treated as
-  client-executed, which is what Responses-compatible clients emit.
-- Requests that contain neither `tool_search` nor `namespace` never reach the
-  JSON parser, and stream chunks that cannot contain a `function_call` are
-  returned untouched without a parse.
-- Unchanged responses and stream chunks return no body, so the host does not
-  clone and replace the payload on every chunk.
-- A panic inside the plugin is converted into an error envelope. The plugin
-  never unwinds a panic across the cgo boundary, which would abort the host
-  process.
-- Request payloads are decoded with `json.Number`, so large integers survive a
-  rewrite unchanged.
+The Codex model catalog is changed only for model-list responses carrying the
+host's trusted `codex_client_models` metadata and only for exact entries in
+`bridge_models`. With the default empty list, the plugin publishes no
+`supports_search_tool` capability.
 
 ## Configuration
 
@@ -72,34 +56,110 @@ plugins:
     codex-tool-search-shim:
       enabled: true
       priority: 100
-      strict_responses_models:
-        - "*muse-spark*"
-      # Optional. Extra client protocol identifiers to treat as
-      # Responses-family. Built-ins: openai-response, openai-responses,
-      # responses, response, codex.
+      strict_responses_models: []
+      bridge_models: []
+      bridge_native_models: []
       extra_source_formats: []
-      # Optional. Probe diagnostics target. Defaults to
-      # codex-tool-search-shim-structure.jsonl in the platform temp directory.
       diagnostics_log_path: ""
+      max_active_tool_bytes: 262144
+      max_request_states: 512
+      max_state_bytes: 33554432
+      max_schema_expansion_bytes: 65536
+      max_schema_expansion_nodes: 10000
+      max_schema_depth: 64
+      strip_custom_tools: false
 ```
 
-The plugin bypasses native Responses/Codex targets, except that models matching
-`strict_responses_models` get two extra request repairs:
+### Model selection
 
-- every property of a client-executed `tool_search` declaration becomes
-  required, previously optional properties widen to accept `null`, and
-  `additionalProperties` is pinned to `false`; `type` and `execution` stay
-  untouched so Codex still receives a locally resolved `tool_search_call`.
-- local `$defs` / `definitions` references are inlined and re-entrant
-  references collapse into an opaque object, because some upstreams reject
-  recursive JSON schemas.
+- `strict_responses_models` accepts exact names or `*` wildcards for strict
+  native schema repairs.
+- `bridge_models` is empty by default. Entries are exact, case-insensitive
+  Codex model slugs; only matching catalog entries receive
+  `supports_search_tool: true`.
+- `bridge_native_models` is empty by default. Entries are exact,
+  case-insensitive model identifiers.
 
-Entries match the selected upstream model and the client-requested model.
-Matching is case-insensitive and `*` is a wildcard, so `muse-spark-*` matches a
-prefix and `*muse-spark*` matches a substring. Quote entries that start with
-`*` when writing YAML. Strict repairs still only run for Responses clients.
+Matching a bridge model is an explicit compatibility decision because the
+upstream must implement the ordinary-function search contract used by this
+plugin.
 
-## Build
+### Budgets and rejection behavior
+
+- `max_active_tool_bytes` counts the serialized `tools` and `additional_tools`
+  arrays. Eager declarations that do not fit return HTTP 413 with
+  `active_tool_budget_exceeded`; they are never silently dropped.
+- Discovery rounds are activated newest first. If the newest round cannot fit
+  completely, the request returns 413 rather than partially activating it. Older
+  discovery rounds are removed until the active set fits.
+- `max_request_states` and `max_state_bytes` bound retained compact request
+  state. Capacity exhaustion returns HTTP 429 with
+  `request_state_capacity`; active streams are not FIFO-evicted.
+- Unsupported server-executed search and unrepresentable strict schemas return
+  HTTP 422 with `unsupported_search_execution` or `invalid_strict_schema`.
+- `max_schema_expansion_bytes`, `max_schema_expansion_nodes`, and
+  `max_schema_depth` bound strict local-reference expansion. Missing, recursive,
+  unsupported, or external references are rejected instead of replaced
+  with guessed schemas.
+
+Request completion in all four terminal outcomes releases retained state.
+
+### Custom tools
+
+`strip_custom_tools` defaults to `false`, preserving custom tools on strict
+native routes. Setting it to `true` enables a lossy compatibility workaround:
+the plugin returns HTTP 422 if `tool_choice` names a custom tool that would be
+removed, or if history already contains a call to that tool. Enable it only for
+routes where custom-tool removal is acceptable.
+
+## Behaviour guarantees
+
+- Protocol and configuration gates are evaluated per request; stale state for a
+  reused request ID cannot widen a rewrite to another client protocol.
+- Missing request state causes a fail-open passthrough instead of guessing tool
+  identities.
+- Nested namespaces remain addressable, including nested paths such as
+  `outer__inner__deep`.
+- Activated aliases appear consistently in tool declarations and subsequent
+  history. Eager and unknown calls retain their original identity.
+- `json.Number` decoding preserves large integers during a rewrite.
+- Non-matching response and stream payloads are returned without a replacement
+  body.
+- ABI entry points contain panics and return error envelopes; a plugin panic
+  cannot unwind across the cgo boundary.
+
+## Diagnostics
+
+Set `X-Codex-Tool-Search-Shim-Probe: 1` on an isolated request to append
+structure-only diagnostics and receive the `X-Codex-Tool-Search-Shim` response
+header. `diagnostics_log_path` defaults to
+`codex-tool-search-shim-structure.jsonl` in the platform temporary directory.
+
+Diagnostics record protocol structure, tool counts and names, namespaces, call
+IDs, budgets, state usage, and rejection reasons. They do not record prompts,
+tool arguments, tool results, credentials, or tokens.
+
+## Validation status
+
+Verified by repository tests on 2026-09-26:
+
+- the plugin unit suite and race detector;
+- a multi-turn closed loop through the real OpenAI Chat, Claude, and Gemini
+  request/response translators, including response-to-Responses restoration;
+- a 500-deferred-tool first packet using all three translators;
+- host model-list capability metadata tests;
+- dynamic-library build and pluginhost load/interceptor/lifecycle validation.
+
+Not yet verified by this review:
+
+- a real Codex client over HTTP, SSE, or WebSocket;
+- real provider/model search quality or upstream acceptance;
+- Linux and Windows dynamic-library loading;
+- actual prompt-token or usage reduction.
+
+Unverified transports and platforms are not claimed as supported.
+
+## Build and install
 
 From the repository root on macOS:
 
@@ -114,30 +174,13 @@ rm -f plugins/darwin/$(go env GOARCH)/codex-tool-search-shim.h
 Use `.so` on Linux or FreeBSD and `.dll` on Windows. The output filename must
 match the plugin ID.
 
-## Install
-
-The repository Makefile owns the build and installation paths so a local
-CLIProxyAPI update can refresh the plugin in the same operation:
+The repository Makefile owns the normal build and installation paths:
 
 ```bash
 make -C examples/plugin build-codex-tool-search-shim
 make -C examples/plugin install-codex-tool-search-shim
 ```
 
-`install-codex-tool-search-shim` defaults to
-`$HOME/.cliproxyapi/plugins`; override it with `CLIPROXYAPI_PLUGIN_DIR`.
-Restart CLIProxyAPI after installing so the new library is mapped, then verify
-`/healthz` before sending traffic.
-
-## Diagnostics
-
-Set `X-Codex-Tool-Search-Shim-Probe: 1` on an isolated request to enable the
-structure-only diagnostic log and receive the
-`X-Codex-Tool-Search-Shim` response header. Normal traffic does not write
-diagnostic files. The log is appended to
-`codex-tool-search-shim-structure.jsonl` in the platform temporary directory;
-set `diagnostics_log_path` to point it somewhere else.
-
-Diagnostics contain protocol types, tool names, namespaces, call IDs, and
-deferred-loading flags only. They do not contain credentials, prompts, tool
-arguments, or tool outputs.
+`install-codex-tool-search-shim` defaults to `$HOME/.cliproxyapi/plugins`;
+override it with `CLIPROXYAPI_PLUGIN_DIR`. Restart CLIProxyAPI after installing
+the new library, then verify `/healthz`.
