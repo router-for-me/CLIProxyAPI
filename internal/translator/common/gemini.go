@@ -146,6 +146,54 @@ func MergeAdjacentGeminiUserContents(contents [][]byte) [][]byte {
 	return merged
 }
 
+// SplitGeminiFunctionResponseTurns separates functionResponse parts from
+// other user parts. Gemini/Antigravity requires a function response turn to
+// immediately follow the model turn containing the corresponding call; text
+// or reminders in the same user turn can otherwise make the response appear
+// orphaned to the upstream validator.
+func SplitGeminiFunctionResponseTurns(contents [][]byte) [][]byte {
+	if len(contents) == 0 {
+		return contents
+	}
+	out := make([][]byte, 0, len(contents))
+	for _, content := range contents {
+		if gjson.GetBytes(content, "role").String() != "user" || !ContentHasGeminiFunctionResponse(content) {
+			out = append(out, content)
+			continue
+		}
+		parts := gjson.GetBytes(content, "parts").Array()
+		responseParts := make([][]byte, 0, len(parts))
+		otherParts := make([][]byte, 0, len(parts))
+		for _, part := range parts {
+			if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
+				responseParts = append(responseParts, []byte(part.Raw))
+			} else {
+				otherParts = append(otherParts, []byte(part.Raw))
+			}
+		}
+		var responseTurn, otherTurn []byte
+		var responseErr, otherErr error
+		if len(responseParts) > 0 {
+			responseTurn, responseErr = sjson.SetRawBytes(content, "parts", JoinRawArray(responseParts))
+		}
+		if len(otherParts) > 0 {
+			otherTurn, otherErr = sjson.SetRawBytes(content, "parts", JoinRawArray(otherParts))
+		}
+		if responseErr != nil || otherErr != nil {
+			// Preserve the original turn if rebuilding either split turn fails.
+			out = append(out, content)
+			continue
+		}
+		if len(responseTurn) > 0 {
+			out = append(out, responseTurn)
+		}
+		if len(otherTurn) > 0 {
+			out = append(out, otherTurn)
+		}
+	}
+	return out
+}
+
 // ContainsJSONRef reports whether value (recursively) contains a string-valued "$ref" property.
 func ContainsJSONRef(value gjson.Result) bool {
 	if !value.IsObject() && !value.IsArray() {
