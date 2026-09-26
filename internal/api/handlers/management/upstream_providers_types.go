@@ -48,6 +48,12 @@ type upstreamProviderReq struct {
 	TokenExpired            *bool          `json:"token_expired,omitempty"`
 	TokenScope              string         `json:"token_scope,omitempty"`
 	ExtraConfig             map[string]any `json:"extra_config,omitempty"`
+	// AutoDisableErrorCodes lists the upstream error codes that auto-disable an
+	// entry (rendered onto the provider row). Empty = feature off.
+	AutoDisableErrorCodes []string `json:"auto_disable_error_codes,omitempty"`
+	// AutoDisableCooldownSeconds is the auto-re-enable cooldown. nil = manual
+	// re-enable only.
+	AutoDisableCooldownSeconds *int `json:"auto_disable_cooldown_seconds,omitempty"`
 
 	// Child collections.
 	Models         []upstreamProviderModelReq `json:"models,omitempty"`
@@ -91,6 +97,25 @@ type upstreamProviderEntryReq struct {
 	// Disabled excludes this entry from routing without deleting it. The
 	// renderer skips disabled entries when rendering config.yaml.
 	Disabled bool `json:"disabled,omitempty"`
+
+	// MaxConcurrent is the per-entry in-flight request cap. nil/0 = unlimited.
+	// Mirrors store.UpstreamProviderAPIKey.MaxConcurrent.
+	MaxConcurrent *int `json:"max_concurrent,omitempty"`
+	// MaxWaitMs is the per-entry wait budget in milliseconds before an
+	// eligible-but-full entry fails over. nil/0 = default wait. Mirrors
+	// store.UpstreamProviderAPIKey.MaxWaitMs.
+	MaxWaitMs *int `json:"max_wait_ms,omitempty"`
+
+	// AutoDisabled is the runtime auto-disable flag. Plan decision #7: the
+	// dashboard re-enables an auto-disabled entry by PUTting false here; the
+	// store always writes it (false clears the runtime flag).
+	AutoDisabled bool `json:"auto_disabled,omitempty"`
+	// AutoDisabledAt is when the entry was auto-disabled, as an RFC3339
+	// string (matches the TokenExpiry convention; parsed via parseRFC3339).
+	AutoDisabledAt string `json:"auto_disabled_at,omitempty"`
+	// AutoDisabledReason is the short human-readable reason (e.g. the matched
+	// upstream error code).
+	AutoDisabledReason string `json:"auto_disabled_reason,omitempty"`
 }
 
 // parseRFC3339 parses an RFC3339 timestamp string, returning ok=false on

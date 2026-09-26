@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -535,5 +536,136 @@ func TestUpstreamProviderProxyPoolBindingDTORoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"proxy_pool_id":7`) {
 		t.Fatalf("response must carry proxy_pool_id: %s", encoded)
+	}
+}
+
+// TestToUpstreamProviderCarriesAutoDisableFields pins the DTO boundary for the
+// auto-disable feature (plan decision #7: re-enable = dashboard PUT carrying
+// auto_disabled:false through the existing CRUD). The PUT body must carry the
+// provider-level codes/cooldown and the per-entry concurrency + runtime auto
+// flags into the store row so a save round-trips them, and a re-enable PUT
+// (auto_disabled:false, empty reason) must map to clear-able store values.
+func TestToUpstreamProviderCarriesAutoDisableFields(t *testing.T) {
+	const payload = `{
+		"provider_type": "openai-compatibility",
+		"name": "auto-dto",
+		"auto_disable_error_codes": ["401", "account_suspended"],
+		"auto_disable_cooldown_seconds": 3600,
+		"api_key_entries": [
+			{"id": 5, "api_key": "k1", "name": "alpha", "max_concurrent": 3, "max_wait_ms": 250,
+			 "auto_disabled": false, "auto_disabled_reason": ""},
+			{"id": 6, "api_key": "k2", "name": "beta", "max_concurrent": 0, "max_wait_ms": 0,
+			 "auto_disabled": true, "auto_disabled_at": "2026-09-26T12:00:00Z", "auto_disabled_reason": "matched 401 upstream"}
+		]
+	}`
+	var req upstreamProviderReq
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+
+	// Provider-level auto-disable config decodes and maps into the store row.
+	if len(req.AutoDisableErrorCodes) != 2 || req.AutoDisableErrorCodes[0] != "401" || req.AutoDisableErrorCodes[1] != "account_suspended" {
+		t.Fatalf("decoded AutoDisableErrorCodes = %#v, want [401 account_suspended]", req.AutoDisableErrorCodes)
+	}
+	if req.AutoDisableCooldownSeconds == nil || *req.AutoDisableCooldownSeconds != 3600 {
+		t.Fatalf("decoded AutoDisableCooldownSeconds = %#v, want pointer to 3600", req.AutoDisableCooldownSeconds)
+	}
+	row := toUpstreamProvider(&req)
+	if len(row.AutoDisableErrorCodes) != len(req.AutoDisableErrorCodes) || row.AutoDisableErrorCodes[0] != "401" {
+		t.Fatalf("store row AutoDisableErrorCodes = %#v, want [401 account_suspended]", row.AutoDisableErrorCodes)
+	}
+	if row.AutoDisableCooldownSeconds == nil || *row.AutoDisableCooldownSeconds != 3600 {
+		t.Fatalf("store row AutoDisableCooldownSeconds = %#v, want pointer to 3600", row.AutoDisableCooldownSeconds)
+	}
+
+	// Entry-level runtime + concurrency fields map into store.UpstreamProviderAPIKey.
+	if len(row.APIKeyEntries) != 2 {
+		t.Fatalf("store row entries = %d, want 2", len(row.APIKeyEntries))
+	}
+	alpha := row.APIKeyEntries[0]
+	if alpha.MaxConcurrent == nil || *alpha.MaxConcurrent != 3 {
+		t.Fatalf("alpha MaxConcurrent = %#v, want pointer to 3", alpha.MaxConcurrent)
+	}
+	if alpha.MaxWaitMs == nil || *alpha.MaxWaitMs != 250 {
+		t.Fatalf("alpha MaxWaitMs = %#v, want pointer to 250", alpha.MaxWaitMs)
+	}
+	// A re-enable PUT: auto_disabled false must NOT be wiped to true, and the
+	// empty reason must map nil so the store COALESCE can clear it.
+	if alpha.AutoDisabled {
+		t.Fatalf("alpha AutoDisabled = true, want false (re-enable PUT)")
+	}
+	if alpha.AutoDisabledAt != nil {
+		t.Fatalf("alpha AutoDisabledAt = %#v, want nil (re-enable clears the timestamp)", alpha.AutoDisabledAt)
+	}
+	if alpha.AutoDisabledReason != "" {
+		t.Fatalf("alpha AutoDisabledReason = %q, want empty", alpha.AutoDisabledReason)
+	}
+
+	beta := row.APIKeyEntries[1]
+	// max_concurrent:0 / max_wait_ms:0 must remain explicit 0 pointers (unlimited,
+	// distinct from nil/inherit), not collapse to nil.
+	if beta.MaxConcurrent == nil || *beta.MaxConcurrent != 0 {
+		t.Fatalf("beta MaxConcurrent = %#v, want pointer to 0", beta.MaxConcurrent)
+	}
+	if beta.MaxWaitMs == nil || *beta.MaxWaitMs != 0 {
+		t.Fatalf("beta MaxWaitMs = %#v, want pointer to 0", beta.MaxWaitMs)
+	}
+	// A positive runtime flag write must land.
+	if !beta.AutoDisabled {
+		t.Fatalf("beta AutoDisabled = false, want true (positive runtime write)")
+	}
+	wantAt := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	if beta.AutoDisabledAt == nil || !beta.AutoDisabledAt.Equal(wantAt) {
+		t.Fatalf("beta AutoDisabledAt = %#v, want %s", beta.AutoDisabledAt, wantAt)
+	}
+	if beta.AutoDisabledReason != "matched 401 upstream" {
+		t.Fatalf("beta AutoDisabledReason = %q, want matched 401 upstream", beta.AutoDisabledReason)
+	}
+	// The decoded entry must also pass through the response projection so the
+	// dashboard can read the persisted flags back (GET embeds the store row).
+	raw, err := json.Marshal(toUpstreamProviderResponse(store.UpstreamProvider{
+		ID:            1,
+		ProviderType:  "openai-compatibility",
+		APIKeyEntries: row.APIKeyEntries,
+	}))
+	if err != nil {
+		t.Fatalf("encode response: %v", err)
+	}
+	encoded := string(raw)
+	if !strings.Contains(encoded, `"auto_disabled":true`) {
+		t.Fatalf("response missing auto_disabled:true: %s", encoded)
+	}
+	if !strings.Contains(encoded, `"max_concurrent":3`) {
+		t.Fatalf("response missing max_concurrent:3: %s", encoded)
+	}
+}
+
+// TestToUpstreamProviderOmitsAutoDisableFieldsWhenAbsent verifies the absent
+// fields decode as nil/false (not zero pointers) so the store's COALESCE
+// preserve-on-absent stays intact for legacy PUT bodies that never mention the
+// auto-disable feature.
+func TestToUpstreamProviderOmitsAutoDisableFieldsWhenAbsent(t *testing.T) {
+	req := upstreamProviderReq{ProviderType: "claude-api-key"}
+	row := toUpstreamProvider(&req)
+	if row.AutoDisableCooldownSeconds != nil {
+		t.Fatalf("absent AutoDisableCooldownSeconds = %#v, want nil", row.AutoDisableCooldownSeconds)
+	}
+	if len(row.AutoDisableErrorCodes) != 0 {
+		t.Fatalf("absent AutoDisableErrorCodes = %#v, want empty", row.AutoDisableErrorCodes)
+	}
+	entry := row.APIKeyEntries // empty: no entry decode path
+	if entry != nil && len(entry) != 0 {
+		t.Fatalf("absent entries = %#v, want empty", entry)
+	}
+	// An entry present without the new fields must decode nil concurrency and
+	// zero auto flags (never stale values).
+	req2 := upstreamProviderReq{ProviderType: "openai-compatibility", APIKeyEntries: []upstreamProviderEntryReq{{APIKey: "k"}}}
+	row2 := toUpstreamProvider(&req2)
+	e := row2.APIKeyEntries[0]
+	if e.MaxConcurrent != nil || e.MaxWaitMs != nil {
+		t.Fatalf("entry with absent fields MaxConcurrent/MaxWaitMs = %#v/%#v, want nil/nil", e.MaxConcurrent, e.MaxWaitMs)
+	}
+	if e.AutoDisabled || e.AutoDisabledReason != "" || e.AutoDisabledAt != nil {
+		t.Fatalf("entry with absent fields auto flags = %#v, want zero", e)
 	}
 }

@@ -822,14 +822,14 @@ func (s *pgUpstreamProviderStore) syncAPIKeyEntriesTx(ctx context.Context, tx *s
 				UPDATE %s
 				SET api_key = $1, name = $2, proxy_url = $3, proxy_pool_id = $4, sort_order = $5, weight = $6, priority = $7, disabled = $8, retry_max_attempts = $9, retry_max_time_ms = $10, retry_backoff_ms = $11,
 				    max_concurrent = $12, max_wait_ms = $13,
-				    auto_disabled = COALESCE($14::boolean, auto_disabled),
-				    auto_disabled_at = COALESCE($15::timestamptz, auto_disabled_at),
-				    auto_disabled_reason = COALESCE($16::text, auto_disabled_reason)
+				    auto_disabled = $14,
+				    auto_disabled_at = $15,
+				    auto_disabled_reason = $16
 				WHERE id = $17 AND provider_id = $18
 				RETURNING id
 			`, s.entries), entry.APIKey, nullableString(entry.Name), nullableString(entry.ProxyURL), nullableID(entry.ProxyPoolID), sortOrder, nullableInt(entry.Weight), nullableInt(entry.Priority), entry.Disabled, nullableUint16(entry.RetryMaxAttempts), nullableUint32(entry.RetryMaxTimeMS), nullableUint32(entry.RetryBackoffMS),
 				nullableInt(entry.MaxConcurrent), nullableInt(entry.MaxWaitMs),
-				nullableBoolActive(entry.AutoDisabled), nullableTime(entry.AutoDisabledAt), nullableString(entry.AutoDisabledReason),
+				entry.AutoDisabled, nullableTime(entry.AutoDisabledAt), nullableString(entry.AutoDisabledReason),
 				entry.ID, providerID).Scan(&persistedID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return fmt.Errorf("postgres store: upstream provider api key entry id %d is missing from upstream provider %d", entry.ID, providerID)
@@ -1106,18 +1106,6 @@ func nullableBool(b *bool) any {
 		return nil
 	}
 	return *b
-}
-
-// nullableBoolActive binds a plain bool so that only TRUE is written; false
-// binds nil, letting COALESCE($n::boolean, col) preserve the existing row
-// state instead of force-clearing it. Used for runtime-written boolean columns
-// (e.g. auto_disabled) on update, where an operator PUT carrying zero values
-// must not wipe the runtime flag.
-func nullableBoolActive(b bool) any {
-	if !b {
-		return nil
-	}
-	return b
 }
 
 // nullableTime binds a *time.Time as nil when zero/unset.

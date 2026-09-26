@@ -1344,9 +1344,10 @@ func TestUpstreamProviderStoreMaxConcurrentWaitRoundTrip(t *testing.T) {
 // entry flags (auto_disabled BOOLEAN NOT NULL DEFAULT FALSE, auto_disabled_at
 // TIMESTAMPTZ, auto_disabled_reason TEXT). Verifies full Create/Get/Update
 // round-trips (entry IDs retained), that Migrate is idempotent for the new
-// columns, and that an operator PUT carrying zero value auto flags does NOT
-// wipe a currently auto-disabled entry's runtime flags (manual intent must not
-// clobber the system state).
+// columns, and — per plan decision #7 (re-enable = dashboard PUT) — that an
+// operator PUT carrying auto_disabled=false on an entry CLEARS its runtime
+// auto-disable flags (auto_disabled always written; false/nil/empty clears),
+// while the positive runtime write still lands.
 func TestUpstreamProviderStoreAutoDisableColumnsRoundTrip(t *testing.T) {
 	pg := newTestPostgresStore(t, "upstream_auto_disable")
 	defer pg.Close()
@@ -1464,10 +1465,14 @@ func TestUpstreamProviderStoreAutoDisableColumnsRoundTrip(t *testing.T) {
 	}
 
 	// Update round-trips the provider codes/cooldown and the entry flags, with
-	// entry IDs retained. Entry A is PUT with zero value auto flags (as an
-	// operator edit to max_concurrent would carry): its runtime flags must be
-	// preserved, not wiped. Entry B is explicitly auto-disabled in the same
-	// PUT: the positive write must land.
+	// entry IDs retained. Entry A is the Re-enable path (plan decision #7: the
+	// dashboard PUTs auto_disabled=false + empty at/reason to bring a
+	// server-auto-disabled entry back): its runtime flags must be CLEARED by
+	// the operator PUT. Entry B is explicitly auto-disabled in the same PUT:
+	// the positive write must land. This is the new contract — a zero-false
+	// auto_disabled on an operator PUT now means "clear the runtime flag"
+	// (which is what Re-enable needs), replacing the old preserve-on-false
+	// behavior.
 	secondDisabledAt := time.Now().UTC().Truncate(time.Second)
 	newMax := 3
 	newCodes := []string{"429", "upstream_error"}
@@ -1479,8 +1484,10 @@ func TestUpstreamProviderStoreAutoDisableColumnsRoundTrip(t *testing.T) {
 		AutoDisableErrorCodes:      newCodes,
 		AutoDisableCooldownSeconds: &newCooldown,
 		APIKeyEntries: []UpstreamProviderAPIKey{
-			// Operator PUT: only max_concurrent changed; auto flags left zero.
-			{ID: firstID, APIKey: "ad-secret-a", Name: "alpha", MaxConcurrent: &newMax},
+			// Re-enable PUT: max_concurrent changed AND the runtime auto flags
+			// explicitly cleared (auto_disabled=false, nil at, empty reason).
+			{ID: firstID, APIKey: "ad-secret-a", Name: "alpha", MaxConcurrent: &newMax,
+				AutoDisabled: false},
 			// Positive runtime write: auto-disable entry B.
 			{ID: secondID, APIKey: "ad-secret-b", Name: "beta",
 				AutoDisabled: true, AutoDisabledAt: &secondDisabledAt, AutoDisabledReason: "matched 429 upstream"},
@@ -1519,16 +1526,16 @@ func TestUpstreamProviderStoreAutoDisableColumnsRoundTrip(t *testing.T) {
 	if gotB.ID == 0 {
 		t.Fatalf("entry B lost: %#v", reloaded.APIKeyEntries)
 	}
-	// Entry A: runtime flags preserved despite the zero-value auto PUT, and its
-	// operator-editable max_concurrent still written.
-	if !gotA.AutoDisabled {
-		t.Fatalf("entry A AutoDisabled wiped to false by zero-value PUT; want preserved true")
+	// Entry A: re-enable PUT cleared the runtime flags, and its operator-editable
+	// max_concurrent still written.
+	if gotA.AutoDisabled {
+		t.Fatalf("entry A AutoDisabled still true after re-enable PUT; want cleared false")
 	}
-	if gotA.AutoDisabledAt == nil || !gotA.AutoDisabledAt.Equal(disabledAt) {
-		t.Fatalf("entry A AutoDisabledAt = %#v, want preserved %s", gotA.AutoDisabledAt, disabledAt)
+	if gotA.AutoDisabledAt != nil {
+		t.Fatalf("entry A AutoDisabledAt = %#v after re-enable PUT; want nil (cleared)", gotA.AutoDisabledAt)
 	}
-	if gotA.AutoDisabledReason != disabledReason {
-		t.Fatalf("entry A AutoDisabledReason = %q, want preserved %q", gotA.AutoDisabledReason, disabledReason)
+	if gotA.AutoDisabledReason != "" {
+		t.Fatalf("entry A AutoDisabledReason = %q after re-enable PUT; want empty (cleared)", gotA.AutoDisabledReason)
 	}
 	if gotA.MaxConcurrent == nil || *gotA.MaxConcurrent != newMax {
 		t.Fatalf("entry A MaxConcurrent = %#v, want pointer to %d", gotA.MaxConcurrent, newMax)

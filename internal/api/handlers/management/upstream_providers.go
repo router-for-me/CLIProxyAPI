@@ -95,34 +95,36 @@ func validateUpstreamProviderRequest(body *upstreamProviderReq) error {
 // zeroing the id/timestamps (set by the DB on insert/update).
 func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 	p := store.UpstreamProvider{
-		ProviderType:            strings.TrimSpace(body.ProviderType),
-		Name:                    strings.TrimSpace(body.Name),
-		Priority:                body.Priority,
-		RoutingStrategy:         config.NormalizePoolRoutingStrategy(body.RoutingStrategy),
-		CircuitBreaker:          body.CircuitBreaker,
-		Disabled:                body.Disabled,
-		Prefix:                  strings.TrimSpace(body.Prefix),
-		APIKey:                  strings.TrimSpace(body.APIKey),
-		BaseURL:                 strings.TrimSpace(body.BaseURL),
-		ProxyURL:                strings.TrimSpace(body.ProxyURL),
-		ProxyPoolID:             body.ProxyPoolID,
-		Label:                   strings.TrimSpace(body.Label),
-		Email:                   strings.TrimSpace(body.Email),
-		FileName:                strings.TrimSpace(body.FileName),
-		SourceBackend:           strings.TrimSpace(body.SourceBackend),
-		Websockets:              body.Websockets,
-		RebuildMidSystemMessage: body.RebuildMidSystemMessage,
-		ExperimentalCCHSigning:  body.ExperimentalCCHSigning,
-		CloakMode:               strings.TrimSpace(body.CloakMode),
-		CloakStrictMode:         body.CloakStrictMode,
-		CloakSensitiveWords:     body.CloakSensitiveWords,
-		TokenAccessToken:        strings.TrimSpace(body.TokenAccessToken),
-		TokenRefreshToken:       strings.TrimSpace(body.TokenRefreshToken),
-		TokenTokenType:          strings.TrimSpace(body.TokenTokenType),
-		TokenScope:              strings.TrimSpace(body.TokenScope),
-		ExtraConfig:             body.ExtraConfig,
-		Headers:                 body.Headers,
-		ExcludedModels:          body.ExcludedModels,
+		ProviderType:               strings.TrimSpace(body.ProviderType),
+		Name:                       strings.TrimSpace(body.Name),
+		Priority:                   body.Priority,
+		RoutingStrategy:            config.NormalizePoolRoutingStrategy(body.RoutingStrategy),
+		CircuitBreaker:             body.CircuitBreaker,
+		Disabled:                   body.Disabled,
+		Prefix:                     strings.TrimSpace(body.Prefix),
+		APIKey:                     strings.TrimSpace(body.APIKey),
+		BaseURL:                    strings.TrimSpace(body.BaseURL),
+		ProxyURL:                   strings.TrimSpace(body.ProxyURL),
+		ProxyPoolID:                body.ProxyPoolID,
+		Label:                      strings.TrimSpace(body.Label),
+		Email:                      strings.TrimSpace(body.Email),
+		FileName:                   strings.TrimSpace(body.FileName),
+		SourceBackend:              strings.TrimSpace(body.SourceBackend),
+		Websockets:                 body.Websockets,
+		RebuildMidSystemMessage:    body.RebuildMidSystemMessage,
+		ExperimentalCCHSigning:     body.ExperimentalCCHSigning,
+		CloakMode:                  strings.TrimSpace(body.CloakMode),
+		CloakStrictMode:            body.CloakStrictMode,
+		CloakSensitiveWords:        body.CloakSensitiveWords,
+		TokenAccessToken:           strings.TrimSpace(body.TokenAccessToken),
+		TokenRefreshToken:          strings.TrimSpace(body.TokenRefreshToken),
+		TokenTokenType:             strings.TrimSpace(body.TokenTokenType),
+		TokenScope:                 strings.TrimSpace(body.TokenScope),
+		ExtraConfig:                body.ExtraConfig,
+		Headers:                    body.Headers,
+		ExcludedModels:             body.ExcludedModels,
+		AutoDisableErrorCodes:      body.AutoDisableErrorCodes,
+		AutoDisableCooldownSeconds: body.AutoDisableCooldownSeconds,
 	}
 	if body.CloakCacheUserID != nil {
 		v := *body.CloakCacheUserID
@@ -159,12 +161,14 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 	// secret material.
 	for _, e := range body.APIKeyEntries {
 		entry := store.UpstreamProviderAPIKey{
-			ID:          e.ID,
-			Name:        e.Name,
-			APIKey:      e.APIKey,
-			ProxyURL:    e.ProxyURL,
-			ProxyPoolID: e.ProxyPoolID,
-			Disabled:    e.Disabled,
+			ID:                 e.ID,
+			Name:               e.Name,
+			APIKey:             e.APIKey,
+			ProxyURL:           e.ProxyURL,
+			ProxyPoolID:        e.ProxyPoolID,
+			Disabled:           e.Disabled,
+			AutoDisabled:       e.AutoDisabled,
+			AutoDisabledReason: e.AutoDisabledReason,
 		}
 		if e.Weight != nil {
 			w := *e.Weight
@@ -173,6 +177,19 @@ func toUpstreamProvider(body *upstreamProviderReq) store.UpstreamProvider {
 		if e.Priority != nil {
 			v := *e.Priority
 			entry.Priority = &v
+		}
+		if e.MaxConcurrent != nil {
+			v := *e.MaxConcurrent
+			entry.MaxConcurrent = &v
+		}
+		if e.MaxWaitMs != nil {
+			v := *e.MaxWaitMs
+			entry.MaxWaitMs = &v
+		}
+		if e.AutoDisabledAt != "" {
+			if t, ok := parseRFC3339(e.AutoDisabledAt); ok {
+				entry.AutoDisabledAt = &t
+			}
 		}
 		p.APIKeyEntries = append(p.APIKeyEntries, entry)
 	}
