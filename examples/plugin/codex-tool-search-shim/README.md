@@ -113,10 +113,12 @@ Request completion in all four terminal outcomes releases retained state.
 native routes. Setting it to `true` enables a lossy compatibility workaround:
 the plugin removes current custom-tool declarations and converts prior
 `custom_tool_call` / `custom_tool_call_output` items into equivalent function
-history. It returns HTTP 422 if `tool_choice` forces a removed custom tool or
-if a historical custom call has no string input. The model cannot make new
-custom-tool calls on that route. Enable it only where this loss of future
-custom-tool use is acceptable.
+history, namespaced calls included. It returns HTTP 422 if `tool_choice` forces
+a removed custom tool or if a historical custom call has no string input.
+Pre-existing `function_call` / `function_call_output` history is preserved
+unchanged, even when a name collides with a removed custom tool. The model
+cannot make new custom-tool calls on that route. Enable it only where this
+loss of future custom-tool use is acceptable.
 
 ## Behaviour guarantees
 

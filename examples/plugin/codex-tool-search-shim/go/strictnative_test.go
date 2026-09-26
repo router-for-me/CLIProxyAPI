@@ -367,6 +367,73 @@ func TestStrictCustomToolRemovalConvertsHistoricalCalls(t *testing.T) {
 	}
 }
 
+func TestStrictCustomToolRemovalRejectsNonStringHistoricalInput(t *testing.T) {
+	t.Cleanup(func() { _ = applyPluginConfig(nil) })
+	if errConfigure := applyPluginConfig([]byte("strip_custom_tools: true\n")); errConfigure != nil {
+		t.Fatalf("applyPluginConfig() error = %v", errConfigure)
+	}
+	body := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}],"input":[{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":{"patch":"diff"}}]}`)
+	_, _, errNormalize := normalizeStrictNativeBody(body)
+	if errNormalize == nil || !strings.Contains(errNormalize.Error(), "custom_tool_history_invalid_input") {
+		t.Fatalf("normalizeStrictNativeBody() error = %v, want invalid history input rejection", errNormalize)
+	}
+}
+
+func TestStrictCustomToolRemovalConvertsNamespacedHistoricalCalls(t *testing.T) {
+	t.Cleanup(func() { _ = applyPluginConfig(nil) })
+	if errConfigure := applyPluginConfig([]byte("strip_custom_tools: true\n")); errConfigure != nil {
+		t.Fatalf("applyPluginConfig() error = %v", errConfigure)
+	}
+	body := []byte(`{
+		"tools":[{"type":"namespace","name":"patcher","tools":[{"type":"custom","name":"apply_patch"}]}],
+		"input":[{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","namespace":"patcher","input":"diff"}]
+	}`)
+	out, changed, errNormalize := normalizeStrictNativeBody(body)
+	if errNormalize != nil {
+		t.Fatalf("normalizeStrictNativeBody() error = %v", errNormalize)
+	}
+	if !changed {
+		t.Fatal("normalizeStrictNativeBody() changed = false, want true")
+	}
+	var root map[string]any
+	if errUnmarshal := json.Unmarshal(out, &root); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	call := root["input"].([]any)[0].(map[string]any)
+	if call["type"] != "function_call" || call["name"] != "patcher__apply_patch" {
+		t.Fatalf("namespaced historical call = %#v, want qualified function_call", call)
+	}
+	if _, exists := call["namespace"]; exists {
+		t.Fatalf("namespaced historical call still has namespace: %#v", call)
+	}
+}
+
+func TestStrictCustomToolRemovalPreservesUnrelatedFunctionHistory(t *testing.T) {
+	t.Cleanup(func() { _ = applyPluginConfig(nil) })
+	if errConfigure := applyPluginConfig([]byte("strip_custom_tools: true\n")); errConfigure != nil {
+		t.Fatalf("applyPluginConfig() error = %v", errConfigure)
+	}
+	body := []byte(`{
+		"tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}],
+		"input":[{"type":"function_call","id":"item-1","call_id":"c1","name":"exec_command","arguments":"{}"}]
+	}`)
+	out, changed, errNormalize := normalizeStrictNativeBody(body)
+	if errNormalize != nil {
+		t.Fatalf("normalizeStrictNativeBody() error = %v", errNormalize)
+	}
+	if changed {
+		t.Fatalf("normalizeStrictNativeBody() changed = true, want unrelated history untouched: %s", out)
+	}
+	var root map[string]any
+	if errUnmarshal := json.Unmarshal(out, &root); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	call := root["input"].([]any)[0].(map[string]any)
+	if call["type"] != "function_call" || call["name"] != "exec_command" {
+		t.Fatalf("unrelated function history changed: %#v", call)
+	}
+}
+
 func TestStrictNativeBodyPreservesCustomToolsByDefault(t *testing.T) {
 	t.Cleanup(func() { _ = applyPluginConfig(nil) })
 	body := []byte(`{"tools":[{"type":"custom","name":"apply_patch","description":"freeform"}]}`)
