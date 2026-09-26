@@ -790,3 +790,106 @@ test('TestPanel: isEntryBearing matches openai-compat, claude, and opencode-go',
   assert.equal(isEntryBearing('gemini-api-key'), false);
   assert.equal(isEntryBearing('oauth:claude'), false);
 });
+
+// ============================================================================
+// Per-entry max-concurrent / max-wait-ms + provider auto-disable round-trip
+// ============================================================================
+
+test('buildForm/buildPayload: per-entry max_concurrent + max_wait_ms round-trip as numbers', () => {
+  const form = buildForm('openai-compatibility', {
+    api_key_entries: [
+      { id: 1, api_key: 'sk-a', name: 'a', max_concurrent: 3, max_wait_ms: 1500 },
+      { id: 2, api_key: 'sk-b', name: 'b' },
+    ],
+  });
+  assert.equal(form.api_key_entries[0].max_concurrent, 3);
+  assert.equal(form.api_key_entries[0].max_wait_ms, 1500);
+  assert.equal(form.api_key_entries[1].max_concurrent, '', 'unset concurrent hydrates blank');
+  assert.equal(form.api_key_entries[1].max_wait_ms, '', 'unset wait hydrates blank');
+
+  const payload = buildPayload(form, 'openai-compatibility');
+  assert.equal(payload.api_key_entries[0].max_concurrent, 3, 'emitted as a number');
+  assert.equal(payload.api_key_entries[0].max_wait_ms, 1500, 'emitted as a number');
+  assert.ok(!('max_concurrent' in payload.api_key_entries[1]), 'unset cap omitted from payload');
+  assert.ok(!('max_wait_ms' in payload.api_key_entries[1]), 'unset wait omitted from payload');
+});
+
+test('buildPayload: max_concurrent 0 is explicit and emitted; blank may omit', () => {
+  const form = buildForm('claude-api-key', {
+    api_key_entries: [{ id: 1, api_key: 'sk-a', name: 'a', max_concurrent: 0, max_wait_ms: '' }],
+  });
+  const payload = buildPayload(form, 'claude-api-key');
+  assert.equal(payload.api_key_entries[0].max_concurrent, 0, 'explicit 0 survives (unlimited)');
+  assert.ok(!('max_wait_ms' in payload.api_key_entries[0]), 'blank wait omitted');
+});
+
+test('buildForm/buildPayload: auto-disabled runtime flags round-trip read-only', () => {
+  const form = buildForm('openai-compatibility', {
+    api_key_entries: [
+      {
+        id: 1, api_key: 'sk-a', name: 'a',
+        auto_disabled: true, auto_disabled_at: '2026-09-25T09:00:00Z', auto_disabled_reason: '401',
+      },
+    ],
+  });
+  assert.equal(form.api_key_entries[0].auto_disabled, true);
+  assert.equal(form.api_key_entries[0].auto_disabled_reason, '401');
+  // A normal save carries the auto flags along untouched (so the store's
+  // COALESCE preserves them instead of treating absence as a wipe).
+  const payload = buildPayload(form, 'openai-compatibility');
+  assert.equal(payload.api_key_entries[0].auto_disabled, true);
+  assert.equal(payload.api_key_entries[0].auto_disabled_at, '2026-09-25T09:00:00Z');
+  assert.equal(payload.api_key_entries[0].auto_disabled_reason, '401');
+});
+
+test('buildPayload: Re-enable clears auto_disabled and disabled via the entry field', () => {
+  const form = buildForm('openai-compatibility', {
+    api_key_entries: [
+      {
+        id: 1, api_key: 'sk-a', name: 'a',
+        auto_disabled: false, auto_disabled_at: '', auto_disabled_reason: '', disabled: false,
+      },
+    ],
+  });
+  const payload = buildPayload(form, 'openai-compatibility');
+  assert.equal(payload.api_key_entries[0].auto_disabled, false, 're-enabled entry sends auto_disabled=false');
+  assert.equal(payload.api_key_entries[0].disabled, false, 'disabled cleared alongside');
+  assert.ok(!('auto_disabled_at' in payload.api_key_entries[0]), 'timestamp cleared');
+  assert.ok(!('auto_disabled_reason' in payload.api_key_entries[0]), 'reason cleared');
+});
+
+test('buildForm/buildPayload: provider auto-disable codes + cooldown round-trip', () => {
+  const form = buildForm('claude-api-key', {
+    auto_disable_error_codes: ['401', 'account_suspended'],
+    auto_disable_cooldown_seconds: 3600,
+  });
+  assert.deepEqual(form.auto_disable_error_codes, ['401', 'account_suspended']);
+  assert.equal(form.auto_disable_cooldown_seconds, 3600);
+
+  const payload = buildPayload(form, 'claude-api-key');
+  assert.deepEqual(payload.auto_disable_error_codes, ['401', 'account_suspended']);
+  assert.equal(payload.auto_disable_cooldown_seconds, 3600);
+});
+
+test('buildPayload: blank provider auto-disable fields emit empty codes and omit cooldown', () => {
+  const form = buildForm('openai-compatibility', {});
+  assert.deepEqual(form.auto_disable_error_codes, [], 'unset codes hydrate to empty list');
+  assert.equal(form.auto_disable_cooldown_seconds, '', 'unset cooldown hydrates blank');
+  const payload = buildPayload(form, 'openai-compatibility');
+  assert.deepEqual(payload.auto_disable_error_codes, [], 'empty list = feature off');
+  assert.ok(!('auto_disable_cooldown_seconds' in payload), 'unset cooldown omitted');
+});
+
+test('validateAPIKeyEntries: negative/non-integer max_concurrent surfaces an inline error', () => {
+  const errs = validateAPIKeyEntries([
+    { id: 1, api_key: 'sk-a', max_concurrent: '-2' },
+  ]);
+  assert.match(errs[0]?.max_concurrent ?? '', /non-negative/);
+});
+
+test('validateAPIKeyEntries: valid max_concurrent + max_wait_ms produce no errors', () => {
+  const errs = validateAPIKeyEntries([
+    { id: 1, api_key: 'sk-a', max_concurrent: 4, max_wait_ms: 250 },
+  ]);
+  assert.deepEqual(errs, {});
+});

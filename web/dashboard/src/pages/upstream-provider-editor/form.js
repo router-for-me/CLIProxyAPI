@@ -66,6 +66,25 @@ export function validateAPIKeyEntries(entries) {
         errs.priority = 'Priority must be a whole number (blank = inherit the row priority).';
       }
     }
+    // MaxConcurrent / MaxWaitMs: blank = unlimited/default; anything else must
+    // be a non-negative whole number (0 is explicit "off" for max_concurrent,
+    // and the default wait for max_wait_ms).
+    const mcRaw = e && e.max_concurrent;
+    if (mcRaw !== undefined && mcRaw !== null && String(mcRaw).trim() !== '') {
+      const s = String(mcRaw).trim();
+      const n = Number(s);
+      if (!Number.isFinite(n) || !/^\d+$/.test(s) || Math.floor(n) !== n) {
+        errs.max_concurrent = 'Max concurrent must be a non-negative whole number (blank / 0 = unlimited).';
+      }
+    }
+    const mwRaw = e && e.max_wait_ms;
+    if (mwRaw !== undefined && mwRaw !== null && String(mwRaw).trim() !== '') {
+      const s = String(mwRaw).trim();
+      const n = Number(s);
+      if (!Number.isFinite(n) || !/^\d+$/.test(s) || Math.floor(n) !== n) {
+        errs.max_wait_ms = 'Max wait must be a non-negative whole number of milliseconds (blank = default).';
+      }
+    }
     if (Object.keys(errs).length > 0) out[i] = errs;
     if (trimmed !== '' && !errs.name) {
       seenNames.set(normalised, i);
@@ -118,6 +137,16 @@ function hydrateEntries(src) {
     // Disabled (per-entry on/off toggle) hydrates to a plain boolean so the
     // editor switch always has a defined value.
     disabled: !!(e && e.disabled),
+    // MaxConcurrent / MaxWaitMs are optional per-entry in-flight caps.
+    // null/0 = unlimited (feature off); blank input = unset. The editor keeps
+    // them as blank strings so a cleared field round-trips to "unset".
+    max_concurrent: e && e.max_concurrent !== undefined && e.max_concurrent !== null ? e.max_concurrent : '',
+    max_wait_ms: e && e.max_wait_ms !== undefined && e.max_wait_ms !== null ? e.max_wait_ms : '',
+    // Auto-disabled runtime flags are read-only in the editor (written by the
+    // server-side sink). Hydrated so the badge + Re-enable action can render.
+    auto_disabled: !!(e && e.auto_disabled),
+    auto_disabled_at: e && e.auto_disabled_at ? e.auto_disabled_at : '',
+    auto_disabled_reason: e && e.auto_disabled_reason ? e.auto_disabled_reason : '',
     };
   });
 }
@@ -159,6 +188,13 @@ export function buildForm(providerType, initial, carryOver) {
     disable_cooling: (src.extra_config && src.extra_config.disable_cooling) ?? false,
     // opencode-go quota probe override (extra_config.quota_url).
     quota_url: (src.extra_config && src.extra_config.quota_url) || '',
+    // Provider-level auto-disable config (Auto-Disable feature). Codes are a
+    // string list (empty = feature off); cooldown is a nullable int (blank/0
+    // = manual re-enable only). Both are hydrated blank so a cleared field
+    // saves back as unset.
+    auto_disable_error_codes: Array.isArray(src.auto_disable_error_codes) ? [...src.auto_disable_error_codes] : [],
+    auto_disable_cooldown_seconds: src.auto_disable_cooldown_seconds !== undefined && src.auto_disable_cooldown_seconds !== null
+      ? src.auto_disable_cooldown_seconds : '',
     headers: [],
     models: [],
     excluded_models: src.excluded_models ?? [],
@@ -212,6 +248,11 @@ export function buildForm(providerType, initial, carryOver) {
       weight: '',
       priority: '',
       disabled: false,
+      max_concurrent: '',
+      max_wait_ms: '',
+      auto_disabled: false,
+      auto_disabled_at: '',
+      auto_disabled_reason: '',
     }];
   }
 
@@ -301,7 +342,21 @@ export function buildPayload(form, providerType) {
         payload.token_expiry = t.toISOString();
       }
     }
+    // Provider-level auto-disable config is meaningful for entry-bearing
+    // providers (it auto-disables individual api_key_entries). OAuth rows
+    // have no entries, so the fields are not emitted for them.
   } else if (openai || claude || isOpenCodeGo(providerType)) {
+    // Provider-level auto-disable config for entry-bearing providers.
+    // Codes are emitted as a string list (empty = feature off); cooldown is a
+    // non-negative int or omitted (blank/0 = manual re-enable only).
+    payload.auto_disable_error_codes = Array.isArray(form.auto_disable_error_codes)
+      ? [...form.auto_disable_error_codes]
+      : [];
+    const cdRaw = form.auto_disable_cooldown_seconds;
+    if (cdRaw !== undefined && cdRaw !== null && String(cdRaw).trim() !== '') {
+      const n = Number(cdRaw);
+      if (Number.isInteger(n) && n >= 0) payload.auto_disable_cooldown_seconds = n;
+    }
     // Entry-bearing providers: openai-compatibility, claude-api-key, and
     // opencode-go all use the multi-row api_key_entries editor below.
     // Row-level proxy pool binding: emitted only when set so a cleared
@@ -368,6 +423,27 @@ export function buildPayload(form, providerType) {
         // entry with a key stays in the payload (persisted, but the renderer
         // excludes it from config.yaml); only blank-key entries are filtered.
         entry.disabled = !!e.disabled;
+        // Per-entry concurrency cap: emitted when filled as a non-negative
+        // whole number; 0 = unlimited (feature off). Blank/empty = unset.
+        // Serialized as numbers, never strings, so the backend *int decode
+        // accepts them.
+        const mcRaw = e.max_concurrent;
+        if (mcRaw !== undefined && mcRaw !== null && String(mcRaw).trim() !== '') {
+          const n = Number(mcRaw);
+          if (Number.isInteger(n) && n >= 0) entry.max_concurrent = n;
+        }
+        const mwRaw = e.max_wait_ms;
+        if (mwRaw !== undefined && mwRaw !== null && String(mwRaw).trim() !== '') {
+          const n = Number(mwRaw);
+          if (Number.isInteger(n) && n >= 0) entry.max_wait_ms = n;
+        }
+        // Auto-disabled runtime flags: a manual Re-enable needs the PUT to
+        // carry auto_disabled=false so it survives the backend's COALESCE
+        // preserve-on-update. Everything on this row is read-only; only the
+        // Re-enable action flips auto_disabled back to false.
+        entry.auto_disabled = !!e.auto_disabled;
+        if (e.auto_disabled_at) entry.auto_disabled_at = e.auto_disabled_at;
+        if (e.auto_disabled_reason) entry.auto_disabled_reason = e.auto_disabled_reason;
         return entry;
       });
   } else {

@@ -424,6 +424,7 @@ export default function UpstreamProvidersTable({
               {pagedRows.map((p) => {
                 const ident = p.name || p.label || p.email || p.file_name || '—';
                 const modelCount = (p.models || []).length;
+                const autoDisabledCount = (p.api_key_entries || []).filter((e) => e && e.auto_disabled).length;
                 const isSel = selectedIds.has(p.id);
                 const liveEntry = liveStatus[String(p.id)];
                 const healthStatus = statusFromHealth(p, liveEntry);
@@ -473,6 +474,15 @@ export default function UpstreamProvidersTable({
                       <span className={`badge ${p.disabled ? 'badge--disabled' : 'badge--active'}`}>
                         {p.disabled ? 'disabled' : 'active'}
                       </span>
+                      {autoDisabledCount > 0 && (
+                        <span
+                          className="badge badge--disabled auto-disabled-count"
+                          style={{ marginLeft: 4, fontSize: 10 }}
+                          title={`${autoDisabledCount} API key entr${autoDisabledCount === 1 ? 'y is' : 'ies are'} auto-disabled (matched upstream error code).`}
+                        >
+                          auto ×{autoDisabledCount}
+                        </span>
+                      )}
                     </td>
                     <td>{modelCount > 0 ? modelCount : <span className="dim">0</span>}</td>
                     <td className="dim" title={p.updated_at ? formatTime(p.updated_at) : ''}>

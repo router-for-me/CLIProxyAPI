@@ -15,6 +15,7 @@
 import React, { useMemo } from 'react';
 import { PasswordInput } from '../manage-cpa/FormPrimitives.jsx';
 import { validateAPIKeyEntries, idHintForIdentity } from './form.js';
+import { formatRelativeTime } from '../../utils/formatRelativeTime.js';
 
 export default function APIKeyEntriesEditor({ entries, onChange, error = '', proxyPools = [] }) {
   const safe = Array.isArray(entries) ? entries : [];
@@ -23,7 +24,7 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '', pro
     onChange(safe.map((e, i) => (i === idx ? { ...e, ...patch } : e)));
   }
   function add() {
-    onChange([...safe, { api_key: '', proxy_url: '', proxy_pool_id: '', name: '', id: 0, weight: '', priority: '', disabled: false }]);
+    onChange([...safe, { api_key: '', proxy_url: '', proxy_pool_id: '', name: '', id: 0, weight: '', priority: '', disabled: false, max_concurrent: '', max_wait_ms: '', auto_disabled: false, auto_disabled_at: '', auto_disabled_reason: '' }]);
   }
   function remove(idx) { onChange(safe.filter((_, i) => i !== idx)); }
 
@@ -47,15 +48,18 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '', pro
         const id = Number(e && e.id) || 0;
         const rowErr = errors[idx] || {};
         const isOff = !!e.disabled;
+        const autoOff = !!(e && e.auto_disabled);
         const hint = id > 0
           ? `Persisted as entry #${id}. ${idHintForIdentity(e)}`
           : 'Blank identity will become key-<id> after save.';
         return (
-          <div className={`list-editor__rowgroup${isOff ? ' list-editor__rowgroup--disabled' : ''}`} key={rowKey(e, idx)}>
+          <div className={`list-editor__rowgroup${(isOff && !autoOff) || autoOff ? ' list-editor__rowgroup--disabled' : ''}`} key={rowKey(e, idx)}>
             <div className="list-editor__row">
               <label
                 className="toggle-switch entry-toggle"
-                title={isOff ? 'Entry is disabled — excluded from routing' : 'Entry is active'}
+                title={autoOff
+                  ? 'Entry auto-disabled by the server on a matched upstream error — use Re-enable to bring it back'
+                  : isOff ? 'Entry is disabled — excluded from routing' : 'Entry is active'}
                 data-testid={`api-key-entry-disabled-${idx}`}
               >
                 <input
@@ -134,6 +138,30 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '', pro
                 aria-invalid={!!rowErr.priority}
                 data-testid={`api-key-entry-priority-${idx}`}
               />
+              <input
+                type="text"
+                inputMode="numeric"
+                value={e.max_concurrent ?? ''}
+                onChange={(ev) => update(idx, { max_concurrent: ev.target.value })}
+                placeholder="max concurrent"
+                title="In-flight request cap for this entry. Blank / 0 = unlimited."
+                spellCheck={false}
+                aria-label="API key entry max concurrent"
+                aria-invalid={!!rowErr.max_concurrent}
+                data-testid={`api-key-entry-max-concurrent-${idx}`}
+              />
+              <input
+                type="text"
+                inputMode="numeric"
+                value={e.max_wait_ms ?? ''}
+                onChange={(ev) => update(idx, { max_wait_ms: ev.target.value })}
+                placeholder="max wait ms"
+                title="Wait budget in milliseconds before an eligible-but-full entry fails over. Blank = default (200ms)."
+                spellCheck={false}
+                aria-label="API key entry max wait ms"
+                aria-invalid={!!rowErr.max_wait_ms}
+                data-testid={`api-key-entry-max-wait-ms-${idx}`}
+              />
               <button
                 type="button"
                 className="list-editor__remove"
@@ -144,10 +172,30 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '', pro
             </div>
             <div className="list-editor__rowhint muted" style={{ fontSize: 11 }}>
               {hint}
-              {isOff && (
+              {isOff && !autoOff && (
                 <span className="badge badge--disabled" style={{ marginLeft: 6, fontSize: 10 }}>disabled</span>
               )}
+              {autoOff && (
+                <AutoDisabledBadge reason={e.auto_disabled_reason} at={e.auto_disabled_at} />
+              )}
             </div>
+            {autoOff && (
+              <div className="list-editor__rowhint" style={{ marginTop: 2 }}>
+                <button
+                  type="button"
+                  className="list-editor__reenable"
+                  onClick={() => update(idx, {
+                    auto_disabled: false,
+                    auto_disabled_at: '',
+                    auto_disabled_reason: '',
+                    disabled: false,
+                  })}
+                  title="Clear auto-disabled state. Click Save to persist."
+                >
+                  Re-enable
+                </button>
+              </div>
+            )}
             {rowErr.name && (
               <div className="form__error" role="alert">{rowErr.name}</div>
             )}
@@ -157,10 +205,37 @@ export default function APIKeyEntriesEditor({ entries, onChange, error = '', pro
             {rowErr.priority && (
               <div className="form__error" role="alert">{rowErr.priority}</div>
             )}
+            {rowErr.max_concurrent && (
+              <div className="form__error" role="alert">{rowErr.max_concurrent}</div>
+            )}
+            {rowErr.max_wait_ms && (
+              <div className="form__error" role="alert">{rowErr.max_wait_ms}</div>
+            )}
           </div>
         );
       })}
       <button type="button" className="list-editor__add" onClick={add}>+ Add key</button>
     </div>
+  );
+}
+
+// AutoDisabledBadge renders the runtime auto-disabled state for an entry:
+// the reason (e.g. "401") and, when known, how long ago the entry was
+// disabled. Uses the app's shared relative-time util for consistency with
+// the rest of the dashboard.
+function AutoDisabledBadge({ reason, at }) {
+  const when = at ? formatRelativeTime(at) : '';
+  const summary = reason
+    ? `Auto-disabled${when ? ` ${when}` : ''}${reason ? ` — reason ${reason}` : ''}`
+    : `Auto-disabled${when ? ` ${when}` : ''}`;
+  return (
+    <span
+      className="badge badge--disabled auto-disabled-badge"
+      style={{ marginLeft: 6, fontSize: 10 }}
+      title="Automatically disabled by the server after a matched upstream error. Re-enable to bring the entry back."
+      aria-label={summary}
+    >
+      auto-disabled {reason ? `(${reason})` : ''}{when ? ` · ${when}` : ''}
+    </span>
   );
 }

@@ -2345,6 +2345,23 @@ select.has-error:focus {
   padding: 4px 10px;
 }
 
+/* Re-enable button for an auto-disabled API key entry (clears the runtime
+   auto-disable flags on save). Compact, mirrors the list-editor link-button
+   density — small text button, hover borrows the success accent. */
+.list-editor__reenable {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--success);
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.list-editor__reenable:hover {
+  border-color: var(--success);
+  background: var(--success-dim);
+}
+
 /* Small chip used for tag-style entries (e.g. excluded-models). */
 .entry-chip {
   display: inline-flex;

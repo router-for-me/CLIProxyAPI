@@ -151,6 +151,16 @@ export function buildSchemas() {
       hint: 'Skip the cooldown schedule when this credential hits an error.' },
   ];
 
+  // Provider-level auto-disable config (Auto-Disable feature). Empty codes =
+  // feature off; cooldown blank/0 = manual re-enable only (no sweeper).
+  const autoDisableFields = [
+    { name: 'auto_disable_error_codes', label: 'Auto-disable error codes', type: 'chips',
+      placeholder: 'error code (e.g. 401)', emptyHint: 'No codes — auto-disable is off.',
+      hint: 'Upstream error codes that permanently auto-disable an API key entry (e.g. 401, account_suspended). On a match the entry is disabled and excluded from routing until re-enabled.' },
+    { name: 'auto_disable_cooldown_seconds', label: 'Auto-disable cooldown (seconds)', type: 'number', min: 0, placeholder: '0',
+      hint: 'How long an auto-disabled entry stays down before the server re-enables it automatically. Blank / 0 = the entry stays down until a manual Re-enable.' },
+  ];
+
   // API-key provider schemas share most structure. The optional
   // `extraIdentity` fields are prepended to the Identity section (used to add
   // the per-type Identifier field, e.g. for Claude).
@@ -238,6 +248,7 @@ export function buildSchemas() {
         { title: 'Routing', fields: commonRouting, fetchModels: true },
         { title: 'Behavior', fields: [
           ...commonBehavior,
+          ...autoDisableFields,
           { name: 'rebuild_mid_system_message', label: 'Rebuild mid system message', type: 'toggle',
             hint: 'Move role=system messages into the top-level system field.' },
           { name: 'experimental_cch_signing', label: 'Experimental CCH signing', type: 'toggle',
@@ -280,6 +291,7 @@ export function buildSchemas() {
             hint: 'When on, this provider is excluded from routing.' },
           { name: 'disable_cooling', label: 'Disable cooldown', type: 'toggle',
             hint: 'Skip the cooldown schedule when this provider hits an error.' },
+          ...autoDisableFields,
           { name: 'api_key_entries', label: 'API key entries', type: 'api_key_entries',
             hint: 'Multiple keys form a round-robin pool for this provider.' },
         ]},
@@ -326,6 +338,7 @@ export function buildSchemas() {
             hint: 'Skip the cooldown schedule when this provider hits an error.' },
           { name: 'quota_url', label: 'Quota URL', type: 'text', placeholder: 'https://opencode.ai/zen/go/v1/quota',
             hint: 'Override for the manual per-entry quota probe. Default uses the OpenCode Zen Go quota endpoint (currently not live upstream — the probe fails open with an explanation).' },
+          ...autoDisableFields,
           { name: 'api_key_entries', label: 'API key entries', type: 'api_key_entries',
             hint: 'Multiple keys form a round-robin pool. Each entry gets a manual Quota check button.' },
         ]},
