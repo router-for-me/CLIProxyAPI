@@ -147,6 +147,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 		rawJSON = removeEmptyGeminiFunctionTools(rawJSON)
 	}
+	rawJSON = degradeAntigravityMixedTools(rawJSON)
 	rawJSON = rewriteGeminiFunctionNames(rawJSON, functionNameMap)
 
 	if strings.Contains(strings.ToLower(modelName), "claude") {
@@ -226,6 +227,59 @@ func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
 		return rawJSON
 	}
 	rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", translatorcommon.JoinRawArray(cleanedTools))
+	return rawJSON
+}
+
+// degradeAntigravityMixedTools drops built-in server-side tools (googleSearch,
+// codeExecution, urlContext) and toolConfig when a request combines them with
+// functionDeclarations. The Antigravity upstream rejects such mixed requests
+// with "Please enable tool_config.include_server_side_tool_invocations ..." and
+// does not honor that switch, so degrade to function-only tools instead of
+// failing the whole request with a hard 400.
+func degradeAntigravityMixedTools(rawJSON []byte) []byte {
+	tools := util.GetGJSONBytesNoCopy(rawJSON, "request.tools")
+	if !tools.IsArray() {
+		return rawJSON
+	}
+
+	hasFunctionDeclarations := false
+	builtinToolIndexes := make([]int, 0, 2)
+	for index, tool := range tools.Array() {
+		if tool.Get("functionDeclarations").IsArray() || tool.Get("function_declarations").IsArray() {
+			hasFunctionDeclarations = true
+			continue
+		}
+
+		for _, builtinKey := range []string{"googleSearch", "google_search", "codeExecution", "code_execution", "urlContext", "url_context"} {
+			if tool.Get(builtinKey).Exists() {
+				builtinToolIndexes = append(builtinToolIndexes, index)
+				break
+			}
+		}
+	}
+
+	if !hasFunctionDeclarations || len(builtinToolIndexes) == 0 {
+		return rawJSON
+	}
+
+	kept := make([][]byte, 0, len(tools.Array()))
+	for index, tool := range tools.Array() {
+		if len(builtinToolIndexes) > 0 && builtinToolIndexes[0] == index {
+			builtinToolIndexes = builtinToolIndexes[1:]
+			continue
+		}
+		kept = append(kept, []byte(tool.Raw))
+	}
+
+	if len(kept) == 0 {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.tools")
+	} else {
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", translatorcommon.JoinRawArray(kept))
+	}
+
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.toolConfig")
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.tool_config")
+	log.Warnf("antigravity: degraded mixed built-in + function tools to function-only tools")
 	return rawJSON
 }
 
