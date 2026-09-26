@@ -604,6 +604,18 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 // WriteModelListResponse serializes the model-list payload, applies plugin response interceptors
 // if a plugin host is configured, and writes the resulting headers and body to the Gin context.
 func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat string, payload any) {
+	h.writeModelListResponse(c, sourceFormat, payload, nil)
+}
+
+// WriteCodexClientModelListResponse marks a Codex client model catalog for
+// trusted plugin capability negotiation. Ordinary model lists remain unmarked.
+func (h *BaseAPIHandler) WriteCodexClientModelListResponse(c *gin.Context, sourceFormat string, payload any) {
+	h.writeModelListResponse(c, sourceFormat, payload, map[string]any{
+		"response_kind": "codex_client_models",
+	})
+}
+
+func (h *BaseAPIHandler) writeModelListResponse(c *gin.Context, sourceFormat string, payload any, metadata map[string]any) {
 	if c == nil {
 		return
 	}
@@ -647,7 +659,7 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 			RequestBody:     nil,
 			Body:            cloneBytes(body),
 			StatusCode:      http.StatusOK,
-			Metadata:        nil,
+			Metadata:        metadata,
 		}, "")
 		if len(resp.Body) > 0 {
 			body = cloneBytes(resp.Body)

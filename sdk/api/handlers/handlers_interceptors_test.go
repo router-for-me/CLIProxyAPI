@@ -1695,6 +1695,48 @@ func TestWriteModelListResponse_ExposesResponseToPluginInterceptors(t *testing.T
 	}
 }
 
+func TestWriteCodexClientModelListResponseMarksOnlyCodexCatalog(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	var codexMetadata map[string]any
+	var ordinaryMetadata map[string]any
+	var ordinaryCalled bool
+	host := &handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			if req.Metadata["response_kind"] == "codex_client_models" {
+				codexMetadata = req.Metadata
+			} else {
+				ordinaryCalled = true
+				ordinaryMetadata = req.Metadata
+			}
+			return pluginapi.ResponseInterceptResponse{Body: req.Body}
+		},
+	}
+	handler.SetPluginHost(host)
+
+	newContext := func() *gin.Context {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		return ctx
+	}
+	payload := gin.H{"models": []map[string]any{{"slug": "route-model"}}}
+	handler.WriteCodexClientModelListResponse(newContext(), "openai", payload)
+	handler.WriteModelListResponse(newContext(), "openai", payload)
+
+	if codexMetadata == nil || codexMetadata["response_kind"] != "codex_client_models" {
+		t.Fatalf("Codex model-list metadata = %#v", codexMetadata)
+	}
+	if !ordinaryCalled {
+		t.Fatal("ordinary model-list interceptor was not called")
+	}
+	if _, exists := ordinaryMetadata["response_kind"]; exists {
+		t.Fatalf("ordinary model list carries response_kind: %#v", ordinaryMetadata)
+	}
+	if ordinaryMetadata != nil {
+		t.Fatalf("ordinary model list metadata = %#v, want nil", ordinaryMetadata)
+	}
+}
+
 func TestRequestAfterAuthCapture_ReadOnlyInterceptorDoesNotReallocatePayload_Issue6101(t *testing.T) {
 	capture := &requestAfterAuthCapture{}
 	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)

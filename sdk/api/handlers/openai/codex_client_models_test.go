@@ -1,12 +1,38 @@
 package openai
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
+
+type codexModelMarkerHost struct {
+	metadata map[string]any
+}
+
+func (h *codexModelMarkerHost) InterceptRequestBeforeAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return pluginapi.RequestInterceptResponse{}
+}
+
+func (h *codexModelMarkerHost) InterceptRequestAfterAuth(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	return pluginapi.RequestInterceptResponse{}
+}
+
+func (h *codexModelMarkerHost) InterceptResponse(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+	h.metadata = req.Metadata
+	return pluginapi.ResponseInterceptResponse{Body: req.Body}
+}
+
+func (h *codexModelMarkerHost) InterceptStreamChunk(context.Context, pluginapi.StreamChunkInterceptRequest) pluginapi.StreamChunkInterceptResponse {
+	return pluginapi.StreamChunkInterceptResponse{}
+}
 
 func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
 	modelID := "codex-client-multi-agent-v2-test"
@@ -55,6 +81,22 @@ func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
 				t.Fatalf("multi_agent_version = %#v, want preserved null", value)
 			}
 		})
+	}
+}
+
+func TestOpenAIModelsClientVersionMarksCodexCatalogForCapabilityPlugins(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil)
+	host := &codexModelMarkerHost{}
+	base.SetPluginHost(host)
+	handler := NewOpenAIAPIHandler(base)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.153.4", nil)
+	handler.OpenAIModels(ctx)
+
+	if host.metadata == nil || host.metadata["response_kind"] != "codex_client_models" {
+		t.Fatalf("Codex model-list metadata = %#v", host.metadata)
 	}
 }
 

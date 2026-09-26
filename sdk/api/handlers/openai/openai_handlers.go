@@ -72,7 +72,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			})
 			return
 		}
-		h.WriteModelListResponse(c, h.HandlerType(), body)
+		h.WriteCodexClientModelListResponse(c, h.HandlerType(), body)
 		return
 	}
 
