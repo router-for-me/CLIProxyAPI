@@ -126,7 +126,7 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 	if from == sdktranslator.FormatOpenAIResponse {
 		payload = RewriteCodexOrphanDelegationInput(ctx, headers, payload, cfg)
 		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
-			payload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+			payload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg, isCompat)
 		}
 	}
 
@@ -167,11 +167,12 @@ func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, 
 
 // OptimizeCodexMultiAgentV2RequestForAuth applies the standard Codex MultiAgentV2
 // request optimization and, when the selected codex-api-key model has is-compat
-// enabled, also converts agent_message items into portable message/user input.
+// enabled, also converts agent_message items into portable message/user input,
+// proactively stripping author, recipient, and internal passthrough metadata.
 func OptimizeCodexMultiAgentV2RequestForAuth(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config, auth *cliproxyauth.Auth, model string) ([]byte, bool) {
 	updated, optimized := multiagentv2.OptimizeCodexMultiAgentV2Request(ctx, headers, payload, cfg)
 	if cliproxyauth.CodexAPIKeyModelIsCompat(cfg, auth, model) {
-		updated = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, updated, cfg)
+		updated = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, updated, cfg, true)
 	}
 	return updated, optimized
 }
