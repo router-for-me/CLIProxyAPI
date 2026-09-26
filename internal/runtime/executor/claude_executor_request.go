@@ -777,6 +777,22 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
+// withClaudeLatestAliasContextBeta makes the stable latest aliases opt in to
+// Anthropic's 1M context window without changing the upstream model name.
+func withClaudeLatestAliasContextBeta(model string, betas []string) []string {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "sonnet-latest", "opus-latest":
+		for _, beta := range betas {
+			if beta == claudeContext1MBeta {
+				return betas
+			}
+		}
+		return append(betas, claudeContext1MBeta)
+	default:
+		return betas
+	}
+}
+
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
 // Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
 // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
@@ -1224,6 +1240,17 @@ func applyClaudeHeadersWithNativeProfile(
 		if !isAnthropicBase {
 			for _, beta := range extraBetas {
 				appendBeta(beta)
+			}
+		} else {
+			// Body-lifted betas on a direct Anthropic upstream come from
+			// operator payload rules, not from the caller fingerprint.
+			// context-1m is a shape real Claude Code sends for [1m] variants,
+			// so honoring just that beta keeps wire parity while letting
+			// config force 1M context behind the -latest aliases.
+			for _, beta := range extraBetas {
+				if beta == claudeContext1MBeta {
+					appendBeta(beta)
+				}
 			}
 		}
 	}
