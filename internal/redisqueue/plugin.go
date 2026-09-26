@@ -100,6 +100,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheReadTokensPresent: true,
 		CacheCreationTokens:    usageDetail.CacheCreationTokens,
 		TotalTokens:            usageDetail.TotalTokens,
+		CacheInputMode:         usageDetail.CacheInputMode,
 	}
 
 	failed := record.Failed
@@ -215,6 +216,13 @@ type tokenStats struct {
 	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
 	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
 	TotalTokens            int64 `json:"total_tokens"`
+	// CacheInputMode forwards the cache accounting contract defined by the
+	// downstream billing system CPA-Manager-Plus (CPAMP). A usage producer such
+	// as the WorkBuddy plugin declares "included_in_input" so CPAMP stops
+	// guessing from the provider or model name and adding the cache buckets on
+	// top of the input a second time. CPA only forwards this value; it does not
+	// interpret it. Omitted when no contract was declared.
+	CacheInputMode string `json:"cache_input_mode,omitempty"`
 }
 
 type failDetail struct {

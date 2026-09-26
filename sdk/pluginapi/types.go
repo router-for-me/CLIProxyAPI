@@ -1486,6 +1486,16 @@ type UsageDetail struct {
 	CacheCreationTokens int64
 	// TotalTokens is the total token count.
 	TotalTokens int64
+	// CacheInputMode carries the optional cache accounting contract defined by
+	// the downstream billing system CPA-Manager-Plus (CPAMP). A usage producer
+	// (for example the WorkBuddy plugin, which wraps Tencent CodeBuddy) reports
+	// "included_in_input" to declare that its input tokens already include the
+	// cache read/creation tokens, so a sink does not add the cache buckets on
+	// top of the input a second time. "separate_from_input" is CPAMP's own
+	// fallback verdict for unrecognized providers and is not produced by our
+	// plugins. CPA forwards this value verbatim; it is not a signal for CPA to
+	// reinterpret token accounting.
+	CacheInputMode string
 }
 
 // QuotaProvider surfaces credential quota, balance, and billing information for management clients.
