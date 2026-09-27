@@ -2,6 +2,8 @@ package auth
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"strconv"
 	"strings"
 	"time"
@@ -113,6 +115,43 @@ func (m *Manager) nextModelPoolOffset(key string, size int) int {
 	return offset % size
 }
 
+// modelPoolOffset picks the starting offset into an upstream model alias pool.
+// When the request carries a session identity, the offset is derived from a hash
+// of the pool key and the session ID, so one conversation keeps the same upstream
+// model while different sessions spread across the pool. Without a session
+// identity it falls back to flat round-robin rotation.
+func (m *Manager) modelPoolOffset(key string, size int, opts cliproxyexecutor.Options) int {
+	if size <= 1 {
+		return 0
+	}
+	if sessionID := sessionIDFromExecutionMetadata(opts.Metadata); sessionID != "" {
+		sum := sha256.Sum256([]byte(key + "|" + sessionID))
+		return int(binary.BigEndian.Uint32(sum[:4]) % uint32(size))
+	}
+	return m.nextModelPoolOffset(key, size)
+}
+
+// sessionIDFromExecutionMetadata extracts the first available session identity
+// published on the execution options, in decreasing preference order.
+func sessionIDFromExecutionMetadata(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	for _, key := range []string{
+		cliproxyexecutor.CanonicalSessionIDMetadataKey,
+		cliproxyexecutor.ExecutionSessionMetadataKey,
+		cliproxyexecutor.LCPAffinitySessionIDMetadataKey,
+		cliproxyexecutor.DerivedSessionIDMetadataKey,
+	} {
+		if value, ok := metadata[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
 func rotateStrings(values []string, offset int) []string {
 	if len(values) <= 1 {
 		return values
@@ -161,7 +200,7 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 	return preserveResolvedModelSuffix(resolved, thinking.ParseSuffix(requestedModel))
 }
 
-func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
+func (m *Manager) executionModelCandidates(auth *Auth, routeModel string, opts cliproxyexecutor.Options) []string {
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
 			return []string{homeModel}
@@ -173,7 +212,7 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 		if len(pool) == 1 {
 			return pool
 		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
+		offset := m.modelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool), opts)
 		return rotateStrings(pool, offset)
 	}
 	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
@@ -191,7 +230,7 @@ func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
 	if m == nil {
 		return routeModel
 	}
-	candidates := m.executionModelCandidates(auth, routeModel)
+	candidates := m.executionModelCandidates(auth, routeModel, cliproxyexecutor.Options{})
 	if len(candidates) == 0 {
 		return routeModel
 	}
@@ -318,17 +357,17 @@ func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidate
 }
 
 func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]string, bool) {
-	candidates := m.executionModelCandidates(auth, routeModel)
+	candidates := m.executionModelCandidates(auth, routeModel, cliproxyexecutor.Options{})
 	pooled := len(candidates) > 1
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
 }
 
-func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
-	candidates, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string, opts cliproxyexecutor.Options) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	candidates, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel, opts)
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled, aliasResult, routing
 }
 
-func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string, opts cliproxyexecutor.Options) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
 	routing := m.loadAPIKeyModelRouting()
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	aliasResult := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
@@ -348,7 +387,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 			if len(pool) == 1 {
 				candidates = pool
 			} else {
-				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))
+				offset := m.modelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool), opts)
 				candidates = rotateStrings(pool, offset)
 			}
 		} else {
