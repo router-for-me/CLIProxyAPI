@@ -6,12 +6,14 @@ package codex
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -36,7 +38,57 @@ type CodexAuth struct {
 	httpClient *http.Client
 }
 
-var codexRefreshGroup singleflight.Group
+const codexRefreshResultTTL = 5 * time.Minute
+
+type codexRefreshResult struct {
+	tokenData CodexTokenData
+	expiresAt time.Time
+}
+
+var (
+	codexRefreshGroup   singleflight.Group
+	codexRefreshResults sync.Map
+)
+
+func codexRefreshKey(refreshToken string) string {
+	sum := sha256.Sum256([]byte(refreshToken))
+	return string(sum[:])
+}
+
+func cachedCodexRefreshResult(key string) *CodexTokenData {
+	value, ok := codexRefreshResults.Load(key)
+	if !ok {
+		return nil
+	}
+	result, ok := value.(codexRefreshResult)
+	if !ok || !result.expiresAt.After(time.Now()) {
+		codexRefreshResults.Delete(key)
+		return nil
+	}
+	tokenData := result.tokenData
+	return &tokenData
+}
+
+func cacheCodexRefreshResult(key string, tokenData *CodexTokenData) {
+	if tokenData == nil {
+		return
+	}
+	result := codexRefreshResult{
+		tokenData: *tokenData,
+		expiresAt: time.Now().Add(codexRefreshResultTTL),
+	}
+	codexRefreshResults.Store(key, result)
+	time.AfterFunc(codexRefreshResultTTL, func() {
+		value, ok := codexRefreshResults.Load(key)
+		if !ok {
+			return
+		}
+		cached, ok := value.(codexRefreshResult)
+		if !ok || !cached.expiresAt.After(time.Now()) {
+			codexRefreshResults.Delete(key)
+		}
+	})
+}
 
 // NewCodexAuth creates a new CodexAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
@@ -194,11 +246,25 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	refreshKey := codexRefreshKey(refreshToken)
+	if tokenData := cachedCodexRefreshResult(refreshKey); tokenData != nil {
+		return tokenData, nil
+	}
 
-	result, err, _ := codexRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+	result, err, _ := codexRefreshGroup.Do(refreshKey, func() (interface{}, error) {
+		// A caller can arrive after the original single-flight call returned but
+		// before its rotated token was persisted. Reuse that completed result
+		// instead of presenting the now-stale refresh token upstream again.
+		if tokenData := cachedCodexRefreshResult(refreshKey); tokenData != nil {
+			return tokenData, nil
+		}
 		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
 		defer cancelRefresh()
-		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
+		tokenData, errRefresh := o.refreshTokensSingleFlight(refreshCtx, refreshToken)
+		if errRefresh == nil {
+			cacheCodexRefreshResult(refreshKey, tokenData)
+		}
+		return tokenData, errRefresh
 	})
 	if err != nil {
 		return nil, err
