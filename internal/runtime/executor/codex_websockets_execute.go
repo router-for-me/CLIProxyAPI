@@ -71,7 +71,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	if !useSIWC {
 		body = normalizeCodexInstructions(body, nativeRequest)
-		if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+		if e.cfg == nil || (e.cfg.DisableImageGeneration == config.DisableImageGenerationOff && !codexImageGenerationDisabledForAuth(e.cfg, auth)) {
 			body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 		}
 	}

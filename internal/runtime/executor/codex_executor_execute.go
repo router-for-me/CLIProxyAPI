@@ -70,7 +70,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	hasExplicitInstructions := gjson.GetBytes(req.Payload, "instructions").Exists() && strings.TrimSpace(gjson.GetBytes(req.Payload, "instructions").String()) != ""
 	if !useSIWC {
 		body = normalizeCodexInstructions(body, helps.IsNativeCodexRequest(req.Payload, opts))
-		if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+		if e.cfg == nil || (e.cfg.DisableImageGeneration == config.DisableImageGenerationOff && !codexImageGenerationDisabledForAuth(e.cfg, auth)) {
 			body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 		}
 	} else {
