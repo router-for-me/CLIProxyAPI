@@ -209,7 +209,7 @@ func TestXAIImagesAspectRatioNineByTwenty(t *testing.T) {
 }
 
 func TestBuildXAIImagesEditRequest(t *testing.T) {
-	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"data:image/png;base64,AA==", "https://example.com/image.png"}, "b64_json", "3:2", "1k", 0)
+	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"data:image/png;base64,AA==", "https://example.com/image.png"}, "b64_json", "3:2", "1k", "", 0)
 
 	if got := gjson.GetBytes(req, "model").String(); got != "grok-imagine-image" {
 		t.Fatalf("model = %q, want grok-imagine-image", got)
@@ -229,7 +229,7 @@ func TestBuildXAIImagesEditRequest(t *testing.T) {
 }
 
 func TestBuildXAIImagesEditRequestSingleImage(t *testing.T) {
-	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"https://example.com/image.png"}, "url", "", "", 0)
+	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"https://example.com/image.png"}, "url", "", "", "", 0)
 
 	if got := gjson.GetBytes(req, "image.type").String(); got != "image_url" {
 		t.Fatalf("image.type = %q, want image_url", got)
