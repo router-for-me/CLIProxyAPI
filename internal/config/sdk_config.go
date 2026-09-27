@@ -4,6 +4,10 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/websearch"
+)
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// CodexResponseSteering mirrors the provider-wide runtime setting for API handlers.
@@ -67,6 +71,10 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// WebSearch configures proxy-side web search for models whose upstream
+	// has no native search support. Disabled by default.
+	WebSearch websearch.Config `yaml:"web-search" json:"web-search"`
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.

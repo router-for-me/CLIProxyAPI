@@ -6,6 +6,7 @@
 package claude
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -241,10 +242,21 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 	// tools
 	var toolItems [][]byte
 	hasStrictTool := false
+	hasTypedWebSearch := false
+	var webSearchAllowedDomains []string
 	if toolsResult := gjson.GetBytes(rawJSON, "tools"); toolsResult.IsArray() {
 		toolsResult.ForEach(func(_, toolResult gjson.Result) bool {
 			if toolResult.Get("strict").Type == gjson.True {
 				hasStrictTool = true
+			}
+			if translatorcommon.IsClaudeWebSearchToolType(toolResult.Get("type").String()) {
+				hasTypedWebSearch = true
+				for _, domain := range toolResult.Get("allowed_domains").Array() {
+					if trimmed := strings.TrimSpace(domain.String()); trimmed != "" {
+						webSearchAllowedDomains = append(webSearchAllowedDomains, trimmed)
+					}
+				}
+				return true
 			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
@@ -276,10 +288,24 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 			}
 			return true
 		})
+		var toolBlocks [][]byte
+		if hasTypedWebSearch && translatorcommon.GeminiModelSupportsWebSearch(modelName) && claudeChoiceAllowsGeminiSearch(rawJSON) {
+			googleSearchBlock := []byte(`{"googleSearch":{}}`)
+			if len(webSearchAllowedDomains) > 0 {
+				domainsJSON, errMarshal := json.Marshal(webSearchAllowedDomains)
+				if errMarshal == nil {
+					googleSearchBlock, _ = sjson.SetRawBytes(googleSearchBlock, "googleSearch.includedDomains", domainsJSON)
+				}
+			}
+			toolBlocks = append(toolBlocks, googleSearchBlock)
+		}
 		if len(toolItems) > 0 {
-			tools := []byte(`[{"functionDeclarations":[]}]`)
-			tools, _ = sjson.SetRawBytes(tools, "0.functionDeclarations", translatorcommon.JoinRawArray(toolItems))
-			out, _ = sjson.SetRawBytes(out, "tools", tools)
+			fnBlock := []byte(`{"functionDeclarations":[]}`)
+			fnBlock, _ = sjson.SetRawBytes(fnBlock, "functionDeclarations", translatorcommon.JoinRawArray(toolItems))
+			toolBlocks = append(toolBlocks, fnBlock)
+		}
+		if len(toolBlocks) > 0 {
+			out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolBlocks))
 		}
 	}
 
@@ -363,6 +389,19 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 	result = common.AttachDefaultSafetySettings(result, "safetySettings")
 
 	return result
+}
+
+// claudeChoiceAllowsGeminiSearch reports whether the Claude tool choice
+// permits native googleSearch grounding. Only an explicit none denies it.
+func claudeChoiceAllowsGeminiSearch(rawJSON []byte) bool {
+	choice := gjson.GetBytes(rawJSON, "tool_choice")
+	if !choice.Exists() || choice.Type == gjson.Null {
+		return true
+	}
+	if choice.Type == gjson.String {
+		return !strings.EqualFold(strings.TrimSpace(choice.String()), "none")
+	}
+	return !strings.EqualFold(strings.TrimSpace(choice.Get("type").String()), "none")
 }
 
 func geminiContentWithParts(role string, parts [][]byte) []byte {

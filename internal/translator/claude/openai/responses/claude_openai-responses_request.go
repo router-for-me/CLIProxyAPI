@@ -555,6 +555,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	// tools that survive conversion.
 	var toolItems [][]byte
 	winners := responsesToolWinners(root)
+	webSearchName := ""
 	for _, descriptor := range responsesToolDescriptors(root) {
 		winner, ok := winners[descriptor.name]
 		if !ok || winner.order != descriptor.order {
@@ -567,6 +568,9 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		toolName := gjson.GetBytes(tJSON, "name").String()
 		if toolName != "" {
 			includedToolNames[toolName] = struct{}{}
+			if descriptor.toolType == "web_search" && webSearchName == "" {
+				webSearchName = toolName
+			}
 		}
 		toolItems = append(toolItems, tJSON)
 	}
@@ -591,7 +595,15 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 		case gjson.JSON:
 			choiceType := toolChoice.Get("type").String()
-			if choiceType == "function" || choiceType == "custom" {
+			if common.IsResponsesWebSearchToolType(choiceType) {
+				if webSearchName != "" {
+					if _, ok := includedToolNames[webSearchName]; ok {
+						toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
+						toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", util.SanitizeClaudeFunctionName(webSearchName))
+						out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+					}
+				}
+			} else if choiceType == "function" || choiceType == "custom" {
 				fn := toolChoice.Get("function.name").String()
 				if fn == "" {
 					fn = toolChoice.Get("custom.name").String()
@@ -1333,6 +1345,9 @@ func responsesToolDescriptors(root gjson.Result) []responsesToolDescriptor {
 	for _, source := range responsesToolSources(root) {
 		source.tools.ForEach(func(_, tool gjson.Result) bool {
 			toolType := strings.TrimSpace(tool.Get("type").String())
+			if common.IsResponsesWebSearchToolType(toolType) {
+				toolType = "web_search"
+			}
 			switch toolType {
 			case "", "function":
 				appendDescriptor(tool, responsesToolName(tool), "", "", "function", source.priority, true)

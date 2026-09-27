@@ -410,6 +410,87 @@ xai:
   # The injected tool is also added to tool_choice.allowed_tools when applicable.
   inject-x-search: false
 
+# Proxy-side web search (OMP-inspired provider chain). When enabled, models
+# whose upstream has no native search support still get a working web_search
+# tool: the proxy rewrites the server tool to a function call, runs the
+# search itself, and feeds results back to the model internally.
+# Native search (Claude/Codex/Grok/Antigravity/Gemini capable routes) is
+# always preferred; this only covers the rest.
+web-search:
+  enabled: false
+  # No credentials are required: the credential-free providers (startpage,
+  # duckduckgo, ecosia, google, mojeek) run out of the box. Setting any
+  # grounded provider key adds a stronger option ahead of them, and a
+  # provider you have already logged into through the proxy lends its
+  # session to search when no key is configured here.
+  # Search provider order. First available provider wins per query.
+  # Built-ins (all 24, OMP-compatible):
+  #   LLM-grounded: perplexity, gemini, anthropic, codex, xai, openrouter, zai
+  #   API keys:      exa, tinyfish, jina, kagi, tavily, firecrawl, brave,
+  #                 kimi, parallel, synthetic, ollama, searxng
+  #   Credential-free: startpage, duckduckgo, ecosia, google, mojeek
+  #   public aggregates the credential-free engines; it is explicit-only,
+  #   so listing it in `order` is required to reach it.
+  # order: ["perplexity", "gemini", "anthropic", "codex", "xai", "openrouter", "zai", "exa",
+  #         "tinyfish", "jina", "kagi", "tavily", "firecrawl", "brave", "kimi",
+  #         "parallel", "synthetic", "ollama", "searxng", "startpage",
+  #         "duckduckgo", "ecosia", "google", "mojeek"]
+  # exclude: []
+  # Per-provider timeout in seconds (default 30, max 120).
+  # timeout-seconds: 30
+  # Default max sources per query (default 10).
+  # limit: 10
+  # Max proxy-executed searches per client request (default 3).
+  # max-searches: 3
+  # public aggregate deadlines in seconds (defaults 5 and 30).
+  # public-fanout-soft-seconds: 5
+  # public-fanout-hard-seconds: 30
+  # Every credential also reads its conventional environment variable, e.g.
+  # PERPLEXITY_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY,
+  # OPENAI_API_KEY, ZAI_API_KEY, EXA_API_KEY, TINYFISH_API_KEY, JINA_API_KEY,
+  # KAGI_API_KEY, TAVILY_API_KEY, FIRECRAWL_API_KEY, BRAVE_API_KEY,
+  # MOONSHOT_SEARCH_API_KEY (or KIMI_SEARCH_API_KEY), PARALLEL_API_KEY,
+  # SYNTHETIC_API_KEY, OLLAMA_CLOUD_API_KEY, SEARXNG_ENDPOINT.
+  # perplexity-api-key: ""
+  # perplexity-oauth-token: ""
+  # perplexity-cookies: ""      # or PERPLEXITY_COOKIES; a raw consumer cookie
+  #                             # header, which takes priority over the token
+  # gemini-api-key: ""
+  # anthropic-api-key: ""
+  # xai-api-key: ""
+  # codex-api-key: ""
+  # openrouter-api-key: ""     # or OPENROUTER_API_KEY
+  # zai-api-key: ""
+  # exa-api-key: ""
+  # tinyfish-api-key: ""
+  # jina-api-key: ""
+  # kagi-api-key: ""
+  # tavily-api-key: ""
+  # firecrawl-api-key: ""
+  # brave-api-key: ""
+  # kimi-api-key: ""
+  # parallel-api-key: ""
+  # synthetic-api-key: ""
+  # ollama-api-key: ""
+  # Grounding models (or PERPLEXITY/GEMINI/ANTHROPIC/XAI/CODEX search model envs).
+  # gemini-search-model: "gemini-2.5-flash"
+  # anthropic-search-model: "claude-haiku-4-5"
+  # xai-search-model: "grok-4.5"
+  # codex-search-model: "gpt-5-mini"
+  # openrouter-search-model: "openai/gpt-5-mini"
+  # Base URL overrides for self-hosted or proxied deployments.
+  # gemini-base-url: ""
+  # anthropic-base-url: ""
+  # xai-base-url: ""
+  # codex-base-url: ""
+  # openrouter-base-url: ""
+  # firecrawl-base-url: ""
+  # Self-hosted SearXNG endpoint (or SEARXNG_ENDPOINT). Optional auth via
+  # SEARXNG_TOKEN or SEARXNG_USERNAME + SEARXNG_PASSWORD.
+  # searxng-endpoint: "http://127.0.0.1:8888"
+  # Proxy for search transports; empty honors ProxyFromEnvironment.
+  # proxy-url: ""
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: true
 

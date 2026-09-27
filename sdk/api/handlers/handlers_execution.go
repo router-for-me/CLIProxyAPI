@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/websearch"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -95,7 +96,13 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		return nil, nil, interceptErr
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+	var resp coreexecutor.Response
+	var err error
+	if searchCfg, okSearch := h.websearchConfigFor(opts, providers); okSearch && websearch.ShouldFallback(searchCfg, string(opts.SourceFormat), providers, normalizedModel, req.Payload, false) {
+		resp, err = h.runWebSearchLoop(ctx, providers, req, opts, searchCfg)
+	} else {
+		resp, err = h.AuthManager.Execute(ctx, providers, req, opts)
+	}
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)

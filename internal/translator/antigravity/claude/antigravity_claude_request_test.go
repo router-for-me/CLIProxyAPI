@@ -297,6 +297,24 @@ func TestConvertClaudeRequestToAntigravity_PreservesToolPairingWithInterveningSy
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_FutureWebSearchVersionBuildsSearchRequest(t *testing.T) {
+	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch-future", "antigravity", []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},
+	})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("test-antigravity-claude-websearch-future") })
+
+	inputJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"messages": [{"role": "user", "content": "weather"}],
+		"tools": [{"type": "web_search_20990101", "name": "web_search"}]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3.1-flash-lite", inputJSON, true)
+	if got := gjson.GetBytes(output, "requestType").String(); got != "web_search" {
+		t.Fatalf("requestType = %q, want web_search: %s", got, output)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_MapsTypedWebSearchToIndependentSearchRequest(t *testing.T) {
 	registry.GetGlobalRegistry().RegisterClient("test-antigravity-claude-websearch", "antigravity", []*registry.ModelInfo{
 		{ID: "gemini-3.1-flash-lite", SupportsWebSearch: true},

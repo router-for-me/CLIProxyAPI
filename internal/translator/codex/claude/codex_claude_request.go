@@ -502,7 +502,7 @@ func shortenCodexCallIDIfNeeded(id string) string {
 }
 
 func isClaudeWebSearchToolType(toolType string) bool {
-	return toolType == "web_search_20250305" || toolType == "web_search_20260209"
+	return translatorcommon.IsClaudeWebSearchToolType(toolType)
 }
 
 func buildClaudeWebSearchToolNameSet(tools gjson.Result) map[string]struct{} {

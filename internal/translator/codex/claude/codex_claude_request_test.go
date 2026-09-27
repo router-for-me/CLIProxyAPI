@@ -483,6 +483,25 @@ func TestConvertClaudeRequestToCodex_WebSearchToolMapping(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_FutureWebSearchVersionMapping(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-opus-4-7",
+		"tools": [{"type": "web_search_20990101", "name": "web_search"}],
+		"tool_choice": {"type":"tool","name":"web_search"},
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tools.0.type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want web_search. Output: %s", got, string(result))
+	}
+	if got := resultJSON.Get("tool_choice.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.type = %q, want web_search. Output: %s", got, string(result))
+	}
+}
+
 func TestConvertClaudeRequestToCodex_WebSearchToolChoiceUsesDeclaredTypedToolName(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-opus-4-7",

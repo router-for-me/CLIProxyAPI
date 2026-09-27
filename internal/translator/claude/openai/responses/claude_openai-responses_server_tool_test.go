@@ -510,3 +510,22 @@ func TestTextSearchTextOrderPreservedInStreamingAndReplay(t *testing.T) {
 		t.Fatalf("replayed block types = %v, want %v", replayedBlocks, wantBlocks)
 	}
 }
+
+func TestVersionedWebSearchToolAndChoiceMapToClaude(t *testing.T) {
+	for _, toolType := range []string{"web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11"} {
+		raw := []byte(`{"model":"claude-test","input":[{"role":"user","content":"hi"}],
+			"tools":[{"type":"` + toolType + `"}],
+			"tool_choice":{"type":"` + toolType + `"}}`)
+		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		if got := gjson.GetBytes(out, "tools.0.type").String(); got != "web_search_20250305" {
+			t.Fatalf("%s: tools.0.type = %q: %s", toolType, got, out)
+		}
+		if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
+			t.Fatalf("%s: tools.0.name = %q: %s", toolType, got, out)
+		}
+		choice := gjson.GetBytes(out, "tool_choice")
+		if choice.Get("type").String() != "tool" || choice.Get("name").String() != "web_search" {
+			t.Fatalf("%s: tool_choice = %s, want forced web_search: %s", toolType, choice.Raw, out)
+		}
+	}
+}

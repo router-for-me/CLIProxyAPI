@@ -7,7 +7,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -17,45 +16,14 @@ import (
 // checking both dynamic registry capability (SupportsWebSearch) and models.json
 // static definitions (native_capabilities.web_search). Explicit false wins as a veto.
 func ModelSupportsWebSearch(modelID string) bool {
-	info := registry.LookupModelInfo(modelID)
-	infoAG := registry.LookupModelInfo(modelID, "antigravity")
-
-	// 1. Explicit false in static definitions acts as an absolute veto.
-	if info != nil && info.NativeCapabilities != nil && info.NativeCapabilities.WebSearch != nil && !*info.NativeCapabilities.WebSearch {
-		return false
-	}
-	if infoAG != nil && infoAG.NativeCapabilities != nil && infoAG.NativeCapabilities.WebSearch != nil && !*infoAG.NativeCapabilities.WebSearch {
-		return false
-	}
-
-	// 2. Explicit true in static definitions.
-	if info != nil && info.NativeCapabilities != nil && info.NativeCapabilities.WebSearch != nil && *info.NativeCapabilities.WebSearch {
-		return true
-	}
-	if infoAG != nil && infoAG.NativeCapabilities != nil && infoAG.NativeCapabilities.WebSearch != nil && *infoAG.NativeCapabilities.WebSearch {
-		return true
-	}
-
-	// 3. Dynamic capability checks via Antigravity probes and registry flags.
-	if registry.AntigravityWebSearchModelFor(modelID) != "" {
-		return true
-	}
-	if (info != nil && info.SupportsWebSearch) || (infoAG != nil && infoAG.SupportsWebSearch) {
-		return true
-	}
-	return false
+	return translatorcommon.GeminiModelSupportsWebSearch(modelID)
 }
 
 // isResponsesWebSearchToolType checks whether a tool type matches OpenAI Responses web search tool.
 // Official OpenAI documentation supports "web_search", "web_search_2025_08_26", and legacy
 // "web_search_preview" / "web_search_preview_2025_03_11".
 func isResponsesWebSearchToolType(toolType string) bool {
-	switch toolType {
-	case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
-		return true
-	default:
-		return false
-	}
+	return translatorcommon.IsResponsesWebSearchToolType(toolType)
 }
 
 // HasResponsesWebSearchTool checks if the request tools array contains an OpenAI web search tool.
