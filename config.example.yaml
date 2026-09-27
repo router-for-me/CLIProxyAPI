@@ -841,6 +841,12 @@ oauth:
       # Some superstitious users believe request tracking identifiers can be used
       # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
       identity-confuse: false
+      # Default prompt_cache_key / Session-Id for HTTP requests without a client prompt_cache_key.
+      # Empty (default): derived from each conversation's opening messages.
+      # "api-key": one stable key per client API key, so many different conversations that share a
+      # long prefix (same system prompt, different user message) are routed to the same cache.
+      # A client prompt_cache_key or an execution session always wins.
+      # prompt-cache-scope: api-key
       # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
       disable-codex-cloaking: false
       # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
@@ -1030,6 +1036,11 @@ oauth:
       # When true, inject the native x_search tool when the request does not declare it.
       # The injected tool is also added to tool_choice.allowed_tools when applicable.
       inject-x-search: false
+      # Default x-grok-conv-id / prompt_cache_key for requests without a client prompt_cache_key.
+      # Empty (default): derived from each conversation's opening messages.
+      # "api-key": one stable conversation id per client API key (not for grok-code composer models),
+      # so different conversations that share a long prefix reach the same xAI cache server.
+      # prompt-cache-scope: api-key
 
     # Devin provider behavior.
     # devin:

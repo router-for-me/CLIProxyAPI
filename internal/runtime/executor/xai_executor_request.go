@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -137,7 +138,7 @@ func (e *XAIExecutor) prepareResponsesRequestTo(ctx context.Context, req cliprox
 	body, _ = sjson.DeleteBytes(body, "stop")
 	body = normalizeXAIImageRefs(body)
 
-	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel)
+	sessionID, errSession := xaiResolveComposerSessionID(ctx, req, opts, baseModel, e.cfg != nil && config.IsPromptCacheScopeAPIKey(e.cfg.XAI.PromptCacheScope))
 	if errSession != nil {
 		return nil, errSession
 	}
@@ -350,7 +351,18 @@ func applyXAIChatHeaders(r *http.Request, auth *cliproxyauth.Auth, token string,
 	applyXAICustomHeaders(r, auth, clientHeaders...)
 }
 
-func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {
+func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string, apiKeyScope bool) (string, error) {
+	// xai.prompt-cache-scope: api-key shares one conversation id per client API key for requests
+	// without their own session, so different conversations with a long common prefix reach the
+	// same xAI cache server. Composer models keep their isolated conversations.
+	if apiKeyScope && !xaiRequiresIsolatedConversation(baseModel) {
+		if sessionID := xaiExplicitSessionID(req, opts); sessionID != "" {
+			return sessionID, nil
+		}
+		if keyID := helps.APIKeyPromptCacheUUID(ctx, "xai"); keyID != "" {
+			return keyID, nil
+		}
+	}
 	if sessionID := xaiExecutionSessionID(req, opts); sessionID != "" {
 		return sessionID, nil
 	}
@@ -368,6 +380,14 @@ func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Reque
 }
 
 func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	if value := xaiExplicitSessionID(req, opts); value != "" {
+		return value
+	}
+	return helps.DerivedSessionUUID("xai", opts.Metadata, req.Metadata)
+}
+
+// xaiExplicitSessionID returns the execution session or client prompt_cache_key, or "".
+func xaiExplicitSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
 	if value := xaiMetadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
 		return value
 	}
@@ -379,7 +399,7 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 			return value
 		}
 	}
-	return helps.DerivedSessionUUID("xai", opts.Metadata, req.Metadata)
+	return ""
 }
 
 func xaiRequiresIsolatedConversation(model string) bool {

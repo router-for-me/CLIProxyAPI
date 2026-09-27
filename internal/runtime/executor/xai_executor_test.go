@@ -21,6 +21,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -7039,5 +7040,61 @@ func TestXAIExecutorFoldsNamespaceNamedWebSearchWithoutAliasing(t *testing.T) {
 	}
 	if got := output.Get("namespace").String(); got != "web_search" {
 		t.Fatalf("output.0.namespace = %q, want web_search; payload=%s", got, resp.Payload)
+	}
+}
+
+func TestXAIExecutorPromptCacheScopeAPIKey(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("userApiKey", "test-api-key")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	keyID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:xai:prompt-cache:test-api-key")).String()
+	auth := &cliproxyauth.Auth{Provider: "xai", Metadata: map[string]any{"access_token": "xai-token"}}
+	derivedA := map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:diff-a"}
+	derivedB := map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:diff-b"}
+
+	tests := []struct {
+		name     string
+		scope    string
+		model    string
+		payload  string
+		metadata map[string]any
+		want     string
+		wantNew  bool
+	}{
+		{name: "default keeps derived", model: "grok-build-0.1", payload: `{"model":"grok-build-0.1","input":"a"}`, metadata: derivedA, want: helps.DerivedSessionUUID("xai", derivedA)},
+		{name: "api-key conversation a", scope: "api-key", model: "grok-build-0.1", payload: `{"model":"grok-build-0.1","input":"a"}`, metadata: derivedA, want: keyID},
+		{name: "api-key conversation b", scope: "api-key", model: "grok-build-0.1", payload: `{"model":"grok-build-0.1","input":"b"}`, metadata: derivedB, want: keyID},
+		{name: "api-key client key wins", scope: "api-key", model: "grok-build-0.1", payload: `{"model":"grok-build-0.1","prompt_cache_key":"client-session","input":"a"}`, metadata: derivedA, want: "client-session"},
+		{name: "api-key composer stays isolated", scope: "api-key", model: "grok-composer-2.5-fast", payload: `{"model":"grok-composer-2.5-fast","input":"a"}`, wantNew: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exec := NewXAIExecutor(&config.Config{XAI: config.XAIConfig{PromptCacheScope: tt.scope}})
+			prepared, err := exec.prepareResponsesRequest(ctx, cliproxyexecutor.Request{
+				Model:    tt.model,
+				Payload:  []byte(tt.payload),
+				Metadata: tt.metadata,
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: true}, true)
+			if err != nil {
+				t.Fatalf("prepareResponsesRequest() error = %v", err)
+			}
+			httpReq, errRequest := http.NewRequest(http.MethodPost, "https://example.test/responses", bytes.NewReader(prepared.body))
+			if errRequest != nil {
+				t.Fatalf("NewRequest() error = %v", errRequest)
+			}
+			applyXAIHeaders(httpReq, auth, "xai-token", true, prepared.sessionID)
+			gotPromptCacheKey := gjson.GetBytes(prepared.body, "prompt_cache_key").String()
+			gotGrokConvID := httpReq.Header.Get("x-grok-conv-id")
+			if tt.wantNew {
+				if prepared.sessionID == "" || prepared.sessionID == keyID {
+					t.Fatalf("composer sessionID = %q, want a fresh isolated session", prepared.sessionID)
+				}
+				return
+			}
+			if prepared.sessionID != tt.want || gotPromptCacheKey != tt.want || gotGrokConvID != tt.want {
+				t.Fatalf("session=%q prompt_cache_key=%q x-grok-conv-id=%q, want %q", prepared.sessionID, gotPromptCacheKey, gotGrokConvID, tt.want)
+			}
+		})
 	}
 }

@@ -392,3 +392,64 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 		t.Fatalf("HTTP/WebSocket prompt keys differ: http=%q websocket=%q", childKey, websocketKey)
 	}
 }
+
+func TestCodexExecutorCacheHelper_PromptCacheScopeAPIKey(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("userApiKey", "test-api-key")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	keyID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:test-api-key")).String()
+
+	newReq := func(payload string, metadata map[string]any) cliproxyexecutor.Request {
+		return cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(payload), Metadata: metadata}
+	}
+	derivedA := map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:diff-a"}
+	derivedB := map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:diff-b"}
+	execution := map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "exec-1"}
+
+	tests := []struct {
+		name  string
+		scope string
+		from  sdktranslator.Format
+		req   cliproxyexecutor.Request
+		want  string
+	}{
+		{"default chat keeps derived", "", sdktranslator.FormatOpenAI, newReq(`{"model":"gpt-5.4"}`, derivedA), helps.DerivedSessionUUID("codex", derivedA)},
+		{"default responses keeps derived", "", sdktranslator.FormatOpenAIResponse, newReq(`{"model":"gpt-5.4"}`, derivedA), helps.DerivedSessionUUID("codex", derivedA)},
+		{"api-key chat conversation a", "api-key", sdktranslator.FormatOpenAI, newReq(`{"model":"gpt-5.4"}`, derivedA), keyID},
+		{"api-key chat conversation b", "api-key", sdktranslator.FormatOpenAI, newReq(`{"model":"gpt-5.4"}`, derivedB), keyID},
+		{"api-key responses", " API-Key ", sdktranslator.FormatOpenAIResponse, newReq(`{"model":"gpt-5.4"}`, derivedB), keyID},
+		{"api-key client key wins", "api-key", sdktranslator.FormatOpenAIResponse, newReq(`{"model":"gpt-5.4","prompt_cache_key":"client-key"}`, derivedA), "client-key"},
+		{"api-key execution session wins", "api-key", sdktranslator.FormatOpenAI, newReq(`{"model":"gpt-5.4"}`, execution), helps.ProviderSessionUUID("codex", execution)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &CodexExecutor{cfg: &config.Config{Codex: config.CodexConfig{PromptCacheScope: tt.scope}}}
+			httpReq, body, _, err := executor.cacheHelper(ctx, tt.from, "https://example.com/responses", nil, tt.req, tt.req.Payload, []byte(`{"model":"gpt-5.4","stream":true}`))
+			if err != nil {
+				t.Fatalf("cacheHelper error: %v", err)
+			}
+			if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != tt.want {
+				t.Fatalf("prompt_cache_key = %q, want %q", got, tt.want)
+			}
+			if got := httpReq.Header.Get("Session-Id"); got != tt.want {
+				t.Fatalf("Session-Id = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCodexExecutorCacheHelper_PromptCacheScopeAPIKeyWithoutClientKeyKeepsDerived(t *testing.T) {
+	t.Parallel()
+
+	executor := &CodexExecutor{cfg: &config.Config{Codex: config.CodexConfig{PromptCacheScope: config.PromptCacheScopeAPIKey}}}
+	metadata := map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-root"}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{"model":"gpt-5.4"}`), Metadata: metadata}
+	_, body, _, err := executor.cacheHelper(context.Background(), sdktranslator.FormatOpenAI, "https://example.com/responses", nil, req, req.Payload, []byte(`{"model":"gpt-5.4"}`))
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	if got, want := gjson.GetBytes(body, "prompt_cache_key").String(), helps.DerivedSessionUUID("codex", metadata); got != want {
+		t.Fatalf("prompt_cache_key = %q, want derived %q", got, want)
+	}
+}

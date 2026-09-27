@@ -146,6 +146,21 @@ type CodexHeaderDefaults struct {
 type XAIConfig struct {
 	// InjectXSearch injects xAI's native x_search tool when the request does not declare it.
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
+	// PromptCacheScope selects the default prompt cache routing key (prompt_cache_key and
+	// x-grok-conv-id) for requests that carry no client prompt_cache_key. See PromptCacheScopeAPIKey.
+	PromptCacheScope string `yaml:"prompt-cache-scope,omitempty" json:"prompt-cache-scope,omitempty"`
+}
+
+// PromptCacheScopeAPIKey makes requests that carry no client prompt_cache_key (and belong to
+// no execution session) share one stable prompt cache routing key per client API key, instead
+// of the key derived from each conversation's opening messages. It helps workloads that send
+// many different conversations with the same long prefix (for example one system prompt and a
+// different user message per call). Any other value, including empty, keeps the derived key.
+const PromptCacheScopeAPIKey = "api-key"
+
+// IsPromptCacheScopeAPIKey reports whether scope selects PromptCacheScopeAPIKey.
+func IsPromptCacheScopeAPIKey(scope string) bool {
+	return strings.EqualFold(strings.TrimSpace(scope), PromptCacheScopeAPIKey)
 }
 
 // DevinConfig configures provider-wide Devin request behavior.
@@ -181,6 +196,9 @@ type AntigravityConnectionPoolConfig struct {
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+	// PromptCacheScope selects the default prompt_cache_key / Session-Id for HTTP requests that
+	// carry no client prompt_cache_key. See PromptCacheScopeAPIKey.
+	PromptCacheScope string `yaml:"prompt-cache-scope,omitempty" json:"prompt-cache-scope,omitempty"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
