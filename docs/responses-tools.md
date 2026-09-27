@@ -101,8 +101,8 @@ Strategy enums:
 Match rules:
 
 - `provider`, `auth-kind`, `upstream-model`, and `upstream-format` are all
-  required exact conditions. The first release supports no wildcards, regex,
-  or capability inference from model names.
+  required exact conditions. No wildcards, regex, or capability inference from
+  model names are supported.
 - API-key routes must set `base-url` so the same provider/model name on
   different endpoints cannot share one rule. OAuth routes leave it empty.
 - Overlapping rules with conflicting strategies are rejected at load time;
@@ -135,17 +135,17 @@ grammar bodies, prompts, results, tokens, and credentials are never logged.
 ## Boundaries
 
 - `interactions`, direct plugin-executor routes, custom unknown executors,
-  images/video, and `responses/compact` never enable the new bridge; they
-  keep their legacy paths without new search capability claims.
+  images/video, and `responses/compact` never enable the bridge; they keep
+  their existing paths and make no new search capability claims.
 - A configured rule that hits an unsupported target returns an explicit 422
   instead of silently passing through.
 - `CountTokens` shares request preparation and declaration budget but builds
-  no response stream state; executors that cannot count keep their original
+  no response stream state; executors that cannot count surface their own
   error behavior.
 - Native stateful passthrough/steering: only passthrough that needs no
   transformation is allowed. Bridged ordinary WebSocket traffic uses replay;
   live steering combinations that need bridging are rejected explicitly, and
-  the first release does not bridge live duplex frame-by-frame.
+  live duplex is not bridged frame-by-frame.
 - Server-side history: only locally expandable history converts; requests
   that depend on remote opaque `previous_response_id` references fail with
   422 on routes that need transformation. Native paths keep their existing

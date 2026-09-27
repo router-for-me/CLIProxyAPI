@@ -48,7 +48,7 @@ type ResponsesToolsRoute struct {
 }
 
 // ResponsesToolsMatch identifies one exact upstream route. All match fields
-// are required; the first release supports no wildcards or regex matching.
+// are required; wildcards and regex matching are not supported.
 type ResponsesToolsMatch struct {
 	Provider       string `yaml:"provider" json:"provider"`
 	AuthKind       string `yaml:"auth-kind" json:"auth-kind"`

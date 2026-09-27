@@ -85,7 +85,7 @@ responses-tools:
 匹配规则：
 
 - `provider`、`auth-kind`、`upstream-model`、`upstream-format` 均为必填精确
-  条件。首版不支持通配符、正则，也不从模型名推断能力。
+  条件。不支持通配符、正则，也不从模型名推断能力。
 - API-key 路由必须填 `base-url`，避免同一 provider/model 名在不同 endpoint
   共用一条规则。OAuth 路由留空。
 - 重叠且策略冲突的规则在加载时拒绝；选路时动态冲突返回明确配置错误，
@@ -115,14 +115,14 @@ responses-tools:
 ## 边界
 
 - `interactions`、直接插件 executor 路由、自定义未知 executor、
-  images/video、`responses/compact` 不启用新桥接；保持旧路径，也不新增
+  images/video、`responses/compact` 不启用桥接；保持各自路径，也不新增
   搜索能力声明。
 - 已配置规则命中不支持目标时返回明确 422，不忽略规则后透传。
 - `CountTokens` 共用请求 Prepare 与声明预算，但不建立响应流状态；
-  无法计数的 executor 保持原错误行为。
+  无法计数的 executor 各自返回自身错误。
 - 原生有状态透传/steering：只允许无需转换的原生透传；需要桥接的普通
-  WebSocket 走 replay；需要桥接的 live steering 组合明确拒绝。首版不对
-  live duplex 逐帧桥接。
+  WebSocket 走 replay；需要桥接的 live steering 组合明确拒绝。live duplex
+  不做逐帧桥接。
 - 服务端历史：只转换本地可展开历史；依赖远端 opaque
-  `previous_response_id` 的请求在需要转换的路由上返回 422。原生路径保留
-  已有能力。
+  `previous_response_id` 的请求在需要转换的路由上返回 422。原生路径不受
+  该限制。

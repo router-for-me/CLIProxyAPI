@@ -36,7 +36,7 @@ type ToolIdentity struct {
 type ClientSearchMode string
 
 const (
-	// ClientSearchInherit keeps the legacy core behavior for the route.
+	// ClientSearchInherit follows the convention policy for the route.
 	ClientSearchInherit ClientSearchMode = "inherit"
 	// ClientSearchNative passes the native Responses route through untouched.
 	ClientSearchNative ClientSearchMode = "native"
@@ -50,7 +50,7 @@ const (
 type CustomToolsMode string
 
 const (
-	// CustomToolsInherit keeps the legacy core behavior for the route.
+	// CustomToolsInherit leaves custom tools untouched.
 	CustomToolsInherit CustomToolsMode = "inherit"
 	// CustomToolsNative keeps custom declarations on native Responses routes.
 	CustomToolsNative CustomToolsMode = "native"
@@ -96,7 +96,7 @@ type SchemaPolicy struct {
 }
 
 // RouteMatch binds a policy to one exact upstream route. All match fields are
-// required; the first release supports no wildcards or regex matching.
+// required; wildcards and regex matching are not supported.
 type RouteMatch struct {
 	Provider       string
 	AuthKind       string
@@ -128,8 +128,7 @@ type Limits struct {
 	MaxDepth                int
 }
 
-// DefaultLimits returns the reference budget defaults shared by the core and
-// the legacy shim documentation.
+// DefaultLimits returns the reference budget defaults.
 func DefaultLimits() Limits {
 	return Limits{
 		MaxActiveToolBytes:      262144,

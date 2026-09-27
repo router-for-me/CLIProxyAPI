@@ -64,8 +64,8 @@ func (m *Manager) responsesToolsCallToFormat(
 		return cliproxyexecutor.Response{}, nil
 	}
 	// Only Responses-family input targeting a Responses-family downstream
-	// enters adaptation. Anything else (or unknown) keeps legacy behavior even
-	// when a route matches the model name.
+	// enters adaptation. Anything else (or unknown) passes through unchanged
+	// even when a route matches the model name.
 	if !isResponsesFamily(execOpts.SourceFormat, cliproxyexecutor.ResponseFormatOrSource(execOpts)) {
 		_ = toFormat
 		resp, err := call(execCtx, execReq, execOpts)

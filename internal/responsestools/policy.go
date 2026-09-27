@@ -166,20 +166,18 @@ func ResolvePolicy(policy Policy, route Route) (RoutePolicy, bool, error) {
 }
 
 // EffectivePolicy returns the policy for one actual routed call: the explicit
-// rule when one matches, otherwise the convention default. Callers that must
-// honor user configuration use this instead of skipping unmatched routes,
-// because a route without a rule is a supported configuration, not a gap.
+// rule when one matches, otherwise the convention default. Every route has an
+// effective policy; a route without a rule is a supported configuration.
 func EffectivePolicy(policy Policy, route Route) (RoutePolicy, error) {
 	routePolicy, matched, err := ResolvePolicy(policy, route)
 	if err != nil {
 		return RoutePolicy{}, err
 	}
 	if !matched {
-		// No rule is a supported configuration, not a gap.
 		routePolicy = RoutePolicy{}
 	}
 	// A rule may leave individual strategies on inherit, which means "follow
-	// the convention" rather than "legacy behavior".
+	// the convention for this route".
 	return applyConventionDefaults(routePolicy, route), nil
 }
 
