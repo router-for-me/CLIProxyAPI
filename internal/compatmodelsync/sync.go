@@ -101,11 +101,19 @@ func doSync(configFilePath string) error {
 			continue
 		}
 
+		// Preserve manually configured aliases for models that still exist upstream.
+		existingAliases := make(map[string]string, len(entry.Models))
+		for _, m := range entry.Models {
+			if alias := strings.TrimSpace(m.Alias); alias != "" {
+				existingAliases[m.Name] = m.Alias
+			}
+		}
+
 		newModels := make([]config.OpenAICompatibilityModel, 0, len(models))
 		for _, m := range models {
 			newModels = append(newModels, config.OpenAICompatibilityModel{
 				Name:  m,
-				Alias: "",
+				Alias: existingAliases[m],
 			})
 		}
 
