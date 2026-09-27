@@ -6,6 +6,7 @@ import (
 
 func TestRestoreSearchResponseItem(t *testing.T) {
 	contract := ParseContract([]byte("{\"tools\": [{\"type\": \"tool_search\"}], \"input\": []}"))
+	contract.SearchBridged = true
 	item := map[string]any{"type": "function_call", "name": "tool_search", "call_id": "c1", "arguments": "{\"query\":\"x\"}"}
 	if !rewriteResponseItem(item, contract, nil) {
 		t.Fatalf("expected restore")

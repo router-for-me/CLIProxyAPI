@@ -549,19 +549,22 @@ func applyCodexClientProviderCapabilities(entry map[string]any, id string, isTem
 }
 
 func applyCodexClientProviderCapabilitiesWithSearchResolver(entry map[string]any, id string, isTemplate bool, providersForModel ProvidersForModelFunc, searchToolCapabilityForModel SearchToolCapabilityForModelFunc) {
+	if isTemplate && providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
+		entry["supports_search_tool"] = false
+		entry["prefer_websockets"] = false
+		entry["service_tiers"] = []any{}
+		nullCodexClientRequiredOptions(entry)
+		if searchToolCapabilityForModel != nil {
+			applyCoreSearchToolCapability(entry, id, searchToolCapabilityForModel)
+		}
+		return
+	}
 	if searchToolCapabilityForModel != nil {
 		applyCoreSearchToolCapability(entry, id, searchToolCapabilityForModel)
 		return
 	}
 	if !isTemplate {
 		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
-		return
-	}
-	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
-		entry["supports_search_tool"] = false
-		entry["prefer_websockets"] = false
-		entry["service_tiers"] = []any{}
-		nullCodexClientRequiredOptions(entry)
 		return
 	}
 	applyCodexClientSearchToolSupport(entry, id, isTemplate, providersForModel)

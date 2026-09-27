@@ -9,6 +9,10 @@ import (
 )
 
 func capabilitiesTestManager(t *testing.T, routes []internalconfig.ResponsesToolsRoute) *Manager {
+	return capabilitiesTestManagerForModels(t, routes, "gpt-5.6-sol", "")
+}
+
+func capabilitiesTestManagerForModels(t *testing.T, routes []internalconfig.ResponsesToolsRoute, clientModel, upstreamModel string) *Manager {
 	t.Helper()
 	cfg := &internalconfig.Config{}
 	cfg.ResponsesTools.Enabled = true
@@ -20,11 +24,15 @@ func capabilitiesTestManager(t *testing.T, routes []internalconfig.ResponsesTool
 	mgr := NewManager(nil, nil, nil)
 	mgr.SetConfig(cfg)
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("cap-auth", "codex", []*registry.ModelInfo{{ID: "gpt-5.6-sol"}})
+	reg.RegisterClient("cap-auth", "codex", []*registry.ModelInfo{{ID: clientModel}})
 	t.Cleanup(func() { reg.UnregisterClient("cap-auth") })
+	attributes := map[string]string{"auth_kind": "oauth"}
+	if upstreamModel != "" {
+		attributes[homeUpstreamModelAttributeKey] = upstreamModel
+	}
 	if _, err := mgr.Register(context.Background(), &Auth{
 		ID: "cap-auth", Provider: "codex",
-		Attributes: map[string]string{"auth_kind": "oauth"},
+		Attributes: attributes,
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -70,5 +78,24 @@ func TestClientSearchSupportedOffIsNil(t *testing.T) {
 	mgr.SetConfig(&internalconfig.Config{})
 	if supported := mgr.ClientSearchSupported("gpt-5.6-sol"); supported != nil {
 		t.Fatalf("disabled feature must stay nil, got %v", *supported)
+	}
+}
+
+func TestResponsesToolsMayApplyToClientModelResolvesUpstreamAlias(t *testing.T) {
+	mgr := capabilitiesTestManagerForModels(t, []internalconfig.ResponsesToolsRoute{
+		capRoute("bridge", "inherit"),
+	}, "client-alias", "gpt-5.6-sol")
+
+	if mgr.ResponsesToolsMayApplyToRoute("codex", "client-alias") {
+		t.Fatal("public model alias must not be mistaken for the configured upstream model")
+	}
+	if !mgr.ResponsesToolsMayApplyToClientModel("client-alias", "codex", "cap-auth") {
+		t.Fatal("active upstream route behind the client model alias must require tools replay")
+	}
+	if mgr.ResponsesToolsMayApplyToClientModel("client-alias", "gemini", "cap-auth") {
+		t.Fatal("different provider must not require tools replay")
+	}
+	if mgr.ResponsesToolsMayApplyToClientModel("client-alias", "codex", "other-auth") {
+		t.Fatal("different pinned auth must not require tools replay")
 	}
 }

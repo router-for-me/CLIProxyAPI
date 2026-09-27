@@ -234,12 +234,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			execute := func() (cliproxyexecutor.Response, error) {
 				if countTokens {
-					return m.responsesToolsCountCall(executorCtx, preparedAuth, selection.Provider, selection.Executor, execReq, execOpts, func(callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-						return selection.Executor.CountTokens(executorCtx, preparedAuth, callReq, callOpts)
+					return m.responsesToolsCountCall(executorCtx, preparedAuth, selection.Provider, selection.Executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+						return selection.Executor.CountTokens(callCtx, preparedAuth, callReq, callOpts)
 					})
 				}
-				return m.responsesToolsCallWithExecutor(execCtx, preparedAuth, selection.Provider, selection.Executor, execReq, execOpts, func(callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-					return selection.Executor.Execute(execCtx, preparedAuth, callReq, callOpts)
+				return m.responsesToolsCallWithExecutor(execCtx, preparedAuth, selection.Provider, selection.Executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+					return selection.Executor.Execute(callCtx, preparedAuth, callReq, callOpts)
 				})
 			}
 			startHomeExec := time.Now()
@@ -269,6 +269,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return response, nil
 			}
 			result.Error = resultErrorFromError(errExecute)
+			if isResponsesToolsError(errExecute) {
+				m.markResponsesToolsNeutral(execCtx, result)
+				releaseAttempt()
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errExecute)
+			}
 			result.RetryAfter = retryAfterFromError(errExecute)
 			if isCredentialScopedError(errExecute) {
 				result.CredentialScope = true

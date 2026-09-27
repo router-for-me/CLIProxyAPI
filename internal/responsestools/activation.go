@@ -314,15 +314,25 @@ func appendExistingDeferredEntries(existing any, additions []any) []any {
 }
 
 // injectDiscoveredTools promotes the latest discovery round in full and older
-// rounds newest-first while the activation budget holds. History items are
-// never deleted: older rounds simply stop activating new schemas when the
-// budget runs out.
+// rounds newest-first while the activation budget holds. Older rounds are
+// admitted atomically. History items are never deleted.
 func injectDiscoveredTools(root map[string]any, contract *ToolContract, limits Limits) (bool, error) {
 	if contract == nil || len(contract.Discovered) == 0 {
 		return false, nil
 	}
-	removePromotedDiscoveries(root, contract)
-	tools, _ := root["tools"].([]any)
+	originalTools, _ := root["tools"].([]any)
+	workingRoot := make(map[string]any, len(root))
+	for key, value := range root {
+		workingRoot[key] = value
+	}
+	removePromotedDiscoveries(workingRoot, contract)
+	tools, _ := workingRoot["tools"].([]any)
+	_, toolsPresent := workingRoot["tools"]
+	tools = append([]any(nil), tools...)
+	removedPromoted := len(tools) != len(originalTools)
+	if !toolsPresent {
+		delete(workingRoot, "tools")
+	}
 	existing := make(map[string]struct{}, len(tools))
 	for _, rawTool := range tools {
 		tool, ok := rawTool.(map[string]any)
@@ -336,7 +346,15 @@ func injectDiscoveredTools(root map[string]any, contract *ToolContract, limits L
 			}
 		}
 	}
-	changed := false
+	if toolsPresent {
+		workingRoot["tools"] = tools
+	}
+	if size, err := ActiveToolArraysBytes(workingRoot); err != nil {
+		return false, err
+	} else if size > limits.MaxActiveToolBytes {
+		return false, budgetError(ReasonDeclarationBudget, fmt.Errorf("eager declarations do not fit: %d > %d", size, limits.MaxActiveToolBytes))
+	}
+
 	identities := make([]ToolIdentity, 0, len(contract.Declarations))
 	for identity := range contract.Declarations {
 		identities = append(identities, identity)
@@ -355,61 +373,93 @@ func injectDiscoveredTools(root map[string]any, contract *ToolContract, limits L
 		}
 		return identities[left].Kind < identities[right].Kind
 	})
-	for _, identity := range identities {
-		raw, ok := contract.Declarations[identity]
-		if !ok {
-			continue
+	changed := removedPromoted
+	for start := 0; start < len(identities); {
+		end := start + 1
+		round := contract.DiscoveredRound[identities[start]]
+		for end < len(identities) && contract.DiscoveredRound[identities[end]] == round {
+			end++
 		}
-		name := contract.AliasByID[identity]
-		if name == "" {
-			name = RawQualifiedToolName(identity.Namespace, identity.Name)
-		}
-		rawName := RawQualifiedToolName(identity.Namespace, identity.Name)
-		if name == "" || name == ToolSearchName {
-			continue
-		}
-		if _, exists := existing[name]; exists {
-			continue
-		}
-		if _, exists := existing[rawName]; exists {
-			continue
-		}
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		decoder.UseNumber()
-		var tool map[string]any
-		if err := decoder.Decode(&tool); err != nil {
-			continue
-		}
-		if strings.TrimSpace(stringField(tool, "type")) == "" {
-			tool["type"] = "function"
-		}
-		changedBeforeAppend := changed
-		tool["name"] = name
-		delete(tool, "namespace")
-		delete(tool, "defer_loading")
-		tools = append(tools, tool)
-		existing[name] = struct{}{}
-		changed = true
-		root["tools"] = tools
-		size, err := ActiveToolArraysBytes(root)
-		if err != nil {
-			return changed, err
-		}
-		if size > limits.MaxActiveToolBytes {
-			tools = tools[:len(tools)-1]
-			root["tools"] = tools
-			delete(existing, name)
-			if contract.DiscoveredRound[identity] == contract.LatestRound {
-				return changed, budgetError(ReasonDeclarationBudget, fmt.Errorf("latest discovery does not fit: %d > %d", size, limits.MaxActiveToolBytes))
+		groupTools := make([]any, 0, end-start)
+		groupNames := make([]string, 0, 2*(end-start))
+		for _, identity := range identities[start:end] {
+			raw, ok := contract.Declarations[identity]
+			if !ok {
+				continue
 			}
-			changed = changedBeforeAppend
-			continue
+			name := contract.AliasByID[identity]
+			if name == "" {
+				name = RawQualifiedToolName(identity.Namespace, identity.Name)
+			}
+			rawName := RawQualifiedToolName(identity.Namespace, identity.Name)
+			if name == "" || name == ToolSearchName {
+				continue
+			}
+			if _, exists := existing[name]; exists {
+				continue
+			}
+			if _, exists := existing[rawName]; exists {
+				continue
+			}
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.UseNumber()
+			var tool map[string]any
+			if err := decoder.Decode(&tool); err != nil {
+				if round == contract.LatestRound {
+					return false, unprocessableError(ReasonAmbiguousIdentity, fmt.Errorf("latest discovery contains an invalid tool declaration"))
+				}
+				groupTools = nil
+				break
+			}
+			delete(tool, "defer_loading")
+			if identity.Kind == ToolKindCustom {
+				// Keep the original custom identity intact until the custom bridge
+				// rewrites it with the single canonical wire alias.
+				if identity.Namespace != "" {
+					tool["namespace"] = identity.Namespace
+				}
+			} else {
+				if strings.TrimSpace(stringField(tool, "type")) == "" {
+					tool["type"] = "function"
+				}
+				tool["name"] = name
+				delete(tool, "namespace")
+			}
+			groupTools = append(groupTools, tool)
+			groupNames = append(groupNames, name, rawName)
 		}
+		if len(groupTools) > 0 {
+			candidateTools := append(append([]any(nil), tools...), groupTools...)
+			candidateRoot := make(map[string]any, len(workingRoot)+1)
+			for key, value := range workingRoot {
+				candidateRoot[key] = value
+			}
+			candidateRoot["tools"] = candidateTools
+			size, err := ActiveToolArraysBytes(candidateRoot)
+			if err != nil {
+				return false, err
+			}
+			if size > limits.MaxActiveToolBytes {
+				if round == contract.LatestRound {
+					return false, budgetError(ReasonDeclarationBudget, fmt.Errorf("latest discovery does not fit: %d > %d", size, limits.MaxActiveToolBytes))
+				}
+				start = end
+				continue
+			}
+			tools = candidateTools
+			workingRoot["tools"] = tools
+			toolsPresent = true
+			for _, name := range groupNames {
+				existing[name] = struct{}{}
+			}
+			changed = true
+		}
+		start = end
 	}
-	if size, err := ActiveToolArraysBytes(root); err != nil {
-		return changed, err
-	} else if size > limits.MaxActiveToolBytes {
-		return changed, budgetError(ReasonDeclarationBudget, fmt.Errorf("eager declarations do not fit: %d > %d", size, limits.MaxActiveToolBytes))
+	if toolsPresent {
+		root["tools"] = tools
+	} else {
+		delete(root, "tools")
 	}
 	return changed, nil
 }

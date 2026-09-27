@@ -3,6 +3,7 @@ package responsestools
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -12,6 +13,11 @@ import (
 // are pruned, and discovered tools are injected under budget. It reports
 // whether the value changed.
 func RewriteRequest(value any, policy RoutePolicy, contract *ToolContract, limits Limits) (bool, error) {
+	if root, ok := value.(map[string]any); ok && policy.ClientSearch == ClientSearchBridge {
+		if err := validateClientSearchRequest(root, contract); err != nil {
+			return false, err
+		}
+	}
 	changed := rewriteRequestValue(value, contract)
 	if root, ok := value.(map[string]any); ok && contract != nil && contract.ClientSearch {
 		policyChanged, err := applyDeferredToolPolicy(root, contract, limits)
@@ -24,6 +30,63 @@ func RewriteRequest(value any, policy RoutePolicy, contract *ToolContract, limit
 	}
 	_ = policy
 	return changed, nil
+}
+
+func validateClientSearchRequest(root map[string]any, contract *ToolContract) error {
+	if contract == nil {
+		return nil
+	}
+	if contract.ServerSearch {
+		return unprocessableError(ReasonUnsupportedProtocol, fmt.Errorf("server-executed tool search is not supported by the bridge route"))
+	}
+	if !contract.ClientSearch {
+		return nil
+	}
+	input, ok := root["input"].([]any)
+	if !ok {
+		return nil
+	}
+	calls := make(map[string]struct{})
+	outputs := make(map[string]struct{})
+	for _, rawItem := range input {
+		item, okItem := rawItem.(map[string]any)
+		if !okItem {
+			continue
+		}
+		switch stringField(item, "type") {
+		case "tool_search_call":
+			callID := strings.TrimSpace(stringField(item, "call_id"))
+			if callID == "" {
+				return unprocessableError(ReasonHistoryLink, fmt.Errorf("client search call is missing call_id"))
+			}
+			if _, exists := calls[callID]; exists {
+				return unprocessableError(ReasonHistoryLink, fmt.Errorf("client search call_id is duplicated"))
+			}
+			if _, okArguments := item["arguments"].(map[string]any); !okArguments {
+				return unprocessableError(ReasonHistoryLink, fmt.Errorf("client search arguments must be an object"))
+			}
+			calls[callID] = struct{}{}
+		case "tool_search_output":
+			callID := strings.TrimSpace(stringField(item, "call_id"))
+			if callID == "" {
+				return unprocessableError(ReasonHistoryLink, fmt.Errorf("client search output is missing call_id"))
+			}
+			if _, exists := calls[callID]; !exists {
+				return unprocessableError(ReasonHistoryLink, fmt.Errorf("client search output has no preceding call"))
+			}
+			if _, exists := outputs[callID]; exists {
+				return unprocessableError(ReasonHistoryLink, fmt.Errorf("client search output is duplicated"))
+			}
+			if _, okTools := item["tools"].([]any); !okTools {
+				return unprocessableError(ReasonHistoryLink, fmt.Errorf("client search output tools must be an array"))
+			}
+			outputs[callID] = struct{}{}
+		}
+	}
+	if len(calls) != len(outputs) {
+		return unprocessableError(ReasonHistoryLink, fmt.Errorf("client search call has no matching output"))
+	}
+	return nil
 }
 
 func rewriteRequestValue(value any, contract *ToolContract) bool {
@@ -111,6 +174,8 @@ func rewriteToolChoice(value any, contract *ToolContract) bool {
 		choice["type"] = "function"
 		choice["name"] = alias
 		changed = true
+	} else if rewriteDiscoveredFunctionChoice(choice, contract) {
+		changed = true
 	}
 	tools, okTools := choice["tools"].([]any)
 	if !okTools {
@@ -118,14 +183,49 @@ func rewriteToolChoice(value any, contract *ToolContract) bool {
 	}
 	for _, rawTool := range tools {
 		tool, okTool := rawTool.(map[string]any)
-		if !okTool || stringField(tool, "type") != "tool_search" {
+		if !okTool {
 			continue
 		}
-		tool["type"] = "function"
-		tool["name"] = alias
-		changed = true
+		if stringField(tool, "type") == "tool_search" {
+			tool["type"] = "function"
+			tool["name"] = alias
+			changed = true
+			continue
+		}
+		if rewriteDiscoveredFunctionChoice(tool, contract) {
+			changed = true
+		}
 	}
 	return changed
+}
+
+func rewriteDiscoveredFunctionChoice(choice map[string]any, contract *ToolContract) bool {
+	if contract == nil || stringField(choice, "type") != "function" {
+		return false
+	}
+	name := strings.TrimSpace(stringField(choice, "name"))
+	namespace := strings.TrimSpace(stringField(choice, "namespace"))
+	if name == "" {
+		return false
+	}
+	lookupName := name
+	if namespace != "" {
+		lookupName = RawQualifiedToolName(namespace, name)
+	}
+	identity, ok := contract.Resolve(lookupName)
+	if !ok || identity.Kind != ToolKindFunction {
+		return false
+	}
+	if _, discovered := contract.Discovered[identity]; !discovered {
+		return false
+	}
+	alias, ok := contract.AliasByID[identity]
+	if !ok || alias == "" || (name == alias && namespace == "") {
+		return false
+	}
+	choice["name"] = alias
+	delete(choice, "namespace")
+	return true
 }
 
 func rewriteToolSearchDeclaration(tool map[string]any, contract *ToolContract) bool {

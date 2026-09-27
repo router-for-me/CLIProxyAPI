@@ -113,6 +113,32 @@ func (ls *Lease) Grow(delta int) error {
 	return nil
 }
 
+// Shrink releases bytes that an attempt no longer retains. It is safe to call
+// with an amount larger than the current reservation; the lease remains
+// non-negative and Close still releases the remaining reservation once.
+func (ls *Lease) Shrink(delta int) {
+	if ls == nil || delta <= 0 {
+		return
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ls.closed || ls.bytes == 0 {
+		return
+	}
+	if delta > ls.bytes {
+		delta = ls.bytes
+	}
+	ls.bytes -= delta
+	if ls.limiter != nil {
+		ls.limiter.mu.Lock()
+		ls.limiter.bytes -= delta
+		if ls.limiter.bytes < 0 {
+			ls.limiter.bytes = 0
+		}
+		ls.limiter.mu.Unlock()
+	}
+}
+
 // Close releases the lease exactly once. It is idempotent: double close,
 // cancellation, and completion all converge here safely.
 func (ls *Lease) Close() {
@@ -191,8 +217,13 @@ func CompactContract(contract *ToolContract) *ToolContract {
 	compact := NewToolContract()
 	compact.Identities = append([]ToolIdentity(nil), contract.Identities...)
 	compact.ClientSearch = contract.ClientSearch
+	compact.SearchBridged = contract.SearchBridged
 	compact.ServerSearch = contract.ServerSearch
 	compact.SearchAlias = contract.SearchAlias
+	compact.searchSyntheticSeen = contract.searchSyntheticSeen
+	for path := range contract.SearchSyntheticNulls {
+		compact.SearchSyntheticNulls[path] = struct{}{}
+	}
 	for identity, deferred := range contract.Deferred {
 		compact.Deferred[identity] = deferred
 	}

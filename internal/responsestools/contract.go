@@ -33,41 +33,49 @@ const (
 // one client request: top-level tools, nested namespaces, additional_tools,
 // and all discovery rounds, plus the activation aliases derived from them.
 type ToolContract struct {
-	Identities      []ToolIdentity
-	Declarations    map[ToolIdentity]json.RawMessage
-	Discovered      map[ToolIdentity]struct{}
-	DiscoveredRound map[ToolIdentity]int
-	LatestRound     int
-	PendingRound    int
-	ClientSearch    bool
-	ServerSearch    bool
-	SearchAlias     string
-	Exact           map[string]ToolIdentity
-	Normalized      map[string]ToolIdentity
-	Local           map[string]ToolIdentity
-	Namespaces      map[string]ToolIdentity
-	NamespaceCounts map[string]int
-	TopLevel        map[string]struct{}
-	Deferred        map[ToolIdentity]bool
-	AliasByID       map[ToolIdentity]string
-	IDByAlias       map[string]ToolIdentity
+	Identities           []ToolIdentity
+	Declarations         map[ToolIdentity]json.RawMessage
+	Discovered           map[ToolIdentity]struct{}
+	DiscoveredRound      map[ToolIdentity]int
+	LatestRound          int
+	PendingRound         int
+	ClientSearch         bool
+	SearchBridged        bool
+	ServerSearch         bool
+	SearchAlias          string
+	SearchSyntheticNulls map[string]struct{}
+	searchSyntheticSeen  bool
+	Exact                map[string]ToolIdentity
+	Normalized           map[string]ToolIdentity
+	Local                map[string]ToolIdentity
+	Namespaces           map[string]ToolIdentity
+	NamespaceCounts      map[string]int
+	TopLevel             map[string]struct{}
+	Deferred             map[ToolIdentity]bool
+	AliasByID            map[ToolIdentity]string
+	IDByAlias            map[string]ToolIdentity
+	discoveryRoundSeen   map[ToolIdentity]json.RawMessage
+	discoveryRound       int
+	discoveryConflict    bool
 }
 
 // NewToolContract returns an empty contract ready for collection.
 func NewToolContract() *ToolContract {
 	return &ToolContract{
-		Declarations:    make(map[ToolIdentity]json.RawMessage),
-		Discovered:      make(map[ToolIdentity]struct{}),
-		DiscoveredRound: make(map[ToolIdentity]int),
-		Exact:           make(map[string]ToolIdentity),
-		Normalized:      make(map[string]ToolIdentity),
-		Local:           make(map[string]ToolIdentity),
-		Namespaces:      make(map[string]ToolIdentity),
-		NamespaceCounts: make(map[string]int),
-		TopLevel:        make(map[string]struct{}),
-		Deferred:        make(map[ToolIdentity]bool),
-		AliasByID:       make(map[ToolIdentity]string),
-		IDByAlias:       make(map[string]ToolIdentity),
+		Declarations:         make(map[ToolIdentity]json.RawMessage),
+		Discovered:           make(map[ToolIdentity]struct{}),
+		DiscoveredRound:      make(map[ToolIdentity]int),
+		Exact:                make(map[string]ToolIdentity),
+		Normalized:           make(map[string]ToolIdentity),
+		Local:                make(map[string]ToolIdentity),
+		Namespaces:           make(map[string]ToolIdentity),
+		NamespaceCounts:      make(map[string]int),
+		TopLevel:             make(map[string]struct{}),
+		Deferred:             make(map[ToolIdentity]bool),
+		AliasByID:            make(map[ToolIdentity]string),
+		IDByAlias:            make(map[string]ToolIdentity),
+		SearchSyntheticNulls: make(map[string]struct{}),
+		discoveryRoundSeen:   make(map[ToolIdentity]json.RawMessage),
 	}
 }
 
@@ -106,10 +114,19 @@ func ParseContract(body []byte) *ToolContract {
 					contract.collectToolArray(item["tools"], "", SourceDeclared)
 				case "tool_search_output":
 					contract.PendingRound = inputIndex + 1
+					contract.beginDiscoveryRound(contract.PendingRound)
 					contract.collectToolArray(item["tools"], "", SourceDiscovered)
-					contract.markClientSearch(item)
+					if IsServerExecutedItem(item) {
+						contract.ServerSearch = true
+					} else {
+						contract.markClientSearch(item)
+					}
 				case "tool_search_call":
-					contract.markClientSearch(item)
+					if IsServerExecutedItem(item) {
+						contract.ServerSearch = true
+					} else {
+						contract.markClientSearch(item)
+					}
 				}
 			}
 		}
@@ -117,10 +134,19 @@ func ParseContract(body []byte) *ToolContract {
 		contract.collectToolArray(root, "", SourceDeclared)
 	}
 	contract.finalize()
+	contract.discoveryRoundSeen = nil
 	if len(contract.Identities) == 0 && len(contract.TopLevel) == 0 && !contract.ClientSearch && !contract.ServerSearch {
 		return nil
 	}
 	return contract
+}
+
+func (c *ToolContract) beginDiscoveryRound(round int) {
+	if c == nil {
+		return
+	}
+	c.discoveryRound = round
+	c.discoveryRoundSeen = make(map[ToolIdentity]json.RawMessage)
 }
 
 // decodeValue decodes JSON while preserving number precision, so large
@@ -196,6 +222,25 @@ func (c *ToolContract) collectToolArray(value any, inheritedNamespace string, so
 	}
 }
 
+func (c *ToolContract) mergeSearchSyntheticNulls(candidates map[string]struct{}, seen bool) {
+	if c == nil || !seen {
+		return
+	}
+	if !c.searchSyntheticSeen {
+		c.SearchSyntheticNulls = make(map[string]struct{}, len(candidates))
+		for path := range candidates {
+			c.SearchSyntheticNulls[path] = struct{}{}
+		}
+		c.searchSyntheticSeen = true
+		return
+	}
+	for path := range c.SearchSyntheticNulls {
+		if _, exists := candidates[path]; !exists {
+			delete(c.SearchSyntheticNulls, path)
+		}
+	}
+}
+
 func (c *ToolContract) addDiscoveredDeclaration(namespace, name string, kind ToolKind, tool map[string]any) {
 	identity := ToolIdentity{
 		Namespace: strings.TrimSpace(namespace),
@@ -209,14 +254,28 @@ func (c *ToolContract) addDiscoveredDeclaration(namespace, name string, kind Too
 	if err != nil {
 		return
 	}
-	c.Declarations[identity] = raw
-	c.Discovered[identity] = struct{}{}
 	if c.PendingRound > 0 {
+		if c.discoveryRound != c.PendingRound {
+			c.beginDiscoveryRound(c.PendingRound)
+		}
+		if previous, exists := c.discoveryRoundSeen[identity]; exists {
+			if !bytes.Equal(previous, raw) {
+				c.discoveryConflict = true
+				return
+			}
+		} else {
+			c.discoveryRoundSeen[identity] = append(json.RawMessage(nil), raw...)
+		}
+		c.Declarations[identity] = raw
+		c.Discovered[identity] = struct{}{}
 		c.DiscoveredRound[identity] = c.PendingRound
 		if c.PendingRound > c.LatestRound {
 			c.LatestRound = c.PendingRound
 		}
+		return
 	}
+	c.Declarations[identity] = raw
+	c.Discovered[identity] = struct{}{}
 }
 
 func (c *ToolContract) collectDeferredMetadata(tool map[string]any) {
@@ -337,13 +396,27 @@ func (c *ToolContract) finalize() {
 			delete(c.Namespaces, namespace)
 		}
 	}
-	_, ordinarySearchExists := c.TopLevel[ToolSearchName]
-	if c.ClientSearch && ordinarySearchExists {
-		c.SearchAlias = "cts_" + ToolSearchName
-	} else {
-		c.SearchAlias = ToolSearchName
-	}
+	c.SearchAlias = c.uniqueSearchAlias()
 	c.buildActivationAliases()
+}
+
+func (c *ToolContract) uniqueSearchAlias() string {
+	if !c.ClientSearch {
+		return ToolSearchName
+	}
+	if _, exists := c.TopLevel[ToolSearchName]; !exists {
+		return ToolSearchName
+	}
+	base := "cts_" + ToolSearchName
+	for suffix := 0; ; suffix++ {
+		candidate := base
+		if suffix > 0 {
+			candidate += itoa(suffix)
+		}
+		if _, exists := c.TopLevel[candidate]; !exists {
+			return candidate
+		}
+	}
 }
 
 func (c *ToolContract) buildActivationAliases() {

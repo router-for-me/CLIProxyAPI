@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 )
@@ -34,21 +35,72 @@ type CustomBridge struct {
 	idByAlias map[string]ToolIdentity
 	byName    map[string]ToolIdentity
 	ambiguous map[string]bool
+	reserved  map[string]struct{}
 	grammar   CustomGrammarMode
 }
 
 // BuildCustomBridge collects every custom declaration reachable from tools,
 // nested namespaces, and additional_tools inputs.
 func BuildCustomBridge(value any, grammar CustomGrammarMode) *CustomBridge {
+	return BuildCustomBridgeWithReserved(value, grammar, nil)
+}
+
+// BuildCustomBridgeWithReserved collects custom identities before request
+// rewriting and avoids every name already assigned to a non-custom function.
+func BuildCustomBridgeWithReserved(value any, grammar CustomGrammarMode, reserved []string) *CustomBridge {
 	bridge := &CustomBridge{
 		aliasByID: make(map[ToolIdentity]string),
 		idByAlias: make(map[string]ToolIdentity),
 		byName:    make(map[string]ToolIdentity),
 		ambiguous: make(map[string]bool),
+		reserved:  make(map[string]struct{}, len(reserved)),
 		grammar:   grammar,
 	}
+	for _, name := range reserved {
+		if name = strings.TrimSpace(name); name != "" {
+			bridge.reserved[name] = struct{}{}
+		}
+	}
+	collectReservedFunctionNames(value, bridge.reserved)
 	collectCustomDeclarations(value, "", bridge)
 	return bridge
+}
+
+func collectReservedFunctionNames(value any, reserved map[string]struct{}) {
+	var visit func(any)
+	visit = func(value any) {
+		switch typed := value.(type) {
+		case map[string]any:
+			if tools, ok := typed["tools"].([]any); ok {
+				for _, rawTool := range tools {
+					tool, okTool := rawTool.(map[string]any)
+					if !okTool {
+						continue
+					}
+					if stringField(tool, "type") == "function" {
+						if name := strings.TrimSpace(stringField(tool, "name")); name != "" {
+							reserved[name] = struct{}{}
+						}
+					}
+					visit(tool["tools"])
+				}
+			}
+			if input, ok := typed["input"].([]any); ok {
+				for _, rawItem := range input {
+					item, okItem := rawItem.(map[string]any)
+					if okItem && (stringField(item, "type") == "additional_tools" ||
+						stringField(item, "type") == "tool_search_output") {
+						visit(item)
+					}
+				}
+			}
+		case []any:
+			for _, child := range typed {
+				visit(child)
+			}
+		}
+	}
+	visit(value)
 }
 
 func collectCustomDeclarations(value any, inheritedNamespace string, bridge *CustomBridge) {
@@ -90,7 +142,8 @@ func collectCustomDeclarations(value any, inheritedNamespace string, bridge *Cus
 		if input, ok := typed["input"].([]any); ok {
 			for _, rawItem := range input {
 				item, ok := rawItem.(map[string]any)
-				if !ok || stringField(item, "type") != "additional_tools" {
+				if !ok || (stringField(item, "type") != "additional_tools" &&
+					stringField(item, "type") != "tool_search_output") {
 					continue
 				}
 				collectCustomDeclarations(item, inheritedNamespace, bridge)
@@ -114,7 +167,8 @@ func (b *CustomBridge) register(identity ToolIdentity) {
 	base := alias
 	for suffix := 1; ; suffix++ {
 		owner, exists := b.idByAlias[alias]
-		if !exists {
+		_, reserved := b.reserved[alias]
+		if !exists && !reserved {
 			break
 		}
 		if owner == identity {
@@ -172,6 +226,27 @@ func (b *CustomBridge) Resolve(name string) (ToolIdentity, bool) {
 		return ToolIdentity{}, false
 	}
 	identity, ok := b.byName[name]
+	return identity, ok
+}
+
+// IsAmbiguous reports whether a display or qualified name resolves to multiple
+// custom identities and therefore cannot be safely registered as history-only.
+func (b *CustomBridge) IsAmbiguous(name string) bool {
+	if b == nil {
+		return false
+	}
+	return b.ambiguous[strings.TrimSpace(name)]
+}
+
+// ResolveWireAlias resolves only generated wire aliases. Display names are
+// useful while translating client history, but are not unique enough to
+// classify an upstream function_call without risking an ordinary function
+// being mistaken for a custom tool.
+func (b *CustomBridge) ResolveWireAlias(name string) (ToolIdentity, bool) {
+	if b == nil {
+		return ToolIdentity{}, false
+	}
+	identity, ok := b.idByAlias[strings.TrimSpace(name)]
 	return identity, ok
 }
 
@@ -307,15 +382,24 @@ func wrapCustomDeclarationInNamespace(tool map[string]any, inheritedNamespace st
 	}
 	description := strings.TrimSpace(stringField(tool, "description"))
 	format, _ := tool["format"].(map[string]any)
-	if len(format) > 0 && bridge.grammar == CustomGrammarReject {
-		return nil, unprocessableError(ReasonUnsupportedGrammar, fmt.Errorf("custom tool %q requires grammar support", name))
-	}
 	if len(format) > 0 {
-		described := describeCustomFormat(format)
-		if description != "" {
-			description += "\n\n"
+		switch stringField(format, "type") {
+		case "text":
+			if len(format) != 1 {
+				return nil, unprocessableError(ReasonUnsupportedGrammar, fmt.Errorf("custom tool %q has unsupported text format fields", name))
+			}
+		case "grammar":
+			if bridge.grammar == CustomGrammarReject {
+				return nil, unprocessableError(ReasonUnsupportedGrammar, fmt.Errorf("custom tool %q requires grammar support", name))
+			}
+			described := describeCustomFormat(format)
+			if description != "" {
+				description += "\n\n"
+			}
+			description += described
+		default:
+			return nil, unprocessableError(ReasonUnsupportedGrammar, fmt.Errorf("custom tool %q has an unsupported format", name))
 		}
-		description += described
 	}
 	if description == "" {
 		description = fmt.Sprintf("Call the %s custom tool with its exact input string.", name)
@@ -361,13 +445,15 @@ func rewriteCustomChoice(choice map[string]any, bridge *CustomBridge) (bool, err
 	changed := false
 	if strings.EqualFold(strings.TrimSpace(stringField(choice, "type")), "custom") {
 		name := strings.TrimSpace(stringField(choice, "name"))
-		identity, ok := bridge.Resolve(name)
+		namespace := strings.TrimSpace(stringField(choice, "namespace"))
+		identity, ok := resolveCustomIdentity(bridge, namespace, name)
 		if !ok {
 			return false, unprocessableError(ReasonAmbiguousIdentity, fmt.Errorf("custom choice %q is ambiguous or unknown", name))
 		}
 		alias, _ := bridge.Alias(identity)
 		choice["type"] = "function"
 		choice["name"] = alias
+		delete(choice, "namespace")
 		changed = true
 	}
 	if tools, ok := choice["tools"].([]any); ok {
@@ -377,26 +463,21 @@ func rewriteCustomChoice(choice map[string]any, bridge *CustomBridge) (bool, err
 				continue
 			}
 			if !strings.EqualFold(strings.TrimSpace(stringField(tool, "type")), "custom") {
-				name := strings.TrimSpace(stringField(tool, "name"))
-				if name == "" {
-					continue
-				}
-				if identity, okResolve := bridge.Resolve(name); okResolve {
-					alias, _ := bridge.Alias(identity)
-					tool["type"] = "function"
-					tool["name"] = alias
-					changed = true
-				}
+				// Function entries are already explicit ordinary function
+				// identities. Never infer that one is custom from a matching
+				// display name; custom entries must carry type=custom.
 				continue
 			}
 			name := strings.TrimSpace(stringField(tool, "name"))
-			identity, okResolve := bridge.Resolve(name)
+			namespace := strings.TrimSpace(stringField(tool, "namespace"))
+			identity, okResolve := resolveCustomIdentity(bridge, namespace, name)
 			if !okResolve {
 				return false, unprocessableError(ReasonAmbiguousIdentity, fmt.Errorf("custom choice entry %q is ambiguous or unknown", name))
 			}
 			alias, _ := bridge.Alias(identity)
 			tool["type"] = "function"
 			tool["name"] = alias
+			delete(tool, "namespace")
 			changed = true
 		}
 	}
@@ -404,6 +485,21 @@ func rewriteCustomChoice(choice map[string]any, bridge *CustomBridge) (bool, err
 		return changed, nil
 	}
 	return changed, nil
+}
+
+func resolveCustomIdentity(bridge *CustomBridge, namespace, name string) (ToolIdentity, bool) {
+	name = strings.TrimSpace(name)
+	namespace = strings.TrimSpace(namespace)
+	if bridge == nil || name == "" {
+		return ToolIdentity{}, false
+	}
+	if namespace != "" {
+		identity := ToolIdentity{Namespace: namespace, Name: name, Kind: ToolKindCustom}
+		_, ok := bridge.Alias(identity)
+		return identity, ok
+	}
+	identity, ok := bridge.Resolve(name)
+	return identity, ok && identity.Kind == ToolKindCustom
 }
 
 // rewriteCustomHistoryItem converts one custom history item to its function
@@ -419,11 +515,17 @@ func rewriteCustomHistoryItem(item map[string]any, bridge *CustomBridge) (bool, 
 		}
 		name := strings.TrimSpace(stringField(item, "name"))
 		namespace := strings.TrimSpace(stringField(item, "namespace"))
-		identity, okResolve := bridge.Resolve(name)
-		if !okResolve && namespace != "" {
-			identity, okResolve = bridge.Resolve(RawQualifiedToolName(namespace, name))
+		var identity ToolIdentity
+		var okResolve bool
+		if namespace != "" {
+			identity, okResolve = resolveCustomIdentity(bridge, namespace, name)
+		} else {
+			identity, okResolve = resolveCustomIdentity(bridge, "", name)
 		}
 		if !okResolve {
+			if bridge.IsAmbiguous(name) {
+				return false, unprocessableError(ReasonAmbiguousIdentity, fmt.Errorf("custom history name %q is ambiguous without a namespace", name))
+			}
 			// History may reference a custom tool declared only in a previous
 			// turn; register it so the round trip stays stable.
 			identity = ToolIdentity{Namespace: namespace, Name: name, Kind: ToolKindCustom}
@@ -460,23 +562,54 @@ func UnpackCustomArguments(arguments string) (string, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	decoder.UseNumber()
-	var value map[string]any
-	if err := decoder.Decode(&value); err != nil {
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
 		return "", unprocessableError(ReasonInvalidCustomInput, err)
 	}
-	if decoder.More() {
-		return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("trailing data after custom arguments"))
+	count := 0
+	seen := make(map[string]struct{}, 1)
+	var input string
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", unprocessableError(ReasonInvalidCustomInput, err)
+		}
+		key, ok := token.(string)
+		if !ok {
+			return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("custom arguments contain a non-string key"))
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("custom arguments contain duplicate fields"))
+		}
+		seen[key] = struct{}{}
+		count++
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return "", unprocessableError(ReasonInvalidCustomInput, err)
+		}
+		if key == CustomFunctionParameter {
+			var okInput bool
+			input, okInput = value.(string)
+			if !okInput {
+				return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("custom input is not a string"))
+			}
+		}
 	}
-	if len(value) != 1 {
+	if end, err := decoder.Token(); err != nil || end != json.Delim('}') {
+		return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("custom arguments object is incomplete"))
+	}
+	if count != 1 {
 		return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("custom arguments must carry exactly one field"))
 	}
-	raw, ok := value[CustomFunctionParameter]
-	if !ok {
+	if _, ok := seen[CustomFunctionParameter]; !ok {
 		return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("custom arguments miss input field"))
 	}
-	input, ok := raw.(string)
-	if !ok {
-		return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("custom input is not a string"))
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return "", unprocessableError(ReasonInvalidCustomInput, fmt.Errorf("trailing value after custom arguments"))
+		}
+		return "", unprocessableError(ReasonInvalidCustomInput, err)
 	}
 	return input, nil
 }
@@ -487,7 +620,7 @@ func (b *CustomBridge) RestoreCustomResponseItem(item map[string]any) bool {
 	if b == nil || stringField(item, "type") != "function_call" {
 		return false
 	}
-	identity, ok := b.Resolve(stringField(item, "name"))
+	identity, ok := b.ResolveWireAlias(stringField(item, "name"))
 	if !ok || identity.Kind != ToolKindCustom {
 		return false
 	}

@@ -3,10 +3,12 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -22,12 +24,45 @@ type fakeResponsesExecutor struct {
 	response   []byte
 	err        error
 	countCalls int
+	wireGuard  *cliproxyexecutor.WireContract
+}
+
+func TestCollectResponsesToolsWireRequirementsPreservesQualifiedHistoryNames(t *testing.T) {
+	wire := &WireContract{
+		CustomAliases:  []string{"ccb_abc"},
+		HistoryAliases: []string{"ccb_abc"},
+	}
+	body := []byte(`{"tools":[{"type":"namespace","name":"fs","tools":[{"type":"function","name":"ccb_abc"}]}],"input":[{"type":"function_call","name":"ccb_abc","call_id":"call_1"},{"type":"function_call_output","call_id":"call_1","output":"done"}]}`)
+	if err := collectResponsesToolsWireRequirements(body, wire); err != nil {
+		t.Fatalf("collect wire requirements: %v", err)
+	}
+	if len(wire.RequiredFunctionNames) != 1 || wire.RequiredFunctionNames[0] != "fs__ccb_abc" {
+		t.Fatalf("required function names = %v, want namespace-qualified function", wire.RequiredFunctionNames)
+	}
+	if len(wire.HistoryCalls) != 1 || wire.HistoryCalls[0].Name != "ccb_abc" ||
+		wire.HistoryCalls[0].CallID != "call_1" {
+		t.Fatalf("history calls = %+v, want the bridged call identity", wire.HistoryCalls)
+	}
+	if len(wire.HistoryCalls[0].AlternateNames) != 1 || wire.HistoryCalls[0].AlternateNames[0] != "fs__ccb_abc" {
+		t.Fatalf("history alternate names = %v, want namespace-qualified wire identity", wire.HistoryCalls[0].AlternateNames)
+	}
+	hasQualifiedHistoryAlias := false
+	for _, alias := range wire.HistoryAliases {
+		if alias == "fs__ccb_abc" {
+			hasQualifiedHistoryAlias = true
+			break
+		}
+	}
+	if !hasQualifiedHistoryAlias {
+		t.Fatalf("history aliases = %v, want the namespace-qualified wire identity", wire.HistoryAliases)
+	}
 }
 
 func (f *fakeResponsesExecutor) Identifier() string { return f.provider }
 
-func (f *fakeResponsesExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (f *fakeResponsesExecutor) Execute(ctx context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	f.wire = append(f.wire, req.Payload)
+	f.wireGuard = cliproxyexecutor.WireContractFromContext(ctx)
 	if f.err != nil {
 		return cliproxyexecutor.Response{}, f.err
 	}
@@ -64,6 +99,14 @@ func (f *fakeResponsesExecutor) RequestToFormat(_ cliproxyexecutor.Request, _ cl
 }
 
 func responsesToolsTestManager() *Manager {
+	return responsesToolsTestManagerWithClientSearch("bridge")
+}
+
+func responsesToolsTestManagerWithClientSearch(clientSearch string) *Manager {
+	return responsesToolsTestManagerWithModes(clientSearch, "inherit")
+}
+
+func responsesToolsTestManagerWithModes(clientSearch, customTools string) *Manager {
 	cfg := &internalconfig.Config{}
 	cfg.ResponsesTools.Enabled = true
 	cfg.ResponsesTools.Routes = []internalconfig.ResponsesToolsRoute{{
@@ -71,7 +114,7 @@ func responsesToolsTestManager() *Manager {
 			Provider: "codex", AuthKind: "oauth",
 			UpstreamModel: "gpt-5.6-sol", UpstreamFormat: "codex",
 		},
-		ClientSearch: "bridge", CustomTools: "inherit",
+		ClientSearch: clientSearch, CustomTools: customTools, CustomGrammar: "describe",
 	}}
 	cfg.NormalizeResponsesToolsConfig()
 	mgr := NewManager(nil, nil, nil)
@@ -127,6 +170,139 @@ func TestResponsesToolsExecuteBridgesSearch(t *testing.T) {
 	}
 }
 
+func TestResponsesToolsExecutePassesWireContractToExecutor(t *testing.T) {
+	mgr := responsesToolsTestManager()
+	responsesToolsTestAuth(t, mgr)
+	exec := &fakeResponsesExecutor{
+		provider: "codex",
+		toFormat: sdktranslator.FormatCodex,
+		response: []byte(`{"output":[]}`),
+	}
+	mgr.RegisterExecutor(exec)
+	body := `{"tools":[{"type":"tool_search"}],"input":[]}`
+	req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(body)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex, OriginalRequest: []byte(body)}
+
+	if _, err := mgr.Execute(context.Background(), []string{"codex"}, req, opts); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if exec.wireGuard == nil {
+		t.Fatal("executor did not receive the prepared wire contract")
+	}
+	if len(exec.wireGuard.SearchAliases) != 1 || exec.wireGuard.SearchAliases[0] == "" {
+		t.Fatalf("search aliases = %v, want one active alias", exec.wireGuard.SearchAliases)
+	}
+}
+
+type failingResponsesToolsStreamAttempt struct {
+	closed chan struct{}
+}
+
+func (a *failingResponsesToolsStreamAttempt) Feed([]byte) ([][]byte, error) {
+	return nil, errors.New("bridge failure")
+}
+
+func (*failingResponsesToolsStreamAttempt) Finish() ([][]byte, error) { return nil, nil }
+
+func (a *failingResponsesToolsStreamAttempt) Close() { close(a.closed) }
+
+type terminalResponsesToolsStreamAttempt struct {
+	closed      chan struct{}
+	finishCalls int
+	finishErr   error
+}
+
+func (*terminalResponsesToolsStreamAttempt) Feed([]byte) ([][]byte, error) { return nil, nil }
+func (a *terminalResponsesToolsStreamAttempt) Finish() ([][]byte, error) {
+	a.finishCalls++
+	return nil, a.finishErr
+}
+func (a *terminalResponsesToolsStreamAttempt) Close() { close(a.closed) }
+
+func TestAdaptResponsesToolsStreamCancelsUpstreamAfterBridgeError(t *testing.T) {
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	attemptCtx, cancelAttempt := context.WithCancel(parentCtx)
+	attempt := &failingResponsesToolsStreamAttempt{closed: make(chan struct{})}
+	upstream := make(chan cliproxyexecutor.StreamChunk)
+	producerExited := make(chan struct{})
+	go func() {
+		defer close(producerExited)
+		select {
+		case upstream <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.output_item.added"}`)}:
+		case <-attemptCtx.Done():
+			return
+		}
+		<-attemptCtx.Done()
+	}()
+
+	result := adaptResponsesToolsStream(parentCtx, attemptCtx, cancelAttempt, attempt, &cliproxyexecutor.StreamResult{Chunks: upstream}, false)
+	chunk, ok := <-result.Chunks
+	if !ok || chunk.Err == nil {
+		t.Fatalf("stream chunk = %+v, open = %v; want one bridge error", chunk, ok)
+	}
+	select {
+	case <-producerExited:
+	case <-time.After(time.Second):
+		t.Fatal("upstream producer did not exit after bridge failure")
+	}
+	select {
+	case <-attempt.closed:
+	default:
+		t.Fatal("attempt lease was not released after bridge failure")
+	}
+}
+
+func TestAdaptResponsesToolsStreamPreservesUpstreamErrorOverFinishError(t *testing.T) {
+	upstreamErr := errors.New("upstream 429")
+	finishErr := errors.New("incomplete bridge tail")
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	attemptCtx, cancelAttempt := context.WithCancel(parentCtx)
+	attempt := &terminalResponsesToolsStreamAttempt{
+		closed:    make(chan struct{}),
+		finishErr: finishErr,
+	}
+	upstream := make(chan cliproxyexecutor.StreamChunk, 1)
+	upstream <- cliproxyexecutor.StreamChunk{Err: upstreamErr}
+	close(upstream)
+
+	result := adaptResponsesToolsStream(parentCtx, attemptCtx, cancelAttempt, attempt, &cliproxyexecutor.StreamResult{Chunks: upstream}, false)
+	chunk, ok := <-result.Chunks
+	if !ok || !errors.Is(chunk.Err, upstreamErr) {
+		t.Fatalf("first terminal chunk = %+v, open = %v; want original upstream error", chunk, ok)
+	}
+	if _, ok := <-result.Chunks; ok {
+		t.Fatal("stream emitted more than one terminal error")
+	}
+	if attempt.finishCalls != 0 {
+		t.Fatalf("Finish called %d times after upstream failure, want 0", attempt.finishCalls)
+	}
+	select {
+	case <-attempt.closed:
+	case <-time.After(time.Second):
+		t.Fatal("attempt lease was not released after upstream failure")
+	}
+}
+
+func TestNormalizeCodexResponsesDataLine(t *testing.T) {
+	input := []byte(`data: {"type":"response.created","response":{"id":"r1"}}`)
+	got := normalizeCodexResponsesDataLine(input)
+	if string(got) != `{"type":"response.created","response":{"id":"r1"}}` {
+		t.Fatalf("normalized data line = %q", got)
+	}
+	for _, unchanged := range [][]byte{
+		[]byte(`data: {"type":"response.created"`),
+		[]byte("data: {\"type\":\"response.created\"}\ndata: continued"),
+		[]byte("data: [DONE]"),
+		[]byte(`event: response.created`),
+	} {
+		if got := normalizeCodexResponsesDataLine(unchanged); string(got) != string(unchanged) {
+			t.Fatalf("incomplete/non-event frame changed: input=%q output=%q", unchanged, got)
+		}
+	}
+}
+
 func TestResponsesToolsExecutePassthroughWhenDisabled(t *testing.T) {
 	mgr := NewManager(nil, nil, nil)
 	mgr.SetConfig(&internalconfig.Config{})
@@ -175,5 +351,54 @@ func TestResponsesToolsBridgeErrorStopsWithoutRotation(t *testing.T) {
 	}
 	if len(exec.wire) != 0 {
 		t.Fatalf("rejected request must never reach upstream")
+	}
+}
+
+func TestResponsesToolsStreamPrepareErrorStopsWithoutNilStreamPanic(t *testing.T) {
+	mgr := responsesToolsTestManagerWithClientSearch("disabled")
+	responsesToolsTestAuth(t, mgr)
+	exec := &fakeResponsesExecutor{provider: "codex", toFormat: sdktranslator.FormatCodex}
+	mgr.RegisterExecutor(exec)
+	body := `{"tools":[{"type":"tool_search"}],"input":[]}`
+	req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(body)}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatCodex,
+		OriginalRequest: []byte(body),
+	}
+
+	_, err := mgr.ExecuteStream(context.Background(), []string{"codex"}, req, opts)
+	if err == nil {
+		t.Fatal("expected the disabled client-search request to stop")
+	}
+	var statusErr interface{ StatusCode() int }
+	if !errors.As(err, &statusErr) || statusErr.StatusCode() != http.StatusUnprocessableEntity {
+		t.Fatalf("stream error status = %v, want 422", err)
+	}
+	if len(exec.wire) != 0 {
+		t.Fatalf("rejected stream request reached the executor: %d calls", len(exec.wire))
+	}
+}
+
+func TestResponsesToolsHistoryOnlyCustomDoesNotRequireDeclaration(t *testing.T) {
+	mgr := responsesToolsTestManagerWithModes("bridge", "function")
+	responsesToolsTestAuth(t, mgr)
+	exec := &fakeResponsesExecutor{
+		provider: "codex", toFormat: sdktranslator.FormatCodex,
+		response: []byte(`{"output":[]}`),
+	}
+	mgr.RegisterExecutor(exec)
+	body := `{"model":"gpt-5.6-sol","input":[{"type":"custom_tool_call","name":"apply_patch","call_id":"c1","input":"patch"},{"type":"custom_tool_call_output","call_id":"c1","output":"ok"}]}`
+	req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(body)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex, OriginalRequest: []byte(body)}
+
+	if _, err := mgr.Execute(context.Background(), []string{"codex"}, req, opts); err != nil {
+		t.Fatalf("history-only custom call: %v", err)
+	}
+	if len(exec.wire) != 1 {
+		t.Fatalf("executor calls = %d, want 1", len(exec.wire))
+	}
+	wire := string(exec.wire[0])
+	if strings.Contains(wire, `"type":"custom_tool_call"`) {
+		t.Fatalf("custom history was not bridged: %s", wire)
 	}
 }

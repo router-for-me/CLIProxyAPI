@@ -63,13 +63,21 @@ func (m *Manager) ClientSearchSupported(modelID string) *bool {
 // recover, and a temporarily unavailable search route must not promote the
 // alias based on whichever credential happens to be usable now.
 func (m *Manager) clientSearchCandidateRoutes(modelID string) []responsestools.Route {
+	return m.responsesToolsCandidateRoutes(modelID, "")
+}
+
+func (m *Manager) responsesToolsCandidateRoutes(modelID, authID string) []responsestools.Route {
 	if m == nil {
+		return nil
+	}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
 		return nil
 	}
 	m.mu.RLock()
 	auths := make([]*Auth, 0, len(m.auths))
 	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled {
+		if auth == nil || auth.Disabled || (authID != "" && auth.ID != authID) {
 			continue
 		}
 		auths = append(auths, auth.Clone())
@@ -119,5 +127,84 @@ func (m *Manager) ResponsesToolsEnabled() bool {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return state.enabled
+	return state.enabled && len(state.policy.Routes) > 0
+}
+
+// ResponsesToolsMayApplyToRoute reports whether a non-pass-through policy
+// could match the route information known to a caller. Empty hints represent
+// unknown dimensions rather than mismatches.
+func (m *Manager) ResponsesToolsMayApplyToRoute(provider, upstreamModel string) bool {
+	if m == nil {
+		return false
+	}
+	state := m.responsesToolsSnapshot()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.enabled {
+		return false
+	}
+	provider = strings.TrimSpace(provider)
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	for _, route := range state.policy.Routes {
+		if provider != "" && !strings.EqualFold(provider, strings.TrimSpace(route.Match.Provider)) {
+			continue
+		}
+		if upstreamModel != "" && !strings.EqualFold(upstreamModel, strings.TrimSpace(route.Match.UpstreamModel)) {
+			continue
+		}
+		if route.ClientSearch == responsestools.ClientSearchBridge ||
+			route.ClientSearch == responsestools.ClientSearchDisabled ||
+			route.CustomTools == responsestools.CustomToolsFunction ||
+			route.CustomTools == responsestools.CustomToolsStrip ||
+			route.CustomTools == responsestools.CustomToolsReject ||
+			route.Schema.CompleteSearchRequired ||
+			route.Schema.LocalRefs == responsestools.LocalRefsInline {
+			return true
+		}
+	}
+	return false
+}
+
+// ResponsesToolsMayApplyToClientModel resolves the public model alias through
+// every eligible credential before checking the tool policy. The optional
+// provider and auth hints narrow the candidate set when a WebSocket session has
+// already selected its route.
+func (m *Manager) ResponsesToolsMayApplyToClientModel(modelID, provider, authID string) bool {
+	if m == nil {
+		return false
+	}
+	state := m.responsesToolsSnapshot()
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	policy := state.policy
+	enabled := state.enabled
+	state.mu.Unlock()
+	if !enabled {
+		return false
+	}
+	provider = strings.TrimSpace(provider)
+	for _, route := range m.responsesToolsCandidateRoutes(modelID, authID) {
+		if provider != "" && !strings.EqualFold(provider, route.Provider) {
+			continue
+		}
+		routePolicy, matched, err := responsestools.ResolvePolicy(policy, route)
+		if err != nil || !matched {
+			continue
+		}
+		if routePolicy.ClientSearch == responsestools.ClientSearchBridge ||
+			routePolicy.ClientSearch == responsestools.ClientSearchDisabled ||
+			routePolicy.CustomTools == responsestools.CustomToolsFunction ||
+			routePolicy.CustomTools == responsestools.CustomToolsStrip ||
+			routePolicy.CustomTools == responsestools.CustomToolsReject ||
+			routePolicy.Schema.CompleteSearchRequired ||
+			routePolicy.Schema.LocalRefs == responsestools.LocalRefsInline {
+			return true
+		}
+	}
+	return false
 }

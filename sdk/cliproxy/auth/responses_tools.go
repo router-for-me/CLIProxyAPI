@@ -3,6 +3,9 @@ package auth
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -151,8 +154,15 @@ func (m *Manager) prepareResponsesToolsAttempt(route responsestools.Route, paylo
 	if prepared.Attempt == nil {
 		return outPayload, nil, nil, nil
 	}
-	guard := &WireContract{ActiveToolBytes: responsestools.ActiveToolArraysBytesOf(prepared.Body)}
+	guard := &WireContract{
+		ActiveToolBytes:    responsestools.ActiveToolArraysBytesOf(prepared.Body),
+		MaxActiveToolBytes: prepared.Attempt.MaxActiveToolBytes(),
+	}
 	collectResponsesToolsAliases(prepared.Attempt, guard)
+	if err := collectResponsesToolsWireRequirements(prepared.Body, guard); err != nil {
+		prepared.Attempt.Close()
+		return outPayload, nil, nil, fmt.Errorf("build responses tools outbound contract: %w", err)
+	}
 	return prepared.Body, prepared.Attempt, guard, nil
 }
 
@@ -215,5 +225,139 @@ func collectResponsesToolsAliases(attempt *responsestools.Attempt, wire *WireCon
 	if attempt == nil || wire == nil {
 		return
 	}
+	wire.SearchBridgeActive = attempt.BridgesClientSearch()
 	wire.SearchAliases, wire.CustomAliases = attempt.WireAliases()
+	wire.HistoryAliases = attempt.WireHistoryAliases()
+}
+
+func collectResponsesToolsWireRequirements(body []byte, wire *WireContract) error {
+	if wire == nil {
+		return nil
+	}
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return fmt.Errorf("prepared request is not valid JSON")
+	}
+	required := make(map[string]struct{})
+	qualifiedNamesByName := make(map[string]map[string]struct{})
+	var collectTools func(any, string)
+	collectTools = func(value any, inheritedNamespace string) {
+		tools, ok := value.([]any)
+		if !ok {
+			return
+		}
+		for _, rawTool := range tools {
+			tool, ok := rawTool.(map[string]any)
+			if !ok {
+				continue
+			}
+			toolType := strings.TrimSpace(responsesToolsStringField(tool, "type"))
+			if toolType == responsestools.NamespaceToolType {
+				namespace := strings.TrimSpace(responsesToolsStringField(tool, "name"))
+				if inheritedNamespace != "" && namespace != "" {
+					namespace = responsestools.JoinNamespace(inheritedNamespace, namespace)
+				} else if inheritedNamespace != "" {
+					namespace = inheritedNamespace
+				}
+				collectTools(tool["tools"], namespace)
+				continue
+			}
+			if toolType != "function" {
+				continue
+			}
+			name := strings.TrimSpace(responsesToolsStringField(tool, "name"))
+			if name == "" {
+				continue
+			}
+			namespace := strings.TrimSpace(responsesToolsStringField(tool, "namespace"))
+			if namespace == "" {
+				namespace = inheritedNamespace
+			}
+			wireName := responsestools.RawQualifiedToolName(namespace, name)
+			if wireName != "" {
+				required[wireName] = struct{}{}
+				if wireName != name {
+					if qualifiedNamesByName[name] == nil {
+						qualifiedNamesByName[name] = make(map[string]struct{})
+					}
+					qualifiedNamesByName[name][wireName] = struct{}{}
+				}
+			}
+		}
+	}
+	collectTools(root["tools"], "")
+	if input, ok := root["input"].([]any); ok {
+		for _, rawItem := range input {
+			item, ok := rawItem.(map[string]any)
+			if ok && responsesToolsStringField(item, "type") == "additional_tools" {
+				collectTools(item["tools"], "")
+			}
+		}
+	}
+	wire.RequiredFunctionNames = make([]string, 0, len(required))
+	for name := range required {
+		wire.RequiredFunctionNames = append(wire.RequiredFunctionNames, name)
+	}
+	sort.Strings(wire.RequiredFunctionNames)
+
+	bridgedAliases := make(map[string]struct{}, len(wire.SearchAliases)+len(wire.CustomAliases)+len(wire.HistoryAliases))
+	historyAliases := make(map[string]struct{}, len(wire.HistoryAliases))
+	for _, alias := range wire.SearchAliases {
+		bridgedAliases[alias] = struct{}{}
+	}
+	for _, alias := range wire.CustomAliases {
+		bridgedAliases[alias] = struct{}{}
+	}
+	for _, alias := range wire.HistoryAliases {
+		bridgedAliases[alias] = struct{}{}
+		historyAliases[alias] = struct{}{}
+	}
+	if input, ok := root["input"].([]any); ok {
+		for _, rawItem := range input {
+			item, ok := rawItem.(map[string]any)
+			if !ok || responsesToolsStringField(item, "type") != "function_call" {
+				continue
+			}
+			name := strings.TrimSpace(responsesToolsStringField(item, "name"))
+			callID := strings.TrimSpace(responsesToolsStringField(item, "call_id"))
+			if name == "" || callID == "" {
+				continue
+			}
+			if _, bridged := bridgedAliases[name]; bridged {
+				reference := cliproxyexecutor.WireToolHistoryReference{
+					Name:   name,
+					CallID: callID,
+				}
+				for alternate := range qualifiedNamesByName[name] {
+					if alternate == name {
+						continue
+					}
+					reference.AlternateNames = append(reference.AlternateNames, alternate)
+					historyAliases[alternate] = struct{}{}
+				}
+				sort.Strings(reference.AlternateNames)
+				wire.HistoryCalls = append(wire.HistoryCalls, reference)
+			}
+		}
+	}
+	wire.HistoryAliases = wire.HistoryAliases[:0]
+	for alias := range historyAliases {
+		wire.HistoryAliases = append(wire.HistoryAliases, alias)
+	}
+	sort.Strings(wire.HistoryAliases)
+	sort.Slice(wire.HistoryCalls, func(left, right int) bool {
+		if wire.HistoryCalls[left].CallID != wire.HistoryCalls[right].CallID {
+			return wire.HistoryCalls[left].CallID < wire.HistoryCalls[right].CallID
+		}
+		return wire.HistoryCalls[left].Name < wire.HistoryCalls[right].Name
+	})
+	return nil
+}
+
+func responsesToolsStringField(value map[string]any, field string) string {
+	if value == nil {
+		return ""
+	}
+	text, _ := value[field].(string)
+	return text
 }

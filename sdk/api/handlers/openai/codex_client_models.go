@@ -14,7 +14,9 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 	var resolver codexmodels.SearchToolCapabilityForModelFunc
 	if h != nil && h.BaseAPIHandler != nil && h.AuthManager != nil {
 		manager := h.AuthManager
-		resolver = func(modelID string) *bool { return manager.ClientSearchSupported(modelID) }
+		if manager.ResponsesToolsEnabled() {
+			resolver = func(modelID string) *bool { return manager.ClientSearchSupported(modelID) }
+		}
 	}
 	return codexmodels.BuildResponseForClientWithToolCapabilities(h.Models(), registry.GetGlobalRegistry().GetModelProviders, registry.GetGlobalRegistry().GetResponsesWebSearchCapability, resolver, optimizeMultiAgentV2, version)
 }

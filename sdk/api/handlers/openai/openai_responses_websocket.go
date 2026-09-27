@@ -348,6 +348,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	// Remains pending until a generating request commits successfully.
 	pendingPrewarmID := ""
 	var lastResponsePendingToolCallIDs []string
+	toolsReplayTurnActive := false
 	pinnedAuthID := ""
 	// Preserve independent upstream auth affinity when a downstream session switches providers.
 	pinnedAuthByProvider := make(map[string]responsesWebsocketPinnedAuthState)
@@ -432,6 +433,24 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
 		}
+		if toolsReplayTurnActive && isResponsesWebsocketToolsReplayControlFrame(payload) {
+			errMsg := &interfaces.ErrorMessage{
+				StatusCode: http.StatusUnprocessableEntity,
+				Error:      errors.New("live steering is not supported for Responses tools-replay turns"),
+			}
+			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
+			log.Infof(
+				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				passthroughSessionID,
+				websocket.TextMessage,
+				websocketPayloadEventType(errorPayload),
+				websocketPayloadPreview(errorPayload),
+			)
+			if errWrite != nil {
+				return
+			}
+			continue
+		}
 		// log.Infof(
 		// 	"responses websocket: downstream_in id=%s type=%d event=%s payload=%s",
 		// 	passthroughSessionID,
@@ -502,13 +521,29 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		// normalization so the same contract mapping applies as HTTP/SSE.
 		// Native passthrough stays available for turns without tool metadata
 		// and for routes outside the core policy.
-		toolsReplayTurn := false
-		if nativeWebsocketPassthrough {
-			toolsReplayTurn = h.responsesWebsocketRequiresToolsReplay(payload)
-			if toolsReplayTurn {
-				nativeWebsocketPassthrough = false
+		providerHint, upstreamModelHint := handlers.PreparedStreamProviderRoute(executionParent)
+		if providerHint == "" && pinnedAuthID != "" {
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
+				providerHint = strings.TrimSpace(pinnedAuth.Provider)
 			}
 		}
+		if providerHint == "" {
+			if providerSet, _ := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(requestModelName)); len(providerSet) == 1 {
+				for provider := range providerSet {
+					providerHint = provider
+				}
+			}
+		}
+		nativeWebsocketPassthrough, toolsReplayTurn := h.responsesWebsocketResolveToolMode(
+			payload,
+			requestModelName,
+			providerHint,
+			upstreamModelHint,
+			pinnedAuthID,
+			nativeWebsocketPassthrough,
+		)
+		toolsReplayTurnActive = toolsReplayTurn
+		executorDuplexInput := responsesWebsocketExecutorInput(duplexInput, toolsReplayTurn)
 		requestRequiresCurrentUpstreamWebsocket := responsesWebsocketRequestRequiresCurrentUpstream(payload)
 		if upstreamMode == responsesWebsocketUpstreamModeWS && !nativeWebsocketPassthrough {
 			if requestRequiresCurrentUpstreamWebsocket {
@@ -702,8 +737,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		pinnedAuthAttempted := false
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, executionParent)
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
-		if duplexInput != nil {
-			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
+		if executorDuplexInput != nil {
+			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, executorDuplexInput)
 			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
 				current, ok := sessionAuthByID(authID)
 				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled
@@ -728,7 +763,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				return
 			}
 			attemptedUpstreamMode = upstreamModeForAuth(selectedAuth)
-			codexDuplexStream.Store(duplexInput != nil && attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
+			codexDuplexStream.Store(executorDuplexInput != nil && attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
 			preserveNativeOutput.Store(nativeRequest && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
 		})
 		executionAuthID := ""
@@ -884,6 +919,20 @@ func responsesWebsocketRequestRequiresCurrentUpstream(payload []byte) bool {
 		strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeAppend
 }
 
+func responsesWebsocketExecutorInput(
+	input <-chan cliproxyexecutor.WebsocketInput,
+	toolsReplayTurn bool,
+) <-chan cliproxyexecutor.WebsocketInput {
+	if toolsReplayTurn {
+		return nil
+	}
+	return input
+}
+
+func isResponsesWebsocketToolsReplayControlFrame(payload []byte) bool {
+	return strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.steer"
+}
+
 func responsesWebsocketNativePassthroughAllowed(upstreamMode string, useUpstreamWebsocket bool, pinnedAuthID string, upstreamAuthID string) bool {
 	return upstreamMode == responsesWebsocketUpstreamModeWS && useUpstreamWebsocket &&
 		strings.TrimSpace(pinnedAuthID) != "" && strings.TrimSpace(pinnedAuthID) == strings.TrimSpace(upstreamAuthID)
@@ -929,5 +978,46 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketRequiresToolsReplay(payloa
 	if h == nil || h.AuthManager == nil || !h.AuthManager.ResponsesToolsEnabled() {
 		return false
 	}
-	return responsestools.ParseContract(payload) != nil
+	return h.responsesWebsocketRequiresToolsReplayForRoute(
+		payload,
+		"",
+		strings.TrimSpace(gjson.GetBytes(payload, "model").String()),
+	)
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketRequiresToolsReplayForRoute(payload []byte, provider, upstreamModel string) bool {
+	if h == nil || h.AuthManager == nil || responsestools.ParseContract(payload) == nil {
+		return false
+	}
+	return h.AuthManager.ResponsesToolsMayApplyToRoute(provider, upstreamModel)
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketRequiresToolsReplayForClientModel(payload []byte, modelID, provider, authID string) bool {
+	if h == nil || h.AuthManager == nil || responsestools.ParseContract(payload) == nil {
+		return false
+	}
+	return h.AuthManager.ResponsesToolsMayApplyToClientModel(modelID, provider, authID)
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketResolveToolMode(
+	payload []byte,
+	modelID string,
+	provider string,
+	upstreamModel string,
+	authID string,
+	nativePassthrough bool,
+) (bool, bool) {
+	var toolsReplay bool
+	switch {
+	case strings.TrimSpace(upstreamModel) != "":
+		toolsReplay = h.responsesWebsocketRequiresToolsReplayForRoute(payload, provider, upstreamModel)
+	case strings.TrimSpace(modelID) != "":
+		toolsReplay = h.responsesWebsocketRequiresToolsReplayForClientModel(payload, modelID, provider, authID)
+	default:
+		toolsReplay = h.responsesWebsocketRequiresToolsReplay(payload)
+	}
+	if toolsReplay {
+		nativePassthrough = false
+	}
+	return nativePassthrough, toolsReplay
 }

@@ -32,40 +32,92 @@ func BudgetFromLimits(limits Limits) SchemaBudget {
 // client still receives a locally resolved tool_search_call. Other tool kinds
 // are never modified.
 func CompleteToolSearchSchemas(tools []any) bool {
-	changed := false
-	for _, rawTool := range tools {
-		tool, ok := rawTool.(map[string]any)
-		if !ok {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(stringField(tool, "type")), NamespaceToolType) {
-			if children, okChildren := tool["tools"].([]any); okChildren {
-				if CompleteToolSearchSchemas(children) {
-					changed = true
-				}
-			}
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(stringField(tool, "type")), "tool_search") || IsServerExecutedItem(tool) {
-			continue
-		}
-		schema, ok := tool["parameters"].(map[string]any)
-		if !ok {
-			continue
-		}
-		if completeToolSearchSchema(schema) {
-			changed = true
-		}
-	}
+	changed, _, _, _ := CompleteToolSearchSchemasWithSyntheticNulls(tools)
 	return changed
 }
 
+// CompleteToolSearchSchemasWithSyntheticNulls completes client search schemas
+// and returns paths whose nullability was added by this call.
+func CompleteToolSearchSchemasWithSyntheticNulls(tools []any) (bool, map[string]struct{}, bool, error) {
+	changed := false
+	var synthetic map[string]struct{}
+	seen := false
+	var visitErr error
+	var visit func([]any)
+	visit = func(entries []any) {
+		for _, rawTool := range entries {
+			if visitErr != nil {
+				return
+			}
+			tool, ok := rawTool.(map[string]any)
+			if !ok {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(stringField(tool, "type")), NamespaceToolType) {
+				if children, okChildren := tool["tools"].([]any); okChildren {
+					visit(children)
+				}
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(stringField(tool, "type")), "tool_search") || IsServerExecutedItem(tool) {
+				continue
+			}
+			seen = true
+			candidates := make(map[string]struct{})
+			if schema, okSchema := tool["parameters"].(map[string]any); okSchema {
+				schemaChanged, err := completeToolSearchSchemaAt(schema, nil, candidates)
+				if err != nil {
+					visitErr = err
+					return
+				}
+				if schemaChanged {
+					changed = true
+				}
+			}
+			if synthetic == nil {
+				synthetic = candidates
+				continue
+			}
+			for path := range synthetic {
+				if _, exists := candidates[path]; !exists {
+					delete(synthetic, path)
+				}
+			}
+		}
+	}
+	visit(tools)
+	if synthetic == nil {
+		synthetic = make(map[string]struct{})
+	}
+	return changed, synthetic, seen, visitErr
+}
+
 func completeToolSearchSchema(schema map[string]any) bool {
+	changed, err := completeToolSearchSchemaAt(schema, nil, nil)
+	return changed && err == nil
+}
+
+func completeToolSearchSchemaAt(schema map[string]any, path []string, synthetic map[string]struct{}) (bool, error) {
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok || len(properties) == 0 {
-		return false
+		return false, nil
 	}
-	required := stringSet(schema["required"])
+	requiredItems := []any(nil)
+	if rawRequired, exists := schema["required"]; exists {
+		var ok bool
+		requiredItems, ok = rawRequired.([]any)
+		if !ok {
+			return false, schemaError("invalid_required")
+		}
+	}
+	required := make(map[string]bool, len(requiredItems))
+	for _, item := range requiredItems {
+		name, ok := item.(string)
+		if !ok {
+			return false, schemaError("invalid_required")
+		}
+		required[name] = true
+	}
 	keys := make([]string, 0, len(properties))
 	for key := range properties {
 		keys = append(keys, key)
@@ -84,10 +136,15 @@ func completeToolSearchSchema(schema map[string]any) bool {
 		if !okProperty {
 			continue
 		}
+		childPath := append(append([]string(nil), path...), key)
 		property, isObjectSchema := propertyValue.(map[string]any)
 		if isObjectSchema {
 			if _, hasNestedProperties := property["properties"].(map[string]any); hasNestedProperties {
-				if completeToolSearchSchema(property) {
+				childChanged, err := completeToolSearchSchemaAt(property, childPath, synthetic)
+				if err != nil {
+					return false, err
+				}
+				if childChanged {
 					nestedChanged = true
 				}
 			}
@@ -95,47 +152,209 @@ func completeToolSearchSchema(schema map[string]any) bool {
 		if required[key] {
 			continue
 		}
+		switch nullability := schemaNullability(propertyValue); nullability {
+		case nullAllowed:
+			continue
+		case nullUnknown:
+			return false, schemaError("nullable_schema_unprovable")
+		}
+		if synthetic != nil {
+			synthetic[jsonPointer(childPath)] = struct{}{}
+		}
 		if !isObjectSchema {
 			properties[key] = map[string]any{
 				"anyOf": []any{propertyValue, map[string]any{"type": "null"}},
 			}
 			continue
 		}
-		if _, alreadyNullable := nullableSchemaEntry(property); !alreadyNullable {
-			original := make(map[string]any, len(property)+1)
-			for nestedKey, value := range property {
-				original[nestedKey] = value
-			}
-			replacement := map[string]any{"anyOf": []any{original, map[string]any{"type": "null"}}}
-			if description, exists := property["description"]; exists {
-				replacement["description"] = description
-			}
-			properties[key] = replacement
+		original := make(map[string]any, len(property)+1)
+		for nestedKey, value := range property {
+			original[nestedKey] = value
 		}
+		replacement := map[string]any{"anyOf": []any{original, map[string]any{"type": "null"}}}
+		if description, exists := property["description"]; exists {
+			replacement["description"] = description
+		}
+		properties[key] = replacement
 	}
-	if !completionNeeded && strictAdditionalPropertiesFalse(schema) && !nestedChanged {
-		return false
+	if !completionNeeded && !nestedChanged {
+		return false, nil
 	}
-	ordered := make([]any, 0, len(keys))
+	ordered := append([]any(nil), requiredItems...)
 	for _, key := range keys {
-		ordered = append(ordered, key)
+		if !required[key] {
+			ordered = append(ordered, key)
+			required[key] = true
+		}
 	}
 	schema["required"] = ordered
-	schema["additionalProperties"] = false
-	return true
+	return true, nil
 }
 
-func nullableSchemaEntry(schema map[string]any) (any, bool) {
-	entries, ok := schema["anyOf"].([]any)
-	if !ok {
-		return nil, false
+func jsonPointer(path []string) string {
+	var builder strings.Builder
+	for _, segment := range path {
+		segment = strings.ReplaceAll(segment, "~", "~0")
+		segment = strings.ReplaceAll(segment, "/", "~1")
+		builder.WriteByte('/')
+		builder.WriteString(segment)
 	}
+	return builder.String()
+}
+
+type nullability uint8
+
+const (
+	nullUnknown nullability = iota
+	nullDenied
+	nullAllowed
+)
+
+func schemaNullability(value any) nullability {
+	switch schema := value.(type) {
+	case bool:
+		if schema {
+			return nullAllowed
+		}
+		return nullDenied
+	case map[string]any:
+		result := nullAllowed
+		if schema["nullable"] == true {
+			result = nullAllowed
+		} else if typeValue, hasType := schema["type"]; hasType {
+			switch types := typeValue.(type) {
+			case string:
+				if types == "null" {
+					result = nullAllowed
+				} else {
+					result = nullDenied
+				}
+			case []any:
+				matched := false
+				for _, item := range types {
+					if item == "null" {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					result = nullAllowed
+				} else {
+					result = nullDenied
+				}
+			default:
+				result = nullUnknown
+			}
+		}
+		if _, exists := schema["$ref"]; exists {
+			result = combineNullability(result, nullUnknown)
+		}
+		if constant, exists := schema["const"]; exists {
+			constraint := nullDenied
+			if constant == nil {
+				constraint = nullAllowed
+			}
+			result = combineNullability(result, constraint)
+		}
+		if values, ok := schema["enum"].([]any); ok {
+			constraint := nullDenied
+			for _, candidate := range values {
+				if candidate == nil {
+					constraint = nullAllowed
+					break
+				}
+			}
+			result = combineNullability(result, constraint)
+		}
+		if entries, ok := schema["anyOf"].([]any); ok {
+			constraint := unionNullability(entries)
+			result = combineNullability(result, constraint)
+		}
+		if entries, ok := schema["oneOf"].([]any); ok {
+			constraint := oneOfNullability(entries)
+			result = combineNullability(result, constraint)
+		}
+		if entries, ok := schema["allOf"].([]any); ok {
+			constraint := intersectionNullability(entries)
+			result = combineNullability(result, constraint)
+		}
+		if not, exists := schema["not"]; exists {
+			constraint := negateNullability(schemaNullability(not))
+			result = combineNullability(result, constraint)
+		}
+		return result
+	default:
+		return nullUnknown
+	}
+}
+
+func combineNullability(left, right nullability) nullability {
+	if left == nullDenied || right == nullDenied {
+		return nullDenied
+	}
+	if left == nullAllowed && right == nullAllowed {
+		return nullAllowed
+	}
+	return nullUnknown
+}
+
+func unionNullability(entries []any) nullability {
+	unknown := false
 	for _, entry := range entries {
-		if candidate, okCandidate := entry.(map[string]any); okCandidate && stringField(candidate, "type") == "null" {
-			return entry, true
+		switch schemaNullability(entry) {
+		case nullAllowed:
+			return nullAllowed
+		case nullUnknown:
+			unknown = true
 		}
 	}
-	return nil, false
+	if unknown {
+		return nullUnknown
+	}
+	return nullDenied
+}
+
+func oneOfNullability(entries []any) nullability {
+	matches := 0
+	for _, entry := range entries {
+		switch schemaNullability(entry) {
+		case nullAllowed:
+			matches++
+		case nullUnknown:
+			return nullUnknown
+		}
+	}
+	if matches == 1 {
+		return nullAllowed
+	}
+	return nullDenied
+}
+
+func intersectionNullability(entries []any) nullability {
+	unknown := false
+	for _, entry := range entries {
+		switch schemaNullability(entry) {
+		case nullDenied:
+			return nullDenied
+		case nullUnknown:
+			unknown = true
+		}
+	}
+	if unknown {
+		return nullUnknown
+	}
+	return nullAllowed
+}
+
+func negateNullability(value nullability) nullability {
+	switch value {
+	case nullAllowed:
+		return nullDenied
+	case nullDenied:
+		return nullAllowed
+	default:
+		return nullUnknown
+	}
 }
 
 func stringSet(value any) map[string]bool {
@@ -150,15 +369,6 @@ func stringSet(value any) map[string]bool {
 		}
 	}
 	return out
-}
-
-func strictAdditionalPropertiesFalse(schema map[string]any) bool {
-	value, exists := schema["additionalProperties"]
-	if !exists {
-		return false
-	}
-	flag, ok := value.(bool)
-	return ok && !flag
 }
 
 var localRefPattern = regexp.MustCompile(`^#/(\$defs|definitions)/([^/]+)$`)

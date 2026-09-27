@@ -1,7 +1,10 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"strings"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -24,7 +27,7 @@ func (m *Manager) responsesToolsCall(
 	provider string,
 	execReq cliproxyexecutor.Request,
 	execOpts cliproxyexecutor.Options,
-	call func(cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error),
+	call func(context.Context, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error),
 ) (cliproxyexecutor.Response, error) {
 	toFormat := requestToFormat(provider, nil, execReq, execOpts)
 	// Without an executor instance the RequestToFormat capability is unknown;
@@ -42,7 +45,7 @@ func (m *Manager) responsesToolsCallWithExecutor(
 	executor ProviderExecutor,
 	execReq cliproxyexecutor.Request,
 	execOpts cliproxyexecutor.Options,
-	call func(cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error),
+	call func(context.Context, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error),
 ) (cliproxyexecutor.Response, error) {
 	toFormat := requestToFormat(provider, executor, execReq, execOpts)
 	return m.responsesToolsCallToFormat(execCtx, auth, provider, toFormat, execReq, execOpts, call)
@@ -55,7 +58,7 @@ func (m *Manager) responsesToolsCallToFormat(
 	toFormat sdktranslator.Format,
 	execReq cliproxyexecutor.Request,
 	execOpts cliproxyexecutor.Options,
-	call func(cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error),
+	call func(context.Context, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error),
 ) (cliproxyexecutor.Response, error) {
 	if m == nil || call == nil {
 		return cliproxyexecutor.Response{}, nil
@@ -65,7 +68,7 @@ func (m *Manager) responsesToolsCallToFormat(
 	// when a route matches the model name.
 	if !isResponsesFamily(execOpts.SourceFormat, cliproxyexecutor.ResponseFormatOrSource(execOpts)) {
 		_ = toFormat
-		resp, err := call(execReq, execOpts)
+		resp, err := call(execCtx, execReq, execOpts)
 		return resp, err
 	}
 	route := responsesToolsRoute(auth, provider, execReq.Model, toFormat)
@@ -76,7 +79,7 @@ func (m *Manager) responsesToolsCallToFormat(
 		return cliproxyexecutor.Response{}, errPrepare
 	}
 	if attempt == nil {
-		resp, err := call(execReq, execOpts)
+		resp, err := call(execCtx, execReq, execOpts)
 		return resp, err
 	}
 	defer attempt.Close()
@@ -101,7 +104,7 @@ func (m *Manager) responsesToolsCallToFormat(
 		normalizedOpts.Metadata = copied
 	}
 	execCtx = withResponsesToolsContract(execCtx, wire)
-	resp, err := call(normalizedReq, normalizedOpts)
+	resp, err := call(execCtx, normalizedReq, normalizedOpts)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -123,13 +126,13 @@ func (m *Manager) responsesToolsCountCall(
 	executor ProviderExecutor,
 	execReq cliproxyexecutor.Request,
 	execOpts cliproxyexecutor.Options,
-	call func(cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error),
+	call func(context.Context, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error),
 ) (cliproxyexecutor.Response, error) {
 	if m == nil || call == nil {
 		return cliproxyexecutor.Response{}, nil
 	}
 	if !isResponsesFamily(execOpts.SourceFormat, cliproxyexecutor.ResponseFormatOrSource(execOpts)) {
-		return call(execReq, execOpts)
+		return call(execCtx, execReq, execOpts)
 	}
 	toFormat := requestToFormat(provider, executor, execReq, execOpts)
 	route := responsesToolsRoute(auth, provider, execReq.Model, toFormat)
@@ -140,7 +143,7 @@ func (m *Manager) responsesToolsCountCall(
 		return cliproxyexecutor.Response{}, errPrepare
 	}
 	if attempt == nil {
-		return call(execReq, execOpts)
+		return call(execCtx, execReq, execOpts)
 	}
 	defer attempt.Close()
 	normalizedReq := execReq
@@ -150,7 +153,7 @@ func (m *Manager) responsesToolsCountCall(
 		normalizedOpts.OriginalRequest = wireBody
 	}
 	execCtx = withResponsesToolsContract(execCtx, wire)
-	return call(normalizedReq, normalizedOpts)
+	return call(execCtx, normalizedReq, normalizedOpts)
 }
 
 // responsesToolsStreamCall wraps one streaming executor call with core tool
@@ -170,13 +173,13 @@ func (m *Manager) responsesToolsStreamCall(
 	executor ProviderExecutor,
 	execReq cliproxyexecutor.Request,
 	execOpts cliproxyexecutor.Options,
-	call func(cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error),
+	call func(context.Context, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error),
 ) (*cliproxyexecutor.StreamResult, bool, error) {
 	if m == nil || call == nil {
 		return nil, false, nil
 	}
 	if !isResponsesFamily(execOpts.SourceFormat, cliproxyexecutor.ResponseFormatOrSource(execOpts)) {
-		result, err := call(execReq, execOpts)
+		result, err := call(parentCtx, execReq, execOpts)
 		return result, false, err
 	}
 	toFormat := requestToFormat(provider, executor, execReq, execOpts)
@@ -188,7 +191,7 @@ func (m *Manager) responsesToolsStreamCall(
 		return nil, false, errPrepare
 	}
 	if attempt == nil {
-		result, err := call(execReq, execOpts)
+		result, err := call(parentCtx, execReq, execOpts)
 		return result, false, err
 	}
 	normalizedReq := execReq
@@ -206,95 +209,190 @@ func (m *Manager) responsesToolsStreamCall(
 		}
 		normalizedOpts.Metadata = copied
 	}
-	parentCtx = withResponsesToolsContract(parentCtx, wire)
-	result, err := call(normalizedReq, normalizedOpts)
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	attemptCtx, cancelAttempt := context.WithCancel(withResponsesToolsContract(parentCtx, wire))
+	result, err := call(attemptCtx, normalizedReq, normalizedOpts)
 	if err != nil {
+		cancelAttempt()
 		attempt.Close()
 		return nil, false, err
 	}
 	if result == nil || result.Chunks == nil {
+		cancelAttempt()
 		attempt.Close()
 		return result, false, nil
 	}
-	adapted := adaptResponsesToolsStream(parentCtx, attempt, result)
+	codexDataLineChunks := toFormat == sdktranslator.FormatCodex
+	adapted := adaptResponsesToolsStream(parentCtx, attemptCtx, cancelAttempt, attempt, result, codexDataLineChunks)
 	return adapted, true, nil
 }
 
 // adaptResponsesToolsStream converts one upstream chunk channel through the
 // attempt feed. Feed output of zero events means buffered, never
 // pass-through. Terminal stream errors emit once and cancel the attempt.
-func adaptResponsesToolsStream(parentCtx context.Context, attempt interface {
+//
+// Restored tool frames leave the pure protocol feed as bare JSON; this
+// adapter wraps them as SSE data: frames because downstream framing (the
+// handlers_stream.go SSE JSON validator and the OpenAI responses SSE framer)
+// only recognizes data:-prefixed frames. Pass-through frames already carry
+// their own SSE framing and are forwarded untouched.
+func adaptResponsesToolsStream(parentCtx, attemptCtx context.Context, cancelAttempt context.CancelFunc, attempt interface {
 	Feed([]byte) ([][]byte, error)
 	Finish() ([][]byte, error)
 	Close()
-}, result *cliproxyexecutor.StreamResult) *cliproxyexecutor.StreamResult {
+}, result *cliproxyexecutor.StreamResult, codexDataLineChunks bool) *cliproxyexecutor.StreamResult {
 	if attempt == nil || result == nil {
+		if cancelAttempt != nil {
+			cancelAttempt()
+		}
 		return result
 	}
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
 	out := make(chan cliproxyexecutor.StreamChunk)
-	ctx, cancel := context.WithCancel(parentCtx)
 	go func() {
 		defer close(out)
-		defer cancel()
+		if cancelAttempt != nil {
+			defer cancelAttempt()
+		}
 		defer attempt.Close()
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
-			if ctx == nil {
-				select {
-				case out <- chunk:
-					return true
-				default:
-					return false
-				}
-			}
 			select {
-			case <-ctx.Done():
+			case <-parentCtx.Done():
 				return false
 			case out <- chunk:
 				return true
 			}
 		}
-		for chunk := range result.Chunks {
-			if chunk.Err != nil {
-				if tail, errTail := attempt.Finish(); errTail != nil {
-					if !send(cliproxyexecutor.StreamChunk{Err: errTail}) {
-						return
-					}
-				} else {
-					for _, frame := range tail {
-						if !send(cliproxyexecutor.StreamChunk{Payload: frame}) {
-							return
-						}
-					}
+		for {
+			var chunk cliproxyexecutor.StreamChunk
+			var ok bool
+			select {
+			case <-parentCtx.Done():
+				return
+			case <-attemptCtx.Done():
+				return
+			case chunk, ok = <-result.Chunks:
+				if !ok {
+					goto finish
 				}
-				send(cliproxyexecutor.StreamChunk{Err: chunk.Err})
+			}
+			if chunk.Err != nil {
+				if cancelAttempt != nil {
+					cancelAttempt()
+				}
+				send(chunk)
 				return
 			}
 			if len(chunk.Payload) == 0 {
 				continue
 			}
-			frames, errFeed := attempt.Feed(chunk.Payload)
+			feedPayload := chunk.Payload
+			if codexDataLineChunks {
+				feedPayload = normalizeCodexResponsesDataLine(chunk.Payload)
+			}
+			frames, errFeed := attempt.Feed(feedPayload)
 			if errFeed != nil {
+				if cancelAttempt != nil {
+					cancelAttempt()
+				}
 				send(cliproxyexecutor.StreamChunk{Err: errFeed})
 				return
 			}
 			for _, frame := range frames {
-				if !send(cliproxyexecutor.StreamChunk{Payload: frame}) {
+				if !send(cliproxyexecutor.StreamChunk{Payload: wrapResponsesToolsSSEFrame(chunk.Payload, frame)}) {
 					return
 				}
 			}
 		}
+	finish:
 		tail, errFinish := attempt.Finish()
 		if errFinish != nil {
 			send(cliproxyexecutor.StreamChunk{Err: errFinish})
 			return
 		}
 		for _, frame := range tail {
-			if !send(cliproxyexecutor.StreamChunk{Payload: frame}) {
+			if !send(cliproxyexecutor.StreamChunk{Payload: wrapResponsesToolsSSEFrame(nil, frame)}) {
 				return
 			}
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: out}
+}
+
+// normalizeCodexResponsesDataLine handles the Codex executor's line-oriented
+// stream contract: it emits each complete data: JSON line as one chunk and
+// drops the following blank separator. Keep generic SSE parsing strict; only
+// normalize a complete, single-line Responses JSON event in this known mode.
+func normalizeCodexResponsesDataLine(frame []byte) []byte {
+	trimmed := bytes.TrimSpace(frame)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return frame
+	}
+	data := bytes.TrimSpace(trimmed[len("data:"):])
+	if bytes.IndexAny(data, "\r\n") >= 0 {
+		return frame
+	}
+	var event struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil || !strings.HasPrefix(event.Type, "response.") {
+		return frame
+	}
+	return bytes.Clone(data)
+}
+
+// wrapResponsesToolsSSEFrame keeps SSE framing intact across tool restore.
+// Pass-through frames already carry their own framing and are forwarded
+// untouched. Restored bare-JSON tool frames are wrapped as SSE data: frames
+// so downstream validators and framers recognize them.
+func wrapResponsesToolsSSEFrame(original, frame []byte) []byte {
+	if len(frame) == 0 {
+		return frame
+	}
+	trimmed := bytes.TrimSpace(frame)
+	if len(trimmed) == 0 {
+		return frame
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) ||
+		bytes.HasPrefix(trimmed, []byte("id:")) || bytes.HasPrefix(trimmed, []byte("retry:")) ||
+		bytes.HasPrefix(trimmed, []byte(":")) {
+		return frame
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(trimmed, &payload); err != nil {
+		return append(append([]byte("data: "), trimmed...), []byte("\n\n")...)
+	}
+	eventType, _ := payload["type"].(string)
+	metadata := responsesToolsSSEMetadata(original)
+	wrapped := make([]byte, 0, len(metadata)+len(trimmed)+32)
+	for _, line := range metadata {
+		wrapped = append(wrapped, line...)
+		wrapped = append(wrapped, '\n')
+	}
+	if eventType != "" {
+		wrapped = append(wrapped, "event: "...)
+		wrapped = append(wrapped, eventType...)
+		wrapped = append(wrapped, '\n')
+	}
+	wrapped = append(wrapped, "data: "...)
+	wrapped = append(wrapped, trimmed...)
+	wrapped = append(wrapped, '\n', '\n')
+	return wrapped
+}
+
+func responsesToolsSSEMetadata(original []byte) [][]byte {
+	var metadata [][]byte
+	for _, line := range bytes.Split(bytes.ReplaceAll(bytes.Clone(original), []byte("\r\n"), []byte("\n")), []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) {
+			metadata = append(metadata, bytes.Clone(line))
+		}
+	}
+	return metadata
 }
 
 // responsesToolsExecuteStream adapts one streaming call and reports whether
@@ -308,7 +406,7 @@ func (m *Manager) responsesToolsExecuteStream(
 	executor ProviderExecutor,
 	execReq cliproxyexecutor.Request,
 	execOpts cliproxyexecutor.Options,
-	call func(cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error),
+	call func(context.Context, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error),
 ) (*cliproxyexecutor.StreamResult, error) {
 	result, _, err := m.responsesToolsStreamCall(ctx, auth, provider, executor, execReq, execOpts, call)
 	return result, err

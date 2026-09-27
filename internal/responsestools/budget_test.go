@@ -71,6 +71,35 @@ func TestLeaseConcurrentClose(t *testing.T) {
 	}
 }
 
+func TestLeaseShrinkReleasesReservedBytes(t *testing.T) {
+	limiter := NewLimiter(DefaultLimits())
+	lease, err := limiter.Acquire(32)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := lease.Grow(16); err != nil {
+		t.Fatalf("grow: %v", err)
+	}
+	lease.Shrink(24)
+	if got := lease.Bytes(); got != 24 {
+		t.Fatalf("lease bytes = %d, want 24", got)
+	}
+	if attempts, bytes := limiter.Usage(); attempts != 1 || bytes != 24 {
+		t.Fatalf("usage after shrink = (%d, %d), want (1, 24)", attempts, bytes)
+	}
+	lease.Shrink(100)
+	if got := lease.Bytes(); got != 0 {
+		t.Fatalf("lease bytes after over-shrink = %d, want 0", got)
+	}
+	if attempts, bytes := limiter.Usage(); attempts != 1 || bytes != 0 {
+		t.Fatalf("usage after over-shrink = (%d, %d), want (1, 0)", attempts, bytes)
+	}
+	lease.Close()
+	if attempts, bytes := limiter.Usage(); attempts != 0 || bytes != 0 {
+		t.Fatalf("usage after close = (%d, %d), want (0, 0)", attempts, bytes)
+	}
+}
+
 func TestValidateLimitsRejectsNonPositive(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MaxDepth = 0

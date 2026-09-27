@@ -31,9 +31,9 @@ const (
 // never rotate credentials or cool them down; only genuine upstream failures
 // keep the existing retry behavior.
 type ToolCompatibilityError struct {
-	Reason     Reason
-	StatusCode int
-	Err        error
+	Reason Reason
+	status int
+	Err    error
 }
 
 func (e *ToolCompatibilityError) Error() string {
@@ -53,18 +53,28 @@ func (e *ToolCompatibilityError) Unwrap() error {
 	return e.Err
 }
 
-// Status exposes the HTTP status for handler error mapping.
-func (e *ToolCompatibilityError) Status() int {
-	if e == nil || e.StatusCode == 0 {
+// StatusCode exposes the HTTP status for handler and conductor error mapping.
+func (e *ToolCompatibilityError) StatusCode() int {
+	if e == nil || e.status == 0 {
 		return http.StatusUnprocessableEntity
 	}
-	return e.StatusCode
+	return e.status
 }
 
-// RequestScoped reports that the failure belongs to this request, not to the
-// credential or upstream health.
-func (e *ToolCompatibilityError) RequestScoped() bool {
+// IsRequestScoped reports that the failure belongs to this request, not to
+// the credential or upstream health.
+func (e *ToolCompatibilityError) IsRequestScoped() bool {
 	return true
+}
+
+// Status keeps the older handler-facing accessor compatible.
+func (e *ToolCompatibilityError) Status() int {
+	return e.StatusCode()
+}
+
+// RequestScoped keeps the older package-local accessor compatible.
+func (e *ToolCompatibilityError) RequestScoped() bool {
+	return e.IsRequestScoped()
 }
 
 // AvailabilityNeutral reports that the failure must neither penalize the
@@ -74,7 +84,7 @@ func (e *ToolCompatibilityError) AvailabilityNeutral() bool {
 }
 
 func newError(reason Reason, status int, err error) *ToolCompatibilityError {
-	return &ToolCompatibilityError{Reason: reason, StatusCode: status, Err: err}
+	return &ToolCompatibilityError{Reason: reason, status: status, Err: err}
 }
 
 func syntaxError(err error) *ToolCompatibilityError {
@@ -100,7 +110,11 @@ func upstreamError(reason Reason, err error) *ToolCompatibilityError {
 // IsRequestScopedError reports whether err is a bridge request-scoped error.
 func IsRequestScopedError(err error) bool {
 	var compat *ToolCompatibilityError
-	return errors.As(err, &compat) && compat != nil
+	if errors.As(err, &compat) && compat != nil {
+		return true
+	}
+	var scoped interface{ IsRequestScoped() bool }
+	return errors.As(err, &scoped) && scoped.IsRequestScoped()
 }
 
 func jsonErrorf(format string, args ...any) error {

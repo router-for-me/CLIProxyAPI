@@ -137,12 +137,16 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				entry := logEntryWithRequestID(ctx)
 				warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), chunk.Err)
 				rerr := resultErrorFromError(chunk.Err)
-				action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.runtimeConfigSnapshot())
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: opts}
 				result.RetryAfter = retryAfterFromError(chunk.Err)
 				result.CredentialScope = isCredentialScopedError(chunk.Err)
-				applyRequestScopedActionToResult(action, okAction, &result)
-				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				if isResponsesToolsError(chunk.Err) {
+					m.markResponsesToolsNeutral(ctx, result)
+				} else {
+					action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.runtimeConfigSnapshot())
+					applyRequestScopedActionToResult(action, okAction, &result)
+					m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				}
 			}
 			if !forward {
 				return false
@@ -239,8 +243,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 		startStream := time.Now()
-		streamResult, errStream := m.responsesToolsExecuteStream(ctx, auth, provider, executor, execReq, execOpts, func(callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-			return executor.ExecuteStream(ctx, auth, callReq, callOpts)
+		streamResult, errStream := m.responsesToolsExecuteStream(ctx, auth, provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+			return executor.ExecuteStream(callCtx, auth, callReq, callOpts)
 		})
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
@@ -261,8 +265,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = newUpstreamAttemptContext(ctx)
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					startRetry := time.Now()
-					streamResult, errStream = m.responsesToolsExecuteStream(ctx, auth, provider, executor, execReq, execOpts, func(callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-						return executor.ExecuteStream(ctx, auth, callReq, callOpts)
+					streamResult, errStream = m.responsesToolsExecuteStream(ctx, auth, provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+						return executor.ExecuteStream(callCtx, auth, callReq, callOpts)
 					})
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
@@ -290,6 +294,17 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		streamResult, errStream = validateStreamResult(streamResult, errStream)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if errStream != nil {
+			if isResponsesToolsError(errStream) {
+				result := Result{
+					AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel,
+					Success: false, Error: resultErrorFromError(errStream), Options: execOpts,
+				}
+				m.markResponsesToolsNeutral(ctx, result)
+				if streamResult != nil {
+					discardStreamChunks(streamResult.Chunks)
+				}
+				return nil, wrapRequestStopError(errStream)
+			}
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts}
@@ -339,8 +354,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					didRefreshOnUnauthorized = true
 					ctx = newUpstreamAttemptContext(ctx)
 					startRetry := time.Now()
-					retryStream, retryErr := m.responsesToolsExecuteStream(ctx, auth, provider, executor, execReq, execOpts, func(callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-						return executor.ExecuteStream(ctx, auth, callReq, callOpts)
+					retryStream, retryErr := m.responsesToolsExecuteStream(ctx, auth, provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+						return executor.ExecuteStream(callCtx, auth, callReq, callOpts)
 					})
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
@@ -377,6 +392,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
+			if isResponsesToolsError(bootstrapErr) {
+				result := Result{
+					AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel,
+					Success: false, Error: resultErrorFromError(bootstrapErr), Options: execOpts,
+				}
+				m.markResponsesToolsNeutral(ctx, result)
+				discardStreamChunks(streamResult.Chunks)
+				return nil, wrapRequestStopError(bootstrapErr)
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)

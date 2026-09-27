@@ -3,6 +3,7 @@ package responsestools
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -11,19 +12,27 @@ import (
 // bridged aliases resolve to their canonical identities. Locations outside
 // confirmed Responses payload shapes are never scanned.
 func RewriteResponseBody(value any, contract *ToolContract, bridge *CustomBridge) bool {
+	changed, _ := RewriteResponseBodyChecked(value, contract, bridge)
+	return changed
+}
+
+// RewriteResponseBodyChecked restores client tool semantics and propagates
+// malformed upstream custom arguments instead of returning them as ordinary
+// function calls.
+func RewriteResponseBodyChecked(value any, contract *ToolContract, bridge *CustomBridge) (bool, error) {
 	return rewriteResponseLocation(value, contract, bridge)
 }
 
-func rewriteResponseLocation(value any, contract *ToolContract, bridge *CustomBridge) bool {
+func rewriteResponseLocation(value any, contract *ToolContract, bridge *CustomBridge) (bool, error) {
 	switch typed := value.(type) {
 	case map[string]any:
 		itemType := stringField(typed, "type")
 		if itemType == "function_call" || itemType == "custom_tool_call" || itemType == "tool_search_call" {
-			return rewriteResponseItem(typed, contract, bridge)
+			return rewriteResponseItemChecked(typed, contract, bridge)
 		}
 		if strings.HasPrefix(itemType, "response.") {
 			if item, ok := typed["item"].(map[string]any); ok {
-				return rewriteResponseItem(item, contract, bridge)
+				return rewriteResponseItemChecked(item, contract, bridge)
 			}
 		}
 		if response, ok := typed["response"].(map[string]any); ok {
@@ -35,37 +44,133 @@ func rewriteResponseLocation(value any, contract *ToolContract, bridge *CustomBr
 	case []any:
 		return rewriteResponseItems(typed, contract, bridge)
 	}
-	return false
+	return false, nil
 }
 
-func rewriteResponseItems(items []any, contract *ToolContract, bridge *CustomBridge) bool {
+func rewriteResponseItems(items []any, contract *ToolContract, bridge *CustomBridge) (bool, error) {
 	changed := false
 	for _, rawItem := range items {
-		if item, ok := rawItem.(map[string]any); ok && rewriteResponseItem(item, contract, bridge) {
+		if item, ok := rawItem.(map[string]any); ok {
+			itemChanged, err := rewriteResponseItemChecked(item, contract, bridge)
+			if err != nil {
+				return changed, err
+			}
+			if itemChanged {
+				changed = true
+			}
+		}
+	}
+	return changed, nil
+}
+
+func rewriteResponseItem(item map[string]any, contract *ToolContract, bridge *CustomBridge) bool {
+	changed, _ := rewriteResponseItemChecked(item, contract, bridge)
+	return changed
+}
+
+func rewriteResponseItemChecked(item map[string]any, contract *ToolContract, bridge *CustomBridge) (bool, error) {
+	if isOrdinaryToolSearchCall(item, contract) {
+		rewriteToolSearchItem(item)
+		restoreSyntheticSearchNulls(item, contract)
+		return true, nil
+	}
+	if stringField(item, "type") == "tool_search_call" {
+		return restoreSyntheticSearchNulls(item, contract), nil
+	}
+	if bridge != nil && stringField(item, "type") == "function_call" {
+		identity, isCustomAlias := bridge.ResolveWireAlias(stringField(item, "name"))
+		if isCustomAlias && identity.Kind == ToolKindCustom {
+			arguments, ok := item["arguments"].(string)
+			if !ok {
+				return false, upstreamError(ReasonUpstreamContract, fmt.Errorf("custom function_call arguments are not a string"))
+			}
+			input, err := UnpackCustomArguments(arguments)
+			if err != nil {
+				return false, upstreamError(ReasonUpstreamContract, fmt.Errorf("invalid custom function_call arguments: %w", err))
+			}
+			item["type"] = "custom_tool_call"
+			item["name"] = identity.Name
+			if identity.Namespace != "" {
+				item["namespace"] = identity.Namespace
+			} else {
+				delete(item, "namespace")
+			}
+			item["input"] = input
+			delete(item, "arguments")
+			return true, nil
+		}
+	}
+	return restoreFunctionCallIdentity(item, contract), nil
+}
+
+func restoreSyntheticSearchNulls(item map[string]any, contract *ToolContract) bool {
+	arguments, ok := item["arguments"].(map[string]any)
+	if !ok {
+		return false
+	}
+	return restoreSyntheticSearchArgumentNulls(arguments, contract)
+}
+
+func restoreSyntheticSearchArgumentNulls(arguments map[string]any, contract *ToolContract) bool {
+	if contract == nil || len(contract.SearchSyntheticNulls) == 0 {
+		return false
+	}
+	changed := false
+	for pointer := range contract.SearchSyntheticNulls {
+		if !strings.HasPrefix(pointer, "/") {
+			continue
+		}
+		segments := strings.Split(pointer[1:], "/")
+		for index := range segments {
+			segments[index] = decodeJSONPointerToken(segments[index])
+		}
+		if restoreSyntheticNullPath(arguments, segments) {
 			changed = true
 		}
 	}
 	return changed
 }
 
-func rewriteResponseItem(item map[string]any, contract *ToolContract, bridge *CustomBridge) bool {
-	if isOrdinaryToolSearchCall(item, contract) {
-		rewriteToolSearchItem(item)
-		return true
+func restoreSyntheticNullPath(value any, path []string) bool {
+	if len(path) == 0 {
+		return false
 	}
-	if bridge != nil && bridge.RestoreCustomResponseItem(item) {
-		return true
+	switch typed := value.(type) {
+	case map[string]any:
+		child, exists := typed[path[0]]
+		if !exists {
+			return false
+		}
+		if len(path) == 1 {
+			if child == nil {
+				delete(typed, path[0])
+				return true
+			}
+			return false
+		}
+		return restoreSyntheticNullPath(child, path[1:])
+	case []any:
+		changed := false
+		if path[0] == "*" {
+			for _, child := range typed {
+				if restoreSyntheticNullPath(child, path[1:]) {
+					changed = true
+				}
+			}
+		}
+		return changed
+	default:
+		return false
 	}
-	return restoreFunctionCallIdentity(item, contract)
 }
 
 func isOrdinaryToolSearchCall(item map[string]any, contract *ToolContract) bool {
-	if stringField(item, "type") != "function_call" {
+	if stringField(item, "type") != "function_call" || contract == nil || !contract.SearchBridged {
 		return false
 	}
 	name, ok := item["name"].(string)
 	expected := ToolSearchName
-	if contract != nil && contract.SearchAlias != "" {
+	if contract.SearchAlias != "" {
 		expected = contract.SearchAlias
 	}
 	return ok && name == expected

@@ -32,8 +32,39 @@ func TestCompleteSearchSchemaNullableRoundTrip(t *testing.T) {
 	if !ok || len(entries) != 2 {
 		t.Fatalf("optional field not widened to nullable: %v", limit)
 	}
-	if schema["additionalProperties"] != false {
-		t.Fatalf("additionalProperties not set")
+	if _, exists := schema["additionalProperties"]; exists {
+		t.Fatalf("completion changed omitted additionalProperties: %v", schema["additionalProperties"])
+	}
+}
+
+func TestCompleteSearchSchemaPreservesAdditionalPropertiesAndRequired(t *testing.T) {
+	additionalProperties := map[string]any{"type": "string", "minLength": 2}
+	tools := []any{map[string]any{
+		"type": "tool_search",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query":    map[string]any{"type": "string"},
+				"optional": map[string]any{"type": "integer"},
+			},
+			"required":             []any{"legacy_required", "query"},
+			"additionalProperties": additionalProperties,
+		},
+	}}
+	if !CompleteToolSearchSchemas(tools) {
+		t.Fatal("expected schema completion")
+	}
+	schema := tools[0].(map[string]any)["parameters"].(map[string]any)
+	if got := mustMarshal(schema["additionalProperties"]); string(got) != string(mustMarshal(additionalProperties)) {
+		t.Fatalf("additionalProperties = %s, want preserved %s", got, mustMarshal(additionalProperties))
+	}
+	required, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatalf("required = %#v, want array", schema["required"])
+	}
+	want := []any{"legacy_required", "query", "optional"}
+	if string(mustMarshal(required)) != string(mustMarshal(want)) {
+		t.Fatalf("required = %v, want original entries plus missing property %v", required, want)
 	}
 }
 

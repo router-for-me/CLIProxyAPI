@@ -81,15 +81,38 @@ func UpstreamAttempted(ctx context.Context) bool {
 type wireContractContextKey struct{}
 
 // WireContract is the read-only tool contract visible to the outbound guard.
-// It carries only alias lists and sizes: never the attempt, the original
-// client request, credentials, or payloads.
+// It carries only tool identifiers and sizes: never the attempt, original
+// client request, credentials, arguments, or tool outputs.
 type WireContract struct {
+	// SearchBridgeActive marks an attempt that adapted client tool_search,
+	// including history-only turns without an active search declaration.
+	SearchBridgeActive bool
 	// SearchAliases lists bridged search aliases that must survive to the wire.
 	SearchAliases []string
 	// CustomAliases lists bridged custom aliases that must survive to the wire.
 	CustomAliases []string
+	// HistoryAliases lists bridged history names that must retain their call
+	// identity without requiring a current tool declaration.
+	HistoryAliases []string
+	// RequiredFunctionNames lists function declarations that must survive all
+	// provider translation and post-rule normalization.
+	RequiredFunctionNames []string
+	// HistoryCalls lists bridged historical calls whose identity and outputs
+	// must remain linked in the final outbound payload.
+	HistoryCalls []WireToolHistoryReference
 	// ActiveToolBytes is the normalized declaration size after adaptation.
 	ActiveToolBytes int
+	// MaxActiveToolBytes is the configured ceiling enforced after all
+	// provider translation and post-rule normalization.
+	MaxActiveToolBytes int
+}
+
+// WireToolHistoryReference is the minimal identity needed to validate one
+// bridged historical tool call after provider translation.
+type WireToolHistoryReference struct {
+	Name           string
+	AlternateNames []string
+	CallID         string
 }
 
 // WithWireContract attaches the read-only wire contract for the final send

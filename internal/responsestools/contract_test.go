@@ -28,6 +28,25 @@ func TestParseContractSearchOnly(t *testing.T) {
 	}
 }
 
+func TestParseContractChoosesUnusedSearchAliasWhenFallbackNameExists(t *testing.T) {
+	contract := decodeTestContract(t, `{
+		"tools": [
+			{"type":"function","name":"tool_search"},
+			{"type":"function","name":"cts_tool_search"},
+			{"type":"tool_search"}
+		],
+		"input":[]
+	}`)
+	if contract.SearchAlias != "cts_tool_search_1" {
+		t.Fatalf("search alias = %q, want cts_tool_search_1", contract.SearchAlias)
+	}
+	for identity, alias := range contract.AliasByID {
+		if alias == contract.SearchAlias {
+			t.Fatalf("search alias collides with declared identity %v", identity)
+		}
+	}
+}
+
 func TestParseContractServerSearchKeptSeparate(t *testing.T) {
 	contract := decodeTestContract(t, `{"tools": [{"type": "tool_search", "execution": "server"}], "input": []}`)
 	if !contract.ServerSearch {

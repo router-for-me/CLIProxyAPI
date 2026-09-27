@@ -36,6 +36,145 @@ func TestPrepareBridgeEndToEnd(t *testing.T) {
 	}
 }
 
+func TestPrepareDiscoveredNamespacedCustomKeepsOneWireAlias(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"tool_search"}],"input":[{"type":"tool_search_call","call_id":"search_1","arguments":{"query":"patch"}},{"type":"tool_search_output","call_id":"search_1","tools":[{"type":"namespace","name":"fs","tools":[{"type":"custom","name":"patch","description":"patch"}]}]}]}`)
+	prepared, err := Prepare(body, bridgeAttemptPolicy(), DefaultLimits(), NewLimiter(DefaultLimits()))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	defer prepared.Attempt.Close()
+
+	identity := ToolIdentity{Namespace: "fs", Name: "patch", Kind: ToolKindCustom}
+	customAlias, ok := prepared.Attempt.bridge.Alias(identity)
+	if !ok {
+		t.Fatalf("custom bridge lost original identity: %v", prepared.Attempt.bridge.Aliases())
+	}
+	if got := prepared.Attempt.contract.AliasByID[identity]; got != customAlias {
+		t.Fatalf("contract alias = %q, custom bridge alias = %q", got, customAlias)
+	}
+	value, ok := decodeValue(prepared.Body)
+	if !ok {
+		t.Fatalf("prepared body is invalid JSON: %s", prepared.Body)
+	}
+	root, _ := value.(map[string]any)
+	tools, _ := root["tools"].([]any)
+	foundDeclaration := false
+	for _, rawTool := range tools {
+		tool, _ := rawTool.(map[string]any)
+		if stringField(tool, "name") == customAlias {
+			foundDeclaration = true
+			break
+		}
+	}
+	if !foundDeclaration {
+		t.Fatalf("active custom declaration alias %q is missing: %s", customAlias, prepared.Body)
+	}
+	input, _ := root["input"].([]any)
+	if len(input) < 2 {
+		t.Fatalf("prepared discovery history is missing: %s", prepared.Body)
+	}
+	var manifest string
+	for _, rawItem := range input {
+		item, _ := rawItem.(map[string]any)
+		if stringField(item, "type") == "function_call_output" && stringField(item, "call_id") == "search_1" {
+			manifest, _ = item["output"].(string)
+			break
+		}
+	}
+	if !strings.Contains(manifest, customAlias) {
+		t.Fatalf("discovery manifest alias does not match declaration %q: %s", customAlias, manifest)
+	}
+}
+
+func TestPrepareCustomAliasAvoidsEagerFunctionNames(t *testing.T) {
+	collidingAlias := CustomAliasFor("", "patch")
+	body := []byte(`{"tools":[{"type":"function","name":"` + collidingAlias + `","parameters":{"type":"object"}},{"type":"custom","name":"patch"}],"input":[]}`)
+	prepared, err := Prepare(body, bridgeAttemptPolicy(), DefaultLimits(), NewLimiter(DefaultLimits()))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	defer prepared.Attempt.Close()
+
+	customAlias, ok := prepared.Attempt.bridge.Alias(ToolIdentity{Name: "patch", Kind: ToolKindCustom})
+	if !ok {
+		t.Fatal("custom alias missing")
+	}
+	if customAlias == collidingAlias {
+		t.Fatalf("custom alias collides with eager function name %q", collidingAlias)
+	}
+	value, _ := decodeValue(prepared.Body)
+	root, _ := value.(map[string]any)
+	tools, _ := root["tools"].([]any)
+	names := make(map[string]struct{}, len(tools))
+	for _, rawTool := range tools {
+		tool, _ := rawTool.(map[string]any)
+		name := stringField(tool, "name")
+		if _, exists := names[name]; exists {
+			t.Fatalf("duplicate outbound function name %q", name)
+		}
+		names[name] = struct{}{}
+	}
+}
+
+func TestPrepareAllowedToolsKeepsOrdinaryFunctionWithCustomDisplayName(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"patch","parameters":{"type":"object"}},{"type":"custom","name":"patch"}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"patch"}]},"input":[]}`)
+	prepared, err := Prepare(body, bridgeAttemptPolicy(), DefaultLimits(), NewLimiter(DefaultLimits()))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	defer prepared.Attempt.Close()
+
+	value, _ := decodeValue(prepared.Body)
+	root, _ := value.(map[string]any)
+	choice, _ := root["tool_choice"].(map[string]any)
+	allowed, _ := choice["tools"].([]any)
+	if len(allowed) != 1 {
+		t.Fatalf("allowed_tools = %v, want one entry", allowed)
+	}
+	tool, _ := allowed[0].(map[string]any)
+	if tool["type"] != "function" || tool["name"] != "patch" {
+		t.Fatalf("ordinary function choice was rewritten as custom: %v", tool)
+	}
+}
+
+func TestPrepareCustomHistoryPrefersExplicitNamespace(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"custom","namespace":"A","name":"patch"}],"input":[{"type":"custom_tool_call","namespace":"B","name":"patch","call_id":"c1","input":"x"},{"type":"custom_tool_call_output","call_id":"c1","output":"ok"}]}`)
+	prepared, err := Prepare(body, bridgeAttemptPolicy(), DefaultLimits(), NewLimiter(DefaultLimits()))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	defer prepared.Attempt.Close()
+
+	value, _ := decodeValue(prepared.Body)
+	root, _ := value.(map[string]any)
+	input, _ := root["input"].([]any)
+	call, _ := input[0].(map[string]any)
+	wantAlias := CustomAliasFor("B", "patch")
+	if call["type"] != "function_call" || call["name"] != wantAlias {
+		t.Fatalf("namespaced custom history = %v, want alias %q", call, wantAlias)
+	}
+}
+
+func TestPrepareRejectsAmbiguousCustomHistoryWithoutNamespace(t *testing.T) {
+	body := []byte(`{
+		"tools":[
+			{"type":"custom","namespace":"A","name":"patch"},
+			{"type":"custom","namespace":"B","name":"patch"}
+		],
+		"input":[
+			{"type":"custom_tool_call","name":"patch","call_id":"c1","input":"x"},
+			{"type":"custom_tool_call_output","call_id":"c1","output":"ok"}
+		]
+	}`)
+	_, err := Prepare(body, bridgeAttemptPolicy(), DefaultLimits(), NewLimiter(DefaultLimits()))
+	if err == nil {
+		t.Fatal("ambiguous custom history must not create a new unnamespaced identity")
+	}
+	if !IsRequestScopedError(err) {
+		t.Fatalf("ambiguous custom history error must be request scoped: %v", err)
+	}
+}
+
 func TestPreparePassthroughReturnsOriginalSlice(t *testing.T) {
 	body := []byte("{\"model\": \"x\", \"input\": \"hello\"}")
 	limiter := NewLimiter(DefaultLimits())
@@ -91,6 +230,56 @@ func TestAttemptResponseRestore(t *testing.T) {
 	}
 	if !strings.Contains(string(restored), "tool_search_call") {
 		t.Fatalf("search call not restored: %s", restored)
+	}
+}
+
+func TestAttemptWireAliasesOnlyIncludeActiveSearchBridge(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantSearch bool
+	}{
+		{
+			name: "custom tools without client search",
+			body: `{"tools":[{"type":"custom","name":"apply_patch","description":"patch"}],"input":[]}`,
+		},
+		{
+			name:       "client search",
+			body:       `{"tools":[{"type":"tool_search"}],"input":[]}`,
+			wantSearch: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prepared, err := Prepare([]byte(tt.body), bridgeAttemptPolicy(), DefaultLimits(), NewLimiter(DefaultLimits()))
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			defer prepared.Attempt.Close()
+
+			search, _ := prepared.Attempt.WireAliases()
+			if gotSearch := len(search) > 0; gotSearch != tt.wantSearch {
+				t.Fatalf("search aliases = %v, want active=%v", search, tt.wantSearch)
+			}
+		})
+	}
+}
+
+func TestAttemptWireHistoryAliasesIncludeHistoryOnlyCustomTools(t *testing.T) {
+	body := []byte(`{"input":[{"type":"custom_tool_call","call_id":"call_1","name":"compile","input":"source"},{"type":"custom_tool_call_output","call_id":"call_1","output":"done"}]}`)
+	prepared, err := Prepare(body, RoutePolicy{CustomTools: CustomToolsFunction}, DefaultLimits(), NewLimiter(DefaultLimits()))
+	if err != nil {
+		t.Fatalf("prepare history-only custom request: %v", err)
+	}
+	defer prepared.Attempt.Close()
+
+	_, custom := prepared.Attempt.WireAliases()
+	if len(custom) != 0 {
+		t.Fatalf("history-only custom tool must not require a current declaration, got active aliases %v", custom)
+	}
+	history := prepared.Attempt.WireHistoryAliases()
+	if len(history) != 1 || !strings.HasPrefix(history[0], CustomAliasPrefix) {
+		t.Fatalf("history aliases = %v, want one stable custom alias", history)
 	}
 }
 
