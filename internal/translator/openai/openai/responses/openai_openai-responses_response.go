@@ -10,6 +10,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -55,6 +56,9 @@ type oaiToResponsesState struct {
 	// these are emitted as custom_tool_call items instead of function_call
 	CustomToolNames map[string]struct{}
 	FinishReason    string
+	// tool calls the upstream never gave a name for; emitting them would write
+	// an unusable function_call into the client's conversation history
+	InvalidToolCalls map[string]struct{}
 	// usage aggregation
 	PromptTokens     int64
 	CachedTokens     int64
@@ -80,6 +84,19 @@ func incompleteByFinishReason(reason string) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// buildResponsesFailedEvent reports a protocol-level failure to the client when
+// the upstream produced a tool call the Responses format cannot represent.
+// Failing the turn is deliberate: silently dropping one call out of a parallel
+// batch would change what the assistant actually asked for.
+func buildResponsesFailedEvent(st *oaiToResponsesState, nextSeq func() int) []byte {
+	failed := []byte(`{"type":"response.failed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"failed","background":false,"error":null}}`)
+	failed, _ = sjson.SetBytes(failed, "sequence_number", nextSeq())
+	failed, _ = sjson.SetBytes(failed, "response.id", st.ResponseID)
+	failed, _ = sjson.SetBytes(failed, "response.created_at", st.Created)
+	failed, _ = sjson.SetRawBytes(failed, "response.error", invalidToolCallErrorJSON)
+	return emitRespEvent("response.failed", failed)
 }
 
 func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
@@ -197,6 +214,9 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 	}
 	if len(st.FuncArgsBuf) > 0 {
 		for key := range st.FuncArgsBuf {
+			if _, invalid := st.InvalidToolCalls[key]; invalid {
+				continue
+			}
 			if !st.FuncItemDone[key] {
 				continue
 			}
@@ -258,21 +278,22 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &oaiToResponsesState{
-			FuncArgsBuf:     make(map[string]*strings.Builder),
-			FuncNames:       make(map[string]string),
-			FuncCallIDs:     make(map[string]string),
-			FuncOutputIx:    make(map[string]int),
-			FuncArgsSent:    make(map[string]int),
-			MsgOutputIx:     make(map[int]int),
-			MsgTextBuf:      make(map[int]*strings.Builder),
-			MsgItemAdded:    make(map[int]bool),
-			MsgContentAdded: make(map[int]bool),
-			MsgItemDone:     make(map[int]bool),
-			FuncItemAdded:   make(map[string]bool),
-			FuncItemCustom:  make(map[string]bool),
-			FuncArgsDone:    make(map[string]bool),
-			FuncItemDone:    make(map[string]bool),
-			Reasonings:      make([]oaiToResponsesStateReasoning, 0),
+			FuncArgsBuf:      make(map[string]*strings.Builder),
+			FuncNames:        make(map[string]string),
+			FuncCallIDs:      make(map[string]string),
+			FuncOutputIx:     make(map[string]int),
+			FuncArgsSent:     make(map[string]int),
+			InvalidToolCalls: make(map[string]struct{}),
+			MsgOutputIx:      make(map[int]int),
+			MsgTextBuf:       make(map[int]*strings.Builder),
+			MsgItemAdded:     make(map[int]bool),
+			MsgContentAdded:  make(map[int]bool),
+			MsgItemDone:      make(map[int]bool),
+			FuncItemAdded:    make(map[string]bool),
+			FuncItemCustom:   make(map[string]bool),
+			FuncArgsDone:     make(map[string]bool),
+			FuncItemDone:     make(map[string]bool),
+			Reasonings:       make([]oaiToResponsesStateReasoning, 0),
 		}
 	}
 	st := (*param).(*oaiToResponsesState)
@@ -360,6 +381,21 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				st.FuncNames[key] = customToolName
 			}
 		}
+		// The upstream never sent a name for this call. Emitting the item anyway
+		// writes a function_call that the client stores in history and replays on
+		// every later turn, where strict upstreams reject the whole request. Mark
+		// the response invalid instead of inventing a name.
+		if strings.TrimSpace(name) == "" {
+			if st.InvalidToolCalls == nil {
+				st.InvalidToolCalls = make(map[string]struct{})
+			}
+			st.InvalidToolCalls[key] = struct{}{}
+			log.WithFields(log.Fields{
+				"response_id": st.ResponseID,
+				"call_id":     callID,
+			}).Warn("upstream streamed a function tool call without a name; failing the response")
+			return
+		}
 		if callID == "" {
 			callID = fmt.Sprintf("call_%s_%s", st.ResponseID, strings.ReplaceAll(key, ":", "_"))
 			st.FuncCallIDs[key] = callID
@@ -420,6 +456,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.FuncCallIDs = make(map[string]string)
 		st.FuncOutputIx = make(map[string]int)
 		st.FuncArgsSent = make(map[string]int)
+		st.InvalidToolCalls = make(map[string]struct{})
 		st.MsgOutputIx = make(map[int]int)
 		st.NextOutputIx = 0
 		st.MsgItemAdded = make(map[int]bool)
@@ -573,6 +610,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			}
 
 			emitToolItem(key, true)
+			if _, invalid := st.InvalidToolCalls[key]; invalid {
+				continue
+			}
 			emitPendingFunctionArgs(key)
 			callID := st.FuncCallIDs[key]
 			if callID == "" || st.FuncItemDone[key] {
@@ -646,10 +686,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		if hasActiveUnfinishedTool {
 			return out
 		}
-		if len(st.MsgItemAdded) == 0 && len(st.FuncItemAdded) == 0 {
+		if len(st.MsgItemAdded) == 0 && len(st.FuncItemAdded) == 0 && len(st.InvalidToolCalls) == 0 {
 			return out
 		}
 		st.CompletedEmitted = true
+		if len(st.InvalidToolCalls) > 0 {
+			out = append(out, buildResponsesFailedEvent(st, nextSeq))
+			return out
+		}
 		out = append(out, buildResponsesCompletedEvent(st, requestForNamespace, nextSeq))
 		return out
 	}
@@ -894,6 +938,24 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		resp, _ = sjson.SetBytes(resp, "model", v.String())
 	}
 
+	// Reject the whole response when the upstream returned a tool call without a
+	// name. Emitting it as a function_call writes an item that the client stores
+	// in conversation history and replays on every later turn, so a single
+	// malformed response permanently breaks the session. Dropping just the
+	// offending call is not safe either: with parallel tool calls that silently
+	// changes what the assistant asked for.
+	if callID, missing := firstToolCallMissingName(root); missing {
+		log.WithFields(log.Fields{
+			"response_id": id,
+			"call_id":     callID,
+			"model":       root.Get("model").String(),
+		}).Warn("upstream returned a function tool call without a name; failing the response")
+		resp, _ = sjson.SetBytes(resp, "status", "failed")
+		resp, _ = sjson.SetRawBytes(resp, "error", invalidToolCallErrorJSON)
+		resp, _ = sjson.SetRawBytes(resp, "output", []byte(`[]`))
+		return resp
+	}
+
 	// Build output list from choices[...]
 	var outputItems [][]byte
 	// Detect and capture reasoning content if present (with fallback to reasoning)
@@ -1003,4 +1065,31 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	}
 
 	return resp
+}
+
+// invalidToolCallErrorJSON is surfaced to the client when an upstream provider
+// emits a tool call without a function name.
+var invalidToolCallErrorJSON = []byte(`{"code":"invalid_upstream_tool_call","message":"upstream returned a function tool call without a name"}`)
+
+// firstToolCallMissingName reports the first tool call in a chat.completions
+// response that carries no function name. Such a call cannot be represented as
+// a Responses function_call item: the name is what the client replays on the
+// next turn, and an empty one makes strict upstreams reject the entire request.
+func firstToolCallMissingName(root gjson.Result) (string, bool) {
+	var (
+		callID  string
+		missing bool
+	)
+	root.Get("choices").ForEach(func(_, choice gjson.Result) bool {
+		choice.Get("message.tool_calls").ForEach(func(_, tc gjson.Result) bool {
+			if strings.TrimSpace(tc.Get("function.name").String()) == "" {
+				callID = tc.Get("id").String()
+				missing = true
+				return false
+			}
+			return true
+		})
+		return !missing
+	})
+	return callID, missing
 }
