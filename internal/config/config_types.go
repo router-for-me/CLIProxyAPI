@@ -674,6 +674,11 @@ type CodexKey struct {
 	// True disables cloaking; false explicitly enables cloaking; omitted inherits global codex.disable-codex-cloaking.
 	DisableCodexCloaking *bool `yaml:"disable-codex-cloaking,omitempty" json:"disable-codex-cloaking,omitempty"`
 
+	// DisableImageGeneration suppresses the proxy-injected image_generation tool for this credential.
+	// Use this for Responses-compatible endpoints (e.g. Azure OpenAI) that reject requests carrying
+	// the injected tool; omitted or false keeps the global injection behavior.
+	DisableImageGeneration *bool `yaml:"disable-image-generation,omitempty" json:"disable-image-generation,omitempty"`
+
 	// RequestRetry optionally overrides the global request-retry for this credential.
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
