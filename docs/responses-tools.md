@@ -25,33 +25,34 @@ content database.
 
 ## Configuration
 
-Top-level `responses-tools` is the only configuration source. There is no
+`requests.responses-tools` is the only configuration source. There is no
 second policy in `models.json`, model aliases, or plugin YAML. Every field is
 optional: an absent block already applies the convention defaults.
 
 ```yaml
-responses-tools:
-  enabled: true            # emergency gate; omit or set false to disable all
-  limits:
-    max-active-tool-bytes: 262144
-    max-active-attempts: 512
-    max-state-bytes: 33554432
-    max-attempt-bytes: 1048576
-    max-schema-expansion-bytes: 65536
-    max-schema-expansion-nodes: 10000
-    max-depth: 64
-  routes:                   # optional overrides of the convention defaults
-    - match:
-        provider: "codex"
-        auth-kind: "oauth"
-        upstream-model: "gpt-5.6"
-        upstream-format: "codex"
-      client-search: "bridge"
-      custom-tools: "function"
-      custom-grammar: "reject"
-      schema:
-        complete-search-required: false
-        local-refs: "preserve"
+requests:
+  responses-tools:
+    enabled: true          # emergency gate; omit or set false to disable all
+    limits:
+      max-active-tool-bytes: 262144
+      max-active-attempts: 512
+      max-state-bytes: 33554432
+      max-attempt-bytes: 1048576
+      max-schema-expansion-bytes: 65536
+      max-schema-expansion-nodes: 10000
+      max-depth: 64
+    routes:                 # optional overrides of the convention defaults
+      - match:
+          provider: "codex"
+          auth-kind: "oauth"
+          upstream-model: "gpt-5.6"
+          upstream-format: "codex"
+        client-search: "bridge"
+        custom-tools: "function"
+        custom-grammar: "reject"
+        schema:
+          complete-search-required: false
+          local-refs: "preserve"
 ```
 
 ## Defaults
@@ -113,10 +114,10 @@ Match rules:
 
 ## Rollback
 
-Set `responses-tools.enabled: false`. No other configuration is affected, and
-the convention policy stops applying on the next request. When changing route
-rules, wait for active requests to drain so no request changes protocol
-semantics mid-flight.
+Set `requests.responses-tools.enabled: false`. No other configuration is
+affected, and the convention policy stops applying on the next request. When
+changing route rules, wait for active requests to drain so no request changes
+protocol semantics mid-flight.
 
 ## Budgets
 

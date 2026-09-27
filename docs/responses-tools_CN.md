@@ -19,32 +19,33 @@
 
 ## 配置
 
-顶层 `responses-tools` 是唯一配置源。`models.json`、模型 alias、插件 YAML
-中不存在第二套可覆盖策略。所有字段都是可选的：整块缺省即按约定生效。
+`requests.responses-tools` 是唯一配置源。`models.json`、模型 alias、插件
+YAML 中不存在第二套可覆盖策略。所有字段都是可选的：整块缺省即按约定生效。
 
 ```yaml
-responses-tools:
-  enabled: true            # 紧急总闸；缺省或设为 false 即全部关闭
-  limits:
-    max-active-tool-bytes: 262144
-    max-active-attempts: 512
-    max-state-bytes: 33554432
-    max-attempt-bytes: 1048576
-    max-schema-expansion-bytes: 65536
-    max-schema-expansion-nodes: 10000
-    max-depth: 64
-  routes:                   # 可选，用于覆盖约定默认
-    - match:
-        provider: "codex"
-        auth-kind: "oauth"
-        upstream-model: "gpt-5.6"
-        upstream-format: "codex"
-      client-search: "bridge"
-      custom-tools: "function"
-      custom-grammar: "reject"
-      schema:
-        complete-search-required: false
-        local-refs: "preserve"
+requests:
+  responses-tools:
+    enabled: true          # 紧急总闸；缺省或设为 false 即全部关闭
+    limits:
+      max-active-tool-bytes: 262144
+      max-active-attempts: 512
+      max-state-bytes: 33554432
+      max-attempt-bytes: 1048576
+      max-schema-expansion-bytes: 65536
+      max-schema-expansion-nodes: 10000
+      max-depth: 64
+    routes:                 # 可选，用于覆盖约定默认
+      - match:
+          provider: "codex"
+          auth-kind: "oauth"
+          upstream-model: "gpt-5.6"
+          upstream-format: "codex"
+        client-search: "bridge"
+        custom-tools: "function"
+        custom-grammar: "reject"
+        schema:
+          complete-search-required: false
+          local-refs: "preserve"
 ```
 
 ## 默认行为
@@ -94,9 +95,9 @@ responses-tools:
 
 ## 回滚
 
-设置 `responses-tools.enabled: false`。其余配置不受影响，约定策略在下一次
-请求起停止生效。修改路由规则时，等待活跃请求排空后再切换，避免单个请求
-中途更换协议语义。
+设置 `requests.responses-tools.enabled: false`。其余配置不受影响，约定策略
+在下一次请求起停止生效。修改路由规则时，等待活跃请求排空后再切换，避免
+单个请求中途更换协议语义。
 
 ## 预算
 
