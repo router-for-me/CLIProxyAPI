@@ -8,11 +8,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/responsestools"
 )
 
-func TestResponsesToolsDefaultsKeepLegacyBehavior(t *testing.T) {
+func TestResponsesToolsDefaultsFollowConvention(t *testing.T) {
 	cfg := &Config{}
 	cfg.NormalizeResponsesToolsConfig()
-	if cfg.ResponsesTools.Enabled {
-		t.Fatalf("default must stay disabled")
+	if !cfg.ResponsesTools.FeatureEnabled() {
+		t.Fatalf("convention must stay enabled without configuration")
 	}
 	limits := cfg.ResponsesTools.Limits
 	defaults := responsestools.DefaultLimits()
@@ -32,14 +32,35 @@ func TestResponsesToolsDefaultsKeepLegacyBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if policy.Enabled || len(policy.Routes) != 0 {
-		t.Fatalf("empty policy must stay off")
+	if !policy.Enabled || len(policy.Routes) != 0 {
+		t.Fatalf("convention policy must be enabled with no explicit routes")
+	}
+	off := false
+	cfg.ResponsesTools.Enabled = &off
+	if cfg.ResponsesTools.FeatureEnabled() {
+		t.Fatalf("explicit false must disable the emergency gate")
+	}
+}
+
+func TestResponsesToolsDefaultsDefersToLegacyShim(t *testing.T) {
+	shim := true
+	cfg := &Config{}
+	cfg.Plugins.Enabled = true
+	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
+		"codex-tool-search-shim": {Enabled: &shim},
+	}
+	cfg.NormalizeResponsesToolsConfig()
+	if cfg.ResponsesTools.FeatureEnabled() {
+		t.Fatalf("an installed shim must win over the convention default")
+	}
+	if err := cfg.ValidateResponsesToolsConfig(); err != nil {
+		t.Fatalf("deference must validate: %v", err)
 	}
 }
 
 func TestResponsesToolsInvalidEnumRejected(t *testing.T) {
 	cfg := &Config{}
-	cfg.ResponsesTools.Enabled = true
+	cfg.ResponsesTools.Enabled = boolPointer(true)
 	cfg.ResponsesTools.Routes = []ResponsesToolsRoute{{
 		Match:        ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"},
 		ClientSearch: "sometimes",
@@ -54,7 +75,7 @@ func TestResponsesToolsInvalidEnumRejected(t *testing.T) {
 func TestResponsesToolsOverlapRejected(t *testing.T) {
 	match := ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"}
 	cfg := &Config{}
-	cfg.ResponsesTools.Enabled = true
+	cfg.ResponsesTools.Enabled = boolPointer(true)
 	cfg.ResponsesTools.Routes = []ResponsesToolsRoute{
 		{Match: match, ClientSearch: "bridge", CustomTools: "function"},
 		{Match: match, ClientSearch: "bridge", CustomTools: "strip"},
@@ -68,7 +89,7 @@ func TestResponsesToolsOverlapRejected(t *testing.T) {
 func TestResponsesToolsLegacyShimMutuallyExclusive(t *testing.T) {
 	enabled := true
 	cfg := &Config{}
-	cfg.ResponsesTools.Enabled = true
+	cfg.ResponsesTools.Enabled = boolPointer(true)
 	cfg.ResponsesTools.Routes = []ResponsesToolsRoute{{
 		Match:        ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"},
 		ClientSearch: "bridge",
@@ -111,7 +132,7 @@ func TestResponsesToolsYAMLRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if !cfg.ResponsesTools.Enabled {
+	if !cfg.ResponsesTools.FeatureEnabled() {
 		t.Fatalf("enabled lost")
 	}
 	if len(cfg.ResponsesTools.Routes) != 1 {
@@ -125,11 +146,15 @@ func TestResponsesToolsYAMLRoundTrip(t *testing.T) {
 		t.Fatalf("strategy defaults lost: %+v", route)
 	}
 	cloned := cfg.CloneForRuntime()
-	if len(cloned.ResponsesTools.Routes) != 1 || !cloned.ResponsesTools.Enabled {
+	if len(cloned.ResponsesTools.Routes) != 1 || !cloned.ResponsesTools.FeatureEnabled() {
 		t.Fatalf("clone lost responses-tools")
 	}
 	cloned.ResponsesTools.Routes[0].ClientSearch = "native"
 	if cfg.ResponsesTools.Routes[0].ClientSearch != "bridge" {
 		t.Fatalf("clone shares route memory")
 	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }

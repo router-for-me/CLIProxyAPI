@@ -15,7 +15,8 @@ func capabilitiesTestManager(t *testing.T, routes []internalconfig.ResponsesTool
 func capabilitiesTestManagerForModels(t *testing.T, routes []internalconfig.ResponsesToolsRoute, clientModel, upstreamModel string) *Manager {
 	t.Helper()
 	cfg := &internalconfig.Config{}
-	cfg.ResponsesTools.Enabled = true
+	enabled := true
+	cfg.ResponsesTools.Enabled = &enabled
 	cfg.ResponsesTools.Routes = routes
 	cfg.NormalizeResponsesToolsConfig()
 	if err := cfg.ValidateResponsesToolsConfig(); err != nil {
@@ -75,9 +76,40 @@ func TestClientSearchSupportedUnknownIsNil(t *testing.T) {
 
 func TestClientSearchSupportedOffIsNil(t *testing.T) {
 	mgr := NewManager(nil, nil, nil)
-	mgr.SetConfig(&internalconfig.Config{})
+	cfg := &internalconfig.Config{}
+	disabled := false
+	cfg.ResponsesTools.Enabled = &disabled
+	mgr.SetConfig(cfg)
 	if supported := mgr.ClientSearchSupported("gpt-5.6-sol"); supported != nil {
 		t.Fatalf("disabled feature must stay nil, got %v", *supported)
+	}
+}
+
+func TestClientSearchSupportedFollowsConventionWithoutRoutes(t *testing.T) {
+	mgr := capabilitiesTestManager(t, nil)
+	supported := mgr.ClientSearchSupported("gpt-5.6-sol")
+	if supported == nil || !*supported {
+		t.Fatalf("native upstream must advertise search support by convention, got %v", supported)
+	}
+}
+
+func TestResponsesToolsReplayFollowsProviderConvention(t *testing.T) {
+	mgr := capabilitiesTestManager(t, nil)
+	if mgr.ResponsesToolsMayApplyToRoute("codex", "gpt-5.6-sol") {
+		t.Fatal("a native Responses provider needs no rewriting and must keep passthrough")
+	}
+	if mgr.ResponsesToolsMayApplyToRoute("xai", "grok") {
+		t.Fatal("xai speaks the native Responses format")
+	}
+	if !mgr.ResponsesToolsMayApplyToRoute("gemini", "gemini-3.8-flash") {
+		t.Fatal("a non-native provider must take the tools bridge and therefore replay")
+	}
+}
+
+func TestResponsesToolsEnabledWithoutRoutes(t *testing.T) {
+	mgr := capabilitiesTestManager(t, nil)
+	if !mgr.ResponsesToolsEnabled() {
+		t.Fatal("the convention policy must be active without explicit routes")
 	}
 }
 

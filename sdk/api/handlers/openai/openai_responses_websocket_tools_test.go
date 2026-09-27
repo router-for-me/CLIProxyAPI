@@ -13,7 +13,8 @@ import (
 func toolsReplayTestHandler(enabled bool) *OpenAIResponsesAPIHandler {
 	cfg := &internalconfig.Config{}
 	if enabled {
-		cfg.ResponsesTools.Enabled = true
+		on := true
+		cfg.ResponsesTools.Enabled = &on
 		cfg.ResponsesTools.Routes = []internalconfig.ResponsesToolsRoute{{
 			Match: internalconfig.ResponsesToolsMatch{
 				Provider: "codex", AuthKind: "oauth",
@@ -21,7 +22,22 @@ func toolsReplayTestHandler(enabled bool) *OpenAIResponsesAPIHandler {
 			},
 			ClientSearch: "bridge", CustomTools: "inherit",
 		}}
+	} else {
+		// Absent configuration keeps the convention on, so the emergency gate
+		// has to be requested explicitly.
+		off := false
+		cfg.ResponsesTools.Enabled = &off
 	}
+	cfg.NormalizeResponsesToolsConfig()
+	mgr := coreauth.NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	return NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, mgr))
+}
+
+// toolsReplayTestHandlerConventions builds a handler with no explicit route
+// table, so every route follows the convention policy.
+func toolsReplayTestHandlerConventions() *OpenAIResponsesAPIHandler {
+	cfg := &internalconfig.Config{}
 	cfg.NormalizeResponsesToolsConfig()
 	mgr := coreauth.NewManager(nil, nil, nil)
 	mgr.SetConfig(cfg)
@@ -54,6 +70,20 @@ func TestResponsesWebsocketRequiresToolsReplay(t *testing.T) {
 	bare := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
 	if bare.responsesWebsocketRequiresToolsReplay(searchTurn) {
 		t.Fatalf("without manager must not force replay")
+	}
+}
+
+func TestResponsesWebsocketNativeRouteKeepsPassthroughByDefault(t *testing.T) {
+	h := toolsReplayTestHandlerConventions()
+	searchTurn := []byte(`{"type":"response.create","tools":[{"type":"tool_search"}],"input":[]}`)
+	if h.responsesWebsocketRequiresToolsReplayForRoute(searchTurn, "codex", "gpt-5.6-sol") {
+		t.Fatal("a native Responses route needs no rewriting and must not be forced into replay")
+	}
+	if h.responsesWebsocketRequiresToolsReplayForRoute(searchTurn, "meta", "muse") {
+		t.Fatal("meta speaks the native Responses format")
+	}
+	if !h.responsesWebsocketRequiresToolsReplayForRoute(searchTurn, "gemini", "gemini-3.8-flash") {
+		t.Fatal("a non-native route takes the bridge and therefore needs replay")
 	}
 }
 

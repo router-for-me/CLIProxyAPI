@@ -79,7 +79,9 @@ func (m *Manager) syncResponsesToolsPolicy(cfgPolicy responsestools.Policy) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.policy = cfgPolicy
-	state.enabled = cfgPolicy.Enabled && len(cfgPolicy.Routes) > 0
+	// The emergency gate is the only switch: an empty route table keeps the
+	// convention policy, which already covers every route.
+	state.enabled = cfgPolicy.Enabled
 	if state.limiter == nil {
 		state.limiter = responsestools.NewLimiter(cfgPolicy.Limits)
 	} else {
@@ -143,8 +145,8 @@ func (m *Manager) prepareResponsesToolsAttempt(route responsestools.Route, paylo
 	if !enabled || limiter == nil {
 		return outPayload, nil, nil, nil
 	}
-	routePolicy, matched, errMatch := responsestools.ResolvePolicy(policy, route)
-	if errMatch != nil || !matched {
+	routePolicy, errMatch := responsestools.EffectivePolicy(policy, route)
+	if errMatch != nil {
 		return outPayload, nil, nil, errMatch
 	}
 	prepared, errPrepare := responsestools.Prepare(payload, routePolicy, policy.Limits, limiter)

@@ -189,7 +189,7 @@ type Config struct {
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
 	// ResponsesTools is the single authoritative source for core Responses
-	// client tool protocol handling. Default off; enabling it with no routes
-	// keeps legacy behavior everywhere.
+	// client tool protocol handling. Absent configuration already applies the
+	// convention policy per route; Routes only overrides it.
 	ResponsesTools ResponsesToolsConfig `yaml:"responses-tools" json:"responses-tools"`
 }

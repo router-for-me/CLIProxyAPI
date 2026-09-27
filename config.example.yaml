@@ -114,12 +114,17 @@ discovery:
 # Plugin list Management API reads Logo and ConfigFields from plugin metadata for management UI display.
 # Per-plugin enabled only controls plugins.configs.<pluginID>.enabled and does not implicitly change global plugins.enabled.
 # Core Responses client tool protocol handling (tool_search discovery and custom
-# tools). Disabled by default; enabling with no routes keeps legacy behavior
-# everywhere. Each route binds strategies to one exact upstream route (no
-# wildcards). The core and the legacy codex-tool-search-shim example plugin
-# must not be enabled together.
+# tools). Convention over configuration: with no block at all the core derives a
+# correct policy per route — native passthrough for upstreams that speak the
+# Responses protocol, the client search bridge everywhere else. The bridge stays
+# inert until a client actually declares tool_search, so requests without it are
+# untouched. Lossy strategies (custom-tools strip/function, custom-grammar
+# describe, schema inline, complete-search-required) stay opt-in below. Each
+# route binds strategies to one exact upstream route (no wildcards). If the
+# legacy codex-tool-search-shim plugin is installed and enabled, the core defers
+# to it automatically; set enabled: true alongside it only after disabling one.
 #responses-tools:
-#  enabled: false
+#  enabled: true # emergency gate; set false to turn the feature off entirely
 #  limits:
 #    max-active-tool-bytes: 262144
 #    max-active-attempts: 512

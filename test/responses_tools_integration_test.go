@@ -97,7 +97,8 @@ func newResponsesToolsIntegrationHarnessWithExpectations(t *testing.T, model str
 	manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)
 	cfg := &config.Config{}
-	cfg.ResponsesTools.Enabled = true
+	enabled := true
+	cfg.ResponsesTools.Enabled = &enabled
 	cfg.ResponsesTools.Routes = []config.ResponsesToolsRoute{{
 		Match:        config.ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: model, UpstreamFormat: "codex"},
 		ClientSearch: "bridge", CustomTools: customTools,
@@ -687,7 +688,8 @@ func responsesToolsMigrationConfig(model string, coreEnabled, shimEnabled bool) 
 		"codex-tool-search-shim": {Enabled: &shimInstanceEnabled},
 	}
 	if coreEnabled {
-		cfg.ResponsesTools.Enabled = true
+		enabled := true
+		cfg.ResponsesTools.Enabled = &enabled
 		cfg.ResponsesTools.Routes = []config.ResponsesToolsRoute{{
 			Match: config.ResponsesToolsMatch{
 				Provider: "codex", AuthKind: "oauth", UpstreamModel: model, UpstreamFormat: "codex",
@@ -769,9 +771,9 @@ func TestResponsesToolsIntegrationMigrationToggleAndRollback(t *testing.T) {
 }
 
 // TestResponsesToolsIntegrationDisabledPassthrough proves the default-off
-// posture through the full chain: with no routes configured the wire body
-// keeps the client search declaration byte-for-byte.
-func TestResponsesToolsIntegrationDisabledPassthrough(t *testing.T) {
+// posture through the full chain: an OpenAI-native route keeps the native
+// protocol, so the client search declaration is forwarded byte-for-byte.
+func TestResponsesToolsIntegrationNativePassthroughByDefault(t *testing.T) {
 	const model = "gpt-5.6-sol"
 	manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)
@@ -810,6 +812,64 @@ func TestResponsesToolsIntegrationDisabledPassthrough(t *testing.T) {
 	}
 	got, _ := wire.Load().(string)
 	if !strings.Contains(got, `"type":"tool_search"`) {
-		t.Fatalf("disabled route must pass the declaration through untouched: %.500s", got)
+		t.Fatalf("native route must pass the declaration through untouched: %.500s", got)
+	}
+}
+
+// TestResponsesToolsIntegrationEmergencyGate verifies that an explicit
+// enabled:false turns the whole feature off, including routes whose convention
+// policy would otherwise bridge.
+func TestResponsesToolsIntegrationEmergencyGate(t *testing.T) {
+	const model = "gpt-5.6-sol"
+	manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	disabled := false
+	cfg := &config.Config{}
+	cfg.ResponsesTools.Enabled = &disabled
+	cfg.ResponsesTools.Routes = []config.ResponsesToolsRoute{{
+		Match: config.ResponsesToolsMatch{
+			Provider: "codex", AuthKind: "oauth", UpstreamModel: model, UpstreamFormat: "codex",
+		},
+		ClientSearch: "bridge", CustomTools: "inherit",
+	}}
+	cfg.NormalizeResponsesToolsConfig()
+	if err := cfg.ValidateResponsesToolsConfig(); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	manager.SetConfig(cfg)
+
+	var wire atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		raw, _ := json.Marshal(body)
+		wire.Store(string(raw))
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, responsesToolsSSECompleted("c1", "tool_search", `{"query":"x"}`))
+	}))
+	defer server.Close()
+
+	manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(cfg))
+	const authID = "rt-integration-gate"
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, err := manager.Register(context.Background(), &cliproxyauth.Auth{
+		ID: authID, Provider: "codex", Status: cliproxyauth.StatusActive,
+		Attributes: map[string]string{"base_url": server.URL, "api_key": "off", "auth_kind": "oauth"},
+		Metadata:   map[string]any{"disable_cooling": true},
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	body := fmt.Sprintf(`{"model":%q,"tools":[{"type":"tool_search"}],"input":[]}`, model)
+	req := cliproxyexecutor.Request{Model: model, Payload: []byte(body)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex, OriginalRequest: []byte(body)}
+	if _, err := manager.Execute(context.Background(), []string{"codex"}, req, opts); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	got, _ := wire.Load().(string)
+	if !strings.Contains(got, `"type":"tool_search"`) {
+		t.Fatalf("emergency gate must pass the declaration through untouched: %.500s", got)
 	}
 }

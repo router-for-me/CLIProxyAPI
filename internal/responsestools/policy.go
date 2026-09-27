@@ -165,6 +165,75 @@ func ResolvePolicy(policy Policy, route Route) (RoutePolicy, bool, error) {
 	return *matched, true, nil
 }
 
+// EffectivePolicy returns the policy for one actual routed call: the explicit
+// rule when one matches, otherwise the convention default. Callers that must
+// honor user configuration use this instead of skipping unmatched routes,
+// because a route without a rule is a supported configuration, not a gap.
+func EffectivePolicy(policy Policy, route Route) (RoutePolicy, error) {
+	routePolicy, matched, err := ResolvePolicy(policy, route)
+	if err != nil {
+		return RoutePolicy{}, err
+	}
+	if !matched {
+		// No rule is a supported configuration, not a gap.
+		routePolicy = RoutePolicy{}
+	}
+	// A rule may leave individual strategies on inherit, which means "follow
+	// the convention" rather than "legacy behavior".
+	return applyConventionDefaults(routePolicy, route), nil
+}
+
+func applyConventionDefaults(routePolicy RoutePolicy, route Route) RoutePolicy {
+	convention := ConventionPolicy(route)
+	if routePolicy.ClientSearch == "" {
+		routePolicy.ClientSearch = convention.ClientSearch
+	}
+	if routePolicy.ClientSearch == ClientSearchInherit {
+		routePolicy.ClientSearch = convention.ClientSearch
+	}
+	if routePolicy.CustomTools == "" {
+		routePolicy.CustomTools = convention.CustomTools
+	}
+	if routePolicy.CustomGrammar == "" {
+		routePolicy.CustomGrammar = convention.CustomGrammar
+	}
+	if routePolicy.Schema.LocalRefs == "" {
+		routePolicy.Schema.LocalRefs = convention.Schema.LocalRefs
+	}
+	return routePolicy
+}
+
+// ConventionPolicy derives the default route policy from what the runtime
+// already knows about the call. Convention over configuration: the format
+// alone decides client search handling, and no lossy strategy is ever
+// inferred. Upstreams speaking the native Responses protocol keep it; every
+// other upstream gets the client search bridge, which stays inert until the
+// client actually declares tool_search.
+func ConventionPolicy(route Route) RoutePolicy {
+	policy := RoutePolicy{
+		CustomTools:   CustomToolsInherit,
+		CustomGrammar: CustomGrammarReject,
+		Schema:        SchemaPolicy{LocalRefs: LocalRefsPreserve},
+	}
+	if IsNativeResponsesFormat(route.UpstreamFormat) {
+		policy.ClientSearch = ClientSearchNative
+	} else {
+		policy.ClientSearch = ClientSearchBridge
+	}
+	return policy
+}
+
+// IsNativeResponsesFormat reports whether an upstream format speaks the
+// Responses protocol natively, so tool declarations need no rewriting.
+func IsNativeResponsesFormat(format string) bool {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "openai-response", "codex":
+		return true
+	default:
+		return false
+	}
+}
+
 // CompilePolicy validates limits and every route rule and returns the
 // immutable snapshot consulted per attempt. Overlapping rules with different
 // strategies are rejected instead of resolved by order.

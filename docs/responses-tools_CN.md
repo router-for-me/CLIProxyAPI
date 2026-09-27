@@ -9,7 +9,7 @@
 目标：
 
 - 仅用核心功能完成客户端 `tool_search` 与 `custom` 桥接，无需安装动态库。
-- 默认不改变现有部署；只有显式匹配的路由进入新适配，其余保持当前行为。
+- 约定大于配置：未声明任何配置的路由同样按运行时已知信息得到正确策略。
 - 按实际上游路由（选定 provider、认证类别、真实上游模型、实际协议、
   endpoint 限定）解析策略，不从客户端 alias 推断能力。
 - 仅当公开模型 alias 背后全部可选路由都能完成客户端搜索闭环时，
@@ -21,11 +21,11 @@
 ## 配置
 
 顶层 `responses-tools` 是唯一配置源。`models.json`、模型 alias、插件 YAML
-中不存在第二套可覆盖策略。
+中不存在第二套可覆盖策略。所有字段都是可选的：整块缺省即按约定生效。
 
 ```yaml
 responses-tools:
-  enabled: false
+  enabled: true            # 紧急总闸；缺省或设为 false 即全部关闭
   limits:
     max-active-tool-bytes: 262144
     max-active-attempts: 512
@@ -34,7 +34,7 @@ responses-tools:
     max-schema-expansion-bytes: 65536
     max-schema-expansion-nodes: 10000
     max-depth: 64
-  routes:
+  routes:                   # 可选，用于覆盖约定默认
     - match:
         provider: "codex"
         auth-kind: "oauth"
@@ -48,11 +48,35 @@ responses-tools:
         local-refs: "preserve"
 ```
 
+## 默认行为
+
+常规场景无需任何配置。有效策略仅由上游格式推导：
+
+- 上游原生支持 Responses 协议（`openai-response`、`codex`）时，
+  `client-search: native`。不做任何改写，保留原生透传路径，包括实时
+  duplex steering。
+- 其余上游一律 `client-search: bridge`。bridge 在客户端真正声明
+  `tool_search` 之前完全不生效，不带该声明的请求原样通过。
+- 所有路由 `custom-tools: inherit`。核心从不自行推断 custom 处理方式。
+- `custom-grammar: reject`、`schema.local-refs: preserve`。有损策略一律不推断。
+
+有损策略保持手动开启，因为它们要么丢失能力，要么改写用户 schema：
+
+- `custom-tools: strip` 与 `custom-grammar: describe`
+- `schema.complete-search-required: true` 与 `schema.local-refs: inline`
+- `client-search: disabled`，用于单条路由关闭搜索
+
+`enabled: false` 是紧急总闸：不删除任何其他配置即可整体关闭。
+
+若已安装并启用 legacy `codex-tool-search-shim` 插件，核心会自动让位，
+因为安装插件本身就是明确的运维决策。此时显式设置 `enabled: true`
+属于配置错误。
+
 策略枚举：
 
-- `client-search`：`inherit`（旧行为）、`native`（真实原生 Responses 路由
-  透传）、`bridge`（function 翻译）、`disabled`（明确的客户端搜索请求返回
-  422，不静默丢弃）。
+- `client-search`：`inherit`（按该路由的约定）、`native`（真实原生
+  Responses 路由透传）、`bridge`（function 翻译）、`disabled`（明确的
+  客户端搜索请求返回 422，不静默丢弃）。
 - `custom-tools`：`inherit`、`native`、`function`（完整包装与恢复）、
   `strip`（有损：删除未来声明但保留可转换历史；强制调用被删除工具返回
   422）、`reject`（遇到 custom 契约直接 422）。

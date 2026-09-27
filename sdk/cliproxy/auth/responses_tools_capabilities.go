@@ -40,8 +40,8 @@ func (m *Manager) ClientSearchSupported(modelID string) *bool {
 		return nil
 	}
 	for _, route := range routes {
-		routePolicy, matched, err := responsestools.ResolvePolicy(policy, route)
-		if err != nil || !matched {
+		routePolicy, err := responsestools.EffectivePolicy(policy, route)
+		if err != nil {
 			no := false
 			return &no
 		}
@@ -127,7 +127,7 @@ func (m *Manager) ResponsesToolsEnabled() bool {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return state.enabled && len(state.policy.Routes) > 0
+	return state.enabled
 }
 
 // ResponsesToolsMayApplyToRoute reports whether a non-pass-through policy
@@ -148,6 +148,11 @@ func (m *Manager) ResponsesToolsMayApplyToRoute(provider, upstreamModel string) 
 	}
 	provider = strings.TrimSpace(provider)
 	upstreamModel = strings.TrimSpace(upstreamModel)
+	if len(state.policy.Routes) == 0 {
+		// The convention policy covers every route, but a native Responses
+		// upstream needs no rewriting and must keep its passthrough path.
+		return providerNeedsToolsBridge(provider)
+	}
 	for _, route := range state.policy.Routes {
 		if provider != "" && !strings.EqualFold(provider, strings.TrimSpace(route.Match.Provider)) {
 			continue
@@ -166,6 +171,19 @@ func (m *Manager) ResponsesToolsMayApplyToRoute(provider, upstreamModel string) 
 		}
 	}
 	return false
+}
+
+// providerNeedsToolsBridge reports whether a provider's upstream speaks the
+// Responses protocol natively. The answer mirrors the static provider mapping
+// in requestToFormat; executor-level resolvers can only widen support, so an
+// unknown provider is treated as needing the bridge.
+func providerNeedsToolsBridge(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "xai", "meta":
+		return false
+	default:
+		return true
+	}
 }
 
 // ResponsesToolsMayApplyToClientModel resolves the public model alias through
@@ -192,8 +210,8 @@ func (m *Manager) ResponsesToolsMayApplyToClientModel(modelID, provider, authID 
 		if provider != "" && !strings.EqualFold(provider, route.Provider) {
 			continue
 		}
-		routePolicy, matched, err := responsestools.ResolvePolicy(policy, route)
-		if err != nil || !matched {
+		routePolicy, err := responsestools.EffectivePolicy(policy, route)
+		if err != nil {
 			continue
 		}
 		if routePolicy.ClientSearch == responsestools.ClientSearchBridge ||
@@ -206,5 +224,7 @@ func (m *Manager) ResponsesToolsMayApplyToClientModel(modelID, provider, authID 
 			return true
 		}
 	}
+	// A native Responses route resolves to client-search native with no custom
+	// handling, which needs no rewriting and therefore no replay.
 	return false
 }

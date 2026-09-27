@@ -11,14 +11,21 @@ import (
 // client tool protocol handling. There is no second policy in models.json,
 // model aliases, or plugin YAML that can override it.
 type ResponsesToolsConfig struct {
-	// Enabled toggles core Responses tools adaptation. Default false preserves
-	// legacy behavior on every route until operators opt in per route.
-	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Enabled is the emergency gate for the whole feature. It is deliberately
+	// tri-state: an absent value keeps the convention defaults on, while an
+	// explicit false turns every route off without deleting configuration.
+	Enabled *bool `yaml:"enabled" json:"enabled"`
 	// Limits bounds retained protocol state. Zero values normalize to defaults.
 	Limits ResponsesToolsLimits `yaml:"limits" json:"limits"`
-	// Routes binds handling strategies to exact upstream routes. Empty routes
-	// with enabled:false is equivalent to the feature being off.
+	// Routes overrides the convention for exact upstream routes. An empty list
+	// keeps the convention defaults, which already cover every route.
 	Routes []ResponsesToolsRoute `yaml:"routes" json:"routes"`
+}
+
+// FeatureEnabled reports whether core Responses tools adaptation is active.
+// Convention over configuration: absent configuration means enabled.
+func (c ResponsesToolsConfig) FeatureEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 // ResponsesToolsLimits mirrors responsestools.Limits in kebab-case YAML.
@@ -58,8 +65,8 @@ type ResponsesToolsSchema struct {
 }
 
 // NormalizeResponsesToolsConfig applies documented defaults: limits fall back
-// to reference budgets, strategy fields default to inherit/preserve, and an
-// empty route list with enabled:false stays fully off.
+// to reference budgets and strategy fields default to inherit/preserve, which
+// resolve to the convention policy for the actual route.
 func (cfg *Config) NormalizeResponsesToolsConfig() {
 	if cfg == nil {
 		return
@@ -87,6 +94,15 @@ func (cfg *Config) NormalizeResponsesToolsConfig() {
 	if limits.MaxDepth <= 0 {
 		limits.MaxDepth = defaults.MaxDepth
 	}
+	// An installed codex-tool-search-shim is an explicit operator decision, so
+	// it outranks our convention: the core defers instead of double-converting
+	// the same request. An explicit enabled:true still reports the conflict.
+	if cfg.Plugins.Enabled && cfg.responsesToolsShimEnabled() {
+		if cfg.ResponsesTools.Enabled == nil {
+			off := false
+			cfg.ResponsesTools.Enabled = &off
+		}
+	}
 	for index := range cfg.ResponsesTools.Routes {
 		route := &cfg.ResponsesTools.Routes[index]
 		if strings.TrimSpace(route.ClientSearch) == "" {
@@ -104,6 +120,18 @@ func (cfg *Config) NormalizeResponsesToolsConfig() {
 	}
 }
 
+func (cfg *Config) responsesToolsShimEnabled() bool {
+	for id, instance := range cfg.Plugins.Configs {
+		if id != "codex-tool-search-shim" {
+			continue
+		}
+		if instance.Enabled != nil && *instance.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidateResponsesToolsConfig compiles the configured policy and rejects
 // unknown enums, illegal combinations, conflicting overlaps, and simultaneous
 // use with the legacy shim plugin.
@@ -111,23 +139,14 @@ func (cfg *Config) ValidateResponsesToolsConfig() error {
 	if cfg == nil {
 		return nil
 	}
-	policy, err := cfg.ResponsesTools.Compile()
-	if err != nil {
+	if _, err := cfg.ResponsesTools.Compile(); err != nil {
 		return err
 	}
-	if !cfg.ResponsesTools.Enabled || len(policy.Routes) == 0 {
+	if !cfg.ResponsesTools.FeatureEnabled() {
 		return nil
 	}
-	if cfg.Plugins.Enabled {
-		for id, instance := range cfg.Plugins.Configs {
-			if id != "codex-tool-search-shim" {
-				continue
-			}
-			enabled := instance.Enabled != nil && *instance.Enabled
-			if enabled {
-				return fmt.Errorf("responses-tools core and the codex-tool-search-shim plugin must not be enabled together; disable one of them")
-			}
-		}
+	if cfg.Plugins.Enabled && cfg.responsesToolsShimEnabled() {
+		return fmt.Errorf("responses-tools core and the codex-tool-search-shim plugin must not be enabled together; disable one of them")
 	}
 	return nil
 }
@@ -135,7 +154,7 @@ func (cfg *Config) ValidateResponsesToolsConfig() error {
 // Compile translates the config snapshot into the immutable core policy.
 func (c ResponsesToolsConfig) Compile() (responsestools.Policy, error) {
 	policy := responsestools.Policy{
-		Enabled: c.Enabled,
+		Enabled: c.FeatureEnabled(),
 		Limits: responsestools.Limits{
 			MaxActiveToolBytes:      c.Limits.MaxActiveToolBytes,
 			MaxActiveAttempts:       c.Limits.MaxActiveAttempts,

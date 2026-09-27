@@ -11,8 +11,8 @@ Goals:
 
 - Complete client `tool_search` and `custom` bridging with core features only,
   without installing any dynamic library.
-- Keep default deployments unchanged; only explicitly matched routes enter
-  the new adaptation, everything else keeps its current behavior.
+- Convention over configuration: routes that declare nothing still get a
+  correct policy, derived from what the runtime already knows about the call.
 - Resolve the strategy from the actual upstream route (selected provider,
   auth kind, real upstream model, actual protocol, endpoint scoping), never
   from client aliases.
@@ -26,11 +26,12 @@ content database.
 ## Configuration
 
 Top-level `responses-tools` is the only configuration source. There is no
-second policy in `models.json`, model aliases, or plugin YAML.
+second policy in `models.json`, model aliases, or plugin YAML. Every field is
+optional: an absent block already applies the convention defaults.
 
 ```yaml
 responses-tools:
-  enabled: false
+  enabled: true            # emergency gate; omit or set false to disable all
   limits:
     max-active-tool-bytes: 262144
     max-active-attempts: 512
@@ -39,7 +40,7 @@ responses-tools:
     max-schema-expansion-bytes: 65536
     max-schema-expansion-nodes: 10000
     max-depth: 64
-  routes:
+  routes:                   # optional overrides of the convention defaults
     - match:
         provider: "codex"
         auth-kind: "oauth"
@@ -53,10 +54,40 @@ responses-tools:
         local-refs: "preserve"
 ```
 
+## Defaults
+
+Nothing needs to be configured for the common case. The effective policy is
+derived from the upstream format alone:
+
+- `client-search: native` for upstreams that speak the Responses protocol
+  natively (`openai-response`, `codex`). Nothing is rewritten and the native
+  passthrough path — including live duplex steering — is preserved.
+- `client-search: bridge` for every other upstream. The bridge stays inert
+  until a client actually declares `tool_search`, so requests without it are
+  untouched.
+- `custom-tools: inherit` everywhere. The core never infers custom handling.
+- `custom-grammar: reject` and `schema.local-refs: preserve`. No lossy
+  strategy is ever inferred.
+
+Lossy strategies stay opt-in, because each of them either drops a capability
+or rewrites user schema:
+
+- `custom-tools: strip` and `custom-grammar: describe`
+- `schema.complete-search-required: true` and `schema.local-refs: inline`
+- `client-search: disabled`, to turn search off for one route
+
+`enabled: false` is the emergency gate: it turns the whole feature off without
+deleting any other configuration.
+
+If the legacy `codex-tool-search-shim` plugin is installed and enabled, the
+core defers to it automatically, because an installed plugin is an explicit
+operator decision. Setting `enabled: true` while the shim is enabled is a
+configuration error.
+
 Strategy enums:
 
-- `client-search`: `inherit` (legacy behavior), `native` (passthrough on a
-  true native Responses route), `bridge` (function translation),
+- `client-search`: `inherit` (follow the convention for this route), `native`
+  (passthrough on a true native Responses route), `bridge` (function translation),
   `disabled` (explicit client search requests fail with 422, never silently
   dropped).
 - `custom-tools`: `inherit`, `native`, `function` (full wrap and restore),

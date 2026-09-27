@@ -25,6 +25,100 @@ func TestCompilePolicyValid(t *testing.T) {
 	}
 }
 
+func TestConventionPolicyDerivesClientSearchFromUpstreamFormat(t *testing.T) {
+	cases := []struct {
+		format string
+		want   ClientSearchMode
+	}{
+		{"codex", ClientSearchNative},
+		{"openai-response", ClientSearchNative},
+		{"OpenAI-Response", ClientSearchNative},
+		{" openai-response ", ClientSearchNative},
+		{"openai", ClientSearchBridge},
+		{"gemini", ClientSearchBridge},
+		{"claude", ClientSearchBridge},
+		{"", ClientSearchBridge},
+	}
+	for _, testCase := range cases {
+		got := ConventionPolicy(Route{UpstreamFormat: testCase.format})
+		if got.ClientSearch != testCase.want {
+			t.Errorf("format %q: client-search = %q, want %q", testCase.format, got.ClientSearch, testCase.want)
+		}
+		if got.CustomTools != CustomToolsInherit {
+			t.Errorf("format %q: convention must never infer custom handling, got %q", testCase.format, got.CustomTools)
+		}
+		if got.CustomGrammar != CustomGrammarReject {
+			t.Errorf("format %q: convention must never degrade grammar, got %q", testCase.format, got.CustomGrammar)
+		}
+		if got.Schema.LocalRefs != LocalRefsPreserve || got.Schema.CompleteSearchRequired {
+			t.Errorf("format %q: convention must keep schema handling inert, got %+v", testCase.format, got.Schema)
+		}
+	}
+}
+
+func TestEffectivePolicyUsesConventionWhenNoRuleMatches(t *testing.T) {
+	policy := Policy{Enabled: true, Limits: DefaultLimits()}
+	route := Route{Provider: "gemini", AuthKind: "api-key", UpstreamModel: "m", UpstreamFormat: "gemini", BaseURL: "https://example.invalid/"}
+	got, err := EffectivePolicy(policy, route)
+	if err != nil {
+		t.Fatalf("effective policy: %v", err)
+	}
+	if got.ClientSearch != ClientSearchBridge {
+		t.Fatalf("unmatched route must follow the convention, got %q", got.ClientSearch)
+	}
+}
+
+func TestEffectivePolicyResolvesInheritToConvention(t *testing.T) {
+	route := Route{Provider: "gemini", AuthKind: "api-key", UpstreamModel: "m", UpstreamFormat: "gemini", BaseURL: "https://example.invalid/"}
+	rule := RoutePolicy{
+		Match:         RouteMatch{Provider: "gemini", AuthKind: "api-key", UpstreamModel: "m", UpstreamFormat: "gemini", BaseURL: "https://example.invalid/"},
+		ClientSearch:  ClientSearchInherit,
+		CustomTools:   CustomToolsInherit,
+		CustomGrammar: CustomGrammarReject,
+		Schema:        SchemaPolicy{LocalRefs: LocalRefsPreserve},
+	}
+	got, err := EffectivePolicy(Policy{Enabled: true, Limits: DefaultLimits(), Routes: []RoutePolicy{rule}}, route)
+	if err != nil {
+		t.Fatalf("effective policy: %v", err)
+	}
+	if got.ClientSearch != ClientSearchBridge {
+		t.Fatalf("inherit must resolve to the convention, got %q", got.ClientSearch)
+	}
+}
+
+func TestEffectivePolicyKeepsExplicitStrategies(t *testing.T) {
+	route := Route{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"}
+	rule := RoutePolicy{
+		Match:         RouteMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"},
+		ClientSearch:  ClientSearchDisabled,
+		CustomTools:   CustomToolsStrip,
+		CustomGrammar: CustomGrammarDescribe,
+		Schema:        SchemaPolicy{LocalRefs: LocalRefsInline},
+	}
+	got, err := EffectivePolicy(Policy{Enabled: true, Limits: DefaultLimits(), Routes: []RoutePolicy{rule}}, route)
+	if err != nil {
+		t.Fatalf("effective policy: %v", err)
+	}
+	if got.ClientSearch != ClientSearchDisabled || got.CustomTools != CustomToolsStrip ||
+		got.CustomGrammar != CustomGrammarDescribe || got.Schema.LocalRefs != LocalRefsInline {
+		t.Fatalf("explicit strategies must win over the convention: %+v", got)
+	}
+}
+
+func TestEffectivePolicySurfacesConflict(t *testing.T) {
+	policy := Policy{
+		Enabled: true,
+		Limits:  DefaultLimits(),
+		Routes: []RoutePolicy{
+			{Match: RouteMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"}, ClientSearch: ClientSearchBridge},
+			{Match: RouteMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"}, ClientSearch: ClientSearchDisabled},
+		},
+	}
+	if _, err := EffectivePolicy(policy, Route{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"}); err == nil {
+		t.Fatalf("conflicting rules must surface as an error")
+	}
+}
+
 func TestCompilePolicyRejectsUnknownEnum(t *testing.T) {
 	route := validRoute()
 	route.ClientSearch = "sometimes"

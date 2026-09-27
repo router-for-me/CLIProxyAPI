@@ -108,7 +108,8 @@ func responsesToolsTestManagerWithClientSearch(clientSearch string) *Manager {
 
 func responsesToolsTestManagerWithModes(clientSearch, customTools string) *Manager {
 	cfg := &internalconfig.Config{}
-	cfg.ResponsesTools.Enabled = true
+	enabled := true
+	cfg.ResponsesTools.Enabled = &enabled
 	cfg.ResponsesTools.Routes = []internalconfig.ResponsesToolsRoute{{
 		Match: internalconfig.ResponsesToolsMatch{
 			Provider: "codex", AuthKind: "oauth",
@@ -332,7 +333,8 @@ func TestResponsesToolsBridgeErrorStopsWithoutRotation(t *testing.T) {
 	mgr.RegisterExecutor(exec)
 	// disabled client-search rejects explicit search contracts at Prepare.
 	cfg := &internalconfig.Config{}
-	cfg.ResponsesTools.Enabled = true
+	enabled := true
+	cfg.ResponsesTools.Enabled = &enabled
 	cfg.ResponsesTools.Routes = []internalconfig.ResponsesToolsRoute{{
 		Match: internalconfig.ResponsesToolsMatch{
 			Provider: "codex", AuthKind: "oauth",
