@@ -37,7 +37,7 @@ const (
 	codexGPTImage25FlareModel    = "gpt-image-2.5-flare"
 	codexGPTImage25SunburstModel = "gpt-image-2.5-sunburst"
 	codexGPTImage25Model         = "gpt-image-2.5"
-	codexOpenAIImagesMainModel   = "gpt-5.4-mini"
+	codexOpenAIImagesMainModel   = "gpt-5.6-terra"
 )
 
 type codexOpenAIImagePreparedRequest struct {
@@ -376,6 +376,14 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 		return resp, err
 	}
 
+	validData, errValidate := validateDirectOpenAIImagesResponse(data)
+	if errValidate != nil {
+		helps.LogWithRequestID(ctx).Debugf("direct image validation error: %v", errValidate)
+		err = errValidate
+		return resp, err
+	}
+	data = validData
+
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	reporter.EnsurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
@@ -476,6 +484,80 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func validateDirectOpenAIImagesResponse(data []byte) ([]byte, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
+	}
+	if !gjson.ValidBytes(trimmed) {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "invalid upstream image response JSON"}
+	}
+	parsed := gjson.ParseBytes(trimmed)
+	if !parsed.IsObject() {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "upstream image response is not a JSON object"}
+	}
+	if errVal := parsed.Get("error"); errVal.Exists() && errVal.Type != gjson.Null {
+		return nil, newCodexStatusErr(http.StatusBadGateway, trimmed)
+	}
+
+	dataVal := parsed.Get("data")
+	if !dataVal.Exists() || !dataVal.IsArray() {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image data"}
+	}
+	rawItems := dataVal.Array()
+	if len(rawItems) == 0 {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "upstream returned empty image data"}
+	}
+
+	seenB64 := make(map[string]struct{})
+	seenURL := make(map[string]struct{})
+	usableEntries := make([][]byte, 0, len(rawItems))
+
+	for _, item := range rawItems {
+		if !item.IsObject() {
+			continue
+		}
+		b64 := strings.TrimSpace(item.Get("b64_json").String())
+		url := strings.TrimSpace(item.Get("url").String())
+		if b64 == "" && url == "" {
+			continue
+		}
+		isDup := false
+		if b64 != "" {
+			if _, seen := seenB64[b64]; seen {
+				isDup = true
+			}
+		}
+		if url != "" {
+			if _, seen := seenURL[url]; seen {
+				isDup = true
+			}
+		}
+		if isDup {
+			continue
+		}
+		if b64 != "" {
+			seenB64[b64] = struct{}{}
+		}
+		if url != "" {
+			seenURL[url] = struct{}{}
+		}
+		usableEntries = append(usableEntries, []byte(item.Raw))
+	}
+
+	if len(usableEntries) == 0 {
+		return nil, statusErr{code: http.StatusBadGateway, msg: "upstream returned empty or unusable image data"}
+	}
+	if len(usableEntries) == len(rawItems) {
+		return data, nil
+	}
+	cleaned, errSet := sjson.SetRawBytes(trimmed, "data", helps.JoinRawJSONArray(usableEntries))
+	if errSet != nil {
+		return nil, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("clean image data failed: %v", errSet)}
+	}
+	return cleaned, nil
 }
 
 func codexDirectOpenAIImageEndpoint(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
@@ -649,6 +731,9 @@ func codexDirectOpenAIImageModel(req cliproxyexecutor.Request) string {
 	for _, model := range []string{gjson.GetBytes(req.Payload, "model").String(), req.Model} {
 		baseModel := codexOpenAIImageBaseModel(model)
 		if codexIsDirectOpenAIImageModel(baseModel) {
+			if baseModel == codexGPTImage25Model {
+				return codexGPTImage25FlareModel
+			}
 			return baseModel
 		}
 	}
@@ -859,6 +944,9 @@ func codexOpenAIImageToolModel(requestModel string, routeModel string) string {
 	}
 	if model == "" {
 		model = codexDefaultImageToolModel
+	}
+	if codexOpenAIImageBaseModel(model) == codexGPTImage25Model {
+		return codexGPTImage25FlareModel
 	}
 	return model
 }

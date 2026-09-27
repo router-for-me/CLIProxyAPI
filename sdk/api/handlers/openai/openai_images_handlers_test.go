@@ -585,3 +585,20 @@ func TestSSEFrameAccumulatorKeepsMultipleFramesDistinct(t *testing.T) {
 		t.Fatalf("frames were overwritten during buffer compaction: %q", frames)
 	}
 }
+
+func TestOpenAIImagesBridgeDefaultModel(t *testing.T) {
+	if defaultImagesMainModel != "gpt-5.6-terra" {
+		t.Fatalf("defaultImagesMainModel = %q, want %q", defaultImagesMainModel, "gpt-5.6-terra")
+	}
+
+	req := buildImagesResponsesRequest("a sunset", nil, nil)
+	if got := gjson.GetBytes(req, "model").String(); got != "gpt-5.6-terra" {
+		t.Fatalf("buildImagesResponsesRequest model = %q, want %q", got, "gpt-5.6-terra")
+	}
+
+	toolJSON := []byte(`{"model":"custom-prefix/gpt-image-2"}`)
+	reqWithPrefix := buildImagesResponsesRequest("a sunset", nil, toolJSON)
+	if got := gjson.GetBytes(reqWithPrefix, "model").String(); got != "custom-prefix/gpt-5.6-terra" {
+		t.Fatalf("buildImagesResponsesRequest with prefix model = %q, want %q", got, "custom-prefix/gpt-5.6-terra")
+	}
+}

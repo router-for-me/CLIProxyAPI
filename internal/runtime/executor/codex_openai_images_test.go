@@ -361,8 +361,12 @@ func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
 			if gotPath != "/images/generations" {
 				t.Fatalf("path = %q, want /images/generations", gotPath)
 			}
-			if got := gjson.GetBytes(gotBody, "model").String(); got != baseModel {
-				t.Fatalf("model = %q, want %s; body=%s", got, baseModel, string(gotBody))
+			wantModel := baseModel
+			if wantModel == "gpt-image-2.5" {
+				wantModel = "gpt-image-2.5-flare"
+			}
+			if got := gjson.GetBytes(gotBody, "model").String(); got != wantModel {
+				t.Fatalf("model = %q, want %s; body=%s", got, wantModel, string(gotBody))
 			}
 		})
 
@@ -394,8 +398,12 @@ func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
 			if gotPath != "/images/edits" {
 				t.Fatalf("path = %q, want /images/edits", gotPath)
 			}
-			if got := gjson.GetBytes(gotBody, "model").String(); got != baseModel {
-				t.Fatalf("model = %q, want %s; body=%s", got, baseModel, string(gotBody))
+			wantModel := baseModel
+			if wantModel == "gpt-image-2.5" {
+				wantModel = "gpt-image-2.5-flare"
+			}
+			if got := gjson.GetBytes(gotBody, "model").String(); got != wantModel {
+				t.Fatalf("model = %q, want %s; body=%s", got, wantModel, string(gotBody))
 			}
 		})
 
@@ -432,8 +440,222 @@ func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
 			if gotPath != "/images/generations" {
 				t.Fatalf("path = %q, want /images/generations", gotPath)
 			}
-			if got := gjson.GetBytes(gotBody, "model").String(); got != baseModel {
-				t.Fatalf("model = %q, want %s; body=%s", got, baseModel, string(gotBody))
+			wantModel := baseModel
+			if wantModel == "gpt-image-2.5" {
+				wantModel = "gpt-image-2.5-flare"
+			}
+			if got := gjson.GetBytes(gotBody, "model").String(); got != wantModel {
+				t.Fatalf("model = %q, want %s; body=%s", got, wantModel, string(gotBody))
+			}
+		})
+	}
+}
+
+func TestCodexOpenAIImagesBridgeDefaultModel(t *testing.T) {
+	if codexOpenAIImagesMainModel != "gpt-5.6-terra" {
+		t.Fatalf("codexOpenAIImagesMainModel = %q, want %q", codexOpenAIImagesMainModel, "gpt-5.6-terra")
+	}
+
+	execDefault := NewCodexExecutor(&config.Config{})
+	if got := execDefault.resolveGPTImage2BaseModel(); got != "gpt-5.6-terra" {
+		t.Fatalf("resolveGPTImage2BaseModel() = %q, want %q", got, "gpt-5.6-terra")
+	}
+
+	var execNil *CodexExecutor
+	if got := execNil.resolveGPTImage2BaseModel(); got != "gpt-5.6-terra" {
+		t.Fatalf("nil executor resolveGPTImage2BaseModel() = %q, want %q", got, "gpt-5.6-terra")
+	}
+
+	cfgCustom := &config.Config{}
+	cfgCustom.GPTImage2BaseModel = "gpt-custom-image"
+	execCustom := NewCodexExecutor(cfgCustom)
+	if got := execCustom.resolveGPTImage2BaseModel(); got != "gpt-custom-image" {
+		t.Fatalf("custom resolveGPTImage2BaseModel() = %q, want %q", got, "gpt-custom-image")
+	}
+
+	cfgInvalid := &config.Config{}
+	cfgInvalid.GPTImage2BaseModel = "invalid-model"
+	execInvalid := NewCodexExecutor(cfgInvalid)
+	if got := execInvalid.resolveGPTImage2BaseModel(); got != "gpt-5.6-terra" {
+		t.Fatalf("invalid resolveGPTImage2BaseModel() = %q, want %q", got, "gpt-5.6-terra")
+	}
+}
+
+func TestValidateDirectOpenAIImagesResponse(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantErr   bool
+		wantEqual bool
+		wantCount int
+	}{
+		{
+			name:    "empty body",
+			body:    "",
+			wantErr: true,
+		},
+		{
+			name:    "whitespace only",
+			body:    "   \n\t  ",
+			wantErr: true,
+		},
+		{
+			name:    "invalid json",
+			body:    "{invalid",
+			wantErr: true,
+		},
+		{
+			name:    "json array instead of object",
+			body:    `[{"b64_json":"AA=="}]`,
+			wantErr: true,
+		},
+		{
+			name:    "top-level error envelope on 200",
+			body:    `{"error":{"message":"bad request","type":"invalid_request_error"}}`,
+			wantErr: true,
+		},
+		{
+			name:    "top-level error string",
+			body:    `{"error":"failed"}`,
+			wantErr: true,
+		},
+		{
+			name:    "missing data field",
+			body:    `{"created":1713833628}`,
+			wantErr: true,
+		},
+		{
+			name:    "data field not array",
+			body:    `{"created":1713833628,"data":"not-an-array"}`,
+			wantErr: true,
+		},
+		{
+			name:    "empty data array",
+			body:    `{"created":1713833628,"data":[]}`,
+			wantErr: true,
+		},
+		{
+			name:    "unusable entries only (no b64 and no url)",
+			body:    `{"created":1713833628,"data":[{"revised_prompt":"hello"},{"index":0}]}`,
+			wantErr: true,
+		},
+		{
+			name:      "valid data with b64_json passes byte-equal",
+			body:      `{"created":1713833628,"data":[{"b64_json":"AA==","revised_prompt":"hello"}]}`,
+			wantErr:   false,
+			wantEqual: true,
+		},
+		{
+			name:      "valid data with url passes byte-equal",
+			body:      `{"created":1713833628,"data":[{"url":"https://example.com/img.png"}]}`,
+			wantErr:   false,
+			wantEqual: true,
+		},
+		{
+			name:      "valid data with multiple distinct entries",
+			body:      `{"created":1713833628,"data":[{"b64_json":"AA=="},{"url":"https://example.com/img.png"}]}`,
+			wantErr:   false,
+			wantEqual: true,
+		},
+		{
+			name:      "duplicate b64 carrier dropped when >=1 remains",
+			body:      `{"created":1713833628,"data":[{"b64_json":"AA=="},{"b64_json":"AA=="}]}`,
+			wantErr:   false,
+			wantCount: 1,
+		},
+		{
+			name:      "duplicate url carrier dropped when >=1 remains",
+			body:      `{"created":1713833628,"data":[{"url":"https://example.com/1.png"},{"url":"https://example.com/1.png"}]}`,
+			wantErr:   false,
+			wantCount: 1,
+		},
+		{
+			name:      "unusable entry dropped when >=1 usable remains",
+			body:      `{"created":1713833628,"data":[{"revised_prompt":"unusable"},{"b64_json":"AA=="}]}`,
+			wantErr:   false,
+			wantCount: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte(tc.body)
+			got, err := validateDirectOpenAIImagesResponse(input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil; output: %s", string(got))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantEqual && !bytes.Equal(got, input) {
+				t.Fatalf("expected byte-equal response; got %s, want %s", string(got), string(input))
+			}
+			if tc.wantCount > 0 {
+				dataArr := gjson.GetBytes(got, "data").Array()
+				if len(dataArr) != tc.wantCount {
+					t.Fatalf("expected %d entries, got %d; body: %s", tc.wantCount, len(dataArr), string(got))
+				}
+			}
+		})
+	}
+}
+
+func TestCodexExecutorDirectOpenAIImageValidationIntegration(t *testing.T) {
+	cases := []struct {
+		name         string
+		upstreamBody string
+		wantErr      bool
+	}{
+		{
+			name:         "empty data array returns error",
+			upstreamBody: `{"created":1713833628,"data":[]}`,
+			wantErr:      true,
+		},
+		{
+			name:         "embedded error envelope returns error",
+			upstreamBody: `{"error":{"message":"content policy violation","type":"policy_error"}}`,
+			wantErr:      true,
+		},
+		{
+			name:         "unusable entries return error",
+			upstreamBody: `{"created":1713833628,"data":[{"revised_prompt":"something"}]}`,
+			wantErr:      true,
+		},
+		{
+			name:         "valid data returns success",
+			upstreamBody: `{"created":1713833628,"data":[{"b64_json":"AA=="}],"usage":{"total_tokens":10}}`,
+			wantErr:      false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.upstreamBody))
+			}))
+			defer server.Close()
+
+			executor := NewCodexExecutor(&config.Config{})
+			resp, err := executor.Execute(context.Background(), newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
+				Model:   "gpt-image-2",
+				Payload: []byte(`{"model":"gpt-image-2","prompt":"draw something"}`),
+			}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, false))
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got response: %s", string(resp.Payload))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !bytes.Equal(resp.Payload, []byte(tc.upstreamBody)) {
+				t.Fatalf("expected byte-equal payload; got %s, want %s", string(resp.Payload), tc.upstreamBody)
 			}
 		})
 	}
