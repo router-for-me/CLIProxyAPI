@@ -132,16 +132,11 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 			cache.ID = strings.TrimSpace(promptCacheKey.String())
 		}
 		if cache.ID == "" {
-			cache.ID = helps.ProviderSessionUUID("codex", req.Metadata)
-		}
-		if cache.ID == "" {
-			if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
-				cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
-			}
+			cache.ID = codexDefaultPromptCacheID(ctx, e.cfg, req, true)
 		}
 	}
 	if cache.ID == "" {
-		cache.ID = helps.ProviderSessionUUID("codex", req.Metadata)
+		cache.ID = codexDefaultPromptCacheID(ctx, e.cfg, req, false)
 	}
 
 	if cache.ID != "" {
@@ -161,6 +156,28 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		httpReq.Header.Set("Session-Id", cache.ID)
 	}
 	return httpReq, rawJSON, identityState, nil
+}
+
+// codexDefaultPromptCacheID picks the prompt_cache_key for a request that carries no client key.
+// With codex.prompt-cache-scope: api-key, an execution session still wins, then the client API key
+// gives one stable key per caller. Otherwise the execution session or derived conversation identity
+// is used, and apiKeyFallback keeps the per-API-key key as the last resort.
+func codexDefaultPromptCacheID(ctx context.Context, cfg *config.Config, req cliproxyexecutor.Request, apiKeyFallback bool) string {
+	if cfg != nil && config.IsPromptCacheScopeAPIKey(cfg.Codex.PromptCacheScope) {
+		if sessionID := helps.ExecutionSessionUUID("codex", req.Metadata); sessionID != "" {
+			return sessionID
+		}
+		if keyID := helps.APIKeyPromptCacheUUID(ctx, "codex"); keyID != "" {
+			return keyID
+		}
+	}
+	if sessionID := helps.ProviderSessionUUID("codex", req.Metadata); sessionID != "" {
+		return sessionID
+	}
+	if apiKeyFallback {
+		return helps.APIKeyPromptCacheUUID(ctx, "codex")
+	}
+	return ""
 }
 
 func applyCodexIdentityConfuseBody(cfg *config.Config, auth *cliproxyauth.Auth, userPayload []byte, rawJSON []byte) ([]byte, codexIdentityConfuseState) {

@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"strconv"
@@ -28,12 +29,32 @@ func DerivedSessionUUID(provider string, metadataSets ...map[string]any) string 
 
 // ProviderSessionUUID prefers a long-lived execution session and falls back to the derived identity.
 func ProviderSessionUUID(provider string, metadataSets ...map[string]any) string {
+	if sessionID := ExecutionSessionUUID(provider, metadataSets...); sessionID != "" {
+		return sessionID
+	}
+	return DerivedSessionUUID(provider, metadataSets...)
+}
+
+// ExecutionSessionUUID maps a long-lived execution session to a provider-scoped stable UUID.
+// It returns "" when no execution session is present.
+func ExecutionSessionUUID(provider string, metadataSets ...map[string]any) string {
 	for _, metadata := range metadataSets {
 		if executionID := metadataString(metadata, cliproxyexecutor.ExecutionSessionMetadataKey); executionID != "" {
 			return stableProviderSessionUUID(provider, "execution-session", executionID)
 		}
 	}
-	return DerivedSessionUUID(provider, metadataSets...)
+	return ""
+}
+
+// APIKeyPromptCacheUUID maps the client API key on ctx to a provider-scoped stable UUID.
+// It returns "" when the request carries no client API key.
+func APIKeyPromptCacheUUID(ctx context.Context, provider string) string {
+	clientKey := strings.TrimSpace(APIKeyFromContext(ctx))
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if clientKey == "" || provider == "" {
+		return ""
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:"+provider+":prompt-cache:"+clientKey)).String()
 }
 
 func stableProviderSessionUUID(provider string, kind string, identityValue string) string {
