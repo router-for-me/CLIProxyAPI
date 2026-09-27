@@ -89,6 +89,9 @@ type apiCallResponse struct {
 //   - header: Upstream response headers.
 //   - body: Upstream response body as string.
 //
+// Successful credential-scoped Codex usage queries also reconcile explicitly
+// confirmed usage-limit recovery with local cooldown and routing state.
+//
 // Example:
 //
 //	curl -sS -X POST "http://127.0.0.1:8317/v0/management/api-call" \
@@ -231,6 +234,8 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
+
+	h.reconcileCodexQuotaRecovery(c.Request.Context(), auth, req, resp, respBody)
 
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
