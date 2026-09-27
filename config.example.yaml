@@ -120,9 +120,7 @@ discovery:
 # inert until a client actually declares tool_search, so requests without it are
 # untouched. Lossy strategies (custom-tools strip/function, custom-grammar
 # describe, schema inline, complete-search-required) stay opt-in below. Each
-# route binds strategies to one exact upstream route (no wildcards). If the
-# legacy codex-tool-search-shim plugin is installed and enabled, the core defers
-# to it automatically; set enabled: true alongside it only after disabling one.
+# route binds strategies to one exact upstream route (no wildcards).
 #responses-tools:
 #  enabled: true # emergency gate; set false to turn the feature off entirely
 #  limits:

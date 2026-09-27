@@ -680,13 +680,8 @@ func TestResponsesToolsIntegrationWebsocketReplay(t *testing.T) {
 	}
 }
 
-func responsesToolsMigrationConfig(model string, coreEnabled, shimEnabled bool) *config.Config {
+func responsesToolsToggleConfig(model string, coreEnabled bool) *config.Config {
 	cfg := &config.Config{}
-	shimInstanceEnabled := shimEnabled
-	cfg.Plugins.Enabled = true
-	cfg.Plugins.Configs = map[string]config.PluginInstanceConfig{
-		"codex-tool-search-shim": {Enabled: &shimInstanceEnabled},
-	}
 	if coreEnabled {
 		enabled := true
 		cfg.ResponsesTools.Enabled = &enabled
@@ -701,72 +696,72 @@ func responsesToolsMigrationConfig(model string, coreEnabled, shimEnabled bool) 
 	return cfg
 }
 
-// TestResponsesToolsIntegrationMigrationToggleAndRollback simulates the
-// isolated cutover: legacy shim only, core only, then rollback to legacy.
-// The shim config is metadata only in this test; no plugin or dylib is loaded.
-func TestResponsesToolsIntegrationMigrationToggleAndRollback(t *testing.T) {
+// TestResponsesToolsIntegrationToggleAndRollback drives the emergency gate
+// end to end: an explicit bridge route restores the client search call, and
+// dropping back to the convention policy stops rewriting the declaration.
+func TestResponsesToolsIntegrationToggleAndRollback(t *testing.T) {
 	const model = "gpt-5.6-sol"
 	h, _ := newResponsesToolsIntegrationHarnessWithExpectations(t, model, []string{
-		responsesToolsSSECompleted("legacy_1", "tool_search", `{"query":"x"}`),
+		responsesToolsSSECompleted("passthrough_1", "tool_search", `{"query":"x"}`),
 		responsesToolsSSECompleted("core_1", "tool_search", `{"query":"x"}`),
-		responsesToolsSSECompleted("legacy_2", "tool_search", `{"query":"x"}`),
+		responsesToolsSSECompleted("passthrough_2", "tool_search", `{"query":"x"}`),
 	}, "inherit", []bool{false, true, false})
 
-	shimOnly := responsesToolsMigrationConfig(model, false, true)
-	if err := shimOnly.ValidateResponsesToolsConfig(); err != nil {
-		t.Fatalf("validate shim-only baseline: %v", err)
+	convention := responsesToolsToggleConfig(model, false)
+	if err := convention.ValidateResponsesToolsConfig(); err != nil {
+		t.Fatalf("validate convention baseline: %v", err)
 	}
-	h.manager.SetConfig(shimOnly)
+	h.manager.SetConfig(convention)
 
 	postSearch := func(t *testing.T, callID string) map[string]any {
 		t.Helper()
 		body := fmt.Sprintf(`{"model":%q,"tools":[{"type":"tool_search"}],"input":[{"type":"message","role":"user","content":"find a tool"}]}`, model)
 		recorder := h.postResponses(t, body)
 		if recorder.Code != http.StatusOK {
-			t.Fatalf("migration turn %s status=%d body=%s", callID, recorder.Code, recorder.Body.String())
+			t.Fatalf("toggle turn %s status=%d body=%s", callID, recorder.Code, recorder.Body.String())
 		}
 		var decoded map[string]any
 		if err := json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
-			t.Fatalf("migration turn %s decode: %v", callID, err)
+			t.Fatalf("toggle turn %s decode: %v", callID, err)
 		}
 		output := completedOutputItems(t, decoded)
 		item, _ := output[0].(map[string]any)
 		if item["call_id"] != callID {
-			t.Fatalf("migration turn call_id=%v, want %s: %#v", item["call_id"], callID, item)
+			t.Fatalf("toggle turn call_id=%v, want %s: %#v", item["call_id"], callID, item)
 		}
 		return item
 	}
 
-	legacyBefore := postSearch(t, "legacy_1")
-	if legacyBefore["type"] != "function_call" {
-		t.Fatalf("shim-only route should retain legacy manager output, got %#v", legacyBefore)
+	before := postSearch(t, "passthrough_1")
+	if before["type"] != "function_call" {
+		t.Fatalf("a native route must keep the upstream function call, got %#v", before)
 	}
 
-	coreOnly := responsesToolsMigrationConfig(model, true, false)
-	if err := coreOnly.ValidateResponsesToolsConfig(); err != nil {
-		t.Fatalf("validate core-only cutover: %v", err)
+	bridged := responsesToolsToggleConfig(model, true)
+	if err := bridged.ValidateResponsesToolsConfig(); err != nil {
+		t.Fatalf("validate bridge cutover: %v", err)
 	}
-	h.manager.SetConfig(coreOnly)
+	h.manager.SetConfig(bridged)
 	coreCall := postSearch(t, "core_1")
 	if coreCall["type"] != "tool_search_call" {
-		t.Fatalf("core-only route did not restore client search: %#v", coreCall)
+		t.Fatalf("bridged route did not restore client search: %#v", coreCall)
 	}
 
-	rollback := responsesToolsMigrationConfig(model, false, true)
+	rollback := responsesToolsToggleConfig(model, false)
 	if err := rollback.ValidateResponsesToolsConfig(); err != nil {
 		t.Fatalf("validate rollback config: %v", err)
 	}
 	h.manager.SetConfig(rollback)
-	legacyAfter := postSearch(t, "legacy_2")
-	if legacyAfter["type"] != "function_call" {
-		t.Fatalf("rollback should restore legacy manager behavior, got %#v", legacyAfter)
+	after := postSearch(t, "passthrough_2")
+	if after["type"] != "function_call" {
+		t.Fatalf("rollback must restore the convention behavior, got %#v", after)
 	}
 
 	h.mu.Lock()
 	wireBodies := append([]string(nil), h.wireBodies...)
 	h.mu.Unlock()
 	if len(wireBodies) != 3 {
-		t.Fatalf("migration drill upstream calls=%d, want 3", len(wireBodies))
+		t.Fatalf("toggle drill upstream calls=%d, want 3", len(wireBodies))
 	}
 }
 

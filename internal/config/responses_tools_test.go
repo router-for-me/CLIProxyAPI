@@ -42,22 +42,6 @@ func TestResponsesToolsDefaultsFollowConvention(t *testing.T) {
 	}
 }
 
-func TestResponsesToolsDefaultsDefersToLegacyShim(t *testing.T) {
-	shim := true
-	cfg := &Config{}
-	cfg.Plugins.Enabled = true
-	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
-		"codex-tool-search-shim": {Enabled: &shim},
-	}
-	cfg.NormalizeResponsesToolsConfig()
-	if cfg.ResponsesTools.FeatureEnabled() {
-		t.Fatalf("an installed shim must win over the convention default")
-	}
-	if err := cfg.ValidateResponsesToolsConfig(); err != nil {
-		t.Fatalf("deference must validate: %v", err)
-	}
-}
-
 func TestResponsesToolsInvalidEnumRejected(t *testing.T) {
 	cfg := &Config{}
 	cfg.ResponsesTools.Enabled = boolPointer(true)
@@ -83,31 +67,6 @@ func TestResponsesToolsOverlapRejected(t *testing.T) {
 	cfg.NormalizeResponsesToolsConfig()
 	if err := cfg.ValidateResponsesToolsConfig(); err == nil {
 		t.Fatalf("expected overlap rejection")
-	}
-}
-
-func TestResponsesToolsLegacyShimMutuallyExclusive(t *testing.T) {
-	enabled := true
-	cfg := &Config{}
-	cfg.ResponsesTools.Enabled = boolPointer(true)
-	cfg.ResponsesTools.Routes = []ResponsesToolsRoute{{
-		Match:        ResponsesToolsMatch{Provider: "codex", AuthKind: "oauth", UpstreamModel: "m", UpstreamFormat: "codex"},
-		ClientSearch: "bridge",
-		CustomTools:  "inherit",
-	}}
-	cfg.Plugins.Enabled = true
-	cfg.Plugins.Configs = map[string]PluginInstanceConfig{
-		"codex-tool-search-shim": {Enabled: &enabled},
-	}
-	cfg.NormalizeResponsesToolsConfig()
-	cfg.NormalizePluginsConfig()
-	if err := cfg.ValidateResponsesToolsConfig(); err == nil {
-		t.Fatalf("expected shim mutual exclusion")
-	}
-	disabled := false
-	cfg.Plugins.Configs["codex-tool-search-shim"] = PluginInstanceConfig{Enabled: &disabled}
-	if err := cfg.ValidateResponsesToolsConfig(); err != nil {
-		t.Fatalf("disabled shim must pass: %v", err)
 	}
 }
 

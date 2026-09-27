@@ -1,9 +1,9 @@
 # Responses Client Tool Protocol (Core)
 
 This document describes the core handling of the Responses client tool
-protocol: client-executed `tool_search` discovery and `custom` tools. It is
-the formal migration target for the legacy `codex-tool-search-shim` example
-plugin: the plugin leaves the production path and stays as reference only.
+protocol: client-executed `tool_search` discovery and `custom` tools. The
+handling lives entirely in the core and requires no plugin or dynamic
+library.
 
 ## Goals and non-goals
 
@@ -79,11 +79,6 @@ or rewrites user schema:
 `enabled: false` is the emergency gate: it turns the whole feature off without
 deleting any other configuration.
 
-If the legacy `codex-tool-search-shim` plugin is installed and enabled, the
-core defers to it automatically, because an installed plugin is an explicit
-operator decision. Setting `enabled: true` while the shim is enabled is a
-configuration error.
-
 Strategy enums:
 
 - `client-search`: `inherit` (follow the convention for this route), `native`
@@ -116,33 +111,22 @@ Match rules:
 - Limits must be positive with reasonable upper bounds; negative values never
   mean unlimited.
 
-## Migration and rollback
+## Rollback
 
-1. Keep a backup of the working configuration.
-2. In a single configuration change, disable the legacy shim
-   (`plugins.configs.codex-tool-search-shim.enabled: false`) and enable the
-   core with exact routes (`responses-tools.enabled: true` plus routes).
-   Enabling both at once is rejected with an explicit error.
-3. Wait for active requests to drain before switching instances, so no
-   request changes protocol semantics mid-flight.
-4. Roll back by reversing the same switch with the kept backup.
+Set `responses-tools.enabled: false`. No other configuration is affected, and
+the convention policy stops applying on the next request. When changing route
+rules, wait for active requests to drain so no request changes protocol
+semantics mid-flight.
 
-Legacy plugin mapping:
+## Budgets
 
-| Legacy plugin setting | Core equivalent |
+| Setting | Meaning |
 |---|---|
-| `bridge_models` | Derived from effective client-search capability across real routes, not a model allowlist |
-| implicit translation-upstream bridge | explicit route plus `client-search: bridge` |
-| `bridge_native_models` | explicit native route plus `client-search: bridge` |
-| `strict_responses_models` wildcard | expanded to concrete routes with matching schema policy; wildcards are not migrated mechanically |
-| `strip_custom_tools: true` | `custom-tools: strip` (never auto-upgraded to `function`) |
-| `strip_custom_tools: false` | `custom-tools: inherit` (or `native`) |
-| `max_active_tool_bytes` | `limits.max-active-tool-bytes` |
-| `max_request_states` | `limits.max-active-attempts` (Manager scope) |
-| `max_state_bytes` | shared Manager budget, no longer a plugin map |
-| schema budgets | same kebab-case limits |
-| `extra_source_formats` | known-protocol registry resolution; unknown aliases are never treated as Responses |
-| `diagnostics_log_path` / probes | structured diagnostic outlets, redacted; no arbitrary file writes |
+| `limits.max-active-tool-bytes` | Declared tool bytes retained per attempt |
+| `limits.max-active-attempts` | Concurrent retained attempts, Manager scope |
+| `limits.max-state-bytes` | Shared Manager state budget |
+| `limits.max-attempt-bytes` | Per-attempt state ceiling |
+| `limits.max-schema-expansion-*` | Schema rewriting ceilings |
 
 Diagnostics carry only route/policy generation, tool kind counts,
 declaration bytes, used budget, and fixed reason codes. Arguments, patches,

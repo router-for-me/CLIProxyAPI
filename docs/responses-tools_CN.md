@@ -1,8 +1,7 @@
 # Responses 客户端工具协议（核心）
 
 本文描述核心对 Responses 客户端工具协议的处理：客户端执行的 `tool_search`
-发现流程与 `custom` 工具。它是 legacy `codex-tool-search-shim` 示例插件的
-正式迁移目标：插件退出正式运行路径，仅保留为参考实现。
+发现流程与 `custom` 工具。处理完全位于核心，无需任何插件或动态库。
 
 ## 目标与非目标
 
@@ -68,10 +67,6 @@ responses-tools:
 
 `enabled: false` 是紧急总闸：不删除任何其他配置即可整体关闭。
 
-若已安装并启用 legacy `codex-tool-search-shim` 插件，核心会自动让位，
-因为安装插件本身就是明确的运维决策。此时显式设置 `enabled: true`
-属于配置错误。
-
 策略枚举：
 
 - `client-search`：`inherit`（按该路由的约定）、`native`（真实原生
@@ -97,19 +92,25 @@ responses-tools:
   不做静默 first-match。
 - 限额必须为正且有合理上界；负数不表示无限。
 
-## 迁移与回滚
+## 回滚
 
-1. 备份当前可用配置。
-2. 在同一次配置变更中关闭旧 shim
-   （`plugins.configs.codex-tool-search-shim.enabled: false`），并开启核心
-   精确路由（`responses-tools.enabled: true` 加 routes）。两者同时启用会被
-   明确拒绝。
-3. 等待活跃请求排空后再切换实例，避免单个请求中途更换协议语义。
-4. 用保留的备份反向切换即回滚。
+设置 `responses-tools.enabled: false`。其余配置不受影响，约定策略在下一次
+请求起停止生效。修改路由规则时，等待活跃请求排空后再切换，避免单个请求
+中途更换协议语义。
 
-旧插件映射关系见英文文档中的对照表。诊断只携带路由/策略 generation、
-工具种类计数、声明字节、已用预算和固定原因码；不记录 arguments、patch、
-grammar 正文、prompt、结果、令牌或凭据。
+## 预算
+
+| 配置 | 含义 |
+|---|---|
+| `limits.max-active-tool-bytes` | 单次尝试保留的工具声明字节 |
+| `limits.max-active-attempts` | Manager 范围内并发保留的尝试数 |
+| `limits.max-state-bytes` | Manager 共享状态预算 |
+| `limits.max-attempt-bytes` | 单次尝试状态上限 |
+| `limits.max-schema-expansion-*` | schema 改写上限 |
+
+诊断只携带路由/策略 generation、工具种类计数、声明字节、已用预算和
+固定原因码；不记录 arguments、patch、grammar 正文、prompt、结果、令牌或
+凭据。
 
 ## 边界
 

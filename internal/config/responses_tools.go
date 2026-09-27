@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/responsestools"
@@ -94,15 +93,6 @@ func (cfg *Config) NormalizeResponsesToolsConfig() {
 	if limits.MaxDepth <= 0 {
 		limits.MaxDepth = defaults.MaxDepth
 	}
-	// An installed codex-tool-search-shim is an explicit operator decision, so
-	// it outranks our convention: the core defers instead of double-converting
-	// the same request. An explicit enabled:true still reports the conflict.
-	if cfg.Plugins.Enabled && cfg.responsesToolsShimEnabled() {
-		if cfg.ResponsesTools.Enabled == nil {
-			off := false
-			cfg.ResponsesTools.Enabled = &off
-		}
-	}
 	for index := range cfg.ResponsesTools.Routes {
 		route := &cfg.ResponsesTools.Routes[index]
 		if strings.TrimSpace(route.ClientSearch) == "" {
@@ -120,33 +110,14 @@ func (cfg *Config) NormalizeResponsesToolsConfig() {
 	}
 }
 
-func (cfg *Config) responsesToolsShimEnabled() bool {
-	for id, instance := range cfg.Plugins.Configs {
-		if id != "codex-tool-search-shim" {
-			continue
-		}
-		if instance.Enabled != nil && *instance.Enabled {
-			return true
-		}
-	}
-	return false
-}
-
 // ValidateResponsesToolsConfig compiles the configured policy and rejects
-// unknown enums, illegal combinations, conflicting overlaps, and simultaneous
-// use with the legacy shim plugin.
+// unknown enums, illegal combinations, and conflicting overlaps.
 func (cfg *Config) ValidateResponsesToolsConfig() error {
 	if cfg == nil {
 		return nil
 	}
 	if _, err := cfg.ResponsesTools.Compile(); err != nil {
 		return err
-	}
-	if !cfg.ResponsesTools.FeatureEnabled() {
-		return nil
-	}
-	if cfg.Plugins.Enabled && cfg.responsesToolsShimEnabled() {
-		return fmt.Errorf("responses-tools core and the codex-tool-search-shim plugin must not be enabled together; disable one of them")
 	}
 	return nil
 }
