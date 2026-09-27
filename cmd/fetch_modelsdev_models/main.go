@@ -31,6 +31,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
+import "sort"
+
 const defaultModelsDevURL = "https://models.dev/api.json"
 
 func main() {
@@ -90,6 +92,13 @@ func main() {
 	if err != nil {
 		fatalf("rewrite %s: %v", opencodePath, err)
 	}
+	// Route maps derive from the raw catalog (per-model provider.npm), not
+	// from the converted sections — ModelInfo deliberately carries no route
+	// field; the maps are the registry's only representation of it.
+	updatedOpencode, err = rewriteRoutesSection(updatedOpencode, renderOpencodeRoutes(opencodeRoutesFromCatalog(data)), true)
+	if err != nil {
+		fatalf("rewrite %s routes: %v", opencodePath, err)
+	}
 	updatedZai, err := rewriteBuiltinFile(string(zaiSrc), "zai-coding-plan", zai, zaiStamp)
 	if err != nil {
 		fatalf("rewrite %s: %v", zaiPath, err)
@@ -118,6 +127,24 @@ func main() {
 	writeFileAtomic(opencodePath, []byte(updatedOpencode))
 	writeFileAtomic(zaiPath, []byte(updatedZai))
 	fmt.Printf("refreshed %s (%d opencode, %d zai models)\n", modelsJSONPath, len(opencode), len(zai))
+}
+
+// opencodeRoutesFromCatalog derives the model -> route map for the whole
+// opencode-go roster straight from the raw catalog plus the deepseek pin.
+func opencodeRoutesFromCatalog(data []byte) map[string]string {
+	npm := extractOpencodeNPM(data)
+	routes := make(map[string]string, len(npm)+1)
+	// Absent ids (no npm hint) are chat-routed by default; enumerate only
+	// models with a hint or a pin so the generated maps stay minimal.
+	for id, hint := range npm {
+		if route := opencodeRouteFor(id, hint); route != "chat" {
+			routes[id] = route
+		}
+	}
+	if route := opencodeRouteFor(opencodePinDeepseekResponses, ""); route != "chat" {
+		routes[opencodePinDeepseekResponses] = route
+	}
+	return routes
 }
 
 // checkSectionsNonEmpty refuses to publish empty provider sections: an empty
@@ -282,7 +309,120 @@ func decodeTopLevelOrdered(raw []byte) ([]string, map[string]json.RawMessage, er
 const (
 	generatedBegin = "// modelsdev:generated:begin"
 	generatedEnd   = "// modelsdev:generated:end"
+
+	routesBegin = "// modelsdev:routes:begin"
+	routesEnd   = "// modelsdev:routes:end"
 )
+
+const (
+	// opencodePinDeepseekResponses pins deepseek-v4-flash to the Responses
+	// lane despite models.dev carrying no npm hint for it. Gateway-verified
+	// (live /responses probe, 2026-08-08, mirroring omp behavior.kdl's
+	// opencode-go pin, which cites issues #887 and #1617 for npm hints
+	// misrouting models). Precedence: pins > npm hints > chat default.
+	opencodePinDeepseekResponses = "deepseek-v4-flash"
+)
+
+// extractOpencodeNPM returns model id -> models.dev per-model provider.npm
+// for the opencode-go section only. This is the same field opencode's own
+// client reads (model.provider?.npm ?? provider.npm) to pick the wire SDK:
+// "@ai-sdk/openai" means the model is served at /responses and
+// "@ai-sdk/anthropic" at bare-base /messages; absence means the
+// openai-compatible client, i.e. /chat/completions.
+func extractOpencodeNPM(data []byte) map[string]string {
+	var catalog struct {
+		OpencodeGo struct {
+			Models map[string]struct {
+				Provider struct {
+					NPM string `json:"npm"`
+				} `json:"provider"`
+			} `json:"models"`
+		} `json:"opencode-go"`
+	}
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		fatalf("decode npm hints: %v", err)
+	}
+	out := make(map[string]string, len(catalog.OpencodeGo.Models))
+	for id, model := range catalog.OpencodeGo.Models {
+		if npm := strings.TrimSpace(model.Provider.NPM); npm != "" {
+			out[id] = npm
+		}
+	}
+	return out
+}
+
+// opencodeRouteFor maps one model to its gateway wire protocol. Precedence:
+// gateway-verified pin, then the models.dev npm hint (what opencode's own
+// client routes on), then the chat default, which is the lane the gateway
+// serves most broadly and the safe fallback for unknown future npm values.
+func opencodeRouteFor(id, npm string) string {
+	if id == opencodePinDeepseekResponses {
+		return "responses"
+	}
+	switch npm {
+	case "@ai-sdk/openai":
+		return "responses"
+	case "@ai-sdk/anthropic":
+		return "anthropic"
+	default:
+		return "chat"
+	}
+}
+
+// renderOpencodeRoutes renders the two generated route maps. Sorted ids keep
+// regen output deterministic; chat-route models stay out entirely (chat is
+// the default in OpencodeUpstreamRoute).
+func renderOpencodeRoutes(routes map[string]string) string {
+	var anthropic, responses []string
+	for id, route := range routes {
+		switch route {
+		case "anthropic":
+			anthropic = append(anthropic, id)
+		case "responses":
+			responses = append(responses, id)
+		}
+	}
+	sort.Strings(anthropic)
+	sort.Strings(responses)
+	render := func(name string, ids []string) string {
+		var buf bytes.Buffer
+		fmt.Fprintf(&buf, "var %s = map[string]bool{\n", name)
+		for _, id := range ids {
+			fmt.Fprintf(&buf, "\t%q: true,\n", id)
+		}
+		buf.WriteString("}")
+		return buf.String()
+	}
+	var buf bytes.Buffer
+	buf.WriteString("// Generated from models.dev per-model provider.npm (the field opencode's\n")
+	buf.WriteString("// own client routes on) plus gateway-verified pins. Regen with:\n")
+	buf.WriteString("// go run ./cmd/fetch_modelsdev_models\n")
+	buf.WriteString(render("opencodeAnthropicRouteModels", anthropic))
+	buf.WriteString("\n\n")
+	buf.WriteString(render("opencodeResponsesRouteModels", responses))
+	return buf.String()
+}
+
+// rewriteRoutesSection replaces the body between the routes markers. When
+// required is false a missing marker pair is not an error (the zai builtins
+// file carries no route maps).
+func rewriteRoutesSection(src, body string, required bool) (string, error) {
+	begin := strings.Index(src, routesBegin)
+	end := strings.Index(src, routesEnd)
+	if begin < 0 || end < 0 || end < begin {
+		if required {
+			return "", fmt.Errorf("missing %s/%s markers", routesBegin, routesEnd)
+		}
+		return src, nil
+	}
+	var buf bytes.Buffer
+	buf.WriteString(src[:begin+len(routesBegin)])
+	buf.WriteString("\n")
+	buf.WriteString(body)
+	buf.WriteString("\n")
+	buf.WriteString(src[end:])
+	return buf.String(), nil
+}
 
 // rewriteBuiltinFile replaces the generated body between the marker comments
 // and refreshes the header stamp. Everything outside the markers is preserved.

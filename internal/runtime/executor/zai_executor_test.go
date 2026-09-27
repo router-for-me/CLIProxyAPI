@@ -169,7 +169,10 @@ func TestZaiOpenAILaneIgnoresAnthropicStamp(t *testing.T) {
 
 func TestZaiClaudeLaneSendsVerbatimKey(t *testing.T) {
 	// Regression: delegation stamped Bearer on non-Anthropic hosts, which Z.AI
-	// rejects. The native lane must send the key verbatim to /messages.
+	// rejects. The native lane must send the key verbatim to /v1/messages —
+	// the bare /messages path answers HTTP 200 with a JSON error envelope
+	// ({"code":500,"msg":"404 NOT_FOUND",...}), which clients read as an
+	// empty/malformed response.
 	var upstreamURL, authHeader string
 	var upstreamBody []byte
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", zaiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -195,7 +198,7 @@ func TestZaiClaudeLaneSendsVerbatimKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if upstreamURL != "https://api.z.ai/api/anthropic/messages" {
+	if upstreamURL != "https://api.z.ai/api/anthropic/v1/messages" {
 		t.Fatalf("upstreamURL = %q", upstreamURL)
 	}
 	if authHeader != "ak-123.sk-456" {
@@ -230,7 +233,7 @@ func TestZaiClaudeSourceStaysNative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if upstreamURL != "https://api.z.ai/api/anthropic/messages" {
+	if upstreamURL != "https://api.z.ai/api/anthropic/v1/messages" {
 		t.Fatalf("upstreamURL = %q", upstreamURL)
 	}
 	if authHeader != "ak-123.sk-456" {
@@ -238,5 +241,59 @@ func TestZaiClaudeSourceStaysNative(t *testing.T) {
 	}
 	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "hello" {
 		t.Fatalf("claude response text = %q (payload %s)", got, resp.Payload)
+	}
+}
+
+const zaiClaudeStreamFixture = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n" +
+	"\n" +
+	"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n" +
+	"\n" +
+	"event: message_stop\ndata: {\"type\":\"message_stop\"}\n" +
+	"\n"
+
+func TestZaiClaudeStreamPreservesSSEFraming(t *testing.T) {
+	// Regression: the Claude lane streamed bare scanner lines — the SSE
+	// newline separators were stripped by the reader and never rebuilt, so
+	// clients concatenated "event: ...data: {...}" into one line. Native
+	// passthrough must reassemble complete events like ClaudeExecutor does.
+	var upstreamURL string
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", zaiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamURL = req.URL.String()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(zaiClaudeStreamFixture)),
+		}, nil
+	}))
+
+	executor := NewZaiExecutor(&config.Config{})
+	result, err := executor.ExecuteStream(ctx, zaiStampedAuth(), cliproxyexecutor.Request{
+		Model:   "glm-5.3",
+		Payload: []byte(`{"model":"glm-5.3","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if upstreamURL != "https://api.z.ai/api/anthropic/v1/messages" {
+		t.Fatalf("upstreamURL = %q", upstreamURL)
+	}
+	var joined []byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		joined = append(joined, chunk.Payload...)
+	}
+	joinedStr := string(joined)
+	if strings.Contains(joinedStr, "data: {") && !strings.Contains(joinedStr, "\ndata: {") {
+		t.Fatalf("SSE data lines are not newline-separated (framing lost): %q", joinedStr)
+	}
+	for _, want := range []string{"event: message_start\n", "event: message_stop\n"} {
+		if !strings.Contains(joinedStr, want) {
+			t.Fatalf("missing framed event %q in stream: %q", want, joinedStr)
+		}
+	}
+	if strings.Contains(joinedStr, "[DONE]") {
+		t.Fatalf("claude lane must not emit OpenAI-style [DONE] sentinel: %q", joinedStr)
 	}
 }

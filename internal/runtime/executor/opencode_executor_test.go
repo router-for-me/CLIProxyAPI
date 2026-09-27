@@ -245,3 +245,74 @@ func TestOpencodeSynthesizesSessionHeader(t *testing.T) {
 		t.Fatalf("x-opencode-session = %q, want canonical claude:claude-sess-456 fallback", upstreamSession)
 	}
 }
+
+const opencodeResponsesFixture = `{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"gpt-5.6-luna","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}`
+
+func TestOpencodeResponsesSourceOnChatRouteTranslates(t *testing.T) {
+	// Regression: Responses input on chat-route lanes went to /responses
+	// natively, which the Zen gateway rejects with ModelProtocolUnsupported
+	// (Codex clients could not use any chat-route model, while Claude Code
+	// worked via the translated chat path). Chat-route models must ride the
+	// translated chat path for every source format.
+	var upstreamURL string
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", opencodeRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamURL = req.URL.String()
+		var err error
+		upstreamBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(opencodeChatFixture)),
+		}, nil
+	}))
+
+	executor := NewOpenCodeExecutor(&config.Config{})
+	resp, err := executor.Execute(ctx, opencodeTestAuth(), cliproxyexecutor.Request{
+		Model:   "mimo-v2.6-flash",
+		Payload: []byte(`{"model":"mimo-v2.6-flash","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if upstreamURL != "https://opencode.ai/zen/go/v1/chat/completions" {
+		t.Fatalf("chat-route responses input must ride /chat/completions, got %q", upstreamURL)
+	}
+	if got := gjson.GetBytes(upstreamBody, "messages.0.role").String(); got != "user" {
+		t.Fatalf("translated role = %q (body %s)", got, upstreamBody)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatalf("empty translated response")
+	}
+}
+
+func TestOpencodeResponsesRouteStaysNative(t *testing.T) {
+	// Responses-native lanes keep the native /responses passthrough.
+	var upstreamURL string
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", opencodeRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamURL = req.URL.String()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(opencodeResponsesFixture)),
+		}, nil
+	}))
+
+	executor := NewOpenCodeExecutor(&config.Config{})
+	resp, err := executor.Execute(ctx, opencodeTestAuth(), cliproxyexecutor.Request{
+		Model:   "gpt-5.6-luna",
+		Payload: []byte(`{"model":"gpt-5.6-luna","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if upstreamURL != "https://opencode.ai/zen/go/v1/responses" {
+		t.Fatalf("responses-native lane must stay on /responses, got %q", upstreamURL)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatalf("empty passthrough response")
+	}
+}

@@ -669,7 +669,7 @@ func (e *ZaiExecutor) executeClaude(ctx context.Context, auth *cliproxyauth.Auth
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
-	url := zaiAnthropicBaseURL(auth) + "/messages"
+	url := zaiAnthropicMessagesURL(auth)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
@@ -774,7 +774,7 @@ func (e *ZaiExecutor) executeClaudeStream(ctx context.Context, auth *cliproxyaut
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
-	url := zaiAnthropicBaseURL(auth) + "/messages"
+	url := zaiAnthropicMessagesURL(auth)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -835,16 +835,53 @@ func (e *ZaiExecutor) executeClaudeStream(ctx context.Context, auth *cliproxyaut
 		var param any
 		var streamUsage helps.StreamUsageBuffer
 		defer streamUsage.Publish(ctx, reporter)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			streamUsage.ObserveClaudeStream(line)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param, claudeInputTokens)
-			for i := range chunks {
+		if responseFormat == to {
+			// Native passthrough: no claude→claude translator is registered,
+			// and the scanner strips the SSE newline separators, so reassemble
+			// complete events here exactly like ClaudeExecutor does —
+			// otherwise clients receive "event: ...data: {...}" concatenated
+			// onto a single line.
+			var event bytes.Buffer
+			flushEvent := func() bool {
+				if event.Len() == 0 {
+					return true
+				}
+				cloned := bytes.Clone(event.Bytes())
+				event.Reset()
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
+					return true
 				case <-ctx.Done():
-					return
+					return false
+				}
+			}
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				streamUsage.ObserveClaudeStream(line)
+				event.Write(line)
+				event.WriteByte('\n')
+				if len(bytes.TrimSpace(line)) == 0 {
+					if !flushEvent() {
+						return
+					}
+				}
+			}
+			if !flushEvent() {
+				return
+			}
+		} else {
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				streamUsage.ObserveClaudeStream(line)
+				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param, claudeInputTokens)
+				for i := range chunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
@@ -924,6 +961,18 @@ func zaiAnthropicBaseURL(auth *cliproxyauth.Auth) string {
 		}
 	}
 	return zaiauth.ZaiAnthropicBaseURL
+}
+
+// zaiAnthropicMessagesURL resolves the full Claude-protocol Messages endpoint:
+// base + /v1/messages, mirroring how Anthropic clients append /v1/messages to
+// the documented https://api.z.ai/api/anthropic base. Posting to the bare
+// /messages path gets a 404 wrapped in HTTP 200 + JSON
+// ({"code":500,"msg":"404 NOT_FOUND","success":false}), which clients read as
+// an empty/malformed response. A base_url override already ending in /v1 is
+// left intact, matching the Kimi lane convention.
+func zaiAnthropicMessagesURL(auth *cliproxyauth.Auth) string {
+	base := strings.TrimSuffix(zaiAnthropicBaseURL(auth), "/v1")
+	return base + "/v1/messages"
 }
 
 // zaiCreds extracts the provisioned Z.AI key from auth.

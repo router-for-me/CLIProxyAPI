@@ -6,27 +6,38 @@ package registry
 
 import "strings"
 
+// Note on the responses set: routing on the Responses protocol is model-driven
+// — only these lanes accept /v1/responses natively. Live-probed 2026-09-26:
+// the Zen gateway rejects /responses for chat-route models with
+// ModelProtocolUnsupported (e.g. mimo-v2.6-flash), so Responses input on those
+// translates to /chat/completions. Earlier probing (2026-09-13) had verified
+// the mirror case — /chat/completions serves the Responses-native lanes after
+// auth — but not this one. The map stays as forward-looking data and documents
+// each lane's native protocol.
+
+// modelsdev:routes:begin
+// Generated from models.dev per-model provider.npm (the field opencode's
+// own client routes on) plus gateway-verified pins. Regen with:
+// go run ./cmd/fetch_modelsdev_models
 var opencodeAnthropicRouteModels = map[string]bool{
 	"minimax-m2.5":  true,
+	"minimax-m2.7":  true,
+	"minimax-m3":    true,
 	"qwen3.8-flash": true,
 }
 
 var opencodeResponsesRouteModels = map[string]bool{
 	"deepseek-v4-flash":          true,
 	"gpt-5.6-luna":               true,
+	"gpt-6-luna":                 true,
 	"grok-4.5":                   true,
 	"grok-4.6":                   true,
+	"grok-4.7":                   true,
 	"muse-spark-1.2-contributor": true,
 	"muse-spark-1.3-contributor": true,
 }
 
-// Note on the responses set: routing is source-driven, not model-driven —
-// Responses input goes to /v1/responses, everything else to /chat/completions
-// (or Claude delegation for anthropic lanes). Live-probed 2026-09-13: the Zen
-// gateway validates models on /chat/completions after auth (fake key +
-// gpt-5.6-luna → AuthError, fake key + bogus id → ModelError), so chat serves
-// the Responses-native lanes too. This map stays as forward-looking data and
-// documents each lane's native protocol.
+// modelsdev:routes:end
 
 // OpencodeUpstreamRoute reports the gateway wire protocol for a model:
 // "anthropic" for the Claude-protocol lanes, "responses" for Responses-native
@@ -48,7 +59,7 @@ func OpencodeUpstreamRoute(model string) string {
 // OpencodeBuiltinModelInfos placeholder
 func opencodeBuiltinModelInfos() []*ModelInfo {
 	// modelsdev:generated:begin
-	models := make([]*ModelInfo, 0, 39)
+	models := make([]*ModelInfo, 0, 42)
 	models = append(models, &ModelInfo{
 		ID:                        "deepseek-v4-flash",
 		Object:                    "model",
@@ -228,6 +239,25 @@ func opencodeBuiltinModelInfos() []*ModelInfo {
 		Type:                      "opencode",
 		DisplayName:               "GPT-5.6 Luna",
 		Description:               "GPT-5.6 Luna via OpenCode Zen Go.",
+		ContextLength:             1050000,
+		MaxCompletionTokens:       128000,
+		InputTokenLimit:           922000,
+		OutputTokenLimit:          128000,
+		Thinking:                  &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh", "max"}},
+		SupportedInputModalities:  []string{"text", "image", "pdf"},
+		SupportedOutputModalities: []string{"text"},
+		SupportedParameters:       []string{"tool_choice", "response_format"},
+		ExplicitThinking:          true,
+		ExplicitInputModalities:   true,
+	})
+	models = append(models, &ModelInfo{
+		ID:                        "gpt-6-luna",
+		Object:                    "model",
+		Created:                   1790035200,
+		OwnedBy:                   "opencode",
+		Type:                      "opencode",
+		DisplayName:               "GPT-6 Luna",
+		Description:               "GPT-6 Luna via OpenCode Zen Go.",
 		ContextLength:             1050000,
 		MaxCompletionTokens:       128000,
 		InputTokenLimit:           922000,
@@ -430,6 +460,25 @@ func opencodeBuiltinModelInfos() []*ModelInfo {
 		ExplicitInputModalities:   true,
 	})
 	models = append(models, &ModelInfo{
+		ID:                        "longcat-2.5-preview-free",
+		Object:                    "model",
+		Created:                   1790294400,
+		OwnedBy:                   "opencode",
+		Type:                      "opencode",
+		DisplayName:               "LongCat 2.5 Preview Free",
+		Description:               "LongCat 2.5 Preview Free via OpenCode Zen Go.",
+		ContextLength:             1000000,
+		MaxCompletionTokens:       131072,
+		InputTokenLimit:           1000000,
+		OutputTokenLimit:          131072,
+		Thinking:                  &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"text"},
+		SupportedParameters:       []string{"tool_choice", "temperature"},
+		ExplicitThinking:          true,
+		ExplicitInputModalities:   true,
+	})
+	models = append(models, &ModelInfo{
 		ID:                        "mimo-v2-omni",
 		Object:                    "model",
 		Created:                   1773792000,
@@ -518,7 +567,7 @@ func opencodeBuiltinModelInfos() []*ModelInfo {
 		InputTokenLimit:           1048576,
 		OutputTokenLimit:          131072,
 		Thinking:                  &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-		SupportedInputModalities:  []string{"text", "image", "audio", "video", "pdf"},
+		SupportedInputModalities:  []string{"text", "image", "audio", "video"},
 		SupportedOutputModalities: []string{"text"},
 		SupportedParameters:       []string{"tool_choice", "temperature"},
 		ExplicitThinking:          true,
@@ -537,7 +586,7 @@ func opencodeBuiltinModelInfos() []*ModelInfo {
 		InputTokenLimit:           1048576,
 		OutputTokenLimit:          131072,
 		Thinking:                  &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-		SupportedInputModalities:  []string{"text", "image", "audio", "video", "pdf"},
+		SupportedInputModalities:  []string{"text", "image", "audio", "video"},
 		SupportedOutputModalities: []string{"text"},
 		SupportedParameters:       []string{"tool_choice", "temperature"},
 		ExplicitThinking:          true,
@@ -787,6 +836,25 @@ func opencodeBuiltinModelInfos() []*ModelInfo {
 		SupportedInputModalities:  []string{"text", "image", "video"},
 		SupportedOutputModalities: []string{"text"},
 		SupportedParameters:       []string{"tool_choice", "response_format", "temperature"},
+		ExplicitThinking:          true,
+		ExplicitInputModalities:   true,
+	})
+	models = append(models, &ModelInfo{
+		ID:                        "space-bunny-free",
+		Object:                    "model",
+		Created:                   1790121600,
+		OwnedBy:                   "opencode",
+		Type:                      "opencode",
+		DisplayName:               "Space Bunny Free",
+		Description:               "Space Bunny Free via OpenCode Zen Go.",
+		ContextLength:             1048576,
+		MaxCompletionTokens:       524288,
+		InputTokenLimit:           524288,
+		OutputTokenLimit:          524288,
+		Thinking:                  &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
+		SupportedInputModalities:  []string{"text", "image", "video"},
+		SupportedOutputModalities: []string{"text"},
+		SupportedParameters:       []string{"tool_choice"},
 		ExplicitThinking:          true,
 		ExplicitInputModalities:   true,
 	})

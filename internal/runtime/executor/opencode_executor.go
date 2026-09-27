@@ -27,8 +27,9 @@ import (
 
 // OpenCodeExecutor is a stateless executor for the OpenCode Zen Go gateway.
 // Model routing follows the reference catalog per-model wire contract:
-// anthropic-routed lanes go through the Claude protocol, everything else
-// through OpenAI chat completions (Responses sources pass through natively).
+// anthropic-routed lanes go through the Claude protocol, Responses-native
+// lanes accept Responses input natively, and chat lanes translate every
+// source format to OpenAI chat completions.
 type OpenCodeExecutor struct {
 	ClaudeExecutor
 	cfg *config.Config
@@ -56,7 +57,10 @@ func opencodeUpstreamRoute(model string) string {
 
 // RequestToFormat reports the upstream request format used after auth selection.
 func (e *OpenCodeExecutor) RequestToFormat(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
-	if opts.SourceFormat == sdktranslator.FormatOpenAIResponse {
+	// Only Responses-native lanes accept Responses wire format natively; chat
+	// lanes translate Responses input to chat completions (the Zen gateway
+	// rejects /responses for chat-route models with ModelProtocolUnsupported).
+	if opts.SourceFormat == sdktranslator.FormatOpenAIResponse && opencodeUpstreamRoute(req.Model) == "responses" {
 		return sdktranslator.FormatOpenAIResponse
 	}
 	if opts.SourceFormat == sdktranslator.FormatClaude && opencodeUpstreamRoute(req.Model) == "anthropic" {
@@ -107,7 +111,10 @@ func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		ensureOpencodeSessionHeader(&opts, sessionPayloadForOptions(req, opts))
 		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
 	}
-	if from == sdktranslator.FormatOpenAIResponse {
+	// Responses input rides /responses only on Responses-native lanes; the
+	// gateway rejects /responses for chat-route models with
+	// ModelProtocolUnsupported, so those translate to the chat lane instead.
+	if from == sdktranslator.FormatOpenAIResponse && opencodeUpstreamRoute(req.Model) == "responses" {
 		return e.executeResponses(ctx, auth, req, opts)
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -221,7 +228,9 @@ func (e *OpenCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		ensureOpencodeSessionHeader(&opts, sessionPayloadForOptions(req, opts))
 		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
-	if from == sdktranslator.FormatOpenAIResponse {
+	// Responses input rides /responses only on Responses-native lanes (see
+	// Execute); chat-route models translate to the chat lane instead.
+	if from == sdktranslator.FormatOpenAIResponse && opencodeUpstreamRoute(req.Model) == "responses" {
 		return e.executeResponsesStream(ctx, auth, req, opts)
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)

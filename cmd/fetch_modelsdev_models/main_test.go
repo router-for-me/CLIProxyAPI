@@ -190,3 +190,106 @@ func TestFetchCatalogRejectsOversize(t *testing.T) {
 		t.Fatal("expected error for oversize catalog")
 	}
 }
+
+func TestOpencodeRouteFor(t *testing.T) {
+	cases := []struct {
+		id   string
+		npm  string
+		want string
+	}{
+		{"gpt-6-luna", "@ai-sdk/openai", "responses"},
+		{"grok-4.7", "@ai-sdk/openai", "responses"},
+		{"minimax-m2.5", "@ai-sdk/anthropic", "anthropic"},
+		{"qwen3.8-flash", "@ai-sdk/anthropic", "anthropic"},
+		{"glm-5.3", "", "chat"},
+		{"mimo-v2.6-flash", "", "chat"},
+		// Pin wins over an absent hint: gateway-verified /responses
+		// (omp behavior.kdl, verified 2026-08-08).
+		{"deepseek-v4-flash", "", "responses"},
+		// Pin wins over even a conflicting hint.
+		{"deepseek-v4-flash", "@ai-sdk/anthropic", "responses"},
+		// Unknown future npm values fall back to the safe chat lane.
+		{"some-future-model", "@ai-sdk/vertex", "chat"},
+	}
+	for _, tc := range cases {
+		if got := opencodeRouteFor(tc.id, tc.npm); got != tc.want {
+			t.Errorf("opencodeRouteFor(%q, %q) = %q, want %q", tc.id, tc.npm, got, tc.want)
+		}
+	}
+}
+
+func TestExtractOpencodeNPM(t *testing.T) {
+	data := []byte(`{
+		"opencode-go": {
+			"api": "https://opencode.ai/zen/go/v1",
+			"models": {
+				"gpt-6-luna": {"id": "gpt-6-luna", "provider": {"npm": "@ai-sdk/openai"}},
+				"glm-5.3": {"id": "glm-5.3"}
+			}
+		},
+		"zai-coding-plan": {
+			"models": {
+				"glm-5.3-flash": {"id": "glm-5.3-flash", "provider": {"npm": "@ai-sdk/anthropic"}}
+			}
+		}
+	}`)
+	got := extractOpencodeNPM(data)
+	want := map[string]string{"gpt-6-luna": "@ai-sdk/openai"}
+	if len(got) != len(want) {
+		t.Fatalf("extractOpencodeNPM = %v, want %v", got, want)
+	}
+	for id, npm := range want {
+		if got[id] != npm {
+			t.Fatalf("npm[%q] = %q, want %q", id, got[id], npm)
+		}
+	}
+}
+
+func TestRewriteRoutesSection(t *testing.T) {
+	src := "package registry\n\n" + routesBegin + "\nvar stale = true\n" + routesEnd + "\n\nfunc keep() {}\n"
+	updated, err := rewriteRoutesSection(src, "var fresh = true", true)
+	if err != nil {
+		t.Fatalf("rewriteRoutesSection: %v", err)
+	}
+	if !strings.Contains(updated, "var fresh = true") || strings.Contains(updated, "var stale = true") {
+		t.Fatalf("routes section not replaced:\n%s", updated)
+	}
+	if !strings.Contains(updated, "func keep() {}") {
+		t.Fatalf("content outside markers not preserved:\n%s", updated)
+	}
+	if _, err := rewriteRoutesSection("no markers", "x", true); err == nil {
+		t.Fatal("expected error when markers missing and required")
+	}
+	unchanged, err := rewriteRoutesSection("no markers", "x", false)
+	if err != nil || unchanged != "no markers" {
+		t.Fatalf("optional markers must leave src untouched: %q, %v", unchanged, err)
+	}
+}
+
+func TestRenderOpencodeRoutesDeterministic(t *testing.T) {
+	routes := map[string]string{
+		"glm-5.3":     "chat",
+		"zeta-model":  "responses",
+		"alpha-model": "responses",
+		"mid-model":   "anthropic",
+		"beta-model":  "anthropic",
+	}
+	out := renderOpencodeRoutes(routes)
+	anthropicIdx := strings.Index(out, "opencodeAnthropicRouteModels")
+	responsesIdx := strings.Index(out, "opencodeResponsesRouteModels")
+	if anthropicIdx < 0 || responsesIdx < 0 || anthropicIdx > responsesIdx {
+		t.Fatalf("map order wrong:\n%s", out)
+	}
+	// Chat-route ids must never appear in either map.
+	if strings.Contains(out, "glm-5.3") {
+		t.Fatalf("chat model leaked into route maps:\n%s", out)
+	}
+	alphaIdx := strings.Index(out, `"alpha-model"`)
+	zetaIdx := strings.Index(out, `"zeta-model"`)
+	if alphaIdx > zetaIdx {
+		t.Fatalf("responses ids not sorted:\n%s", out)
+	}
+	if out != renderOpencodeRoutes(routes) {
+		t.Fatal("render not deterministic")
+	}
+}

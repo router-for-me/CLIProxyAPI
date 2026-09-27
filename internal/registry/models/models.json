@@ -4965,6 +4965,41 @@
       }
     },
     {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "GPT-6 Luna",
+      "description": "GPT-6 Luna via OpenCode Zen Go.",
+      "inputTokenLimit": 922000,
+      "outputTokenLimit": 128000,
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tool_choice",
+        "response_format"
+      ],
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "grok-4.5",
       "object": "model",
       "created": 1783468800,
@@ -5279,6 +5314,37 @@
       }
     },
     {
+      "id": "longcat-2.5-preview-free",
+      "object": "model",
+      "created": 1790294400,
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "LongCat 2.5 Preview Free",
+      "description": "LongCat 2.5 Preview Free via OpenCode Zen Go.",
+      "inputTokenLimit": 1000000,
+      "outputTokenLimit": 131072,
+      "context_length": 1000000,
+      "max_completion_tokens": 131072,
+      "supported_parameters": [
+        "tool_choice",
+        "temperature"
+      ],
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "mimo-v2-omni",
       "object": "model",
       "created": 1773792000,
@@ -5424,8 +5490,7 @@
         "text",
         "image",
         "audio",
-        "video",
-        "pdf"
+        "video"
       ],
       "supportedOutputModalities": [
         "text"
@@ -5458,8 +5523,7 @@
         "text",
         "image",
         "audio",
-        "video",
-        "pdf"
+        "video"
       ],
       "supportedOutputModalities": [
         "text"
@@ -5891,6 +5955,39 @@
           "low",
           "medium",
           "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "space-bunny-free",
+      "object": "model",
+      "created": 1790121600,
+      "owned_by": "opencode",
+      "type": "opencode",
+      "display_name": "Space Bunny Free",
+      "description": "Space Bunny Free via OpenCode Zen Go.",
+      "inputTokenLimit": 524288,
+      "outputTokenLimit": 524288,
+      "context_length": 1048576,
+      "max_completion_tokens": 524288,
+      "supported_parameters": [
+        "tool_choice"
+      ],
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
         ]
       }
     }
