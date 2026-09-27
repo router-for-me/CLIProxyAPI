@@ -13,10 +13,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 )
 
 func TestShouldSkipMethodForRequestLogging(t *testing.T) {
@@ -584,5 +584,13 @@ func TestCaptureRequestInfo_HeadersDeepCopy(t *testing.T) {
 
 	if got := info.Headers["X-Audit"][0]; got != "original-value" {
 		t.Fatalf("header slice was aliased: got %q, want %q", got, "original-value")
+	}
+}
+
+func TestManagementV8RequestsAreNotLogged(t *testing.T) {
+	for _, path := range []string{"/v8/management/config", "/v8/management/config.yaml", "/v8/management/config/api-keys/codex", "/v8/management/oauth/auth-url"} {
+		if shouldLogRequest(path) {
+			t.Errorf("management config request would be logged: %s", path)
+		}
 	}
 }

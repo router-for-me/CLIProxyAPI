@@ -11,7 +11,8 @@ import (
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
-func SaveConfigPreserveComments(configFile string, cfg *Config) error {
+// A successful v8 migration also synchronizes cfg's OAuth scope for runtime snapshots.
+func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...bool) error {
 	persistCfg := cfg
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
@@ -29,9 +30,16 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	if original.Content[0] == nil || original.Content[0].Kind != yaml.MappingNode {
 		return fmt.Errorf("expected root mapping node")
 	}
+	layout := deepCopyNode(original.Content[0])
+	flat, err := flattenV8(layout)
+	if err != nil {
+		return err
+	}
+	original.Content[0] = flat
+	layout = expandConfigAliases(layout)
 
 	// Marshal the current cfg to YAML, then unmarshal to a yaml.Node we can merge from.
-	rendered, err := yaml.Marshal(persistCfg)
+	rendered, err := yaml.Marshal((*legacyConfig)(persistCfg))
 	if err != nil {
 		return err
 	}
@@ -59,14 +67,12 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
-	normalizeCollectionNodeStyles(original.Content[0])
-
-	// Write back.
-	f, err := os.Create(configFile)
-	if err != nil {
+	if err = restoreV8Layout(original.Content[0], layout, data, generated.Content[0]); err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
+	normalizeCollectionNodeStyles(original.Content[0])
+
+	// Encode and validate the layout before opening the destination for writing.
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -78,8 +84,25 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 		return err
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	var migrated *Config
+	if len(migrateV8) > 0 && migrateV8[0] {
+		data, _, err = NormalizeConfigLayout(data, true)
+		if err != nil {
+			return err
+		}
+		migrated = new(Config)
+		if err = yaml.Unmarshal(data, migrated); err != nil {
+			return fmt.Errorf("decode migrated config: %w", err)
+		}
+	}
+	if err = os.WriteFile(configFile, data, 0600); err != nil {
+		return err
+	}
+	if migrated != nil {
+		// Keep runtime-only values intact and publish scope only after the write succeeds.
+		cfg.OAuthOnlyFields = migrated.OAuthOnlyFields
+	}
+	return nil
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
@@ -96,6 +119,13 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
 		return fmt.Errorf("invalid yaml document structure")
 	}
+	// Resolve aliases and merge keys before updating a path. Otherwise replacing
+	// an alias with a mapping drops inherited siblings or mutates a shared anchor.
+	var decoded map[string]any
+	if err = root.Decode(&decoded); err != nil {
+		return err
+	}
+	root.Content[0] = expandConfigAliases(root.Content[0])
 	node := root.Content[0]
 	// descend mapping nodes following path
 	for i, key := range path {
@@ -331,8 +361,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		}
 	}
 
-	// Weight is pointer-backed, so an explicit zero is meaningful and must be preserved.
-	if len(path) > 0 && path[len(path)-1] == "weight" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
+	// Credential weights and retry overrides are pointer-backed: zero is explicit.
+	if len(path) > 0 && (path[len(path)-1] == "weight" || path[len(path)-1] == "request-retry") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
 		return false
 	}
 
@@ -712,10 +742,9 @@ func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, keyPath ...string)
 	}
 	srcIdx := findMapKeyIndex(srcRoot, key)
 	if srcIdx < 0 {
-		// Keep an explicit empty mapping for oauth-model-alias and oauth-request-scoped-errors when previously present.
-		// When users delete the last channel via the management API,
-		// we want that deletion to persist across hot reloads and restarts.
-		if key == "oauth-model-alias" || key == "oauth-request-scoped-errors" {
+		// Keep explicit OAuth maps when the last channel is removed. Their presence
+		// must survive saves and override legacy fields when restored to the v8 layout.
+		if key == "oauth-excluded-models" || key == "oauth-model-alias" || key == "oauth-request-scoped-errors" {
 			dstRoot.Content[dstIdx+1] = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 			return
 		}

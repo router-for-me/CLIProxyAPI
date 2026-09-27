@@ -3,7 +3,7 @@ package translator
 import (
 	"context"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 // RequestEnvelope represents a request in the translation pipeline.

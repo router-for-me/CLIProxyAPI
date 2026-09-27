@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/responsestools"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/responsestools"
 )
 
 func TestResponsesToolsDefaultsFollowConvention(t *testing.T) {

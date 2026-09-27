@@ -12,10 +12,10 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -101,6 +101,10 @@ func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Hea
 // multi-agent input while preserving request-scoped translation metadata.
 func TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
 	if from == sdktranslator.FormatOpenAIResponse {
+		if cfg != nil && cfg.OAuthOnlyFields["codex.optimize-multi-agent-v2"] {
+			// OAuth-only tool preparation is deferred until credential selection.
+			req.Body, _ = PrepareCodexMultiAgentV2Tools(ctx, headers, req.Body, cfg.Codex.OptimizeMultiAgentV2, cfg.Home.Enabled)
+		}
 		req.Body = RewriteCodexOrphanDelegationInputForConfig(ctx, headers, req.Body, cfg)
 		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
 			req.Body = RewriteCodexMultiAgentV2Input(ctx, headers, req.Body, cfg)

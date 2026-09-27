@@ -3,7 +3,7 @@ package config
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/responsestools"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/responsestools"
 )
 
 // ResponsesToolsConfig is the single authoritative source for core Responses

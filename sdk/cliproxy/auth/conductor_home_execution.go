@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/sjson"
 )
 
@@ -232,14 +232,15 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if countTokens {
 				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
 			}
+			executor := executorForAuth(selection.Executor, preparedAuth)
 			execute := func() (cliproxyexecutor.Response, error) {
 				if countTokens {
-					return m.responsesToolsCountCall(executorCtx, preparedAuth, selection.Provider, selection.Executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-						return selection.Executor.CountTokens(callCtx, preparedAuth, callReq, callOpts)
+					return m.responsesToolsCountCall(executorCtx, preparedAuth, selection.Provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+						return executor.CountTokens(callCtx, preparedAuth, callReq, callOpts)
 					})
 				}
-				return m.responsesToolsCallWithExecutor(execCtx, preparedAuth, selection.Provider, selection.Executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-					return selection.Executor.Execute(callCtx, preparedAuth, callReq, callOpts)
+				return m.responsesToolsCallWithExecutor(execCtx, preparedAuth, selection.Provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+					return executor.Execute(callCtx, preparedAuth, callReq, callOpts)
 				})
 			}
 			startHomeExec := time.Now()

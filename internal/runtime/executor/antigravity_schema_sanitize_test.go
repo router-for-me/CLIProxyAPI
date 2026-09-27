@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	antigravitychat "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/openai/chat-completions"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	antigravitychat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/openai/chat-completions"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 )
 
