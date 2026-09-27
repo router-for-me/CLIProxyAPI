@@ -46,8 +46,10 @@ func newLiteLLMRouter(h *Handler) *gin.Engine {
 	g.POST("/litellm/key/regenerate", h.RegenerateLiteLLMKeyCompat)
 	g.POST("/litellm/key/delete", h.DeleteLiteLLMKeyCompat)
 	g.GET("/litellm/spend/logs", h.ListLiteLLMSpendLogsCompat)
-	g.GET("/litellm/spend/users", h.ListLiteLLMSpendUsersCompat)
-	g.GET("/litellm/global/spend", h.GetLiteLLMGlobalSpendCompat)
+	g.GET("/litellm/global/spend/report", h.GetLiteLLMGlobalSpendReport)
+	g.GET("/litellm/spend/tags", h.GetLiteLLMSpendTags)
+	g.GET("/litellm/user/spend/report", h.GetLiteLLMUserSpendReport)
+	g.GET("/litellm/key/spend/report", h.GetLiteLLMKeySpendReport)
 	return r
 }
 
@@ -92,8 +94,10 @@ func TestLiteLLMRoutesReturn503WhenNotConfigured(t *testing.T) {
 		{http.MethodPost, "/v0/management/litellm/key/regenerate", `{"key":"sk-123"}`},
 		{http.MethodPost, "/v0/management/litellm/key/delete", `{"keys":["sk-123"]}`},
 		{http.MethodGet, "/v0/management/litellm/spend/logs", ""},
-		{http.MethodGet, "/v0/management/litellm/spend/users", ""},
-		{http.MethodGet, "/v0/management/litellm/global/spend", ""},
+		{http.MethodGet, "/v0/management/litellm/global/spend/report?start_date=2026-01-01&end_date=2026-01-02", ""},
+		{http.MethodGet, "/v0/management/litellm/spend/tags", ""},
+		{http.MethodGet, "/v0/management/litellm/user/spend/report", ""},
+		{http.MethodGet, "/v0/management/litellm/key/spend/report", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {

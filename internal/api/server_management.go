@@ -277,8 +277,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/litellm/key/regenerate", s.mgmt.RegenerateLiteLLMKeyCompat)
 		mgmt.POST("/litellm/key/delete", s.mgmt.DeleteLiteLLMKeyCompat)
 		mgmt.GET("/litellm/spend/logs", s.mgmt.ListLiteLLMSpendLogsCompat)
-		mgmt.GET("/litellm/spend/users", s.mgmt.ListLiteLLMSpendUsersCompat)
-		mgmt.GET("/litellm/global/spend", s.mgmt.GetLiteLLMGlobalSpendCompat)
+		// Spec spend-report routes (replacing the non-spec /litellm/spend/users
+		// and /litellm/global/spend legacy compat routes).
+		mgmt.GET("/litellm/global/spend/report", s.mgmt.GetLiteLLMGlobalSpendReport)
+		mgmt.GET("/litellm/spend/tags", s.mgmt.GetLiteLLMSpendTags)
+		mgmt.GET("/litellm/user/spend/report", s.mgmt.GetLiteLLMUserSpendReport)
+		mgmt.GET("/litellm/key/spend/report", s.mgmt.GetLiteLLMKeySpendReport)
 
 		// Aggregate usage stats powered by the PG usage_events table.
 		mgmt.GET("/usage-stats", s.mgmt.GetUsageStats)

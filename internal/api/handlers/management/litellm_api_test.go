@@ -7,7 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,10 +49,8 @@ func newTestLiteLLMCompatHandler(t *testing.T, schema string) *Handler {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
 	// Mirror production Bootstrap: EnsureSchema creates the base tables, but the
-	// usage_stat_day rollup table (and the Task-3 aggregate indexes) are created
-	// by Migrate. Run it so a day-aligned /litellm/spend/users request — which
-	// routes through the rollup fast path — resolves its table instead of 500ing
-	// with "relation usage_stat_day does not exist".
+	// usage_stat_day rollup table (and the aggregate indexes) are created by
+	// Migrate. Run it so the spend endpoints resolve their tables.
 	if err := pg.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
@@ -76,365 +74,19 @@ func newTestLiteLLMCompatHandler(t *testing.T, schema string) *Handler {
 	return h
 }
 
-// TestCreateLiteLLMUserCompatRoundTrip verifies POST /litellm/user/new persists
-// an internal user and responds 201 with LiteLLM field names, not NixLLM's
-// internal ID/UserAlias casing.
-func TestCreateLiteLLMUserCompatRoundTrip(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_new")
-	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	body := `{"user_id":"team-a","user_alias":"Team A","user_email":"a@example.com","models":["gpt-4o"],"max_budget":10}`
-	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/user/new", bytes.NewBufferString(body))
-	c.Request.Header.Set("Content-Type", "application/json")
-
-	h.CreateLiteLLMUserCompat(c)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d; want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	resp := rec.Body.String()
-	for _, want := range []string{
-		`"user_id":"team-a"`,
-		`"user_alias":"Team A"`,
-		`"user_email":"a@example.com"`,
-		`"models"`,
-		`"max_budget"`,
-		`"spend"`,
-		`"created_at"`,
-		`"updated_at"`,
-	} {
-		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
-			t.Errorf("response missing %s; body=%s", want, resp)
-		}
-	}
-	// user_email was set in the request, so it must be present as a value (not
-	// omitted): confirm it carries the value.
-	if !bytes.Contains(rec.Body.Bytes(), []byte(`"user_email":"a@example.com"`)) {
-		t.Errorf("response missing user_email value; body=%s", resp)
-	}
-	// Fields NOT set in the request must be ABSENT (omitempty parity), not
-	// present-as-empty. budget_duration / tpm_limit / rpm_limit / metadata were
-	// not sent, so they must not appear at all.
-	for _, absent := range []string{
-		`"budget_duration"`,
-		`"tpm_limit"`,
-		`"rpm_limit"`,
-		`"metadata"`,
-	} {
-		if bytes.Contains(rec.Body.Bytes(), []byte(absent)) {
-			t.Errorf("response contains unset field %s; want omitted; body=%s", absent, resp)
-		}
-	}
-	// The internal NixLLM casing must NOT leak into the compat response.
-	if bytes.Contains(rec.Body.Bytes(), []byte(`"UserAlias"`)) {
-		t.Errorf("response leaked internal casing; body=%s", resp)
-	}
-}
-
-// TestListLiteLLMUsersCompat seeds two users and verifies GET /litellm/user/list
-// returns them with LiteLLM field names plus pagination fields.
-func TestListLiteLLMUsersCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_list")
-	gin.SetMode(gin.TestMode)
+// seedCompatUser creates an internal user (idempotent on the id).
+func seedCompatUser(t *testing.T, h *Handler, id string) {
+	t.Helper()
 	ctx := context.Background()
-	for _, u := range []store.InternalUser{
-		{ID: "team-a", UserAlias: "Team A", UserEmail: "a@example.com", UserRole: "org"},
-		{ID: "team-b", UserAlias: "Team B", UserEmail: "b@example.com", UserRole: "admin"},
-	} {
-		if _, err := h.pgUsers.Create(ctx, u); err != nil {
-			t.Fatalf("seed Create(%s): %v", u.ID, err)
-		}
+	if _, err := h.pgUsers.Get(ctx, id); err == nil {
+		return
+	} else if !errors.Is(err, store.ErrInternalUserNotFound) {
+		t.Fatalf("seed user Get(%s): %v", id, err)
 	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/user/list?page=1&page_size=25", nil)
-	h.ListLiteLLMUsersCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.Bytes()
-	for _, want := range []string{
-		`"users"`,
-		`"total":2`,
-		`"page":1`,
-		`"page_size":25`,
-		`"user_id":"team-a"`,
-		`"user_alias":"Team A"`,
-		`"user_id":"team-b"`,
-	} {
-		if !bytes.Contains(body, []byte(want)) {
-			t.Errorf("list response missing %s; body=%s", want, rec.Body.String())
-		}
-	}
-	if bytes.Contains(body, []byte(`"UserAlias"`)) {
-		t.Errorf("list response leaked internal casing; body=%s", rec.Body.String())
-	}
-}
-
-// TestGetLiteLLMUserCompat seeds a user and verifies GET /litellm/user/info
-// returns it by user_id, plus a 404 when the user does not exist.
-func TestGetLiteLLMUserCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_info")
-	gin.SetMode(gin.TestMode)
-	if _, err := h.pgUsers.Create(context.Background(), store.InternalUser{
-		ID: "team-a", UserAlias: "Team A", UserEmail: "a@example.com", UserRole: "org",
-	}); err != nil {
-		t.Fatalf("seed Create: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/user/info?user_id=team-a", nil)
-	h.GetLiteLLMUserCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	for _, want := range []string{`"user_id":"team-a"`, `"user_alias":"Team A"`, `"user_role":"org"`} {
-		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
-			t.Errorf("info response missing %s; body=%s", want, rec.Body.String())
-		}
-	}
-
-	// 404 case.
-	rec2 := httptest.NewRecorder()
-	c2, _ := gin.CreateTestContext(rec2)
-	c2.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/user/info?user_id=nope", nil)
-	h.GetLiteLLMUserCompat(c2)
-	if rec2.Code != http.StatusNotFound {
-		t.Fatalf("missing user status = %d; want 404; body=%s", rec2.Code, rec2.Body.String())
-	}
-	if !bytes.Contains(rec2.Body.Bytes(), []byte(`"not_found"`)) {
-		t.Errorf("missing user response missing not_found type; body=%s", rec2.Body.String())
-	}
-}
-
-// TestUpdateLiteLLMUserCompat seeds a user, updates user_alias via
-// POST /litellm/user/update, and verifies the returned value reflects the change.
-func TestUpdateLiteLLMUserCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_update")
-	gin.SetMode(gin.TestMode)
-	if _, err := h.pgUsers.Create(context.Background(), store.InternalUser{
-		ID: "team-a", UserAlias: "Team A", UserEmail: "a@example.com", UserRole: "org",
-	}); err != nil {
-		t.Fatalf("seed Create: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	body := `{"user_id":"team-a","user_alias":"Team Alpha","user_role":"admin"}`
-	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/user/update", bytes.NewBufferString(body))
-	c.Request.Header.Set("Content-Type", "application/json")
-	h.UpdateLiteLLMUserCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	for _, want := range []string{`"user_alias":"Team Alpha"`, `"user_role":"admin"`, `"user_id":"team-a"`} {
-		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
-			t.Errorf("update response missing %s; body=%s", want, rec.Body.String())
-		}
-	}
-}
-
-// TestDeleteLiteLLMUserCompat seeds a user, deletes it via POST /litellm/user/delete,
-// verifies {"deleted": true}, and confirms a subsequent Get 404s.
-func TestDeleteLiteLLMUserCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_delete")
-	gin.SetMode(gin.TestMode)
-	if _, err := h.pgUsers.Create(context.Background(), store.InternalUser{
-		ID: "team-a", UserAlias: "Team A", UserRole: "org",
-	}); err != nil {
-		t.Fatalf("seed Create: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	body := `{"user_id":"team-a"}`
-	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/user/delete", bytes.NewBufferString(body))
-	c.Request.Header.Set("Content-Type", "application/json")
-	h.DeleteLiteLLMUserCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	for _, want := range []string{`"id":"team-a"`, `"deleted":true`} {
-		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
-			t.Errorf("delete response missing %s; body=%s", want, rec.Body.String())
-		}
-	}
-
-	// Confirm the user is gone.
-	rec2 := httptest.NewRecorder()
-	c2, _ := gin.CreateTestContext(rec2)
-	c2.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/user/info?user_id=team-a", nil)
-	h.GetLiteLLMUserCompat(c2)
-	if rec2.Code != http.StatusNotFound {
-		t.Fatalf("post-delete get status = %d; want 404; body=%s", rec2.Code, rec2.Body.String())
-	}
-}
-
-// TestGenerateLiteLLMKeyCompat seeds a user, POSTs /litellm/key/generate, and
-// verifies the plaintext secret is returned once and is actually usable at
-// runtime (LookupByHash resolves to the created key). It also covers the 400
-// empty-user_id and 404 unknown-owner cases.
-func TestGenerateLiteLLMKeyCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_generate")
-	gin.SetMode(gin.TestMode)
-	ctx := context.Background()
 	if _, err := h.pgUsers.Create(ctx, store.InternalUser{
-		ID: "team-a", UserAlias: "Team A", UserRole: "org",
+		ID: id, UserAlias: "Team " + strings.ToUpper(id), UserRole: "org",
 	}); err != nil {
-		t.Fatalf("seed Create: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	body := `{"user_id":"team-a","models":["gpt-4o"],"alias":"prod-key","max_budget":10}`
-	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/generate", bytes.NewBufferString(body))
-	c.Request.Header.Set("Content-Type", "application/json")
-	h.GenerateLiteLLMKeyCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	resp := rec.Body.Bytes()
-	for _, want := range []string{
-		`"key"`,
-		`"user_id":"team-a"`,
-		`"secret"`,
-		`"key_alias":"prod-key"`,
-		`"models"`,
-		`"max_budget"`,
-		`"spend"`,
-		`"created_at"`,
-		`"updated_at"`,
-	} {
-		if !bytes.Contains(resp, []byte(want)) {
-			t.Errorf("generate response missing %s; body=%s", want, rec.Body.String())
-		}
-	}
-	// Extract the plaintext secret and prove it resolves via hash lookup.
-	var gen struct {
-		Key    string `json:"key"`
-		Secret string `json:"secret"`
-	}
-	if err := json.Unmarshal(resp, &gen); err != nil {
-		t.Fatalf("unmarshal generate response: %v", err)
-	}
-	if gen.Secret == "" {
-		t.Fatalf("generate returned empty secret; body=%s", rec.Body.String())
-	}
-	key, _, err := h.pgAPIKeys.LookupByHash(ctx, store.HashSecret(gen.Secret))
-	if err != nil {
-		t.Fatalf("LookupByHash(secret) failed: %v", err)
-	}
-	if key.ID != gen.Key {
-		t.Errorf("LookupByHash resolved key %s; want generated key %s", key.ID, gen.Key)
-	}
-
-	// 400: empty user_id.
-	rec400 := httptest.NewRecorder()
-	c400, _ := gin.CreateTestContext(rec400)
-	c400.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/generate", bytes.NewBufferString(`{"user_id":""}`))
-	c400.Request.Header.Set("Content-Type", "application/json")
-	h.GenerateLiteLLMKeyCompat(c400)
-	if rec400.Code != http.StatusBadRequest {
-		t.Fatalf("empty user_id status = %d; want 400; body=%s", rec400.Code, rec400.Body.String())
-	}
-	if !bytes.Contains(rec400.Body.Bytes(), []byte(`"invalid_request"`)) {
-		t.Errorf("empty user_id response missing invalid_request type; body=%s", rec400.Body.String())
-	}
-
-	// 404: unknown owner.
-	rec404 := httptest.NewRecorder()
-	c404, _ := gin.CreateTestContext(rec404)
-	c404.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/generate", bytes.NewBufferString(`{"user_id":"nope"}`))
-	c404.Request.Header.Set("Content-Type", "application/json")
-	h.GenerateLiteLLMKeyCompat(c404)
-	if rec404.Code != http.StatusNotFound {
-		t.Fatalf("unknown owner status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
-	}
-	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
-		t.Errorf("unknown owner response missing not_found type; body=%s", rec404.Body.String())
-	}
-
-	// 400: tpm_limit is not supported on the runtime policy, so it must be
-	// rejected explicitly rather than silently dropped.
-	recTpm := httptest.NewRecorder()
-	cTpm, _ := gin.CreateTestContext(recTpm)
-	cTpm.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/generate", bytes.NewBufferString(`{"user_id":"team-a","tpm_limit":100}`))
-	cTpm.Request.Header.Set("Content-Type", "application/json")
-	h.GenerateLiteLLMKeyCompat(cTpm)
-	if recTpm.Code != http.StatusBadRequest {
-		t.Fatalf("tpm_limit status = %d; want 400; body=%s", recTpm.Code, recTpm.Body.String())
-	}
-	if !bytes.Contains(recTpm.Body.Bytes(), []byte(`"invalid_request"`)) {
-		t.Errorf("tpm_limit response missing invalid_request type; body=%s", recTpm.Body.String())
-	}
-}
-
-// TestGetLiteLLMKeyCompat seeds a user + key, GETs /litellm/key/info, and
-// verifies the fields are present while the secret is omitted (LiteLLM omits it
-// on read). Also covers the 404 case.
-func TestGetLiteLLMKeyCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_info")
-	gin.SetMode(gin.TestMode)
-	ctx := context.Background()
-	if _, err := h.pgUsers.Create(ctx, store.InternalUser{
-		ID: "team-a", UserAlias: "Team A", UserRole: "org",
-	}); err != nil {
-		t.Fatalf("seed user Create: %v", err)
-	}
-	pol := store.Policy{AllowedModels: []string{"gpt-4o"}}
-	key, _, err := h.pgAPIKeys.Create(ctx, "prod", "prod-key", "", nil, nil, &pol)
-	if err != nil {
-		t.Fatalf("seed key Create: %v", err)
-	}
-	if err := h.pgAPIKeys.UpdateUserID(ctx, key.ID, "team-a"); err != nil {
-		t.Fatalf("seed UpdateUserID: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/key/info?key="+key.ID, nil)
-	h.GetLiteLLMKeyCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	resp := rec.Body.Bytes()
-	for _, want := range []string{
-		`"key":"` + key.ID + `"`,
-		`"user_id":"team-a"`,
-		`"key_alias":"prod-key"`,
-		`"models"`,
-		`"spend"`,
-		`"created_at"`,
-		`"updated_at"`,
-	} {
-		if !bytes.Contains(resp, []byte(want)) {
-			t.Errorf("info response missing %s; body=%s", want, rec.Body.String())
-		}
-	}
-	// The secret must NOT be leaked on read.
-	if bytes.Contains(resp, []byte(`"secret"`)) {
-		t.Errorf("info response leaked secret; body=%s", rec.Body.String())
-	}
-
-	// 404 case.
-	rec404 := httptest.NewRecorder()
-	c404, _ := gin.CreateTestContext(rec404)
-	c404.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/key/info?key=nope", nil)
-	h.GetLiteLLMKeyCompat(c404)
-	if rec404.Code != http.StatusNotFound {
-		t.Fatalf("missing key status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
-	}
-	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
-		t.Errorf("missing key response missing not_found type; body=%s", rec404.Body.String())
+		t.Fatalf("seed user Create(%s): %v", id, err)
 	}
 }
 
@@ -444,19 +96,7 @@ func TestGetLiteLLMKeyCompat(t *testing.T) {
 func seedCompatKey(t *testing.T, h *Handler, name, alias string) *store.APIKey {
 	t.Helper()
 	ctx := context.Background()
-	// Idempotent on the owner user: seedCompatKey may be called multiple times
-	// within one test (e.g. TestListLiteLLMKeysCompat), so only Create the user
-	// when it does not already exist to avoid a duplicate-PK error on real PG.
-	if _, err := h.pgUsers.Get(ctx, "team-a"); err != nil {
-		if !errors.Is(err, store.ErrInternalUserNotFound) {
-			t.Fatalf("seed user Get: %v", err)
-		}
-		if _, cerr := h.pgUsers.Create(ctx, store.InternalUser{
-			ID: "team-a", UserAlias: "Team A", UserRole: "org",
-		}); cerr != nil {
-			t.Fatalf("seed user Create: %v", cerr)
-		}
-	}
+	seedCompatUser(t, h, "team-a")
 	pol := store.Policy{AllowedModels: []string{"gpt-4o"}}
 	key, _, err := h.pgAPIKeys.Create(ctx, name, alias, "", nil, nil, &pol)
 	if err != nil {
@@ -466,179 +106,6 @@ func seedCompatKey(t *testing.T, h *Handler, name, alias string) *store.APIKey {
 		t.Fatalf("seed UpdateUserID: %v", err)
 	}
 	return key
-}
-
-// TestListLiteLLMKeysCompat seeds a user + two keys and verifies GET
-// /litellm/key/list returns them under the api_keys array key (LiteLLM's
-// convention) plus pagination fields.
-func TestListLiteLLMKeysCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_list")
-	gin.SetMode(gin.TestMode)
-	k1 := seedCompatKey(t, h, "prod", "prod-key")
-	k2 := seedCompatKey(t, h, "dev", "dev-key")
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/key/list?page=1&page_size=25", nil)
-	h.ListLiteLLMKeysCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.Bytes()
-	for _, want := range []string{
-		`"api_keys"`,
-		`"total":2`,
-		`"page":1`,
-		`"page_size":25`,
-		`"key":"` + k1.ID + `"`,
-		`"key_alias":"prod-key"`,
-		`"key":"` + k2.ID + `"`,
-		`"key_alias":"dev-key"`,
-	} {
-		if !bytes.Contains(body, []byte(want)) {
-			t.Errorf("list response missing %s; body=%s", want, rec.Body.String())
-		}
-	}
-	// The secret must NOT be leaked on read.
-	if bytes.Contains(body, []byte(`"secret"`)) {
-		t.Errorf("list response leaked secret; body=%s", rec.Body.String())
-	}
-}
-
-// TestUpdateLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/update
-// changing name/status/alias, and verifies the returned values reflect the
-// changes.
-func TestUpdateLiteLLMKeyCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_update")
-	gin.SetMode(gin.TestMode)
-	key := seedCompatKey(t, h, "prod", "prod-key")
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	body := `{"key":"` + key.ID + `","name":"prod-v2","status":"disabled","alias":"prod-alias"}`
-	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/update", bytes.NewBufferString(body))
-	c.Request.Header.Set("Content-Type", "application/json")
-	h.UpdateLiteLLMKeyCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	for _, want := range []string{`"key":"` + key.ID + `"`, `"key_alias":"prod-alias"`} {
-		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
-			t.Errorf("update response missing %s; body=%s", want, rec.Body.String())
-		}
-	}
-	// Confirm the name/status persisted on the row.
-	reloaded, _, err := h.pgAPIKeys.LookupByID(context.Background(), key.ID)
-	if err != nil {
-		t.Fatalf("reload LookupByID: %v", err)
-	}
-	if reloaded.Name != "prod-v2" {
-		t.Errorf("reloaded name = %q; want prod-v2", reloaded.Name)
-	}
-	if reloaded.Status != "disabled" {
-		t.Errorf("reloaded status = %q; want disabled", reloaded.Status)
-	}
-
-	// Updating a nonexistent key must return 404 (not 500), even though the
-	// mutation itself (Rename) surfaces ErrAPIKeyNotFound.
-	rec404 := httptest.NewRecorder()
-	c404, _ := gin.CreateTestContext(rec404)
-	c404.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/update", bytes.NewBufferString(`{"key":"nope","name":"x"}`))
-	c404.Request.Header.Set("Content-Type", "application/json")
-	h.UpdateLiteLLMKeyCompat(c404)
-	if rec404.Code != http.StatusNotFound {
-		t.Fatalf("missing key update status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
-	}
-	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
-		t.Errorf("missing key update response missing not_found type; body=%s", rec404.Body.String())
-	}
-}
-
-// TestRegenerateLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/regenerate,
-// and verifies the new plaintext secret is returned AND that rotation actually
-// happened: the old secret no longer resolves while the new one does.
-func TestRegenerateLiteLLMKeyCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_regenerate")
-	gin.SetMode(gin.TestMode)
-	ctx := context.Background()
-	key := seedCompatKey(t, h, "prod", "prod-key")
-
-	// Recover the current plaintext secret so we can prove rotation.
-	seedKey, _, err := h.pgAPIKeys.LookupByID(ctx, key.ID)
-	if err != nil {
-		t.Fatalf("seed LookupByID: %v", err)
-	}
-	if seedKey.KeyHash == "" {
-		t.Fatal("seeded key has no secret hash")
-	}
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/regenerate", bytes.NewBufferString(`{"key":"`+key.ID+`"}`))
-	c.Request.Header.Set("Content-Type", "application/json")
-	h.RegenerateLiteLLMKeyCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Key    string `json:"key"`
-		Secret string `json:"secret"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal regenerate response: %v", err)
-	}
-	if resp.Key != key.ID {
-		t.Errorf("response key = %q; want %q", resp.Key, key.ID)
-	}
-	if resp.Secret == "" {
-		t.Fatalf("regenerate returned empty secret; body=%s", rec.Body.String())
-	}
-	newHash := store.HashSecret(resp.Secret)
-	if newHash == seedKey.KeyHash {
-		t.Fatal("regenerate returned the same secret; expected rotation")
-	}
-	// The old secret hash must no longer resolve.
-	if _, _, err := h.pgAPIKeys.LookupByHash(ctx, seedKey.KeyHash); !errors.Is(err, store.ErrAPIKeyNotFound) {
-		t.Errorf("old secret still resolves after regenerate; err=%v", err)
-	}
-	// The new secret must resolve to the same key id.
-	newKey, _, err := h.pgAPIKeys.LookupByHash(ctx, newHash)
-	if err != nil {
-		t.Fatalf("LookupByHash(new secret) failed: %v", err)
-	}
-	if newKey.ID != key.ID {
-		t.Errorf("LookupByHash(new) resolved key %s; want %s", newKey.ID, key.ID)
-	}
-}
-
-// TestDeleteLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/delete,
-// verifies {"deleted": true}, and confirms a subsequent LookupByID 404s.
-func TestDeleteLiteLLMKeyCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_delete")
-	gin.SetMode(gin.TestMode)
-	key := seedCompatKey(t, h, "prod", "prod-key")
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/litellm/key/delete", bytes.NewBufferString(`{"key":"`+key.ID+`"}`))
-	c.Request.Header.Set("Content-Type", "application/json")
-	h.DeleteLiteLLMKeyCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	for _, want := range []string{`"key":"` + key.ID + `"`, `"deleted":true`} {
-		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
-			t.Errorf("delete response missing %s; body=%s", want, rec.Body.String())
-		}
-	}
-	// Confirm the key is gone.
-	if _, _, err := h.pgAPIKeys.LookupByID(context.Background(), key.ID); !errors.Is(err, store.ErrAPIKeyNotFound) {
-		t.Fatalf("post-delete LookupByID err = %v; want ErrAPIKeyNotFound", err)
-	}
 }
 
 // seedCompatSpendEvent inserts a usage event carrying token/cost data so the
@@ -663,308 +130,844 @@ func seedCompatSpendEvent(t *testing.T, h *Handler, userID string) store.UsageEv
 	return ev
 }
 
-// TestListLiteLLMSpendLogsCompat verifies GET /litellm/spend/logs returns the
-// paginated spend rows using LiteLLM's field names (request_id, model, spend,
-// total_tokens, prompt_tokens, completion_tokens) and honors the user_id filter.
-func TestListLiteLLMSpendLogsCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_logs")
+// doCompat performs one request against the given handler func and returns the
+// recorder. Sets the Content-Type header for POST bodies.
+func doCompat(h func(c *gin.Context), method, path, body string) *httptest.ResponseRecorder {
 	gin.SetMode(gin.TestMode)
-	seedCompatSpendEvent(t, h, "team-a")
-
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/logs?user_id=team-a", nil)
-	h.ListLiteLLMSpendLogsCompat(c)
+	c.Request = httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	if body != "" {
+		c.Request.Header.Set("Content-Type", "application/json")
+	}
+	h(c)
+	return rec
+}
 
+// ---------------------------------------------------------------------------
+// POST /litellm/user/new
+// ---------------------------------------------------------------------------
+
+// TestCreateLiteLLMUserCompatRoundTrip verifies POST /litellm/user/new returns
+// 200 with LiteLLM's NewUserResponse field names, including the generated
+// plaintext key (auto_create_key defaults true) that resolves at runtime.
+func TestCreateLiteLLMUserCompatRoundTrip(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_new")
+	ctx := context.Background()
+
+	rec := doCompat(h.CreateLiteLLMUserCompat, http.MethodPost,
+		"/v0/management/litellm/user/new",
+		`{"user_id":"team-a","user_alias":"Team A","user_email":"a@example.com","models":["gpt-4o"],"max_budget":10}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := rec.Body.Bytes()
+	for _, want := range []string{
+		`"user_id":"team-a"`,
+		`"user_alias":"Team A"`,
+		`"user_email":"a@example.com"`,
+		`"models"`,
+		`"max_budget"`,
+		`"spend"`,
+		`"created_at"`,
+		`"updated_at"`,
+		`"key"`,
+		`"token_id"`,
+	} {
+		if !bytes.Contains(resp, []byte(want)) {
+			t.Errorf("response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// Fields NOT set in the request must be ABSENT (omitempty parity).
+	for _, absent := range []string{`"budget_duration"`, `"tpm_limit"`, `"rpm_limit"`, `"metadata"`} {
+		if bytes.Contains(resp, []byte(absent)) {
+			t.Errorf("response contains unset field %s; want omitted; body=%s", absent, rec.Body.String())
+		}
+	}
+	// The generated key must be a plaintext secret that resolves at runtime.
+	var gen struct {
+		Key     string `json:"key"`
+		TokenID string `json:"token_id"`
+	}
+	if err := json.Unmarshal(resp, &gen); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+	if !strings.HasPrefix(gen.Key, "sk-") {
+		t.Errorf("key = %q; want sk- plaintext secret", gen.Key)
+	}
+	if gen.TokenID == "" {
+		t.Error("token_id empty; want the key row id")
+	}
+	key, _, err := h.pgAPIKeys.LookupByHash(ctx, store.HashSecret(gen.Key))
+	if err != nil {
+		t.Fatalf("LookupByHash(generated key) failed: %v", err)
+	}
+	if key.ID != gen.TokenID {
+		t.Errorf("LookupByHash resolved %s; want token_id %s", key.ID, gen.TokenID)
+	}
+	// The internal NixLLM casing must NOT leak into the compat response.
+	if bytes.Contains(resp, []byte(`"UserAlias"`)) {
+		t.Errorf("response leaked internal casing; body=%s", rec.Body.String())
+	}
+}
+
+// TestCreateLiteLLMUserCompatNoAutoKey verifies auto_create_key=false suppresses
+// the generated key fields (LiteLLM's behavior when the caller manages keys).
+func TestCreateLiteLLMUserCompatNoAutoKey(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_new_noauto")
+
+	rec := doCompat(h.CreateLiteLLMUserCompat, http.MethodPost,
+		"/v0/management/litellm/user/new",
+		`{"user_id":"team-a","auto_create_key":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(`"key"`)) {
+		t.Errorf("auto_create_key=false still returned a key; body=%s", rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(`"token_id"`)) {
+		t.Errorf("auto_create_key=false still returned token_id; body=%s", rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GET /litellm/user/list
+// ---------------------------------------------------------------------------
+
+// TestListLiteLLMUsersCompat seeds two users and verifies GET /litellm/user/list
+// returns LiteLLM's UserListResponse envelope with total_pages and asc default
+// sort_order.
+func TestListLiteLLMUsersCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_list")
+	ctx := context.Background()
+	for _, u := range []store.InternalUser{
+		{ID: "team-a", UserAlias: "Team A", UserEmail: "a@example.com", UserRole: "org"},
+		{ID: "team-b", UserAlias: "Team B", UserEmail: "b@example.com", UserRole: "admin"},
+	} {
+		if _, err := h.pgUsers.Create(ctx, u); err != nil {
+			t.Fatalf("seed Create(%s): %v", u.ID, err)
+		}
+	}
+
+	rec := doCompat(h.ListLiteLLMUsersCompat, http.MethodGet,
+		"/v0/management/litellm/user/list?page=1&page_size=25", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	for _, want := range []string{
+		`"users"`,
+		`"total":2`,
+		`"page":1`,
+		`"page_size":25`,
+		`"total_pages":1`,
+		`"user_id":"team-a"`,
+		`"user_alias":"Team A"`,
+		`"user_id":"team-b"`,
+	} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Errorf("list response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// Default sort_order is asc: team-a (alias "Team A") must precede team-b
+	// ("Team B") — an asc listing of the aliases.
+	if aIdx, bIdx := bytes.Index(body, []byte(`"user_alias":"Team A"`)), bytes.Index(body, []byte(`"user_alias":"Team B"`)); aIdx < 0 || bIdx < 0 || aIdx > bIdx {
+		t.Errorf("default sort_order not asc by alias; aIdx=%d bIdx=%d body=%s", aIdx, bIdx, rec.Body.String())
+	}
+	if bytes.Contains(body, []byte(`"UserAlias"`)) {
+		t.Errorf("list response leaked internal casing; body=%s", rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GET /litellm/user/info
+// ---------------------------------------------------------------------------
+
+// TestGetLiteLLMUserCompat seeds a user + key and verifies GET /litellm/user/info
+// returns LiteLLM's UserInfoResponse shape {user_id, user_info, keys, teams}.
+func TestGetLiteLLMUserCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_info")
+	seedCompatKey(t, h, "prod", "prod-key")
+
+	rec := doCompat(h.GetLiteLLMUserCompat, http.MethodGet,
+		"/v0/management/litellm/user/info?user_id=team-a", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	for _, want := range []string{
+		`"user_id":"team-a"`,
+		`"user_info"`,
+		`"keys"`,
+		`"teams"`,
+		`"user_alias"`,
+		`"user_role"`,
+		`"key_alias":"prod-key"`,
+	} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Errorf("info response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+
+	// 404 case.
+	rec404 := doCompat(h.GetLiteLLMUserCompat, http.MethodGet,
+		"/v0/management/litellm/user/info?user_id=nope", "")
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("missing user status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
+	}
+	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
+		t.Errorf("missing user response missing not_found type; body=%s", rec404.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /litellm/user/update
+// ---------------------------------------------------------------------------
+
+// TestUpdateLiteLLMUserCompat seeds a user, updates user_alias via
+// POST /litellm/user/update, and verifies the returned value reflects the change.
+func TestUpdateLiteLLMUserCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_update")
+	seedCompatUser(t, h, "team-a")
+
+	rec := doCompat(h.UpdateLiteLLMUserCompat, http.MethodPost,
+		"/v0/management/litellm/user/update",
+		`{"user_id":"team-a","user_alias":"Team Alpha","user_role":"admin"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"user_alias":"Team Alpha"`, `"user_role":"admin"`, `"user_id":"team-a"`} {
+		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
+			t.Errorf("update response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /litellm/user/delete
+// ---------------------------------------------------------------------------
+
+// TestDeleteLiteLLMUserCompat seeds a user, deletes it via POST /litellm/user/delete
+// with the spec body {"user_ids": [...]}, and verifies the deleted_users count
+// plus that the user (and its keys) are gone.
+func TestDeleteLiteLLMUserCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_delete")
+	ctx := context.Background()
+	seedCompatKey(t, h, "prod", "prod-key")
+	seedCompatUser(t, h, "team-b")
+
+	rec := doCompat(h.DeleteLiteLLMUserCompat, http.MethodPost,
+		"/v0/management/litellm/user/delete",
+		`{"user_ids":["team-a","team-b"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// LiteLLM's delete_user returns the raw delete count (an int), not an
+	// envelope.
+	var deleted int
+	if err := json.Unmarshal(rec.Body.Bytes(), &deleted); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+	if deleted != 2 {
+		t.Errorf("deleted_users = %d; want 2", deleted)
+	}
+
+	// Confirm both users are gone.
+	if _, err := h.pgUsers.Get(ctx, "team-a"); !errors.Is(err, store.ErrInternalUserNotFound) {
+		t.Errorf("post-delete Get(team-a) err = %v; want ErrInternalUserNotFound", err)
+	}
+	if _, err := h.pgUsers.Get(ctx, "team-b"); !errors.Is(err, store.ErrInternalUserNotFound) {
+		t.Errorf("post-delete Get(team-b) err = %v; want ErrInternalUserNotFound", err)
+	}
+	// Confirm team-a's key was deleted too.
+	keys, _, err := h.pgAPIKeys.ListPagedFiltered(ctx, 1, 100, store.APIKeyListFilter{UserID: "team-a"})
+	if err != nil {
+		t.Fatalf("ListPagedFiltered: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("user delete left %d keys behind; want 0", len(keys))
+	}
+}
+
+// TestDeleteLiteLLMUserCompatMissingUser verifies a batch delete skips an
+// unknown user id without erroring (LiteLLM's count semantics).
+func TestDeleteLiteLLMUserCompatMissingUser(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_delete_missing")
+
+	rec := doCompat(h.DeleteLiteLLMUserCompat, http.MethodPost,
+		"/v0/management/litellm/user/delete",
+		`{"user_ids":["nope"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "0" {
+		t.Errorf("deleted_users = %s; want 0", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /litellm/key/generate
+// ---------------------------------------------------------------------------
+
+// TestGenerateLiteLLMKeyCompat seeds a user, POSTs /litellm/key/generate, and
+// verifies the plaintext secret is returned once (GenerateKeyResponse) and is
+// actually usable at runtime (LookupByHash resolves to the created key). It
+// also covers the 400 empty-user_id and 404 unknown-owner cases.
+func TestGenerateLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_generate")
+	ctx := context.Background()
+	seedCompatUser(t, h, "team-a")
+
+	rec := doCompat(h.GenerateLiteLLMKeyCompat, http.MethodPost,
+		"/v0/management/litellm/key/generate",
+		`{"user_id":"team-a","models":["gpt-4o"],"alias":"prod-key","max_budget":10,"tpm_limit":400,"budget_duration":"30d"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := rec.Body.Bytes()
+	for _, want := range []string{
+		`"key"`,
+		`"user_id":"team-a"`,
+		`"key_alias":"prod-key"`,
+		`"models"`,
+		`"max_budget"`,
+		`"spend"`,
+		`"created_at"`,
+		`"updated_at"`,
+		`"token_id"`,
+	} {
+		if !bytes.Contains(resp, []byte(want)) {
+			t.Errorf("generate response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// Extract the plaintext secret and prove it resolves via hash lookup. The
+	// response key is the plaintext (not the internal id).
+	var gen struct {
+		Key     string `json:"key"`
+		TokenID string `json:"token_id"`
+	}
+	if err := json.Unmarshal(resp, &gen); err != nil {
+		t.Fatalf("unmarshal generate response: %v", err)
+	}
+	if !strings.HasPrefix(gen.Key, "sk-") {
+		t.Fatalf("key = %q; want sk- plaintext; body=%s", gen.Key, rec.Body.String())
+	}
+	key, _, err := h.pgAPIKeys.LookupByHash(ctx, store.HashSecret(gen.Key))
+	if err != nil {
+		t.Fatalf("LookupByHash(secret) failed: %v", err)
+	}
+	if key.ID != gen.TokenID {
+		t.Errorf("LookupByHash resolved %s; want token_id %s", key.ID, gen.TokenID)
+	}
+
+	// 400: empty user_id.
+	rec400 := doCompat(h.GenerateLiteLLMKeyCompat, http.MethodPost,
+		"/v0/management/litellm/key/generate", `{"user_id":""}`)
+	if rec400.Code != http.StatusBadRequest {
+		t.Fatalf("empty user_id status = %d; want 400; body=%s", rec400.Code, rec400.Body.String())
+	}
+	if !bytes.Contains(rec400.Body.Bytes(), []byte(`"invalid_request"`)) {
+		t.Errorf("empty user_id response missing invalid_request type; body=%s", rec400.Body.String())
+	}
+
+	// 404: unknown owner.
+	rec404 := doCompat(h.GenerateLiteLLMKeyCompat, http.MethodPost,
+		"/v0/management/litellm/key/generate", `{"user_id":"nope"}`)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("unknown owner status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
+	}
+	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
+		t.Errorf("unknown owner response missing not_found type; body=%s", rec404.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GET /litellm/key/info
+// ---------------------------------------------------------------------------
+
+// TestGetLiteLLMKeyCompat seeds a user + key, GETs /litellm/key/info by the
+// internal id, and verifies the LiteLLM {"key": <echoed>, "info": {…}} envelope
+// with the secret omitted on read. Also covers hash lookup and the 404 case.
+func TestGetLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_info")
+	key := seedCompatKey(t, h, "prod", "prod-key")
+
+	rec := doCompat(h.GetLiteLLMKeyCompat, http.MethodGet,
+		"/v0/management/litellm/key/info?key="+key.ID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	resp := rec.Body.Bytes()
+	for _, want := range []string{
+		`"key":"` + key.ID + `"`,
+		`"info"`,
+		`"user_id":"team-a"`,
+		`"key_alias":"prod-key"`,
+		`"models"`,
+		`"spend"`,
+		`"created_at"`,
+		`"updated_at"`,
+	} {
+		if !bytes.Contains(resp, []byte(want)) {
+			t.Errorf("info response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// The secret must NOT be leaked on read.
+	if bytes.Contains(resp, []byte(`"secret"`)) {
+		t.Errorf("info response leaked secret; body=%s", rec.Body.String())
+	}
+
+	// 404 case.
+	rec404 := doCompat(h.GetLiteLLMKeyCompat, http.MethodGet,
+		"/v0/management/litellm/key/info?key=nope", "")
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("missing key status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
+	}
+	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
+		t.Errorf("missing key response missing not_found type; body=%s", rec404.Body.String())
+	}
+}
+
+// TestGetLiteLLMKeyCompatByHash verifies /litellm/key/info resolves a sha256
+// hash (the LiteLLM wire contract for hash-lookup) to the same key.
+func TestGetLiteLLMKeyCompatByHash(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_info_hash")
+	ctx := context.Background()
+	key, _, err := h.pgAPIKeys.Create(ctx, "prod", "prod-key", "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+	if err := h.pgAPIKeys.UpdateUserID(ctx, key.ID, "team-a"); err != nil {
+		t.Fatalf("seed UpdateUserID: %v", err)
+	}
+
+	rec := doCompat(h.GetLiteLLMKeyCompat, http.MethodGet,
+		"/v0/management/litellm/key/info?key="+key.KeyHash, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"key_alias":"prod-key"`)) {
+		t.Errorf("hash lookup response missing key_alias; body=%s", rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GET /litellm/key/list
+// ---------------------------------------------------------------------------
+
+// TestListLiteLLMKeysCompat seeds a user + two keys and verifies GET
+// /litellm/key/list returns LiteLLM's KeyListResponseObject fields
+// (keys/total_count/current_page/total_pages) with the size param.
+func TestListLiteLLMKeysCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_list")
+	k1 := seedCompatKey(t, h, "prod", "prod-key")
+	k2 := seedCompatKey(t, h, "dev", "dev-key")
+
+	rec := doCompat(h.ListLiteLLMKeysCompat, http.MethodGet,
+		"/v0/management/litellm/key/list?page=1&size=25", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.Bytes()
+	for _, want := range []string{
+		`"keys"`,
+		`"total_count":2`,
+		`"current_page":1`,
+		`"total_pages":1`,
+		`"key":"` + k1.ID + `"`,
+		`"key_alias":"prod-key"`,
+		`"key":"` + k2.ID + `"`,
+		`"key_alias":"dev-key"`,
+	} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Errorf("list response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// The secret must NOT be leaked on read.
+	if bytes.Contains(body, []byte(`"secret"`)) {
+		t.Errorf("list response leaked secret; body=%s", rec.Body.String())
+	}
+	// size is clamped to 100 (LiteLLM's max).
+	recClamped := doCompat(h.ListLiteLLMKeysCompat, http.MethodGet,
+		"/v0/management/litellm/key/list?size=9999", "")
+	if recClamped.Code != http.StatusOK {
+		t.Fatalf("clamped status = %d; want 200; body=%s", recClamped.Code, recClamped.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /litellm/key/update
+// ---------------------------------------------------------------------------
+
+// TestUpdateLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/update
+// changing name/status/alias, and verifies the returned values reflect the
+// changes.
+func TestUpdateLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_update")
+	ctx := context.Background()
+	key := seedCompatKey(t, h, "prod", "prod-key")
+
+	rec := doCompat(h.UpdateLiteLLMKeyCompat, http.MethodPost,
+		"/v0/management/litellm/key/update",
+		`{"key":"`+key.ID+`","name":"prod-v2","status":"disabled","alias":"prod-alias"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"key":"` + key.ID + `"`, `"key_alias":"prod-alias"`} {
+		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
+			t.Errorf("update response missing %s; body=%s", want, rec.Body.String())
+		}
+	}
+	// Confirm the name/status persisted on the row.
+	reloaded, _, err := h.pgAPIKeys.LookupByID(ctx, key.ID)
+	if err != nil {
+		t.Fatalf("reload LookupByID: %v", err)
+	}
+	if reloaded.Name != "prod-v2" {
+		t.Errorf("reloaded name = %q; want prod-v2", reloaded.Name)
+	}
+	if reloaded.Status != "disabled" {
+		t.Errorf("reloaded status = %q; want disabled", reloaded.Status)
+	}
+
+	// Updating a nonexistent key must return 404 (not 500).
+	rec404 := doCompat(h.UpdateLiteLLMKeyCompat, http.MethodPost,
+		"/v0/management/litellm/key/update", `{"key":"nope","name":"x"}`)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("missing key update status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
+	}
+	if !bytes.Contains(rec404.Body.Bytes(), []byte(`"not_found"`)) {
+		t.Errorf("missing key update response missing not_found type; body=%s", rec404.Body.String())
+	}
+}
+
+// TestUpdateLiteLLMKeyCompatByAlias verifies /litellm/key/update accepts the
+// key_alias identifier (LiteLLM's UpdateKeyRequest alternative).
+func TestUpdateLiteLLMKeyCompatByAlias(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_update_alias")
+	key := seedCompatKey(t, h, "prod", "prod-key")
+
+	rec := doCompat(h.UpdateLiteLLMKeyCompat, http.MethodPost,
+		"/v0/management/litellm/key/update",
+		`{"key_alias":"prod-key","name":"prod-renamed"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	reloaded, _, err := h.pgAPIKeys.LookupByID(context.Background(), key.ID)
+	if err != nil {
+		t.Fatalf("reload LookupByID: %v", err)
+	}
+	if reloaded.Name != "prod-renamed" {
+		t.Errorf("reloaded name = %q; want prod-renamed", reloaded.Name)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /litellm/key/regenerate
+// ---------------------------------------------------------------------------
+
+// TestRegenerateLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/regenerate
+// with the key as a QUERY param (the spec contract), and verifies the new
+// plaintext secret is returned AND that rotation actually happened: the old
+// secret no longer resolves while the new one does.
+func TestRegenerateLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_regenerate")
+	ctx := context.Background()
+	key := seedCompatKey(t, h, "prod", "prod-key")
+
+	// Recover the current plaintext secret so we can prove rotation.
+	seedKey, _, err := h.pgAPIKeys.LookupByID(ctx, key.ID)
+	if err != nil {
+		t.Fatalf("seed LookupByID: %v", err)
+	}
+	if seedKey.KeyHash == "" {
+		t.Fatal("seeded key has no secret hash")
+	}
+
+	rec := doCompat(h.RegenerateLiteLLMKeyCompat, http.MethodPost,
+		"/v0/management/litellm/key/regenerate?key="+key.ID, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Data []map[string]any `json:"data"`
+		Key     string `json:"key"`
+		TokenID string `json:"token_id"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal regenerate response: %v", err)
+	}
+	if !strings.HasPrefix(resp.Key, "sk-") {
+		t.Fatalf("key = %q; want sk- plaintext; body=%s", resp.Key, rec.Body.String())
+	}
+	if resp.TokenID != key.ID {
+		t.Errorf("token_id = %q; want %q", resp.TokenID, key.ID)
+	}
+	newHash := store.HashSecret(resp.Key)
+	if newHash == seedKey.KeyHash {
+		t.Fatal("regenerate returned the same secret; expected rotation")
+	}
+	// The old secret hash must no longer resolve.
+	if _, _, err := h.pgAPIKeys.LookupByHash(ctx, seedKey.KeyHash); !errors.Is(err, store.ErrAPIKeyNotFound) {
+		t.Errorf("old secret still resolves after regenerate; err=%v", err)
+	}
+	// The new secret must resolve to the same key id.
+	newKey, _, err := h.pgAPIKeys.LookupByHash(ctx, newHash)
+	if err != nil {
+		t.Fatalf("LookupByHash(new secret) failed: %v", err)
+	}
+	if newKey.ID != key.ID {
+		t.Errorf("LookupByHash(new) resolved key %s; want %s", newKey.ID, key.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /litellm/key/delete
+// ---------------------------------------------------------------------------
+
+// TestDeleteLiteLLMKeyCompat seeds a user + key, POSTs /litellm/key/delete with
+// the spec body {"keys": [...]}, verifies {"deleted_keys": [...]}, and confirms
+// the key is gone.
+func TestDeleteLiteLLMKeyCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_delete")
+	ctx := context.Background()
+	k1 := seedCompatKey(t, h, "prod", "prod-key")
+	k2 := seedCompatKey(t, h, "dev", "dev-key")
+
+	rec := doCompat(h.DeleteLiteLLMKeyCompat, http.MethodPost,
+		"/v0/management/litellm/key/delete",
+		`{"keys":["`+k1.ID+`","`+k2.ID+`"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var del struct {
+		DeletedKeys []string `json:"deleted_keys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &del); err != nil {
 		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
 	}
-	if len(resp.Data) != 1 {
-		t.Fatalf("data len = %d; want 1; body=%s", len(resp.Data), rec.Body.String())
+	if len(del.DeletedKeys) != 2 {
+		t.Errorf("deleted_keys len = %d; want 2; body=%s", len(del.DeletedKeys), rec.Body.String())
 	}
-	row := resp.Data[0]
+	// Confirm both keys are gone.
+	if _, _, err := h.pgAPIKeys.LookupByID(ctx, k1.ID); !errors.Is(err, store.ErrAPIKeyNotFound) {
+		t.Errorf("post-delete LookupByID(k1) err = %v; want ErrAPIKeyNotFound", err)
+	}
+	if _, _, err := h.pgAPIKeys.LookupByID(ctx, k2.ID); !errors.Is(err, store.ErrAPIKeyNotFound) {
+		t.Errorf("post-delete LookupByID(k2) err = %v; want ErrAPIKeyNotFound", err)
+	}
+}
+
+// TestDeleteLiteLLMKeyCompatByAliases verifies /litellm/key/delete accepts the
+// spec's {"key_aliases": [...]} alternative body.
+func TestDeleteLiteLLMKeyCompatByAliases(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_delete_aliases")
+	seedCompatKey(t, h, "prod", "prod-key")
+
+	rec := doCompat(h.DeleteLiteLLMKeyCompat, http.MethodPost,
+		"/v0/management/litellm/key/delete",
+		`{"key_aliases":["prod-key"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var del struct {
+		DeletedKeys []string `json:"deleted_keys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &del); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+	if len(del.DeletedKeys) != 1 || del.DeletedKeys[0] != "prod-key" {
+		t.Errorf("deleted_keys = %v; want [prod-key]", del.DeletedKeys)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GET /litellm/spend/logs
+// ---------------------------------------------------------------------------
+
+// TestListLiteLLMSpendLogsCompat verifies GET /litellm/spend/logs returns a
+// DIRECT array of LiteLLM spend-log rows (not a paginated envelope) and honors
+// the user_id filter.
+func TestListLiteLLMSpendLogsCompat(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_logs")
+	seedCompatSpendEvent(t, h, "team-a")
+
+	rec := doCompat(h.ListLiteLLMSpendLogsCompat, http.MethodGet,
+		"/v0/management/litellm/spend/logs?user_id=team-a", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// The response is a DIRECT array: the first non-whitespace byte is '['.
+	body := rec.Body.Bytes()
+	if !bytes.HasPrefix(bytes.TrimSpace(body), []byte("[")) {
+		t.Fatalf("spend/logs response is not a direct array; body=%s", rec.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(body, &rows); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows len = %d; want 1; body=%s", len(rows), rec.Body.String())
+	}
+	row := rows[0]
 	if got := row["model"]; got != "gpt-4o" {
 		t.Errorf("model = %v; want gpt-4o", got)
 	}
 	if got := row["spend"]; got != float64(1.25) {
 		t.Errorf("spend = %v; want 1.25", got)
 	}
-	for _, field := range []string{"request_id", "total_tokens", "prompt_tokens", "completion_tokens"} {
+	for _, field := range []string{"request_id", "total_tokens", "prompt_tokens", "completion_tokens", "startTime", "endTime", "call_type", "status"} {
 		if _, ok := row[field]; !ok {
 			t.Errorf("spend/logs row missing %q; row=%v", field, row)
 		}
 	}
 
-	// A different user yields no rows.
-	rec2 := httptest.NewRecorder()
-	c2, _ := gin.CreateTestContext(rec2)
-	c2.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/logs?user_id=other", nil)
-	h.ListLiteLLMSpendLogsCompat(c2)
-	var resp2 struct {
-		Data  []map[string]any `json:"data"`
-		Total int64            `json:"total"`
-	}
-	if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
-		t.Fatalf("unmarshal resp2: %v", err)
-	}
-	if len(resp2.Data) != 0 || resp2.Total != 0 {
-		t.Fatalf("other-user rows = %d (total %d); want 0", len(resp2.Data), resp2.Total)
-	}
-
-	// An end_date before the seeded event's requested_at narrows results to 0,
-	// proving the start_date/end_date parsing actually filters.
-	earlier := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
-	rec3 := httptest.NewRecorder()
-	c3, _ := gin.CreateTestContext(rec3)
-	c3.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/logs?user_id=team-a&end_date="+url.QueryEscape(earlier), nil)
-	h.ListLiteLLMSpendLogsCompat(c3)
-	var resp3 struct {
-		Data  []map[string]any `json:"data"`
-		Total int64            `json:"total"`
-	}
-	if err := json.Unmarshal(rec3.Body.Bytes(), &resp3); err != nil {
-		t.Fatalf("unmarshal resp3: %v", err)
-	}
-	if len(resp3.Data) != 0 || resp3.Total != 0 {
-		t.Fatalf("end_date-narrowed rows = %d (total %d); want 0", len(resp3.Data), resp3.Total)
+	// A different user yields an empty array.
+	rec2 := doCompat(h.ListLiteLLMSpendLogsCompat, http.MethodGet,
+		"/v0/management/litellm/spend/logs?user_id=other", "")
+	if got := strings.TrimSpace(rec2.Body.String()); got != "[]" {
+		t.Errorf("other-user rows = %s; want []", got)
 	}
 }
 
-// TestListLiteLLMSpendUsersCompat verifies GET /litellm/spend/users groups
-// spend by user and returns total_spend/total_requests per user. A day-aligned
-// (no date filter) request routes through the usage_stat_day rollup fast path,
-// so the seeded event must first be folded into the rollup — mirroring
-// production, where RunRollupLoop folds each day before daily aggregates are
-// served.
-func TestListLiteLLMSpendUsersCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_users")
-	gin.SetMode(gin.TestMode)
+// ---------------------------------------------------------------------------
+// Spend reports
+// ---------------------------------------------------------------------------
+
+// TestGetLiteLLMGlobalSpendReport verifies GET /litellm/global/spend/report
+// returns the LiteLLM per-api_key spend report shape (api_key/total_cost/
+// total_input_tokens/total_output_tokens/model_details) and requires both
+// start_date and end_date.
+func TestGetLiteLLMGlobalSpendReport(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_global_spend_report")
 	ev := seedCompatSpendEvent(t, h, "team-a")
-	// Fold the fixture's calendar day into usage_stat_day so the day-aligned
-	// fast path can answer it (otherwise the rollup is empty and the aggregate
-	// returns no rows).
-	if err := h.pgUsage.RunRollup(context.Background(), ev.RequestedAt); err != nil {
-		t.Fatalf("RunRollup: %v", err)
-	}
 
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/users", nil)
-	h.ListLiteLLMSpendUsersCompat(c)
-
+	start := ev.RequestedAt.Add(-time.Hour).Format("2006-01-02")
+	end := ev.RequestedAt.Add(time.Hour).Format("2006-01-02")
+	rec := doCompat(h.GetLiteLLMGlobalSpendReport, http.MethodGet,
+		"/v0/management/litellm/global/spend/report?start_date="+start+"&end_date="+end, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var resp struct {
-		Data []map[string]any `json:"data"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
 	}
-	if len(resp.Data) != 1 {
-		t.Fatalf("data len = %d; want 1; body=%s", len(resp.Data), rec.Body.String())
+	if len(rows) != 1 {
+		t.Fatalf("rows len = %d; want 1; body=%s", len(rows), rec.Body.String())
 	}
-	row := resp.Data[0]
-	if got := row["user_id"]; got != "team-a" {
-		t.Errorf("user_id = %v; want team-a", got)
+	row := rows[0]
+	if got := row["api_key"]; got != "key-usage-compat" {
+		t.Errorf("api_key = %v; want key-usage-compat", got)
 	}
-	if got := row["total_spend"]; got != float64(1.25) {
-		t.Errorf("total_spend = %v; want 1.25", got)
+	if got := row["total_cost"]; got != float64(1.25) {
+		t.Errorf("total_cost = %v; want 1.25", got)
 	}
-	if got := row["total_requests"]; got != float64(1) {
-		t.Errorf("total_requests = %v; want 1", got)
+	if got := row["total_input_tokens"]; got != float64(100) {
+		t.Errorf("total_input_tokens = %v; want 100", got)
+	}
+	if got := row["total_output_tokens"]; got != float64(50) {
+		t.Errorf("total_output_tokens = %v; want 50", got)
+	}
+	details, ok := row["model_details"].([]any)
+	if !ok || len(details) != 1 {
+		t.Fatalf("model_details = %v; want 1 entry", row["model_details"])
+	}
+	md := details[0].(map[string]any)
+	if got := md["model"]; got != "gpt-4o" {
+		t.Errorf("model_details[0].model = %v; want gpt-4o", got)
+	}
+	if got := md["total_cost"]; got != float64(1.25) {
+		t.Errorf("model_details[0].total_cost = %v; want 1.25", got)
+	}
+
+	// Missing date params must 400 (LiteLLM's contract).
+	rec400 := doCompat(h.GetLiteLLMGlobalSpendReport, http.MethodGet,
+		"/v0/management/litellm/global/spend/report", "")
+	if rec400.Code != http.StatusBadRequest {
+		t.Fatalf("missing dates status = %d; want 400; body=%s", rec400.Code, rec400.Body.String())
 	}
 }
 
-// TestGetLiteLLMGlobalSpendCompat verifies GET /litellm/global/spend returns the
-// total spend and request count across all usage.
-func TestGetLiteLLMGlobalSpendCompat(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_global_spend")
-	gin.SetMode(gin.TestMode)
-	seedCompatSpendEvent(t, h, "team-a")
-
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/global/spend", nil)
-	h.GetLiteLLMGlobalSpendCompat(c)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		TotalSpend    float64 `json:"total_spend"`
-		TotalRequests int64   `json:"total_requests"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
-	}
-	if resp.TotalSpend != 1.25 {
-		t.Errorf("total_spend = %v; want 1.25", resp.TotalSpend)
-	}
-	if resp.TotalRequests != 1 {
-		t.Errorf("total_requests = %d; want 1", resp.TotalRequests)
-	}
-}
-
-// callSpendUsersCompat performs one GET /litellm/spend/users request against the
-// handler and returns the raw response body. It mirrors the request construction
-// used by TestListLiteLLMSpendUsersCompat. startDate sets a partial-day RFC3339
-// start_date bound: a non-midnight From keeps the query on the cached
-// usage_events path (the day-aligned rollup fast-path is not exercised here
-// because the test harness schema has no usage_stat_day rollup table — rolling
-// that in is the pre-existing store-layer concern, not this test's).
-func callSpendUsersCompat(h *Handler, startDate string) *httptest.ResponseRecorder {
-	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/users?start_date="+url.QueryEscape(startDate), nil)
-	h.ListLiteLLMSpendUsersCompat(c)
-	return rec
-}
-
-// callGlobalSpendCompat performs one GET /litellm/global/spend request against the
-// handler and returns the raw response body. startDate sets a partial-day RFC3339
-// start_date bound so a shared window is cached identically across calls.
-func callGlobalSpendCompat(h *Handler, startDate string) *httptest.ResponseRecorder {
-	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/global/spend?start_date="+url.QueryEscape(startDate), nil)
-	h.GetLiteLLMGlobalSpendCompat(c)
-	return rec
-}
-
-// spendUsersTotalSpend extracts the total_spend for the given user_id from a
-// /litellm/spend/users response body, or -1 when absent/mismatched.
-func spendUsersTotalSpend(t *testing.T, body []byte, userID string) float64 {
-	t.Helper()
-	var resp struct {
-		Data []map[string]any `json:"data"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("unmarshal spend/users response: %v; body=%s", err, string(body))
-	}
-	for _, row := range resp.Data {
-		if row["user_id"] == userID {
-			if sp, ok := row["total_spend"].(float64); ok {
-				return sp
-			}
-			return -1
-		}
-	}
-	return -1
-}
-
-// TestLiteLLMSpendEndpointsServedViaCache proves the /litellm/spend/users and
-// /litellm/global/spend endpoints are served through the UsageStore's short-TTL
-// read-through cache (wired by NewUsageStore at the store layer, inherited by
-// the handlers with no handler code change). It inserts NEW usage events between
-// two calls inside the 15s TTL and asserts the second call still returns the
-// ORIGINAL aggregate — proving the second call did NOT re-query the DB. If the
-// cache were inactive, the second call would see the new events and the
-// assertion would fail.
-//
-// Both endpoints are queried with the SAME partial-day start_date window so the
-// cache key (and thus the cached value) is identical across the two calls. The
-// partial-day window keeps the query on the cached usage_events path (the
-// day-aligned rollup fast-path is out of scope; see callSpendUsersCompat).
-// request_id is deduped (unique) in usage_events, so each inserted event uses a
-// distinct RequestID.
-func TestLiteLLMSpendEndpointsServedViaCache(t *testing.T) {
-	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_cache")
+// TestGetLiteLLMKeySpendReport verifies GET /litellm/key/spend/report scopes by
+// api_key and returns the same spend-report shape.
+func TestGetLiteLLMKeySpendReport(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_key_spend_report")
 	ctx := context.Background()
-
-	// A partial-day (non-midnight) start bound: routes both endpoints through the
-	// cached usage_events path and is well inside the seeded events' window, so
-	// the aggregate includes them.
-	probeStart := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
-
-	// Prime the store: one spend event for team-a worth 1.25.
-	seedCompatSpendEvent(t, h, "team-a")
-
-	// First call populates the aggregate cache for both endpoints.
-	recA := callSpendUsersCompat(h, probeStart)
-	if recA.Code != http.StatusOK {
-		t.Fatalf("spend/users status = %d; want 200; body=%s", recA.Code, recA.Body.String())
+	// Seed a real runtime key and attach the spend event to it so the api_key
+	// query param (an internal key id here) resolves to the row.
+	key := seedCompatKey(t, h, "prod", "prod-key")
+	ev := store.UsageEvent{
+		RequestID:   "req-usage-compat",
+		APIKeyID:    key.ID,
+		UserID:      "team-a",
+		Provider:    "openai",
+		Model:       "gpt-4o",
+		InputTokens: 100, OutputTokens: 50, TotalTokens: 150,
+		CostUSD:     1.25,
+		RequestedAt: time.Now().Add(-time.Hour).UTC(),
 	}
-	if got := spendUsersTotalSpend(t, recA.Body.Bytes(), "team-a"); got != 1.25 {
-		t.Fatalf("spend/users baseline total_spend = %v; want 1.25", got)
-	}
-	globA := callGlobalSpendCompat(h, probeStart)
-	if globA.Code != http.StatusOK {
-		t.Fatalf("global/spend status = %d; want 200; body=%s", globA.Code, globA.Body.String())
+	if err := h.pgUsage.InsertEvent(ctx, ev); err != nil {
+		t.Fatalf("InsertEvent: %v", err)
 	}
 
-	// Insert ADDITIONAL spend for team-a while the 15s cache TTL is still active.
-	// A live (non-cached) aggregate would now report 1.25 + 0.50 = 1.75.
-	extra := store.UsageEvent{
-		RequestID:    "req-usage-cache-probe",
-		APIKeyID:     "key-usage-compat",
-		UserID:       "team-a",
-		Provider:     "openai",
-		Model:        "gpt-4o",
-		InputTokens:  40,
-		OutputTokens: 10,
-		TotalTokens:  50,
-		CostUSD:      0.50,
-		RequestedAt:  time.Now().Add(-time.Hour).UTC(),
+	start := ev.RequestedAt.Add(-time.Hour).Format("2006-01-02")
+	end := ev.RequestedAt.Add(time.Hour).Format("2006-01-02")
+	rec := doCompat(h.GetLiteLLMKeySpendReport, http.MethodGet,
+		"/v0/management/litellm/key/spend/report?start_date="+start+"&end_date="+end+"&api_key="+key.ID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if err := h.pgUsage.InsertEvent(ctx, extra); err != nil {
-		t.Fatalf("InsertEvent(extra): %v", err)
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
 	}
-
-	// Second call within the TTL: the cached aggregate must NOT see the new
-	// event, i.e. spend/users still reports 1.25 (not 1.75).
-	recB := callSpendUsersCompat(h, probeStart)
-	if got := spendUsersTotalSpend(t, recB.Body.Bytes(), "team-a"); got != 1.25 {
-		t.Fatalf("cached spend/users total_spend after extra insert = %v; want 1.25 (cache should hide the new event); body=%s", got, recB.Body.String())
+	if len(rows) != 1 || rows[0]["api_key"] != key.ID {
+		t.Fatalf("rows = %v; want 1 row for %s", rows, key.ID)
 	}
-	// And the two responses must be byte-identical (served from the same cache entry).
-	if !bytes.Equal(recA.Body.Bytes(), recB.Body.Bytes()) {
-		t.Errorf("spend/users responses differ across cached calls:\n A=%s\n B=%s", recA.Body.String(), recB.Body.String())
+	if got := rows[0]["total_cost"]; got != float64(1.25) {
+		t.Errorf("total_cost = %v; want 1.25", got)
 	}
 
-	// Same proof for /litellm/global/spend.
-	globB := callGlobalSpendCompat(h, probeStart)
-	var aG, bG struct {
-		TotalSpend float64 `json:"total_spend"`
+	// A different (unknown) key must 404.
+	rec404 := doCompat(h.GetLiteLLMKeySpendReport, http.MethodGet,
+		"/v0/management/litellm/key/spend/report?start_date="+start+"&end_date="+end+"&api_key=sk-unknown", "")
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("unknown key status = %d; want 404; body=%s", rec404.Code, rec404.Body.String())
 	}
-	if err := json.Unmarshal(globA.Body.Bytes(), &aG); err != nil {
-		t.Fatalf("unmarshal global A: %v; body=%s", err, globA.Body.String())
-	}
-	if err := json.Unmarshal(globB.Body.Bytes(), &bG); err != nil {
-		t.Fatalf("unmarshal global B: %v; body=%s", err, globB.Body.String())
-	}
-	if aG.TotalSpend != 1.25 {
-		t.Fatalf("global/spend baseline total_spend = %v; want 1.25", aG.TotalSpend)
-	}
-	if bG.TotalSpend != 1.25 {
-		t.Fatalf("cached global/spend total_spend after extra insert = %v; want 1.25 (cache should hide the new event); body=%s", bG.TotalSpend, globB.Body.String())
-	}
-	if !bytes.Equal(globA.Body.Bytes(), globB.Body.Bytes()) {
-		t.Errorf("global/spend responses differ across cached calls:\n A=%s\n B=%s", globA.Body.String(), globB.Body.String())
-	}
+}
 
-	// Sanity: the extra event really did land in the DB — so the unchanged
-	// aggregate really is the cache, not an insert that silently failed. Re-query
-	// via the uncached spend/logs path (which is NOT cached by design).
-	var logs struct {
-		Total int64 `json:"total"`
+// TestGetLiteLLMUserSpendReport verifies GET /litellm/user/spend/report scopes by
+// internal_user_id and returns the spend-report shape.
+func TestGetLiteLLMUserSpendReport(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_user_spend_report")
+	ev := seedCompatSpendEvent(t, h, "team-a")
+
+	start := ev.RequestedAt.Add(-time.Hour).Format("2006-01-02")
+	end := ev.RequestedAt.Add(time.Hour).Format("2006-01-02")
+	rec := doCompat(h.GetLiteLLMUserSpendReport, http.MethodGet,
+		"/v0/management/litellm/user/spend/report?start_date="+start+"&end_date="+end+"&internal_user_id=team-a", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	recLogs := httptest.NewRecorder()
-	cLogs, _ := gin.CreateTestContext(recLogs)
-	cLogs.Request = httptest.NewRequest(http.MethodGet, "/v0/management/litellm/spend/logs?user_id=team-a", nil)
-	h.ListLiteLLMSpendLogsCompat(cLogs)
-	if err := json.Unmarshal(recLogs.Body.Bytes(), &logs); err != nil {
-		t.Fatalf("unmarshal spend/logs: %v", err)
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rec.Body.String())
 	}
-	if logs.Total != 2 {
-		t.Fatalf("uncached spend/logs total = %d; want 2 (proves extra insert persisted)", logs.Total)
+	if len(rows) != 1 || rows[0]["api_key"] != "key-usage-compat" {
+		t.Fatalf("rows = %v; want 1 row for key-usage-compat", rows)
+	}
+}
+
+// TestGetLiteLLMSpendTags verifies GET /litellm/spend/tags returns an empty
+// array (the runtime has no request_tags column to aggregate).
+func TestGetLiteLLMSpendTags(t *testing.T) {
+	h := newTestLiteLLMCompatHandler(t, "mgmt_litellm_spend_tags")
+
+	rec := doCompat(h.GetLiteLLMSpendTags, http.MethodGet, "/v0/management/litellm/spend/tags", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Errorf("spend/tags body = %s; want []", got)
 	}
 }
