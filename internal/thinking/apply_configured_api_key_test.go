@@ -518,3 +518,37 @@ func TestApplyThinkingWithModelInfoUsesOriginalResponsesEffort(t *testing.T) {
 		t.Fatalf("output effort = %q, want max; body=%s", got, out)
 	}
 }
+
+// The /v1/responses/compact route targets the openai-response format, which
+// normalizes to the Codex applier. Assumed sentinels must survive that route
+// too: an explicit disable must not become the fabricated first level and an
+// (auto) suffix — with no body field to preserve — must still serialize as an
+// explicit auto effort (#5511 review).
+func TestApplyThinkingWithModelInfoKeepsAssumedSentinelsOnCompactResponses(t *testing.T) {
+	modelInfo := &registry.ModelInfo{
+		ID:   "compat-upstream",
+		Type: "openai-compatibility",
+		Thinking: &registry.ThinkingSupport{
+			Levels:        []string{"low", "medium", "high"},
+			LevelsAssumed: true,
+		},
+	}
+
+	noneBody := []byte(`{"reasoning":{"effort":"none"}}`)
+	out, err := thinking.ApplyThinkingWithModelInfo(noneBody, noneBody, "compat-upstream", "openai", "openai-response", "compat-provider", modelInfo)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithModelInfo(none) error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "none" {
+		t.Fatalf("compact none reasoning.effort = %q, want none; body=%s", got, out)
+	}
+
+	suffixBody := []byte(`{}`)
+	out, err = thinking.ApplyThinkingWithModelInfo(suffixBody, suffixBody, "compat-upstream(auto)", "openai-response", "openai-response", "compat-provider", modelInfo)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithModelInfo(suffix auto) error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "auto" {
+		t.Fatalf("compact suffix auto reasoning.effort = %q, want auto; body=%s", got, out)
+	}
+}
