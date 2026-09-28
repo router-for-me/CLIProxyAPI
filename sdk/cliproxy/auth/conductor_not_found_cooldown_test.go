@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // Alias-mapped models: the provider's structured 404 names the alias-resolved
@@ -167,5 +169,44 @@ func TestManager_MarkResult_SingleNotFoundCooldownsMinutes(t *testing.T) {
 				t.Fatalf("single 404 cooldown = %v, want a short window (minutes)", cooldown)
 			}
 		})
+	}
+}
+
+// A streamed alias-mapped request can emit payloads before the structured 404
+// arrives as a terminal chunk error. The result recorded by wrapStreamResult
+// must carry the alias-resolved upstream model so classification matches the
+// provider's error text and keeps the long model-support cooldown instead of
+// the short transient window (#5514 review).
+func TestWrapStreamResult_TerminalErrorCarriesUpstreamModel(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-stream-404-upstream", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	remaining := make(chan cliproxyexecutor.StreamChunk, 2)
+	remaining <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"delta":"hi"}`)}
+	remaining <- cliproxyexecutor.StreamChunk{Err: &Error{
+		HTTPStatus: http.StatusNotFound,
+		Message:    `{"type":"not_found_error","message":"model upstream-name was not found"}`,
+	}}
+	close(remaining)
+
+	streamResult := m.wrapStreamResult(context.Background(), auth.Clone(), "codex", "public-model", "public-model", "upstream-name", nil, nil, remaining, OAuthModelAliasResult{}, false, cliproxyexecutor.Options{})
+	for range streamResult.Chunks {
+	}
+
+	before := time.Now()
+	updated, _ := m.GetByID(auth.ID)
+	state := existingModelState(updated, canonicalModelKey("public-model"))
+	if state == nil {
+		t.Fatal("model state missing")
+	}
+	if state.NextRetryAfter.Before(before.Add(6 * time.Hour)) {
+		t.Fatalf("stream terminal 404 fell into the transient branch: %v", state.NextRetryAfter.Sub(before))
 	}
 }
