@@ -6,6 +6,7 @@ import {
 import { useAsync } from '../hooks/useAsync.js';
 import { Spinner, ErrorBanner, Stat } from '../components/Primitives.jsx';
 import DynamicSettingsCard from '../components/DynamicSettingsCard.jsx';
+import JevSettingsCard from '../components/JevSettingsCard.jsx';
 import { useToast } from '../components/Toast.jsx';
 
 // SettingsPage — dashboard session / connection info plus every operator
@@ -37,6 +38,8 @@ export default function SettingsPage() {
       </div>
 
       <AlertSettingsCard toast={toast} />
+
+      <JevSettingsCard />
 
       <div className="card">
         <DynamicSettingsCard />

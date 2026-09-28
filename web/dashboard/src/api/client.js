@@ -1159,6 +1159,30 @@ export async function putAlertSettings(body) {
   });
 }
 
+// --- Jev AI classifier settings ---------------------------------------------
+//
+// The Jev AI gate classifies each auto-routed request before the heuristic
+// tier is used, and routes by the classifier's tier when its confidence clears
+// the router's floor. These are the global switches; the per-router opt-in
+// lives on each Auto Router.
+//
+// Returns { settings: { enabled, api_key_set, api_key_prefix, model, updated_at } }.
+// The API key itself is never returned — only whether one is configured and a
+// short prefix for recognition.
+export async function getJevSettings() {
+  return fetchJSON('/jev/settings');
+}
+
+// Update the Jev settings (partial merge). `api_key` is tri-state:
+// omit it to keep the stored key, send "" to clear it, or send a new value to
+// rotate it. Returns the persisted settings.
+export async function putJevSettings(body) {
+  return fetchJSON('/jev/settings', {
+    method: 'PUT',
+    body: JSON.stringify(body || {}),
+  });
+}
+
 // --- Model entry (per-model catalog edit) -----------------------------------
 //
 // The dashboard can edit individual catalog rows: rename display fields,

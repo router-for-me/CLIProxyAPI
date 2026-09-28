@@ -331,12 +331,14 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		if key, errKey := jevAPIKey(handles.Jev); errKey != nil {
 			log.WithError(errKey).Warn("api: Jev classifier disabled; could not unseal the API key")
 			handlers.SetJevGate(nil)
-		} else if key != "" {
-			handlers.SetJevGate(jevclient.New("", key, nil))
 		} else {
-			// No key configured: leave the gate detached. The provider reports
-			// apiKeySet=false, so the gate would be skipped anyway.
-			handlers.SetJevGate(nil)
+			// The client is always built, even with no key, so that saving one
+			// from the dashboard can be adopted live (SetJevKeyRotator below).
+			// The gate still short-circuits before any call while the provider
+			// reports apiKeySet=false.
+			client := jevclient.New("", key, nil)
+			handlers.SetJevGate(client)
+			s.mgmt.SetJevKeyRotator(client)
 		}
 		// Surface official_provider on Usage Stats / Errors rows so the
 		// dashboard can show "Provider Official" (e.g. "anthropic") instead of

@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	log "github.com/sirupsen/logrus"
 )
 
 // jevSettingsStore is the surface the Jev settings handlers need. The real
@@ -68,9 +69,8 @@ type jevSettingsRequest struct {
 // PutJevSettings handles PUT /v0/management/jev/settings.
 //
 // Partial update: omitted fields keep their stored value. A key rotated here is
-// sealed at rest and takes effect for new classifications; because the gate's
-// client is built once at startup, an already-running server keeps using the
-// previously loaded key until it restarts.
+// sealed at rest and, when a rotator is wired, handed to the live classifier
+// client so it takes effect immediately rather than on the next restart.
 func (h *Handler) PutJevSettings(c *gin.Context) {
 	s, ok := h.requireJev(c)
 	if !ok {
@@ -100,5 +100,40 @@ func (h *Handler) PutJevSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errPut.Error()})
 		return
 	}
+	// A key change (rotate or clear) must reach the live client: the gate is
+	// built once at startup, so without this a saved key would only apply after
+	// a restart. The plaintext value is read back from the store rather than
+	// reusing req.APIKey so the clear case ("" → empty) takes the same path.
+	if req.APIKey != nil {
+		h.rotateJevKey(c, s)
+	}
 	c.JSON(http.StatusOK, gin.H{"settings": updated})
+}
+
+// rotateJevKey hands the currently stored key to the live classifier client. It
+// is best-effort: a failure to read the key back is logged and swallowed
+// because the settings write itself already succeeded, and the next restart
+// picks the key up regardless.
+func (h *Handler) rotateJevKey(c *gin.Context, s jevSettingsStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	rotator := h.jevKeyRotator
+	h.mu.Unlock()
+	if rotator == nil {
+		return
+	}
+	key := ""
+	if ks, ok := s.(interface {
+		APIKey(context.Context) (string, error)
+	}); ok {
+		plain, errKey := ks.APIKey(c.Request.Context())
+		if errKey != nil {
+			log.WithError(errKey).Warn("management: jev api key rotation skipped; could not read the stored key")
+			return
+		}
+		key = plain
+	}
+	rotator.SetAPIKey(key)
 }

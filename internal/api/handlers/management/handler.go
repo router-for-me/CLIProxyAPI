@@ -147,6 +147,11 @@ type Handler struct {
 	// the /jev/settings routes return 503 in that case.
 	pgJev jevSettingsStore
 
+	// jevKeyRotator receives a newly saved API key so the live classifier picks
+	// it up without a restart. nil disables live rotation, in which case a
+	// rotated key applies from the next server start.
+	jevKeyRotator JevKeyRotator
+
 	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
 	// wired by api.Server after route setup so the management handler can
 	// trigger an in-process sync into models_catalog without a network
@@ -556,6 +561,25 @@ func (h *Handler) SetJevStore(s *store.JevStore) {
 	}
 	h.mu.Lock()
 	h.pgJev = s
+	h.mu.Unlock()
+}
+
+// JevKeyRotator receives the plaintext classifier API key whenever an operator
+// saves or clears one, so a running server can adopt it without a restart. The
+// implementation is the classifier client; keeping it an interface avoids an
+// api → autorouter dependency in the management package.
+type JevKeyRotator interface {
+	SetAPIKey(key string)
+}
+
+// SetJevKeyRotator wires the sink for classifier API-key changes. Called during
+// server construction, after the gate's client exists.
+func (h *Handler) SetJevKeyRotator(r JevKeyRotator) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.jevKeyRotator = r
 	h.mu.Unlock()
 }
 

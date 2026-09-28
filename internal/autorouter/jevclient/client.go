@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -80,8 +81,11 @@ type request struct {
 // Client is an HTTP client for the System One API.
 type Client struct {
 	baseURL string
-	apiKey  string
-	http    *http.Client
+	// apiKey is guarded by mu: the key can be rotated at runtime (the operator
+	// saves a new one in the dashboard) while requests are in flight.
+	mu     sync.RWMutex
+	apiKey string
+	http   *http.Client
 }
 
 // New builds a Client. An empty baseURL uses DefaultBaseURL; a nil http client
@@ -97,6 +101,29 @@ func New(baseURL, apiKey string, hc *http.Client) *Client {
 	return &Client{baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, http: hc}
 }
 
+// SetAPIKey rotates the credential used for subsequent calls. Safe to call
+// while requests are in flight; already-built requests keep the key they were
+// created with. An empty key is allowed and makes calls fail with 401 until a
+// real one is set — callers that gate on key presence should check first.
+func (c *Client) SetAPIKey(key string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.apiKey = key
+	c.mu.Unlock()
+}
+
+// APIKey returns the credential currently in use.
+func (c *Client) APIKey() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.apiKey
+}
+
 // Call sends one state and its question set, returning the parsed response. It
 // performs exactly one attempt.
 func (c *Client) Call(ctx context.Context, model string, state any, questions map[string]Question) (Response, error) {
@@ -109,7 +136,7 @@ func (c *Client) Call(ctx context.Context, model string, state any, questions ma
 		return Response{}, fmt.Errorf("jevclient: build request: %w", errReq)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.APIKey())
 
 	resp, errDo := c.http.Do(req)
 	if errDo != nil {

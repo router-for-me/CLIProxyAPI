@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -93,5 +94,48 @@ func decodeJSON(t *testing.T, r *http.Request, into any) {
 	t.Helper()
 	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
 		t.Fatalf("decode request body: %v", err)
+	}
+}
+
+// A key rotated at runtime must be the one the next request carries, and the
+// rotation must be safe against concurrent calls under -race.
+func TestSetAPIKeyRotatesCredential(t *testing.T) {
+	var gotAuth []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"jev-1.13.0","answers":{},"usage":{}}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "first-key", srv.Client())
+	if got := c.APIKey(); got != "first-key" {
+		t.Fatalf("APIKey() = %q, want first-key", got)
+	}
+	if _, errFirst := c.Call(context.Background(), "jev-1.13.0", nil, nil); errFirst != nil {
+		t.Fatalf("first call: %v", errFirst)
+	}
+
+	c.SetAPIKey("second-key")
+	if _, errSecond := c.Call(context.Background(), "jev-1.13.0", nil, nil); errSecond != nil {
+		t.Fatalf("second call: %v", errSecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"Bearer first-key", "Bearer second-key"}
+	if len(gotAuth) != 2 || gotAuth[0] != want[0] || gotAuth[1] != want[1] {
+		t.Errorf("authorization headers = %v, want %v", gotAuth, want)
+	}
+}
+
+func TestSetAPIKeyNilClientIsSafe(t *testing.T) {
+	var c *Client
+	c.SetAPIKey("ignored") // must not panic
+	if got := c.APIKey(); got != "" {
+		t.Errorf("APIKey() on a nil client = %q, want empty", got)
 	}
 }
