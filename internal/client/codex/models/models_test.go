@@ -228,6 +228,42 @@ func TestCodexClientModelsResponse_RequiresTemplateAndCodexProvidersForSearchToo
 	}
 }
 
+func TestCodexClientModelsResponse_CoreSearchResolverKeepsNonCodexTemplateCleanup(t *testing.T) {
+	resp := BuildResponseForClientWithToolCapabilities(
+		[]map[string]any{{"id": "gpt-5.5"}},
+		func(id string) []string {
+			if id == "gpt-5.5" {
+				return []string{"openai-compatibility"}
+			}
+			return nil
+		},
+		nil,
+		func(string) *bool {
+			supported := true
+			return &supported
+		},
+		false,
+		"0.153.4",
+	)
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", resp["models"])
+	}
+	entry := models[0]
+	if supported, ok := entry["supports_search_tool"].(bool); !ok || !supported {
+		t.Fatalf("core route resolver should retain bridged search support: %#v", entry["supports_search_tool"])
+	}
+	if preferred, _ := entry["prefer_websockets"].(bool); preferred {
+		t.Fatal("non-Codex template must not prefer Codex WebSockets")
+	}
+	if tiers, ok := entry["service_tiers"].([]any); !ok || len(tiers) != 0 {
+		t.Fatalf("service_tiers = %#v, want empty array for non-Codex template", entry["service_tiers"])
+	}
+	assertCodexNullableFieldCleared(t, entry, "apply_patch_tool_type")
+	assertCodexNullableFieldCleared(t, entry, "upgrade")
+	assertCodexNullableFieldCleared(t, entry, "availability_nux")
+}
+
 func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {
 	resp := BuildResponse([]map[string]any{{"id": "gpt-5.6-sol"}}, nil, false)
 	models, ok := resp["models"].([]map[string]any)
