@@ -67,6 +67,10 @@ const (
 	// master API key) plus the last-sync outcome. Mirrors the alert_settings
 	// singleton pattern.
 	defaultLiteLLMSyncSettingsTable = "litellm_sync_settings"
+	// JevSettingsTable stores the singleton Jev AI classifier configuration
+	// (master toggle + sealed API key + pinned model). Mirrors the
+	// alert_settings / litellm_sync_settings singleton pattern.
+	defaultJevSettingsTable = "jev_settings"
 	// RuntimeConfigTable is the PG-first control-plane singleton: stores the
 	// canonical runtime configuration (settings + extra metadata + revision
 	// counter + update provenance) that supersedes the legacy config.yaml /
@@ -262,6 +266,9 @@ type PostgresStoreConfig struct {
 	// LiteLLMSyncSettingsTable stores the singleton Manage-LiteLLM external
 	// sync settings (base URL + sealed master API key + last-sync outcome).
 	LiteLLMSyncSettingsTable string
+	// JevSettingsTable stores the singleton Jev AI classifier configuration
+	// (master toggle + sealed API key + pinned model).
+	JevSettingsTable string
 
 	// RuntimeConfigTable stores the PG-first control-plane singleton: one
 	// row (id = 1, CHECK enforced) holding the canonical runtime configuration
@@ -427,6 +434,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.LiteLLMSyncSettingsTable == "" {
 		cfg.LiteLLMSyncSettingsTable = defaultLiteLLMSyncSettingsTable
+	}
+	if cfg.JevSettingsTable == "" {
+		cfg.JevSettingsTable = defaultJevSettingsTable
 	}
 	if cfg.RuntimeConfigTable == "" {
 		cfg.RuntimeConfigTable = defaultRuntimeConfigTable
@@ -827,6 +837,33 @@ func (s *PostgresStore) ensureLiteLLMSchema(ctx context.Context) error {
 		)); err != nil {
 			return fmt.Errorf("postgres store: alter litellm_sync_settings add column %q: %w", col, err)
 		}
+	}
+
+	// jev_settings stores the singleton Jev AI classifier configuration: the
+	// master on/off switch, the AES-GCM-sealed API key (plaintext when
+	// PGSTORE_ENCRYPTION_KEY is unset, the legacy-tolerant path shared with the
+	// other sealed stores), and the pinned classifier model. Classification is
+	// off by default, so no external traffic is attempted until an operator
+	// turns it on and supplies a key.
+	jevTable := s.fullTableName(s.cfg.JevSettingsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                INTEGER PRIMARY KEY DEFAULT 1,
+			enabled           BOOLEAN NOT NULL DEFAULT FALSE,
+			api_key_sealed    TEXT,
+			api_key_prefix    TEXT,
+			model             TEXT NOT NULL DEFAULT 'jev-1.13.0',
+			updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT jev_settings_singleton CHECK (id = 1)
+		)
+	`, jevTable)); err != nil {
+		return fmt.Errorf("postgres store: create jev_settings table: %w", err)
+	}
+	// Seed the singleton row so Get always finds a row.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (id) VALUES (1) ON CONFLICT (id) DO NOTHING`, jevTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: seed jev_settings singleton: %w", err)
 	}
 	return nil
 }
@@ -2778,6 +2815,15 @@ func (s *PostgresStore) LiteLLMSyncSettingsTable() string {
 		return quoteIdentifier(defaultLiteLLMSyncSettingsTable)
 	}
 	return s.fullTableName(s.cfg.LiteLLMSyncSettingsTable)
+}
+
+// JevSettingsTable returns the fully-qualified name of the jev_settings
+// singleton table.
+func (s *PostgresStore) JevSettingsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultJevSettingsTable)
+	}
+	return s.fullTableName(s.cfg.JevSettingsTable)
 }
 
 // Save persists authentication metadata to disk and PostgreSQL.
