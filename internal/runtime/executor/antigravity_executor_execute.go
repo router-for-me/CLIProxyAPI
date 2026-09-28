@@ -129,6 +129,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		err = errReq
 		return resp, err
 	}
+	if errGuard := helps.ValidateOutboundToolContractRequest(ctx, httpReq, helps.WireContractByteLimit(ctx)); errGuard != nil {
+		return resp, errGuard
+	}
 
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
@@ -335,6 +338,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	if errReq != nil {
 		err = errReq
 		return resp, err
+	}
+	if errGuard := helps.ValidateOutboundToolContractRequest(ctx, httpReq, helps.WireContractByteLimit(ctx)); errGuard != nil {
+		return resp, errGuard
 	}
 
 	httpResp, errDo := httpClient.Do(httpReq)
