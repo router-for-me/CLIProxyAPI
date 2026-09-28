@@ -15,10 +15,14 @@ func TestNativeClaudeProtocolHeadersBoundary(t *testing.T) {
 		"X-Stainless-Os": {"MacOS"}, "X-Stainless-Arch": {"arm64"},
 		"X-Stainless-Package-Version": {"0.112.1"}, "X-Stainless-Runtime-Version": {"v26.3.0"},
 		"X-Stainless-Async": {"async"}, "X-Client-Request-Id": {"per-request-correlation"},
-		"X-Claude-Code-Agent-Id": {"tool-agent"}, "X-Claude-Code-Parent-Agent-Id": {"parent-agent"},
+		"X-Claude-Code-Session-Id": {"11111111-2222-4333-8444-555555555555"},
+		"X-Claude-Code-Agent-Id":   {"tool-agent"}, "X-Claude-Code-Parent-Agent-Id": {"parent-agent"},
+		"X-Claude-Remote-Container-Id":      {"remote-container"},
+		"X-Claude-Remote-Session-Id":        {"remote-session"},
+		"X-Anthropic-Additional-Protection": {"true"},
 	}
 	src := safe.Clone()
-	for _, name := range []string{"Authorization", "Cookie", "X-Api-Key", "Proxy-Authorization", "X-Organization-Uuid", "X-Account-Id", "X-Forwarded-For", "X-Claude-Code-Session-Id", "X-Claude-Remote-Container-Id", "X-Claude-Remote-Session-Id", "X-Anthropic-Additional-Protection", "X-Unknown", "X-Stainless-Future-Secret", "X-Trusted-Device-Token", "Content-Length"} {
+	for _, name := range []string{"Authorization", "Cookie", "X-Api-Key", "Proxy-Authorization", "X-Organization-Uuid", "X-Account-Id", "X-Forwarded-For", "X-Unknown", "X-Stainless-Future-Secret", "X-Trusted-Device-Token", "Content-Length"} {
 		src.Set(name, "private-canary")
 	}
 	if got := NativeClaudeProtocolHeaders(src); !reflect.DeepEqual(got, safe) {

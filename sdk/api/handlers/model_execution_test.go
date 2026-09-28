@@ -28,6 +28,7 @@ type modelExecutionCaptureExecutor struct {
 	lastOptions coreexecutor.Options
 	execute     func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
 	stream      func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
+	count       func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
 }
 
 type modelExecutionStatusHeaderError struct {
@@ -132,7 +133,11 @@ func (e *modelExecutionCaptureExecutor) Refresh(ctx context.Context, auth *corea
 	return auth, nil
 }
 
-func (e *modelExecutionCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *modelExecutionCaptureExecutor) CountTokens(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	e.capture(req, opts)
+	if e.count != nil {
+		return e.count(ctx, auth, req, opts)
+	}
 	return coreexecutor.Response{Payload: []byte("0")}, nil
 }
 
@@ -687,6 +692,75 @@ func TestExecuteProtocolWithAuthManagerAgentUsesSelectionModelForAuth(t *testing
 	}
 	if string(gotReq.Payload) != string(requestBody) {
 		t.Fatalf("executor payload = %q, want %q", gotReq.Payload, requestBody)
+	}
+	if gotOpts.Metadata[coreexecutor.AuthSelectionModelMetadataKey] != selectionModel {
+		t.Fatalf("auth selection metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.AuthSelectionModelMetadataKey], selectionModel)
+	}
+}
+
+func TestCountProtocolWithAuthManagerUsesForcedProviderAndSelectionModel(t *testing.T) {
+	selectionModel := "claude-master-auth-selection-count"
+	nativeModel := "claude-native-model-from-request"
+	requestBody := []byte(`{"model":"claude-native-model-from-request","messages":[{"role":"user","content":"hi"}]}`)
+	executor := &modelExecutionCaptureExecutor{
+		provider: constant.Claude,
+		count: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{
+				Payload: []byte(`{"input_tokens":12}`),
+				Headers: http.Header{"X-Upstream": []string{"count"}},
+			}, nil
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       "model-execution-count-selection",
+		Provider: constant.Claude,
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "count-selection@example.com"},
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: selectionModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register(): %v", errRegister)
+	}
+	manager.RefreshSchedulerEntry(auth.ID)
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, manager)
+
+	resp, errMsg := handler.CountProtocolWithAuthManager(context.Background(), ProtocolExecutionRequest{
+		EntryProtocol:      constant.Claude,
+		ForcedProvider:     constant.Claude,
+		AuthSelectionModel: selectionModel,
+		Model:              nativeModel,
+		Body:               requestBody,
+	})
+	if errMsg != nil {
+		t.Fatalf("CountProtocolWithAuthManager() error = %+v", errMsg)
+	}
+	if string(resp.Body) != `{"input_tokens":12}` {
+		t.Fatalf("body = %q, want native count response", resp.Body)
+	}
+	if resp.Headers.Get("X-Upstream") != "count" {
+		t.Fatalf("headers = %#v, want upstream count header", resp.Headers)
+	}
+
+	gotReq, gotOpts := executor.captured()
+	if gotReq.Model != nativeModel {
+		t.Fatalf("executor model = %q, want %q", gotReq.Model, nativeModel)
+	}
+	if string(gotReq.Payload) != string(requestBody) {
+		t.Fatalf("executor payload = %q, want %q", gotReq.Payload, requestBody)
+	}
+	if gotOpts.Stream {
+		t.Fatal("executor stream option = true, want false")
+	}
+	if gotOpts.SourceFormat != sdktranslator.FormatClaude {
+		t.Fatalf("SourceFormat = %q, want %q", gotOpts.SourceFormat, sdktranslator.FormatClaude)
+	}
+	if gotOpts.Metadata[coreexecutor.RequestedModelMetadataKey] != nativeModel {
+		t.Fatalf("requested model metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.RequestedModelMetadataKey], nativeModel)
 	}
 	if gotOpts.Metadata[coreexecutor.AuthSelectionModelMetadataKey] != selectionModel {
 		t.Fatalf("auth selection metadata = %#v, want %q", gotOpts.Metadata[coreexecutor.AuthSelectionModelMetadataKey], selectionModel)

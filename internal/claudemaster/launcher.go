@@ -27,17 +27,44 @@ const NativeClaudeVersion = "2.1.269"
 
 // Launch starts the native master with its existing personal Claude login and a process-only proxy.
 // The caller must hold the profile lock until this returns. It never edits Claude configuration.
-func Launch(ctx context.Context, profile Profile, model string, args []string) (int, error) {
-	return LaunchWithDiagnostics(ctx, profile, model, args, nil)
+func Launch(ctx context.Context, profile Profile, args []string) (int, error) {
+	return LaunchWithDiagnostics(ctx, profile, args, nil)
 }
 
 // LaunchWithDiagnostics optionally emits numeric counters and fixed error-stage labels. It never
 // emits proxy credentials, request content, URLs, or account identifiers.
-func LaunchWithDiagnostics(ctx context.Context, profile Profile, model string, args []string, diagnostics io.Writer) (int, error) {
-	if strings.TrimSpace(model) == "" {
-		return 1, errors.New("an explicit backend model is required")
+func LaunchWithDiagnostics(ctx context.Context, profile Profile, args []string, diagnostics io.Writer) (int, error) {
+	return LaunchProfilesWithDiagnostics(ctx, []Profile{profile}, args, diagnostics)
+}
+
+// LaunchProfiles starts the native master with an explicitly ordered series of
+// independently authenticated Claude inference profiles.
+func LaunchProfiles(ctx context.Context, profiles []Profile, args []string) (int, error) {
+	return LaunchProfilesWithDiagnostics(ctx, profiles, args, nil)
+}
+
+// LaunchProfilesWithDiagnostics is LaunchProfiles with privacy-safe diagnostics.
+// The caller must hold every supplied profile lock until this function returns.
+func LaunchProfilesWithDiagnostics(ctx context.Context, profiles []Profile, args []string, diagnostics io.Writer) (int, error) {
+	if len(profiles) == 0 {
+		return 1, errors.New("at least one inference profile is required")
 	}
-	args, err := NativeArguments(profile.Provider, model, args)
+	provider := profiles[0].Provider
+	locations := make(map[string]struct{}, len(profiles))
+	for _, profile := range profiles {
+		if profile.Provider != provider {
+			return 1, errors.New("ordered inference profiles must use one provider")
+		}
+		location := profile.AuthDir + "\x00" + profile.AuthID
+		if _, exists := locations[location]; exists {
+			return 1, errors.New("ordered inference profiles must be distinct")
+		}
+		locations[location] = struct{}{}
+	}
+	if provider != "claude" {
+		return 1, errors.New("native inference run requires Claude subscription profiles")
+	}
+	args, err := NativeArguments(provider, args)
 	if err != nil {
 		return 1, err
 	}
@@ -50,9 +77,19 @@ func LaunchWithDiagnostics(ctx context.Context, profile Profile, model string, a
 		return 1, err
 	}
 	defer func() { _ = os.RemoveAll(certs.dir) }()
-	backend, err := NewBackend(ctx, BackendOptions{AuthDir: profile.AuthDir, Provider: profile.Provider, AuthID: profile.AuthID, Model: model})
+	var backend *Backend
+	if len(profiles) == 1 {
+		profile := profiles[0]
+		backend, err = NewBackend(ctx, BackendOptions{AuthDir: profile.AuthDir, Provider: profile.Provider, AuthID: profile.AuthID, UseRequestModel: true})
+	} else {
+		credentials := make([]BackendCredential, 0, len(profiles))
+		for _, profile := range profiles {
+			credentials = append(credentials, BackendCredential{AuthDir: profile.AuthDir, Provider: profile.Provider, AuthID: profile.AuthID})
+		}
+		backend, err = NewBackendSeries(ctx, BackendSeriesOptions{Credentials: credentials})
+	}
 	if err != nil {
-		return 1, errors.New("cannot start selected inference backend; check the profile and model")
+		return 1, errors.New("cannot start selected inference backend; check the profile")
 	}
 	defer func() { _ = backend.Close() }()
 	observation := &backendErrorObservation{}

@@ -348,8 +348,9 @@ func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		// Construct a fresh request, not a clone. In particular, master bearer,
 		// cookies, API keys, account IDs, URL queries and TLS identity are not
-		// part of the selected inference account's request. The backend removes
-		// metadata.user_id while remapping the model and owns its own login.
+		// part of the selected inference account's request. The backend preserves
+		// native content, while its executor replaces account/device identity and
+		// owns the selected subscription's login.
 		request, errRequest := http.NewRequestWithContext(r.Context(), http.MethodPost, path, r.Body)
 		if errRequest != nil {
 			p.counters.blockedRequests.Add(1)

@@ -17,11 +17,14 @@ func nativeProtocolFixture() http.Header {
 		"Anthropic-Version": {"2023-06-01"},
 		"Anthropic-Beta":    {"claude-code-20250219,oauth-2025-04-20", "native-feature-order-preserved"},
 		"Anthropic-Dangerous-Direct-Browser-Access": {"true"}, "X-App": {"cli"},
-		"X-Stainless-Lang": {"js"}, "X-Stainless-Package-Version": {"0.112.1"},
+		"X-Anthropic-Additional-Protection": {"true"},
+		"X-Stainless-Lang":                  {"js"}, "X-Stainless-Package-Version": {"0.112.1"},
 		"X-Stainless-Os": {"Linux"}, "X-Stainless-Arch": {"arm64"},
 		"X-Stainless-Runtime": {"node"}, "X-Stainless-Runtime-Version": {"v26.3.0"},
 		"X-Stainless-Timeout": {"600"}, "X-Stainless-Retry-Count": {"0"},
-		"X-Client-Request-Id": {"11111111-1111-4111-8111-111111111111"},
+		"X-Client-Request-Id":          {"11111111-1111-4111-8111-111111111111"},
+		"X-Claude-Remote-Container-Id": {"native-remote-container"},
+		"X-Claude-Remote-Session-Id":   {"native-remote-session"},
 	}
 }
 

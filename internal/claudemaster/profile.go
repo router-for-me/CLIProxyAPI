@@ -59,8 +59,8 @@ func OpenProfile(name string, create bool) (*ProfileLock, error) {
 }
 
 func openProfileAt(root, name string, create bool) (*ProfileLock, error) {
-	if !profileName.MatchString(name) {
-		return nil, errors.New("profile name must be 1-64 letters, digits, underscores, or hyphens, starting with a letter or digit")
+	if err := ValidateProfileName(name); err != nil {
+		return nil, err
 	}
 	if err := ownedDirectory(root, create, true); err != nil {
 		return nil, err
@@ -83,6 +83,14 @@ func openProfileAt(root, name string, create bool) (*ProfileLock, error) {
 		return nil, errors.New("profile is already in use; wait for its current login or run to finish")
 	}
 	return &ProfileLock{dir: dir, name: name, file: f}, nil
+}
+
+// ValidateProfileName validates a profile identifier without touching disk.
+func ValidateProfileName(name string) error {
+	if !profileName.MatchString(name) {
+		return errors.New("profile name must be 1-64 letters, digits, underscores, or hyphens, starting with a letter or digit")
+	}
+	return nil
 }
 
 func (l *ProfileLock) Close() error {
@@ -150,7 +158,10 @@ func (l *ProfileLock) Login(ctx context.Context, provider string, prompt func(st
 	store.SetBaseDir(authDir)
 	// A constrained wrapper refuses provider-derived filenames that could escape this new auth dir.
 	manager := sdkauth.NewManager(&loginStore{dir: authDir, store: store}, sdkauth.NewClaudeAuthenticator(), sdkauth.NewCodexAuthenticator())
-	options := &sdkauth.LoginOptions{NoBrowser: true, Prompt: prompt}
+	// Use the normal interactive Anthropic OAuth flow. The authenticator opens
+	// the browser when one is available and otherwise prints the same URL plus
+	// callback/tunnel instructions for a remote host.
+	options := &sdkauth.LoginOptions{Prompt: prompt}
 	if provider == "codex" {
 		options.Metadata = map[string]string{"codex_login_mode": "device"}
 	}

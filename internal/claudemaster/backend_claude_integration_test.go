@@ -15,6 +15,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -47,6 +48,7 @@ type claudeIntegrationTransport struct {
 	status      int
 	contentType string
 	response    string
+	respond     func([]byte) (int, string, string)
 	unexpected  bool
 }
 
@@ -79,15 +81,19 @@ func (rt *claudeIntegrationTransport) RoundTrip(request *http.Request) (*http.Re
 		rt.unexpected = true
 		return nil, errors.New("synthetic transport rejects unexpected upstream route")
 	}
+	status, contentType, response := rt.status, rt.contentType, rt.response
+	if rt.respond != nil {
+		status, contentType, response = rt.respond(raw)
+	}
 	return &http.Response{
-		StatusCode: rt.status,
+		StatusCode: status,
 		Header: http.Header{
-			"Content-Type": {rt.contentType}, "Request-Id": {"selected-request-id"},
+			"Content-Type": {contentType}, "Request-Id": {"selected-request-id"},
 			"Retry-After": {"3"}, "X-Should-Retry": {"false"},
 			"Anthropic-Ratelimit-Unified-Status": {"allowed"},
 			"Set-Cookie":                         {"selected-private-canary"}, "X-Account-Id": {"selected-private-canary"},
 		},
-		Body:    io.NopCloser(strings.NewReader(rt.response)),
+		Body:    io.NopCloser(strings.NewReader(response)),
 		Request: request,
 	}, nil
 }
@@ -117,10 +123,6 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			model, err := backendModel(opts)
-			if err != nil {
-				t.Fatal(err)
-			}
 			cfg := backendConfig(opts.AuthDir)
 			// Production deliberately uses direct egress. Only this synthetic
 			// fixture clears it so the SDK honors our no-network transport.
@@ -140,7 +142,7 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 			manager.SetRetryConfig(0, 0, 1)
 			manager.SetRoundTripperProvider(transport)
 			manager.RegisterExecutor(executor)
-			registry.GetGlobalRegistry().RegisterClient(opts.AuthID, opts.Provider, []*registry.ModelInfo{model})
+			registry.GetGlobalRegistry().RegisterClient(opts.AuthID, opts.Provider, []*registry.ModelInfo{{ID: backendAuthSelectionModel}})
 			t.Cleanup(func() {
 				store.seal()
 				manager.CloseExecutionSession(coreauth.CloseAllExecutionSessionsID)
@@ -153,10 +155,13 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 			// OAuth authority and exercises inference only.
 			lifetime, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			handler := newBackendHandler(lifetime, opts, handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
-			body := fmt.Sprintf(`{"model":"master-model-canary","max_tokens":64,"stream":%t,"metadata":{"user_id":%q},"messages":[{"role":"user","content":"integration hello"}],"tools":[{"name":"Bash","description":"Execute a command","input_schema":%s}]}`, tc.stream, integrationMasterCanary, integrationToolSchema)
+			handlerOpts := opts
+			handlerOpts.Model = ""
+			handlerOpts.UseRequestModel = true
+			handler := newBackendHandler(lifetime, handlerOpts, handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+			body := fmt.Sprintf(`{"model":%q,"max_tokens":64,"stream":%t,"metadata":{"user_id":%q},"messages":[{"role":"user","content":"integration hello"}],"tools":[{"name":"Bash","description":"Execute a command","input_schema":%s}]}`, opts.Model, tc.stream, integrationMasterCanary, integrationToolSchema)
 			request := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com"+tc.path+"?api_key="+integrationMasterCanary, strings.NewReader(body))
-			for _, header := range []string{"Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization", "X-Account-Id", "X-Claude-Code-Session-Id", "X-Claude-Remote-Container-Id", "X-Claude-Remote-Session-Id", "X-Anthropic-Additional-Protection"} {
+			for _, header := range []string{"Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization", "X-Account-Id", "X-Claude-Code-Session-Id", "X-Claude-Remote-Container-Id", "X-Claude-Remote-Session-Id"} {
 				request.Header.Set(header, integrationMasterCanary)
 			}
 			request.Header.Set("Content-Type", "application/json")
@@ -230,7 +235,7 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 				t.Fatal("master identity leaked in upstream body or URL")
 			}
 			if gjson.GetBytes(upstream.body, "model").String() != opts.Model || gjson.GetBytes(upstream.body, "tools.0.name").String() != "Bash" {
-				t.Fatalf("pinned model or native tool name lost: %s", upstream.body)
+				t.Fatalf("native model or tool name changed: %s", upstream.body)
 			}
 			var wantSchema, gotSchema any
 			if err := json.Unmarshal([]byte(integrationToolSchema), &wantSchema); err != nil {
@@ -253,6 +258,112 @@ func TestBackendRealClaudeExecutor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBackendRealClaudeExecutorPreservesNativeSessionAcrossResponseModes(t *testing.T) {
+	opts := writeSyntheticBackendCredential(t, canonicalTestTempDir(t), "real-claude-session-continuity.json", map[string]any{
+		"type": "claude", "access_token": integrationClaudeToken,
+		"account_uuid": integrationClaudeAccount, "claude_device_ids": []string{integrationClaudeDevice},
+	})
+	opts.Provider, opts.Model = "claude", "claude-opus-4-8"
+	store, credential, err := loadBackendCredential(t.Context(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := backendConfig(opts.AuthDir)
+	cfg.ProxyURL = ""
+	executor := runtimeexecutor.NewClaudeExecutor(cfg)
+	if executor.ShouldPrepareRequestAuth(credential) {
+		t.Fatal("synthetic identity would require a live OAuth profile lookup")
+	}
+	transport := &claudeIntegrationTransport{
+		expectedURL: "https://api.anthropic.com/v1/messages?beta=true",
+		respond: func(body []byte) (int, string, string) {
+			if gjson.GetBytes(body, "stream").Bool() {
+				return http.StatusOK, "text/event-stream", integrationClaudeStream()
+			}
+			return http.StatusOK, "application/json", integrationClaudeReply
+		},
+	}
+	manager := coreauth.NewManager(store, &backendSelector{authID: opts.AuthID, provider: opts.Provider}, nil)
+	manager.SetConfig(cfg)
+	manager.SetRetryConfig(0, 0, 1)
+	manager.SetRoundTripperProvider(transport)
+	manager.RegisterExecutor(executor)
+	registry.GetGlobalRegistry().RegisterClient(opts.AuthID, opts.Provider, []*registry.ModelInfo{{ID: backendAuthSelectionModel}})
+	t.Cleanup(func() {
+		store.seal()
+		manager.CloseExecutionSession(coreauth.CloseAllExecutionSessionsID)
+		registry.GetGlobalRegistry().UnregisterClient(opts.AuthID)
+	})
+	if _, err = manager.Register(coreauth.WithSkipPersist(t.Context()), credential); err != nil {
+		t.Fatal(err)
+	}
+	lifetime, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	handlerOpts := opts
+	handlerOpts.Model = ""
+	handlerOpts.UseRequestModel = true
+	handler := newBackendHandler(lifetime, handlerOpts, handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+
+	const (
+		sessionID     = "11111111-2222-4333-8444-555555555555"
+		masterAccount = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		masterDevice  = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	)
+	masterIdentity := `{"device_id":"` + masterDevice + `","account_uuid":"` + masterAccount + `","session_id":"` + sessionID + `","native_extra":"preserved"}`
+	for i, stream := range []bool{false, true} {
+		body := fmt.Sprintf(`{"model":%q,"max_tokens":64,"stream":%t,"metadata":{"user_id":%q},"messages":[{"role":"user","content":"continuity turn %d"}]}`, opts.Model, stream, masterIdentity, i+1)
+		request := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?api_key="+integrationMasterCanary, strings.NewReader(body))
+		for key, values := range nativeProtocolFixture() {
+			request.Header[key] = append([]string(nil), values...)
+		}
+		request.Header.Del("X-Claude-Code-Agent-Id")
+		request.Header.Del("X-Claude-Code-Parent-Agent-Id")
+		request.Header.Set("X-Client-Request-Id", fmt.Sprintf("00000000-0000-4000-8000-%012d", i+1))
+		request.Header.Set("Authorization", "Bearer "+integrationMasterCanary)
+		request.Header.Set("X-Api-Key", integrationMasterCanary)
+		if detection := helps.DetectClaudeCodeRequest(request.Header, []byte(body), false, cfg); !detection.Confirmed {
+			t.Fatalf("turn %d fixture is not recognized as native Claude Code: %+v", i+1, detection)
+		}
+		request = request.WithContext(coreexecutor.WithNativeClaudeProtocolHeaders(request.Context(), request.Header))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("turn %d status = %d: %s", i+1, response.Code, response.Body.String())
+		}
+		if stream && !strings.Contains(response.Body.String(), "message_stop") {
+			t.Fatalf("turn %d stream was incomplete: %s", i+1, response.Body.String())
+		}
+	}
+
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	if transport.unexpected || len(transport.requests) != 2 {
+		t.Fatalf("expected two isolated upstream requests; requests=%d unexpected=%t", len(transport.requests), transport.unexpected)
+	}
+	for i, upstream := range transport.requests {
+		identity := gjson.GetBytes(upstream.body, "metadata.user_id").String()
+		if got := upstream.header.Get("X-Claude-Code-Session-Id"); got != sessionID {
+			t.Fatalf("turn %d upstream session header = %q, want %q", i+1, got, sessionID)
+		}
+		if got := gjson.Get(identity, "session_id").String(); got != sessionID {
+			t.Fatalf("turn %d session_id = %q, want %q; identity=%s upstream-session-header=%q", i+1, got, sessionID, identity, upstream.header.Get("X-Claude-Code-Session-Id"))
+		}
+		if got := gjson.Get(identity, "account_uuid").String(); got != integrationClaudeAccount {
+			t.Fatalf("turn %d account_uuid = %q, want selected account", i+1, got)
+		}
+		if got := gjson.Get(identity, "device_id").String(); got != integrationClaudeDevice {
+			t.Fatalf("turn %d device_id = %q, want selected device", i+1, got)
+		}
+		if got := gjson.Get(identity, "native_extra").String(); got != "preserved" {
+			t.Fatalf("turn %d native metadata extension = %q, want preserved", i+1, got)
+		}
+		if strings.Contains(string(upstream.body), integrationMasterCanary) || strings.Contains(fmt.Sprint(upstream.header), integrationMasterCanary) ||
+			strings.Contains(string(upstream.body), masterAccount) || strings.Contains(string(upstream.body), masterDevice) {
+			t.Fatalf("turn %d leaked native-master identity", i+1)
+		}
 	}
 }
 

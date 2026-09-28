@@ -94,7 +94,7 @@ func nativeCompatibilitySmoke(t *testing.T, binary, mode string) {
 		if !ok || !reflect.DeepEqual(marker, coreexecutor.NativeClaudeProtocolHeaders(before)) {
 			t.Error("proxy lost the native protocol opt-in context required by the selected executor")
 		}
-		for _, name := range []string{"Authorization", "X-Api-Key", "Cookie", "X-Claude-Code-Session-Id", "Proxy-Authorization"} {
+		for _, name := range []string{"Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization"} {
 			if r.Header.Get(name) != "" {
 				t.Errorf("inference retained forbidden native identity header %s", name)
 			}
@@ -145,8 +145,8 @@ func nativeCompatibilitySmoke(t *testing.T, binary, mode string) {
 			for name := range r.Header {
 				key := http.CanonicalHeaderKey(name)
 				switch key {
-				case "Authorization", "X-Api-Key", "Cookie", "X-Claude-Code-Session-Id", "Proxy-Authorization", "Connection", "Content-Length":
-					continue // Explicit credential, session or transport exclusions.
+				case "Authorization", "X-Api-Key", "Cookie", "Proxy-Authorization", "Connection", "Content-Length":
+					continue // Explicit credential or transport exclusions.
 				}
 				if _, ok := classified[key]; !ok {
 					t.Errorf("unclassified native inference header %s requires compatibility review", key)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -414,6 +415,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 				cloned := bytes.Clone(event.Bytes())
 				event.Reset()
+				if streamErr := claudeStreamingEventError(cloned, httpResp.Header); streamErr != nil {
+					streamErr = wrapClaudeFastRequestError(fastRequest, claudeStreamErrorStatusCode(streamErr), streamErr)
+					payloadErr := &claudePayloadBackedStreamError{cause: streamErr}
+					helps.RecordAPIResponseError(ctx, e.cfg, payloadErr)
+					streamUsage.PublishFailure(ctx, reporter, payloadErr)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: cloned, Err: payloadErr}:
+					case <-ctx.Done():
+					}
+					return false
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
 					return true
@@ -482,6 +494,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveClaudeStream(line)
+			if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
+				if streamErr := claudeStreamingEventError(line, httpResp.Header); streamErr != nil {
+					emitResponseError(streamErr)
+					return
+				}
+			}
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
 				emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
@@ -539,6 +557,103 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		result = wrapClaudeThinkingReplayStream(ctx, result, replayScope)
 	}
 	return result, nil
+}
+
+// claudePayloadBackedStreamError marks a terminal error whose original Claude
+// SSE frame is carried on the same StreamChunk. The auth conductor consumes the
+// error for result tracking after a stream has started while forwarding the
+// payload itself unchanged.
+type claudePayloadBackedStreamError struct {
+	cause error
+}
+
+func (e *claudePayloadBackedStreamError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *claudePayloadBackedStreamError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (*claudePayloadBackedStreamError) StreamErrorPayloadEncoded() bool { return true }
+
+func claudeStreamingEventError(event []byte, headers http.Header) error {
+	var eventName string
+	var data bytes.Buffer
+	scanner := bufio.NewScanner(bytes.NewReader(event))
+	scanner.Buffer(nil, 52_428_800)
+	for scanner.Scan() {
+		line := bytes.TrimSuffix(scanner.Bytes(), []byte{'\r'})
+		switch {
+		case bytes.HasPrefix(line, []byte("event:")):
+			eventName = strings.TrimSpace(string(line[len("event:"):]))
+		case bytes.HasPrefix(line, []byte("data:")):
+			value := line[len("data:"):]
+			if len(value) > 0 && value[0] == ' ' {
+				value = value[1:]
+			}
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.Write(value)
+		}
+	}
+	body := bytes.TrimSpace(data.Bytes())
+	isError := strings.EqualFold(eventName, "error")
+	if len(body) > 0 && gjson.ValidBytes(body) && strings.EqualFold(gjson.GetBytes(body, "type").String(), "error") {
+		isError = true
+	}
+	if !isError {
+		return nil
+	}
+	if len(body) == 0 {
+		body = []byte(`{"type":"error","error":{"type":"api_error","message":"upstream stream returned an empty error event"}}`)
+	}
+	return classifyClaudeUpstreamError(claudeStreamingErrorStatus(body), headers, body)
+}
+
+func claudeStreamErrorStatusCode(err error) int {
+	type statusCoder interface {
+		StatusCode() int
+	}
+	var statusErr statusCoder
+	if errors.As(err, &statusErr) && statusErr != nil {
+		return statusErr.StatusCode()
+	}
+	return http.StatusBadGateway
+}
+
+func claudeStreamingErrorStatus(body []byte) int {
+	for _, path := range []string{"error.status_code", "error.status", "status_code", "status"} {
+		if status := int(gjson.GetBytes(body, path).Int()); status >= 400 && status <= 599 {
+			return status
+		}
+	}
+	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
+	switch errorType {
+	case "invalid_request_error", "bad_request_error":
+		return http.StatusBadRequest
+	case "authentication_error":
+		return http.StatusUnauthorized
+	case "permission_error":
+		return http.StatusForbidden
+	case "not_found_error":
+		return http.StatusNotFound
+	case "rate_limit_error":
+		return http.StatusTooManyRequests
+	case "overloaded_error":
+		return 529
+	case "api_error":
+		return http.StatusInternalServerError
+	default:
+		return http.StatusBadGateway
+	}
 }
 
 func validateClaudeStreamingResponse(data []byte) error {

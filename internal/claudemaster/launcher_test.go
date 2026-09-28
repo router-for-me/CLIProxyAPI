@@ -8,6 +8,27 @@ import (
 	"testing"
 )
 
+func TestLaunchProfilesRejectsInvalidSeriesBeforePreflight(t *testing.T) {
+	profile := Profile{Provider: "claude", AuthDir: "/profiles/one/auth", AuthID: "credential.json"}
+	for _, tc := range []struct {
+		name     string
+		profiles []Profile
+	}{
+		{name: "empty", profiles: nil},
+		{name: "duplicate", profiles: []Profile{profile, profile}},
+		{name: "mixed", profiles: []Profile{profile, {Provider: "codex", AuthDir: "/profiles/two/auth", AuthID: "credential.json"}}},
+		{name: "codex-single", profiles: []Profile{{Provider: "codex", AuthDir: "/profiles/one/auth", AuthID: "credential.json"}}},
+		{name: "codex-series", profiles: []Profile{{Provider: "codex", AuthDir: "/profiles/one/auth", AuthID: "credential.json"}, {Provider: "codex", AuthDir: "/profiles/two/auth", AuthID: "credential.json"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, err := LaunchProfiles(t.Context(), tc.profiles, nil)
+			if err == nil || code != 1 {
+				t.Fatalf("invalid series accepted: code=%d err=%v", code, err)
+			}
+		})
+	}
+}
+
 func environmentMap(env []string) map[string]string {
 	out := map[string]string{}
 	for _, entry := range env {

@@ -8,9 +8,11 @@ import (
 
 type nativeClaudeHeadersKey struct{}
 
-// NativeClaudeProtocolHeaders copies the reviewed native client's protocol and
-// request-correlation headers. Account credentials, session identity, arbitrary
-// extensions and connection-scoped headers are never part of this boundary.
+// NativeClaudeProtocolHeaders copies the reviewed native client's protocol,
+// request-correlation, and remote-environment headers. Account credentials,
+// arbitrary extensions and connection-scoped headers are never part of this
+// boundary. The Claude Code session ID is conversation state and is replaced by
+// the executor's resolved copy at the final send boundary.
 // Keep this list explicit: new client headers require compatibility review.
 func NativeClaudeProtocolHeaders(src http.Header) http.Header {
 	dst := make(http.Header)
@@ -32,11 +34,13 @@ func NativeClaudeProtocolHeaders(src http.Header) http.Header {
 		switch key {
 		case "Accept", "Accept-Encoding", "Content-Type", "User-Agent",
 			"Anthropic-Version", "Anthropic-Beta", "Anthropic-Dangerous-Direct-Browser-Access",
+			"X-Anthropic-Additional-Protection",
 			"X-App", "X-Client-Request-Id", "X-Client-App",
 			"X-Stainless-Lang", "X-Stainless-Package-Version", "X-Stainless-Os", "X-Stainless-Arch",
 			"X-Stainless-Runtime", "X-Stainless-Runtime-Version", "X-Stainless-Retry-Count",
 			"X-Stainless-Timeout", "X-Stainless-Async",
-			"X-Claude-Code-Agent-Id", "X-Claude-Code-Parent-Agent-Id":
+			"X-Claude-Code-Session-Id", "X-Claude-Code-Agent-Id", "X-Claude-Code-Parent-Agent-Id",
+			"X-Claude-Remote-Container-Id", "X-Claude-Remote-Session-Id":
 			dst[key] = append(dst[key], values...)
 		}
 	}

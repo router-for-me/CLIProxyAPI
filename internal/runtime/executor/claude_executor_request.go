@@ -1491,8 +1491,8 @@ func applyClaudeHeadersWithNativeProfile(
 func doClaudeUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
 	if native, ok := cliproxyexecutor.NativeClaudeProtocolHeadersFromContext(req.Context()); ok {
 		// Only the in-process native adapter opts in. The executor has already
-		// resolved the selected OAuth identity; never reuse master credentials,
-		// remote-container identity, or the master's session identifier.
+		// resolved the selected OAuth identity. Never reuse master credentials;
+		// the resolved request session below replaces the native header snapshot.
 		if !isAnthropicUpstreamURL(req.URL) {
 			return nil, fmt.Errorf("native Claude protocol headers require the Anthropic origin")
 		}

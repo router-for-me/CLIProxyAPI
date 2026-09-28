@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -32,9 +33,12 @@ func TestPrepareBackendRequest(t *testing.T) {
 	request.Header.Set("Anthropic-Version", "2023-06-01")
 	request.Header.Set("Anthropic-Beta", "test-beta")
 	request.Header.Set("User-Agent", "claude-cli/2.1.269 (external, cli)")
-	clean, err := prepareBackendRequest(request, "selected-model")
+	clean, model, err := prepareBackendRequest(request, BackendOptions{Model: "selected-model"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if model != "selected-model" {
+		t.Fatalf("selected model = %q", model)
 	}
 	if strings.Contains(string(clean), "master-") {
 		t.Fatalf("master identity survived: %s", clean)
@@ -67,23 +71,74 @@ func TestPrepareBackendRequestRejectsMalformedInput(t *testing.T) {
 	for _, input := range []string{"", "null", "[]", "1", `{"x":`, `{"stream":"yes"}`, `{"stream":null}`, `{"metadata":[]}`, `{"metadata":null}`, `{"metadata":"identity"}`, `{}` + `{}`} {
 		t.Run(input, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(input))
-			if _, err := prepareBackendRequest(r, "model"); err == nil {
+			if _, _, err := prepareBackendRequest(r, BackendOptions{Model: "model"}); err == nil {
 				t.Fatal("malformed input accepted")
 			}
 		})
 	}
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
 	r.Header.Set("Content-Encoding", "gzip")
-	if _, err := prepareBackendRequest(r, "model"); err == nil {
+	if _, _, err := prepareBackendRequest(r, BackendOptions{Model: "model"}); err == nil {
 		t.Fatal("encoded request accepted without decoding")
 	}
 }
 
 func TestPrepareBackendRequestDropsEmptyIdentityMetadata(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"metadata":{"user_id":"private"}}`))
-	clean, err := prepareBackendRequest(r, "model")
+	clean, _, err := prepareBackendRequest(r, BackendOptions{Model: "model"})
 	if err != nil || strings.Contains(string(clean), "metadata") {
 		t.Fatalf("identity-only metadata survived: %s, %v", clean, err)
+	}
+}
+
+func TestPrepareBackendRequestPreservesNativeClaudeContent(t *testing.T) {
+	const (
+		nativeModel = "claude-sonnet-native-selection"
+		sessionID   = "11111111-2222-4333-8444-555555555555"
+	)
+	input := "{\n  \"tools\": [{\"name\":\"Bash\",\"input_schema\":{\"type\":\"object\"}}],\n" +
+		`  "metadata": {"user_id":"{\"device_id\":\"master-device\",\"account_uuid\":\"master-account\",\"session_id\":\"` + sessionID + `\"}"},` + "\n" +
+		`  "messages": [{"role":"user","content":[{"type":"text","text":"hello"}]}], "model":"` + nativeModel + `",` + "\n" +
+		`  "thinking":{"type":"enabled","budget_tokens":1024}, "system":[{"type":"text","text":"native system","cache_control":{"type":"ephemeral"}}],` + "\n" +
+		`  "max_tokens":4096, "stream":true` + "\n}"
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(input))
+	clean, model, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != nativeModel {
+		t.Fatalf("native model changed: %q", model)
+	}
+	if string(clean) != input {
+		t.Fatalf("native Claude bytes changed:\nwant: %q\n got: %q", input, clean)
+	}
+	if got := request.Header.Get("X-Claude-Code-Session-Id"); got != sessionID {
+		t.Fatalf("derived native session header = %q, want %q", got, sessionID)
+	}
+	var before, after map[string]any
+	if err := json.Unmarshal([]byte(input), &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(clean, &after); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("native Claude content changed:\nwant: %#v\n got: %#v", before, after)
+	}
+}
+
+func TestPrepareBackendRequestRequiresNativeModel(t *testing.T) {
+	for _, body := range []string{
+		`{}`,
+		`{"model":null}`,
+		`{"model":1}`,
+		`{"model":""}`,
+		`{"model":"  "}`,
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		if _, _, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true}); err == nil {
+			t.Fatalf("invalid native model accepted: %s", body)
+		}
 	}
 }
 
@@ -150,6 +205,131 @@ func TestLoadBackendCredentialAndConstrainedRefreshStore(t *testing.T) {
 	info, err := os.Stat(filepath.Join(opts.AuthDir, opts.AuthID))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal("refreshed credential is not mode 0600")
+	}
+}
+
+func TestLoadBackendCredentialAsKeepsRuntimeIDOutOfPersistence(t *testing.T) {
+	opts := writeSyntheticBackendCredential(t, t.TempDir(), "selected.json", nil)
+	sourcePath := filepath.Join(opts.AuthDir, opts.AuthID)
+	store, auth, err := loadBackendCredentialAs(t.Context(), opts, "opaque-runtime-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth.ID != "opaque-runtime-id" || auth.FileName != opts.AuthID || auth.Attributes[coreauth.AttributePath] != sourcePath {
+		t.Fatal("runtime identity replaced the credential's source location")
+	}
+	auth.Metadata["access_token"] = "synthetic-refreshed"
+	if savedPath, errSave := store.Save(t.Context(), auth); errSave != nil || savedPath != sourcePath {
+		t.Fatalf("runtime credential was not saved to its source path: %q, %v", savedPath, errSave)
+	}
+	_, reloaded, err := loadBackendCredential(t.Context(), opts)
+	if err != nil || reloaded.ID != opts.AuthID || reloaded.Metadata["access_token"] != "synthetic-refreshed" {
+		t.Fatal("runtime identity leaked into the persisted credential")
+	}
+}
+
+func TestBackendStoreSetRoutesSameFilenameIndependently(t *testing.T) {
+	firstOpts := writeSyntheticBackendCredential(t, t.TempDir(), "selected.json", nil)
+	secondOpts := writeSyntheticBackendCredential(t, t.TempDir(), "selected.json", nil)
+	firstStore, firstAuth, err := loadBackendCredentialAs(t.Context(), firstOpts, "runtime-first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondStore, secondAuth, err := loadBackendCredentialAs(t.Context(), secondOpts, "runtime-second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stores := newBackendStoreSet([]*backendStore{firstStore, secondStore})
+	firstAuth.Metadata["access_token"] = "refreshed-first"
+	if _, err = stores.Save(t.Context(), firstAuth); err != nil {
+		t.Fatal(err)
+	}
+	_, firstReloaded, err := loadBackendCredential(t.Context(), firstOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secondReloaded, err := loadBackendCredential(t.Context(), secondOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstReloaded.Metadata["access_token"] != "refreshed-first" || secondReloaded.Metadata["access_token"] != "synthetic-access" {
+		t.Fatal("first runtime credential save crossed profile directories")
+	}
+	secondAuth.Metadata["access_token"] = "refreshed-second"
+	if _, err = stores.Save(t.Context(), secondAuth); err != nil {
+		t.Fatal(err)
+	}
+	_, secondReloaded, err = loadBackendCredential(t.Context(), secondOpts)
+	if err != nil || secondReloaded.Metadata["access_token"] != "refreshed-second" {
+		t.Fatal("second runtime credential was not routed to its own profile")
+	}
+}
+
+func TestNewBackendSeriesUsesDistinctRuntimeIDsAndUnregistersOnClose(t *testing.T) {
+	first := writeSyntheticBackendCredential(t, t.TempDir(), "selected.json", map[string]any{"type": "claude"})
+	second := writeSyntheticBackendCredential(t, t.TempDir(), "selected.json", map[string]any{"type": "claude"})
+	first.Provider, second.Provider = "claude", "claude"
+	backend, err := NewBackendSeries(t.Context(), BackendSeriesOptions{
+		Credentials: []BackendCredential{
+			{AuthDir: first.AuthDir, Provider: first.Provider, AuthID: first.AuthID},
+			{AuthDir: second.AuthDir, Provider: second.Provider, AuthID: second.AuthID},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	if len(backend.authIDs) != 2 || backend.authIDs[0] == backend.authIDs[1] || backend.authIDs[0] == first.AuthID || backend.authIDs[1] == second.AuthID {
+		t.Fatalf("source filenames were not isolated by runtime IDs: %v", backend.authIDs)
+	}
+	auth, ok := backend.manager.GetByID(backend.authIDs[0])
+	if !ok || auth == nil {
+		t.Fatal("first runtime credential was not registered")
+	}
+	for _, authID := range backend.authIDs {
+		models := registry.GetGlobalRegistry().GetModelsForClient(authID)
+		if len(models) != 1 || models[0] == nil || models[0].ID != backendAuthSelectionModel {
+			t.Fatalf("runtime credential %s has unexpected auth-selection registration: %#v", authID, models)
+		}
+	}
+	if err := backend.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, authID := range backend.authIDs {
+		if len(registry.GetGlobalRegistry().GetModelsForClient(authID)) != 0 {
+			t.Fatalf("runtime credential %s remained in the model registry", authID)
+		}
+	}
+	if _, err := backend.store.Save(t.Context(), auth); err == nil {
+		t.Fatal("closed series accepted a late credential write")
+	}
+}
+
+func TestBackendModelsDoNotApplyLocalModelAllowlist(t *testing.T) {
+	const futureModel = "claude-future-model-from-anthropic"
+	models, err := backendModels(BackendOptions{Provider: "claude", Model: futureModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0] == nil || models[0].ID != futureModel {
+		t.Fatalf("caller model was not registered unchanged: %#v", models)
+	}
+}
+
+func TestNewBackendSeriesRejectsDuplicateClaudeAccount(t *testing.T) {
+	const accountUUID = "11111111-1111-4111-8111-111111111111"
+	first := writeSyntheticBackendCredential(t, t.TempDir(), "first.json", map[string]any{"type": "claude", "account_uuid": accountUUID})
+	second := writeSyntheticBackendCredential(t, t.TempDir(), "second.json", map[string]any{"type": "claude", "account_uuid": accountUUID})
+	first.Provider, second.Provider = "claude", "claude"
+	backend, err := NewBackendSeries(t.Context(), BackendSeriesOptions{Credentials: []BackendCredential{
+		{AuthDir: first.AuthDir, Provider: first.Provider, AuthID: first.AuthID},
+		{AuthDir: second.AuthDir, Provider: second.Provider, AuthID: second.AuthID},
+	}})
+	if err == nil || backend != nil {
+		if backend != nil {
+			_ = backend.Close()
+		}
+		t.Fatal("two profiles for the same Claude account were accepted")
 	}
 }
 
@@ -237,7 +417,7 @@ func TestLoadBackendCredentialRejectsOverrides(t *testing.T) {
 		{"type": "claude"}, {"disabled": true}, {"refresh_token": ""}, {"access_token": ""},
 		{"proxy_url": "https://untrusted.invalid"}, {"base_url": "https://untrusted.invalid"},
 		{"headers": map[string]string{"Authorization": "override"}}, {"custom_headers": map[string]string{"X-Key": "override"}},
-		{"prefix": "other"}, {"plugins": []string{"other"}}, {"cloak_mode": "always"},
+		{"prefix": "other"}, {"plugins": []string{"other"}}, {"cloak_mode": "always"}, {"disable_cooling": true},
 	}
 	for i, extra := range cases {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {

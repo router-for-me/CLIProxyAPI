@@ -18,6 +18,12 @@ type streamQuotaError struct {
 
 func (e streamQuotaError) IsCredentialScoped() bool { return e.credentialScoped }
 
+type payloadBackedStreamQuotaError struct {
+	streamQuotaError
+}
+
+func (payloadBackedStreamQuotaError) StreamErrorPayloadEncoded() bool { return true }
+
 func TestExecuteStreamQuotaFailurePreservesCooldownAndScope(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	for _, credentialScoped := range []bool{true, false} {
@@ -113,5 +119,134 @@ func TestExecuteStreamQuotaFailurePreservesCooldownAndScope(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestExecuteStreamPayloadBackedQuotaErrorPreservesFrameAndRotatesNextRequest(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 2)
+	model := "payload-backed-stream-quota"
+	highID, lowID := "payload-backed-stream-quota-high", "payload-backed-stream-quota-low"
+	for _, candidate := range []*Auth{
+		{ID: highID, Provider: "claude", Status: StatusActive, Attributes: map[string]string{"priority": "4"}},
+		{ID: lowID, Provider: "claude", Status: StatusActive, Attributes: map[string]string{"priority": "3"}},
+	} {
+		registry.GetGlobalRegistry().RegisterClient(candidate.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(candidate.ID) })
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+	}
+
+	const startFrame = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n"
+	const errorFrame = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}\n\n"
+	const stopFrame = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	retryAfter := time.Hour
+	quotaErr := payloadBackedStreamQuotaError{streamQuotaError{
+		customStatusError: customStatusError{code: http.StatusTooManyRequests, msg: "subscription quota exhausted", retryAfter: &retryAfter},
+		credentialScoped:  true,
+	}}
+	var attempts []string
+	manager.RegisterExecutor(&customStreamMockExecutor{
+		identifier: "claude",
+		streamFn: func(_ context.Context, selected *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+			attempts = append(attempts, selected.ID)
+			chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+			if selected.ID == highID {
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(startFrame)}
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(errorFrame), Err: quotaErr}
+			} else {
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(stopFrame)}
+			}
+			close(chunks)
+			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	})
+
+	collect := func() (string, int) {
+		result, errStream := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		var body string
+		var failures int
+		for chunk := range result.Chunks {
+			body += string(chunk.Payload)
+			if chunk.Err != nil {
+				failures++
+			}
+		}
+		return body, failures
+	}
+
+	firstBody, firstFailures := collect()
+	if firstBody != startFrame+errorFrame || firstFailures != 0 {
+		t.Fatalf("started stream changed: body=%q failures=%d", firstBody, firstFailures)
+	}
+	secondBody, secondFailures := collect()
+	if secondBody != stopFrame || secondFailures != 0 {
+		t.Fatalf("next request did not use healthy credential: body=%q failures=%d", secondBody, secondFailures)
+	}
+	if got := fmt.Sprint(attempts); got != fmt.Sprint([]string{highID, lowID}) {
+		t.Fatalf("attempts = %v, want no replay then next credential", attempts)
+	}
+}
+
+func TestExecuteStreamPayloadBackedQuotaErrorRetriesBeforeOutput(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 2)
+	model := "payload-backed-bootstrap-quota"
+	highID, lowID := "payload-backed-bootstrap-high", "payload-backed-bootstrap-low"
+	for _, candidate := range []*Auth{
+		{ID: highID, Provider: "claude", Status: StatusActive, Attributes: map[string]string{"priority": "4"}},
+		{ID: lowID, Provider: "claude", Status: StatusActive, Attributes: map[string]string{"priority": "3"}},
+	} {
+		registry.GetGlobalRegistry().RegisterClient(candidate.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(candidate.ID) })
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+	}
+
+	const errorFrame = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}\n\n"
+	const stopFrame = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	quotaErr := payloadBackedStreamQuotaError{streamQuotaError{
+		customStatusError: customStatusError{code: http.StatusTooManyRequests, msg: "subscription quota exhausted"},
+		credentialScoped:  true,
+	}}
+	var attempts []string
+	manager.RegisterExecutor(&customStreamMockExecutor{
+		identifier: "claude",
+		streamFn: func(_ context.Context, selected *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+			attempts = append(attempts, selected.ID)
+			chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+			if selected.ID == highID {
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(errorFrame), Err: quotaErr}
+			} else {
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(stopFrame)}
+			}
+			close(chunks)
+			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	})
+
+	result, errStream := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	var body string
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected terminal error after failover: %v", chunk.Err)
+		}
+		body += string(chunk.Payload)
+	}
+	if body != stopFrame {
+		t.Fatalf("bootstrap error leaked or healthy response changed: %q", body)
+	}
+	if got := fmt.Sprint(attempts); got != fmt.Sprint([]string{highID, lowID}) {
+		t.Fatalf("attempts = %v, want same-request failover", attempts)
 	}
 }

@@ -1,7 +1,9 @@
 # Claude master with separate inference profiles
 
 `claude-master` keeps native Claude Code as the agent and Remote Control client,
-while routing inference through one explicitly selected Claude or Codex login.
+while routing inference through a separately authorized Claude subscription. One
+profile can be fixed for a run, or an explicit profile series can drain those
+subscriptions in order.
 This is an experimental integration, not a vendor-supported subscription gateway.
 The account holder must authorize each inference login separately and review the
 providers' current subscription and credential-use terms. A working interception
@@ -18,8 +20,9 @@ Claude app <--> native Claude Remote Control <--> Claude Code (master login)
                                   |                            |
                            api.anthropic.com        embedded CLIProxyAPI
                                                               |
-                                              ONE pinned profile + model
-                                                (Claude OR Codex login)
+                                    ONE fixed Claude login (default), or
+                                  ordered Claude logins drained in sequence
+                                      with native-selected models
 ```
 
 Claude Code owns the conversation, permission prompts, tools, and filesystem
@@ -31,17 +34,22 @@ from the master account.
 Only exact POST requests to `/v1/messages` and `/v1/messages/count_tokens` are
 redirected. The interceptor preserves the reviewed native protocol header names,
 values, and multi-value order, including user agent, client software/OS/architecture,
-request correlation, compression negotiation, and feature betas. It drops
-the master account's credentials, and the backend removes `metadata.user_id` and
-pins the model and credential. Known control endpoints keep their original master
-authentication and query string and go to the fixed Anthropic origin. Unknown
+request correlation, compression negotiation, feature betas, and the Claude Code
+conversation session. The request body and native-selected model reach the Claude
+executor unchanged. At the final upstream boundary, only the account-specific
+parts are substituted: the master bearer/API key is discarded, the selected
+profile's OAuth bearer is installed, and `metadata.user_id` receives the selected
+account and device while retaining its conversation session and other native
+fields. Known control endpoints keep their original master authentication and query
+string and go to the fixed Anthropic origin. Unknown
 Anthropic routes fail closed instead of falling through to master inference.
 
 The backend is an in-memory HTTP handler: no management API, public inference
-listener, dashboard, credential watcher, remote model updater, or automatic
-account rotation. Exhaustion, authentication errors, and unsupported models are
-errors, not reasons to use another subscription. There is no API-key or Bedrock
-billing fallback.
+listener, dashboard, credential watcher, remote model updater, quota balancing,
+or unconfigured account rotation. In the default single-profile mode, exhaustion,
+authentication errors, and unsupported models are errors, not reasons to use
+another subscription. The ordered mode advances only under the narrow condition
+documented below. There is no API-key or Bedrock billing fallback.
 
 ## Build and use
 
@@ -55,8 +63,7 @@ development server, not an administration jumpbox:
 ```bash
 go build -o claude-master ./cmd/claude-master
 ./claude-master check
-./claude-master login claude-work --provider claude
-./claude-master login codex-work --provider codex
+./claude-master login claude-work
 ```
 
 On macOS, build and run these commands as the same Mac user who owns the native
@@ -81,25 +88,81 @@ fixed prompt before starting the native client:
 `probe` sends only its built-in test prompt, with no tools or project context. It
 reports an HTTP status, whether the expected reply matched, and a fixed error-stage
 label, never a raw response or token. It uses the same profile lock and account pin
-as `run`.
+as `run`. Its required `--model` is a diagnostic input and does not configure the
+profile or a later Claude `run`.
 
-Each login starts a new provider authorization flow. Use the intended inference
-account in that flow. Codex uses device authorization; Claude supports its callback
-flow and manual callback entry. Do not paste native token files into a profile.
+Each `login` starts a fresh, normal Claude OAuth authorization and never imports the
+native Claude Code login. It opens the Anthropic sign-in page when a local browser
+is available; otherwise it prints the authorization URL. Sign in as the intended
+subscription account. On a remote host, use the printed SSH-tunnel instructions or
+paste the full callback URL when prompted. Use a separate or incognito browser
+session for each profile so the intended account is selected. The resulting OAuth
+credential is stored only in that profile; existing profiles are never overwritten.
+Do not paste native token files into a profile.
 
-Start a new session with one account and an explicit model supported by that
-provider's bundled CLIProxyAPI model catalog:
+Start a new session with one account. Native Claude Code selects the model:
 
 ```bash
-./claude-master run claude-work --model <claude-model-id> -- --remote-control
-./claude-master run codex-work --model <codex-model-id> -- --remote-control
+./claude-master run claude-work -- --remote-control
 ```
 
-For a Claude backend, the launcher supplies the same exact model ID to native
-Claude Code. A native `--model` override must match it exactly; drifting aliases
-such as `sonnet` and fallback models are rejected. This matters because native
-Sonnet 5 request features are not valid for a pinned Sonnet 4.6 backend. Codex model
-translation remains a separately gated live test.
+For a Claude backend, the launcher does not inject or pin a model. Claude Code may
+use its normal default selection or its native `--model` and `--fallback-model`
+options; put those native options after the launcher separator:
+
+```bash
+./claude-master run claude-work -- --model sonnet --fallback-model haiku --remote-control
+```
+
+The backend preserves the model on each Claude request. Model and fallback changes
+do not change the selected inference login. There is no local allowed-model list;
+Anthropic decides whether the selected subscription can use the requested model.
+
+### Ordered drain-then-advance profiles (Claude only)
+
+`run` accepts repeatable `--next-profile` flags to form an explicit order. The
+positional profile is always first, and flags are appended in command-line order:
+
+```bash
+./claude-master login claude-primary
+./claude-master login claude-secondary
+./claude-master login claude-tertiary
+
+./claude-master run claude-primary \
+  --next-profile claude-secondary \
+  --next-profile claude-tertiary \
+  -- --remote-control
+```
+
+Every profile must be a separately authorized Claude login. The series orders
+credentials, not models: native Claude Code can select any supported Claude model
+for each request, and qualifying credential exhaustion advances the whole series
+regardless of the current model. Omitting `--next-profile` retains single-profile
+behavior.
+
+The series always begins with its first profile when `run` starts. Progress is
+process-local and is not persisted, so a restart begins with the first profile
+again. The launcher acquires and holds the exclusive lock for every profile in the
+series for the full run, including credential-refresh persistence and shutdown.
+If any profile cannot be locked, loaded, or validated, startup fails rather than
+running a partial series.
+
+Advancement has one exact predicate: the active profile must produce a structured
+provider result with HTTP status 429 that is classified as credential-scoped.
+Request-scoped errors and short, model-scoped rate limits do not qualify, nor do
+authentication, transport, validation, or other failures. Those failures remain
+errors and do not select the next profile.
+
+When a qualifying rejection arrives before response output begins, the same
+request is retried on the next profile; it may continue through later configured
+profiles if they are also drained. A rejection after streaming output has begun
+is not replayed, but the next request starts on the next profile.
+
+Advancement is monotonic within a run: after moving forward, the series never
+returns to an earlier profile and never wraps from the last profile to the first.
+When no later profile exists, inference fails closed. At no point does the proxy
+send an inference request through the native master login; that login remains only
+on the native control path.
 
 For troubleshooting, add `--diagnostics` before `--`. It prints numeric counts of
 accepted/rejected proxy connections, parsed requests, inference/control dispatches,
@@ -108,11 +171,15 @@ a fixed backend error-stage label at shutdown. It does
 not log URLs, headers, prompts, responses, or account identifiers. An inference
 dispatch count means the adapter was called, not that the provider accepted it.
 
-The master Claude login remains the native login for the current Unix user. The
-selected inference profile is fixed for the lifetime of the launched process.
-Switch by ending that session and launching another profile/model. Profile locking
-allows only one login or running launcher per profile, preventing competing token
-refresh writers in this first version. Separate profiles can run concurrently.
+The master Claude login remains the native login for the current Unix user. In the
+default single-profile mode, the selected inference profile is fixed for the
+lifetime of the launched process; Claude Code remains free to choose models while
+using that credential. Switch inference profiles by ending that session and
+launching another profile. In ordered mode, only the explicit monotonic advancement
+described above can change the active profile. Profile locking allows only one login
+or running launcher per profile, preventing competing token refresh writers.
+Separate profiles can run concurrently only when they are not members of the same
+running ordered series; a series holds every member's lock.
 
 ## Credential and host boundaries
 
@@ -122,7 +189,7 @@ refresh writers in this first version. Separate profiles can run concurrently.
   `profile.json` and `auth/` directory. Unexpected credentials, unsafe paths, and
   provider mismatches are rejected. Token refresh uses atomic, fsynced replacement;
   shutdown waits for in-flight background refresh persistence before unlocking.
-- No native `~/.claude` or `~/.codex` credential is imported, replaced, or copied
+- No native `~/.claude` credential is imported, replaced, or copied
   between Unix users or hosts. Existing sessions and systemd services are untouched.
 - The local CONNECT listener has a random process-specific proxy credential. The
   child receives it only through its environment; it is not printed or persisted.
@@ -157,8 +224,9 @@ unattended fleet service yet.
 ## Verification and rollout
 
 Automated tests use synthetic credentials and fake HTTP/TLS upstreams. They check
-credential separation, pinned model/account selection, path validation, streaming,
-cancellation, shutdown, profile permissions, locking, and child environment setup.
+credential separation, credential pinning, Claude request-model preservation,
+path validation, streaming, cancellation, shutdown, profile
+permissions, locking, and child environment setup.
 The trusted-contributor CI matrix runs these tests on Linux, Apple Silicon macOS,
 and Intel macOS. Cross-compilation establishes build compatibility only; an actual
 macOS test run is required before claiming runtime verification. Native Remote
@@ -172,8 +240,8 @@ that unrelated existing failure must not be reported as a passing full suite.
 On September 13, 2026, the ARM development-server test passed direct Claude OAuth
 inference, native streamed replies, and an actual native Bash `pwd` tool turn using
 the independently authorized profile. Native Remote Control reported an active
-session. Phone-side round-trip confirmation, Codex OAuth inference, full native
-subagent behavior, and unattended fleet rollout remain separate acceptance gates.
+session. Phone-side round-trip confirmation, full native subagent behavior, and
+unattended fleet rollout remain separate acceptance gates.
 
 On the same date, the launcher and ordinary server built on an Apple Silicon Mac,
 the six affected packages and targeted executor header tests passed with the race
@@ -189,8 +257,8 @@ Before enabling this for normal sessions, complete a separately authorized profi
 login and a disposable session on the development server. Verify that it appears
 in the Claude app, streams replies, executes an approved harmless tool through
 Claude Code, and reports errors when the selected backend is unavailable without
-using the master for inference. Verify both Claude and Codex backends separately.
-Only then install the same reviewed build on other hosts. Do not restart aggregate
+using the master for inference. Only then install the same reviewed build on other
+hosts. Do not restart aggregate
 Claude services or migrate existing sessions as part of that test.
 
 ## Compatibility contract and version audit
@@ -233,11 +301,12 @@ feature-flag variations still require separate verification.
 
 Header preservation is an explicit in-process native-adapter opt-in, not a public
 HTTP flag or a change to ordinary CLIProxyAPI clients. It keeps measured protocol
-headers; it intentionally substitutes the selected account's authorization and
-session identity. Master account, remote-container, remote-session, and
-additional-protection identity headers are not forwarded to inference. Unknown
-custom headers remain excluded. HTTP header ordering, framing, compression, and
-TLS bytes are not byte-identical to a direct native connection. This is a bounded
+headers, including the conversation session and additional-protection flag, while
+intentionally substituting only the selected account's authorization, account UUID,
+and device ID. Native remote-container and remote-session context is retained;
+master authorization, cookies, API keys, and account headers are not. Unknown custom
+headers remain excluded. HTTP framing and TLS bytes are not byte-identical to a
+direct native connection. This is a bounded
 compatibility contract, not a promise of perfect native equivalence or readiness
 for unattended fleet rollout.
 

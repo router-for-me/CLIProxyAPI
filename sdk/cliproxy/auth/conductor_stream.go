@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -120,6 +121,22 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
+// isPayloadBackedStreamError reports that a terminal stream error is already
+// represented by the payload on the same chunk. Before the first downstream
+// payload the conductor can still retry it normally. Once a stream has started,
+// wrapStreamResult records the failure but forwards only the original payload,
+// avoiding a second synthesized error frame.
+func isPayloadBackedStreamError(chunk cliproxyexecutor.StreamChunk) bool {
+	if chunk.Err == nil || len(chunk.Payload) == 0 {
+		return false
+	}
+	type payloadBacked interface {
+		StreamErrorPayloadEncoded() bool
+	}
+	var marker payloadBacked
+	return errors.As(chunk.Err, &marker) && marker != nil && marker.StreamErrorPayloadEncoded()
+}
+
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	streamStart := time.Now()
@@ -132,6 +149,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: aliasResult.OriginalAlias})
 		}
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
+			payloadBackedError := isPayloadBackedStreamError(chunk)
 			if chunk.Err != nil && !failed {
 				failed = true
 				entry := logEntryWithRequestID(ctx)
@@ -147,7 +165,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if !forward {
 				return false
 			}
-			if chunk.Err != nil {
+			if chunk.Err != nil && !payloadBackedError {
 				if ctx == nil {
 					out <- chunk
 					return true
@@ -163,21 +181,28 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if len(chunk.Payload) == 0 {
 				return true
 			}
-			payload := rewriteForceMappedStreamChunk(rewriter, chunk.Payload)
+			payload := chunk.Payload
+			if payloadBackedError {
+				// The provider's original terminal frame is the downstream error.
+				// Keep it byte-for-byte and consume the side-band error locally.
+				chunk.Err = nil
+			} else {
+				payload = rewriteForceMappedStreamChunk(rewriter, payload)
+			}
 			if len(payload) == 0 {
 				return true
 			}
 			chunk.Payload = payload
 			if ctx == nil {
 				out <- chunk
-				return true
+				return !payloadBackedError
 			}
 			select {
 			case <-ctx.Done():
 				forward = false
 				return false
 			case out <- chunk:
-				return true
+				return !payloadBackedError
 			}
 		}
 		for _, chunk := range buffered {
