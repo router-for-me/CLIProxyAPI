@@ -2,8 +2,8 @@ package logging
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
+	"fmt"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 )
@@ -14,13 +14,13 @@ type requestIDKey struct{}
 // ginRequestIDKey is the Gin context key for request IDs.
 const ginRequestIDKey = "__request_id__"
 
-// GenerateRequestID creates a new 8-character hex request ID.
+var requestIDCounter atomic.Uint32
+
+// GenerateRequestID creates a new 8-character hex auto-incrementing request ID,
+// wrapping around to 00000000 after ffffffff.
 func GenerateRequestID() string {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return "00000000"
-	}
-	return hex.EncodeToString(b)
+	id := requestIDCounter.Add(1) - 1
+	return fmt.Sprintf("%08x", id)
 }
 
 // WithRequestID returns a new context with the request ID attached.

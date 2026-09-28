@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,6 +21,7 @@ func (s *Server) registerManagementRoutes() {
 
 	log.Info("management routes registered after secret key configuration")
 
+	s.registerManagementV8Routes()
 	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
 	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
 
@@ -191,6 +192,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/kimi-ai-auth-url", s.mgmt.RequestKimiAIToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.GET("/devin-auth-url", s.mgmt.RequestDevinToken)
 		mgmt.GET("/meta-auth-url", s.mgmt.RequestMetaToken)

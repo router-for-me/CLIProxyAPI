@@ -88,6 +88,7 @@ func GetAntigravityModels() []*ModelInfo {
 }
 
 var staticDevinModels = []*ModelInfo{
+	devinBuiltinSWE16SlowModelInfo(),
 	{
 		ID:                  "devin/swe-2",
 		Type:                "devin",
@@ -494,7 +495,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetCodexProModels()
-	case "kimi":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()

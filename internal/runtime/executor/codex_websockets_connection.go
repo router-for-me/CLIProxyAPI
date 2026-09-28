@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
 	"golang.org/x/net/proxy"
@@ -29,7 +29,7 @@ const (
 )
 
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *websocketConnectionCloser, *http.Response, error) {
-	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
+	dialer := newProxyAwareWebsocketDialer(ctx, e.cfg, auth)
 	dialer.HandshakeTimeout = codexResponsesWebsocketHandshakeTO
 	dialer.EnableCompression = true
 	if ctx == nil {
@@ -181,7 +181,18 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 	}
 }
 
-func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
+func executionProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) string {
+	proxyURL := cliproxyexecutor.RequestProxyURL(ctx)
+	if proxyURL == "" && auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	return proxyURL
+}
+
+func newProxyAwareWebsocketDialer(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
 	dialer := &websocket.Dialer{
 		Proxy:             http.ProxyFromEnvironment,
 		HandshakeTimeout:  codexResponsesWebsocketHandshakeTO,
@@ -192,13 +203,7 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 		}).DialContext,
 	}
 
-	proxyURL := ""
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+	proxyURL := executionProxyURL(ctx, cfg, auth)
 	if proxyURL == "" {
 		return dialer
 	}

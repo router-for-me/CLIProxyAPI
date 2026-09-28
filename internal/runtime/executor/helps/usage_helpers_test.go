@@ -11,11 +11,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -865,6 +869,39 @@ func TestUsageReporterSetTranslatedReasoningEffortCodexConfigurationUpdate(t *te
 	}
 }
 
+func TestUsageReporterSetTranslatedReasoningEffortConfigurationUpdateAfterCleanup(t *testing.T) {
+	const source = `{"reasoning":{"effort":"xhigh"},"input":[{"type":"configuration_update","reasoning":{"effort":"medium"}},{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`
+	for _, tc := range []struct {
+		name      string
+		supported bool
+		want      string
+	}{
+		{name: "supported target reports effective update", supported: true, want: "low"},
+		{name: "unsupported target reports cleaned suffix", want: "high"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := "opaque-route(high)"
+			requestEffort := thinking.ExtractReasoningEffort([]byte(source), "openai-response", model)
+			if requestEffort != "low" {
+				t.Fatalf("request effort = %q, want low", requestEffort)
+			}
+			info := &registry.ModelInfo{
+				ID: "opaque-route", Type: "codex", SupportConfigurationUpdate: tc.supported,
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+			}
+			body, err := thinking.ApplyThinkingWithModelInfoAndSummary([]byte(source), []byte(source), model, "openai-response", "codex", "codex", info, thinking.SummaryConfig{})
+			if err != nil {
+				t.Fatalf("ApplyThinkingWithModelInfoAndSummary() error = %v", err)
+			}
+			reporter := NewUsageReporter(usage.WithReasoningEffort(context.Background(), requestEffort), "codex", model, nil)
+			reporter.SetTranslatedReasoningEffort(body, "codex")
+			if got := reporter.buildRecord(usage.Detail{TotalTokens: 10}, false).ReasoningEffort; got != tc.want {
+				t.Fatalf("final usage effort = %q, want %q; body=%s", got, tc.want, body)
+			}
+		})
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",
@@ -1177,5 +1214,57 @@ func TestUsageReporterPropagatesBaseURL(t *testing.T) {
 	recordNilAuth := reporterNilAuth.buildRecord(usage.Detail{TotalTokens: 10}, false, usage.Failure{})
 	if recordNilAuth.BaseURL != "" {
 		t.Fatalf("recordNilAuth.BaseURL = %q, want empty", recordNilAuth.BaseURL)
+	}
+}
+
+func TestUsageReporter_AllocatesUniqueUUIDPerAttemptWithSharedTraceID(t *testing.T) {
+	ctx := logging.WithRequestID(context.Background(), "00000042")
+
+	// First execution attempt
+	reporter1 := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	record1 := reporter1.buildRecord(usage.Detail{TotalTokens: 10}, false, usage.Failure{})
+
+	// Second execution attempt (retry)
+	reporter2 := NewUsageReporter(ctx, "claude", "claude-3-7-sonnet", nil)
+	record2 := reporter2.buildRecord(usage.Detail{TotalTokens: 20}, false, usage.Failure{})
+
+	if record1.TraceID != "00000042" {
+		t.Fatalf("record1.TraceID = %q, want 00000042", record1.TraceID)
+	}
+	if record2.TraceID != "00000042" {
+		t.Fatalf("record2.TraceID = %q, want 00000042", record2.TraceID)
+	}
+
+	if record1.RequestID == "" {
+		t.Fatal("record1.RequestID should not be empty")
+	}
+	if record2.RequestID == "" {
+		t.Fatal("record2.RequestID should not be empty")
+	}
+
+	if record1.RequestID == record2.RequestID {
+		t.Fatalf("consecutive attempts must have distinct UUID RequestIDs: got %q and %q", record1.RequestID, record2.RequestID)
+	}
+
+	// Verify UUID format and version 4
+	u1, err1 := uuid.Parse(record1.RequestID)
+	if err1 != nil || u1.Version() != 4 {
+		t.Fatalf("record1.RequestID %q is not valid UUID v4: %v", record1.RequestID, err1)
+	}
+	u2, err2 := uuid.Parse(record2.RequestID)
+	if err2 != nil || u2.Version() != 4 {
+		t.Fatalf("record2.RequestID %q is not valid UUID v4: %v", record2.RequestID, err2)
+	}
+}
+
+func TestUsageReporter_ExplicitTraceIDPrecedenceOverLogRequestID(t *testing.T) {
+	ctx := logging.WithRequestID(context.Background(), "log-id-1")
+	ctx = usage.WithTraceID(ctx, "explicit-trace-1")
+
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 10}, false, usage.Failure{})
+
+	if record.TraceID != "explicit-trace-1" {
+		t.Fatalf("record.TraceID = %q, want explicit-trace-1", record.TraceID)
 	}
 }

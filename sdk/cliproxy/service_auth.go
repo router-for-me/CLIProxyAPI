@@ -5,13 +5,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/wsrelay"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,6 +21,10 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.GetTokenStore(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
+		sdkAuth.NewAntigravityAuthenticator(),
+		sdkAuth.NewKimiAuthenticator(),
+		sdkAuth.NewKimiAIAuthenticator(),
+		sdkAuth.NewKimiAIDotAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
 		sdkAuth.NewDevinAuthenticator(),
 		sdkAuth.NewMetaAuthenticator(),

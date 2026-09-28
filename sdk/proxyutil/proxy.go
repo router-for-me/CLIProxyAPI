@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +72,24 @@ func Parse(raw string) (Setting, error) {
 		setting.Mode = ModeInvalid
 		return setting, fmt.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
 	}
+}
+
+// ValidRequestProxy reports whether raw is a concrete execution proxy override.
+// The host must be present, and an explicit port must be in the range 1-65535.
+func ValidRequestProxy(raw string) bool {
+	setting, errParse := Parse(raw)
+	if errParse != nil || setting.Mode != ModeProxy || setting.URL == nil {
+		return false
+	}
+	if strings.TrimSpace(setting.URL.Hostname()) == "" {
+		return false
+	}
+	port := setting.URL.Port()
+	if port == "" {
+		return true
+	}
+	number, errPort := strconv.Atoi(port)
+	return errPort == nil && number >= 1 && number <= 65535
 }
 
 func cloneDefaultTransport() *http.Transport {

@@ -5,12 +5,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 type openAICompatibilityRegistrationCache struct {
@@ -208,6 +208,8 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"aistudio",
 		"antigravity",
 		"kimi",
+		"kimi-ai",
+		"kimi.ai",
 		"xai",
 		"devin",
 		"meta",
@@ -292,7 +294,7 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
-	case "kimi":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
 	case "xai":
 		if !forceReplace {

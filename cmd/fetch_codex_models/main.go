@@ -29,21 +29,21 @@ import (
 	"strings"
 	"time"
 
-	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
 	codexModelsBaseURL       = "https://chatgpt.com/backend-api/codex"
 	codexModelsPath          = "/models"
-	defaultClientVersion     = "0.154.0"
-	defaultCodexUserAgent    = "codex_cli_rs/0.154.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	defaultClientVersion     = "0.155.0"
+	defaultCodexUserAgent    = "codex_cli_rs/0.155.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	defaultCodexOriginator   = "codex_cli_rs"
 	accessTokenRefreshLeeway = 30 * time.Second
 )

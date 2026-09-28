@@ -1,6 +1,7 @@
 package common
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -52,5 +53,56 @@ func TestAttachMessageCacheControl_SkipsWhenLastPartHasCacheControl(t *testing.T
 	out := AttachMessageCacheControl(msg, src)
 	if gjson.GetBytes(out, "content.0.cache_control.ttl").Exists() {
 		t.Fatalf("part-level cache_control should win; out=%s", out)
+	}
+}
+
+func TestAttachToolMessageCacheControl_HoistsPartLevel(t *testing.T) {
+	src := gjson.Parse(`{"role":"tool","content":[{"type":"text","text":"4","cache_control":{"type":"ephemeral"}}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`)
+	msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"4"}]}]}`)
+
+	out := AttachToolMessageCacheControl(msg, src)
+	if got := gjson.GetBytes(out, "content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool_result cache_control.type = %q, want ephemeral; out=%s", got, out)
+	}
+	// Part-level does not carry ttl, so ttl should be absent
+	if gjson.GetBytes(out, "content.0.cache_control.ttl").Exists() {
+		t.Fatalf("part-level should take precedence over message-level; out=%s", out)
+	}
+}
+
+func TestAttachToolMessageCacheControl_InvalidPartDoesNotBlockMessageLevel(t *testing.T) {
+	testCases := []struct {
+		name       string
+		partCCJSON string
+	}{
+		{name: "empty object", partCCJSON: `{}`},
+		{name: "invalid type string", partCCJSON: `{"type":"invalid"}`},
+		{name: "whitespace padded type", partCCJSON: `{"type":" ephemeral "}`},
+		{name: "non-string type", partCCJSON: `{"type":123}`},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := gjson.Parse(fmt.Sprintf(`{"role":"tool","content":[{"type":"text","text":"4","cache_control":%s}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`, tc.partCCJSON))
+			msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"4"}]}]}`)
+
+			out := AttachToolMessageCacheControl(msg, src)
+			if got := gjson.GetBytes(out, "content.0.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("[%s] expected message-level ephemeral to win; got %q; out=%s", tc.name, got, out)
+			}
+			if got := gjson.GetBytes(out, "content.0.cache_control.ttl").String(); got != "1h" {
+				t.Fatalf("[%s] expected message-level ttl=1h; got %q; out=%s", tc.name, got, out)
+			}
+		})
+	}
+}
+
+func TestAttachToolMessageCacheControl_NoToolResultLeavesMessageUntouched(t *testing.T) {
+	src := gjson.Parse(`{"role":"tool","cache_control":{"type":"ephemeral"}}`)
+	msg := []byte(`{"role":"user","content":[{"type":"text","text":"just text"}]}`)
+
+	out := AttachToolMessageCacheControl(msg, src)
+	if gjson.GetBytes(out, "content.0.cache_control").Exists() {
+		t.Fatalf("expected text block to not receive cache_control; out=%s", out)
 	}
 }

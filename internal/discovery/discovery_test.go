@@ -297,7 +297,7 @@ func TestInterfaceFiltering_Helpers(t *testing.T) {
 		}
 	}
 
-	physicalNames := []string{"en0", "eth0", "wlan0", "eno1"}
+	physicalNames := []string{"en0", "eth0", "wlan0", "eno1", "bond0"}
 	for _, name := range physicalNames {
 		if isVirtualOrTunnel(name) {
 			t.Errorf("expected %s to be recognized as physical interface", name)

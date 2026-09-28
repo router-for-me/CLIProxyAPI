@@ -15,12 +15,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -695,7 +695,11 @@ func syncAuthFilePriorityAttribute(auth *coreauth.Auth) {
 	priority, ok := authFileIntValue(auth.Metadata["priority"])
 	if !ok {
 		delete(auth.Attributes, "priority")
+		delete(auth.Attributes, coreauth.AttributeFilePriority)
 		return
+	}
+	if auth.Attributes[coreauth.AttributeSourceBackend] == coreauth.AuthSourceFile {
+		auth.Attributes[coreauth.AttributeFilePriority] = "true"
 	}
 	if priority == 0 {
 		delete(auth.Attributes, "priority")

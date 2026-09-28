@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -180,7 +180,6 @@ type AntigravityConnectionPoolConfig struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
@@ -332,6 +331,8 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+	// BaseURL specifies the base URL of the remote management API for TUI client mode (e.g. "https://proxy.example.com").
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -622,6 +623,10 @@ type CodexKey struct {
 	// True disables auth/model cooldowns; false explicitly enables them.
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
+	// DisableCodexCloaking optionally overrides the global codex.disable-codex-cloaking for this credential.
+	// True disables cloaking; false explicitly enables cloaking; omitted inherits global codex.disable-codex-cloaking.
+	DisableCodexCloaking *bool `yaml:"disable-codex-cloaking,omitempty" json:"disable-codex-cloaking,omitempty"`
+
 	// RequestRetry optionally overrides the global request-retry for this credential.
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
@@ -661,6 +666,10 @@ type CodexModel struct {
 	// native agent_message items or empty-signature thinking blocks. Default false
 	// keeps the native behavior unchanged.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
+
+	// SupportConfigurationUpdate enables configuration_update for this API-key model.
+	// It defaults to false, independently of the built-in OAuth model catalog.
+	SupportConfigurationUpdate bool `yaml:"support-configuration-update,omitempty" json:"support-configuration-update,omitempty"`
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`

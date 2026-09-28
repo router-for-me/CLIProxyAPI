@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -151,12 +151,16 @@ func isKimiAPIEndpoint(endpoint string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(parsed.Hostname(), "api.kimi.com")
+	host := parsed.Hostname()
+	return strings.EqualFold(host, "api.kimi.com") || strings.EqualFold(host, "api.kimi.ai")
 }
 
 func isKimiMessagesUpstream(auth *cliproxyauth.Auth, endpoint string) bool {
-	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "kimi") {
-		return true
+	if auth != nil {
+		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		if provider == "kimi" || provider == "kimi-ai" || provider == "kimi.ai" || provider == "kimi.com" {
+			return true
+		}
 	}
 	return isKimiAPIEndpoint(endpoint)
 }
