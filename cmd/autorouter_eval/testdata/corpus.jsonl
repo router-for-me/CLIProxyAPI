@@ -1,0 +1,27 @@
+# Starter corpus for cmd/autorouter_eval. Labels are the tier a careful operator
+# would pick, not ground truth from a benchmark — extend it with your own
+# traffic before trusting the numbers.
+{"id":"greet","tier":"simple","text":"hi there"}
+{"id":"arith","tier":"simple","text":"what is 2+2?"}
+{"id":"capitals","tier":"simple","text":"What is the capital of France?"}
+{"id":"rename-var","tier":"simple","text":"rename the variable x to count in this snippet: x = 1"}
+{"id":"typo-fix","tier":"simple","text":"fix the typo: teh quick brown fox"}
+
+{"id":"summarize-paragraph","tier":"medium","text":"Summarize this paragraph in two sentences: The industrial revolution began in Britain in the late eighteenth century and transformed manufacturing through mechanization, steam power, and factory systems, reshaping both urban demographics and global trade patterns over the following century."}
+{"id":"translate","tier":"medium","text":"Translate the following into Indonesian: Please make sure the deployment finishes before Friday and notify the on-call engineer if anything looks wrong."}
+{"id":"sql-query","tier":"medium","text":"Write a SQL query that returns the top 10 customers by total order value in the last 90 days, given tables customers(id, name) and orders(id, customer_id, total, created_at)."}
+{"id":"small-edit","tier":"medium","text":"In this function, add a nil check before dereferencing the pointer and return an error instead:\n\nfunc load(p *Thing) string {\n  return p.Name\n}"}
+{"id":"api-explain","tier":"medium","text":"Explain what a REST API is to a junior developer in a short paragraph."}
+{"id":"short-debug","tier":"medium","text":"Why does this return 0? sum := 0\nfor i := range []int{1,2,3} {\n  sum += i\n}"}
+
+{"id":"multi-file-refactor","tier":"complex","text":"Refactor the payment module so that all three call sites use the new interface. The gateway package defines Charge(ctx, amount) error, the handler calls it in two places, and the worker calls it in one. Make sure the mocks in the tests are updated to match, and keep the existing behavior when amount is zero."}
+{"id":"debug-with-context","tier":"complex","text":"Our service started returning 502s after the last deploy. Here is the nginx config, the health check endpoint, and the last 200 lines of the app log. Figure out what changed and propose a fix.\n\nlog tail:\n2026-09-28T10:00:01Z ERROR dial tcp 10.0.3.14:8080: connect: connection refused\n2026-09-28T10:00:02Z ERROR dial tcp 10.0.3.14:8080: connect: connection refused"}
+{"id":"doc-analysis","tier":"complex","text":"Read this 40-page contract and list every clause that assigns liability to the vendor, then flag the three clauses most likely to be disputed, with the specific language that makes them risky."}
+{"id":"agent-tool-turn","tier":"complex","text":"Use the available tools to find every TODO in the repository, group them by module, and open a tracking issue for the ones that reference a security concern."}
+{"id":"migration-plan","tier":"complex","text":"We need to migrate 12 services from EC2 to Kubernetes over one quarter without downtime. Outline the ordering, the cutover strategy per service, and what could go wrong."}
+
+{"id":"proof","tier":"reasoning","text":"Prove that the square root of 2 is irrational, and explain why the same argument fails for the square root of 4."}
+{"id":"algorithm-analysis","tier":"reasoning","text":"Analyze the amortized time complexity of a splay tree under an adversarial access sequence, and compare it against a red-black tree for a workload where 90% of lookups hit the same 50 keys."}
+{"id":"architecture-tradeoffs","tier":"reasoning","text":"We are choosing between a shared-nothing microservice architecture with eventual consistency and a modular monolith with a single database. Given a team of eight engineers, a 99.99% availability target, and a requirement that financial balances are always exactly reconcileable, reason through the trade-offs and recommend an approach."}
+{"id":"math-derivation","tier":"reasoning","text":"Derive the closed form for the sum of the first n squares and prove it by induction."}
+{"id":"planning","tier":"reasoning","text":"Design a rate limiter that is fair across tenants, survives a node failure without losing more than one second of counts, and does not require synchronized clocks. Reason about the failure modes before proposing the design."}

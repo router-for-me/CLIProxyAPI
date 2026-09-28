@@ -25,6 +25,11 @@ const (
 	systemOnePath = "/v1/systemone"
 	// maxErrorBody bounds how much of a non-200 body is retained for logging.
 	maxErrorBody = 512
+	// DefaultModel is the pinned classifier version used when no override is
+	// configured. It names an explicit version rather than the "jev-latest"
+	// alias: an alias moves when a release ships, and a moved model invalidates
+	// confidence thresholds an operator has already tuned.
+	DefaultModel = "jev-1.13.0"
 )
 
 // Question is one typed question sent to the System One model. Type is one of

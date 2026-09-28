@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter/jevclient"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter/jevgate"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -25,9 +26,9 @@ const (
 	// jevDefaultTimeout bounds the classifier call. It applies before any
 	// upstream model connection exists, the same phase as the vision bridge.
 	jevDefaultTimeout = 400 * time.Millisecond
-	// jevDefaultModel mirrors store.JevDefaultModel for this package's default
-	// when no global model is configured.
-	jevDefaultModel = "jev-1.13.0"
+	// jevDefaultModel is the classifier model used when no global model is
+	// configured (see jevclient.DefaultModel).
+	jevDefaultModel = jevclient.DefaultModel
 )
 
 // jevGate and jevBreaker are process-local. The gate holds no per-router state;

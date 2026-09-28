@@ -9,14 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter/jevclient"
 	log "github.com/sirupsen/logrus"
 )
 
-// JevDefaultModel is the default classifier model. It is pinned to an explicit
-// version rather than the "jev-latest" alias: an alias moves when a release
-// ships, and a moved model invalidates confidence thresholds an operator has
-// already tuned.
-const JevDefaultModel = "jev-1.13.0"
+// JevDefaultModel is the default classifier model (see jevclient.DefaultModel).
+const JevDefaultModel = jevclient.DefaultModel
 
 // JevSettings is the singleton operator configuration for Jev AI
 // classification. The plaintext API key is never represented here — only
