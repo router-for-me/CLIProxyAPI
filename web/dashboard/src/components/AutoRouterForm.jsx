@@ -95,6 +95,10 @@ export const EMPTY_ROUTER = {
   description: '',
   display_name: '',
   vision_bridge_model: '',
+  jev_enabled: false,
+  jev_min_confidence: '',
+  jev_timeout_ms: '',
+  jev_model_override: '',
   enabled: true,
   pricing: { input_per_1m_usd: '', cached_input_per_1m_usd: '', cached_read_per_1m_usd: '', output_per_1m_usd: '' },
   mappings: TIERS.map((t) => routerShape(t.tier)),
@@ -137,6 +141,12 @@ export function routerToForm(r) {
     description: r?.description || '',
     display_name: r?.display_name || '',
     vision_bridge_model: r?.vision_bridge_model || '',
+    jev_enabled: r?.jev_enabled ?? false,
+    // 0 is the server's "unset" sentinel for these two, so render it blank
+    // rather than as a literal 0 the operator would have to clear.
+    jev_min_confidence: Number(r?.jev_min_confidence) > 0 ? String(r.jev_min_confidence) : '',
+    jev_timeout_ms: Number(r?.jev_timeout_ms) > 0 ? String(r.jev_timeout_ms) : '',
+    jev_model_override: r?.jev_model_override || '',
     enabled: r?.enabled ?? true,
     pricing: {
       input_per_1m_usd: r?.pricing?.input_per_1m_usd ?? '',
@@ -256,6 +266,16 @@ export function formToRouter(form) {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : null;
   };
+  // The server treats 0 as "unset, use the default" for both classifier knobs,
+  // so a blank or invalid entry must serialize as 0 rather than NaN.
+  const fractionOrZero = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.min(n, 1) : 0;
+  };
+  const intOrZero = (v) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
   const inputPer = num(form.pricing?.input_per_1m_usd);
   const cachedPer = num(form.pricing?.cached_input_per_1m_usd);
   const cachedReadPer = num(form.pricing?.cached_read_per_1m_usd);
@@ -267,6 +287,14 @@ export function formToRouter(form) {
     description: (form.description || '').trim(),
     display_name: (form.display_name || '').trim(),
     vision_bridge_model: (form.vision_bridge_model || '').trim(),
+    // The classifier is opt-in per router; its knobs are only meaningful when
+    // it is on, so they are zeroed (the server's "use the default" sentinel)
+    // whenever it is off. That keeps a disabled router's stored row free of
+    // stale tuning values that would silently apply if it were re-enabled.
+    jev_enabled: !!form.jev_enabled,
+    jev_min_confidence: fractionOrZero(form.jev_min_confidence),
+    jev_timeout_ms: intOrZero(form.jev_timeout_ms),
+    jev_model_override: (form.jev_model_override || '').trim(),
     enabled: form.enabled !== false,
     pricing: !hasPricing ? null : {
       input_per_1m_usd: inputPer ?? 0,
@@ -541,6 +569,69 @@ export default function AutoRouterForm({ initial, onChange }) {
               text is passed to the tier model. Leave empty to disable.
             </div>
           </div>
+
+          <div className="ar-form__field">
+            <label className="ar-form__label" htmlFor="ar-jev-enabled" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <input
+                id="ar-jev-enabled"
+                type="checkbox"
+                checked={!!form.jev_enabled}
+                onChange={(e) => set('jev_enabled', e.target.checked)}
+                style={{ width: 'auto' }}
+              />
+              <span>Jev AI classification for this router</span>
+            </label>
+            <div className="ar-form__hint">
+              When on — and the global Jev AI switches are on in Settings — this router consults the
+              classifier before scoring and routes by the tier it picks, as long as its confidence clears
+              the threshold below. Any failure or a low-confidence answer falls back to the heuristic tier,
+              which is still recorded for comparison.
+            </div>
+          </div>
+
+          {form.jev_enabled && (
+            <div className="ar-form__grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+              <div className="ar-form__field">
+                <label className="ar-form__label" htmlFor="ar-jev-conf">Minimum confidence</label>
+                <input
+                  id="ar-jev-conf"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={form.jev_min_confidence}
+                  onChange={(e) => set('jev_min_confidence', e.target.value)}
+                  placeholder="0.5"
+                />
+                <div className="ar-form__hint">0–1. Below this, the heuristic tier wins.</div>
+              </div>
+              <div className="ar-form__field">
+                <label className="ar-form__label" htmlFor="ar-jev-timeout">Timeout (ms)</label>
+                <input
+                  id="ar-jev-timeout"
+                  type="number"
+                  min="1"
+                  step="50"
+                  value={form.jev_timeout_ms}
+                  onChange={(e) => set('jev_timeout_ms', e.target.value)}
+                  placeholder="400"
+                />
+                <div className="ar-form__hint">Blank uses the 400 ms default.</div>
+              </div>
+              <div className="ar-form__field">
+                <label className="ar-form__label" htmlFor="ar-jev-model">Classifier model override</label>
+                <input
+                  id="ar-jev-model"
+                  type="text"
+                  value={form.jev_model_override}
+                  onChange={(e) => set('jev_model_override', e.target.value)}
+                  placeholder="jev-1.13.0"
+                  spellCheck={false}
+                />
+                <div className="ar-form__hint">Blank uses the model from Settings.</div>
+              </div>
+            </div>
+          )}
 
           <div className="ar-form__field">
             <label className="ar-form__label" htmlFor="ar-desc">Description</label>
