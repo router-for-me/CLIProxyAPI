@@ -129,6 +129,11 @@ type PgStoreHandles struct {
 	// Alerts). nil when PG is not configured — the /alerts routes return 503
 	// and the detection sweep is a no-op.
 	Alerts *store.AlertStore
+	// Jev is the PG-backed store for the Jev AI classifier settings (global
+	// master toggle + sealed API key + pinned model). nil when PG is not
+	// configured — the /jev/settings routes return 503 and the classifier gate
+	// is never wired, so routing stays purely heuristic.
+	Jev *store.JevStore
 	// Backup is the PG-backed store that powers the /export and /import routes
 	// (dump/restore of the PG tables). nil when PG is not configured — those
 	// routes return 503.

@@ -281,6 +281,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// detection sweep is started here so it only runs after the auth manager
 		// is attached (the provider-cooldown detector polls live cooldowns).
 		s.mgmt.SetAlertsStore(handles.Alerts)
+		// Wire the PG-backed Jev AI classifier settings (master toggle +
+		// sealed API key + pinned model). The gate itself is attached
+		// separately below, since it needs a client built from the stored key.
+		s.mgmt.SetJevStore(handles.Jev)
 		s.mgmt.SetUsageFlusher(handles.Flusher)
 		s.mgmt.StartAlertSweep()
 		// Wire the backup store that powers the /export and /import routes

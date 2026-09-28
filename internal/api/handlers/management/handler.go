@@ -142,6 +142,11 @@ type Handler struct {
 	pgAlerts           *store.AlertStore
 	pgFlusherLastDrops int64
 
+	// pgJev stores the singleton Jev AI classifier configuration (master
+	// toggle + sealed API key + pinned model). nil when PG is not configured —
+	// the /jev/settings routes return 503 in that case.
+	pgJev jevSettingsStore
+
 	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
 	// wired by api.Server after route setup so the management handler can
 	// trigger an in-process sync into models_catalog without a network
@@ -540,6 +545,18 @@ func (h *Handler) SetAlertsStore(s *store.AlertStore) {
 	h.pgAlerts = s
 	h.mu.Unlock()
 	store.StartAlertRetentionSweep(s) // nil-safe
+}
+
+// SetJevStore wires the PG-backed store for the Jev AI classifier settings
+// (master toggle + sealed API key + pinned model). When nil, the
+// /v0/management/jev/settings routes return 503.
+func (h *Handler) SetJevStore(s *store.JevStore) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.pgJev = s
+	h.mu.Unlock()
 }
 
 // SetUsageFlusher wires the PG usage flusher so the alerts sweep can flag drops

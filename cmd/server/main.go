@@ -676,6 +676,8 @@ func main() {
 		pgAutoRouterProfiles = store.NewAutoRouterProfileStore(pgStoreInst)
 		pgModelHealth := store.NewModelHealthStore(pgStoreInst)
 		pgAlerts := store.NewAlertStore(pgStoreInst)
+		// Jev AI classifier settings (global master toggle + sealed API key).
+		pgJev := store.NewJevStore(pgStoreInst)
 		// Manage-LiteLLM stores (dedicated litellm_* tables, management-only).
 		pgLiteLLMUsers := store.NewLiteLLMUserStore(pgStoreInst)
 		pgLiteLLMKeys := store.NewLiteLLMKeyStore(pgStoreInst)
@@ -798,6 +800,7 @@ func main() {
 			AutoRouterProfiles: pgAutoRouterProfiles,
 			ModelHealth:        pgModelHealth,
 			Alerts:             pgAlerts,
+			Jev:                pgJev,
 			Backup:             pgStoreInst,
 			LiteLLMUsers:       pgLiteLLMUsers,
 			LiteLLMKeys:        pgLiteLLMKeys,

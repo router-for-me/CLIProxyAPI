@@ -259,6 +259,13 @@ func (s *Server) registerManagementRoutes() {
 		// internal_users table ("sync to NixLLM"). Needs no external connection.
 		mgmt.POST("/litellm/sync/nixllm", s.mgmt.RunLiteLLMSyncNixLLM)
 
+		// Jev AI classifier settings (global master toggle + sealed API key +
+		// pinned model). The API key is write-only: GET returns only
+		// api_key_set and a masked prefix. Returns 503 when PG is not
+		// configured.
+		mgmt.GET("/jev/settings", s.mgmt.GetJevSettings)
+		mgmt.PUT("/jev/settings", s.mgmt.PutJevSettings)
+
 		// Runtime-backed LiteLLM compat routes (wire-parity with LiteLLM's
 		// OpenAPI). These are additive siblings of the Manage-LiteLLM routes
 		// above: each is served by a *Compat handler that reads/writes the
