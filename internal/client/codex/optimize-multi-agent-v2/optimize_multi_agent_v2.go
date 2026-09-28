@@ -12,10 +12,10 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -65,11 +65,16 @@ func RewriteCodexSpawnAgentDescription(ctx context.Context, headers http.Header,
 
 // RewriteCodexMultiAgentV2Input converts official Codex multi-agent input into
 // standard Responses API messages when multi-agent v2 optimization is enabled.
-func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) []byte {
-	if !codexMultiAgentV2Enabled(ctx, headers, cfg) {
+// When isCompat is true, it proactively removes non-standard metadata fields
+// (author, recipient, internal_chat_message_metadata_passthrough) from agent_message
+// and regular message items, even if optimize-multi-agent-v2 is disabled.
+func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config, isCompat ...bool) []byte {
+	compatMode := len(isCompat) > 0 && isCompat[0]
+	optimizeEnabled := cfg != nil && cfg.Codex.OptimizeMultiAgentV2 && (compatMode || isCodexMultiAgentClient(codexClientUserAgent(ctx, headers)))
+	if !compatMode && !optimizeEnabled {
 		return payload
 	}
-	return rewriteCodexAgentMessageInput(payload)
+	return rewriteCodexAgentMessageInput(payload, optimizeEnabled, compatMode)
 }
 
 // RewriteCodexOrphanDelegationInputForConfig applies RewriteCodexOrphanDelegationInput
@@ -96,6 +101,10 @@ func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Hea
 // multi-agent input while preserving request-scoped translation metadata.
 func TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
 	if from == sdktranslator.FormatOpenAIResponse {
+		if cfg != nil && cfg.OAuthOnlyFields["codex.optimize-multi-agent-v2"] {
+			// OAuth-only tool preparation is deferred until credential selection.
+			req.Body, _ = PrepareCodexMultiAgentV2Tools(ctx, headers, req.Body, cfg.Codex.OptimizeMultiAgentV2, cfg.Home.Enabled)
+		}
 		req.Body = RewriteCodexOrphanDelegationInputForConfig(ctx, headers, req.Body, cfg)
 		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
 			req.Body = RewriteCodexMultiAgentV2Input(ctx, headers, req.Body, cfg)
@@ -780,26 +789,47 @@ func restoreCodexCollaborationValue(value any) bool {
 	return changed
 }
 
-func rewriteCodexAgentMessageInput(payload []byte) []byte {
+func rewriteCodexAgentMessageInput(payload []byte, optimizeEnabled bool, compatMode bool) []byte {
 	input := gjson.GetBytes(payload, "input")
 	if !input.IsArray() {
 		return payload
 	}
 
-	updated := rewriteCodexAgentMessageContent(payload)
+	updated := payload
+	if optimizeEnabled {
+		updated = rewriteCodexAgentMessageContent(payload)
+	}
 	for itemIndex, item := range input.Array() {
-		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
-			continue
-		}
+		itemType := strings.TrimSpace(item.Get("type").String())
 		itemPath := fmt.Sprintf("input.%d", itemIndex)
-		var errSet error
-		updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user")
-		if errSet != nil {
-			return payload
+		if itemType == "agent_message" && optimizeEnabled {
+			var errSet error
+			updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user")
+			if errSet != nil {
+				return payload
+			}
+			updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message")
+			if errSet != nil {
+				return payload
+			}
 		}
-		updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message")
-		if errSet != nil {
-			return payload
+		if compatMode {
+			var errDelete error
+			if item.Get("author").Exists() {
+				if updated, errDelete = sjson.DeleteBytes(updated, itemPath+".author"); errDelete != nil {
+					return payload
+				}
+			}
+			if item.Get("recipient").Exists() {
+				if updated, errDelete = sjson.DeleteBytes(updated, itemPath+".recipient"); errDelete != nil {
+					return payload
+				}
+			}
+			if item.Get("internal_chat_message_metadata_passthrough").Exists() {
+				if updated, errDelete = sjson.DeleteBytes(updated, itemPath+".internal_chat_message_metadata_passthrough"); errDelete != nil {
+					return payload
+				}
+			}
 		}
 	}
 	return updated

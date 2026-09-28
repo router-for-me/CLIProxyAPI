@@ -4,17 +4,17 @@ import (
 	"context"
 	"net/http"
 
-	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/optimize-multi-agent-v2"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	openaichatclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/chat-completions"
-	responsesclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/claude/openai/responses"
-	codexclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/claude"
-	geminiclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/claude"
-	interactionsclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/interactions/claude"
-	openaiclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/claude"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	openaichatclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/chat-completions"
+	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
+	geminiclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/claude"
+	interactionsclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/interactions/claude"
+	openaiclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/claude"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // RewriteCodexSpawnAgentDescription optimizes spawn_agent definitions for
@@ -126,7 +126,7 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 	if from == sdktranslator.FormatOpenAIResponse {
 		payload = RewriteCodexOrphanDelegationInput(ctx, headers, payload, cfg)
 		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
-			payload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+			payload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg, isCompat)
 		}
 	}
 
@@ -167,11 +167,16 @@ func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, 
 
 // OptimizeCodexMultiAgentV2RequestForAuth applies the standard Codex MultiAgentV2
 // request optimization and, when the selected codex-api-key model has is-compat
-// enabled, also converts agent_message items into portable message/user input.
+// enabled, also converts agent_message items into portable message/user input,
+// proactively stripping author, recipient, and internal passthrough metadata.
 func OptimizeCodexMultiAgentV2RequestForAuth(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config, auth *cliproxyauth.Auth, model string) ([]byte, bool) {
+	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		cfg = cfg.ForAPIKey()
+	}
+	payload = multiagentv2.RewriteCodexOrphanDelegationInputForConfig(ctx, headers, payload, cfg)
 	updated, optimized := multiagentv2.OptimizeCodexMultiAgentV2Request(ctx, headers, payload, cfg)
 	if cliproxyauth.CodexAPIKeyModelIsCompat(cfg, auth, model) {
-		updated = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, updated, cfg)
+		updated = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, updated, cfg, true)
 	}
 	return updated, optimized
 }

@@ -5,8 +5,8 @@ import (
 	"context"
 	"testing"
 
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 

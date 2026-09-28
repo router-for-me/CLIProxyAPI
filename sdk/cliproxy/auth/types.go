@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created

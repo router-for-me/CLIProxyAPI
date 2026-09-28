@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 
@@ -108,6 +110,17 @@ func LookupDevinModel(modelID string) *ModelInfo {
 			return cloneModelInfo(m)
 		}
 	}
+
+	// Fallback: If clean is a thinking variant (e.g. claude-opus-5-low-fast or gpt-6-astra-high),
+	// look up its base model (e.g. claude-opus-5 or gpt-6-astra).
+	if base, _ := splitDevinModelID(clean); base != clean && base != "" {
+		for _, m := range models {
+			mClean := strings.ToLower(strings.TrimPrefix(m.ID, "devin/"))
+			if mClean == base {
+				return cloneModelInfo(m)
+			}
+		}
+	}
 	return nil
 }
 
@@ -181,30 +194,245 @@ func ValidateDevinModelsJSON(data []byte) ([]*ModelInfo, error) {
 	return nil, fmt.Errorf("invalid Devin models JSON: expected non-empty 'devin'/'models' array or model list")
 }
 
-func sanitizeAndValidateDevinModels(models []*ModelInfo) ([]*ModelInfo, error) {
-	seen := make(map[string]struct{}, len(models))
-	out := make([]*ModelInfo, 0, len(models))
+var devinCompoundSuffixes = []struct {
+	suffix string
+	effort string
+	readd  string
+}{
+	{suffix: "-low-fast", effort: "low"},
+	{suffix: "-medium-fast", effort: "medium"},
+	{suffix: "-high-fast", effort: "high"},
+	{suffix: "-xhigh-fast", effort: "xhigh"},
+	{suffix: "-max-fast", effort: "max"},
+	{suffix: "-none-fast", effort: "none"},
+	{suffix: "-low-priority", effort: "low"},
+	{suffix: "-medium-priority", effort: "medium"},
+	{suffix: "-high-priority", effort: "high"},
+	{suffix: "-xhigh-priority", effort: "xhigh"},
+	{suffix: "-max-priority", effort: "max"},
+	{suffix: "-none-priority", effort: "none"},
+	{suffix: "-thinking-1m", effort: "", readd: "-1m"},
+	{suffix: "-thinking", effort: ""},
+	{suffix: "-max-1m", effort: "max", readd: "-1m"},
+	{suffix: "-none-1m", effort: "none", readd: "-1m"},
+}
 
-	for i, m := range models {
+var devinSimpleEffortSuffixes = []struct {
+	suffix string
+	effort string
+}{
+	{suffix: "-none", effort: "none"},
+	{suffix: "-minimal", effort: "minimal"},
+	{suffix: "-low", effort: "low"},
+	{suffix: "-medium", effort: "medium"},
+	{suffix: "-high", effort: "high"},
+	{suffix: "-xhigh", effort: "xhigh"},
+	{suffix: "-max", effort: "max"},
+}
+
+var devinDisplayNameSuffixes = []string{
+	" Low Fast", " Medium Fast", " High Fast", " XHigh Fast", " Max Fast",
+	" Low Thinking Fast", " Medium Thinking Fast", " High Thinking Fast",
+	" XHigh Thinking Fast", " Max Thinking Fast", " No Thinking Fast",
+	" Low Thinking", " Medium Thinking", " High Thinking", " XHigh Thinking",
+	" Max Thinking", " No Thinking",
+	" Low", " Medium", " High", " XHigh", " Max", " None", " Minimal",
+	" Thinking", " Fast",
+}
+
+var devinLevelOrder = map[string]int{
+	"none":     0,
+	"minimal":  1,
+	"low":      2,
+	"medium":   3,
+	"high":     4,
+	"xhigh":    5,
+	"max":      6,
+	"fast":     7,
+	"priority": 8,
+}
+
+func splitDevinModelID(cleanID string) (string, string) {
+	if cleanID == "swe-1-6-slow" {
+		return cleanID, ""
+	}
+	if cleanID == "swe-1-6-fast" {
+		return "swe-1-6", ""
+	}
+
+	upper := strings.ToUpper(cleanID)
+	for _, s := range []struct {
+		suffix string
+		effort string
+	}{
+		{"_NONE", "none"},
+		{"_MINIMAL", "minimal"},
+		{"_LOW", "low"},
+		{"_MEDIUM", "medium"},
+		{"_HIGH", "high"},
+		{"_XHIGH", "xhigh"},
+		{"_MAX", "max"},
+		{"_THINKING", "high"},
+	} {
+		if strings.HasSuffix(upper, s.suffix) {
+			base := cleanID[:len(cleanID)-len(s.suffix)]
+			return base, s.effort
+		}
+	}
+
+	for _, s := range devinCompoundSuffixes {
+		if strings.HasSuffix(cleanID, s.suffix) {
+			base := cleanID[:len(cleanID)-len(s.suffix)]
+			if s.readd != "" {
+				base += s.readd
+			}
+			return base, s.effort
+		}
+	}
+
+	for _, s := range devinSimpleEffortSuffixes {
+		if strings.HasSuffix(cleanID, s.suffix) {
+			base := cleanID[:len(cleanID)-len(s.suffix)]
+			return base, s.effort
+		}
+	}
+
+	return cleanID, ""
+}
+
+func cleanDevinDisplayName(name string) string {
+	trimmed := strings.TrimSpace(name)
+	for {
+		changed := false
+		for _, s := range devinDisplayNameSuffixes {
+			if strings.HasSuffix(strings.ToLower(trimmed), strings.ToLower(s)) {
+				trimmed = strings.TrimSpace(trimmed[:len(trimmed)-len(s)])
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return trimmed
+}
+
+func aggregateDevinModels(models []*ModelInfo) []*ModelInfo {
+	type aggEntry struct {
+		model  *ModelInfo
+		levels map[string]struct{}
+	}
+
+	order := make([]string, 0, len(models))
+	aggregated := make(map[string]*aggEntry, len(models))
+
+	for _, m := range models {
 		if m == nil {
-			return nil, fmt.Errorf("model at index %d is null", i)
+			continue
 		}
-		id := strings.TrimSpace(m.ID)
-		if id == "" {
-			return nil, fmt.Errorf("model at index %d has empty id", i)
+		cleanID := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(m.ID), "devin/"))
+		baseID, effort := splitDevinModelID(cleanID)
+		if baseID == "" {
+			baseID = cleanID
 		}
-		// Automatically namespace model IDs under devin/ if not already prefixed
-		if !strings.HasPrefix(strings.ToLower(id), "devin/") {
-			id = "devin/" + id
-		}
-		id = strings.ToLower(id)
-		m.ID = id
-		if _, exists := seen[id]; exists {
-			return nil, fmt.Errorf("duplicate model id: %q", id)
-		}
-		seen[id] = struct{}{}
+		namespacedBase := "devin/" + baseID
+		isBase := (baseID == cleanID)
 
-		// Ensure proper default fields
+		entry, exists := aggregated[namespacedBase]
+		if !exists {
+			clone := *m
+			clone.ID = namespacedBase
+			clone.DisplayName = cleanDevinDisplayName(m.DisplayName)
+			if clone.DisplayName == "" {
+				clone.DisplayName = m.DisplayName
+			}
+			entry = &aggEntry{
+				model:  &clone,
+				levels: make(map[string]struct{}),
+			}
+			aggregated[namespacedBase] = entry
+			order = append(order, namespacedBase)
+		}
+
+		if isBase {
+			if m.DisplayName != "" {
+				entry.model.DisplayName = cleanDevinDisplayName(m.DisplayName)
+			}
+			if m.OwnedBy != "" {
+				entry.model.OwnedBy = m.OwnedBy
+			}
+		}
+		if m.ContextLength > entry.model.ContextLength {
+			entry.model.ContextLength = m.ContextLength
+		}
+		if m.MaxCompletionTokens > entry.model.MaxCompletionTokens {
+			entry.model.MaxCompletionTokens = m.MaxCompletionTokens
+		}
+		if m.InputTokenLimit > entry.model.InputTokenLimit {
+			entry.model.InputTokenLimit = m.InputTokenLimit
+		}
+		if m.OutputTokenLimit > entry.model.OutputTokenLimit {
+			entry.model.OutputTokenLimit = m.OutputTokenLimit
+		}
+		for _, mod := range m.SupportedInputModalities {
+			if !slices.Contains(entry.model.SupportedInputModalities, mod) {
+				entry.model.SupportedInputModalities = append(entry.model.SupportedInputModalities, mod)
+			}
+		}
+		for _, mod := range m.SupportedOutputModalities {
+			if !slices.Contains(entry.model.SupportedOutputModalities, mod) {
+				entry.model.SupportedOutputModalities = append(entry.model.SupportedOutputModalities, mod)
+			}
+		}
+		for _, gen := range m.SupportedGenerationMethods {
+			if !slices.Contains(entry.model.SupportedGenerationMethods, gen) {
+				entry.model.SupportedGenerationMethods = append(entry.model.SupportedGenerationMethods, gen)
+			}
+		}
+
+		if m.Thinking != nil && len(m.Thinking.Levels) > 0 {
+			for _, l := range m.Thinking.Levels {
+				if l != "" && l != "priority" {
+					entry.levels[l] = struct{}{}
+				}
+			}
+		}
+		if effort != "" && effort != "priority" {
+			entry.levels[effort] = struct{}{}
+		}
+	}
+
+	out := make([]*ModelInfo, 0, len(order))
+	for _, id := range order {
+		entry := aggregated[id]
+		m := entry.model
+
+		if len(entry.levels) > 0 {
+			lvls := make([]string, 0, len(entry.levels))
+			for l := range entry.levels {
+				lvls = append(lvls, l)
+			}
+			sort.Slice(lvls, func(i, j int) bool {
+				rI, okI := devinLevelOrder[lvls[i]]
+				if !okI {
+					rI = 99
+				}
+				rJ, okJ := devinLevelOrder[lvls[j]]
+				if !okJ {
+					rJ = 99
+				}
+				if rI != rJ {
+					return rI < rJ
+				}
+				return lvls[i] < lvls[j]
+			})
+			m.Thinking = &ThinkingSupport{
+				Levels: lvls,
+			}
+		}
+
+		// Ensure defaults
 		if m.Type == "" {
 			m.Type = "devin"
 		}
@@ -226,8 +454,35 @@ func sanitizeAndValidateDevinModels(models []*ModelInfo) ([]*ModelInfo, error) {
 		if len(m.SupportedGenerationMethods) == 0 {
 			m.SupportedGenerationMethods = []string{"generateContent", "countTokens"}
 		}
+
 		out = append(out, m)
 	}
 
-	return out, nil
+	return out
+}
+
+func sanitizeAndValidateDevinModels(models []*ModelInfo) ([]*ModelInfo, error) {
+	seenExact := make(map[string]struct{}, len(models))
+
+	for i, m := range models {
+		if m == nil {
+			return nil, fmt.Errorf("model at index %d is null", i)
+		}
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			return nil, fmt.Errorf("model at index %d has empty id", i)
+		}
+		// Automatically namespace model IDs under devin/ if not already prefixed
+		if !strings.HasPrefix(strings.ToLower(id), "devin/") {
+			id = "devin/" + id
+		}
+		id = strings.ToLower(id)
+		m.ID = id
+		if _, exists := seenExact[id]; exists {
+			return nil, fmt.Errorf("duplicate model id: %q", id)
+		}
+		seenExact[id] = struct{}{}
+	}
+
+	return aggregateDevinModels(models), nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -349,5 +351,68 @@ func TestWithDevinBuiltins(t *testing.T) {
 	}
 	if replaced[0].DisplayName != "SWE-1.6 Slow" {
 		t.Errorf("expected DisplayName 'SWE-1.6 Slow', got %q", replaced[0].DisplayName)
+	}
+}
+
+func TestEmbeddedDevinModels_NoThinkingSuffixes_Issue6141(t *testing.T) {
+	models := GetDevinModels()
+	disallowedSuffixes := []string{
+		"-low-fast", "-medium-fast", "-high-fast", "-xhigh-fast", "-max-fast",
+		"-none-fast", "-low", "-medium", "-high", "-xhigh", "-max", "-none",
+		"-thinking-1m", "-thinking", "_none", "_minimal", "_low", "_medium",
+		"_high", "_xhigh", "_max", "_thinking",
+	}
+	var exposedThinkingVariants []string
+	for _, m := range models {
+		cleanID := strings.TrimPrefix(m.ID, "devin/")
+		for _, s := range disallowedSuffixes {
+			if strings.HasSuffix(cleanID, s) {
+				exposedThinkingVariants = append(exposedThinkingVariants, m.ID)
+				break
+			}
+		}
+	}
+	if len(exposedThinkingVariants) > 0 {
+		t.Fatalf("Devin catalog exposes thinking-parameter model variants (count=%d): %v", len(exposedThinkingVariants), exposedThinkingVariants)
+	}
+}
+
+func TestValidateDevinModelsJSON_AggregatesThinkingVariants_Issue6141(t *testing.T) {
+	payload := []byte(`{
+		"devin": [
+			{
+				"id": "claude-opus-5",
+				"display_name": "Claude Opus 5",
+				"owned_by": "anthropic",
+				"thinking": {"levels": ["medium"]}
+			},
+			{
+				"id": "claude-opus-5-low-fast",
+				"display_name": "Claude Opus 5 Low Fast",
+				"owned_by": "anthropic"
+			},
+			{
+				"id": "claude-opus-5-high-fast",
+				"display_name": "Claude Opus 5 High Fast",
+				"owned_by": "anthropic"
+			}
+		]
+	}`)
+	models, err := ValidateDevinModelsJSON(payload)
+	if err != nil {
+		t.Fatalf("ValidateDevinModelsJSON failed: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("expected 1 aggregated model, got %d: %+v", len(models), models)
+	}
+	if models[0].ID != "devin/claude-opus-5" {
+		t.Errorf("expected ID devin/claude-opus-5, got %q", models[0].ID)
+	}
+	if models[0].Thinking == nil {
+		t.Fatalf("expected Thinking to be populated")
+	}
+	expectedLevels := []string{"low", "medium", "high"}
+	if !reflect.DeepEqual(models[0].Thinking.Levels, expectedLevels) {
+		t.Fatalf("expected thinking levels %v, got %v", expectedLevels, models[0].Thinking.Levels)
 	}
 }

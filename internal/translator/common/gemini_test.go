@@ -135,6 +135,101 @@ func TestMergeAdjacentGeminiUserContents(t *testing.T) {
 	})
 }
 
+func TestSplitGeminiFunctionResponseTurns(t *testing.T) {
+	t.Run("splits mixed user turn with response first", func(t *testing.T) {
+		input := [][]byte{
+			[]byte(`{"role":"model","parts":[{"functionCall":{"name":"Bash"}}]}`),
+			[]byte(`{"role":"user","parts":[{"text":"reminder"},{"functionResponse":{"name":"Bash"}}]}`),
+		}
+		got := SplitGeminiFunctionResponseTurns(input)
+		if len(got) != 3 {
+			t.Fatalf("got %d turns, want 3", len(got))
+		}
+		if !ContentHasGeminiFunctionResponse(got[1]) || ContentHasGeminiFunctionResponse(got[2]) {
+			t.Fatalf("function response was not isolated before text: %s / %s", got[1], got[2])
+		}
+	})
+
+	t.Run("keeps function response only turn intact", func(t *testing.T) {
+		input := [][]byte{[]byte(`{"role":"user","parts":[{"functionResponse":{"name":"Bash"}}]}`)}
+		got := SplitGeminiFunctionResponseTurns(input)
+		if len(got) != 1 || string(got[0]) != string(input[0]) {
+			t.Fatalf("got %s, want original turn", JoinRawArray(got))
+		}
+	})
+
+	t.Run("handles multiple responses and alternate key", func(t *testing.T) {
+		input := [][]byte{[]byte(`{"role":"user","parts":[{"text":"before"},{"functionResponse":{"name":"one"}},{"function_response":{"name":"two"}},{"text":"after"}]}`)}
+		got := SplitGeminiFunctionResponseTurns(input)
+		if len(got) != 2 || len(gjson.GetBytes(got[0], "parts").Array()) != 2 || len(gjson.GetBytes(got[1], "parts").Array()) != 2 {
+			t.Fatalf("unexpected split: %s", JoinRawArray(got))
+		}
+		if !ContentHasGeminiFunctionResponse(got[0]) || ContentHasGeminiFunctionResponse(got[1]) {
+			t.Fatalf("responses were not isolated: %s", JoinRawArray(got))
+		}
+	})
+
+	t.Run("preserves non-user and empty turns", func(t *testing.T) {
+		input := [][]byte{
+			[]byte(`{"role":"model","parts":[{"functionResponse":{"name":"model-response"}}]}`),
+			[]byte(`{"role":"user","parts":[]}`),
+		}
+		got := SplitGeminiFunctionResponseTurns(input)
+		if len(got) != len(input) || string(got[0]) != string(input[0]) || string(got[1]) != string(input[1]) {
+			t.Fatalf("turns were changed: %s", JoinRawArray(got))
+		}
+	})
+
+	t.Run("splits each mixed turn independently", func(t *testing.T) {
+		input := [][]byte{
+			[]byte(`{"role":"user","parts":[{"text":"one"},{"functionResponse":{"name":"one"}}]}`),
+			[]byte(`{"role":"user","parts":[{"text":"two"},{"functionResponse":{"name":"two"}}]}`),
+		}
+		got := SplitGeminiFunctionResponseTurns(input)
+		if len(got) != 4 {
+			t.Fatalf("got %d turns, want 4: %s", len(got), JoinRawArray(got))
+		}
+		for i := range got {
+			if ContentHasGeminiFunctionResponse(got[i]) != (i%2 == 0) {
+				t.Fatalf("unexpected turn %d: %s", i, got[i])
+			}
+		}
+	})
+
+	t.Run("hoists function response before intervening text reminder", func(t *testing.T) {
+		input := [][]byte{
+			[]byte(`{"role":"model","parts":[{"functionCall":{"name":"Bash"}}]}`),
+			[]byte(`{"role":"user","parts":[{"text":"system reminder"}]}`),
+			[]byte(`{"role":"user","parts":[{"functionResponse":{"name":"Bash"}}]}`),
+		}
+		got := SplitGeminiFunctionResponseTurns(input)
+		if len(got) != 3 {
+			t.Fatalf("got %d turns, want 3", len(got))
+		}
+		if !ContentHasGeminiFunctionResponse(got[1]) {
+			t.Fatalf("expected function response immediately after model turn, got %s", got[1])
+		}
+		if gotText := gjson.GetBytes(got[2], "parts.0.text").String(); gotText != "system reminder" {
+			t.Fatalf("expected text reminder after function response, got %s", got[2])
+		}
+	})
+
+	t.Run("merges multiple function response turns into single turn following model", func(t *testing.T) {
+		input := [][]byte{
+			[]byte(`{"role":"model","parts":[{"functionCall":{"name":"A"}},{"functionCall":{"name":"B"}}]}`),
+			[]byte(`{"role":"user","parts":[{"functionResponse":{"name":"A"}}]}`),
+			[]byte(`{"role":"user","parts":[{"functionResponse":{"name":"B"}}]}`),
+		}
+		got := SplitGeminiFunctionResponseTurns(input)
+		if len(got) != 2 {
+			t.Fatalf("got %d turns, want 2", len(got))
+		}
+		if len(gjson.GetBytes(got[1], "parts").Array()) != 2 {
+			t.Fatalf("expected 2 parts in single function response turn, got %s", got[1])
+		}
+	})
+}
+
 func TestReorderGeminiUserParts(t *testing.T) {
 	t.Run("returns unchanged when no functionResponse", func(t *testing.T) {
 		parts := [][]byte{
