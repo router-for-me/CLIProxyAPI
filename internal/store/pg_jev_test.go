@@ -154,3 +154,34 @@ func TestNewJevStoreNilParent(t *testing.T) {
 }
 
 func ptrString(s string) *string { return &s }
+
+// The plaintext-encryption status must be reported honestly: a deployment with
+// no PGSTORE_ENCRYPTION_KEY stores the key as-is, and the UI relies on this
+// flag to say so rather than claiming the credential is encrypted.
+func TestJevStoreReportsEncryptionStatus(t *testing.T) {
+	js := newTestJevStore(t)
+	ctx := context.Background()
+
+	// No key stored: nothing is encrypted, regardless of the sealer.
+	if got, errGet := js.Get(ctx); errGet != nil {
+		t.Fatalf("get: %v", errGet)
+	} else if got.APIKeyEncrypted {
+		t.Error("no key stored must report api_key_encrypted=false")
+	}
+
+	key := "sk-ts-plaintext-probe"
+	if _, errPut := js.Upsert(ctx, JevSettings{Enabled: true}, &key); errPut != nil {
+		t.Fatalf("upsert: %v", errPut)
+	}
+	got, errGet := js.Get(ctx)
+	if errGet != nil {
+		t.Fatalf("get after upsert: %v", errGet)
+	}
+	if !got.APIKeySet {
+		t.Fatal("precondition: a key must be set")
+	}
+	// The test store has no encryption key configured, so this must be false.
+	if got.APIKeyEncrypted {
+		t.Error("a store without an encryption key must report api_key_encrypted=false")
+	}
+}

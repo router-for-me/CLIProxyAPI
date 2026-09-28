@@ -1,6 +1,7 @@
 package management
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -110,5 +111,58 @@ func TestValidateTierMappingsDuplicateTargets(t *testing.T) {
 		}},
 	}); msg == "" {
 		t.Fatal("expected duplicate target models to be rejected")
+	}
+}
+
+// Regression: the four classifier knobs must survive the request DTO. They were
+// dropped here once — the store and the gate both handled them, but the
+// management DTO never carried them, so a router created with jev_enabled:true
+// came back with the classifier off and no error to explain it.
+func TestDecodeAutoRouterJevFields(t *testing.T) {
+	body := `{
+		"name": "r1", "model_id": "router:r1", "jev_enabled": true,
+		"jev_min_confidence": 0.65, "jev_timeout_ms": 250,
+		"jev_model_override": "jev-preview"
+	}`
+	var req createAutoRouterRequest
+	if errDecode := json.Unmarshal([]byte(body), &req); errDecode != nil {
+		t.Fatalf("decode create request: %v", errDecode)
+	}
+	if !req.JevEnabled {
+		t.Error("jev_enabled must decode true")
+	}
+	if req.JevMinConfidence != 0.65 {
+		t.Errorf("jev_min_confidence = %v, want 0.65", req.JevMinConfidence)
+	}
+	if req.JevTimeoutMs != 250 {
+		t.Errorf("jev_timeout_ms = %d, want 250", req.JevTimeoutMs)
+	}
+	if req.JevModelOverride != "jev-preview" {
+		t.Errorf("jev_model_override = %q", req.JevModelOverride)
+	}
+}
+
+// An update that omits the knobs must leave them untouched (nil), while an
+// explicit false/0 must be distinguishable from absent so the operator can turn
+// the classifier off without clearing their other settings.
+func TestDecodeAutoRouterJevUpdateDistinguishesAbsentFromZero(t *testing.T) {
+	var absent updateAutoRouterRequest
+	if errDecode := json.Unmarshal([]byte(`{"name":"r1"}`), &absent); errDecode != nil {
+		t.Fatalf("decode absent: %v", errDecode)
+	}
+	if absent.JevEnabled != nil || absent.JevMinConfidence != nil ||
+		absent.JevTimeoutMs != nil || absent.JevModelOverride != nil {
+		t.Errorf("absent knobs must stay nil (preserve), got %+v", absent)
+	}
+
+	var explicit updateAutoRouterRequest
+	if errDecode := json.Unmarshal([]byte(`{"jev_enabled":false,"jev_min_confidence":0}`), &explicit); errDecode != nil {
+		t.Fatalf("decode explicit: %v", errDecode)
+	}
+	if explicit.JevEnabled == nil || *explicit.JevEnabled {
+		t.Error("explicit jev_enabled:false must decode to a non-nil false")
+	}
+	if explicit.JevMinConfidence == nil || *explicit.JevMinConfidence != 0 {
+		t.Error("explicit jev_min_confidence:0 must decode to a non-nil zero")
 	}
 }

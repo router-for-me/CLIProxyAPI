@@ -114,10 +114,16 @@ function JevSettingsCard() {
           </div>
 
           <p className="muted" style={{ marginTop: 8 }}>
-            The key is stored encrypted and is never returned by the API. Leave the
-            field blank to keep the current key; type a new one to replace it. A
-            saved key is adopted by the running server immediately.
+            The key is never returned by the API. Leave the field blank to keep the
+            current key; type a new one to replace it. A saved key is adopted by the
+            running server immediately.
           </p>
+          {keySet && !draft.api_key_encrypted && (
+            <p className="muted" style={{ marginTop: 8, color: 'var(--warn, #b45309)' }}>
+              <strong>Stored in plaintext.</strong> Set <code>PGSTORE_ENCRYPTION_KEY</code> on
+              the server to seal stored credentials with AES-GCM.
+            </p>
+          )}
 
           <div className="form__actions" style={{ marginTop: 16 }}>
             <button onClick={handleSave} disabled={saving}>{saving ? 'Saving…' : 'Save Jev AI settings'}</button>

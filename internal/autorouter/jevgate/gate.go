@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter/jevclient"
+	log "github.com/sirupsen/logrus"
 )
 
 // Caller is the subset of jevclient.Client the gate needs, kept as an interface
@@ -77,10 +78,22 @@ func (g *Gate) Decide(ctx context.Context, cfg Config, format, routerID string, 
 	if errCall != nil {
 		v.Verdict = VerdictError
 		var statusErr *jevclient.StatusError
-		if errors.As(errCall, &statusErr) &&
-			(statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden) {
+		credentialRejected := errors.As(errCall, &statusErr) &&
+			(statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden)
+		if credentialRejected {
 			g.breaker.Trip(routerID)
 		}
+		// Failing open must not mean failing silently: without this, a wrong
+		// key or an unreachable endpoint turns the classifier into a no-op with
+		// nothing in the logs to explain why routing never changed. The error
+		// text carries no credential (see jevclient.StatusError), and the
+		// request proceeds on the heuristic tier either way.
+		log.WithError(errCall).WithFields(log.Fields{
+			"router_id":         routerID,
+			"model":             cfg.Model,
+			"breaker_tripped":   credentialRejected,
+			"fallback_decision": "heuristic_tier",
+		}).Warn("jev gate: classifier unavailable; routing on the heuristic tier")
 		return v, false
 	}
 	v.LatencyMs = time.Since(start).Milliseconds()
@@ -89,6 +102,12 @@ func (g *Gate) Decide(ctx context.Context, cfg Config, format, routerID string, 
 	if !ok {
 		// A 200 without our answer is a malformed response, not a verdict.
 		v.Verdict = VerdictError
+		log.WithFields(log.Fields{
+			"router_id":         routerID,
+			"model":             cfg.Model,
+			"question_id":       QuestionID,
+			"fallback_decision": "heuristic_tier",
+		}).Warn("jev gate: classifier response had no tier answer; routing on the heuristic tier")
 		return v, false
 	}
 	v.Choice = answer.Choice

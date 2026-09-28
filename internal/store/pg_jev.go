@@ -21,11 +21,17 @@ const JevDefaultModel = jevclient.DefaultModel
 // APIKeySet and a masked APIKeyPrefix — so a GET response cannot leak it. The
 // key itself is sealed at rest via the shared Sealer.
 type JevSettings struct {
-	Enabled      bool      `json:"enabled"`
-	APIKeySet    bool      `json:"api_key_set"`
-	APIKeyPrefix string    `json:"api_key_prefix,omitempty"`
-	Model        string    `json:"model"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	Enabled      bool   `json:"enabled"`
+	APIKeySet    bool   `json:"api_key_set"`
+	APIKeyPrefix string `json:"api_key_prefix,omitempty"`
+	// APIKeyEncrypted reports whether a stored key is actually sealed at rest.
+	// False when no key is stored, and — importantly — also false when a key is
+	// stored as plaintext because PGSTORE_ENCRYPTION_KEY is unset. The dashboard
+	// surfaces this so an operator is not told a credential is encrypted when
+	// it is not.
+	APIKeyEncrypted bool      `json:"api_key_encrypted"`
+	Model           string    `json:"model"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // defaultJevSettings returns the fallback settings used when the singleton row
@@ -96,6 +102,7 @@ func (s *JevStore) Get(ctx context.Context) (JevSettings, error) {
 		return defaultJevSettings(), fmt.Errorf("postgres store: get jev_settings: %w", errScan)
 	}
 	set = clampJevSettings(set)
+	set.APIKeyEncrypted = set.APIKeySet && s.encryptionEnabled()
 	s.mu.Lock()
 	s.cached = &set
 	s.mu.Unlock()
@@ -109,6 +116,13 @@ func clampJevSettings(s JevSettings) JevSettings {
 		s.Model = JevDefaultModel
 	}
 	return s
+}
+
+// encryptionEnabled reports whether secrets are sealed at rest. False when the
+// store has no usable sealer, which is the default deployment (no
+// PGSTORE_ENCRYPTION_KEY).
+func (s *JevStore) encryptionEnabled() bool {
+	return s != nil && s.sealer != nil && s.sealer.Enabled()
 }
 
 // Upsert replaces the singleton settings row. The API key is updated only when
