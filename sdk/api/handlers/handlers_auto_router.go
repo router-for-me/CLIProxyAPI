@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter/jevgate"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -14,6 +16,114 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
+
+const (
+	// jevDefaultMinConfidence is the classifier confidence floor when a router
+	// does not set one. With four options an even probability spread scores 0,
+	// so 0.5 means "at least a mild preference".
+	jevDefaultMinConfidence = 0.5
+	// jevDefaultTimeout bounds the classifier call. It applies before any
+	// upstream model connection exists, the same phase as the vision bridge.
+	jevDefaultTimeout = 400 * time.Millisecond
+	// jevDefaultModel mirrors store.JevDefaultModel for this package's default
+	// when no global model is configured.
+	jevDefaultModel = "jev-1.13.0"
+)
+
+// jevGate and jevBreaker are process-local. The gate holds no per-router state;
+// the breaker's cooldowns are keyed by router id.
+var (
+	jevGate    *jevgate.Gate
+	jevBreaker = jevgate.NewBreaker(0)
+)
+
+// SetJevGate wires the classifier gate. Called once during server construction;
+// while unwired the gate is skipped entirely, so existing deployments are
+// unaffected. A nil caller detaches the gate.
+func SetJevGate(caller jevgate.Caller) {
+	if caller == nil {
+		jevGate = nil
+		return
+	}
+	jevGate = jevgate.NewGate(caller, jevgate.NewCache(0), jevBreaker)
+}
+
+// effectiveJevConfig folds the three switches (global master, API key present,
+// router opt-in) and the router knobs into the gate's config, applying defaults
+// for unset values.
+func effectiveJevConfig(globalEnabled, apiKeySet bool, cfg autorouter.Config) jevgate.Config {
+	jevCfg := jevgate.Config{
+		GlobalEnabled: globalEnabled,
+		APIKeySet:     apiKeySet,
+		RouterEnabled: cfg.JevEnabled,
+		Model:         strings.TrimSpace(cfg.JevModelOverride),
+		MinConfidence: cfg.JevMinConfidence,
+		Timeout:       time.Duration(cfg.JevTimeoutMs) * time.Millisecond,
+	}
+	if jevCfg.Model == "" {
+		jevCfg.Model = jevDefaultModel
+	}
+	if jevCfg.MinConfidence <= 0 {
+		jevCfg.MinConfidence = jevDefaultMinConfidence
+	}
+	if jevCfg.Timeout <= 0 {
+		jevCfg.Timeout = jevDefaultTimeout
+	}
+	return jevCfg
+}
+
+// applyJevGate consults the classifier and returns the tier to use plus the
+// snapshot block to persist. It returns the heuristic tier unchanged whenever
+// the gate is disabled, unavailable, or not confident enough — the caller never
+// branches on an error because there is none to branch on.
+//
+// The returned cause is one of the three DecisionCauseJev* constants when the
+// gate was consulted, and the heuristic cause otherwise.
+func applyJevGate(
+	ctx context.Context,
+	jevCfg jevgate.Config,
+	state jevgate.State,
+	result autorouter.ScoreResult,
+	format, routerID string,
+) (autorouter.Tier, string, *autorouter.JevDecision) {
+	if jevGate == nil || !jevCfg.Enabled() {
+		return result.EffectiveTier, result.DecisionCause, nil
+	}
+	verdict, accepted := jevGate.Decide(ctx, jevCfg, format, routerID, state)
+	if verdict.Verdict == "" {
+		return result.EffectiveTier, result.DecisionCause, nil
+	}
+	info := &autorouter.JevDecision{
+		Model: verdict.Model, Choice: verdict.Choice, Confidence: verdict.Confidence,
+		Probabilities: verdict.Probabilities, LatencyMs: verdict.LatencyMs,
+		InputTokens: verdict.InputTokens, Cache: verdict.Cache, Verdict: verdict.Verdict,
+	}
+	if !accepted {
+		cause := autorouter.DecisionCauseJevLowConfidence
+		if verdict.Verdict == jevgate.VerdictError || verdict.Verdict == jevgate.VerdictBreakerOpen {
+			cause = autorouter.DecisionCauseJevFallback
+		}
+		return result.EffectiveTier, cause, info
+	}
+	tier := autorouter.Tier(strings.TrimSpace(verdict.Choice))
+	if !validRouterTier(tier) {
+		// A choice outside the four option keys is a malformed response; fall
+		// back rather than letting Resolve see an unknown tier.
+		info.Verdict = jevgate.VerdictError
+		return result.EffectiveTier, autorouter.DecisionCauseJevFallback, info
+	}
+	return tier, autorouter.DecisionCauseJevClassifier, info
+}
+
+// validRouterTier reports whether t is one of the four classifier option keys.
+func validRouterTier(t autorouter.Tier) bool {
+	for _, candidate := range autorouter.TierOrder {
+		if candidate == t {
+			return true
+		}
+	}
+	return false
+}
 
 // autoRouterFromModel returns the Auto Router definition owned by modelID, or
 // nil when none matches. It consults the (optionally wired) resolver and
@@ -125,6 +235,11 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 	if routerCfg == nil {
 		routerCfg = storeRouterToConfig(router)
 	}
+	// The Jev classifier gate is consulted only on the compiled-profile path
+	// below: that is the path production wiring always takes, and keeping the
+	// legacy path untouched makes "gate off" provably identical to the previous
+	// behaviour.
+	jevCfg := h.effectiveJevConfigFor(ctx, routerCfg)
 	// Prefer the compiled profile (normalization done once per version); fall
 	// back to the legacy per-request profile path when only that resolver is
 	// wired.
@@ -139,52 +254,106 @@ func (h *BaseAPIHandler) resolveAutoRouterModel(ctx context.Context, entryProtoc
 		cacheKey := autoRouterScoreCache.Key(rawJSON, entryProtocol, router.ID, hash)
 		if len(rawJSON) <= maxAutoRouterCacheableBody {
 			if cached, hit := autoRouterScoreCache.Get(cacheKey); hit {
-				return h.autoRouterResolvedFromScore(router, routerCfg, cached, compiled.Hash, compiledVersion(compiled))
+				score := cached
+				tier, cause, jevInfo := h.applyJevDecision(ctx, jevCfg, rawJSON, entryProtocol, router.ID, score)
+				return h.autoRouterResolvedFromScore(router, routerCfg, score, compiled.Hash, compiledVersion(compiled), tier, cause, jevInfo)
 			}
 		}
 		result := autorouter.ScoreWithProfileCompiled(rawJSON, entryProtocol, compiled)
 		if len(rawJSON) <= maxAutoRouterCacheableBody {
 			autoRouterScoreCache.Put(cacheKey, result)
 		}
-		return h.autoRouterResolvedFromScore(router, routerCfg, result, result.ProfileHash, result.ProfileVersion)
+		tier, cause, jevInfo := h.applyJevDecision(ctx, jevCfg, rawJSON, entryProtocol, router.ID, result)
+		return h.autoRouterResolvedFromScore(router, routerCfg, result, result.ProfileHash, result.ProfileVersion, tier, cause, jevInfo)
 	}
 	var profile *autorouter.Profile
 	if h.AutoRouterProfileResolver != nil {
 		profile = h.AutoRouterProfileResolver.AutoRouterProfile(ctx, router.ID)
 	}
 	result := autorouter.ScoreWithProfile(rawJSON, entryProtocol, profile)
-	return h.autoRouterResolvedFromScore(router, routerCfg, result, result.ProfileHash, result.ProfileVersion)
+	// Legacy path: no classifier, so pass the heuristic outcome through
+	// unchanged.
+	return h.autoRouterResolvedFromScore(router, routerCfg, result, result.ProfileHash, result.ProfileVersion,
+		result.EffectiveTier, result.DecisionCause, nil)
+}
+
+// effectiveJevConfigFor resolves the classifier configuration for one request,
+// folding the router's knobs together with the global switches. It reads the
+// global switches through the optional provider; a nil provider means the
+// feature is off.
+func (h *BaseAPIHandler) effectiveJevConfigFor(ctx context.Context, routerCfg *autorouter.Config) jevgate.Config {
+	globalEnabled, apiKeySet := false, false
+	if h != nil && h.JevSettingsProvider != nil {
+		globalEnabled, apiKeySet = h.JevSettingsProvider.JevSettings(ctx)
+	}
+	if routerCfg == nil {
+		return jevgate.Config{GlobalEnabled: globalEnabled, APIKeySet: apiKeySet}
+	}
+	return effectiveJevConfig(globalEnabled, apiKeySet, *routerCfg)
+}
+
+// applyJevDecision builds the classifier state for a request and runs the gate.
+// It is a no-op passthrough when the gate is disabled, so the caller can call
+// it unconditionally.
+func (h *BaseAPIHandler) applyJevDecision(
+	ctx context.Context,
+	jevCfg jevgate.Config,
+	rawJSON []byte,
+	entryProtocol, routerID string,
+	result autorouter.ScoreResult,
+) (autorouter.Tier, string, *autorouter.JevDecision) {
+	if jevGate == nil || !jevCfg.Enabled() {
+		return result.EffectiveTier, result.DecisionCause, nil
+	}
+	// Extracted here rather than carried on ScoreResult so the scorer's
+	// persisted output stays byte-identical whether or not the gate is on.
+	ext := autorouter.ExtractJevStateInput(rawJSON, entryProtocol)
+	state := jevgate.BuildState(jevgate.StateInput{
+		LatestUserText:      ext.LatestUserText,
+		MessageCount:        ext.MessageCount,
+		HistoryWordEstimate: ext.HistoryWordEstimate,
+		HasTools:            ext.HasTools,
+		HasCodeFence:        ext.HasCodeFence,
+		HasImages:           ext.HasImages,
+	})
+	return applyJevGate(ctx, jevCfg, state, result, entryProtocol, routerID)
 }
 
 // autoRouterResolvedFromScore turns a score result into the concrete upstream
 // resolution: resolves the tier against the router's config, builds the
 // explainability snapshot, and returns the matched outcome. Shared by the
 // compiled-profile path (with its score cache) and the legacy path.
-func (h *BaseAPIHandler) autoRouterResolvedFromScore(router *store.AutoRouter, routerCfg *autorouter.Config, result autorouter.ScoreResult, profileHash string, profileVersion int64) autoRouterResolved {
-	resolved, ok := autorouter.Resolve(result.EffectiveTier, routerCfg)
+//
+// tier and cause are the effective routing outcome: the Jev classifier's
+// verdict when the gate accepted one, otherwise the heuristic result's own
+// EffectiveTier/DecisionCause. jevInfo is nil whenever the classifier was not
+// consulted or produced nothing, and is persisted as-is for tuning.
+func (h *BaseAPIHandler) autoRouterResolvedFromScore(router *store.AutoRouter, routerCfg *autorouter.Config, result autorouter.ScoreResult, profileHash string, profileVersion int64, tier autorouter.Tier, cause string, jevInfo *autorouter.JevDecision) autoRouterResolved {
+	resolved, ok := autorouter.Resolve(tier, routerCfg)
 	if !ok || resolved == nil || strings.TrimSpace(resolved.Model) == "" {
 		log.WithFields(log.Fields{
 			"router_id": strings.TrimSpace(router.ID),
-			"tier":      string(result.EffectiveTier),
+			"tier":      string(tier),
 		}).Warn("auto-router: no resolvable tier mapping; rejecting request")
 		return autoRouterResolved{
 			resolveFailed: true,
-			tier:          string(result.EffectiveTier),
+			tier:          string(tier),
 			routerID:      strings.TrimSpace(router.ID),
 		}
 	}
 	decision := autorouter.DecisionSnapshot{
 		ProfileVersion: profileVersion, ProfileHash: profileHash, ProfileSnapshot: result.ProfileConfig,
 		ScoreTotal: result.Score.Total, ScoreFields: result.Score.Fields, ReasoningMarkers: result.Score.ReasoningMarkers,
-		ScoredTier: result.Score.Tier, EffectiveTier: result.EffectiveTier, DecisionCause: result.DecisionCause,
+		ScoredTier: result.Score.Tier, EffectiveTier: tier, DecisionCause: cause,
 		MatchedRules: result.MatchedRules, MappingTier: resolved.MappingTier, FallbackChain: resolved.FallbackChain, TargetModel: resolved.Model,
+		Jev: jevInfo,
 	}
 	// routerID is the router's PK id, not the requestable model id: usage
 	// attribution (usage_events.router_id) must key on the same identifier the
 	// management endpoints (decisions/simulate/replay) address the router by.
 	// ModelID previously landed here and made those endpoints miss every
 	// persisted event.
-	return autoRouterResolved{targetModel: resolved.Model, route: resolved, visionBridgeModel: strings.TrimSpace(router.VisionBridgeModel), tier: string(result.EffectiveTier), routerID: strings.TrimSpace(router.ID), decision: decision, matched: true}
+	return autoRouterResolved{targetModel: resolved.Model, route: resolved, visionBridgeModel: strings.TrimSpace(router.VisionBridgeModel), tier: string(tier), routerID: strings.TrimSpace(router.ID), decision: decision, matched: true}
 }
 
 // applyAutoRouterRoute applies a resolved tier's per-model routing (providers +

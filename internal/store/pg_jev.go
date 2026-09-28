@@ -176,6 +176,23 @@ func (s *JevStore) Upsert(ctx context.Context, set JevSettings, apiKey *string) 
 	return s.Get(ctx)
 }
 
+// JevSettings returns the two global switches the classifier gate needs: the
+// master toggle and whether an API key is configured. It satisfies the
+// handlers.JevSettingsProvider interface and is served from the in-memory cache,
+// so it is safe to call once per auto-routed request. A nil store (PG not
+// configured) reports "off", which keeps the gate disabled.
+func (s *JevStore) JevSettings(ctx context.Context) (enabled bool, apiKeySet bool) {
+	if s == nil {
+		return false, false
+	}
+	set, errGet := s.Get(ctx)
+	if errGet != nil {
+		// Fail closed: a settings read error must not enable an external call.
+		return false, false
+	}
+	return set.Enabled, set.APIKeySet
+}
+
 // APIKey returns the unsealed plaintext API key, or "" when none is configured.
 // Used exclusively by the classifier client; never exposed over HTTP.
 func (s *JevStore) APIKey(ctx context.Context) (string, error) {

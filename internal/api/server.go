@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter/jevclient"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -322,6 +323,21 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// Auto Router are scored and forwarded to a tier-appropriate upstream
 		// model. Non-nil only when PG is configured and routers exist.
 		s.handlers.SetAutoRouterResolver(store.NewAutoRoutersResolver(handles.AutoRouters, handles.AutoRouterProfiles))
+		// Wire the global Jev AI classifier switches so the hybrid gate can
+		// run. The provider only reports the toggle + whether a key is set; the
+		// gate itself is attached below once the key is unsealed, which keeps
+		// the plaintext credential confined to this wiring step.
+		s.handlers.SetJevSettingsProvider(handles.Jev)
+		if key, errKey := jevAPIKey(handles.Jev); errKey != nil {
+			log.WithError(errKey).Warn("api: Jev classifier disabled; could not unseal the API key")
+			handlers.SetJevGate(nil)
+		} else if key != "" {
+			handlers.SetJevGate(jevclient.New("", key, nil))
+		} else {
+			// No key configured: leave the gate detached. The provider reports
+			// apiKeySet=false, so the gate would be skipped anyway.
+			handlers.SetJevGate(nil)
+		}
 		// Surface official_provider on Usage Stats / Errors rows so the
 		// dashboard can show "Provider Official" (e.g. "anthropic") instead of
 		// the raw internal provider key (e.g. "claude").
@@ -552,4 +568,15 @@ func (s *Server) Stop(ctx context.Context) error {
 
 	log.Debug("API server stopped")
 	return nil
+}
+
+// jevAPIKey unseals the classifier API key from the Jev settings store. It
+// returns "" when no key is configured; a nil store (PG not configured) is not
+// an error. The plaintext key is used only to build the classifier client and
+// is never logged.
+func jevAPIKey(jevStore *store.JevStore) (string, error) {
+	if jevStore == nil {
+		return "", nil
+	}
+	return jevStore.APIKey(context.Background())
 }

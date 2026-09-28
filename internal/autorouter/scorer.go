@@ -25,6 +25,16 @@ type ScoreResult struct {
 const (
 	DecisionCauseKeywordMatch     = "literal_keyword_match"
 	DecisionCauseComplexityScorer = "complexity_scorer"
+	// DecisionCauseJevClassifier: the Jev classifier's tier was used instead of
+	// the heuristic tier.
+	DecisionCauseJevClassifier = "jev_classifier"
+	// DecisionCauseJevLowConfidence: the classifier answered below the
+	// confidence floor, so the heuristic tier was used.
+	DecisionCauseJevLowConfidence = "jev_low_confidence"
+	// DecisionCauseJevFallback: the classifier was unavailable (timeout, bad
+	// status, malformed response) or its breaker was open, so the heuristic
+	// tier was used.
+	DecisionCauseJevFallback = "jev_fallback_heuristic"
 )
 
 // Score inspects the raw request body using the built-in scoring policy. It
