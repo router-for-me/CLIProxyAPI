@@ -15,6 +15,11 @@ import (
 func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...bool) error {
 	persistCfg := cfg
 	migrating := len(migrateV8) > 0 && migrateV8[0]
+	if cfg != nil && cfg.ListUnprefixedModels == nil {
+		copyConfig := *cfg
+		copyConfig.SetListUnprefixedModels(true)
+		persistCfg = &copyConfig
+	}
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -372,6 +377,11 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	// Pointer-backed booleans (such as cache-user-id and disable-cooling): explicit false is meaningful and must be preserved.
 	if len(path) > 0 && (path[len(path)-1] == "cache-user-id" || path[len(path)-1] == "disable-cooling") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
 		return false
+	}
+	// list-unprefixed-models defaults to true. An explicit false is meaningful
+	// and must survive insertion into a file that did not previously contain it.
+	if len(path) > 0 && path[len(path)-1] == "list-unprefixed-models" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+		return node.Value == "true"
 	}
 
 	// First check if it's a zero value

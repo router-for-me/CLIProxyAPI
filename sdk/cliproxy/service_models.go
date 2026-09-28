@@ -13,6 +13,19 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+func (s *Service) listUnprefixedModels() bool {
+	if s == nil {
+		return true
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg == nil {
+		return true
+	}
+	return cfg.EffectiveListUnprefixedModels()
+}
+
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	s.registerModelsForAuthWithCache(ctx, a, nil)
@@ -228,11 +241,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				}
 				if len(ms) > 0 {
 					ms = s.appendPluginModels(providerKey, ms)
-					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix, s.listUnprefixedModels()))
 				} else {
 					ms = s.appendPluginModels(providerKey, nil)
 					if len(ms) > 0 {
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix, s.listUnprefixedModels()))
 					} else {
 						GlobalModelRegistry().UnregisterClient(a.ID)
 					}
@@ -250,11 +263,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 				ms := cached.models
 				if len(ms) > 0 {
 					ms = s.appendPluginModels(providerKey, ms)
-					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix, s.listUnprefixedModels()))
 				} else {
 					ms = s.appendPluginModels(providerKey, nil)
 					if len(ms) > 0 {
-						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+						s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix, s.listUnprefixedModels()))
 					} else {
 						GlobalModelRegistry().UnregisterClient(a.ID)
 					}
@@ -273,7 +286,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			if isCompatAuth {
 				models = s.appendPluginModels(providerKey, nil)
 				if len(models) > 0 {
-					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+					s.registerResolvedModelsForAuth(a, providerKey, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix, s.listUnprefixedModels()))
 				} else {
 					// No matching provider found or models removed entirely; drop any prior registration.
 					GlobalModelRegistry().UnregisterClient(a.ID)
@@ -295,7 +308,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	}
 	models = s.appendPluginModels(key, models)
 	if len(models) > 0 {
-		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		s.registerResolvedModelsForAuth(a, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix, s.listUnprefixedModels()))
 		if strings.EqualFold(strings.TrimSpace(a.Provider), "antigravity") {
 			s.asyncProbeAntigravityCapabilities(ctx, a, key)
 		}
@@ -619,14 +632,14 @@ func cloneModelInfoForCatalogRoute(model *ModelInfo) ModelInfo {
 	return clone
 }
 
-func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {
+func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix, listUnprefixedModels bool) []*ModelInfo {
 	trimmedPrefix := strings.TrimSpace(prefix)
 	if trimmedPrefix == "" || len(models) == 0 {
 		return models
 	}
 
 	out := make([]*ModelInfo, 0, len(models)*2)
-	seen := make(map[string]struct{}, len(models)*2)
+	seen := make(map[string]int, len(models)*2)
 
 	addModel := func(model *ModelInfo) {
 		if model == nil {
@@ -636,10 +649,13 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		if id == "" {
 			return
 		}
-		if _, exists := seen[id]; exists {
+		if index, exists := seen[id]; exists {
+			if out[index].HiddenFromModelCatalog && !model.HiddenFromModelCatalog {
+				out[index] = model
+			}
 			return
 		}
-		seen[id] = struct{}{}
+		seen[id] = len(out)
 		out = append(out, model)
 	}
 
@@ -652,7 +668,9 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 			continue
 		}
 		if !forceModelPrefix || trimmedPrefix == baseID {
-			addModel(model)
+			bare := *model
+			bare.HiddenFromModelCatalog = !listUnprefixedModels && !(forceModelPrefix && trimmedPrefix == baseID)
+			addModel(&bare)
 		}
 		clone := cloneModelInfoForCatalogRoute(model)
 		clone.ID = trimmedPrefix + "/" + baseID
@@ -661,6 +679,7 @@ func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix boo
 		}
 		clone.ExplicitThinking = model.ExplicitThinking
 		clone.ExplicitInputModalities = model.ExplicitInputModalities
+		clone.HiddenFromModelCatalog = false
 		addModel(&clone)
 	}
 	return out
