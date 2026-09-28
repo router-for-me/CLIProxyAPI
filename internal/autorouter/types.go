@@ -180,6 +180,18 @@ type Config struct {
 	// when a tier's resolved target model does not support vision. Empty = the
 	// vision bridge is disabled for this router.
 	VisionBridgeModel string `json:"vision_bridge_model,omitempty"`
+	// JevEnabled opts this router into Jev AI classification. The global
+	// jev_settings master toggle must also be on and an API key configured;
+	// otherwise this router's heuristic tier is used unchanged.
+	JevEnabled bool `json:"jev_enabled"`
+	// JevMinConfidence is the confidence floor for accepting a classifier
+	// verdict. Below it the heuristic tier wins. Zero means "use the default".
+	JevMinConfidence float64 `json:"jev_min_confidence,omitempty"`
+	// JevTimeoutMs bounds the classifier call. Zero means "use the default".
+	JevTimeoutMs int `json:"jev_timeout_ms,omitempty"`
+	// JevModelOverride pins a classifier model for this router. Empty uses the
+	// global jev_settings model.
+	JevModelOverride string `json:"jev_model_override,omitempty"`
 	// Pricing is optional model-style pricing metadata (USD per 1M tokens).
 	Pricing *Pricing `json:"pricing,omitempty"`
 }

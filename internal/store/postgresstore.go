@@ -2142,6 +2142,23 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter auto_routers add vision_bridge_model: %w", err)
 	}
+	// Idempotent backfill for the per-router Jev AI classifier knobs. The
+	// feature is off per router by default; the global master toggle lives in
+	// jev_settings, so both must be on for the classifier to run. The defaults
+	// mirror jevgate's own defaults so a router that only sets jev_enabled=true
+	// gets the standard confidence floor and timeout.
+	for _, col := range []string{
+		`jev_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+		`jev_min_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5`,
+		`jev_timeout_ms INTEGER NOT NULL DEFAULT 400`,
+		`jev_model_override TEXT`,
+	} {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s`, autoRoutersTable, col,
+		)); err != nil {
+			return fmt.Errorf("postgres store: alter auto_routers add %q: %w", col, err)
+		}
+	}
 
 	// auto_router_profiles stores one active scoring policy per Auto Router.
 	// JSONB fields retain the operator-editable thresholds, scorer weights, and
