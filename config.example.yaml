@@ -1042,6 +1042,37 @@ oauth:
     #     - "API"
     #     - "proxy"
 
+  # Core Responses client tool protocol handling (tool_search discovery and custom
+  # tools). Convention over configuration: with no block at all the core derives a
+  # correct policy per route — native passthrough for upstreams that speak the
+  # Responses protocol, the client search bridge everywhere else. The bridge stays
+  # inert until a client actually declares tool_search, so requests without it are
+  # untouched. Lossy strategies (custom-tools strip/function, custom-grammar
+  # describe, schema inline, complete-search-required) stay opt-in below. Each
+  # route binds strategies to one exact upstream route (no wildcards).
+  # responses-tools:
+  #   enabled: true # emergency gate; set false to turn the feature off entirely
+  #   limits:
+  #     max-active-tool-bytes: 262144
+  #     max-active-attempts: 512
+  #     max-state-bytes: 33554432
+  #     max-attempt-bytes: 1048576
+  #     max-schema-expansion-bytes: 65536
+  #     max-schema-expansion-nodes: 10000
+  #     max-depth: 64
+  #   routes:
+  #     - match:
+  #         provider: "codex"
+  #         auth-kind: "oauth"
+  #         upstream-model: "gpt-5.6"
+  #         upstream-format: "codex"
+  #       client-search: "bridge" # inherit | native | bridge | disabled
+  #       custom-tools: "function" # inherit | native | function | strip | reject
+  #       custom-grammar: "reject" # reject | describe (function mode only)
+  #       schema:
+  #         complete-search-required: false
+  #         local-refs: "preserve" # preserve | inline
+
 # Image and video behavior.
 multimedia:
   # disable-image-generation supports: false (default), true, "chat", or "passthrough".

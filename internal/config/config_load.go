@@ -225,6 +225,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 	}
 
+	// Normalize the core Responses tools policy and reject invalid enums,
+	// illegal combinations, and conflicting route overlaps.
+	cfg.NormalizeResponsesToolsConfig()
+	if errResponsesTools := cfg.ValidateResponsesToolsConfig(); errResponsesTools != nil {
+		return nil, errResponsesTools
+	}
+
 	// Return the populated configuration struct.
 	return &cfg, nil
 }
