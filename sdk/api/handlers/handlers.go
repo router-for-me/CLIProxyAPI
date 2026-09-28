@@ -355,6 +355,19 @@ type BaseAPIHandler struct {
 	// scoring profile for a router. When set it takes precedence over
 	// AutoRouterProfileResolver (same data, compiled once per version).
 	AutoRouterCompiledProfileResolver AutoRouterCompiledProfileResolver
+
+	// JevSettingsProvider optionally supplies the global Jev AI classifier
+	// switches (master toggle + whether an API key is configured). When nil,
+	// globalEnabled and apiKeySet are both treated as false, so the classifier
+	// gate never runs and routing stays purely heuristic.
+	JevSettingsProvider JevSettingsProvider
+}
+
+// JevSettingsProvider reports the global Jev AI classifier switches. It is
+// consulted once per auto-routed request; implementations should be cheap
+// (the PG-backed store serves this from an in-memory cache refreshed on write).
+type JevSettingsProvider interface {
+	JevSettings(ctx context.Context) (enabled bool, apiKeySet bool)
 }
 
 // ModelsCatalogResolver resolves an internal provider key to the official
@@ -427,6 +440,15 @@ func (h *BaseAPIHandler) SetAutoRouterResolver(r AutoRouterResolver) {
 	} else {
 		h.AutoRouterProfileResolver = nil
 	}
+}
+
+// SetJevSettingsProvider wires the global Jev AI classifier switches. A nil
+// provider detaches it, which keeps the classifier gate off.
+func (h *BaseAPIHandler) SetJevSettingsProvider(p JevSettingsProvider) {
+	if h == nil {
+		return
+	}
+	h.JevSettingsProvider = p
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.

@@ -1,0 +1,70 @@
+# Starter corpus for cmd/autorouter_eval. Labels are the tier a careful operator
+# would pick, not ground truth from a benchmark — extend it with your own
+# traffic before trusting the numbers.
+{"id":"greet","tier":"simple","text":"hi there"}
+{"id":"arith","tier":"simple","text":"what is 2+2?"}
+{"id":"capitals","tier":"simple","text":"What is the capital of France?"}
+{"id":"rename-var","tier":"simple","text":"rename the variable x to count in this snippet: x = 1"}
+{"id":"typo-fix","tier":"simple","text":"fix the typo: teh quick brown fox"}
+
+{"id":"summarize-paragraph","tier":"medium","text":"Summarize this paragraph in two sentences: The industrial revolution began in Britain in the late eighteenth century and transformed manufacturing through mechanization, steam power, and factory systems, reshaping both urban demographics and global trade patterns over the following century."}
+{"id":"translate","tier":"medium","text":"Translate the following into Indonesian: Please make sure the deployment finishes before Friday and notify the on-call engineer if anything looks wrong."}
+{"id":"sql-query","tier":"medium","text":"Write a SQL query that returns the top 10 customers by total order value in the last 90 days, given tables customers(id, name) and orders(id, customer_id, total, created_at)."}
+{"id":"small-edit","tier":"medium","text":"In this function, add a nil check before dereferencing the pointer and return an error instead:\n\nfunc load(p *Thing) string {\n  return p.Name\n}"}
+{"id":"api-explain","tier":"medium","text":"Explain what a REST API is to a junior developer in a short paragraph."}
+{"id":"short-debug","tier":"medium","text":"Why does this return 0? sum := 0\nfor i := range []int{1,2,3} {\n  sum += i\n}"}
+
+{"id":"multi-file-refactor","tier":"complex","text":"Refactor the payment module so that all three call sites use the new interface. The gateway package defines Charge(ctx, amount) error, the handler calls it in two places, and the worker calls it in one. Make sure the mocks in the tests are updated to match, and keep the existing behavior when amount is zero."}
+{"id":"debug-with-context","tier":"complex","text":"Our service started returning 502s after the last deploy. Here is the nginx config, the health check endpoint, and the last 200 lines of the app log. Figure out what changed and propose a fix.\n\nlog tail:\n2026-09-28T10:00:01Z ERROR dial tcp 10.0.3.14:8080: connect: connection refused\n2026-09-28T10:00:02Z ERROR dial tcp 10.0.3.14:8080: connect: connection refused"}
+{"id":"doc-analysis","tier":"complex","text":"Read this 40-page contract and list every clause that assigns liability to the vendor, then flag the three clauses most likely to be disputed, with the specific language that makes them risky."}
+{"id":"agent-tool-turn","tier":"complex","text":"Use the available tools to find every TODO in the repository, group them by module, and open a tracking issue for the ones that reference a security concern."}
+{"id":"migration-plan","tier":"complex","text":"We need to migrate 12 services from EC2 to Kubernetes over one quarter without downtime. Outline the ordering, the cutover strategy per service, and what could go wrong."}
+
+{"id":"proof","tier":"reasoning","text":"Prove that the square root of 2 is irrational, and explain why the same argument fails for the square root of 4."}
+{"id":"algorithm-analysis","tier":"reasoning","text":"Analyze the amortized time complexity of a splay tree under an adversarial access sequence, and compare it against a red-black tree for a workload where 90% of lookups hit the same 50 keys."}
+{"id":"architecture-tradeoffs","tier":"reasoning","text":"We are choosing between a shared-nothing microservice architecture with eventual consistency and a modular monolith with a single database. Given a team of eight engineers, a 99.99% availability target, and a requirement that financial balances are always exactly reconcileable, reason through the trade-offs and recommend an approach."}
+{"id":"math-derivation","tier":"reasoning","text":"Derive the closed form for the sum of the first n squares and prove it by induction."}
+{"id":"planning","tier":"reasoning","text":"Design a rate limiter that is fair across tenants, survives a node failure without losing more than one second of counts, and does not require synchronized clocks. Reason about the failure modes before proposing the design."}
+
+{"id":"thanks","tier":"simple","text":"thanks!"}
+{"id":"time-now","tier":"simple","text":"what timezone is UTC+7?"}
+{"id":"spell","tier":"simple","text":"how do you spell necessary?"}
+{"id":"unit","tier":"simple","text":"convert 15 celsius to fahrenheit"}
+{"id":"boil","tier":"simple","text":"at what temperature does water boil at sea level?"}
+{"id":"json-fmt","tier":"simple","text":"is this valid JSON? {\"a\": 1,}"}
+{"id":"git-undo","tier":"simple","text":"what git command undoes the last commit but keeps the changes?"}
+{"id":"list-http","tier":"simple","text":"list the HTTP methods"}
+{"id":"regex-simple","tier":"simple","text":"write a regex that matches a US zip code"}
+{"id":"diff-two","tier":"simple","text":"what is the difference between let and const in JavaScript?"}
+
+{"id":"email-draft","tier":"medium","text":"Draft a short email to a client explaining that the invoice will be two days late and apologizing for the delay."}
+{"id":"table-schema","tier":"medium","text":"Given a users table with id, email, and created_at, write a query returning the number of signups per week for the last quarter."}
+{"id":"refactor-func","tier":"medium","text":"Rewrite this function to use early returns instead of nested ifs:\n\nfunc check(u *User) error {\n  if u != nil {\n    if u.Active {\n      if u.Email != \"\" {\n        return nil\n      }\n      return errNoEmail\n    }\n    return errInactive\n  }\n  return errNil\n}"}
+{"id":"explain-concept","tier":"medium","text":"Explain the difference between a process and a thread to someone who knows basic programming."}
+{"id":"summarize-article","tier":"medium","text":"Summarize the key arguments in this 800-word article about remote work productivity and list the three strongest counterarguments."}
+{"id":"test-case","tier":"medium","text":"Write unit tests for a function that parses a duration string like '1h30m' into seconds."}
+{"id":"fix-bug-short","tier":"medium","text":"This loop skips the last element, why? for i := 0; i < len(items)-1; i++ { process(items[i]) }"}
+{"id":"translate-code","tier":"medium","text":"Convert this Python snippet to Go: result = [x*2 for x in nums if x > 0]"}
+{"id":"config-yaml","tier":"medium","text":"Write a docker-compose file for a Postgres database and an app service that depends on it, with a healthcheck on the database."}
+{"id":"compare-libs","tier":"medium","text":"Compare axios and fetch for making HTTP requests in a browser app, and recommend one for a small project."}
+
+{"id":"debug-multifile","tier":"complex","text":"The integration tests pass locally but fail in CI with a timeout on the database connection. Here are the CI config, the test setup file, and the connection pool settings. Identify the cause and the fix."}
+{"id":"api-redesign","tier":"complex","text":"Our REST API has grown to 40 endpoints with inconsistent naming and three different pagination styles. Propose a migration path to a consistent design that does not break existing clients, and describe the versioning strategy."}
+{"id":"perf-investigate","tier":"complex","text":"A service's p99 latency went from 80ms to 900ms after adding a caching layer. Walk through how you would isolate whether the cache is the cause, and what you would measure."}
+{"id":"feature-plan","tier":"complex","text":"Plan the implementation of multi-tenant support in a single-tenant codebase: schema changes, request routing, data isolation, and the rollout order across five services."}
+{"id":"review-pr","tier":"complex","text":"Review this 400-line PR that adds a background job queue. Check for error handling gaps, resource leaks, and whether the retry semantics match the documented behavior."}
+{"id":"security-audit","tier":"complex","text":"Audit this authentication flow for vulnerabilities: JWT issued on login, stored in localStorage, validated on each request, refresh token in an httpOnly cookie. Point out the weaknesses and how to fix each."}
+{"id":"data-pipeline","tier":"complex","text":"Design a pipeline that ingests 50GB of event data per day, deduplicates it, and makes it queryable within 15 minutes, given a fixed budget for storage and compute."}
+{"id":"legacy-migrate","tier":"complex","text":"We need to move a 200k-line monolith to a modular structure while shipping features every week. Propose a sequencing that keeps the main branch releasable."}
+{"id":"concurrency-bug","tier":"complex","text":"This mutex-based code intermittently deadlocks under load. Read the four functions involved, identify the lock ordering violation, and propose the minimal fix."}
+
+{"id":"prove-induction","tier":"reasoning","text":"Prove by induction that every integer greater than 1 has a prime factorization."}
+{"id":"p-vs-np","tier":"reasoning","text":"Explain why the P vs NP problem is hard to resolve, and what a proof in either direction would imply for cryptography."}
+{"id":"algo-design","tier":"reasoning","text":"Design an algorithm that finds the median of two sorted arrays in logarithmic time, and prove the recurrence bounds the runtime."}
+{"id":"cap-analysis","tier":"reasoning","text":"Reason through why the CAP theorem forces a choice, and whether a system can be simultaneously consistent and available during a network partition if it degrades a specific operation."}
+{"id":"probability","tier":"reasoning","text":"Given a biased coin with unknown probability p, derive the expected number of flips to decide with confidence whether p > 0.5."}
+{"id":"distributed-consensus","tier":"reasoning","text":"Reason about whether Raft can make progress if a majority of nodes are alive but partitioned away from the leader, and what the client observes in each case."}
+{"id":"opt-model","tier":"reasoning","text":"Derive the update rule for gradient descent with momentum and reason about why it accelerates convergence in ravines."}
+{"id":"tradeoff-reason","tier":"reasoning","text":"We must choose between strong consistency and low latency for a global inventory system with warehouses on three continents. Reason through the failure modes of each choice before recommending one."}
+{"id":"complexity-proof","tier":"reasoning","text":"Prove that comparison-based sorting cannot do better than O(n log n) in the worst case."}
+{"id":"game-theory","tier":"reasoning","text":"In a repeated prisoner's dilemma with an unknown number of rounds, reason about why cooperation can be sustained and what breaks that reasoning if the round count is known."}

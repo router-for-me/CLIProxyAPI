@@ -53,7 +53,13 @@ type createAutoRouterRequest struct {
 	Mappings          []store.TierMapping      `json:"mappings,omitempty"`
 	Pricing           *store.AutoRouterPricing `json:"pricing,omitempty"`
 	VisionBridgeModel string                   `json:"vision_bridge_model,omitempty"`
-	Enabled           *bool                    `json:"enabled,omitempty"`
+	// JevEnabled opts this router into Jev AI classification; the three knobs
+	// tune it. Zero values mean "use the global default".
+	JevEnabled       bool    `json:"jev_enabled,omitempty"`
+	JevMinConfidence float64 `json:"jev_min_confidence,omitempty"`
+	JevTimeoutMs     int     `json:"jev_timeout_ms,omitempty"`
+	JevModelOverride string  `json:"jev_model_override,omitempty"`
+	Enabled          *bool   `json:"enabled,omitempty"`
 }
 
 // updateAutoRouterRequest supports partial updates (mirrors the store update
@@ -66,7 +72,13 @@ type updateAutoRouterRequest struct {
 	Mappings          *[]store.TierMapping     `json:"mappings,omitempty"`
 	Pricing           *store.AutoRouterPricing `json:"pricing,omitempty"`
 	VisionBridgeModel *string                  `json:"vision_bridge_model,omitempty"`
-	Enabled           *bool                    `json:"enabled,omitempty"`
+	// JevEnabled / JevMinConfidence / JevTimeoutMs / JevModelOverride update the
+	// per-router classifier knobs. Non-nil applies the change; nil preserves.
+	JevEnabled       *bool    `json:"jev_enabled,omitempty"`
+	JevMinConfidence *float64 `json:"jev_min_confidence,omitempty"`
+	JevTimeoutMs     *int     `json:"jev_timeout_ms,omitempty"`
+	JevModelOverride *string  `json:"jev_model_override,omitempty"`
+	Enabled          *bool    `json:"enabled,omitempty"`
 }
 
 // ListAutoRouters handles GET /v0/management/auto-routers.
@@ -142,6 +154,10 @@ func (h *Handler) CreateAutoRouter(c *gin.Context) {
 		Mappings:          req.Mappings,
 		Pricing:           req.Pricing,
 		VisionBridgeModel: req.VisionBridgeModel,
+		JevEnabled:        req.JevEnabled,
+		JevMinConfidence:  req.JevMinConfidence,
+		JevTimeoutMs:      req.JevTimeoutMs,
+		JevModelOverride:  req.JevModelOverride,
 		Enabled:           enabled,
 	}
 	created, err := routers.Create(c.Request.Context(), r)
@@ -203,6 +219,10 @@ func (h *Handler) UpdateAutoRouter(c *gin.Context) {
 		Mappings:          req.Mappings,
 		Pricing:           req.Pricing,
 		VisionBridgeModel: req.VisionBridgeModel,
+		JevEnabled:        req.JevEnabled,
+		JevMinConfidence:  req.JevMinConfidence,
+		JevTimeoutMs:      req.JevTimeoutMs,
+		JevModelOverride:  req.JevModelOverride,
 		Enabled:           req.Enabled,
 	}
 	if err := routers.Update(c.Request.Context(), id, upd); err != nil {

@@ -67,6 +67,10 @@ const (
 	// master API key) plus the last-sync outcome. Mirrors the alert_settings
 	// singleton pattern.
 	defaultLiteLLMSyncSettingsTable = "litellm_sync_settings"
+	// JevSettingsTable stores the singleton Jev AI classifier configuration
+	// (master toggle + sealed API key + pinned model). Mirrors the
+	// alert_settings / litellm_sync_settings singleton pattern.
+	defaultJevSettingsTable = "jev_settings"
 	// RuntimeConfigTable is the PG-first control-plane singleton: stores the
 	// canonical runtime configuration (settings + extra metadata + revision
 	// counter + update provenance) that supersedes the legacy config.yaml /
@@ -262,6 +266,9 @@ type PostgresStoreConfig struct {
 	// LiteLLMSyncSettingsTable stores the singleton Manage-LiteLLM external
 	// sync settings (base URL + sealed master API key + last-sync outcome).
 	LiteLLMSyncSettingsTable string
+	// JevSettingsTable stores the singleton Jev AI classifier configuration
+	// (master toggle + sealed API key + pinned model).
+	JevSettingsTable string
 
 	// RuntimeConfigTable stores the PG-first control-plane singleton: one
 	// row (id = 1, CHECK enforced) holding the canonical runtime configuration
@@ -427,6 +434,9 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 	if cfg.LiteLLMSyncSettingsTable == "" {
 		cfg.LiteLLMSyncSettingsTable = defaultLiteLLMSyncSettingsTable
+	}
+	if cfg.JevSettingsTable == "" {
+		cfg.JevSettingsTable = defaultJevSettingsTable
 	}
 	if cfg.RuntimeConfigTable == "" {
 		cfg.RuntimeConfigTable = defaultRuntimeConfigTable
@@ -827,6 +837,42 @@ func (s *PostgresStore) ensureLiteLLMSchema(ctx context.Context) error {
 		)); err != nil {
 			return fmt.Errorf("postgres store: alter litellm_sync_settings add column %q: %w", col, err)
 		}
+	}
+
+	// jev_settings stores the singleton Jev AI classifier configuration: the
+	// master on/off switch, the AES-GCM-sealed API key (plaintext when
+	// PGSTORE_ENCRYPTION_KEY is unset, the legacy-tolerant path shared with the
+	// other sealed stores), the pinned classifier model, and the API root.
+	// Classification is off by default, so no external traffic is attempted
+	// until an operator turns it on and supplies a key.
+	jevTable := s.fullTableName(s.cfg.JevSettingsTable)
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id                INTEGER PRIMARY KEY DEFAULT 1,
+			enabled           BOOLEAN NOT NULL DEFAULT FALSE,
+			api_key_sealed    TEXT,
+			api_key_prefix    TEXT,
+			model             TEXT NOT NULL DEFAULT 'jev-1.13.0',
+			base_url          TEXT,
+			updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT jev_settings_singleton CHECK (id = 1)
+		)
+	`, jevTable)); err != nil {
+		return fmt.Errorf("postgres store: create jev_settings table: %w", err)
+	}
+	// Idempotent backfill for base_url on rows created before the column
+	// existed. NULL means "use the public TypeSafe endpoint", which is what an
+	// empty COALESCE in the read path resolves to.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS base_url TEXT`, jevTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter jev_settings add base_url: %w", err)
+	}
+	// Seed the singleton row so Get always finds a row.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`INSERT INTO %s (id) VALUES (1) ON CONFLICT (id) DO NOTHING`, jevTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: seed jev_settings singleton: %w", err)
 	}
 	return nil
 }
@@ -2105,6 +2151,26 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter auto_routers add vision_bridge_model: %w", err)
 	}
+	// Idempotent backfill for the per-router Jev AI classifier knobs. The
+	// feature is off per router by default; the global master toggle lives in
+	// jev_settings, so both must be on for the classifier to run.
+	//
+	// These column defaults are inert for the routing path: the insert always
+	// names every column, and a router that stores 0 is treated at runtime as
+	// "use the default" (see jevDefaultMinConfidence). They are kept in step
+	// with the runtime defaults so a fresh deployment's schema reads truthfully.
+	for _, col := range []string{
+		`jev_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+		`jev_min_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.35`,
+		`jev_timeout_ms INTEGER NOT NULL DEFAULT 400`,
+		`jev_model_override TEXT`,
+	} {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s`, autoRoutersTable, col,
+		)); err != nil {
+			return fmt.Errorf("postgres store: alter auto_routers add %q: %w", col, err)
+		}
+	}
 
 	// auto_router_profiles stores one active scoring policy per Auto Router.
 	// JSONB fields retain the operator-editable thresholds, scorer weights, and
@@ -2778,6 +2844,15 @@ func (s *PostgresStore) LiteLLMSyncSettingsTable() string {
 		return quoteIdentifier(defaultLiteLLMSyncSettingsTable)
 	}
 	return s.fullTableName(s.cfg.LiteLLMSyncSettingsTable)
+}
+
+// JevSettingsTable returns the fully-qualified name of the jev_settings
+// singleton table.
+func (s *PostgresStore) JevSettingsTable() string {
+	if s == nil {
+		return quoteIdentifier(defaultJevSettingsTable)
+	}
+	return s.fullTableName(s.cfg.JevSettingsTable)
 }
 
 // Save persists authentication metadata to disk and PostgreSQL.

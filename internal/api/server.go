@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/autorouter/jevclient"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
@@ -281,6 +282,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// detection sweep is started here so it only runs after the auth manager
 		// is attached (the provider-cooldown detector polls live cooldowns).
 		s.mgmt.SetAlertsStore(handles.Alerts)
+		// Wire the PG-backed Jev AI classifier settings (master toggle +
+		// sealed API key + pinned model). The gate itself is attached
+		// separately below, since it needs a client built from the stored key.
+		s.mgmt.SetJevStore(handles.Jev)
 		s.mgmt.SetUsageFlusher(handles.Flusher)
 		s.mgmt.StartAlertSweep()
 		// Wire the backup store that powers the /export and /import routes
@@ -318,6 +323,23 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		// Auto Router are scored and forwarded to a tier-appropriate upstream
 		// model. Non-nil only when PG is configured and routers exist.
 		s.handlers.SetAutoRouterResolver(store.NewAutoRoutersResolver(handles.AutoRouters, handles.AutoRouterProfiles))
+		// Wire the global Jev AI classifier switches so the hybrid gate can
+		// run. The provider only reports the toggle + whether a key is set; the
+		// gate itself is attached below once the key is unsealed, which keeps
+		// the plaintext credential confined to this wiring step.
+		s.handlers.SetJevSettingsProvider(handles.Jev)
+		if key, errKey := jevAPIKey(handles.Jev); errKey != nil {
+			log.WithError(errKey).Warn("api: Jev classifier disabled; could not unseal the API key")
+			handlers.SetJevGate(nil)
+		} else {
+			// The client is always built, even with no key, so that saving one
+			// from the dashboard can be adopted live (SetJevConfigRotator below).
+			// The gate still short-circuits before any call while the provider
+			// reports apiKeySet=false.
+			client := jevclient.New(jevBaseURL(handles.Jev), key, nil)
+			handlers.SetJevGate(client)
+			s.mgmt.SetJevConfigRotator(client)
+		}
 		// Surface official_provider on Usage Stats / Errors rows so the
 		// dashboard can show "Provider Official" (e.g. "anthropic") instead of
 		// the raw internal provider key (e.g. "claude").
@@ -548,4 +570,31 @@ func (s *Server) Stop(ctx context.Context) error {
 
 	log.Debug("API server stopped")
 	return nil
+}
+
+// jevAPIKey unseals the classifier API key from the Jev settings store. It
+// returns "" when no key is configured; a nil store (PG not configured) is not
+// an error. The plaintext key is used only to build the classifier client and
+// is never logged.
+func jevAPIKey(jevStore *store.JevStore) (string, error) {
+	if jevStore == nil {
+		return "", nil
+	}
+	return jevStore.APIKey(context.Background())
+}
+
+// jevBaseURL returns the configured classifier API root, or "" to accept the
+// client's default. A read failure is not fatal: the feature is unusable
+// without a key anyway, and the stored value can be re-applied from the
+// dashboard, so this warns and falls back rather than disabling the gate.
+func jevBaseURL(jevStore *store.JevStore) string {
+	if jevStore == nil {
+		return ""
+	}
+	set, errGet := jevStore.Get(context.Background())
+	if errGet != nil {
+		log.WithError(errGet).Warn("api: could not read the Jev base URL; using the default endpoint")
+		return ""
+	}
+	return set.BaseURL
 }

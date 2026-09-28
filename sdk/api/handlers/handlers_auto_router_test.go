@@ -306,6 +306,19 @@ func (r stubCachedConfigResolver) AutoRouterConfigForModel(_ context.Context, mo
 	return nil, nil, false
 }
 
+// AutoRouterProfile / AutoRouterProfileCompiled make the stub satisfy the
+// profile-resolver contracts so tests can exercise the production (compiled,
+// gated) code path. Like the real resolver, the compiled variant never returns
+// nil: a router without a profile row resolves to the built-in default.
+func (r stubCachedConfigResolver) AutoRouterProfile(_ context.Context, _ string) *autorouter.Profile {
+	return nil
+}
+
+func (r stubCachedConfigResolver) AutoRouterProfileCompiled(_ context.Context, _ string) *autorouter.CompiledProfile {
+	def := autorouter.DefaultCompiledProfile()
+	return &def
+}
+
 // Bodies above the cache-size threshold must bypass the score cache (hashing
 // a multi-MB body costs more than windowed scoring) while small bodies stay
 // cached.

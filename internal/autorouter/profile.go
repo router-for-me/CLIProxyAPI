@@ -344,4 +344,23 @@ type DecisionSnapshot struct {
 	MappingTier      Tier                   `json:"mapping_tier"`
 	FallbackChain    []Tier                 `json:"fallback_chain,omitempty"`
 	TargetModel      string                 `json:"target_model"`
+	// Jev carries the classifier verdict when the Jev gate was consulted. Nil
+	// when the gate is disabled or was never reached, so its presence alone
+	// distinguishes "heuristic only" from "classifier involved".
+	Jev *JevDecision `json:"jev,omitempty"`
+}
+
+// JevDecision is the classifier's contribution to a routing decision: what it
+// chose, how confident it was, and how the gate resolved it. Persisting the
+// full probability distribution (not just the winner) is what lets operators
+// tune the confidence floor against recorded data rather than by guesswork.
+type JevDecision struct {
+	Model         string             `json:"model,omitempty"`
+	Choice        string             `json:"choice,omitempty"`
+	Confidence    float64            `json:"confidence"`
+	Probabilities map[string]float64 `json:"probabilities,omitempty"`
+	LatencyMs     int64              `json:"latency_ms"`
+	InputTokens   int                `json:"input_tokens"`
+	Cache         string             `json:"cache,omitempty"`
+	Verdict       string             `json:"verdict,omitempty"`
 }

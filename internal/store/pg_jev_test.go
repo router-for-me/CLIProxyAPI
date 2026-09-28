@@ -1,0 +1,242 @@
+package store
+
+import (
+	"context"
+	"testing"
+)
+
+func newTestJevStore(t *testing.T) *JevStore {
+	t.Helper()
+	pg := newTestPostgresStore(t, "test_jev")
+	// The shared helper does not clean jev_settings, so reset the singleton to
+	// its seeded state. Without this, a test that leaves enabled=true makes the
+	// next run's default assertion fail.
+	js := NewJevStore(pg)
+	if js == nil {
+		t.Fatal("NewJevStore returned nil")
+	}
+	ctx := context.Background()
+	if _, errExec := pg.DB().ExecContext(ctx, "DELETE FROM "+js.table); errExec != nil {
+		t.Fatalf("reset jev_settings: %v", errExec)
+	}
+	if _, errExec := pg.DB().ExecContext(ctx, "INSERT INTO "+js.table+" (id) VALUES (1)"); errExec != nil {
+		t.Fatalf("reseed jev_settings: %v", errExec)
+	}
+	return js
+}
+
+func TestJevStoreDefaultsDisabledWithPinnedModel(t *testing.T) {
+	s := newTestJevStore(t)
+	ctx := context.Background()
+
+	got, err := s.Get(ctx)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Enabled {
+		t.Error("enabled must default to false")
+	}
+	if got.APIKeySet {
+		t.Error("api_key_set must default to false")
+	}
+	if got.Model != JevDefaultModel {
+		t.Errorf("model = %q, want %q", got.Model, JevDefaultModel)
+	}
+}
+
+func TestJevStoreUpsertKeyLifecycle(t *testing.T) {
+	s := newTestJevStore(t)
+	ctx := context.Background()
+	defer func() {
+		if _, errClean := s.Upsert(ctx, JevSettings{Model: JevDefaultModel}, ptrString("")); errClean != nil {
+			t.Errorf("cleanup Upsert: %v", errClean)
+		}
+	}()
+
+	key := "sk-ts-abcdef123456"
+	got, err := s.Upsert(ctx, JevSettings{Enabled: true, Model: "jev-1.13.0"}, &key)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if !got.Enabled {
+		t.Error("enabled must round-trip")
+	}
+	if !got.APIKeySet {
+		t.Error("api_key_set must be true after storing a key")
+	}
+	if got.APIKeyPrefix == "" || got.APIKeyPrefix == key {
+		t.Errorf("prefix must be a mask, got %q", got.APIKeyPrefix)
+	}
+
+	// nil keeps the stored key.
+	kept, err := s.Upsert(ctx, JevSettings{Enabled: false, Model: "jev-1.13.0"}, nil)
+	if err != nil {
+		t.Fatalf("Upsert keep: %v", err)
+	}
+	if kept.Enabled {
+		t.Error("enabled must update to false")
+	}
+	if !kept.APIKeySet {
+		t.Error("nil apiKey must keep the stored key")
+	}
+	if kept.APIKeyPrefix == key {
+		t.Error("settings projection leaked the key")
+	}
+
+	// The plaintext key must survive the nil-keep write.
+	plain, err := s.APIKey(ctx)
+	if err != nil {
+		t.Fatalf("APIKey: %v", err)
+	}
+	if plain != key {
+		t.Errorf("APIKey = %q, want %q (nil must not clear)", plain, key)
+	}
+
+	// "" clears it.
+	cleared, err := s.Upsert(ctx, JevSettings{Model: "jev-1.13.0"}, ptrString(""))
+	if err != nil {
+		t.Fatalf("Upsert clear: %v", err)
+	}
+	if cleared.APIKeySet {
+		t.Error("empty apiKey must clear the stored key")
+	}
+	if cleared.APIKeyPrefix != "" {
+		t.Errorf("cleared prefix must be empty, got %q", cleared.APIKeyPrefix)
+	}
+	gone, err := s.APIKey(ctx)
+	if err != nil {
+		t.Fatalf("APIKey after clear: %v", err)
+	}
+	if gone != "" {
+		t.Errorf("APIKey = %q, want empty", gone)
+	}
+}
+
+func TestJevStoreAPIKeyRoundTrips(t *testing.T) {
+	s := newTestJevStore(t)
+	ctx := context.Background()
+	key := "sk-ts-roundtrip"
+	defer func() {
+		if _, errClean := s.Upsert(ctx, JevSettings{Model: JevDefaultModel}, ptrString("")); errClean != nil {
+			t.Errorf("cleanup Upsert: %v", errClean)
+		}
+	}()
+
+	if _, err := s.Upsert(ctx, JevSettings{Model: JevDefaultModel}, &key); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := s.APIKey(ctx)
+	if err != nil {
+		t.Fatalf("APIKey: %v", err)
+	}
+	if got != key {
+		t.Errorf("APIKey = %q, want %q", got, key)
+	}
+}
+
+func TestJevStoreDefaultsModelWhenBlank(t *testing.T) {
+	s := newTestJevStore(t)
+	ctx := context.Background()
+
+	got, err := s.Upsert(ctx, JevSettings{Enabled: true}, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if got.Model != JevDefaultModel {
+		t.Errorf("model = %q, want %q", got.Model, JevDefaultModel)
+	}
+}
+
+// The default settings and a blank stored value must both resolve to the public
+// endpoint: a blank base URL would otherwise build a relative request URL.
+func TestJevStoreDefaultsBaseURL(t *testing.T) {
+	s := newTestJevStore(t)
+	ctx := context.Background()
+
+	got, errGet := s.Get(ctx)
+	if errGet != nil {
+		t.Fatalf("Get: %v", errGet)
+	}
+	if got.BaseURL != JevDefaultBaseURL {
+		t.Errorf("default base_url = %q, want %q", got.BaseURL, JevDefaultBaseURL)
+	}
+
+	blank, errBlank := s.Upsert(ctx, JevSettings{Enabled: true, BaseURL: "   "}, nil)
+	if errBlank != nil {
+		t.Fatalf("Upsert: %v", errBlank)
+	}
+	if blank.BaseURL != JevDefaultBaseURL {
+		t.Errorf("blank base_url = %q, want %q", blank.BaseURL, JevDefaultBaseURL)
+	}
+}
+
+// A custom base URL must survive the round-trip through the database, since it
+// is what points the classifier at a self-hosted deployment. Reading it back
+// through a fresh store instance proves it came from the column and not from
+// the in-memory cache the write invalidated.
+func TestJevStoreBaseURLRoundTrips(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_jev_baseurl")
+	ctx := context.Background()
+	if _, errExec := pg.DB().ExecContext(ctx, "DELETE FROM "+pg.JevSettingsTable()); errExec != nil {
+		t.Fatalf("reset jev_settings: %v", errExec)
+	}
+	if _, errExec := pg.DB().ExecContext(ctx, "INSERT INTO "+pg.JevSettingsTable()+" (id) VALUES (1)"); errExec != nil {
+		t.Fatalf("reseed jev_settings: %v", errExec)
+	}
+	s := NewJevStore(pg)
+	if s == nil {
+		t.Fatal("NewJevStore returned nil")
+	}
+
+	const custom = "https://jev.internal.example"
+	if _, errPut := s.Upsert(ctx, JevSettings{Enabled: true, BaseURL: custom}, nil); errPut != nil {
+		t.Fatalf("Upsert: %v", errPut)
+	}
+
+	got, errGet := NewJevStore(pg).Get(ctx)
+	if errGet != nil {
+		t.Fatalf("Get: %v", errGet)
+	}
+	if got.BaseURL != custom {
+		t.Errorf("base_url = %q, want %q", got.BaseURL, custom)
+	}
+}
+
+func TestNewJevStoreNilParent(t *testing.T) {
+	if s := NewJevStore(nil); s != nil {
+		t.Fatalf("NewJevStore(nil) = %v, want nil", s)
+	}
+}
+
+func ptrString(s string) *string { return &s }
+
+// The plaintext-encryption status must be reported honestly: a deployment with
+// no PGSTORE_ENCRYPTION_KEY stores the key as-is, and the UI relies on this
+// flag to say so rather than claiming the credential is encrypted.
+func TestJevStoreReportsEncryptionStatus(t *testing.T) {
+	js := newTestJevStore(t)
+	ctx := context.Background()
+
+	// No key stored: nothing is encrypted, regardless of the sealer.
+	if got, errGet := js.Get(ctx); errGet != nil {
+		t.Fatalf("get: %v", errGet)
+	} else if got.APIKeyEncrypted {
+		t.Error("no key stored must report api_key_encrypted=false")
+	}
+
+	key := "sk-ts-plaintext-probe"
+	if _, errPut := js.Upsert(ctx, JevSettings{Enabled: true}, &key); errPut != nil {
+		t.Fatalf("upsert: %v", errPut)
+	}
+	got, errGet := js.Get(ctx)
+	if errGet != nil {
+		t.Fatalf("get after upsert: %v", errGet)
+	}
+	if !got.APIKeySet {
+		t.Fatal("precondition: a key must be set")
+	}
+	// The test store has no encryption key configured, so this must be false.
+	if got.APIKeyEncrypted {
+		t.Error("a store without an encryption key must report api_key_encrypted=false")
+	}
+}

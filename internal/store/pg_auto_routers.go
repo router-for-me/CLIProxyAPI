@@ -118,11 +118,23 @@ type AutoRouter struct {
 	// VisionBridgeModel is an optional per-router model used to analyze images
 	// when a tier's resolved target model does not support vision. Empty = the
 	// vision bridge is disabled for this router.
-	VisionBridgeModel string         `json:"vision_bridge_model,omitempty"`
-	Enabled           bool           `json:"enabled"`
-	Metadata          map[string]any `json:"metadata,omitempty"`
-	CreatedAt         time.Time      `json:"created_at"`
-	UpdatedAt         time.Time      `json:"updated_at"`
+	VisionBridgeModel string `json:"vision_bridge_model,omitempty"`
+	// JevEnabled opts this router into Jev AI classification. The global
+	// jev_settings master toggle must also be on and an API key configured;
+	// otherwise this router's heuristic tier is used unchanged.
+	JevEnabled bool `json:"jev_enabled"`
+	// JevMinConfidence is the confidence floor for accepting a classifier
+	// verdict. Below it the heuristic tier wins. Zero means "use the default".
+	JevMinConfidence float64 `json:"jev_min_confidence,omitempty"`
+	// JevTimeoutMs bounds the classifier call. Zero means "use the default".
+	JevTimeoutMs int `json:"jev_timeout_ms,omitempty"`
+	// JevModelOverride pins a classifier model for this router. Empty uses the
+	// global jev_settings model.
+	JevModelOverride string         `json:"jev_model_override,omitempty"`
+	Enabled          bool           `json:"enabled"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
 // AutoRouterStore provides CRUD and runtime lookups for Auto Router
@@ -157,7 +169,7 @@ func NewAutoRouterStore(parent *PostgresStore) *AutoRouterStore {
 	}
 }
 
-const autoRouterColumns = "id, name, model_id, COALESCE(description, ''), COALESCE(display_name, ''), tier_mappings, pricing, COALESCE(vision_bridge_model, ''), enabled, metadata, created_at, updated_at"
+const autoRouterColumns = "id, name, model_id, COALESCE(description, ''), COALESCE(display_name, ''), tier_mappings, pricing, COALESCE(vision_bridge_model, ''), jev_enabled, jev_min_confidence, jev_timeout_ms, COALESCE(jev_model_override, ''), enabled, metadata, created_at, updated_at"
 
 // Create inserts a new Auto Router. ID is generated when empty. Names and model
 // ids must be unique; a conflict surfaces ErrAutoRouterNameTaken /
@@ -195,11 +207,14 @@ func (s *AutoRouterStore) Create(ctx context.Context, r AutoRouter) (AutoRouter,
 	metaJSON, _ := json.Marshal(r.Metadata)
 
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, name, model_id, description, display_name, tier_mappings, pricing, vision_bridge_model, enabled, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb)
+		INSERT INTO %s (id, name, model_id, description, display_name, tier_mappings, pricing, vision_bridge_model,
+		                jev_enabled, jev_min_confidence, jev_timeout_ms, jev_model_override, enabled, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13, $14::jsonb)
 	`, s.table),
 		r.ID, r.Name, r.ModelID, nullableString(r.Description), nullableString(r.DisplayName),
-		string(mappingsJSON), pricingJSON, nullableString(strings.TrimSpace(r.VisionBridgeModel)), r.Enabled, string(metaJSON),
+		string(mappingsJSON), pricingJSON, nullableString(strings.TrimSpace(r.VisionBridgeModel)),
+		r.JevEnabled, r.JevMinConfidence, r.JevTimeoutMs, nullableString(strings.TrimSpace(r.JevModelOverride)),
+		r.Enabled, string(metaJSON),
 	); err != nil {
 		return AutoRouter{}, mapAutoRouterWriteError(err, r.Name, r.ModelID)
 	}
@@ -352,8 +367,14 @@ type AutoRouterUpdate struct {
 	// VisionBridgeModel updates the optional per-router vision bridge model.
 	// Non-nil (even empty) applies the change.
 	VisionBridgeModel *string
-	Enabled           *bool
-	Metadata          *map[string]any
+	// JevEnabled / JevMinConfidence / JevTimeoutMs / JevModelOverride update
+	// the per-router Jev AI classifier knobs. Non-nil applies the change.
+	JevEnabled       *bool
+	JevMinConfidence *float64
+	JevTimeoutMs     *int
+	JevModelOverride *string
+	Enabled          *bool
+	Metadata         *map[string]any
 }
 
 // Update applies a partial update to an Auto Router. Name/model id uniqueness
@@ -415,6 +436,34 @@ func (s *AutoRouterStore) Update(ctx context.Context, id string, upd AutoRouterU
 			`UPDATE %s SET vision_bridge_model = $1, updated_at = NOW() WHERE id = $2`, s.table,
 		), nullableString(strings.TrimSpace(*upd.VisionBridgeModel)), id); err != nil {
 			return fmt.Errorf("postgres store: update auto router vision_bridge_model: %w", err)
+		}
+	}
+	if upd.JevEnabled != nil {
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %s SET jev_enabled = $1, updated_at = NOW() WHERE id = $2`, s.table,
+		), *upd.JevEnabled, id); err != nil {
+			return fmt.Errorf("postgres store: update auto router jev_enabled: %w", err)
+		}
+	}
+	if upd.JevMinConfidence != nil {
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %s SET jev_min_confidence = $1, updated_at = NOW() WHERE id = $2`, s.table,
+		), *upd.JevMinConfidence, id); err != nil {
+			return fmt.Errorf("postgres store: update auto router jev_min_confidence: %w", err)
+		}
+	}
+	if upd.JevTimeoutMs != nil {
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %s SET jev_timeout_ms = $1, updated_at = NOW() WHERE id = $2`, s.table,
+		), *upd.JevTimeoutMs, id); err != nil {
+			return fmt.Errorf("postgres store: update auto router jev_timeout_ms: %w", err)
+		}
+	}
+	if upd.JevModelOverride != nil {
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf(
+			`UPDATE %s SET jev_model_override = $1, updated_at = NOW() WHERE id = $2`, s.table,
+		), nullableString(strings.TrimSpace(*upd.JevModelOverride)), id); err != nil {
+			return fmt.Errorf("postgres store: update auto router jev_model_override: %w", err)
 		}
 	}
 	if upd.Mappings != nil {
@@ -491,14 +540,18 @@ func scanAutoRouter(row rowScanner) (AutoRouter, error) {
 		description  sql.NullString
 		displayName  sql.NullString
 		visionBridge sql.NullString
+		jevModel     sql.NullString
 	)
 	if err := row.Scan(&r.ID, &r.Name, &r.ModelID, &description, &displayName,
-		&mappingsJSON, &pricingJSON, &visionBridge, &r.Enabled, &metadataJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		&mappingsJSON, &pricingJSON, &visionBridge,
+		&r.JevEnabled, &r.JevMinConfidence, &r.JevTimeoutMs, &jevModel,
+		&r.Enabled, &metadataJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		return AutoRouter{}, err
 	}
 	r.Description = description.String
 	r.DisplayName = displayName.String
 	r.VisionBridgeModel = visionBridge.String
+	r.JevModelOverride = jevModel.String
 	r.Mappings = decodeTierMappings(mappingsJSON)
 	if len(pricingJSON) > 0 && string(pricingJSON) != "null" {
 		var p AutoRouterPricing
@@ -551,6 +604,10 @@ func BridgeAutoRouterConfig(r *AutoRouter) *autorouter.Config {
 		DisplayName:       r.DisplayName,
 		Enabled:           r.Enabled,
 		VisionBridgeModel: strings.TrimSpace(r.VisionBridgeModel),
+		JevEnabled:        r.JevEnabled,
+		JevMinConfidence:  r.JevMinConfidence,
+		JevTimeoutMs:      r.JevTimeoutMs,
+		JevModelOverride:  strings.TrimSpace(r.JevModelOverride),
 		Mappings:          make([]autorouter.TierMapping, 0, len(r.Mappings)),
 	}
 	for _, m := range r.Mappings {
