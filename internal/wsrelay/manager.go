@@ -23,8 +23,11 @@ type Manager struct {
 	// keyLocks serializes auth emissions per provider key: an install's
 	// onConnected Add and an owner disconnect's onDisconnected Delete each
 	// validate ownership and emit while holding the key's lock, so a stale
-	// emission can never land after a newer session's Delete.
-	keyLocks map[string]*sync.Mutex
+	// emission can never land after a newer session's Delete. Entries are
+	// reference counted: the default provider factory hands every connection
+	// a fresh random key, so unreferenced entries must be reclaimed or a
+	// long-running gateway would grow the map without bound.
+	keyLocks map[string]*keyLockEntry
 
 	providerFactory func(*http.Request) (string, error)
 	onConnected     func(string)
@@ -58,7 +61,7 @@ func NewManager(opts Options) *Manager {
 	mgr := &Manager{
 		path:     path,
 		sessions: make(map[string]*session),
-		keyLocks: make(map[string]*sync.Mutex),
+		keyLocks: make(map[string]*keyLockEntry),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -151,8 +154,9 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	// against the previous session's disconnect Delete and any competing
 	// install, so the last emission for a key always belongs to its live
 	// session (#5392, #5520 review).
-	lock := m.keyLock(s.provider)
-	lock.Lock()
+	key := strings.ToLower(strings.TrimSpace(s.provider))
+	lock := m.acquireKeyLock(s.provider)
+	lock.mu.Lock()
 	m.sessMutex.Lock()
 	var replaced *session
 	if existing, ok := m.sessions[s.provider]; ok {
@@ -167,7 +171,8 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	if m.onConnected != nil && m.session(s.provider) == s {
 		m.onConnected(s.provider)
 	}
-	lock.Unlock()
+	lock.mu.Unlock()
+	m.releaseKeyLock(lock, key)
 
 	if replaced != nil {
 		replaced.cleanup(errors.New("replaced by new connection"))
@@ -194,22 +199,45 @@ func (m *Manager) session(provider string) *session {
 	return s
 }
 
-// keyLock returns the per-provider mutex that serializes ownership validation
-// with auth-emission callbacks, keeping Add/Delete ordering deterministic per
-// provider key without holding the global session lock during callbacks.
-func (m *Manager) keyLock(provider string) *sync.Mutex {
+// keyLockEntry is one provider key's emission lock with its live-user count.
+type keyLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// acquireKeyLock returns the provider key's lock entry and takes one reference
+// on it. The reference must be released with releaseKeyLock after the final
+// Unlock, so the entry can be removed once no session or callback can reach it.
+func (m *Manager) acquireKeyLock(provider string) *keyLockEntry {
 	key := strings.ToLower(strings.TrimSpace(provider))
 	m.sessMutex.Lock()
 	if m.keyLocks == nil {
-		m.keyLocks = make(map[string]*sync.Mutex)
+		m.keyLocks = make(map[string]*keyLockEntry)
 	}
-	l := m.keyLocks[key]
-	if l == nil {
-		l = &sync.Mutex{}
-		m.keyLocks[key] = l
+	e := m.keyLocks[key]
+	if e == nil {
+		e = &keyLockEntry{}
+		m.keyLocks[key] = e
+	}
+	e.refs++
+	m.sessMutex.Unlock()
+	return e
+}
+
+// releaseKeyLock drops one reference from the entry and removes it from the
+// map when it was the last one. The entry is only deletable after its lock has
+// been unlocked, so a concurrent acquirer either takes a reference on this
+// entry or replaces a fully released one.
+func (m *Manager) releaseKeyLock(e *keyLockEntry, key string) {
+	if e == nil {
+		return
+	}
+	m.sessMutex.Lock()
+	e.refs--
+	if e.refs <= 0 && m.keyLocks[key] == e {
+		delete(m.keyLocks, key)
 	}
 	m.sessMutex.Unlock()
-	return l
 }
 
 func (m *Manager) handleSessionClosed(s *session, cause error) {
@@ -239,8 +267,8 @@ func (m *Manager) handleSessionClosed(s *session, cause error) {
 	// lock so it can never follow a newer session's Add (#5392, #5520 review).
 	// The callback runs while holding the per-key lock, not the global session
 	// lock, so same-key manager calls from the callback must not be made.
-	lock := m.keyLock(key)
-	lock.Lock()
+	lock := m.acquireKeyLock(key)
+	lock.mu.Lock()
 	m.sessMutex.Lock()
 	if cur, ok := m.sessions[key]; ok && cur == s {
 		delete(m.sessions, key)
@@ -251,7 +279,8 @@ func (m *Manager) handleSessionClosed(s *session, cause error) {
 	if m.onDisconnected != nil {
 		m.onDisconnected(s.provider, cause)
 	}
-	lock.Unlock()
+	lock.mu.Unlock()
+	m.releaseKeyLock(lock, key)
 }
 
 func randomProviderName() string {

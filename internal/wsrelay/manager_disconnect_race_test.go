@@ -192,3 +192,36 @@ waitLoop:
 
 	_ = connB.Close()
 }
+
+// Connection churn over unique provider keys (the default factory hands every
+// connection a random name) must not grow keyLocks without bound: once the
+// session and its disconnect emission are done, the per-key entry is reclaimed
+// (#5520 review).
+func TestHandleWebsocket_ReclaimsPerKeyLocksAfterDisconnect(t *testing.T) {
+	relay := NewManager(Options{})
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + relay.Path()
+
+	for i := 0; i < 5; i++ {
+		conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+		if errDial != nil {
+			t.Fatalf("dial websocket: %v", errDial)
+		}
+		_ = conn.Close()
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		relay.sessMutex.RLock()
+		locks, sessions := len(relay.keyLocks), len(relay.sessions)
+		relay.sessMutex.RUnlock()
+		if locks == 0 && sessions == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("keyLocks=%d sessions=%d after churn; lock entries leaked", locks, sessions)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
