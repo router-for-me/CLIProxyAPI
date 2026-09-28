@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type nativeHeaderTransport func(*http.Request) (*http.Response, error)

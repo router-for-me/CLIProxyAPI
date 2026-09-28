@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // TestNativeCompatibilitySmoke is deliberately opt-in: normal unit tests never

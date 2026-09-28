@@ -233,9 +233,8 @@ macOS test run is required before claiming runtime verification. Native Remote
 Control with a real Mac login remains a separate acceptance test even when the
 synthetic macOS tests pass.
 Passing these tests does not establish live Remote Control compatibility or billing
-behavior. The pristine upstream baseline currently fails
-`TestOpenAICompatExecutorToolResultContentByInputModalities` in four subcases;
-that unrelated existing failure must not be reported as a passing full suite.
+behavior. The full repository suite and the focused race suites passed on the
+rebased v8 tree when this change was prepared.
 
 On September 13, 2026, the ARM development-server test passed direct Claude OAuth
 inference, native streamed replies, and an actual native Bash `pwd` tool turn using
@@ -312,9 +311,8 @@ for unattended fleet rollout.
 
 ## Reference lineage
 
-This fork starts at CLIProxyAPI commit
-`ac02da6c05e18f465aa7e3ed5b0a65a2f060917d`. It reuses CLIProxyAPI's authentication,
-provider executors, protocol translation, and pinned-auth request context. The
+This feature branch is rebased onto CLIProxyAPI v8 `main`. It reuses CLIProxyAPI's
+authentication, provider executors, protocol translation, and pinned-auth request context. The
 process-scoped interception design follows
 [remote-claw](https://github.com/ejc3/remote-claw): retain the native control plane
 and intercept only the intended API traffic. It does not modify the Claude binary
