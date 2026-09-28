@@ -601,9 +601,9 @@ export default function AutoRouterForm({ initial, onChange }) {
                   step="0.05"
                   value={form.jev_min_confidence}
                   onChange={(e) => set('jev_min_confidence', e.target.value)}
-                  placeholder="0.5"
+                  placeholder="0.35"
                 />
-                <div className="ar-form__hint">0–1. Below this, the heuristic tier wins.</div>
+                <div className="ar-form__hint">0–1. Below this, the heuristic tier wins. Blank uses the 0.35 default.</div>
               </div>
               <div className="ar-form__field">
                 <label className="ar-form__label" htmlFor="ar-jev-timeout">Timeout (ms)</label>

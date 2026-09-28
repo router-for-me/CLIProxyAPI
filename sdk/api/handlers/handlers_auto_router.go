@@ -20,9 +20,22 @@ import (
 
 const (
 	// jevDefaultMinConfidence is the classifier confidence floor when a router
-	// does not set one. With four options an even probability spread scores 0,
-	// so 0.5 means "at least a mild preference".
-	jevDefaultMinConfidence = 0.5
+	// does not set one.
+	//
+	// 0.35 is measured, not chosen by taste. On a 60-case corpus the hybrid
+	// scored 85.0% at a floor of 0.35 but 83.3% at 0.5: the cases the classifier
+	// answers with low confidence are disproportionately the ones the heuristic
+	// gets *wrong* (the heuristic disagrees with the classifier on ~60% of
+	// cases, and under-routes 29/60 of them), so discarding its unsure answers
+	// discards correct overrides. Two cases sat in that band — both labelled
+	// complex, both answered "complex" by the classifier at 0.32-0.43 while the
+	// heuristic answered "simple".
+	//
+	// The floor cannot be set much below this: classifier confidence is not
+	// deterministic across runs (it drifted 0.01-0.04 on 22/60 cases while the
+	// chosen tier stayed 60/60 stable), so a floor between roughly 0.41 and 0.47
+	// would flip a case run to run. See docs/plans/2026-09-28-autorouter-jev-eval-findings.md.
+	jevDefaultMinConfidence = 0.35
 	// jevDefaultTimeout bounds the classifier call. It applies before any
 	// upstream model connection exists, the same phase as the vision bridge.
 	jevDefaultTimeout = 400 * time.Millisecond

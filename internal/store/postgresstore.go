@@ -2144,12 +2144,15 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	}
 	// Idempotent backfill for the per-router Jev AI classifier knobs. The
 	// feature is off per router by default; the global master toggle lives in
-	// jev_settings, so both must be on for the classifier to run. The defaults
-	// mirror jevgate's own defaults so a router that only sets jev_enabled=true
-	// gets the standard confidence floor and timeout.
+	// jev_settings, so both must be on for the classifier to run.
+	//
+	// These column defaults are inert for the routing path: the insert always
+	// names every column, and a router that stores 0 is treated at runtime as
+	// "use the default" (see jevDefaultMinConfidence). They are kept in step
+	// with the runtime defaults so a fresh deployment's schema reads truthfully.
 	for _, col := range []string{
 		`jev_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
-		`jev_min_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5`,
+		`jev_min_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.35`,
 		`jev_timeout_ms INTEGER NOT NULL DEFAULT 400`,
 		`jev_model_override TEXT`,
 	} {
