@@ -311,8 +311,9 @@ for unattended fleet rollout.
 
 ## Reference lineage
 
-This feature branch is rebased onto CLIProxyAPI v8 `main`. It reuses CLIProxyAPI's
-authentication, provider executors, protocol translation, and pinned-auth request context. The
+This feature branch is rebased onto the CLIProxyAPI v8 development branch. It
+reuses CLIProxyAPI's authentication, provider executors, protocol translation,
+and pinned-auth request context. The
 process-scoped interception design follows
 [remote-claw](https://github.com/ejc3/remote-claw): retain the native control plane
 and intercept only the intended API traffic. It does not modify the Claude binary
