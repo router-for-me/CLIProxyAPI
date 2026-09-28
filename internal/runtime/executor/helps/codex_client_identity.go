@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // codexFirstPartyOriginators lists the originator tokens the official Codex clients use.

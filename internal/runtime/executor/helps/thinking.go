@@ -3,8 +3,8 @@ package helps
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // ApplyThinkingWithSourcePayload preserves summary visibility from the original

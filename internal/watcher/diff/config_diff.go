@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // BuildConfigChangeDetails computes a redacted, human-readable list of config changes.
@@ -474,6 +474,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	newPanelRepo := strings.TrimSpace(newCfg.RemoteManagement.PanelGitHubRepository)
 	if oldPanelRepo != newPanelRepo {
 		changes = append(changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", formatURL(oldPanelRepo), formatURL(newPanelRepo)))
+	}
+	oldBaseURL := strings.TrimSpace(oldCfg.RemoteManagement.BaseURL)
+	newBaseURL := strings.TrimSpace(newCfg.RemoteManagement.BaseURL)
+	if oldBaseURL != newBaseURL {
+		changes = append(changes, fmt.Sprintf("remote-management.base-url: %s -> %s", formatURL(oldBaseURL), formatURL(newBaseURL)))
 	}
 	if oldCfg.RemoteManagement.SecretKey != newCfg.RemoteManagement.SecretKey {
 		switch {

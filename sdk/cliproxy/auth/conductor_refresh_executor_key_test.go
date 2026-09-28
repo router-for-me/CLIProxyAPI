@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type countingRefreshExecutor struct {

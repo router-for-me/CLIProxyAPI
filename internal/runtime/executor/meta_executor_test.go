@@ -15,15 +15,15 @@ import (
 	"testing"
 	"time"
 
-	metaauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/meta"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
@@ -1241,5 +1241,121 @@ func TestMetaExecutor_NotFoundCooldown_Shortened_Issue6117(t *testing.T) {
 	remaining := time.Until(state.NextRetryAfter)
 	if remaining < 4*time.Minute || remaining > 6*time.Minute {
 		t.Fatalf("expected short ~5m cooldown for Meta 404, got remaining=%v", remaining)
+	}
+}
+
+func TestMetaExecutor_Execute_StripsSearchContentTypesFromWebSearch(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read body: %v", errRead)
+			http.Error(w, errRead.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	payload := []byte(`{
+		"model": "muse-spark-1.3-contributor",
+		"input": [{"role": "user", "content": "search something"}],
+		"tools": [
+			{"type": "function", "name": "lookup", "parameters": {"type": "object"}},
+			{"type": "web_search", "external_web_access": true, "search_content_types": ["text", "image"]}
+		]
+	}`)
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3-contributor",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	tools := gjson.GetBytes(gotBody, "tools").Array()
+	var foundWebSearch bool
+	for _, tool := range tools {
+		if tool.Get("type").String() == "web_search" {
+			foundWebSearch = true
+			if tool.Get("search_content_types").Exists() {
+				t.Fatalf("web_search tool still contains search_content_types: %s", gotBody)
+			}
+		}
+	}
+	if !foundWebSearch {
+		t.Fatalf("web_search tool missing from forwarded body: %s", gotBody)
+	}
+}
+
+func TestMetaExecutor_ExecuteStream_StripsSearchContentTypesFromWebSearch(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read body: %v", errRead)
+			http.Error(w, errRead.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeMetaResponsesOK(w, "stream-ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	payload := []byte(`{
+		"model": "muse-spark-1.3-contributor",
+		"input": [{"role": "user", "content": "search something"}],
+		"tools": [
+			{"type": "web_search", "external_web_access": true, "search_content_types": ["text", "image"]}
+		]
+	}`)
+
+	streamResult, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3-contributor",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	// Consume stream chunks
+	for range streamResult.Chunks {
+	}
+
+	tools := gjson.GetBytes(gotBody, "tools").Array()
+	var foundWebSearch bool
+	for _, tool := range tools {
+		if tool.Get("type").String() == "web_search" {
+			foundWebSearch = true
+			if tool.Get("search_content_types").Exists() {
+				t.Fatalf("web_search tool still contains search_content_types in stream request: %s", gotBody)
+			}
+		}
+	}
+	if !foundWebSearch {
+		t.Fatalf("web_search tool missing from forwarded stream body: %s", gotBody)
 	}
 }

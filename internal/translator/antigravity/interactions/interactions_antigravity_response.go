@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -95,8 +95,10 @@ func ConvertAntigravityResponseToInteractionsNonStream(ctx context.Context, mode
 	out, _ = sjson.SetBytes(out, "model", modelName)
 	var steps [][]byte
 	root.Get("candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
-		if step := antigravityPartToInteractionsStep(part); len(step) > 0 {
-			steps = append(steps, step)
+		for _, step := range antigravityPartToInteractionsSteps(part) {
+			if len(step) > 0 {
+				steps = append(steps, step)
+			}
 		}
 		return true
 	})
@@ -268,7 +270,8 @@ func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToIn
 		delta := []byte(`{"index":0,"delta":{"text":"","type":"text"},"event_type":"step.delta"}`)
 		delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 		delta, _ = sjson.SetBytes(delta, "delta.text", text.String())
-		return append(out, translatorcommon.SSEEventData("step.delta", delta))
+		out = append(out, translatorcommon.SSEEventData("step.delta", delta))
+		return appendAntigravityThoughtSignature(out, st, part)
 	}
 	if fc := part.Get("functionCall"); fc.Exists() {
 		out = appendAntigravityThoughtSignature(out, st, part)
@@ -294,6 +297,9 @@ func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToIn
 		out = append(out, translatorcommon.SSEEventData("step.delta", delta))
 		return appendAntigravityInteractionsStepStop(out, st)
 	}
+	if sig := antigravityThoughtSignature(part); sig != "" {
+		return appendAntigravityThoughtSignature(out, st, part)
+	}
 	return out
 }
 
@@ -308,8 +314,13 @@ func appendAntigravityThoughtSignature(out [][]byte, st *antigravityToInteractio
 	return out
 }
 
-func antigravityPartToInteractionsStep(part gjson.Result) []byte {
+func antigravityPartToInteractionsSteps(part gjson.Result) [][]byte {
+	sig := antigravityThoughtSignature(part)
 	if fc := part.Get("functionCall"); fc.Exists() {
+		var steps [][]byte
+		if sig != "" {
+			steps = append(steps, antigravityThoughtStepJSON(sig, ""))
+		}
 		step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
 		step, _ = sjson.SetBytes(step, "name", fc.Get("name").String())
 		if id := fc.Get("id"); id.Exists() {
@@ -320,7 +331,8 @@ func antigravityPartToInteractionsStep(part gjson.Result) []byte {
 		if args := fc.Get("args"); args.Exists() {
 			step, _ = sjson.SetRawBytes(step, "arguments", []byte(args.Raw))
 		}
-		return step
+		steps = append(steps, step)
+		return steps
 	}
 	if fr := part.Get("functionResponse"); fr.Exists() {
 		step := []byte(`{"type":"function_result","name":"","result":{}}`)
@@ -333,25 +345,79 @@ func antigravityPartToInteractionsStep(part gjson.Result) []byte {
 		if response := fr.Get("response"); response.Exists() {
 			step, _ = sjson.SetRawBytes(step, "result", []byte(response.Raw))
 		}
-		return step
+		return [][]byte{step}
 	}
 	if text := part.Get("text"); text.Exists() {
-		step := []byte(`{"type":"model_output","content":[]}`)
 		if part.Get("thought").Bool() {
-			step, _ = sjson.SetBytes(step, "type", "thought")
+			return [][]byte{antigravityThoughtStepJSON(sig, text.String())}
 		}
+		if text.String() == "" {
+			if sig != "" {
+				return [][]byte{antigravityThoughtStepJSON(sig, "")}
+			}
+			return nil
+		}
+		step := []byte(`{"type":"model_output","content":[]}`)
 		item := []byte(`{"type":"text","text":""}`)
 		item, _ = sjson.SetBytes(item, "text", text.String())
 		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{item})
-		return step
+		var steps [][]byte
+		steps = append(steps, step)
+		if sig != "" {
+			steps = append(steps, antigravityThoughtStepJSON(sig, ""))
+		}
+		return steps
 	}
 	if inline := part.Get("inlineData"); inline.Exists() {
-		return antigravityInlineDataToInteractionsStep(inline)
+		if step := antigravityInlineDataToInteractionsStep(inline); len(step) > 0 {
+			var steps [][]byte
+			steps = append(steps, step)
+			if sig != "" {
+				steps = append(steps, antigravityThoughtStepJSON(sig, ""))
+			}
+			return steps
+		}
 	}
 	if inline := part.Get("inline_data"); inline.Exists() {
-		return antigravityInlineDataToInteractionsStep(inline)
+		if step := antigravityInlineDataToInteractionsStep(inline); len(step) > 0 {
+			var steps [][]byte
+			steps = append(steps, step)
+			if sig != "" {
+				steps = append(steps, antigravityThoughtStepJSON(sig, ""))
+			}
+			return steps
+		}
+	}
+	if sig != "" {
+		return [][]byte{antigravityThoughtStepJSON(sig, "")}
 	}
 	return nil
+}
+
+func antigravityThoughtStepJSON(sig, text string) []byte {
+	step := []byte(`{"type":"thought"}`)
+	if sig != "" {
+		step, _ = sjson.SetBytes(step, "signature", sig)
+	}
+	if text != "" {
+		item := []byte(`{"type":"text","text":""}`)
+		item, _ = sjson.SetBytes(item, "text", text)
+		step = translatorcommon.SetRawArrayItems(step, "content", [][]byte{item})
+	}
+	return step
+}
+
+func antigravityPartToInteractionsStep(part gjson.Result) []byte {
+	steps := antigravityPartToInteractionsSteps(part)
+	if len(steps) == 0 {
+		return nil
+	}
+	for _, s := range steps {
+		if gjson.GetBytes(s, "type").String() == "function_call" {
+			return s
+		}
+	}
+	return steps[0]
 }
 
 func antigravityInlineDataToInteractionsStep(inline gjson.Result) []byte {
