@@ -4239,7 +4239,6 @@ func TestApplyClaudeSystemInstructionPolicy_RelaxedPreservesFinalCallerCacheCont
 
 func TestClaudeExecutor_RelaxedSystemPromptDefersCacheOwnershipUntilAfterPayloadRules(t *testing.T) {
 	const model = "claude-opus-5"
-	enabled := true
 	tests := []struct {
 		name                     string
 		stream                   bool
@@ -4292,27 +4291,37 @@ func TestClaudeExecutor_RelaxedSystemPromptDefersCacheOwnershipUntilAfterPayload
 			}))
 			defer server.Close()
 
-			cfg := &config.Config{
-				ClaudeKey: []config.ClaudeKey{{
-					APIKey:  "key-relaxed-cache-policy",
-					BaseURL: server.URL,
-					Cloak: &config.CloakConfig{
-						RelaxedSystemPrompt: &enabled,
-					},
-				}},
-			}
+			configYAML := fmt.Sprintf(`api-keys:
+  claude:
+    - name: relaxed
+      base-url: %q
+      keys:
+        - api-key: key-relaxed-cache-policy
+          cloak:
+            relaxed-system-prompt: true
+oauth:
+  providers:
+    claude:
+      disable-claude-cloak-mode: true
+`, server.URL)
 			if test.payloadBreakpoint {
-				cfg.Payload.Override = []config.PayloadRule{{
-					Models: []config.PayloadModelRule{{
-						Name:         "*",
-						Protocol:     "claude",
-						FromProtocol: "openai",
-						Headers:      map[string]string{"user-agent": "node-fetch*"},
-					}},
-					Params: map[string]any{
-						"system.1.cache_control": map[string]any{"type": "ephemeral"},
-					},
-				}}
+				configYAML += `requests:
+  payload:
+    override:
+      - models:
+          - name: "*"
+            protocol: claude
+            from-protocol: openai
+            headers:
+              user-agent: "node-fetch*"
+        params:
+          system.1.cache_control:
+            type: ephemeral
+`
+			}
+			cfg, errConfig := config.ParseConfigBytes([]byte(configYAML))
+			if errConfig != nil {
+				t.Fatal(errConfig)
 			}
 
 			executor := NewClaudeExecutor(cfg)

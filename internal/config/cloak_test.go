@@ -46,11 +46,16 @@ func TestSaveConfigPreserveCommentsRelaxedSystemPromptPresence(t *testing.T) {
 	for _, initial := range []struct {
 		name string
 		yaml string
+		v8   bool
 	}{
 		{name: "new credential", yaml: "{}\n"},
 		{name: "new cloak", yaml: "claude-api-key:\n  - api-key: test-key\n"},
 		{name: "new field", yaml: "claude-api-key:\n  - api-key: test-key\n    cloak:\n      mode: auto\n"},
 		{name: "existing field", yaml: "claude-api-key:\n  - api-key: test-key\n    cloak:\n      relaxed-system-prompt: true\n"},
+		{name: "v8/new credential", yaml: "api-keys: {claude: []}\n", v8: true},
+		{name: "v8/new cloak", yaml: "api-keys: {claude: [{name: primary, keys: [{api-key: test-key}]}]}\n", v8: true},
+		{name: "v8/new field", yaml: "api-keys: {claude: [{name: primary, keys: [{api-key: test-key, cloak: {mode: auto}}]}]}\n", v8: true},
+		{name: "v8/existing field", yaml: "api-keys: {claude: [{name: primary, keys: [{api-key: test-key, cloak: {relaxed-system-prompt: true}}]}]}\n", v8: true},
 	} {
 		for _, setting := range []struct {
 			name  string
@@ -68,7 +73,7 @@ func TestSaveConfigPreserveCommentsRelaxedSystemPromptPresence(t *testing.T) {
 				cfg := &Config{ClaudeKey: []ClaudeKey{{
 					APIKey: "test-key", Cloak: &CloakConfig{RelaxedSystemPrompt: setting.value},
 				}}}
-				if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
+				if errSave := SaveConfigPreserveComments(configPath, cfg, initial.v8); errSave != nil {
 					t.Fatal(errSave)
 				}
 				saved, errRead := os.ReadFile(configPath)
@@ -79,7 +84,16 @@ func TestSaveConfigPreserveCommentsRelaxedSystemPromptPresence(t *testing.T) {
 				if errYAML := yaml.Unmarshal(saved, &document); errYAML != nil {
 					t.Fatal(errYAML)
 				}
-				entry := document["claude-api-key"].([]any)[0].(map[string]any)
+				var entry map[string]any
+				if initial.v8 {
+					if errValidate := ValidateV8Config(saved); errValidate != nil {
+						t.Fatalf("saved config is not valid v8: %v\n%s", errValidate, saved)
+					}
+					group := document["api-keys"].(map[string]any)["claude"].([]any)[0].(map[string]any)
+					entry = group["keys"].([]any)[0].(map[string]any)
+				} else {
+					entry = document["claude-api-key"].([]any)[0].(map[string]any)
+				}
 				for key := range entry {
 					if key != "api-key" && key != "cloak" {
 						t.Fatalf("save added default credential field %q: %s", key, saved)

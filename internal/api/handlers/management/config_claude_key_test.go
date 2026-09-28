@@ -67,6 +67,62 @@ func TestPatchClaudeKeyFingerprintProfile(t *testing.T) {
 	}
 }
 
+func TestConfigV8ClaudeRelaxedSystemPromptPresence(t *testing.T) {
+	for _, setting := range []struct {
+		name  string
+		value *bool
+	}{
+		{name: "omitted"},
+		{name: "disabled", value: new(bool)},
+		{name: "enabled", value: new(true)},
+	} {
+		t.Run(setting.name, func(t *testing.T) {
+			h := &Handler{cfg: &config.Config{}, configFilePath: writeTestConfigFile(t)}
+			router := gin.New()
+			router.PUT("/v8/management/config/*path", h.ConfigV8)
+			router.PATCH("/v8/management/config", h.ConfigV8)
+			cloak := map[string]any{"mode": "auto"}
+			if setting.value != nil {
+				cloak["relaxed-system-prompt"] = *setting.value
+			}
+			body, errMarshal := json.Marshal([]any{map[string]any{
+				"name": "primary",
+				"keys": []any{map[string]any{"api-key": "test-key", "cloak": cloak}},
+			}})
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+			for _, request := range []struct {
+				method string
+				path   string
+				body   string
+			}{
+				{http.MethodPut, "/v8/management/config/api-keys/claude", string(body)},
+				{http.MethodPatch, "/v8/management/config", `{"observability":{"logs":{"debug":true}}}`},
+			} {
+				recorder := httptest.NewRecorder()
+				router.ServeHTTP(recorder, httptest.NewRequest(request.method, request.path, strings.NewReader(request.body)))
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("%s %s: %d %s", request.method, request.path, recorder.Code, recorder.Body.String())
+				}
+				loaded, errLoad := config.LoadConfigOptional(h.configFilePath, false)
+				if errLoad != nil {
+					t.Fatal(errLoad)
+				}
+				for _, cfg := range []*config.Config{h.cfg, loaded} {
+					if len(cfg.ClaudeKey) != 1 || cfg.ClaudeKey[0].Cloak == nil {
+						t.Fatal("v8 write lost the Claude credential cloak")
+					}
+					got := cfg.ClaudeKey[0].Cloak.RelaxedSystemPrompt
+					if (got == nil) != (setting.value == nil) || (got != nil && *got != *setting.value) {
+						t.Fatalf("relaxed-system-prompt = %v, want %v", got, setting.value)
+					}
+				}
+			}
+		})
+	}
+}
+
 // A typo must fail the write instead of reaching the request path, where it can
 // only be reported as a warning behind every later request.
 func TestPatchClaudeKeyRejectsUnknownFingerprintProfile(t *testing.T) {
