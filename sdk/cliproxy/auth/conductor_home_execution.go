@@ -235,9 +235,13 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			executor := executorForAuth(selection.Executor, preparedAuth)
 			execute := func() (cliproxyexecutor.Response, error) {
 				if countTokens {
-					return executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
+					return m.responsesToolsCountCall(executorCtx, preparedAuth, selection.Provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+						return executor.CountTokens(callCtx, preparedAuth, callReq, callOpts)
+					})
 				}
-				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+				return m.responsesToolsCallWithExecutor(execCtx, preparedAuth, selection.Provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+					return executor.Execute(callCtx, preparedAuth, callReq, callOpts)
+				})
 			}
 			startHomeExec := time.Now()
 			response, errExecute = execute()
@@ -266,6 +270,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return response, nil
 			}
 			result.Error = resultErrorFromError(errExecute)
+			if isResponsesToolsError(errExecute) {
+				m.markResponsesToolsNeutral(execCtx, result)
+				releaseAttempt()
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errExecute)
+			}
 			result.RetryAfter = retryAfterFromError(errExecute)
 			if isCredentialScopedError(errExecute) {
 				result.CredentialScope = true

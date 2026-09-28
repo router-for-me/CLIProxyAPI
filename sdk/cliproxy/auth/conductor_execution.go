@@ -413,6 +413,12 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 	if opts.Alt == "responses/compact" && !opts.Stream {
 		return sdktranslator.FormatOpenAIResponse
 	}
+	return providerDefaultFormat(provider)
+}
+
+// providerDefaultFormat is the single static provider-to-format mapping used
+// by requestToFormat and by every policy decision that must agree with it.
+func providerDefaultFormat(provider string) sdktranslator.Format {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex":
 		return sdktranslator.FormatCodex
@@ -592,7 +598,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			resp, errExec := m.responsesToolsCallWithExecutor(execCtx, auth, provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				return executor.Execute(callCtx, auth, callReq, callOpts)
+			})
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -609,7 +617,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					resp, errExec = m.responsesToolsCallWithExecutor(execCtx, auth, provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+						return executor.Execute(callCtx, auth, callReq, callOpts)
+					})
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -630,6 +640,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {
+				if isResponsesToolsError(errExec) {
+					result.Error = resultErrorFromError(errExec)
+					m.markResponsesToolsNeutral(execCtx, result)
+					return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
+				}
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
@@ -804,7 +819,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			// CountTokens shares request preparation and declaration budget
+			// but builds no response stream state and never restores output.
+			resp, errExec := m.responsesToolsCountCall(execCtx, auth, provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				return executor.CountTokens(callCtx, auth, callReq, callOpts)
+			})
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -821,7 +840,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					resp, errExec = m.responsesToolsCountCall(execCtx, auth, provider, executor, execReq, execOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+						return executor.CountTokens(callCtx, auth, callReq, callOpts)
+					})
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -843,6 +864,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts, SkipQuotaObservation: true}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
+				if isResponsesToolsError(errExec) {
+					m.markResponsesToolsNeutral(execCtx, result)
+					return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
+				}
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}

@@ -192,6 +192,12 @@ type Manager struct {
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
 
+	// responsesTools owns the core Responses tool protocol limiter and the
+	// compiled policy snapshot. The zero value is usable via
+	// responsesToolsSnapshot; config updates refresh it without resetting
+	// already-counted usage.
+	responsesTools sync.Map
+
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 

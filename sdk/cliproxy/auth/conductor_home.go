@@ -1422,10 +1422,16 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq := req
 			execReq.Model = upstreamModel
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			resp, errExec := m.responsesToolsCallWithExecutor(creditsCtx, c.auth, c.provider, c.executor, execReq, creditsOpts, func(callCtx context.Context, callReq cliproxyexecutor.Request, callOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				return c.executor.Execute(callCtx, c.auth, callReq, callOpts)
+			})
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
+				if isResponsesToolsError(errExec) {
+					m.markResponsesToolsNeutral(creditsCtx, result)
+					return cliproxyexecutor.Response{}, false, wrapRequestStopError(errExec)
+				}
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -1482,6 +1488,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
 		if errStream != nil {
+			if isResponsesToolsError(errStream) {
+				return nil, false, errStream
+			}
 			continue
 		}
 		return result, true, nil
