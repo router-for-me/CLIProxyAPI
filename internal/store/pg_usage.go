@@ -193,6 +193,80 @@ type AutoRouterDecisionStats struct {
 	MismatchCount     int64                   `json:"mismatch_count"`
 }
 
+// AutoRouterJevStats is the rollup of the Jev AI classifier's contribution to
+// one router's routing decisions. Every field is derived from the persisted
+// `auto_router_decision->'jev'` block plus the effective tier, so it reflects
+// what the classifier actually did — not what it was configured to do (the
+// configured knobs travel separately in the management response's router
+// block).
+//
+// Only the two JSONB keys the aggregation needs (choice, confidence) are read;
+// the persisted probability distribution is never selected, which keeps the
+// scanned rows small.
+type AutoRouterJevStats struct {
+	// Consulted counts routed events that carry a classifier block, i.e. the
+	// gate was reached and produced a verdict.
+	Consulted int64 `json:"consulted"`
+	// Verdict outcome counts; these sum to Consulted.
+	Accepted      int64 `json:"accepted"`
+	LowConfidence int64 `json:"low_confidence"`
+	Errors        int64 `json:"errors"`
+	BreakerOpen   int64 `json:"breaker_open"`
+	// CacheHits counts verdicts served from the process-local cache. A cache
+	// hit carries the original call's latency and tokens, so it must not be
+	// used to compute per-call cost.
+	CacheHits int64 `json:"cache_hits"`
+	// Confidence statistics over the consulted events that carry a confidence.
+	// DecidedCount is that denominator; a breaker-open verdict has no
+	// confidence and is excluded rather than counted as 0.
+	AvgConfidence float64 `json:"avg_confidence"`
+	P95Confidence float64 `json:"p95_confidence"`
+	DecidedCount  int64   `json:"decided_count"`
+	// Overrouted counts events where the classifier's choice sat above the
+	// heuristic's scored tier; Underrouted the reverse. Overrouting costs
+	// money, underrouting costs capability, so they are reported separately.
+	//
+	// The heuristic tier is read from the scored_tier column, which is the
+	// scorer's tier *before* keyword-rule overrides. A keyword rule can
+	// therefore make the heuristic's own final tier differ from scored_tier,
+	// so these are the classifier-versus-scorer disagreement counts, not
+	// classifier-versus-final-routing counts.
+	Overrouted  int64 `json:"overrouted"`
+	Underrouted int64 `json:"underrouted"`
+	// OverrideCount counts accepted verdicts whose choice differed from the
+	// heuristic tier — i.e. requests the classifier actually re-routed rather
+	// than merely agreeing with.
+	OverrideCount int64 `json:"override_count"`
+	// ChoiceCounts is the classifier's tier choice distribution over every
+	// verdict that named a tier, seeded with all four canonical tiers so a
+	// consumer renders 0 rather than a gap. It includes verdicts that were
+	// rejected for low confidence — what the classifier wanted, whether or not
+	// it was used.
+	ChoiceCounts map[string]int64 `json:"choice_counts"`
+	// AppliedChoiceCounts is the same distribution restricted to accepted
+	// verdicts, i.e. the tiers that were actually routed. The two together show
+	// how much of the classifier's opinion the floor discards.
+	AppliedChoiceCounts map[string]int64 `json:"applied_choice_counts"`
+	// ChoiceVsScored maps "choice|scored_tier" to a count: the diagonal is
+	// agreement, above is over-routing, below is under-routing. Only observed
+	// pairs are present; consumers seed missing cells themselves.
+	ChoiceVsScored map[string]int64 `json:"choice_vs_scored"`
+	// OverroutedByTier attributes over-routing to the heuristic tier the
+	// request was scored at, so an operator can see which tier the classifier
+	// escalates away from.
+	OverroutedByTier map[string]int64 `json:"overrouted_by_tier"`
+	// ConfidenceHistogram is 20 buckets of 0.05, mirroring the score histogram.
+	ConfidenceHistogram []AutoRouterScoreBucket `json:"confidence_histogram"`
+	// Classifier call cost. These are averaged over every consulted event that
+	// reports the field, which includes cache hits — a hit re-serves the
+	// original call's latency and token count rather than performing a fresh
+	// one, so a warm cache makes both figures an upper bound on the real
+	// per-call cost. InputTokens is the raw sum behind AvgInputTokens.
+	AvgLatencyMs   float64 `json:"avg_latency_ms"`
+	AvgInputTokens float64 `json:"avg_input_tokens"`
+	InputTokens    int64   `json:"input_tokens"`
+}
+
 // AutoRouterTierPerformance is one tier × target-model performance row.
 type AutoRouterTierPerformance struct {
 	Tier         string  `json:"tier"`
@@ -2360,9 +2434,15 @@ func (s *UsageStore) SelectAutoRouterDecisionStats(ctx context.Context, filter U
 			"multi_step_patterns": 0,
 			"question_complexity": 0,
 		},
+		// Every cause the router can emit is seeded so a consumer can render a
+		// zero ("this never happened in range") instead of an absent key. The
+		// three jev_* causes stay 0 when the classifier is off.
 		CauseCounts: map[string]int64{
-			"literal_keyword_match": 0,
-			"complexity_scorer":     0,
+			"literal_keyword_match":  0,
+			"complexity_scorer":      0,
+			"jev_classifier":         0,
+			"jev_low_confidence":     0,
+			"jev_fallback_heuristic": 0,
 		},
 		FallbackChains: []AutoRouterChainCount{},
 	}
@@ -2381,24 +2461,30 @@ func (s *UsageStore) SelectAutoRouterDecisionStats(ctx context.Context, filter U
 		COALESCE(AVG((e.auto_router_decision->'score_fields'->>'question_complexity')::float8), 0),
 		COALESCE(SUM(CASE WHEN e.decision_cause = 'literal_keyword_match' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN e.decision_cause = 'complexity_scorer' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN e.decision_cause = 'jev_classifier' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN e.decision_cause = 'jev_low_confidence' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN e.decision_cause = 'jev_fallback_heuristic' THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN e.effective_tier IS DISTINCT FROM e.mapping_tier THEN 1 ELSE 0 END), 0)`)
 	b.WriteString(base)
 	var (
-		count       int64
-		avgTokens   float64
-		avgCode     float64
-		avgReason   float64
-		avgTech     float64
-		avgSimple   float64
-		avgMulti    float64
-		avgQuestion float64
-		causeKw     int64
-		causeScore  int64
-		mismatch    int64
+		count        int64
+		avgTokens    float64
+		avgCode      float64
+		avgReason    float64
+		avgTech      float64
+		avgSimple    float64
+		avgMulti     float64
+		avgQuestion  float64
+		causeKw      int64
+		causeScore   int64
+		causeJevPick int64
+		causeJevLow  int64
+		causeJevFall int64
+		mismatch     int64
 	)
 	if err := s.db.QueryRowContext(ctx, b.String(), args...).Scan(
 		&count, &avgTokens, &avgCode, &avgReason, &avgTech, &avgSimple, &avgMulti, &avgQuestion,
-		&causeKw, &causeScore, &mismatch,
+		&causeKw, &causeScore, &causeJevPick, &causeJevLow, &causeJevFall, &mismatch,
 	); err != nil {
 		return nil, fmt.Errorf("postgres store: auto-router decision stats aggregate: %w", err)
 	}
@@ -2412,6 +2498,9 @@ func (s *UsageStore) SelectAutoRouterDecisionStats(ctx context.Context, filter U
 	out.DimensionAverages["question_complexity"] = avgQuestion
 	out.CauseCounts["literal_keyword_match"] = causeKw
 	out.CauseCounts["complexity_scorer"] = causeScore
+	out.CauseCounts["jev_classifier"] = causeJevPick
+	out.CauseCounts["jev_low_confidence"] = causeJevLow
+	out.CauseCounts["jev_fallback_heuristic"] = causeJevFall
 	out.MismatchCount = mismatch
 
 	// Histogram: width_bucket over score_total. width_bucket returns 1..20 for
@@ -2476,6 +2565,209 @@ func (s *UsageStore) SelectAutoRouterDecisionStats(ctx context.Context, filter U
 	}
 	if err := chainRows.Err(); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// jevTierRankSQL renders expr as a 0..3 tier rank; a value outside the four
+// canonical tiers yields NULL, which propagates so any comparison against it is
+// NULL and the row drops out of the CASE. Inlined rather than defined as a SQL
+// function because this codebase migrates with plain DDL, not CREATE FUNCTION.
+func jevTierRankSQL(expr string) string {
+	return `(CASE ` + expr + ` WHEN 'simple' THEN 0 WHEN 'medium' THEN 1 WHEN 'complex' THEN 2 WHEN 'reasoning' THEN 3 END)`
+}
+
+// jevPresentSQL is the predicate selecting events the classifier was consulted
+// on. `? 'jev'` is a key-existence test, so this is true even for a
+// breaker-open verdict, which carries no choice or confidence.
+const jevPresentSQL = `AND e.auto_router_decision ? 'jev'`
+
+// jevAppliedSQL selects the verdicts whose tier was actually routed: only an
+// accepted verdict changes anything. A rejected-low-confidence verdict still
+// records what the classifier *wanted*, which is worth showing, but counting it
+// as a route would report headroom that was never spent.
+const jevAppliedSQL = `e.auto_router_decision->'jev'->>'verdict' = 'accepted'`
+
+// jevAnsweredSQL selects the verdicts that carry a meaningful confidence. A
+// breaker-open or error verdict never assigns one, yet the persisted JSON
+// still says confidence:0 (the field has no omitempty), so a plain
+// "confidence IS NOT NULL" test would average in a 0 for every call that never
+// got an answer — reporting an unsure classifier where there was none.
+const jevAnsweredSQL = `e.auto_router_decision->'jev'->>'verdict' IN ('accepted', 'rejected_low_confidence')`
+
+// jevIntSQL casts a JSONB text value to int, yielding NULL rather than raising
+// when the key is absent (e.g. a breaker-open verdict has no input_tokens).
+func jevIntSQL(path string) string {
+	return `NULLIF(` + path + `, '')::int`
+}
+
+// SelectAutoRouterJevStats rolls up the Jev AI classifier's contribution to one
+// router's decisions over the same window and scope as the other analysis
+// aggregations. Rows without a classifier block are excluded throughout, so
+// every field describes consulted requests only.
+func (s *UsageStore) SelectAutoRouterJevStats(ctx context.Context, filter UsageFilter) (*AutoRouterJevStats, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store: usage store not initialized")
+	}
+	if strings.TrimSpace(filter.RouterID) == "" {
+		return nil, fmt.Errorf("postgres store: router_id is required for jev stats")
+	}
+	out := &AutoRouterJevStats{
+		ChoiceCounts: map[string]int64{
+			"simple": 0, "medium": 0, "complex": 0, "reasoning": 0,
+		},
+		AppliedChoiceCounts: map[string]int64{
+			"simple": 0, "medium": 0, "complex": 0, "reasoning": 0,
+		},
+		ChoiceVsScored:      map[string]int64{},
+		OverroutedByTier:    map[string]int64{},
+		ConfidenceHistogram: make([]AutoRouterScoreBucket, 20),
+	}
+
+	const j = `e.auto_router_decision->'jev'`
+	choice := j + `->>'choice'`
+
+	// Single-row aggregate: verdict split, confidence stats, over/under-routing.
+	base, args := autoRouterSnapshotWhere(s.eventsTable, filter, "")
+	var b strings.Builder
+	b.WriteString(`SELECT
+		COUNT(*),
+		COALESCE(SUM(CASE WHEN ` + j + `->>'verdict' = 'accepted' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + j + `->>'verdict' = 'rejected_low_confidence' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + j + `->>'verdict' = 'error' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + j + `->>'verdict' = 'breaker_open' THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + j + `->>'cache' = 'hit' THEN 1 ELSE 0 END), 0),
+		COALESCE(AVG(NULLIF(` + j + `->>'confidence', '')::float8) FILTER (WHERE ` + jevAnsweredSQL + `), 0),
+		COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY NULLIF(` + j + `->>'confidence', '')::float8) FILTER (WHERE ` + jevAnsweredSQL + `), 0),
+		COUNT(*) FILTER (WHERE ` + jevAnsweredSQL + `),
+		COALESCE(SUM(CASE WHEN ` + jevAppliedSQL + ` AND ` + jevTierRankSQL(choice) + ` > ` + jevTierRankSQL(`e.scored_tier`) + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + jevAppliedSQL + ` AND ` + jevTierRankSQL(choice) + ` < ` + jevTierRankSQL(`e.scored_tier`) + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + jevAppliedSQL + ` AND ` + jevTierRankSQL(choice) + ` IS DISTINCT FROM ` + jevTierRankSQL(`e.scored_tier`) + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(AVG(NULLIF(` + j + `->>'latency_ms', '')::float8), 0),
+		COALESCE(AVG(` + jevIntSQL(j+`->>'input_tokens'`) + `), 0),
+		COALESCE(SUM(` + jevIntSQL(j+`->>'input_tokens'`) + `), 0)`)
+	b.WriteString(base)
+	b.WriteString(` ` + jevPresentSQL)
+
+	var (
+		consulted, accepted, lowConf, errs, breakerOpen, cacheHits int64
+		avgConf, p95Conf                                           float64
+		decidedCount                                               int64
+		over, under, overridden                                    int64
+		avgLatency, avgTokens                                      float64
+		tokenSum                                                   int64
+	)
+	if err := s.db.QueryRowContext(ctx, b.String(), args...).Scan(
+		&consulted, &accepted, &lowConf, &errs, &breakerOpen, &cacheHits,
+		&avgConf, &p95Conf, &decidedCount,
+		&over, &under, &overridden,
+		&avgLatency, &avgTokens, &tokenSum,
+	); err != nil {
+		return nil, fmt.Errorf("postgres store: auto-router jev stats aggregate: %w", err)
+	}
+	out.Consulted = consulted
+	out.Accepted = accepted
+	out.LowConfidence = lowConf
+	out.Errors = errs
+	out.BreakerOpen = breakerOpen
+	out.CacheHits = cacheHits
+	out.AvgConfidence = avgConf
+	out.P95Confidence = p95Conf
+	out.DecidedCount = decidedCount
+	out.Overrouted = over
+	out.Underrouted = under
+	out.OverrideCount = overridden
+	out.AvgLatencyMs = avgLatency
+	out.AvgInputTokens = avgTokens
+	out.InputTokens = tokenSum
+
+	// Choice distribution, seeded with the canonical tiers and split by whether
+	// the verdict was actually applied. base already opens with FROM, so the
+	// select list is prepended to it rather than restated.
+	cb := strings.Builder{}
+	cb.WriteString(`SELECT (` + choice + `) AS c, ` + jevAppliedSQL + ` AS applied, COUNT(*)`)
+	cb.WriteString(base)
+	cb.WriteString(` ` + jevPresentSQL + ` AND ` + choice + ` IS NOT NULL GROUP BY 1, 2`)
+	cargs := append([]any(nil), args...)
+	choiceRows, err := s.db.QueryContext(ctx, cb.String(), cargs...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: auto-router jev choice counts: %w", err)
+	}
+	defer choiceRows.Close()
+	for choiceRows.Next() {
+		var c string
+		var applied bool
+		var n int64
+		if err := choiceRows.Scan(&c, &applied, &n); err != nil {
+			return nil, err
+		}
+		out.ChoiceCounts[c] += n
+		if applied {
+			out.AppliedChoiceCounts[c] += n
+		}
+	}
+	if err := choiceRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Choice × scored tier, and over-routing attributed to the scored tier.
+	// Only applied verdicts can over-route, so the same predicate gates both.
+	vb := strings.Builder{}
+	vb.WriteString(`SELECT (` + choice + `), COALESCE(e.scored_tier, ''), COUNT(*), ` +
+		`COALESCE(SUM(CASE WHEN ` + jevTierRankSQL(choice) + ` > ` + jevTierRankSQL(`e.scored_tier`) + ` THEN 1 ELSE 0 END), 0)`)
+	vb.WriteString(base)
+	vb.WriteString(` ` + jevPresentSQL + ` AND ` + jevAppliedSQL + ` AND ` + choice + ` IS NOT NULL GROUP BY 1, 2`)
+	vargs := append([]any(nil), args...)
+	verdictRows, err := s.db.QueryContext(ctx, vb.String(), vargs...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: auto-router jev verdict tiers: %w", err)
+	}
+	defer verdictRows.Close()
+	for verdictRows.Next() {
+		var c, scored string
+		var n, overN int64
+		if err := verdictRows.Scan(&c, &scored, &n, &overN); err != nil {
+			return nil, err
+		}
+		out.ChoiceVsScored[c+"|"+scored] = n
+		if overN > 0 && scored != "" {
+			out.OverroutedByTier[scored] += overN
+		}
+	}
+	if err := verdictRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Confidence histogram: 20 buckets of 0.05. width_bucket returns 1..20 for
+	// [0,1) and 21 for a confidence of exactly 1.0, folded back into the last
+	// bucket so the histogram sums to DecidedCount.
+	hb := strings.Builder{}
+	hb.WriteString(`SELECT width_bucket(NULLIF(` + j + `->>'confidence', '')::float8, 0, 1, 20), COUNT(*)`)
+	hb.WriteString(base)
+	hb.WriteString(` ` + jevPresentSQL + ` AND ` + jevAnsweredSQL + ` GROUP BY 1 ORDER BY 1`)
+	hargs := append([]any(nil), args...)
+	histRows, err := s.db.QueryContext(ctx, hb.String(), hargs...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres store: auto-router jev confidence histogram: %w", err)
+	}
+	defer histRows.Close()
+	for histRows.Next() {
+		var bucket int
+		var n int64
+		if err := histRows.Scan(&bucket, &n); err != nil {
+			return nil, err
+		}
+		if bucket >= 1 && bucket <= 20 {
+			out.ConfidenceHistogram[bucket-1].Count = n
+		} else if bucket == 21 {
+			out.ConfidenceHistogram[19].Count += n
+		}
+	}
+	if err := histRows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out.ConfidenceHistogram {
+		out.ConfidenceHistogram[i].Bucket = i
 	}
 	return out, nil
 }

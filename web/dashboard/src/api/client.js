@@ -2155,6 +2155,19 @@ export async function getAutoRouterTierPerformance(params = {}) {
   return getAutoRouterStats({ ...params, top: 'performance' });
 }
 
+// Jev AI classifier rollup for one router: how often the classifier was
+// consulted and what it decided (accepted / low confidence / error / breaker
+// open), the confidence distribution, over- and under-routing against the
+// heuristic tier, latency, and token spend.
+// Returns { jev_stats: {...}, router: {...} } — the router block carries the
+// configured knobs (jev_enabled, jev_min_confidence, jev_timeout_ms,
+// jev_model_override), which the observed numbers must be read against. It is
+// omitted when the router cannot be resolved, so consumers must tolerate its
+// absence.
+export async function getAutoRouterJevStats(params = {}) {
+  return getAutoRouterStats({ ...params, top: 'jev' });
+}
+
 // Active scoring profile of one router (id = router PK id, not model_id).
 // Returns { router_id, version, hash, config, is_default }.
 export async function getAutoRouterProfile(id) {

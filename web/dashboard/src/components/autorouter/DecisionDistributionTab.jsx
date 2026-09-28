@@ -134,7 +134,13 @@ export default function DecisionDistributionTab({ router, decisionStats, onOpenR
   const cause = stats.cause_counts || {};
   const keywordCount = Number(cause.literal_keyword_match || 0);
   const scorerCount = Number(cause.complexity_scorer || 0);
-  const causeTotal = keywordCount + scorerCount;
+  // The classifier causes belong to the same denominator: with them omitted,
+  // every heuristic share is overstated as soon as the gate is enabled.
+  const jevAccepted = Number(cause.jev_classifier || 0);
+  const jevLowConf = Number(cause.jev_low_confidence || 0);
+  const jevFallback = Number(cause.jev_fallback_heuristic || 0);
+  const jevTotal = jevAccepted + jevLowConf + jevFallback;
+  const causeTotal = keywordCount + scorerCount + jevTotal;
   const mismatch = Number(stats.mismatch_count || 0);
 
   return (
@@ -166,6 +172,18 @@ export default function DecisionDistributionTab({ router, decisionStats, onOpenR
             <div className="stat-card__label">Complexity scorer</div>
             <div className="stat-card__value">{scorerCount.toLocaleString()}</div>
             <div className="stat-card__hint">{causeTotal ? `${Math.round((scorerCount / causeTotal) * 100)}% of decisions` : '—'}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-card__label">Jev classifier</div>
+            <div className="stat-card__value">{jevAccepted.toLocaleString()}</div>
+            <div className="stat-card__hint">{causeTotal ? `${Math.round((jevAccepted / causeTotal) * 100)}% of decisions` : '—'}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-card__label">Classifier fallbacks</div>
+            <div className="stat-card__value">{(jevLowConf + jevFallback).toLocaleString()}</div>
+            <div className="stat-card__hint">
+              {jevTotal > 0 ? `${jevLowConf.toLocaleString()} below floor · ${jevFallback.toLocaleString()} failed` : 'classifier never consulted'}
+            </div>
           </div>
           <div className="stat-card">
             <div className="stat-card__label">Tier mismatches</div>

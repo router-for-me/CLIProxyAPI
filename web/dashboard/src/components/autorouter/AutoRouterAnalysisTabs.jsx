@@ -1,8 +1,9 @@
 import React, { useState, useMemo } from 'react';
-import { listAutoRouters, getAutoRouterStats, getAutoRouterDecisionStats, getAutoRouterTierPerformance, getUsageFilterOptions } from '../../api/client.js';
+import { listAutoRouters, getAutoRouterStats, getAutoRouterDecisionStats, getAutoRouterTierPerformance, getAutoRouterJevStats, getUsageFilterOptions } from '../../api/client.js';
 import { useAsync } from '../../hooks/useAsync.js';
 import { Spinner, ErrorBanner, EmptyState } from '../Primitives.jsx';
 import DecisionDistributionTab from './DecisionDistributionTab.jsx';
+import JevTab from './JevTab.jsx';
 import SimulationTab from './SimulationTab.jsx';
 import ReplayTab from './ReplayTab.jsx';
 import { loadTimezone } from '../../pages/usageShared.jsx';
@@ -76,6 +77,10 @@ function buildStatsParams(router, apiKeyId, range) {
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'distribution', label: 'Decision distribution' },
+  // Jev AI sits next to the decision distribution because both explain the
+  // same routing decision from different angles: the distribution covers the
+  // heuristic scorer, this covers the classifier layered on top of it.
+  { key: 'jev', label: 'Jev AI' },
   { key: 'simulation', label: 'Simulation' },
   { key: 'replay', label: 'Replay' },
 ];
@@ -125,6 +130,12 @@ export default function AutoRouterAnalysisPage() {
   const performance = useAsync(
     () => getAutoRouterTierPerformance(params),
     [statsKey, tab === 'overview' ? 'active' : 'idle'],
+  );
+  // Classifier rollup + the router's configured knobs. Fetched for the Jev tab
+  // and for Overview, which surfaces the classifier's share of decisions.
+  const jevStats = useAsync(
+    () => getAutoRouterJevStats(params),
+    [statsKey, tab === 'jev' || tab === 'overview' || tab === 'distribution' ? 'active' : 'idle'],
   );
 
   const routerOptions = routers.data?.auto_routers || [];
@@ -277,9 +288,36 @@ export default function AutoRouterAnalysisPage() {
             error: decisionStats.error,
             data: decisionStats.data?.decision_stats || null,
           }}
+          jevStats={{
+            loading: jevStats.loading,
+            error: jevStats.error,
+            data: jevStats.data?.jev_stats || null,
+          }}
+          // The stats response's router block is authoritative; the list row is
+          // the fallback so the card still names the configuration if the block
+          // was omitted (an unresolvable router).
+          routerConfig={jevStats.data?.router || routerOptions.find(
+            (r) => r.model_id === selectedRouter?.model_id,
+          ) || null}
           totalRequests={totalRequests}
           totalCost={totalCost}
           noData={noData}
+        />
+      )}
+
+      {hasSelection && tab === 'jev' && (
+        <JevTab
+          jevStats={{
+            loading: jevStats.loading,
+            error: jevStats.error,
+            reload: jevStats.reload,
+            data: jevStats.data?.jev_stats || null,
+          }}
+          routedTotal={totalRequests}
+          // The stats response's router block is authoritative and always
+          // present when the router resolves; the list row is the fallback so
+          // the tab still names the configuration if the block was omitted.
+          routerConfig={jevStats.data?.router || selectedRouter}
         />
       )}
 
@@ -324,7 +362,7 @@ export default function AutoRouterAnalysisPage() {
 
 // OverviewTab is the original analysis page content, enriched with cause
 // badges on the tier cards and latency/error columns on the model table.
-function OverviewTab({ tiers, models, performance, decisionStats, totalRequests, totalCost, noData }) {
+function OverviewTab({ tiers, models, performance, decisionStats, jevStats, routerConfig, totalRequests, totalCost, noData }) {
   // Join performance rows onto the model table by model id.
   const perfByModel = useMemo(() => {
     const map = new Map();
@@ -337,8 +375,20 @@ function OverviewTab({ tiers, models, performance, decisionStats, totalRequests,
   const causeCounts = decisionStats.data?.cause_counts || {};
   const keywordCount = Number(causeCounts.literal_keyword_match || 0);
   const scorerCount = Number(causeCounts.complexity_scorer || 0);
-  const causeTotal = keywordCount + scorerCount;
+  // The classifier causes are part of the same denominator: omitting them
+  // would overstate every heuristic share once the gate is on.
+  const jevAccepted = Number(causeCounts.jev_classifier || 0);
+  const jevLowConf = Number(causeCounts.jev_low_confidence || 0);
+  const jevFallback = Number(causeCounts.jev_fallback_heuristic || 0);
+  const jevCount = jevAccepted + jevLowConf + jevFallback;
+  const causeTotal = keywordCount + scorerCount + jevCount;
   const keywordShare = causeTotal > 0 ? Math.round((keywordCount / causeTotal) * 100) : 0;
+  const jevShare = causeTotal > 0 ? Math.round((jevCount / causeTotal) * 100) : 0;
+  // Over-routing is the number worth watching: the classifier's errors on the
+  // evaluation corpus were all over-routing, which buys headroom rather than
+  // costing capability.
+  const jevOverrouted = Number(jevStats?.data?.overrouted || 0);
+  const jevConfigured = !!routerConfig?.jev_enabled;
 
   return (
     <>
@@ -349,6 +399,7 @@ function OverviewTab({ tiers, models, performance, decisionStats, totalRequests,
           <span className="dim" style={{ fontSize: 12 }}>
             {totalRequests.toLocaleString()} req · ${totalCost.toFixed(4)}
             {causeTotal > 0 && ` · ${keywordShare}% keyword-routed`}
+            {jevCount > 0 && ` · ${jevShare}% classifier-consulted`}
           </span>
         </div>
         {tiers.loading && <Spinner label="Loading tier stats…" />}
@@ -371,7 +422,51 @@ function OverviewTab({ tiers, models, performance, decisionStats, totalRequests,
         )}
       </div>
 
-      {/* View 2 — Cost + performance per target model */}
+      {/* View 2 — Jev AI classifier summary. Shown only when the router is
+          opted in or the classifier actually ran, so a deployment that never
+          enabled it sees the page it always saw. */}
+      {(jevConfigured || jevCount > 0) && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="row row--between" style={{ marginBottom: 12 }}>
+            <h3 className="card__title" style={{ margin: 0 }}>Jev AI classification</h3>
+            <span className="dim" style={{ fontSize: 12 }}>
+              {jevConfigured ? 'router opted in' : 'not opted in for this router'}
+            </span>
+          </div>
+          <div className="stats-grid">
+            <div className="stat-card">
+              <div className="stat-card__label">Consulted</div>
+              <div className="stat-card__value">{Number(jevStats?.data?.consulted || 0).toLocaleString()}</div>
+              <div className="stat-card__hint">
+                {causeTotal > 0 ? `${jevShare}% of decisions in range` : '—'}
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-card__label">Accepted</div>
+              <div className="stat-card__value">{jevAccepted.toLocaleString()}</div>
+              <div className="stat-card__hint">classifier tier routed</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-card__label">Over-routed</div>
+              <div className="stat-card__value">{jevOverrouted.toLocaleString()}</div>
+              <div className="stat-card__hint">
+                {Number(jevStats?.data?.underrouted || 0).toLocaleString()} under-routed
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-card__label">Fallbacks</div>
+              <div className="stat-card__value">{(jevLowConf + jevFallback).toLocaleString()}</div>
+              <div className="stat-card__hint">heuristic tier kept</div>
+            </div>
+          </div>
+          <p className="muted" style={{ marginTop: 12, marginBottom: 0 }}>
+            Full classifier detail — verdict split, confidence distribution
+            against the floor, and per-tier over-routing — is on the Jev AI tab.
+          </p>
+        </div>
+      )}
+
+      {/* View 3 — Cost + performance per target model */}
       <div className="card" style={{ marginTop: 16, padding: 0 }}>
         <div className="row row--between" style={{ padding: '14px 16px 8px' }}>
           <h3 className="card__title" style={{ margin: 0 }}>Cost & performance per target model</h3>
