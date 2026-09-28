@@ -1626,3 +1626,37 @@ func TestConvertClaudeRequestToOpenAI_ToolChoice(t *testing.T) {
 		}
 	})
 }
+
+
+func TestConvertClaudeRequestToOpenAI_EnabledThinkingEffort(t *testing.T) {
+	tests := []struct {
+		name       string
+		inputJSON  string
+		wantEffort string
+	}{
+		{
+			name:       "explicit output_config effort is preserved without budget",
+			inputJSON:  `{"thinking":{"type":"enabled"},"output_config":{"effort":"high"}}`,
+			wantEffort: "high",
+		},
+		{
+			name:       "legacy budget remains authoritative when both are present",
+			inputJSON:  `{"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}}`,
+			wantEffort: "medium",
+		},
+		{
+			name:       "enabled without budget or effort keeps auto default",
+			inputJSON:  `{"thinking":{"type":"enabled"}}`,
+			wantEffort: "auto",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+			if got := gjson.GetBytes(out, "reasoning_effort").String(); got != tt.wantEffort {
+				t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, tt.wantEffort, out)
+			}
+		})
+	}
+}
