@@ -16,6 +16,10 @@ import (
 // JevDefaultModel is the default classifier model (see jevclient.DefaultModel).
 const JevDefaultModel = jevclient.DefaultModel
 
+// JevDefaultBaseURL is the default classifier API root (see
+// jevclient.DefaultBaseURL).
+const JevDefaultBaseURL = jevclient.DefaultBaseURL
+
 // JevSettings is the singleton operator configuration for Jev AI
 // classification. The plaintext API key is never represented here — only
 // APIKeySet and a masked APIKeyPrefix — so a GET response cannot leak it. The
@@ -29,16 +33,20 @@ type JevSettings struct {
 	// stored as plaintext because PGSTORE_ENCRYPTION_KEY is unset. The dashboard
 	// surfaces this so an operator is not told a credential is encrypted when
 	// it is not.
-	APIKeyEncrypted bool      `json:"api_key_encrypted"`
-	Model           string    `json:"model"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	APIKeyEncrypted bool   `json:"api_key_encrypted"`
+	Model           string `json:"model"`
+	// BaseURL is the classifier API root. Empty means the public TypeSafe
+	// endpoint; an operator sets it to reach a self-hosted or regional
+	// deployment. It is not a secret, so it is returned as stored.
+	BaseURL   string    `json:"base_url"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // defaultJevSettings returns the fallback settings used when the singleton row
 // is missing. Classification is disabled by default, so no external traffic is
 // attempted until an operator turns it on and supplies a key.
 func defaultJevSettings() JevSettings {
-	return JevSettings{Enabled: false, Model: JevDefaultModel}
+	return JevSettings{Enabled: false, Model: JevDefaultModel, BaseURL: JevDefaultBaseURL}
 }
 
 // JevStore provides the singleton classifier configuration. It is backed by the
@@ -92,9 +100,10 @@ func (s *JevStore) Get(ctx context.Context) (JevSettings, error) {
 		       COALESCE(api_key_sealed, '') <> '' AS api_key_set,
 		       COALESCE(api_key_prefix, ''),
 		       model,
+		       COALESCE(base_url, ''),
 		       updated_at
 		FROM %s WHERE id = 1`, s.table))
-	errScan := row.Scan(&set.Enabled, &set.APIKeySet, &set.APIKeyPrefix, &set.Model, &set.UpdatedAt)
+	errScan := row.Scan(&set.Enabled, &set.APIKeySet, &set.APIKeyPrefix, &set.Model, &set.BaseURL, &set.UpdatedAt)
 	if errScan != nil {
 		if errors.Is(errScan, sql.ErrNoRows) {
 			return defaultJevSettings(), nil
@@ -109,11 +118,14 @@ func (s *JevStore) Get(ctx context.Context) (JevSettings, error) {
 	return set, nil
 }
 
-// clampJevSettings normalizes a settings row: a blank model falls back to the
-// pinned default.
+// clampJevSettings normalizes a settings row: a blank model or base URL falls
+// back to the pinned defaults.
 func clampJevSettings(s JevSettings) JevSettings {
 	if strings.TrimSpace(s.Model) == "" {
 		s.Model = JevDefaultModel
+	}
+	if strings.TrimSpace(s.BaseURL) == "" {
+		s.BaseURL = JevDefaultBaseURL
 	}
 	return s
 }
@@ -170,15 +182,16 @@ func (s *JevStore) Upsert(ctx context.Context, set JevSettings, apiKey *string) 
 	}
 
 	if _, errExec := s.db.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, enabled, api_key_sealed, api_key_prefix, model, updated_at)
-		VALUES (1, $1, $2, $3, $4, NOW())
+		INSERT INTO %s (id, enabled, api_key_sealed, api_key_prefix, model, base_url, updated_at)
+		VALUES (1, $1, $2, $3, $4, $5, NOW())
 		ON CONFLICT (id) DO UPDATE SET
 			enabled        = EXCLUDED.enabled,
 			api_key_sealed = EXCLUDED.api_key_sealed,
 			api_key_prefix = EXCLUDED.api_key_prefix,
 			model          = EXCLUDED.model,
+			base_url       = EXCLUDED.base_url,
 			updated_at     = NOW()
-	`, s.table), set.Enabled, sealedArg, prefixArg, set.Model); errExec != nil {
+	`, s.table), set.Enabled, sealedArg, prefixArg, set.Model, set.BaseURL); errExec != nil {
 		return set, fmt.Errorf("postgres store: upsert jev_settings: %w", errExec)
 	}
 

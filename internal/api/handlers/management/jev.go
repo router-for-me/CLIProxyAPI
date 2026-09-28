@@ -59,18 +59,21 @@ func (h *Handler) GetJevSettings(c *gin.Context) {
 // jevSettingsRequest is the JSON body accepted by PutJevSettings. Pointer-typed
 // fields are applied only when present, so a client can toggle the feature
 // without resending the key. api_key semantics: nil = keep, "" = clear,
-// non-empty = rotate and seal.
+// non-empty = rotate and seal. base_url semantics: nil = keep, "" = reset to
+// the public TypeSafe endpoint, non-empty = point at that API root.
 type jevSettingsRequest struct {
 	Enabled *bool   `json:"enabled,omitempty"`
 	APIKey  *string `json:"api_key,omitempty"`
 	Model   *string `json:"model,omitempty"`
+	BaseURL *string `json:"base_url,omitempty"`
 }
 
 // PutJevSettings handles PUT /v0/management/jev/settings.
 //
-// Partial update: omitted fields keep their stored value. A key rotated here is
-// sealed at rest and, when a rotator is wired, handed to the live classifier
-// client so it takes effect immediately rather than on the next restart.
+// Partial update: omitted fields keep their stored value. Endpoint changes (key
+// or base URL) are sealed at rest where applicable and, when a rotator is
+// wired, handed to the live classifier client so they take effect immediately
+// rather than on the next restart.
 func (h *Handler) PutJevSettings(c *gin.Context) {
 	s, ok := h.requireJev(c)
 	if !ok {
@@ -95,31 +98,39 @@ func (h *Handler) PutJevSettings(c *gin.Context) {
 			current.Model = model
 		}
 	}
+	if req.BaseURL != nil {
+		// An empty value is meaningful: it resets to the public endpoint rather
+		// than leaving the previous override in place. clampJevSettings fills in
+		// the default, so the stored value is never blank.
+		current.BaseURL = strings.TrimSpace(*req.BaseURL)
+	}
 	updated, errPut := s.Upsert(ctx, current, req.APIKey)
 	if errPut != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errPut.Error()})
 		return
 	}
-	// A key change (rotate or clear) must reach the live client: the gate is
-	// built once at startup, so without this a saved key would only apply after
-	// a restart. The plaintext value is read back from the store rather than
-	// reusing req.APIKey so the clear case ("" → empty) takes the same path.
-	if req.APIKey != nil {
-		h.rotateJevKey(c, s)
+	// Endpoint changes must reach the live client: the gate's client is built
+	// once at startup, so without this a saved key or base URL would only apply
+	// after a restart. The key is read back from the store rather than reused
+	// from req.APIKey so the clear case ("" → empty) takes the same path; the
+	// base URL comes from the saved settings so a blank input resolves to the
+	// default the store actually holds.
+	if req.APIKey != nil || req.BaseURL != nil {
+		h.rotateJevConfig(c, s, updated.BaseURL)
 	}
 	c.JSON(http.StatusOK, gin.H{"settings": updated})
 }
 
-// rotateJevKey hands the currently stored key to the live classifier client. It
-// is best-effort: a failure to read the key back is logged and swallowed
-// because the settings write itself already succeeded, and the next restart
-// picks the key up regardless.
-func (h *Handler) rotateJevKey(c *gin.Context, s jevSettingsStore) {
+// rotateJevConfig hands the stored key and the saved base URL to the live
+// classifier client. It is best-effort: a failure to read the key back is
+// logged and swallowed because the settings write itself already succeeded, and
+// the next restart picks the values up regardless.
+func (h *Handler) rotateJevConfig(c *gin.Context, s jevSettingsStore, baseURL string) {
 	if h == nil {
 		return
 	}
 	h.mu.Lock()
-	rotator := h.jevKeyRotator
+	rotator := h.jevRotator
 	h.mu.Unlock()
 	if rotator == nil {
 		return
@@ -136,4 +147,5 @@ func (h *Handler) rotateJevKey(c *gin.Context, s jevSettingsStore) {
 		key = plain
 	}
 	rotator.SetAPIKey(key)
+	rotator.SetBaseURL(baseURL)
 }

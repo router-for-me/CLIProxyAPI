@@ -143,14 +143,15 @@ type Handler struct {
 	pgFlusherLastDrops int64
 
 	// pgJev stores the singleton Jev AI classifier configuration (master
-	// toggle + sealed API key + pinned model). nil when PG is not configured —
-	// the /jev/settings routes return 503 in that case.
+	// toggle + sealed API key + pinned model + API root). nil when PG is not
+	// configured — the /jev/settings routes return 503 in that case.
 	pgJev jevSettingsStore
 
-	// jevKeyRotator receives a newly saved API key so the live classifier picks
-	// it up without a restart. nil disables live rotation, in which case a
-	// rotated key applies from the next server start.
-	jevKeyRotator JevKeyRotator
+	// jevRotator receives the classifier endpoint settings whenever an operator
+	// saves them, so the live client picks them up without a restart. nil
+	// disables live rotation, in which case a change applies from the next
+	// server start.
+	jevRotator JevConfigRotator
 
 	// v1ModelsHandler is the http.Handler that serves GET /v1/models. It is
 	// wired by api.Server after route setup so the management handler can
@@ -564,22 +565,28 @@ func (h *Handler) SetJevStore(s *store.JevStore) {
 	h.mu.Unlock()
 }
 
-// JevKeyRotator receives the plaintext classifier API key whenever an operator
-// saves or clears one, so a running server can adopt it without a restart. The
-// implementation is the classifier client; keeping it an interface avoids an
-// api → autorouter dependency in the management package.
-type JevKeyRotator interface {
+// JevConfigRotator receives the classifier endpoint settings whenever an
+// operator changes them, so a running server can adopt them without a restart.
+// The implementation is the classifier client; keeping it an interface avoids
+// an api → autorouter dependency in the management package.
+//
+// Both methods are called on every settings write, including a write that
+// changed neither — an empty key (or an empty base URL, which resets to the
+// public endpoint) is a legitimate value here, so there is no "unchanged"
+// sentinel to skip on.
+type JevConfigRotator interface {
 	SetAPIKey(key string)
+	SetBaseURL(baseURL string)
 }
 
-// SetJevKeyRotator wires the sink for classifier API-key changes. Called during
-// server construction, after the gate's client exists.
-func (h *Handler) SetJevKeyRotator(r JevKeyRotator) {
+// SetJevConfigRotator wires the sink for classifier endpoint changes. Called
+// during server construction, after the gate's client exists.
+func (h *Handler) SetJevConfigRotator(r JevConfigRotator) {
 	if h == nil {
 		return
 	}
 	h.mu.Lock()
-	h.jevKeyRotator = r
+	h.jevRotator = r
 	h.mu.Unlock()
 }
 

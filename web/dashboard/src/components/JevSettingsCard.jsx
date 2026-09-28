@@ -39,6 +39,7 @@ function JevSettingsCard() {
       const body = {
         enabled: !!draft.enabled,
         model: String(draft.model || '').trim(),
+        base_url: String(draft.base_url ?? '').trim(),
       };
       // Only send the key when one was typed: omitting it preserves whatever is
       // stored, which is what "leave the box blank" should mean.
@@ -113,10 +114,26 @@ function JevSettingsCard() {
             </label>
           </div>
 
+          <label className="form__row" style={{ marginTop: 12 }}>
+            <span className="form__label">API base URL</span>
+            <input
+              type="text"
+              value={draft.base_url ?? ''}
+              placeholder="https://api.typesafe.ai"
+              onChange={(e) => set({ base_url: e.target.value })}
+              spellCheck={false}
+            />
+          </label>
+          <p className="muted" style={{ marginTop: 4 }}>
+            The endpoint classifier requests are sent to. Point it at a
+            self-hosted or regional deployment, or leave it at the public
+            TypeSafe API. Clearing the field resets it to that default.
+          </p>
+
           <p className="muted" style={{ marginTop: 8 }}>
             The key is never returned by the API. Leave the field blank to keep the
-            current key; type a new one to replace it. A saved key is adopted by the
-            running server immediately.
+            current key; type a new one to replace it. A saved key or base URL is
+            adopted by the running server immediately.
           </p>
           {keySet && !draft.api_key_encrypted && (
             <p className="muted" style={{ marginTop: 8, color: 'var(--warn, #b45309)' }}>

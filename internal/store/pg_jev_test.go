@@ -147,6 +147,61 @@ func TestJevStoreDefaultsModelWhenBlank(t *testing.T) {
 	}
 }
 
+// The default settings and a blank stored value must both resolve to the public
+// endpoint: a blank base URL would otherwise build a relative request URL.
+func TestJevStoreDefaultsBaseURL(t *testing.T) {
+	s := newTestJevStore(t)
+	ctx := context.Background()
+
+	got, errGet := s.Get(ctx)
+	if errGet != nil {
+		t.Fatalf("Get: %v", errGet)
+	}
+	if got.BaseURL != JevDefaultBaseURL {
+		t.Errorf("default base_url = %q, want %q", got.BaseURL, JevDefaultBaseURL)
+	}
+
+	blank, errBlank := s.Upsert(ctx, JevSettings{Enabled: true, BaseURL: "   "}, nil)
+	if errBlank != nil {
+		t.Fatalf("Upsert: %v", errBlank)
+	}
+	if blank.BaseURL != JevDefaultBaseURL {
+		t.Errorf("blank base_url = %q, want %q", blank.BaseURL, JevDefaultBaseURL)
+	}
+}
+
+// A custom base URL must survive the round-trip through the database, since it
+// is what points the classifier at a self-hosted deployment. Reading it back
+// through a fresh store instance proves it came from the column and not from
+// the in-memory cache the write invalidated.
+func TestJevStoreBaseURLRoundTrips(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_jev_baseurl")
+	ctx := context.Background()
+	if _, errExec := pg.DB().ExecContext(ctx, "DELETE FROM "+pg.JevSettingsTable()); errExec != nil {
+		t.Fatalf("reset jev_settings: %v", errExec)
+	}
+	if _, errExec := pg.DB().ExecContext(ctx, "INSERT INTO "+pg.JevSettingsTable()+" (id) VALUES (1)"); errExec != nil {
+		t.Fatalf("reseed jev_settings: %v", errExec)
+	}
+	s := NewJevStore(pg)
+	if s == nil {
+		t.Fatal("NewJevStore returned nil")
+	}
+
+	const custom = "https://jev.internal.example"
+	if _, errPut := s.Upsert(ctx, JevSettings{Enabled: true, BaseURL: custom}, nil); errPut != nil {
+		t.Fatalf("Upsert: %v", errPut)
+	}
+
+	got, errGet := NewJevStore(pg).Get(ctx)
+	if errGet != nil {
+		t.Fatalf("Get: %v", errGet)
+	}
+	if got.BaseURL != custom {
+		t.Errorf("base_url = %q, want %q", got.BaseURL, custom)
+	}
+}
+
 func TestNewJevStoreNilParent(t *testing.T) {
 	if s := NewJevStore(nil); s != nil {
 		t.Fatalf("NewJevStore(nil) = %v, want nil", s)

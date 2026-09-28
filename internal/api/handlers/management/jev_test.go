@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,14 @@ func (s *stubJevStore) Get(_ context.Context) (store.JevSettings, error) {
 func (s *stubJevStore) Upsert(_ context.Context, set store.JevSettings, apiKey *string) (store.JevSettings, error) {
 	s.set.Enabled = set.Enabled
 	s.set.Model = set.Model
+	// Mirror the real store's normalization: the handler deliberately passes a
+	// blank base URL through on a clear, relying on the store to resolve it to
+	// the public default. A stub that stored the blank verbatim would let the
+	// handler's callers be tested against behaviour the real store never has.
+	s.set.BaseURL = set.BaseURL
+	if strings.TrimSpace(s.set.BaseURL) == "" {
+		s.set.BaseURL = store.JevDefaultBaseURL
+	}
 	s.seen = apiKey
 	if apiKey != nil {
 		if *apiKey == "" {
@@ -164,6 +173,79 @@ func TestGetJevSettingsReturnsMaskedPrefix(t *testing.T) {
 	}
 	if got.Settings.APIKeyPrefix != "sk-ts-…1234" {
 		t.Errorf("prefix = %q", got.Settings.APIKeyPrefix)
+	}
+}
+
+// The base URL is not a secret, so unlike the key it round-trips through GET
+// and lets the dashboard show what the classifier is actually pointed at.
+func TestJevSettingsBaseURLRoundTrips(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	stub := &stubJevStore{set: store.JevSettings{Enabled: true, APIKeySet: true, Model: "jev-1.13.0"}}
+	h := &Handler{pgJev: stub}
+
+	c, rec := newJevTestContext(http.MethodPut, "/v0/management/jev/settings",
+		`{"base_url":"https://jev.internal.example"}`)
+	h.PutJevSettings(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if stub.set.BaseURL != "https://jev.internal.example" {
+		t.Fatalf("stored base URL = %q", stub.set.BaseURL)
+	}
+
+	gc, grec := newJevTestContext(http.MethodGet, "/v0/management/jev/settings", "")
+	h.GetJevSettings(gc)
+	var got struct {
+		Settings struct {
+			BaseURL string `json:"base_url"`
+		} `json:"settings"`
+	}
+	if errDecode := json.Unmarshal(grec.Body.Bytes(), &got); errDecode != nil {
+		t.Fatalf("decode: %v", errDecode)
+	}
+	if got.Settings.BaseURL != "https://jev.internal.example" {
+		t.Errorf("GET base_url = %q, want the stored value", got.Settings.BaseURL)
+	}
+}
+
+// Omitting base_url must leave an existing override untouched: a dashboard save
+// that only flips the master switch must not silently repoint the classifier.
+func TestPutJevSettingsOmittedBaseURLIsPreserved(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	stub := &stubJevStore{set: store.JevSettings{
+		Enabled: true, Model: "jev-1.13.0", BaseURL: "https://jev.internal.example",
+	}}
+	h := &Handler{pgJev: stub}
+
+	c, rec := newJevTestContext(http.MethodPut, "/v0/management/jev/settings", `{"enabled":false}`)
+	h.PutJevSettings(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if stub.set.BaseURL != "https://jev.internal.example" {
+		t.Errorf("base URL = %q, want the stored override preserved", stub.set.BaseURL)
+	}
+}
+
+// A blank base URL is an explicit reset, not a no-op: it must resolve to the
+// public endpoint rather than persist an empty string that would produce a
+// relative request URL.
+func TestPutJevSettingsBlankBaseURLResetsToDefault(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	stub := &stubJevStore{set: store.JevSettings{
+		Enabled: true, Model: "jev-1.13.0", BaseURL: "https://jev.internal.example",
+	}}
+	h := &Handler{pgJev: stub}
+
+	c, rec := newJevTestContext(http.MethodPut, "/v0/management/jev/settings", `{"base_url":"  "}`)
+	h.PutJevSettings(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if stub.set.BaseURL != store.JevDefaultBaseURL {
+		t.Errorf("base URL = %q, want the public default %q", stub.set.BaseURL, store.JevDefaultBaseURL)
 	}
 }
 

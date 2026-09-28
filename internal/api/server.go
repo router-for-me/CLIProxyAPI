@@ -333,12 +333,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 			handlers.SetJevGate(nil)
 		} else {
 			// The client is always built, even with no key, so that saving one
-			// from the dashboard can be adopted live (SetJevKeyRotator below).
+			// from the dashboard can be adopted live (SetJevConfigRotator below).
 			// The gate still short-circuits before any call while the provider
 			// reports apiKeySet=false.
-			client := jevclient.New("", key, nil)
+			client := jevclient.New(jevBaseURL(handles.Jev), key, nil)
 			handlers.SetJevGate(client)
-			s.mgmt.SetJevKeyRotator(client)
+			s.mgmt.SetJevConfigRotator(client)
 		}
 		// Surface official_provider on Usage Stats / Errors rows so the
 		// dashboard can show "Provider Official" (e.g. "anthropic") instead of
@@ -581,4 +581,20 @@ func jevAPIKey(jevStore *store.JevStore) (string, error) {
 		return "", nil
 	}
 	return jevStore.APIKey(context.Background())
+}
+
+// jevBaseURL returns the configured classifier API root, or "" to accept the
+// client's default. A read failure is not fatal: the feature is unusable
+// without a key anyway, and the stored value can be re-applied from the
+// dashboard, so this warns and falls back rather than disabling the gate.
+func jevBaseURL(jevStore *store.JevStore) string {
+	if jevStore == nil {
+		return ""
+	}
+	set, errGet := jevStore.Get(context.Background())
+	if errGet != nil {
+		log.WithError(errGet).Warn("api: could not read the Jev base URL; using the default endpoint")
+		return ""
+	}
+	return set.BaseURL
 }

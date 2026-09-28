@@ -1166,16 +1166,21 @@ export async function putAlertSettings(body) {
 // the router's floor. These are the global switches; the per-router opt-in
 // lives on each Auto Router.
 //
-// Returns { settings: { enabled, api_key_set, api_key_prefix, model, updated_at } }.
+// Returns { settings: { enabled, api_key_set, api_key_prefix, api_key_encrypted,
+// model, base_url, updated_at } }.
 // The API key itself is never returned — only whether one is configured and a
-// short prefix for recognition.
+// short prefix for recognition. The base URL is not a secret and is returned as
+// stored.
 export async function getJevSettings() {
   return fetchJSON('/jev/settings');
 }
 
-// Update the Jev settings (partial merge). `api_key` is tri-state:
-// omit it to keep the stored key, send "" to clear it, or send a new value to
-// rotate it. Returns the persisted settings.
+// Update the Jev settings (partial merge). Two fields are tri-state on the
+// wire, and the distinction between "omitted" and "empty" matters for both:
+//   api_key  — omit to keep the stored key, "" to clear it, a value to rotate.
+//   base_url — omit to keep the stored endpoint, "" to reset to the public
+//              TypeSafe endpoint, a value to point at it.
+// Returns the persisted settings.
 export async function putJevSettings(body) {
   return fetchJSON('/jev/settings', {
     method: 'PUT',

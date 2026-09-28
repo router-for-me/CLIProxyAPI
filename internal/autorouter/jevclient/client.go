@@ -85,25 +85,32 @@ type request struct {
 
 // Client is an HTTP client for the System One API.
 type Client struct {
+	// baseURL and apiKey are guarded by mu: both can be changed at runtime (the
+	// operator saves a new one in the dashboard) while requests are in flight.
+	mu      sync.RWMutex
 	baseURL string
-	// apiKey is guarded by mu: the key can be rotated at runtime (the operator
-	// saves a new one in the dashboard) while requests are in flight.
-	mu     sync.RWMutex
-	apiKey string
-	http   *http.Client
+	apiKey  string
+	http    *http.Client
 }
 
 // New builds a Client. An empty baseURL uses DefaultBaseURL; a nil http client
 // uses http.DefaultClient. The client is used as-is so the caller owns
 // connection pooling.
 func New(baseURL, apiKey string, hc *http.Client) *Client {
-	if strings.TrimSpace(baseURL) == "" {
-		baseURL = DefaultBaseURL
-	}
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, http: hc}
+	return &Client{baseURL: normalizeBaseURL(baseURL), apiKey: apiKey, http: hc}
+}
+
+// normalizeBaseURL trims a configured endpoint and falls back to the public API
+// root when nothing is set, so an empty setting never yields a relative request.
+func normalizeBaseURL(baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return DefaultBaseURL
+	}
+	return strings.TrimRight(baseURL, "/")
 }
 
 // SetAPIKey rotates the credential used for subsequent calls. Safe to call
@@ -129,6 +136,28 @@ func (c *Client) APIKey() string {
 	return c.apiKey
 }
 
+// SetBaseURL repoints the client at a different API root, for a self-hosted or
+// regional endpoint. Safe to call while requests are in flight. An empty value
+// restores DefaultBaseURL rather than producing relative URLs.
+func (c *Client) SetBaseURL(baseURL string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.baseURL = normalizeBaseURL(baseURL)
+	c.mu.Unlock()
+}
+
+// BaseURL returns the API root currently in use.
+func (c *Client) BaseURL() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.baseURL
+}
+
 // Call sends one state and its question set, returning the parsed response. It
 // performs exactly one attempt.
 func (c *Client) Call(ctx context.Context, model string, state any, questions map[string]Question) (Response, error) {
@@ -136,7 +165,7 @@ func (c *Client) Call(ctx context.Context, model string, state any, questions ma
 	if errMarshal != nil {
 		return Response{}, fmt.Errorf("jevclient: marshal request: %w", errMarshal)
 	}
-	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+systemOnePath, bytes.NewReader(body))
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL()+systemOnePath, bytes.NewReader(body))
 	if errReq != nil {
 		return Response{}, fmt.Errorf("jevclient: build request: %w", errReq)
 	}

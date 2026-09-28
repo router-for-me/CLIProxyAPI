@@ -162,6 +162,7 @@ func main() {
 	corpusPath := flag.String("corpus", "", "path to the JSONL corpus (required)")
 	doClassify := flag.Bool("classify", false, "also run the Jev classifier (requires JEV_API_KEY; calls the API and costs money)")
 	model := flag.String("model", "", "classifier model (default: store default)")
+	baseURL := flag.String("base-url", "", "classifier API root (default: the public TypeSafe endpoint)")
 	minConf := flag.Float64("min-confidence", 0.5, "confidence floor for accepting a classifier verdict")
 	timeout := flag.Duration("timeout", 5*time.Second, "per-call classifier timeout (eval only; the request path uses its own bound)")
 	concurrency := flag.Int("concurrency", 4, "parallel classifier calls; keep low to stay under API rate limits")
@@ -195,7 +196,7 @@ func main() {
 			log.Error("autorouter_eval: -classify requires JEV_API_KEY")
 			os.Exit(2)
 		}
-		caller = jevclient.New("", key, nil)
+		caller = jevclient.New(*baseURL, key, nil)
 	}
 
 	outcomes := run(cases, caller, classificationModel, *minConf, *timeout, *concurrency)

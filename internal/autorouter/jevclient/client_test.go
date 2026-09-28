@@ -139,3 +139,73 @@ func TestSetAPIKeyNilClientIsSafe(t *testing.T) {
 		t.Errorf("APIKey() on a nil client = %q, want empty", got)
 	}
 }
+
+// Repointing the client at a different API root must change where the next
+// request goes, without rebuilding the client (the gate holds one instance for
+// the process lifetime).
+func TestSetBaseURLRepointsRequests(t *testing.T) {
+	var hits []string
+	var mu sync.Mutex
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits = append(hits, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"jev-1.13.0","answers":{},"usage":{}}`))
+	}
+	first := httptest.NewServer(http.HandlerFunc(handler))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(handler))
+	defer second.Close()
+
+	c := New(first.URL, "k", first.Client())
+	if _, errOne := c.Call(context.Background(), "jev-1.13.0", nil, nil); errOne != nil {
+		t.Fatalf("first call: %v", errOne)
+	}
+	c.SetBaseURL(second.URL)
+	if got := c.BaseURL(); got != second.URL {
+		t.Fatalf("BaseURL() = %q, want %q", got, second.URL)
+	}
+	// The client is shared, so a repoint must also carry the transport that can
+	// reach the new host — srv.Client() trusts both httptest servers here.
+	c.http = second.Client()
+	if _, errTwo := c.Call(context.Background(), "jev-1.13.0", nil, nil); errTwo != nil {
+		t.Fatalf("second call: %v", errTwo)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hits) != 2 {
+		t.Fatalf("hits = %v, want one call per server", hits)
+	}
+}
+
+// A blank or whitespace-only base URL must restore the default rather than
+// leave the client building relative URLs.
+func TestSetBaseURLBlankRestoresDefault(t *testing.T) {
+	c := New("https://jev.internal.example", "k", nil)
+	for _, blank := range []string{"", "   ", "\t"} {
+		c.SetBaseURL("https://jev.internal.example")
+		c.SetBaseURL(blank)
+		if got := c.BaseURL(); got != DefaultBaseURL {
+			t.Errorf("BaseURL() after %q = %q, want %q", blank, got, DefaultBaseURL)
+		}
+	}
+}
+
+// A configured endpoint keeps no trailing slash, so the request path is not
+// doubled when it is concatenated.
+func TestNewTrimsTrailingSlashFromBaseURL(t *testing.T) {
+	c := New("https://jev.internal.example/", "k", nil)
+	if got := c.BaseURL(); got != "https://jev.internal.example" {
+		t.Errorf("BaseURL() = %q, want the trailing slash trimmed", got)
+	}
+}
+
+func TestSetBaseURLNilClientIsSafe(t *testing.T) {
+	var c *Client
+	c.SetBaseURL("https://ignored.example") // must not panic
+	if got := c.BaseURL(); got != "" {
+		t.Errorf("BaseURL() on a nil client = %q, want empty", got)
+	}
+}
