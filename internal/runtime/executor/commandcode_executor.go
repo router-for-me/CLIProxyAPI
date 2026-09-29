@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	responses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -252,6 +253,14 @@ func (e *CommandCodeExecutor) Execute(ctx context.Context, a *cliproxyauth.Auth,
 		// building the upstream envelope.
 		upstreamModel := registry.CommandCodeUpstreamModelID(req.Model)
 		payload = helps.ConvertOpenAIToCommandCodeRequest(upstreamModel, req.Payload, false)
+	} else if opts.SourceFormat == sdktranslator.FormatOpenAIResponse {
+		// OpenAI Responses API requests arrive as raw Responses JSON. Convert
+		// them to Chat Completions first, then reuse the existing Chat
+		// Completions → harness envelope conversion; skipping this chain sent
+		// the untranslatable body upstream, which dropped the model field and
+		// surfaced plan-gate 403s (MODEL_NOT_IN_PLAN for the default model).
+		chatPayload := responses.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(registry.CommandCodeUpstreamModelID(req.Model), req.Payload, false)
+		payload = helps.ConvertOpenAIToCommandCodeRequest(registry.CommandCodeUpstreamModelID(req.Model), chatPayload, false)
 	}
 
 	httpReq, errNew := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
@@ -293,6 +302,13 @@ func (e *CommandCodeExecutor) Execute(ctx context.Context, a *cliproxyauth.Auth,
 		}, fmt.Errorf("commandcode execute aggregation error: %w", errAccum)
 	}
 
+	// Downstream /v1/responses clients expect a Responses object, not a Chat
+	// Completions payload; the gateway does not run an executor-side response
+	// translation pass, so translate here.
+	if opts.ResponseFormat == sdktranslator.FormatOpenAIResponse {
+		openaiJSON = responses.ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(ctx, req.Model, opts.OriginalRequest, req.Payload, openaiJSON, nil)
+	}
+
 	return cliproxyexecutor.Response{
 		Payload: openaiJSON,
 		Headers: resp.Header,
@@ -310,6 +326,11 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, a *cliproxyauth
 		// Same upstream spelling rewrite as the non-streaming path.
 		upstreamModel := registry.CommandCodeUpstreamModelID(req.Model)
 		payload = helps.ConvertOpenAIToCommandCodeRequest(upstreamModel, req.Payload, true)
+	} else if opts.SourceFormat == sdktranslator.FormatOpenAIResponse {
+		// Same two-stage Responses-API request repair as the non-streaming
+		// path: Responses → Chat Completions → harness envelope.
+		chatPayload := responses.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(registry.CommandCodeUpstreamModelID(req.Model), req.Payload, true)
+		payload = helps.ConvertOpenAIToCommandCodeRequest(registry.CommandCodeUpstreamModelID(req.Model), chatPayload, true)
 	}
 
 	httpReq, errNew := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
@@ -343,7 +364,17 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, a *cliproxyauth
 
 		reader := helps.NewUnboundedNDJSONReader(resp.Body)
 		var param any
+		var responsesParam any
 		sawTerminal := false
+		emit := func(chunk []byte) bool {
+			select {
+			case <-ctx.Done():
+				chunks <- cliproxyexecutor.StreamChunk{Err: ctx.Err()}
+				return false
+			case chunks <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+				return true
+			}
+		}
 
 		for {
 			select {
@@ -389,6 +420,40 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, a *cliproxyauth
 			}
 
 			sseChunks := helps.ConvertCommandCodeStreamToOpenAI(ctx, req.Model, opts.OriginalRequest, req.Payload, line, &param)
+			if opts.ResponseFormat == sdktranslator.FormatOpenAIResponse {
+				// Downstream is a /v1/responses client: translate each Chat
+				// Completions chunk into Responses SSE events. Emit a terminal
+				// [DONE] frame after finish-step/finish because the ndjson
+				// converter never produces one, and the Responses converter
+				// relies on it to flush its completed event.
+				done := false
+				for _, chunk := range sseChunks {
+					for _, respChunk := range sdktranslator.TranslateStream(ctx, sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse, req.Model, opts.OriginalRequest, req.Payload, chunk, &responsesParam) {
+						if !emit(respChunk) {
+							done = true
+							break
+						}
+					}
+					if done {
+						break
+					}
+				}
+				if !done && (event.Type == "finish-step" || event.Type == "finish") {
+					// Feed [DONE] through the converter first: the Responses
+					// converter defers response.completed until it sees the
+					// terminal marker, then emit the literal [DONE] frame.
+					for _, respChunk := range sdktranslator.TranslateStream(ctx, sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse, req.Model, opts.OriginalRequest, req.Payload, []byte("[DONE]"), &responsesParam) {
+						if !emit(respChunk) {
+							done = true
+							break
+						}
+					}
+					if !done {
+						emit([]byte("[DONE]"))
+					}
+				}
+				continue
+			}
 			for _, chunk := range sseChunks {
 				select {
 				case <-ctx.Done():
