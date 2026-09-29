@@ -676,7 +676,8 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	}
 	saved, errUpdate := m.UpdateRefreshedAuth(ctx, base, updated)
 	if errUpdate != nil {
-		log.Debugf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
+		log.Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
 		return nil, errUpdate
 	}
 	if saved == nil {
