@@ -477,6 +477,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var seenDone bool
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			if e.responseSink != nil {
+				e.responseSink.CaptureStreamChunk(ctx, bytes.Clone(line))
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			streamUsage.ObserveOpenAIStream(line)
 			trimmedLine := bytes.TrimSpace(line)
@@ -659,9 +662,6 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			n, errRead := httpResp.Body.Read(buffer)
 			if n > 0 {
 				chunk := bytes.Clone(buffer[:n])
-				if e.responseSink != nil {
-					e.responseSink.CaptureStreamChunk(ctx, chunk)
-				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
