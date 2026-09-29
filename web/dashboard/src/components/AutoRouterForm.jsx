@@ -95,6 +95,9 @@ export const EMPTY_ROUTER = {
   description: '',
   display_name: '',
   vision_bridge_model: '',
+  vision_bridge_providers: [],
+  vision_bridge_strategy: '',
+  vision_bridge_priorities: [],
   jev_enabled: false,
   jev_min_confidence: '',
   jev_timeout_ms: '',
@@ -141,6 +144,16 @@ export function routerToForm(r) {
     description: r?.description || '',
     display_name: r?.display_name || '',
     vision_bridge_model: r?.vision_bridge_model || '',
+    vision_bridge_providers: Array.isArray(r?.vision_bridge_providers)
+      ? r.vision_bridge_providers.map((p) => (typeof p === 'string' ? p : ''))
+      : [],
+    vision_bridge_strategy: r?.vision_bridge_strategy || '',
+    vision_bridge_priorities: Array.isArray(r?.vision_bridge_priorities)
+      ? r.vision_bridge_priorities.map((p) => ({
+          provider: p?.provider || '',
+          priority: Number(p?.priority) || 0,
+        }))
+      : [],
     jev_enabled: r?.jev_enabled ?? false,
     // 0 is the server's "unset" sentinel for these two, so render it blank
     // rather than as a literal 0 the operator would have to clear.
@@ -287,6 +300,16 @@ export function formToRouter(form) {
     description: (form.description || '').trim(),
     display_name: (form.display_name || '').trim(),
     vision_bridge_model: (form.vision_bridge_model || '').trim(),
+    // Bridge routing pin: empty providers serialise as [] (clear) so the
+    // operator can return to auto-discover with one click. Priorities with a
+    // missing/blank provider or zero weight are dropped to avoid cluttering
+    // the persisted row.
+    vision_bridge_providers: (form.vision_bridge_providers || [])
+      .filter((p) => typeof p === 'string' && p.trim() !== ''),
+    vision_bridge_strategy: (form.vision_bridge_strategy || '').trim(),
+    vision_bridge_priorities: (form.vision_bridge_priorities || [])
+      .filter((p) => p && (p.provider || '').trim() !== '' && Number(p.priority) > 0)
+      .map((p) => ({ provider: p.provider.trim(), priority: Number(p.priority) || 0 })),
     // The classifier is opt-in per router; its knobs are only meaningful when
     // it is on, so they are zeroed (the server's "use the default" sentinel)
     // whenever it is off. That keeps a disabled router's stored row free of
@@ -569,6 +592,33 @@ export default function AutoRouterForm({ initial, onChange }) {
               text is passed to the tier model. Leave empty to disable.
             </div>
           </div>
+
+          {form.vision_bridge_model && (
+            <div className="ar-form__field">
+              <label className="ar-form__label">Vision bridge routing</label>
+              <ModelRouteConfigSection
+                model={form.vision_bridge_model}
+                allowWeighted
+                route={{
+                  providers: form.vision_bridge_providers,
+                  strategy: form.vision_bridge_strategy,
+                  priorities: form.vision_bridge_priorities,
+                }}
+                onChange={(next) => {
+                  set('vision_bridge_providers', next.providers);
+                  set('vision_bridge_strategy', next.strategy);
+                  set('vision_bridge_priorities', next.priorities);
+                }}
+              />
+              <div className="ar-form__hint">
+                Pins upstream providers for the vision bridge model. Leave empty to auto-discover live
+                providers via the global registry (legacy). When pinned, "priority" orders by the weights
+                below; "failover" (or empty) tries in pinned order and stops at the first non-empty
+                analysis; "weighted" picks exactly one provider per request, weighted by the priorities
+                below, so load can be spread across providers.
+              </div>
+            </div>
+          )}
 
           <div className="ar-form__field">
             <label className="ar-form__label" htmlFor="ar-jev-enabled" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>

@@ -166,3 +166,99 @@ func TestDecodeAutoRouterJevUpdateDistinguishesAbsentFromZero(t *testing.T) {
 		t.Error("explicit jev_min_confidence:0 must decode to a non-nil zero")
 	}
 }
+
+// TestDecodeAutoRouterVisionBridgeFields asserts the create-side DTO carries
+// the per-router vision bridge routing fields (providers/strategy/priorities).
+// Mirrors the Jev decode test for the same reason: regression coverage for
+// "the store and runtime both handle them, but the DTO never carried them so
+// the operator's settings silently dropped on save".
+func TestDecodeAutoRouterVisionBridgeFields(t *testing.T) {
+	body := `{
+		"name": "r1", "model_id": "router:r1",
+		"vision_bridge_model": "gemma-4-31b",
+		"vision_bridge_providers": ["opencode", "zai"],
+		"vision_bridge_strategy": "priority",
+		"vision_bridge_priorities": [
+			{"provider": "opencode", "priority": 10},
+			{"provider": "zai",     "priority": 5}
+		]
+	}`
+	var req createAutoRouterRequest
+	if errDecode := json.Unmarshal([]byte(body), &req); errDecode != nil {
+		t.Fatalf("decode create request: %v", errDecode)
+	}
+	if req.VisionBridgeModel != "gemma-4-31b" {
+		t.Errorf("vision_bridge_model = %q", req.VisionBridgeModel)
+	}
+	if len(req.VisionBridgeProviders) != 2 || req.VisionBridgeProviders[0] != "opencode" {
+		t.Errorf("vision_bridge_providers = %v", req.VisionBridgeProviders)
+	}
+	if req.VisionBridgeStrategy != "priority" {
+		t.Errorf("vision_bridge_strategy = %q", req.VisionBridgeStrategy)
+	}
+	if len(req.VisionBridgePriorities) != 2 || req.VisionBridgePriorities[0].Provider != "opencode" || req.VisionBridgePriorities[0].Priority != 10 {
+		t.Errorf("vision_bridge_priorities = %+v", req.VisionBridgePriorities)
+	}
+}
+
+// TestDecodeAutoRouterVisionBridgeUpdateDistinguishesAbsentFromZero mirrors
+// the Jev partial-update test for the bridge fields: a request that omits
+// them must keep them nil/empty (preserve), while an explicit empty slice /
+// explicit "" strategy must be distinguishable so the operator can clear the
+// pin to auto-discover.
+func TestDecodeAutoRouterVisionBridgeUpdateDistinguishesAbsentFromZero(t *testing.T) {
+	var absent updateAutoRouterRequest
+	if errDecode := json.Unmarshal([]byte(`{"name":"r1"}`), &absent); errDecode != nil {
+		t.Fatalf("decode absent: %v", errDecode)
+	}
+	if absent.VisionBridgeProviders != nil {
+		t.Errorf("absent vision_bridge_providers must stay nil (preserve), got %+v", absent.VisionBridgeProviders)
+	}
+	if absent.VisionBridgeStrategy != nil {
+		t.Errorf("absent vision_bridge_strategy must stay nil (preserve), got %+v", *absent.VisionBridgeStrategy)
+	}
+
+	var explicit updateAutoRouterRequest
+	if errDecode := json.Unmarshal([]byte(`{"vision_bridge_providers":[],"vision_bridge_strategy":""}`), &explicit); errDecode != nil {
+		t.Fatalf("decode explicit: %v", errDecode)
+	}
+	if explicit.VisionBridgeProviders == nil {
+		t.Error("explicit vision_bridge_providers:[] must decode to a non-nil empty slice (clear)")
+	}
+	if explicit.VisionBridgeStrategy == nil || *explicit.VisionBridgeStrategy != "" {
+		t.Error("explicit vision_bridge_strategy:\"\" must decode to a non-nil empty string (clear)")
+	}
+}
+
+// TestValidateVisionBridgeRoute exercises the strategy/pin invariants.
+func TestValidateVisionBridgeRoute(t *testing.T) {
+	// Default (empty strategy, no priorities) is allowed.
+	if msg := validateVisionBridgeRoute([]string{"opencode"}, "", nil); msg != "" {
+		t.Errorf("empty strategy rejected: %s", msg)
+	}
+	// failover and priority and weighted are allowed.
+	for _, s := range []string{"priority", "failover", "weighted"} {
+		var msg string
+		if s == "weighted" {
+			msg = validateVisionBridgeRoute([]string{"opencode"}, s, []store.ProviderPriority{{Provider: "opencode", Priority: 5}})
+		} else {
+			msg = validateVisionBridgeRoute([]string{"opencode"}, s, nil)
+		}
+		if msg != "" {
+			t.Errorf("%s strategy rejected: %s", s, msg)
+		}
+	}
+	// Unknown strategy is rejected.
+	if msg := validateVisionBridgeRoute([]string{"opencode"}, "round-robin", nil); msg == "" {
+		t.Error("unknown strategy must be rejected")
+	}
+	// Weighted without priorities is rejected (each provider must have a weight).
+	if msg := validateVisionBridgeRoute([]string{"opencode"}, "weighted", nil); msg == "" {
+		t.Error("weighted without priorities must be rejected")
+	}
+	// Priority referencing an unpinned provider is rejected.
+	if msg := validateVisionBridgeRoute([]string{"opencode"}, "priority",
+		[]store.ProviderPriority{{Provider: "zai", Priority: 5}}); msg == "" {
+		t.Error("priority on unpinned provider must be rejected")
+	}
+}

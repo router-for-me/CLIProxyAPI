@@ -40,7 +40,7 @@ var logFieldOrder = []string{
 	"media_session_id", "call_id", "peer", "state", "reason",
 	// Auto-router diagnostics (vision bridge duration, resolve-failure,
 	// cooldown waits, zero-output warnings).
-	"router_id", "tier", "vision_bridge_model", "target_model", "elapsed_ms",
+	"router_id", "tier", "vision_bridge_model", "target_model", "elapsed_ms", "skip_reason",
 	"wait_ms", "max_wait_ms", "request_id",
 }
 

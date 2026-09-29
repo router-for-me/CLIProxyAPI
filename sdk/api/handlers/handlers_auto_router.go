@@ -170,10 +170,16 @@ type autoRouterResolved struct {
 	targetModel       string
 	route             *autorouter.Resolved
 	visionBridgeModel string
-	tier              string
-	routerID          string
-	decision          autorouter.DecisionSnapshot
-	matched           bool
+	// visionBridgeProviders / visionBridgeStrategy / visionBridgePriorities
+	// pin the bridge call to a specific upstream set. Empty/zero values mean
+	// "auto-discover via the global registry" (legacy behaviour).
+	visionBridgeProviders  []string
+	visionBridgeStrategy   string
+	visionBridgePriorities []store.ProviderPriority
+	tier                   string
+	routerID               string
+	decision               autorouter.DecisionSnapshot
+	matched                bool
 	// resolveFailed reports that the request targeted an enabled auto-router
 	// whose tier could not be resolved to any mapping — surfaced to the client
 	// as an explicit 503 instead of falling through to the synthetic
@@ -367,7 +373,18 @@ func (h *BaseAPIHandler) autoRouterResolvedFromScore(router *store.AutoRouter, r
 	// management endpoints (decisions/simulate/replay) address the router by.
 	// ModelID previously landed here and made those endpoints miss every
 	// persisted event.
-	return autoRouterResolved{targetModel: resolved.Model, route: resolved, visionBridgeModel: strings.TrimSpace(router.VisionBridgeModel), tier: string(tier), routerID: strings.TrimSpace(router.ID), decision: decision, matched: true}
+	return autoRouterResolved{
+		targetModel:            resolved.Model,
+		route:                  resolved,
+		visionBridgeModel:      strings.TrimSpace(router.VisionBridgeModel),
+		visionBridgeProviders:  append([]string(nil), router.VisionBridgeProviders...),
+		visionBridgeStrategy:   strings.TrimSpace(router.VisionBridgeStrategy),
+		visionBridgePriorities: append([]store.ProviderPriority(nil), router.VisionBridgePriorities...),
+		tier:                   string(tier),
+		routerID:               strings.TrimSpace(router.ID),
+		decision:               decision,
+		matched:                true,
+	}
 }
 
 // applyAutoRouterRoute applies a resolved tier's per-model routing (providers +

@@ -2151,6 +2151,21 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	)); err != nil {
 		return fmt.Errorf("postgres store: alter auto_routers add vision_bridge_model: %w", err)
 	}
+	// Idempotent backfill for the optional per-router vision bridge routing
+	// (providers/strategy/priorities). All three mirror TierMapping's shape so
+	// the bridge path can be pinned per-router exactly like the tier path. Empty
+	// providers/priorities default to '[]' and mean "auto-discover" at runtime.
+	for _, col := range []string{
+		`vision_bridge_providers JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		`vision_bridge_strategy TEXT`,
+		`vision_bridge_priorities JSONB NOT NULL DEFAULT '[]'::jsonb`,
+	} {
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s`, autoRoutersTable, col,
+		)); err != nil {
+			return fmt.Errorf("postgres store: alter auto_routers add %q: %w", col, err)
+		}
+	}
 	// Idempotent backfill for the per-router Jev AI classifier knobs. The
 	// feature is off per router by default; the global master toggle lives in
 	// jev_settings, so both must be on for the classifier to run.

@@ -3,12 +3,14 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -31,23 +33,27 @@ import (
 // intentional exception to the no-timeouts rule (see AGENTS.md).
 func (h *BaseAPIHandler) applyVisionBridgeIfNeeded(ctx context.Context, resolved autoRouterResolved, rawJSON []byte) []byte {
 	if !resolved.matched || strings.TrimSpace(resolved.visionBridgeModel) == "" {
+		h.logVisionBridgeSkip(resolved, "no_bridge_model")
 		return rawJSON
 	}
 	timeout := VisionBridgeTimeout(h.Cfg)
 	if timeout == 0 {
 		// Explicitly disabled by configuration (negative value).
+		h.logVisionBridgeSkip(resolved, "disabled_by_config")
 		return rawJSON
 	}
 	if modelSupportsVision(resolved.targetModel) {
+		h.logVisionBridgeSkip(resolved, "target_supports_vision")
 		return rawJSON
 	}
 	if !requestContainsImage(rawJSON) {
+		h.logVisionBridgeSkip(resolved, "no_image_in_request")
 		return rawJSON
 	}
 	started := time.Now()
 	bridgeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	analysis, err := h.runVisionBridge(bridgeCtx, resolved.visionBridgeModel, rawJSON)
+	analysis, err := h.runVisionBridge(bridgeCtx, resolved.visionBridgeModel, rawJSON, resolved.visionBridgeProviders, resolved.visionBridgeStrategy, resolved.visionBridgePriorities)
 	elapsed := time.Since(started)
 	if err != nil {
 		log.WithError(err).
@@ -63,6 +69,21 @@ func (h *BaseAPIHandler) applyVisionBridgeIfNeeded(ctx context.Context, resolved
 		"elapsed_ms":          elapsed.Milliseconds(),
 	}).Info("vision bridge completed")
 	return replaceImagesWithVisionText(rawJSON, "", analysis)
+}
+
+// logVisionBridgeSkip emits a Debug diagnostic for each of the silent
+// early-return guards in applyVisionBridgeIfNeeded. Debug (not Warn) per the
+// operator's choice: these are expected, per-request branches, so they stay out
+// of the default log stream unless an operator opts into --log-level=debug to
+// diagnose a misconfigured router.
+func (h *BaseAPIHandler) logVisionBridgeSkip(resolved autoRouterResolved, skipReason string) {
+	log.WithFields(log.Fields{
+		"router_id":           resolved.routerID,
+		"tier":                resolved.tier,
+		"vision_bridge_model": resolved.visionBridgeModel,
+		"target_model":        resolved.targetModel,
+		"skip_reason":         skipReason,
+	}).Debug("vision bridge skipped")
 }
 
 // defaultThinkingCompletionCap is the max_tokens fallback for registered
@@ -470,11 +491,71 @@ func extractOpenAICompletionText(payload []byte) string {
 	return b.String()
 }
 
+// weightedPickProvider picks one provider from providers weighted by
+// priorities[].priority. Providers not listed in priorities default to
+// weight 1 (mirrors the normalization in autorouter.pickTargetIndex so an
+// all-blank priorities slice still spreads requests). Returns "" when
+// providers is empty.
+//
+// Uses the shared concurrency-safe random source (math/rand/v2 default) so
+// concurrent vision-bridge calls stay race-free.
+func weightedPickProvider(providers []string, priorities []store.ProviderPriority) string {
+	if len(providers) == 0 {
+		return ""
+	}
+	if len(providers) == 1 {
+		return providers[0]
+	}
+	weight := make(map[string]int, len(priorities))
+	for _, pr := range priorities {
+		weight[strings.ToLower(strings.TrimSpace(pr.Provider))] = pr.Priority
+	}
+	effective := make([]int, len(providers))
+	total := 0
+	for i, p := range providers {
+		w := weight[strings.ToLower(strings.TrimSpace(p))]
+		if w <= 0 {
+			w = 1
+		}
+		effective[i] = w
+		total += w
+	}
+	if total <= 0 {
+		return providers[0]
+	}
+	roll := randFloatWeighted() * float64(total)
+	cumulative := 0.0
+	for i, w := range effective {
+		cumulative += float64(w)
+		if roll < cumulative {
+			return providers[i]
+		}
+	}
+	return providers[len(providers)-1]
+}
+
+// randFloatWeighted returns a [0,1) float from the shared math/rand/v2 source.
+// Kept in its own function so tests can reason about the seam.
+func randFloatWeighted() float64 {
+	return rand.Float64()
+}
+
 // runVisionBridge calls the configured vision bridge model with the images from
 // the request and returns a targeted textual analysis. It mirrors the health
 // probe's one-off Execute pattern (OpenAI chat payload, Stream=false). On any
 // failure it returns an error so the caller can decide to proceed unchanged.
-func (h *BaseAPIHandler) runVisionBridge(ctx context.Context, bridgeModel string, rawJSON []byte) (string, error) {
+//
+// When pinnedProviders is non-empty the bridge runs only against that
+// operator-pinned subset; otherwise it auto-discovers via the global registry
+// (legacy behaviour). strategy controls iteration over the resulting set:
+//   - "" or "failover": try providers in order, stop on the first non-empty
+//     analysis (the legacy loop).
+//   - "priority": reorder by descending priorities[].priority (ties preserve
+//     pinned order) before the failover loop.
+//   - "weighted": pick exactly one provider weighted by priorities[].priority
+//     (default 1, normalized for non-positive weights), so vision-bridge load
+//     can be spread across multiple providers for a single shot.
+func (h *BaseAPIHandler) runVisionBridge(ctx context.Context, bridgeModel string, rawJSON []byte, pinnedProviders []string, strategy string, pinnedPriorities []store.ProviderPriority) (string, error) {
 	if h == nil || h.AuthManager == nil {
 		return "", fmt.Errorf("vision bridge: auth manager unavailable")
 	}
@@ -487,9 +568,22 @@ func (h *BaseAPIHandler) runVisionBridge(ctx context.Context, bridgeModel string
 		return "", fmt.Errorf("vision bridge: no images found in request")
 	}
 
-	providers := registry.GetGlobalRegistry().GetModelProviders(bridgeModel)
+	var providers []string
+	if len(pinnedProviders) > 0 {
+		providers = append([]string(nil), pinnedProviders...)
+	} else {
+		providers = registry.GetGlobalRegistry().GetModelProviders(bridgeModel)
+	}
 	if len(providers) == 0 {
 		return "", fmt.Errorf("vision bridge: no live provider for model %s", bridgeModel)
+	}
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "priority":
+		providers = orderProvidersByPriority(providers, pinnedPriorities)
+	case "weighted":
+		if picked := weightedPickProvider(providers, pinnedPriorities); picked != "" {
+			providers = []string{picked}
+		}
 	}
 
 	const instruction = "Analyze the image(s) in this conversation and provide a detailed, factual textual description of their contents. Do not answer whatever question may be attached; only describe what is visible in the image(s)."

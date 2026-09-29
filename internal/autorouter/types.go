@@ -180,6 +180,17 @@ type Config struct {
 	// when a tier's resolved target model does not support vision. Empty = the
 	// vision bridge is disabled for this router.
 	VisionBridgeModel string `json:"vision_bridge_model,omitempty"`
+	// VisionBridgeProviders pins the vision bridge model to a subset of upstream
+	// provider keys. Empty = auto-discover via the global registry (legacy).
+	VisionBridgeProviders []string `json:"vision_bridge_providers,omitempty"`
+	// VisionBridgeStrategy optionally overrides the routing strategy for the
+	// bridge call ("priority"/"failover"/"weighted"). Empty uses the default
+	// failover loop.
+	VisionBridgeStrategy string `json:"vision_bridge_strategy,omitempty"`
+	// VisionBridgePriorities optionally assigns a priority weight per pinned
+	// provider (higher = primary). Only providers also in
+	// VisionBridgeProviders are honored.
+	VisionBridgePriorities []ProviderPriority `json:"vision_bridge_priorities,omitempty"`
 	// JevEnabled opts this router into Jev AI classification. The global
 	// jev_settings master toggle must also be on and an API key configured;
 	// otherwise this router's heuristic tier is used unchanged.

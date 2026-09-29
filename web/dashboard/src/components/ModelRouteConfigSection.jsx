@@ -41,6 +41,17 @@ const STRATEGY_OPTIONS = [
   },
 ];
 
+// WEIGHTED_STRATEGY_OPTION is appended to the strategy picker only when the
+// caller passes allowWeighted. The backend's per-target tier routing rejects
+// "weighted", so regular tier editors must not surface it; the vision bridge
+// route (the only consumer today) accepts it as a per-request load spread.
+const WEIGHTED_STRATEGY_OPTION = {
+  value: 'weighted',
+  label: 'Weighted',
+  short: 'weighted',
+  blurb: "Pick one provider per request, weighted by each provider's priority. Spreads load across providers.",
+};
+
 // Rank marker glyphs (avoid emoji-width issues; using circled digits).
 const RANK_GLYPHS = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
 
@@ -103,7 +114,7 @@ function computeRanks(selected, priorityFor) {
   return { ranks, ordered: withPriority.map((e) => e.p) };
 }
 
-export default function ModelRouteConfigSection({ model, route, onChange }) {
+export default function ModelRouteConfigSection({ model, route, onChange, allowWeighted = false }) {
   const [liveProviders, setLiveProviders] = useState(null); // null = loading
   const [allProviderKeys, setAllProviderKeys] = useState(null); // null = loading
   // Full upstream rows keyed by their provider_key, so the picker can show
@@ -197,7 +208,7 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
   const catalogEmpty = allProviderKeys !== null && allProviderKeys.length === 0;
   const liveLoadedAndEmpty = liveLoaded && liveProviders.length === 0;
 
-  const strategyActive = strategy === 'priority' || strategy === 'failover';
+  const strategyActive = strategy === 'priority' || strategy === 'failover' || strategy === 'weighted';
 
   function priorityFor(p) {
     if (!strategyActive) return 0;
@@ -220,7 +231,11 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
       return false;
     })();
 
-  const activeOption = STRATEGY_OPTIONS.find((o) => o.value === strategy) || STRATEGY_OPTIONS[0];
+  const activeOption =
+    (allowWeighted ? [WEIGHTED_STRATEGY_OPTION, ...STRATEGY_OPTIONS] : STRATEGY_OPTIONS).find((o) => o.value === strategy) ||
+    STRATEGY_OPTIONS[0];
+
+  const strategyOptions = allowWeighted ? [WEIGHTED_STRATEGY_OPTION, ...STRATEGY_OPTIONS] : STRATEGY_OPTIONS;
 
   function emit(mutator) {
     const next = {
@@ -384,7 +399,7 @@ export default function ModelRouteConfigSection({ model, route, onChange }) {
 
       <div className="model-routes__strategy">
         <div className="seg" role="group" aria-label={`Routing strategy for ${model}`}>
-          {STRATEGY_OPTIONS.map((opt) => {
+          {strategyOptions.map((opt) => {
             const active = (strategy || '') === opt.value;
             return (
               <button

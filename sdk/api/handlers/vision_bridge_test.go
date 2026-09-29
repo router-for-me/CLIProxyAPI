@@ -7,6 +7,10 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
+	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 )
 
@@ -186,5 +190,104 @@ func TestApplyVisionBridgeDisabledByNegativeConfig(t *testing.T) {
 	out := h.applyVisionBridgeIfNeeded(context.Background(), res, body)
 	if string(out) != string(body) {
 		t.Fatalf("bridge must be skipped when disabled; body changed: %s", out)
+	}
+}
+
+// TestApplyVisionBridgeSkipLogsDebug captures the logrus output and confirms
+// every silent skip guard emits a Debug entry with a distinct skip_reason.
+// This regression-tests the "no log output" symptom the user reported: prior
+// to the per-guard logs, all four branches returned rawJSON unchanged with
+// zero diagnostics.
+//
+// glm-5.2 is registered as a non-vision model so the target_supports_vision
+// guard does not fire prematurely (modelSupportsVision treats unknown
+// models as vision-capable to avoid spurious bridge calls).
+func TestApplyVisionBridgeSkipLogsDebug(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("vision-bridge-test", "test", []*registry.ModelInfo{
+		{ID: "glm-5.2", SupportedInputModalities: []string{"text"}},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient("vision-bridge-test")
+	})
+
+	cases := []struct {
+		name       string
+		resolved   autoRouterResolved
+		body       string
+		skipReason string
+	}{
+		{
+			name:       "no_bridge_model",
+			resolved:   autoRouterResolved{targetModel: "glm-5.2", matched: true, routerID: "r1", tier: "complex"},
+			body:       `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}]}]}`,
+			skipReason: "no_bridge_model",
+		},
+		{
+			name:       "disabled_by_config",
+			resolved:   autoRouterResolved{targetModel: "glm-5.2", visionBridgeModel: "gemma-4-31b", matched: true, routerID: "r1", tier: "complex"},
+			body:       `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}]}]}`,
+			skipReason: "disabled_by_config",
+		},
+		{
+			name:     "target_supports_vision",
+			resolved: autoRouterResolved{targetModel: "gpt-4o", visionBridgeModel: "gemma-4-31b", matched: true, routerID: "r1", tier: "complex"},
+			body:     `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAA"}}]}]}`,
+			// gpt-4o is registered as vision-capable.
+			skipReason: "target_supports_vision",
+		},
+		{
+			name:       "no_image_in_request",
+			resolved:   autoRouterResolved{targetModel: "glm-5.2", visionBridgeModel: "gemma-4-31b", matched: true, routerID: "r1", tier: "complex"},
+			body:       `{"messages":[{"role":"user","content":"hello"}]}`,
+			skipReason: "no_image_in_request",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hook := test.NewLocal(log.StandardLogger())
+			prev := log.GetLevel()
+			log.SetLevel(log.DebugLevel)
+			defer log.SetLevel(prev)
+
+			h := &BaseAPIHandler{Cfg: &config.SDKConfig{VisionBridgeTimeoutSeconds: 30}}
+			if c.skipReason == "disabled_by_config" {
+				h.Cfg.VisionBridgeTimeoutSeconds = -1
+			}
+			_ = h.applyVisionBridgeIfNeeded(context.Background(), c.resolved, []byte(c.body))
+
+			matched := false
+			for _, entry := range hook.AllEntries() {
+				if entry.Level == log.DebugLevel &&
+					entry.Message == "vision bridge skipped" &&
+					entry.Data["skip_reason"] == c.skipReason {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Fatalf("expected Debug entry skip_reason=%q; got %d entries: %+v",
+					c.skipReason, len(hook.AllEntries()), hook.AllEntries())
+			}
+		})
+	}
+}
+
+// TestWeightedPickProviderDistribution asserts the weighted helper spreads
+// selections across providers per their priorities — it's a smoke test, not a
+// statistical guarantee (n=100, weights 9:1 → majority class > 60%).
+func TestWeightedPickProviderDistribution(t *testing.T) {
+	providers := []string{"alpha", "beta"}
+	priorities := []store.ProviderPriority{
+		{Provider: "alpha", Priority: 9},
+		{Provider: "beta", Priority: 1},
+	}
+	count := map[string]int{}
+	for i := 0; i < 100; i++ {
+		count[weightedPickProvider(providers, priorities)]++
+	}
+	if count["alpha"] < 60 {
+		t.Errorf("weighted pick should favour alpha; got %v", count)
 	}
 }

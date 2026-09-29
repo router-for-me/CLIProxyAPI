@@ -156,3 +156,53 @@ func TestBridgedConfigWithJevStillResolves(t *testing.T) {
 		t.Fatalf("Resolve() = %+v, %v; want gpt-4o", resolved, ok)
 	}
 }
+
+// TestBridgeAutoRouterConfigCarriesVisionBridgeKnobs asserts the bridged config
+// carries and trims the per-router vision bridge routing fields (mirrors
+// TestBridgeAutoRouterConfigCarriesJevKnobs).
+func TestBridgeAutoRouterConfigCarriesVisionBridgeKnobs(t *testing.T) {
+	cfg := BridgeAutoRouterConfig(&AutoRouter{
+		ID: "pk-vb", Name: "r", ModelID: "router:r", Enabled: true,
+		VisionBridgeModel:      "  gemma-4-31b  ",
+		VisionBridgeStrategy:   "  priority  ",
+		VisionBridgeProviders:  []string{" opencode ", "zai"},
+		VisionBridgePriorities: []ProviderPriority{{Provider: " opencode ", Priority: 10}, {Provider: "zai", Priority: 5}},
+	})
+	if cfg == nil {
+		t.Fatal("BridgeAutoRouterConfig returned nil")
+	}
+	if cfg.VisionBridgeModel != "gemma-4-31b" {
+		t.Errorf("VisionBridgeModel = %q, want trimmed", cfg.VisionBridgeModel)
+	}
+	if cfg.VisionBridgeStrategy != "priority" {
+		t.Errorf("VisionBridgeStrategy = %q, want trimmed", cfg.VisionBridgeStrategy)
+	}
+	if len(cfg.VisionBridgeProviders) != 2 || cfg.VisionBridgeProviders[0] != " opencode " {
+		t.Errorf("VisionBridgeProviders = %v, want 2 entries preserved verbatim", cfg.VisionBridgeProviders)
+	}
+	if len(cfg.VisionBridgePriorities) != 2 || cfg.VisionBridgePriorities[0].Provider != "opencode" {
+		t.Errorf("VisionBridgePriorities = %+v, want provider names trimmed", cfg.VisionBridgePriorities)
+	}
+}
+
+// TestBridgeAutoRouterConfigVisionBridgeDefaultsEmpty asserts an empty pin list
+// bridges to nil/empty (auto-discover at runtime) rather than a non-nil empty
+// slice that could surprise callers.
+func TestBridgeAutoRouterConfigVisionBridgeDefaultsEmpty(t *testing.T) {
+	cfg := BridgeAutoRouterConfig(&AutoRouter{
+		ID: "pk-vb-empty", ModelID: "router:r", Enabled: true,
+		VisionBridgeModel: "gemma-4-31b",
+	})
+	if cfg == nil {
+		t.Fatal("BridgeAutoRouterConfig returned nil")
+	}
+	if len(cfg.VisionBridgeProviders) != 0 {
+		t.Errorf("VisionBridgeProviders = %v, want empty", cfg.VisionBridgeProviders)
+	}
+	if len(cfg.VisionBridgePriorities) != 0 {
+		t.Errorf("VisionBridgePriorities = %v, want empty", cfg.VisionBridgePriorities)
+	}
+	if cfg.VisionBridgeStrategy != "" {
+		t.Errorf("VisionBridgeStrategy = %q, want empty", cfg.VisionBridgeStrategy)
+	}
+}

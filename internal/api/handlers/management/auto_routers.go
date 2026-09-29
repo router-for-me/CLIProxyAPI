@@ -53,6 +53,15 @@ type createAutoRouterRequest struct {
 	Mappings          []store.TierMapping      `json:"mappings,omitempty"`
 	Pricing           *store.AutoRouterPricing `json:"pricing,omitempty"`
 	VisionBridgeModel string                   `json:"vision_bridge_model,omitempty"`
+	// VisionBridgeProviders pins upstream providers for the vision bridge call;
+	// empty = auto-discover via the global registry (legacy).
+	VisionBridgeProviders []string `json:"vision_bridge_providers,omitempty"`
+	// VisionBridgeStrategy optionally overrides the bridge routing strategy
+	// ("priority"/"failover"/"weighted"). Empty uses the default failover loop.
+	VisionBridgeStrategy string `json:"vision_bridge_strategy,omitempty"`
+	// VisionBridgePriorities assigns a per-provider weight when the strategy
+	// honours priorities ("priority" or "weighted").
+	VisionBridgePriorities []store.ProviderPriority `json:"vision_bridge_priorities,omitempty"`
 	// JevEnabled opts this router into Jev AI classification; the three knobs
 	// tune it. Zero values mean "use the global default".
 	JevEnabled       bool    `json:"jev_enabled,omitempty"`
@@ -72,6 +81,15 @@ type updateAutoRouterRequest struct {
 	Mappings          *[]store.TierMapping     `json:"mappings,omitempty"`
 	Pricing           *store.AutoRouterPricing `json:"pricing,omitempty"`
 	VisionBridgeModel *string                  `json:"vision_bridge_model,omitempty"`
+	// VisionBridgeProviders replaces the bridge pin list. nil preserves;
+	// a JSON "[]" clears to auto-discover.
+	VisionBridgeProviders []string `json:"vision_bridge_providers,omitempty"`
+	// VisionBridgeStrategy updates the bridge strategy. Non-nil applies the
+	// change; nil preserves; an explicit "" clears.
+	VisionBridgeStrategy *string `json:"vision_bridge_strategy,omitempty"`
+	// VisionBridgePriorities replaces the bridge priority weights. nil
+	// preserves; a JSON "[]" clears.
+	VisionBridgePriorities []store.ProviderPriority `json:"vision_bridge_priorities,omitempty"`
 	// JevEnabled / JevMinConfidence / JevTimeoutMs / JevModelOverride update the
 	// per-router classifier knobs. Non-nil applies the change; nil preserves.
 	JevEnabled       *bool    `json:"jev_enabled,omitempty"`
@@ -142,23 +160,30 @@ func (h *Handler) CreateAutoRouter(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
 		return
 	}
+	if msg := validateVisionBridgeRoute(req.VisionBridgeProviders, req.VisionBridgeStrategy, req.VisionBridgePriorities); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
+		return
+	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
 	r := store.AutoRouter{
-		Name:              req.Name,
-		ModelID:           req.ModelID,
-		Description:       req.Description,
-		DisplayName:       req.DisplayName,
-		Mappings:          req.Mappings,
-		Pricing:           req.Pricing,
-		VisionBridgeModel: req.VisionBridgeModel,
-		JevEnabled:        req.JevEnabled,
-		JevMinConfidence:  req.JevMinConfidence,
-		JevTimeoutMs:      req.JevTimeoutMs,
-		JevModelOverride:  req.JevModelOverride,
-		Enabled:           enabled,
+		Name:                   req.Name,
+		ModelID:                req.ModelID,
+		Description:            req.Description,
+		DisplayName:            req.DisplayName,
+		Mappings:               req.Mappings,
+		Pricing:                req.Pricing,
+		VisionBridgeModel:      req.VisionBridgeModel,
+		VisionBridgeProviders:  req.VisionBridgeProviders,
+		VisionBridgeStrategy:   req.VisionBridgeStrategy,
+		VisionBridgePriorities: req.VisionBridgePriorities,
+		JevEnabled:             req.JevEnabled,
+		JevMinConfidence:       req.JevMinConfidence,
+		JevTimeoutMs:           req.JevTimeoutMs,
+		JevModelOverride:       req.JevModelOverride,
+		Enabled:                enabled,
 	}
 	created, err := routers.Create(c.Request.Context(), r)
 	if err != nil {
@@ -211,19 +236,32 @@ func (h *Handler) UpdateAutoRouter(c *gin.Context) {
 			return
 		}
 	}
+	if len(req.VisionBridgeProviders) > 0 || req.VisionBridgeStrategy != nil || len(req.VisionBridgePriorities) > 0 {
+		strategy := ""
+		if req.VisionBridgeStrategy != nil {
+			strategy = *req.VisionBridgeStrategy
+		}
+		if msg := validateVisionBridgeRoute(req.VisionBridgeProviders, strategy, req.VisionBridgePriorities); msg != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request", "message": msg}})
+			return
+		}
+	}
 	upd := store.AutoRouterUpdate{
-		Name:              req.Name,
-		ModelID:           req.ModelID,
-		Description:       req.Description,
-		DisplayName:       req.DisplayName,
-		Mappings:          req.Mappings,
-		Pricing:           req.Pricing,
-		VisionBridgeModel: req.VisionBridgeModel,
-		JevEnabled:        req.JevEnabled,
-		JevMinConfidence:  req.JevMinConfidence,
-		JevTimeoutMs:      req.JevTimeoutMs,
-		JevModelOverride:  req.JevModelOverride,
-		Enabled:           req.Enabled,
+		Name:                   req.Name,
+		ModelID:                req.ModelID,
+		Description:            req.Description,
+		DisplayName:            req.DisplayName,
+		Mappings:               req.Mappings,
+		Pricing:                req.Pricing,
+		VisionBridgeModel:      req.VisionBridgeModel,
+		VisionBridgeProviders:  req.VisionBridgeProviders,
+		VisionBridgeStrategy:   req.VisionBridgeStrategy,
+		VisionBridgePriorities: req.VisionBridgePriorities,
+		JevEnabled:             req.JevEnabled,
+		JevMinConfidence:       req.JevMinConfidence,
+		JevTimeoutMs:           req.JevTimeoutMs,
+		JevModelOverride:       req.JevModelOverride,
+		Enabled:                req.Enabled,
 	}
 	if err := routers.Update(c.Request.Context(), id, upd); err != nil {
 		h.translateAutoRouterError(c, err)
@@ -376,7 +414,32 @@ func validateTierMappings(mappings []store.TierMapping) string {
 	return ""
 }
 
-// autoRouterCatalogModel builds the models_catalog StoredModel that exposes an
+// validateVisionBridgeRoute enforces the same routing invariants for the
+// per-router vision bridge fields that validateTierMappings enforces for the
+// tier route fields (strategy ∈ {”, priority, failover, weighted}; every
+// priority entry must reference a pinned provider). Weighted requires
+// priorities so each provider has a meaningful weight.
+func validateVisionBridgeRoute(providers []string, strategy string, priorities []store.ProviderPriority) string {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "", "priority", "failover", "weighted":
+	default:
+		return fmt.Sprintf("vision_bridge: unknown strategy %q (expected priority/failover/weighted)", strategy)
+	}
+	if strings.EqualFold(strings.TrimSpace(strategy), "weighted") && len(priorities) == 0 {
+		return "vision_bridge: weighted strategy requires at least one priority entry"
+	}
+	pinned := map[string]bool{}
+	for _, p := range providers {
+		pinned[strings.ToLower(strings.TrimSpace(p))] = true
+	}
+	for _, pr := range priorities {
+		if !pinned[strings.ToLower(strings.TrimSpace(pr.Provider))] {
+			return fmt.Sprintf("vision_bridge: priority references %q which is not a pinned provider", pr.Provider)
+		}
+	}
+	return ""
+}
+
 // Auto Router's model_id as a normal, always-available model. It carries
 // UserDefined=true so periodic catalog auto-syncs (protectUserDefined) never
 // clobber or delete the row, mirroring dashboard-created model entries.
