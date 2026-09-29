@@ -113,6 +113,59 @@ func TestMigrateUpstreamProviderEntryIdentity(t *testing.T) {
 	}
 }
 
+// TestUsageEventsEnergyAndMetadataColumns verifies the Neuralwatt billing
+// columns are materialized by EnsureSchema, both fresh and on existing tables.
+// energy_joules carries per-request watt-hour consumption as NUMERIC(12,6);
+// provider_metadata is a JSONB NOT NULL DEFAULT '{}' so callers can rely on a
+// well-formed object without checking IS NULL.
+func TestUsageEventsEnergyAndMetadataColumns(t *testing.T) {
+	pg := newTestPostgresStore(t, "test_usage_events_energy_metadata")
+	defer pg.Close()
+	ensureMigrated(t, pg)
+	ctx := context.Background()
+
+	var dataType, isNullable string
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT data_type, is_nullable
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'energy_joules'
+	`, pg.cfg.Schema, pg.cfg.UsageEventsTable).Scan(&dataType, &isNullable); err != nil {
+		t.Fatalf("energy_joules column missing: %v", err)
+	}
+	if dataType != "numeric" {
+		t.Fatalf("energy_joules data_type = %q, want numeric", dataType)
+	}
+
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT data_type, is_nullable
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = 'provider_metadata'
+	`, pg.cfg.Schema, pg.cfg.UsageEventsTable).Scan(&dataType, &isNullable); err != nil {
+		t.Fatalf("provider_metadata column missing: %v", err)
+	}
+	if dataType != "jsonb" {
+		t.Fatalf("provider_metadata data_type = %q, want jsonb", dataType)
+	}
+	if isNullable != "NO" {
+		t.Fatalf("provider_metadata is_nullable = %q, want NO (NOT NULL DEFAULT)", isNullable)
+	}
+
+	// Re-running the schema bootstrap must leave the column set intact
+	// (the ALTER ADD COLUMN IF NOT EXISTS statements are idempotent).
+	ensureMigrated(t, pg)
+	var count int
+	if err := pg.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2
+		  AND column_name IN ('energy_joules', 'provider_metadata')
+	`, pg.cfg.Schema, pg.cfg.UsageEventsTable).Scan(&count); err != nil {
+		t.Fatalf("count neuralwatt columns: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 neuralwatt columns after re-migrate, found %d", count)
+	}
+}
+
 // TestProxyPoolsSchemaAndBindingColumns verifies the proxy_pools table is
 // created by EnsureSchema and the binding columns exist on the provider +
 // entry tables after Migrate.

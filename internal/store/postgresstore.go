@@ -1217,10 +1217,26 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 			fail_status_code        INTEGER,
 			generate                BOOLEAN NOT NULL DEFAULT FALSE,
 			requested_at            TIMESTAMPTZ NOT NULL,
-			flushed_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			flushed_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			energy_joules           NUMERIC(12,6),
+			provider_metadata       JSONB NOT NULL DEFAULT '{}'::jsonb
 		)
 	`, usageEventsTable)); err != nil {
 		return fmt.Errorf("postgres store: create usage_events table: %w", err)
+	}
+	// Idempotent migration for deployments that pre-date the Neuralwatt
+	// billing columns. ADD COLUMN IF NOT EXISTS is safe to re-run on every
+	// boot; the column types match the CREATE TABLE defaults above so a
+	// pre-existing table materializes the same shape.
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS energy_joules NUMERIC(12,6)`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add energy_joules: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
+		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS provider_metadata JSONB NOT NULL DEFAULT '{}'::jsonb`, usageEventsTable,
+	)); err != nil {
+		return fmt.Errorf("postgres store: alter usage_events add provider_metadata: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`CREATE INDEX IF NOT EXISTS idx_usage_events_api_key ON %s(api_key_id, requested_at)`, usageEventsTable,
