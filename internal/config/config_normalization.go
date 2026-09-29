@@ -157,6 +157,18 @@ func (cfg *Config) SanitizeMetaKeys() {
 	}
 }
 
+// SanitizeNeuralwattKeys removes Neuralwatt API key entries missing a BaseURL.
+// It applies the same normalization rules as codex-api-key.
+func (cfg *Config) SanitizeNeuralwattKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.NeuralwattKey = sanitizeCodexKeyEntries(cfg.NeuralwattKey)
+	for i := range cfg.NeuralwattKey {
+		cfg.NeuralwattKey[i].AlphaSearch = false
+	}
+}
+
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	if len(entries) == 0 {
 		return entries

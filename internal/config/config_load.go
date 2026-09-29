@@ -165,6 +165,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Meta keys: drop entries without base-url
 	cfg.SanitizeMetaKeys()
 
+	// Sanitize Neuralwatt keys: drop entries without base-url
+	cfg.SanitizeNeuralwattKeys()
+
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
 
