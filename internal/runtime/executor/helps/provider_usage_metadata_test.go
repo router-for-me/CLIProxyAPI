@@ -50,3 +50,40 @@ func TestProviderUsageMetadataFromContextCopiesMetadataMap(t *testing.T) {
 		t.Fatalf("internal state leaked; got %q, want us-west-2", got)
 	}
 }
+
+// TestProviderUsageMetadataMergesAcrossCalls pins the merge contract: a second
+// SetProviderUsageMetadata call for the same provider must preserve keys it
+// does not carry. The neuralwatt executor relies on this — the retry stamps
+// flex_downgraded before the upstream call, and the response sink's later
+// cost-header write must not wipe it.
+func TestProviderUsageMetadataMergesAcrossCalls(t *testing.T) {
+	ctx := EnsureProviderUsageMetadata(context.Background())
+	SetProviderUsageMetadata(ctx, "neuralwatt", map[string]any{"flex_downgraded": true})
+	SetProviderUsageMetadata(ctx, "neuralwatt", map[string]any{"request_cost_usd": 0.0034})
+
+	md := ProviderUsageMetadataFromContext(ctx)
+	inner, ok := md.Metadata["neuralwatt"].(map[string]any)
+	if !ok {
+		t.Fatalf("neuralwatt metadata missing: %+v", md.Metadata)
+	}
+	if got, _ := inner["flex_downgraded"].(bool); !got {
+		t.Fatalf("flex_downgraded = %v, want true (later write wiped it); metadata = %+v", inner["flex_downgraded"], inner)
+	}
+	if got := inner["request_cost_usd"]; got != 0.0034 {
+		t.Fatalf("request_cost_usd = %v, want 0.0034", got)
+	}
+}
+
+// TestProviderUsageMetadataMergeOverwritesSameKey pins the other half of the
+// merge contract: keys present in BOTH calls take the later value.
+func TestProviderUsageMetadataMergeOverwritesSameKey(t *testing.T) {
+	ctx := EnsureProviderUsageMetadata(context.Background())
+	SetProviderUsageMetadata(ctx, "neuralwatt", map[string]any{"grid_id": "us-west-2"})
+	SetProviderUsageMetadata(ctx, "neuralwatt", map[string]any{"grid_id": "eu-central-1"})
+
+	md := ProviderUsageMetadataFromContext(ctx)
+	inner := md.Metadata["neuralwatt"].(map[string]any)
+	if got := inner["grid_id"]; got != "eu-central-1" {
+		t.Fatalf("grid_id = %v, want eu-central-1 (later value must win)", got)
+	}
+}

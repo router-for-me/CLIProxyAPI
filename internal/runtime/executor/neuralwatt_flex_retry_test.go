@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 
@@ -19,16 +18,17 @@ import (
 
 // flexRetryServer is a configurable httptest server for the flex-503 retry
 // tests. The handler receives the raw upstream request body and returns the
-// status code, content type, and response body the upstream should produce.
-// Each request body is captured so the test can assert ordering and content.
+// status code, response headers, and response body the upstream should
+// produce. Each request body is captured so the test can assert ordering and
+// content.
 type flexRetryServer struct {
 	*httptest.Server
 	mu      sync.Mutex
 	bodies  [][]byte
-	handler func(body []byte) (status int, contentType string, respBody []byte)
+	handler func(body []byte) (status int, headers http.Header, respBody []byte)
 }
 
-func newFlexRetryServer(t *testing.T, handler func(body []byte) (int, string, []byte)) *flexRetryServer {
+func newFlexRetryServer(t *testing.T, handler func(body []byte) (int, http.Header, []byte)) *flexRetryServer {
 	t.Helper()
 	s := &flexRetryServer{handler: handler}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,12 +37,15 @@ func newFlexRetryServer(t *testing.T, handler func(body []byte) (int, string, []
 		s.mu.Lock()
 		s.bodies = append(s.bodies, append([]byte(nil), body...))
 		s.mu.Unlock()
-		status, contentType, respBody := s.handler(body)
-		w.Header().Set("Content-Type", contentType)
+		status, headers, respBody := s.handler(body)
+		for k, vs := range headers {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
 		w.WriteHeader(status)
 		_, _ = w.Write(respBody)
-		if flusher, ok := w.(http.Flusher); ok && status >= 200 && status < 300 &&
-			strings.HasPrefix(contentType, "text/event-stream") {
+		if flusher, ok := w.(http.Flusher); ok && status >= 200 && status < 300 {
 			flusher.Flush()
 		}
 	}))
@@ -110,11 +113,11 @@ const neuralwattRequestPayload = `{"model":"neuralwatt-model","messages":[{"role
 //   - the ctx-scoped provider metadata carries flex_downgraded=true so the
 //     dashboard / audit log can show the shed happened
 func TestNeuralwattFlexRetryExecute(t *testing.T) {
-	server := newFlexRetryServer(t, func(body []byte) (int, string, []byte) {
+	server := newFlexRetryServer(t, func(body []byte) (int, http.Header, []byte) {
 		if bytes.Contains(body, []byte(`"service_tier":"flex"`)) {
-			return http.StatusServiceUnavailable, "application/json", []byte(`{"error":{"message":"flex shed"}}`)
+			return http.StatusServiceUnavailable, http.Header{"Content-Type": {"application/json"}}, []byte(`{"error":{"message":"flex shed"}}`)
 		}
-		return http.StatusOK, "application/json", []byte(flexRetrySuccessBody)
+		return http.StatusOK, http.Header{"Content-Type": {"application/json"}}, []byte(flexRetrySuccessBody)
 	})
 	defer server.close()
 
@@ -157,11 +160,11 @@ func TestNeuralwattFlexRetryExecute(t *testing.T) {
 // connection, before it opens the chunk channel), so the retry is
 // well-defined: there are no partial-stream bytes to drop on the floor.
 func TestNeuralwattFlexRetryExecuteStream(t *testing.T) {
-	server := newFlexRetryServer(t, func(body []byte) (int, string, []byte) {
+	server := newFlexRetryServer(t, func(body []byte) (int, http.Header, []byte) {
 		if bytes.Contains(body, []byte(`"service_tier":"flex"`)) {
-			return http.StatusServiceUnavailable, "application/json", []byte(`{"error":{"message":"flex shed"}}`)
+			return http.StatusServiceUnavailable, http.Header{"Content-Type": {"application/json"}}, []byte(`{"error":{"message":"flex shed"}}`)
 		}
-		return http.StatusOK, "text/event-stream", []byte(flexRetryStreamBody)
+		return http.StatusOK, http.Header{"Content-Type": {"text/event-stream"}}, []byte(flexRetryStreamBody)
 	})
 	defer server.close()
 
@@ -208,8 +211,8 @@ func TestNeuralwattFlexRetryExecuteStream(t *testing.T) {
 // retried (no retry on transient server bugs, validation failures, etc).
 // The downgrade flag must NOT be set either because no retry happened.
 func TestNeuralwattFlexNoRetryOnNon503(t *testing.T) {
-	server := newFlexRetryServer(t, func(body []byte) (int, string, []byte) {
-		return http.StatusInternalServerError, "application/json", []byte(`{"error":{"message":"upstream bug"}}`)
+	server := newFlexRetryServer(t, func(body []byte) (int, http.Header, []byte) {
+		return http.StatusInternalServerError, http.Header{"Content-Type": {"application/json"}}, []byte(`{"error":{"message":"upstream bug"}}`)
 	})
 	defer server.close()
 
@@ -243,8 +246,8 @@ func TestNeuralwattFlexNoRetryOnNon503(t *testing.T) {
 // on a 503. The retry only sheds flex→default; if the caller already asked
 // for default (or has no tier at all) there is nothing to fall back to.
 func TestNeuralwattFlexNoRetryOnNonFlexTier(t *testing.T) {
-	server := newFlexRetryServer(t, func(body []byte) (int, string, []byte) {
-		return http.StatusServiceUnavailable, "application/json", []byte(`{"error":{"message":"down"}}`)
+	server := newFlexRetryServer(t, func(body []byte) (int, http.Header, []byte) {
+		return http.StatusServiceUnavailable, http.Header{"Content-Type": {"application/json"}}, []byte(`{"error":{"message":"down"}}`)
 	})
 	defer server.close()
 
@@ -271,8 +274,8 @@ func TestNeuralwattFlexNoRetryOnNonFlexTier(t *testing.T) {
 // retry also returns 503, the executor must NOT loop. Exactly two requests,
 // period, with the retry's error propagated to the caller.
 func TestNeuralwattFlexRetryExactlyOnce(t *testing.T) {
-	server := newFlexRetryServer(t, func(body []byte) (int, string, []byte) {
-		return http.StatusServiceUnavailable, "application/json", []byte(`{"error":{"message":"still down"}}`)
+	server := newFlexRetryServer(t, func(body []byte) (int, http.Header, []byte) {
+		return http.StatusServiceUnavailable, http.Header{"Content-Type": {"application/json"}}, []byte(`{"error":{"message":"still down"}}`)
 	})
 	defer server.close()
 
@@ -299,8 +302,8 @@ func TestNeuralwattFlexRetryExactlyOnce(t *testing.T) {
 // the first try, the executor must NOT stamp flex_downgraded (no retry
 // happened) and the upstream must see exactly one request.
 func TestNeuralwattFlexNoRetryOnFirstTrySuccess(t *testing.T) {
-	server := newFlexRetryServer(t, func(body []byte) (int, string, []byte) {
-		return http.StatusOK, "application/json", []byte(flexRetrySuccessBody)
+	server := newFlexRetryServer(t, func(body []byte) (int, http.Header, []byte) {
+		return http.StatusOK, http.Header{"Content-Type": {"application/json"}}, []byte(flexRetrySuccessBody)
 	})
 	defer server.close()
 
@@ -326,5 +329,107 @@ func TestNeuralwattFlexNoRetryOnFirstTrySuccess(t *testing.T) {
 		if got, _ := inner["flex_downgraded"].(bool); got {
 			t.Fatalf("flex_downgraded set on success path; metadata = %+v", inner)
 		}
+	}
+}
+
+// TestNeuralwattFlexRetrySurvivesCostHeader is the regression test for the
+// [Important] bug found by code review: when the retry's 200 response
+// carries production-style cost headers (X-Request-Cost-USD +
+// X-NW-Service-Tier), the response sink's SetProviderUsageMetadata call
+// must NOT wipe the flex_downgraded flag the retry stamped before the
+// second attempt. SetProviderUsageMetadata used to replace the per-provider
+// map wholesale; this test pins the merge contract end-to-end.
+func TestNeuralwattFlexRetrySurvivesCostHeader(t *testing.T) {
+	server := newFlexRetryServer(t, func(body []byte) (int, http.Header, []byte) {
+		if bytes.Contains(body, []byte(`"service_tier":"flex"`)) {
+			return http.StatusServiceUnavailable, http.Header{"Content-Type": {"application/json"}}, []byte(`{"error":{"message":"flex shed"}}`)
+		}
+		// Production-style cost headers. Without the merge fix, the sink's
+		// CaptureResponse would wipe flex_downgraded with this fresh map.
+		return http.StatusOK, http.Header{
+			"Content-Type":       {"application/json"},
+			"X-Request-Cost-USD": {"0.0034"},
+			"X-NW-Service-Tier":  {"default"},
+		}, []byte(flexRetrySuccessBody)
+	})
+	defer server.close()
+
+	executor := newFlexRetryExecutor()
+	auth := newFlexRetryAuth(server.URL, "flex")
+
+	ctx := helps.EnsureProviderUsageMetadata(context.Background())
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "neuralwatt-model",
+		Payload: []byte(neuralwattRequestPayload),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := server.requestCount(); got != 2 {
+		t.Fatalf("server observed %d requests, want 2", got)
+	}
+	md := helps.ProviderUsageMetadataFromContext(ctx)
+	inner, ok := md.Metadata["neuralwatt"].(map[string]any)
+	if !ok {
+		t.Fatalf("neuralwatt metadata missing: %+v", md.Metadata)
+	}
+	if got, _ := inner["flex_downgraded"].(bool); !got {
+		t.Fatalf("flex_downgraded = %v, want true (sink's cost write wiped it); metadata = %+v", inner["flex_downgraded"], inner)
+	}
+	if got := inner["request_cost_usd"]; got != 0.0034 {
+		t.Fatalf("request_cost_usd = %v, want 0.0034", got)
+	}
+	if got := inner["service_tier"]; got != "default" {
+		t.Fatalf("service_tier = %v, want default", got)
+	}
+}
+
+// TestNeuralwattFlexRetryStreamSurvivesCostComment is the stream-side twin:
+// when the retry's SSE response carries a ": cost {...}" comment, the cost
+// fields and flex_downgraded must coexist in the final metadata.
+func TestNeuralwattFlexRetryStreamSurvivesCostComment(t *testing.T) {
+	server := newFlexRetryServer(t, func(body []byte) (int, http.Header, []byte) {
+		if bytes.Contains(body, []byte(`"service_tier":"flex"`)) {
+			return http.StatusServiceUnavailable, http.Header{"Content-Type": {"application/json"}}, []byte(`{"error":{"message":"flex shed"}}`)
+		}
+		// A real Neuralwatt stream carries a ": cost {...}" SSE comment before
+		// the data lines. The sink parses it and must merge, not replace.
+		cost := ": cost {\"request_cost_usd\":0.0041}\n\n"
+		return http.StatusOK, http.Header{"Content-Type": {"text/event-stream"}}, []byte(cost + flexRetryStreamBody)
+	})
+	defer server.close()
+
+	executor := newFlexRetryExecutor()
+	auth := newFlexRetryAuth(server.URL, "flex")
+
+	ctx := helps.EnsureProviderUsageMetadata(context.Background())
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "neuralwatt-model",
+		Payload: []byte(neuralwattRequestPayload),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for range result.Chunks {
+	}
+	if got := server.requestCount(); got != 2 {
+		t.Fatalf("server observed %d requests, want 2", got)
+	}
+	md := helps.ProviderUsageMetadataFromContext(ctx)
+	inner, ok := md.Metadata["neuralwatt"].(map[string]any)
+	if !ok {
+		t.Fatalf("neuralwatt metadata missing: %+v", md.Metadata)
+	}
+	if got, _ := inner["flex_downgraded"].(bool); !got {
+		t.Fatalf("flex_downgraded = %v, want true (sink's cost write wiped it); metadata = %+v", inner["flex_downgraded"], inner)
+	}
+	if got := inner["request_cost_usd"]; got != 0.0041 {
+		t.Fatalf("request_cost_usd = %v, want 0.0041", got)
 	}
 }

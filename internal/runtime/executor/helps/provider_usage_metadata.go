@@ -45,8 +45,13 @@ func providerUsageMetadataHolderFrom(ctx context.Context) *providerUsageMetadata
 	return holder
 }
 
-// SetProviderUsageMetadata merges md under the provider key. Later calls with
-// the same provider overwrite earlier values for the same keys.
+// SetProviderUsageMetadata merges md into the provider's existing metadata
+// map. Existing keys in the provider's map are overwritten, but keys NOT
+// present in md are preserved — so a flag stamped by the executor (e.g.
+// "flex_downgraded": true) survives a later sink write that captures cost
+// headers or a mid-stream cost comment. The merge happens against the
+// holder's authoritative inner map; readers see the merged result via
+// ProviderUsageMetadataFromContext.
 func SetProviderUsageMetadata(ctx context.Context, provider string, md map[string]any) {
 	holder := providerUsageMetadataHolderFrom(ctx)
 	if holder == nil || len(md) == 0 {
@@ -57,7 +62,14 @@ func SetProviderUsageMetadata(ctx context.Context, provider string, md map[strin
 	if holder.md.Metadata == nil {
 		holder.md.Metadata = map[string]any{}
 	}
-	holder.md.Metadata[provider] = md
+	inner, ok := holder.md.Metadata[provider].(map[string]any)
+	if !ok || inner == nil {
+		inner = map[string]any{}
+		holder.md.Metadata[provider] = inner
+	}
+	for k, v := range md {
+		inner[k] = v
+	}
 }
 
 // SetProviderEnergyJoules records measured energy for the request.
