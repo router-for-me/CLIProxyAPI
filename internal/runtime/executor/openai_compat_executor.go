@@ -67,6 +67,9 @@ type OpenAICompatResponseSink interface {
 	// CaptureResponse receives the full body of a non-streaming response.
 	CaptureResponse(ctx context.Context, headers http.Header, body []byte)
 	// CaptureStreamHeaders receives the response headers before any chunk.
+	// After it returns on the request goroutine, CaptureStreamChunk is invoked
+	// from the single streaming goroutine in arrival order; implementers must
+	// not assume the two methods share a goroutine.
 	CaptureStreamHeaders(ctx context.Context, headers http.Header)
 	// CaptureStreamChunk receives each raw streaming chunk in arrival order.
 	CaptureStreamChunk(ctx context.Context, chunk []byte)
@@ -247,7 +250,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 	if e.responseSink != nil {
-		e.responseSink.CaptureResponse(ctx, httpResp.Header, body)
+		e.responseSink.CaptureResponse(ctx, httpResp.Header.Clone(), body)
 	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
