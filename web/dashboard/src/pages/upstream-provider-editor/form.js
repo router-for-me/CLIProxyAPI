@@ -188,6 +188,11 @@ export function buildForm(providerType, initial, carryOver) {
     disable_cooling: (src.extra_config && src.extra_config.disable_cooling) ?? false,
     // opencode-go quota probe override (extra_config.quota_url).
     quota_url: (src.extra_config && src.extra_config.quota_url) || '',
+    // neuralwatt service tier (extra_config.service_tier). Hydrated blank
+    // when absent so the operator's selector defaults to "(provider default)"
+    // and the field is omitted from the payload on save (the store keeps the
+    // provider default when service_tier is missing).
+    service_tier: (src.extra_config && src.extra_config.service_tier) || '',
     // Provider-level auto-disable config (Auto-Disable feature). Codes are a
     // string list (empty = feature off); cooldown is a nullable int (blank/0
     // = manual re-enable only). Both are hydrated blank so a cleared field
@@ -309,6 +314,14 @@ export function buildPayload(form, providerType) {
   if (isOpenCodeGo(providerType)) {
     const quotaURL = (form.quota_url || '').trim();
     if (quotaURL) extra.quota_url = quotaURL; else delete extra.quota_url;
+  }
+  // neuralwatt service tier: emitted when set, dropped when cleared. Lives in
+  // extra_config because the upstream store has no dedicated column for it
+  // (the value is rendered back onto config.NeuralwattKey.ServiceTier at
+  // render time). Blank keeps the provider default.
+  if (providerType === 'neuralwatt-api-key') {
+    const tier = (form.service_tier || '').trim();
+    if (tier) extra.service_tier = tier; else delete extra.service_tier;
   }
   // Don't send an empty object — extra_config defaults to '{}' server-side.
   const extraConfig = Object.keys(extra).length > 0 ? extra : {};

@@ -15,7 +15,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSchemas } from './schemas.js';
+import { API_KEY_TYPES, buildSchemas } from './schemas.js';
 import {
   buildForm,
   buildPayload,
@@ -59,6 +59,47 @@ test('buildSchemas: openai-compatibility still has api_key_entries in Behavior',
   const fieldNames = behaviour.map((f) => f.name);
   assert.ok(fieldNames.includes('api_key_entries'),
     `openai behavior keeps api_key_entries, got ${JSON.stringify(fieldNames)}`);
+});
+
+test('buildSchemas: neuralwatt-api-key is registered with the standard Identity/Endpoint/Routing/Behavior shape', () => {
+  // Neuralwatt sits alongside meta-api-key in the catalog (both Codex-style
+  // providers; same field shape with one Behaviour extra: the
+  // service_tier select that the executor reads at request time). The
+  // schema must expose Identity.api_key, Routing with fetchModels:true, and
+  // a Behaviour field named 'service_tier' — matching the upstream store's
+  // extra_config.service_tier key (the JSON path is snake_case because the
+  // form layer round-trips through extra_config, not the CodexKey YAML tag).
+  const schemas = buildSchemas();
+  const neuralwatt = schemas['neuralwatt-api-key'];
+  assert.ok(neuralwatt, 'neuralwatt-api-key schema missing from buildSchemas()');
+  const identityNames = neuralwatt.sections.find((s) => s.title === 'Identity').fields.map((f) => f.name);
+  assert.ok(identityNames.includes('api_key'),
+    `neuralwatt Identity keeps the single api_key, got ${JSON.stringify(identityNames)}`);
+  const routingSection = neuralwatt.sections.find((s) => s.title === 'Routing');
+  assert.ok(routingSection.fetchModels === true,
+    'neuralwatt Routing section opts into the models probe');
+  const behaviorFields = neuralwatt.sections.find((s) => s.title === 'Behavior').fields;
+  const serviceTier = behaviorFields.find((f) => f.name === 'service_tier');
+  assert.ok(serviceTier, 'neuralwatt Behavior exposes the service_tier select');
+  assert.equal(serviceTier.type, 'select');
+  const values = serviceTier.options.map((o) => o.value);
+  assert.ok(values.includes(''), 'service_tier option list includes the blank default');
+  assert.ok(values.includes('default'), 'service_tier option list includes "default"');
+  assert.ok(values.includes('flex'), 'service_tier option list includes "flex"');
+  assert.ok(typeof serviceTier.hint === 'string' && serviceTier.hint.length > 0,
+    'service_tier carries an operator hint');
+});
+
+test('API_KEY_TYPES: neuralwatt-api-key is registered alongside meta-api-key', () => {
+  // The dashboard's upstream-provider list + create-mode picker drive off
+  // API_KEY_TYPES. The Neuralwatt entry must be present so operators can
+  // pick the type without a special-case code path.
+  const entry = API_KEY_TYPES.find((t) => t.value === 'neuralwatt-api-key');
+  assert.ok(entry, 'API_KEY_TYPES must contain a neuralwatt-api-key entry');
+  assert.equal(entry.simple, 'neuralwatt',
+    'simple key matches the providerListEndpoint mapper key');
+  assert.ok(entry.label && /neuralwatt/i.test(entry.label),
+    'label should mention Neuralwatt');
 });
 
 // ============================================================================
