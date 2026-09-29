@@ -31,6 +31,7 @@ const (
 	TypeCodexAPIKey         = "codex-api-key"
 	TypeXAIAPIKey           = "xai-api-key"
 	TypeMetaAPIKey          = "meta-api-key"
+	TypeNeuralwattAPIKey    = "neuralwatt-api-key"
 	TypeClaudeAPIKey        = "claude-api-key"
 	TypeOpenAICompatibility = "openai-compatibility"
 	TypeOpenCodeGo          = "opencode-go"
