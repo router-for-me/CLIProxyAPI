@@ -133,11 +133,13 @@ derived from the upstream format **and** the provider:
   whose upstream accepts the native tool surface. The core never infers
   custom handling on its own.
 - `schema.local-refs: preserve` and `schema.complete-search-required: false`
-  unless a provider needs a portable tool surface. `meta` is the one such
-  provider today: it rejects `type: custom` and requires every property to be
-  listed in `required`, so the convention folds its tools with
-  `custom-tools: function`, `custom-grammar: describe`, and
-  `schema.complete-search-required: true`.
+  for every route. Neither is ever set to a rewriting value by the convention.
+  `meta` is the one provider that needs a portable tool surface today: it
+  rejects `type: custom` and requires every property to be listed in
+  `required`, so the convention folds its tools with `custom-tools: function`,
+  `custom-grammar: describe`, and `schema.complete-search-required: true`.
+  `schema.local-refs: inline` stays opt-in for every provider, `meta`
+  included: the convention never expands a client-authored `$ref`.
 
 Lossy strategies stay opt-in, because each of them either drops a capability
 or rewrites user schema. The single exception is the portable-surface folding

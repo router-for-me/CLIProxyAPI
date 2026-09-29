@@ -114,11 +114,14 @@ provider 到格式的映射是固定的：
   生效，不带该声明的请求原样通过。
 - 对能接受原生工具面的 provider，一律 `custom-tools: inherit`、
   `custom-grammar: reject`。核心从不自行推断 custom 处理方式。
-- 除非 provider 需要可移植工具面，否则 `schema.local-refs: preserve`、
-  `schema.complete-search-required: false`。目前只有 `meta` 需要：它拒绝
-  `type: custom`，且要求每个属性都出现在 `required` 中，因此约定会对它
-  采用 `custom-tools: function`、`custom-grammar: describe` 与
-  `schema.complete-search-required: true`。
+- 所有路由一律 `schema.local-refs: preserve`、
+  `schema.complete-search-required: false`。约定从不把其中任何一个改写为
+  重写类取值。目前只有 `meta` 需要可移植工具面：它拒绝 `type: custom`，
+  且要求每个属性都出现在 `required` 中，因此约定会对它采用
+  `custom-tools: function`、`custom-grammar: describe` 与
+  `schema.complete-search-required: true`。`schema.local-refs: inline` 对所有
+  provider 都是手动开启，`meta` 也不例外：约定从不展开客户端自己写的
+  `$ref`。
 
 有损策略保持手动开启，因为它们要么丢失能力，要么改写用户 schema。唯一的
 例外是上文所述的可移植工具面折叠——对 `meta` 而言这是约定而非可选项，
