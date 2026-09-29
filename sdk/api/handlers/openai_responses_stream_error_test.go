@@ -227,3 +227,42 @@ func TestBuildOpenAIResponsesStreamErrorChunkPreservesLargeIntPrecision(t *testi
 		t.Fatalf("large integer was corrupted by float64 in failed chunk: %s", failedRaw)
 	}
 }
+
+func TestBuildOpenAIResponsesStreamErrorChunkRequestTimeoutIsServerError(t *testing.T) {
+	chunk := BuildOpenAIResponsesStreamErrorChunk(http.StatusRequestTimeout, "stream disconnected before completion", 0)
+	var payload struct {
+		Type           string         `json:"type"`
+		Error          map[string]any `json:"error"`
+		SequenceNumber int            `json:"sequence_number"`
+	}
+	if errUnmarshal := json.Unmarshal(chunk, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal: %v", errUnmarshal)
+	}
+	if payload.Type != "error" {
+		t.Fatalf("type = %q, want %q", payload.Type, "error")
+	}
+	if got := payload.Error["code"]; got != "request_timeout" {
+		t.Fatalf("error.code = %v, want %q", got, "request_timeout")
+	}
+	if got := payload.Error["type"]; got != "server_error" {
+		t.Fatalf("error.type = %v, want %q", got, "server_error")
+	}
+
+	failedChunk := BuildOpenAIResponsesStreamFailedChunk(http.StatusRequestTimeout, "stream disconnected before completion", 0)
+	var failedPayload struct {
+		Type     string `json:"type"`
+		Response struct {
+			Status string         `json:"status"`
+			Error  map[string]any `json:"error"`
+		} `json:"response"`
+	}
+	if errUnmarshal := json.Unmarshal(failedChunk, &failedPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal: %v", errUnmarshal)
+	}
+	if got := failedPayload.Response.Error["code"]; got != "request_timeout" {
+		t.Fatalf("failed.response.error.code = %v, want %q", got, "request_timeout")
+	}
+	if got := failedPayload.Response.Error["type"]; got != "server_error" {
+		t.Fatalf("failed.response.error.type = %v, want %q", got, "server_error")
+	}
+}

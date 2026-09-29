@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestHostHTTPClientMarksUpstreamAttempt(t *testing.T) {
@@ -1420,5 +1420,21 @@ func TestHostHTTPClientWireProfile_DefaultTransportCustomTLSDialer(t *testing.T)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for default transport custom TLS dialer")
+	}
+}
+
+func TestHostHTTPClientOmittedProxyClearsAmbientRequestProxy(t *testing.T) {
+	ambient := cliproxyexecutor.WithRequestProxyURL(context.Background(), "http://ambient-proxy.example:8081")
+	client := &hostHTTPClient{}
+	cleared := client.proxyContext(ambient)
+	if got := cliproxyexecutor.RequestProxyURL(cleared); got != "" {
+		t.Fatalf("ambient proxy = %q, want cleared", got)
+	}
+
+	override := client
+	override.requestProxyURL = "http://request-proxy.example:8082"
+	replaced := override.proxyContext(ambient)
+	if got := cliproxyexecutor.RequestProxyURL(replaced); got != override.requestProxyURL {
+		t.Fatalf("request proxy = %q, want %q", got, override.requestProxyURL)
 	}
 }

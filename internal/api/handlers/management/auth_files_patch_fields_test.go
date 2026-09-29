@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,10 +13,26 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	fileauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	fileauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
+
+func TestSyncAuthFilePriorityAttributeTracksFileSource(t *testing.T) {
+	auth := &coreauth.Auth{
+		Attributes: map[string]string{coreauth.AttributeSourceBackend: coreauth.AuthSourceFile},
+		Metadata:   map[string]any{"priority": float64(1)},
+	}
+	syncAuthFilePriorityAttribute(auth)
+	if auth.Attributes[coreauth.AttributeFilePriority] != "true" {
+		t.Fatal("added file priority not marked as inherited")
+	}
+	delete(auth.Metadata, "priority")
+	syncAuthFilePriorityAttribute(auth)
+	if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
+		t.Fatal("removed file priority still marked as inherited")
+	}
+}
 
 func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
@@ -711,5 +728,66 @@ func TestPatchAuthFileFields_ClearsPlanTypeWhenRemoved(t *testing.T) {
 	}
 	if _, exists := auth.Attributes["plan_type"]; exists {
 		t.Fatalf("expected plan_type attribute to be deleted after clearing plan_type, got %q", auth.Attributes["plan_type"])
+	}
+}
+
+func TestPatchAuthFileFields_IDTokenMissingPlanTypeDefaultsToFree(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	tempDir := t.TempDir()
+	fileName := "codex-test-patch-idtoken.json"
+	filePath := filepath.Join(tempDir, fileName)
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	claimsMap := map[string]any{
+		"email": "user@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acc-12345",
+		},
+	}
+	payloadBytes, _ := json.Marshal(claimsMap)
+	claims := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	testIDToken := header + "." + claims + "."
+
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{"type": "codex"},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: tempDir}, manager)
+
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+
+	body := fmt.Sprintf(`{"name":%q,"id_token":%q}`, fileName, testIDToken)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.PatchAuthFileFields(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PatchAuthFileFields status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	auth, ok := manager.GetByID(fileName)
+	if !ok || auth == nil {
+		t.Fatal("auth not found after patch")
+	}
+	if got := auth.Attributes["plan_type"]; got != "free" {
+		t.Fatalf("auth plan_type attribute = %q, want free", got)
 	}
 }

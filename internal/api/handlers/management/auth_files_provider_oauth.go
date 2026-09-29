@@ -14,17 +14,17 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
-	metaauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/meta"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -301,17 +301,26 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		// Extract additional info for filename generation
 		claims, _ := codex.ParseJWTToken(bundle.TokenData.IDToken)
 		planType := ""
+		if bundle != nil && strings.TrimSpace(bundle.TokenData.PlanType) != "" {
+			planType = strings.TrimSpace(bundle.TokenData.PlanType)
+		}
 		hashAccountID := ""
 		if claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+			if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
+				planType = pt
+			}
 			if accountID := claims.GetAccountID(); accountID != "" {
 				digest := sha256.Sum256([]byte(accountID))
 				hashAccountID = hex.EncodeToString(digest[:])[:8]
 			}
 		}
+		if planType == "" {
+			planType = codex.DefaultPlanType
+		}
 
 		// Create token storage and persist
 		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
+		tokenStorage.PlanType = planType
 		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 		record := &coreauth.Auth{
 			ID:       fileName,
@@ -321,6 +330,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			Metadata: map[string]any{
 				"email":      tokenStorage.Email,
 				"account_id": tokenStorage.AccountID,
+				"plan_type":  planType,
+			},
+			Attributes: map[string]string{
+				"plan_type": planType,
 			},
 		}
 		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
@@ -671,64 +684,7 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 			return
 		}
 
-		fileName := metaauth.CredentialFileName(tokenStorage.Email, tokenStorage.DCAToken)
-		label := strings.TrimSpace(tokenStorage.Email)
-		if label == "" {
-			label = "Meta"
-		}
-
-		metadata := map[string]any{
-			"type":         "meta",
-			"access_token": tokenStorage.AccessToken,
-			"token_type":   tokenStorage.TokenType,
-			"expires_in":   tokenStorage.ExpiresIn,
-			"expired":      tokenStorage.Expired,
-			"last_refresh": tokenStorage.LastRefresh,
-			"base_url":     tokenStorage.BaseURL,
-			"auth_kind":    "oauth",
-		}
-		if tokenStorage.DCAExpired != "" {
-			metadata["dca_expired"] = tokenStorage.DCAExpired
-		}
-		if tokenStorage.DCAExpiresAt > 0 {
-			metadata["dca_expires_at"] = tokenStorage.DCAExpiresAt
-		}
-		if tokenStorage.APIKey != "" {
-			metadata["api_key"] = tokenStorage.APIKey
-		}
-		if tokenStorage.DCAToken != "" {
-			metadata["dca_token"] = tokenStorage.DCAToken
-		}
-		if tokenStorage.Email != "" {
-			metadata["email"] = tokenStorage.Email
-		}
-		if tokenStorage.Name != "" {
-			metadata["name"] = tokenStorage.Name
-		}
-
-		attrs := map[string]string{
-			"auth_kind": "oauth",
-			"base_url":  tokenStorage.BaseURL,
-		}
-		if tokenStorage.APIKey != "" {
-			attrs["api_key"] = tokenStorage.APIKey
-		}
-		if tokenStorage.DCAToken != "" {
-			attrs["dca_token"] = tokenStorage.DCAToken
-		}
-		if tokenStorage.Email != "" {
-			attrs["email"] = tokenStorage.Email
-		}
-
-		record := &coreauth.Auth{
-			ID:         fileName,
-			Provider:   "meta",
-			FileName:   fileName,
-			Label:      label,
-			Storage:    tokenStorage,
-			Metadata:   metadata,
-			Attributes: attrs,
-		}
+		record := buildMetaAuthRecord(bundle, tokenStorage)
 		if errGuard := guardOAuthSessionPendingForSave(state, "meta"); errGuard != nil {
 			return
 		}
@@ -756,15 +712,110 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 	c.JSON(200, response)
 }
 
+func buildMetaAuthRecord(bundle *metaauth.MetaAuthBundle, tokenStorage *metaauth.MetaTokenStorage) *coreauth.Auth {
+	fileName := metaauth.CredentialFileName(tokenStorage.Email, tokenStorage.DCAToken)
+	label := strings.TrimSpace(tokenStorage.Email)
+	if label == "" {
+		label = "Meta"
+	}
+
+	metadata := map[string]any{
+		"type":         "meta",
+		"access_token": tokenStorage.AccessToken,
+		"token_type":   tokenStorage.TokenType,
+		"expires_in":   tokenStorage.ExpiresIn,
+		"expired":      tokenStorage.Expired,
+		"last_refresh": tokenStorage.LastRefresh,
+		"base_url":     tokenStorage.BaseURL,
+		"auth_kind":    "oauth",
+	}
+	if tokenStorage.DCAExpired != "" {
+		metadata["dca_expired"] = tokenStorage.DCAExpired
+	}
+	if tokenStorage.DCAExpiresAt > 0 {
+		metadata["dca_expires_at"] = tokenStorage.DCAExpiresAt
+	}
+	if tokenStorage.APIKey != "" {
+		metadata["api_key"] = tokenStorage.APIKey
+	}
+	if tokenStorage.DCAToken != "" {
+		metadata["dca_token"] = tokenStorage.DCAToken
+	}
+	if tokenStorage.Email != "" {
+		metadata["email"] = tokenStorage.Email
+	}
+	if tokenStorage.Name != "" {
+		metadata["name"] = tokenStorage.Name
+	}
+	if bundle != nil && bundle.MintedKey != nil {
+		metadata["subs_tier_name"] = bundle.MintedKey.SubsTierName
+		metadata["subs_tier_id"] = bundle.MintedKey.SubsTierID
+		metadata["is_subs_active"] = bundle.MintedKey.IsSubsActive
+		metadata["has_payment_method"] = bundle.MintedKey.HasPaymentMethod
+	}
+
+	attrs := map[string]string{
+		"auth_kind": "oauth",
+		"base_url":  tokenStorage.BaseURL,
+	}
+	if tokenStorage.APIKey != "" {
+		attrs["api_key"] = tokenStorage.APIKey
+	}
+	if tokenStorage.DCAToken != "" {
+		attrs["dca_token"] = tokenStorage.DCAToken
+	}
+	if tokenStorage.Email != "" {
+		attrs["email"] = tokenStorage.Email
+	}
+
+	return &coreauth.Auth{
+		ID:         fileName,
+		Provider:   "meta",
+		FileName:   fileName,
+		Label:      label,
+		Storage:    tokenStorage,
+		Metadata:   metadata,
+		Attributes: attrs,
+	}
+}
+
 func (h *Handler) RequestKimiToken(c *gin.Context) {
+	domain := kimi.KimiDefaultDomain
+	if qDomain := strings.TrimSpace(c.Query("domain")); qDomain != "" {
+		domain = qDomain
+	} else if qChan := strings.TrimSpace(c.Query("channel")); qChan != "" {
+		domain = qChan
+	}
+	h.requestKimiTokenWithDomain(c, domain)
+}
+
+func (h *Handler) RequestKimiAIToken(c *gin.Context) {
+	h.requestKimiTokenWithDomain(c, kimi.KimiAIDomain)
+}
+
+func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
-	fmt.Println("Initializing Kimi authentication...")
+	isAI := kimi.IsKimiAIDomain(domain)
+	displayName := "Kimi"
+	providerName := "kimi"
+	filePrefix := "kimi"
+	statePrefix := "kmi"
+	baseURL := kimi.KimiAPIBaseURL
+	if isAI {
+		displayName = "Kimi.ai"
+		providerName = "kimi-ai"
+		filePrefix = "kimi-ai"
+		statePrefix = "kmi-ai"
+		baseURL = kimi.KimiAIAPIBaseURL
+	}
 
-	state := fmt.Sprintf("kmi-%d", time.Now().UnixNano())
+	fmt.Printf("Initializing %s authentication...\n", displayName)
+
+	state := fmt.Sprintf("%s-%d", statePrefix, time.Now().UnixNano())
 	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuth(h.cfg)
+	kimiAuth := kimi.NewKimiAuthWithDomain(h.cfg, domain)
 
 	// Generate authorization URL
 	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
@@ -778,37 +829,42 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		authURL = deviceFlow.VerificationURI
 	}
 
-	RegisterOAuthSession(state, "kimi")
+	RegisterOAuthSession(state, providerName)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
 		defer cancelPoll()
-		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "kimi")
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, providerName)
 
-		fmt.Println("Waiting for authentication...")
+		fmt.Printf("Waiting for %s authentication...\n", displayName)
 		authBundle, errWaitForAuthorization := kimiAuth.WaitForAuthorization(pollCtx, deviceFlow)
 		if errWaitForAuthorization != nil {
-			if !IsOAuthSessionPending(state, "kimi") {
+			if !IsOAuthSessionPending(state, providerName) {
 				return
 			}
 			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
-			fmt.Printf("Authentication failed: %v\n", errWaitForAuthorization)
+			fmt.Printf("%s authentication failed: %v\n", displayName, errWaitForAuthorization)
 			return
 		}
-		if !IsOAuthSessionPending(state, "kimi") {
+		if !IsOAuthSessionPending(state, providerName) {
 			return
 		}
 
 		// Create token storage
 		tokenStorage := kimiAuth.CreateTokenStorage(authBundle)
+		if isAI {
+			tokenStorage.Type = providerName
+		}
 
 		metadata := map[string]any{
-			"type":          "kimi",
+			"type":          providerName,
 			"access_token":  authBundle.TokenData.AccessToken,
 			"refresh_token": authBundle.TokenData.RefreshToken,
 			"token_type":    authBundle.TokenData.TokenType,
 			"scope":         authBundle.TokenData.Scope,
 			"timestamp":     time.Now().UnixMilli(),
+			"domain":        domain,
+			"base_url":      baseURL,
 		}
 		if authBundle.TokenData.ExpiresAt > 0 {
 			expired := time.Unix(authBundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
@@ -818,16 +874,20 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 			metadata["device_id"] = strings.TrimSpace(authBundle.DeviceID)
 		}
 
-		fileName := fmt.Sprintf("kimi-%d.json", time.Now().UnixMilli())
+		fileName := fmt.Sprintf("%s-%d.json", filePrefix, time.Now().UnixMilli())
 		record := &coreauth.Auth{
 			ID:       fileName,
-			Provider: "kimi",
+			Provider: providerName,
 			FileName: fileName,
-			Label:    "Kimi User",
+			Label:    fmt.Sprintf("%s User", displayName),
 			Storage:  tokenStorage,
 			Metadata: metadata,
+			Attributes: map[string]string{
+				"base_url": baseURL,
+				"domain":   domain,
+			},
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "kimi"); errGuard != nil {
+		if errGuard := guardOAuthSessionPendingForSave(state, providerName); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -838,7 +898,7 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		}
 
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-		fmt.Println("You can now use Kimi services through this CLI")
+		fmt.Printf("You can now use %s services through this CLI\n", displayName)
 		CompleteOAuthSession(state)
 	}()
 

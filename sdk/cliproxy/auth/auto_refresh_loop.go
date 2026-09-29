@@ -251,7 +251,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	}
 	next, shouldSchedule := nextRefreshCheckAt(now, auth, l.interval)
 	shouldRefresh := manager.shouldRefresh(auth, now)
-	exec := manager.executors[executorKeyFromAuth(auth)]
+	exec, _ := manager.executorLocked(executorKeyFromAuth(auth))
 	manager.mu.RUnlock()
 
 	if !shouldSchedule {
@@ -345,6 +345,7 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	delete(l.dirty, authID)
 	item, ok := l.index[authID]
 	if !ok || item == nil {
 		return
@@ -357,7 +358,7 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	if auth == nil {
 		return time.Time{}, false
 	}
-	if hasUnauthorizedAuthFailure(auth) {
+	if hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
 		return time.Time{}, false
 	}
 

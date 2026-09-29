@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -355,7 +355,7 @@ func xaiImagesRef(imageURL string) []byte {
 	return ref
 }
 
-func buildXAIImagesBaseRequest(model string, prompt string, responseFormat string, aspectRatio string, resolution string, n int64) []byte {
+func buildXAIImagesBaseRequest(model string, prompt string, responseFormat string, aspectRatio string, resolution string, quality string, n int64) []byte {
 	req := []byte(`{}`)
 	req, _ = sjson.SetBytes(req, "model", canonicalXAIImagesModel(model))
 	req, _ = sjson.SetBytes(req, "prompt", strings.TrimSpace(prompt))
@@ -365,6 +365,9 @@ func buildXAIImagesBaseRequest(model string, prompt string, responseFormat strin
 	}
 	if resolution != "" {
 		req, _ = sjson.SetBytes(req, "resolution", resolution)
+	}
+	if q := strings.TrimSpace(quality); q != "" {
+		req, _ = sjson.SetBytes(req, "quality", q)
 	}
 	if n > 0 {
 		req, _ = sjson.SetBytes(req, "n", n)
@@ -381,15 +384,16 @@ func buildXAIImagesGenerationsRequest(rawJSON []byte, model string, responseForm
 		aspectRatio = xaiImagesDefaultAspectRatio
 	}
 	resolution := xaiImagesResolution(gjson.GetBytes(rawJSON, "resolution").String(), size, xaiImagesDefaultResolution)
+	quality := strings.TrimSpace(gjson.GetBytes(rawJSON, "quality").String())
 	n := int64(0)
 	if v := gjson.GetBytes(rawJSON, "n"); v.Exists() && v.Type == gjson.Number {
 		n = v.Int()
 	}
-	return buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, n)
+	return buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, quality, n)
 }
 
-func buildXAIImagesEditRequest(model string, prompt string, images []string, responseFormat string, aspectRatio string, resolution string, n int64) []byte {
-	req := buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, n)
+func buildXAIImagesEditRequest(model string, prompt string, images []string, responseFormat string, aspectRatio string, resolution string, quality string, n int64) []byte {
+	req := buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, quality, n)
 	trimmedImages := make([]string, 0, len(images))
 	for _, img := range images {
 		if strings.TrimSpace(img) != "" {
@@ -442,15 +446,16 @@ func collectXAIImagesFromJSON(rawJSON []byte) []string {
 	return images
 }
 
-func xaiImagesEditOptionsFromJSON(rawJSON []byte) (aspectRatio string, resolution string, n int64) {
+func xaiImagesEditOptionsFromJSON(rawJSON []byte) (aspectRatio string, resolution string, quality string, n int64) {
 	size := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String())
 	aspectRatio = xaiImagesAspectRatio(gjson.GetBytes(rawJSON, "aspect_ratio").String(), "")
 	aspectRatio = xaiImagesAspectRatioFromSize(size, aspectRatio)
 	resolution = xaiImagesResolution(gjson.GetBytes(rawJSON, "resolution").String(), size, "")
+	quality = strings.TrimSpace(gjson.GetBytes(rawJSON, "quality").String())
 	if v := gjson.GetBytes(rawJSON, "n"); v.Exists() && v.Type == gjson.Number {
 		n = v.Int()
 	}
-	return aspectRatio, resolution, n
+	return aspectRatio, resolution, quality, n
 }
 
 func mimeTypeFromOutputFormat(outputFormat string) string {
@@ -826,8 +831,9 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		aspectRatio := xaiImagesAspectRatio(c.PostForm("aspect_ratio"), "")
 		aspectRatio = xaiImagesAspectRatioFromSize(c.PostForm("size"), aspectRatio)
 		resolution := xaiImagesResolution(c.PostForm("resolution"), c.PostForm("size"), "")
+		quality := strings.TrimSpace(c.PostForm("quality"))
 		n := parseIntField(c.PostForm("n"), 0)
-		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
+		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, quality, n)
 		h.handleXAIImages(c, xaiReq, responseFormat, "image_edit", stream)
 		return
 	}
@@ -965,8 +971,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 			})
 			return
 		}
-		aspectRatio, resolution, n := xaiImagesEditOptionsFromJSON(rawJSON)
-		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
+		aspectRatio, resolution, quality, n := xaiImagesEditOptionsFromJSON(rawJSON)
+		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, quality, n)
 		h.handleXAIImages(c, xaiReq, responseFormat, "image_edit", stream)
 		return
 	}

@@ -283,6 +283,70 @@
       ]
     },
     {
+      "id": "claude-opus-5-5",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 5.5",
+      "description": "Latest premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1790553600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Sonnet 5.5",
+      "description": "Anthropic's agentic Sonnet model for coding, tool use, and enterprise workflows",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "claude-opus-4-5-20251101",
       "object": "model",
       "created": 1761955200,
@@ -432,7 +496,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash",
@@ -465,7 +532,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -498,7 +568,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-preview",
@@ -535,7 +608,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -573,7 +649,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-image-preview",
@@ -609,7 +688,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash-preview",
@@ -648,7 +730,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-lite-preview",
@@ -685,7 +770,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-image-preview",
@@ -721,7 +809,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash",
@@ -760,7 +851,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash-lite",
@@ -799,7 +893,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.6-flash",
@@ -838,7 +935,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.7-flash",
@@ -869,7 +969,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.8-flash",
@@ -900,7 +1003,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "vertex": [
@@ -935,7 +1041,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash",
@@ -968,7 +1077,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-image",
@@ -1000,7 +1112,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -1033,7 +1148,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro",
@@ -1070,7 +1188,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash",
@@ -1109,7 +1230,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro",
@@ -1147,7 +1271,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -1185,7 +1312,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-image",
@@ -1221,7 +1351,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-lite",
@@ -1260,7 +1393,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-image",
@@ -1296,7 +1432,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "imagen-4.0-generate-001",
@@ -1435,7 +1574,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash-lite",
@@ -1474,7 +1616,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.6-flash",
@@ -1513,7 +1658,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.7-flash",
@@ -1543,7 +1691,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.8-flash",
@@ -1573,7 +1724,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "gemini-cli": [
@@ -1608,7 +1762,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash",
@@ -1641,7 +1798,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -1674,7 +1834,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-preview",
@@ -1711,7 +1874,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -1749,7 +1915,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash-preview",
@@ -1788,7 +1957,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-lite-preview",
@@ -1827,7 +1999,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "aistudio": [
@@ -1862,7 +2037,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash",
@@ -1895,7 +2073,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -1928,7 +2109,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-preview",
@@ -1961,7 +2145,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -1994,7 +2181,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash-preview",
@@ -2027,7 +2217,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-lite-preview",
@@ -2066,7 +2259,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-pro-latest",
@@ -2099,7 +2295,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-flash-latest",
@@ -2132,7 +2331,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-flash-lite-latest",
@@ -2166,7 +2368,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-image",
@@ -2193,7 +2398,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash",
@@ -2232,7 +2440,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash-lite",
@@ -2271,7 +2482,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.6-flash",
@@ -2310,7 +2524,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.7-flash",
@@ -2341,7 +2558,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.8-flash",
@@ -2372,10 +2592,48 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "codex-free": [
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
     {
       "id": "gpt-5.5",
       "object": "model",
@@ -2583,7 +2841,78 @@
       ],
       "native_capabilities": {
         "web_search": true
-      }
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-sol",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Sol",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Sol Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-sol",
@@ -2729,38 +3058,6 @@
   ],
   "codex-plus": [
     {
-      "id": "gpt-5.3-codex-spark",
-      "object": "model",
-      "created": 1770912000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex Spark",
-      "version": "gpt-5.3",
-      "description": "Ultra-fast coding model.",
-      "context_length": 128000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ],
-      "native_capabilities": {
-        "web_search": true
-      }
-    },
-    {
       "id": "gpt-5.5",
       "object": "model",
       "created": 1776902400,
@@ -2825,7 +3122,78 @@
       ],
       "native_capabilities": {
         "web_search": true
-      }
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-sol",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Sol",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Sol Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-sol",
@@ -2971,38 +3339,6 @@
   ],
   "codex-pro": [
     {
-      "id": "gpt-5.3-codex-spark",
-      "object": "model",
-      "created": 1770912000,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.3 Codex Spark",
-      "version": "gpt-5.3",
-      "description": "Ultra-fast coding model.",
-      "context_length": 128000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ],
-      "native_capabilities": {
-        "web_search": true
-      }
-    },
-    {
       "id": "gpt-5.5",
       "object": "model",
       "created": 1776902400,
@@ -3067,7 +3403,78 @@
       ],
       "native_capabilities": {
         "web_search": true
-      }
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-sol",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Sol",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Sol Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-sol",
@@ -3519,6 +3926,7 @@
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.6 Flash",
       "name": "gemini-3.6-flash-high",
       "description": "Gemini 3.6 Flash (High)",
@@ -3543,13 +3951,17 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.7-flash-high",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.7 Flash",
       "name": "gemini-3.7-flash-high",
       "description": "Gemini 3.7 Flash (High)",
@@ -3573,13 +3985,17 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.8-flash-high",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.8 Flash",
       "name": "gemini-3.8-flash-high",
       "description": "Gemini 3.8 Flash (High)",
@@ -3603,13 +4019,17 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3 Flash",
       "name": "gemini-3-flash",
       "description": "Gemini 3 Flash",
@@ -3634,13 +4054,17 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-image",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.1 Flash Image",
       "name": "gemini-3.1-flash-image",
       "description": "Gemini 3.1 Flash Image",
@@ -3660,13 +4084,17 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-pro-agent",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.1 Pro (High)",
       "name": "gemini-pro-agent",
       "description": "Gemini 3.1 Pro (High)",
@@ -3690,13 +4118,17 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-low",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.1 Pro (Low)",
       "name": "gemini-3.1-pro-low",
       "description": "Gemini 3.1 Pro (Low)",
@@ -3720,7 +4152,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gpt-oss-120b-medium",
@@ -3744,6 +4179,7 @@
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.1 Flash Lite",
       "name": "gemini-3.1-flash-lite",
       "description": "Gemini 3.1 Flash Lite",
@@ -3769,13 +4205,17 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash-lite",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.5 Flash Lite",
       "name": "gemini-3.5-flash-lite",
       "description": "Gemini 3.5 Flash Lite",
@@ -3804,6 +4244,68 @@
     }
   ],
   "xai": [
+    {
+      "id": "grok-4.7",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1789948800,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.7",
+      "name": "grok-4.7",
+      "description": "SpaceXAI's frontier model for coding, agentic tasks, and knowledge work.",
+      "context_length": 500000,
+      "max_completion_tokens": 500000,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "grok-4.7-build-fast",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1789948800,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.7 Fast",
+      "name": "grok-4.7-build-fast",
+      "description": "Grok 4.7 Fast as served by the Grok Build chat-proxy. Same model as grok-4.7 on the faster tier.",
+      "context_length": 500000,
+      "max_completion_tokens": 500000,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
     {
       "id": "grok-4.6",
       "native_capabilities": {
@@ -4040,7 +4542,7 @@
     {
       "id": "muse-spark-1.3",
       "object": "model",
-      "created": 1787000000,
+      "created": 1788307200,
       "owned_by": "meta",
       "type": "meta",
       "display_name": "Muse Spark 1.3",
@@ -4069,7 +4571,7 @@
     {
       "id": "muse-spark-1.3-contributor",
       "object": "model",
-      "created": 1787000000,
+      "created": 1788307200,
       "owned_by": "meta",
       "type": "meta",
       "display_name": "Muse Spark 1.3 Contributor",
@@ -4098,7 +4600,7 @@
     {
       "id": "muse-spark-1.2",
       "object": "model",
-      "created": 1785000000,
+      "created": 1785888000,
       "owned_by": "meta",
       "type": "meta",
       "display_name": "Muse Spark 1.2",
@@ -4126,7 +4628,7 @@
     {
       "id": "muse-spark-1.2-contributor",
       "object": "model",
-      "created": 1785000000,
+      "created": 1785888000,
       "owned_by": "meta",
       "type": "meta",
       "display_name": "Muse Spark 1.2 Contributor",
@@ -4154,7 +4656,7 @@
     {
       "id": "muse-spark-1.1",
       "object": "model",
-      "created": 1783000000,
+      "created": 1783555200,
       "owned_by": "meta",
       "type": "meta",
       "display_name": "Muse Spark 1.1",

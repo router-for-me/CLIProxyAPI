@@ -219,6 +219,9 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"codex", oldData.CodexPlus, newData.CodexPlus},
 		{"codex", oldData.CodexPro, newData.CodexPro},
 		{"kimi", oldData.Kimi, newData.Kimi},
+		{"kimi-ai", oldData.Kimi, newData.Kimi},
+		{"kimi.ai", oldData.Kimi, newData.Kimi},
+		{"kimi.com", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
 		{"devin", oldData.Devin, newData.Devin},
@@ -249,8 +252,10 @@ func modelSectionChanged(a, b []*ModelInfo) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != nil && b[i] != nil && !reflect.DeepEqual(a[i].NativeCapabilities, b[i].NativeCapabilities) {
-			return true
+		if a[i] != nil && b[i] != nil {
+			if !reflect.DeepEqual(a[i].NativeCapabilities, b[i].NativeCapabilities) || a[i].SupportConfigurationUpdate != b[i].SupportConfigurationUpdate {
+				return true
+			}
 		}
 	}
 	aj, err1 := json.Marshal(a)

@@ -26,8 +26,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 )
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {
@@ -206,6 +206,26 @@ func TestAuthDispatchRequestIncludesParentSessionID(t *testing.T) {
 	}
 	if got := payload["parent_session_id"]; got != "slot:pi-main" {
 		t.Fatalf("parent_session_id = %#v, want slot:pi-main", got)
+	}
+}
+
+func TestAuthDispatchRequestIncludesNodeKind(t *testing.T) {
+	headers := http.Header{"X-Node-Kind": []string{"compaction"}}
+	req := newAuthDispatchRequest("gpt-5.4", "lcp:v1:child", "lcp:v1:parent", headers, 1, "", nil, "")
+	if req.NodeKind != "compaction" {
+		t.Fatalf("node_kind = %q, want compaction", req.NodeKind)
+	}
+
+	raw, errMarshal := json.Marshal(&req)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth dispatch request: %v", errMarshal)
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", errUnmarshal)
+	}
+	if got := payload["node_kind"]; got != "compaction" {
+		t.Fatalf("payload node_kind = %#v, want compaction", got)
 	}
 }
 

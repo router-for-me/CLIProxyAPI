@@ -1,6 +1,8 @@
 package common
 
 import (
+	"strings"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -54,6 +56,19 @@ func MergeAdjacentGeminiContents(contents [][]byte) [][]byte {
 		merged = append(merged, content)
 	}
 	return merged
+}
+
+// ContentHasGeminiFunctionCall reports whether a Gemini content turn contains any functionCall part.
+func ContentHasGeminiFunctionCall(content []byte) bool {
+	hasFC := false
+	gjson.GetBytes(content, "parts").ForEach(func(_, part gjson.Result) bool {
+		if part.Get("functionCall").Exists() || part.Get("function_call").Exists() {
+			hasFC = true
+			return false
+		}
+		return true
+	})
+	return hasFC
 }
 
 // ContentHasGeminiFunctionResponse reports whether a Gemini content turn contains any functionResponse part.
@@ -142,4 +157,158 @@ func MergeAdjacentGeminiUserContents(contents [][]byte) [][]byte {
 		merged = append(merged, content)
 	}
 	return merged
+}
+
+// SplitGeminiFunctionResponseTurns separates functionResponse parts from
+// other user parts. Gemini/Antigravity requires a function response turn to
+// immediately follow the model turn containing the corresponding call; text
+// or reminders in the same user turn or intervening reminder turns can otherwise
+// make the response appear orphaned to the upstream validator.
+func SplitGeminiFunctionResponseTurns(contents [][]byte) [][]byte {
+	if len(contents) == 0 {
+		return contents
+	}
+	split := make([][]byte, 0, len(contents))
+	for _, content := range contents {
+		if gjson.GetBytes(content, "role").String() != "user" || !ContentHasGeminiFunctionResponse(content) {
+			split = append(split, content)
+			continue
+		}
+		parts := gjson.GetBytes(content, "parts").Array()
+		responseParts := make([][]byte, 0, len(parts))
+		otherParts := make([][]byte, 0, len(parts))
+		for _, part := range parts {
+			if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
+				responseParts = append(responseParts, []byte(part.Raw))
+			} else {
+				otherParts = append(otherParts, []byte(part.Raw))
+			}
+		}
+		var responseTurn, otherTurn []byte
+		var responseErr, otherErr error
+		if len(responseParts) > 0 {
+			responseTurn, responseErr = sjson.SetRawBytes(content, "parts", JoinRawArray(responseParts))
+		}
+		if len(otherParts) > 0 {
+			otherTurn, otherErr = sjson.SetRawBytes(content, "parts", JoinRawArray(otherParts))
+		}
+		if responseErr != nil || otherErr != nil {
+			// Preserve the original turn if rebuilding either split turn fails.
+			split = append(split, content)
+			continue
+		}
+		if len(responseTurn) > 0 {
+			split = append(split, responseTurn)
+		}
+		if len(otherTurn) > 0 {
+			split = append(split, otherTurn)
+		}
+	}
+
+	// For any consecutive block of user turns immediately following a model turn
+	// containing function calls, ensure that turns containing functionResponse
+	// precede pure text/reminder turns. This guarantees that function responses
+	// immediately follow the preceding model turn even when mid-session system
+	// or developer reminders were inserted between the model and tool_result turns.
+	out := make([][]byte, 0, len(split))
+	n := len(split)
+	for i := 0; i < n; {
+		if gjson.GetBytes(split[i], "role").String() != "user" {
+			out = append(out, split[i])
+			i++
+			continue
+		}
+		precedingModelHasFC := len(out) > 0 &&
+			gjson.GetBytes(out[len(out)-1], "role").String() == "model" &&
+			ContentHasGeminiFunctionCall(out[len(out)-1])
+
+		j := i
+		hasFR := false
+		for j < n && gjson.GetBytes(split[j], "role").String() == "user" {
+			if ContentHasGeminiFunctionResponse(split[j]) {
+				hasFR = true
+			}
+			j++
+		}
+		userRun := split[i:j]
+		if precedingModelHasFC && hasFR && len(userRun) > 1 {
+			var combinedFRParts [][]byte
+			otherTurns := make([][]byte, 0, len(userRun))
+			for _, turn := range userRun {
+				if ContentHasGeminiFunctionResponse(turn) {
+					parts := gjson.GetBytes(turn, "parts").Array()
+					for _, p := range parts {
+						combinedFRParts = append(combinedFRParts, []byte(p.Raw))
+					}
+				} else {
+					otherTurns = append(otherTurns, turn)
+				}
+			}
+			if len(combinedFRParts) > 0 {
+				frTurn := []byte(`{"role":"user","parts":[]}`)
+				frTurn, _ = sjson.SetRawBytes(frTurn, "parts", JoinRawArray(combinedFRParts))
+				out = append(out, frTurn)
+			}
+			out = append(out, otherTurns...)
+		} else {
+			out = append(out, userRun...)
+		}
+		i = j
+	}
+	return out
+}
+
+// ContainsJSONRef reports whether value (recursively) contains a string-valued "$ref" property.
+func ContainsJSONRef(value gjson.Result) bool {
+	if !value.IsObject() && !value.IsArray() {
+		return false
+	}
+	found := false
+	value.ForEach(func(key, child gjson.Result) bool {
+		if value.IsObject() && key.String() == "$ref" && child.Type == gjson.String {
+			found = true
+			return false
+		}
+		if ContainsJSONRef(child) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// SetGeminiFunctionResponseResult sets the Gemini functionResponse result or response field.
+// If the result contains a JSON Schema or OpenAPI "$ref" property with a string value, it is
+// preserved as opaque JSON text with sjson.SetBytes. This prevents Gemini/Vertex AI from
+// interpreting "$ref" as a reference to a media part in function_response.parts and rejecting
+// the request with HTTP 400.
+// If path points to "functionResponse.response" or "response", a stringified result is placed
+// under the ".result" child object to satisfy Gemini's requirement that "response" is an object.
+func SetGeminiFunctionResponseResult(part []byte, path string, result gjson.Result) []byte {
+	if !result.Exists() {
+		part, _ = sjson.SetBytes(part, path, "")
+		return part
+	}
+	if ContainsJSONRef(result) {
+		targetPath := path
+		if strings.HasSuffix(path, "response") {
+			targetPath = path + ".result"
+		}
+		part, _ = sjson.SetBytes(part, targetPath, result.Raw)
+		return part
+	}
+	part, _ = sjson.SetRawBytes(part, path, []byte(result.Raw))
+	return part
+}
+
+// SetGeminiFunctionResponseRaw is a convenience wrapper around SetGeminiFunctionResponseResult
+// for raw JSON strings.
+func SetGeminiFunctionResponseRaw(part []byte, path string, rawJSON string) []byte {
+	trimmed := strings.TrimSpace(rawJSON)
+	if trimmed == "" {
+		part, _ = sjson.SetBytes(part, path, "")
+		return part
+	}
+	return SetGeminiFunctionResponseResult(part, path, gjson.Parse(trimmed))
 }

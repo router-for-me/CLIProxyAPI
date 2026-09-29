@@ -7,11 +7,11 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -130,6 +130,9 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	// (mid-conversation role=system messages, or system reminders on legacy
 	// models), so this layer must not merge, trim or downgrade them to user text.
 	messageCapacity := root.Get("input.#").Int()
+	if messageCapacity == 0 && root.Get("input").Type == gjson.String {
+		messageCapacity = 1
+	}
 	messageBlocks := common.NewRawArrayItems(messageCapacity)
 	systemBlocks := make([][]byte, 0, 4)
 	appendSystemText := func(text string, cacheSource gjson.Result) {
@@ -274,8 +277,14 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	var inputItems []gjson.Result
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		inputItems = common.NormalizeResponsesToolCallOutputs(input.Array())
+	if input := root.Get("input"); input.Exists() {
+		if input.IsArray() {
+			inputItems = common.NormalizeResponsesToolCallOutputs(input.Array())
+		} else if input.Type == gjson.String {
+			contentPart := []byte(`{"type":"text","text":""}`)
+			contentPart, _ = sjson.SetBytes(contentPart, "text", input.String())
+			appendParts("user", contentPart)
+		}
 	}
 
 	lastToolResult := map[string]gjson.Result{}
@@ -451,7 +460,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 			toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 			toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
-			toolUse, _ = sjson.SetBytes(toolUse, "name", name)
+			toolUse, _ = sjson.SetBytes(toolUse, "name", util.SanitizeClaudeFunctionName(name))
 			if isCustomToolCall {
 				toolUse, _ = sjson.SetBytes(toolUse, "input.input", item.Get("input").String())
 			} else {
@@ -605,7 +614,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 				if _, ok := includedToolNames[fn]; ok {
 					toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", util.SanitizeClaudeFunctionName(fn))
 					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 				}
 			}
@@ -614,7 +623,7 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 
-	return out
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai-response", modelName)
 }
 
 func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
@@ -1508,8 +1517,8 @@ func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string
 		return nil, false
 	}
 
-	tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", util.SanitizeClaudeFunctionName(name))
 	if d := responsesToolDescription(tool); d != "" {
 		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
 	}
@@ -1531,7 +1540,7 @@ func convertResponsesCustomToolToClaude(tool gjson.Result, overrideName string) 
 	}
 
 	tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", util.SanitizeClaudeFunctionName(name))
 	if description := responsesToolDescription(tool); description != "" {
 		tJSON, _ = sjson.SetBytes(tJSON, "description", description)
 	}

@@ -318,7 +318,7 @@ func BuildGeminiFunctionDeclarations(root gjson.Result) ([][]byte, map[string]st
 		} else {
 			params := responsesToolParameters(desc.Tool)
 			if params.Exists() {
-				funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(CleanJSONSchemaForGemini(params.Raw)))
+				funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(CleanJSONSchemaForGeminiJSONSchema(params.Raw)))
 			}
 		}
 		declarations = append(declarations, funcDecl)

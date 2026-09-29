@@ -1539,3 +1539,90 @@ func TestConvertClaudeRequestToOpenAI_ToolCallPairing_OrphanAndIncompletePreserv
 		t.Fatalf("expected untouched order [user, assistant, user, tool], got: %v", roles)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_ToolChoice(t *testing.T) {
+	t.Run("none does not become auto", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "Answer without calling tools."}],
+			"tool_choice": {"type": "none"},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+				{"name": "tool_b", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		gotToolChoice := gjson.GetBytes(result, "tool_choice").String()
+		if gotToolChoice != "none" {
+			t.Fatalf("expected tool_choice to be 'none', got %q. Output: %s", gotToolChoice, result)
+		}
+	})
+
+	t.Run("disable_parallel_tool_use maps to parallel_tool_calls false", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		parallel := gjson.GetBytes(result, "parallel_tool_calls")
+		if !parallel.Exists() || parallel.Bool() {
+			t.Fatalf("expected parallel_tool_calls to be false, got %v. Output: %s", parallel.Value(), result)
+		}
+	})
+
+	t.Run("unknown tool_choice type fails closed to none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "unknown_future_restriction"},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		gotToolChoice := gjson.GetBytes(result, "tool_choice").String()
+		if gotToolChoice != "none" {
+			t.Fatalf("expected tool_choice to fail closed to 'none', got %q. Output: %s", gotToolChoice, result)
+		}
+	})
+
+	t.Run("tool choice with empty name fails closed to none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "tool", "name": ""},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		gotToolChoice := gjson.GetBytes(result, "tool_choice").String()
+		if gotToolChoice != "none" {
+			t.Fatalf("expected tool_choice to fail closed to 'none', got %q. Output: %s", gotToolChoice, result)
+		}
+	})
+
+	t.Run("tool_choice null does not set tool_choice", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": null,
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		if gjson.GetBytes(result, "tool_choice").Exists() {
+			t.Fatalf("expected tool_choice not to be set when tool_choice is null, got: %s", result)
+		}
+	})
+}

@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -63,6 +63,7 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, req cliproxy
 	body, _ = sjson.DeleteBytes(body, "client_metadata")
 	body = normalizeCodexInstructions(body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "meta executor", body)
+	body = helps.SanitizeMetaWebSearchTools(body)
 
 	return &metaPreparedRequest{
 		baseModel:       baseModel,
@@ -127,6 +128,7 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, errRead
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.ObserveResponseModel(data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		return resp, wrapMetaUpstreamError(httpResp.StatusCode, data)
@@ -135,6 +137,9 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	out, errCompleted := e.translateMetaCompleted(ctx, req, prepared, data)
 	if errCompleted != nil {
 		return resp, errCompleted
+	}
+	if len(out.sourceEvent) > 0 {
+		reporter.ObserveResponseModel(out.sourceEvent)
 	}
 	if detail, ok := helps.ParseCodexUsage(out.sourceEvent); ok {
 		reporter.Publish(ctx, detail)
@@ -235,6 +240,7 @@ func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token strin
 		req.Header.Del("Authorization")
 	}
 	req.Header.Set("User-Agent", metaUserAgent)
+	req.Header.Set("X-Client-Id", "tbh:tui")
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 		req.Header.Set("Cache-Control", "no-cache")
@@ -248,6 +254,8 @@ func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token strin
 	util.ApplyCustomHeadersFromAttrs(req, attrs, clientHeaders)
 }
 
+const metaNotFoundCooldown = 5 * time.Minute
+
 func wrapMetaUpstreamError(statusCode int, body []byte) error {
 	se := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
@@ -256,6 +264,14 @@ func wrapMetaUpstreamError(statusCode int, body []byte) error {
 		}
 		if isMetaSubscriptionQuota(statusCode, body) {
 			return metaRateLimitError{statusErr: se, credentialScoped: true}
+		}
+	}
+	if statusCode == http.StatusNotFound {
+		if retryAfter := parseMetaRetryAfter(statusCode, body, time.Now()); retryAfter != nil {
+			se.retryAfter = retryAfter
+		} else {
+			retry := metaNotFoundCooldown
+			se.retryAfter = &retry
 		}
 	}
 	return se

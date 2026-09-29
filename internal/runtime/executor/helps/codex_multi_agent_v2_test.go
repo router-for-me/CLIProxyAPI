@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -232,7 +232,7 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t
 	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
 
 	cfg := &config.Config{}
-	payload := []byte(`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high"}`)
+	payload := []byte(`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high","include_reasoning":true}`)
 
 	out := TranslateRequestWithAPIKeyModelCompatibility(
 		context.Background(),
