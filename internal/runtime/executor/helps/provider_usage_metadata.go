@@ -31,7 +31,7 @@ func EnsureProviderUsageMetadata(ctx context.Context) context.Context {
 	if ctx == nil {
 		return ctx
 	}
-	if _, ok := ctx.Value(providerUsageMetadataKey{}).(*providerUsageMetadataHolder); ok {
+	if holder, ok := ctx.Value(providerUsageMetadataKey{}).(*providerUsageMetadataHolder); ok && holder != nil {
 		return ctx
 	}
 	return context.WithValue(ctx, providerUsageMetadataKey{}, &providerUsageMetadataHolder{})
@@ -91,10 +91,21 @@ func ProviderUsageMetadataFromContext(ctx context.Context) ProviderUsageMetadata
 	}
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
-	out := holder.md
+	out := ProviderUsageMetadata{
+		EnergyJoules:        holder.md.EnergyJoules,
+		ResponseServiceTier: holder.md.ResponseServiceTier,
+	}
 	if holder.md.Metadata != nil {
 		out.Metadata = make(map[string]any, len(holder.md.Metadata))
 		for k, v := range holder.md.Metadata {
+			if inner, ok := v.(map[string]any); ok {
+				cp := make(map[string]any, len(inner))
+				for ik, iv := range inner {
+					cp[ik] = iv
+				}
+				out.Metadata[k] = cp
+				continue
+			}
 			out.Metadata[k] = v
 		}
 	}

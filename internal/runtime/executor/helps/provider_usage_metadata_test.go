@@ -29,3 +29,24 @@ func TestProviderUsageMetadataAbsentIsZero(t *testing.T) {
 		t.Fatalf("absent holder = %+v, want zero value", md)
 	}
 }
+
+func TestEnsureProviderUsageMetadataIsIdempotent(t *testing.T) {
+	ctx1 := EnsureProviderUsageMetadata(context.Background())
+	ctx2 := EnsureProviderUsageMetadata(ctx1)
+	if ctx1 != ctx2 {
+		t.Fatalf("Ensure must be idempotent; got %v vs %v", ctx1, ctx2)
+	}
+}
+
+func TestProviderUsageMetadataFromContextCopiesMetadataMap(t *testing.T) {
+	ctx := EnsureProviderUsageMetadata(context.Background())
+	SetProviderUsageMetadata(ctx, "neuralwatt", map[string]any{"grid_id": "us-west-2"})
+
+	md := ProviderUsageMetadataFromContext(ctx)
+	md.Metadata["neuralwatt"].(map[string]any)["grid_id"] = "tampered"
+
+	md2 := ProviderUsageMetadataFromContext(ctx)
+	if got := md2.Metadata["neuralwatt"].(map[string]any)["grid_id"]; got != "us-west-2" {
+		t.Fatalf("internal state leaked; got %q, want us-west-2", got)
+	}
+}
