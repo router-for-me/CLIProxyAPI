@@ -655,9 +655,9 @@ func syncAuthFilePlanTypeAttribute(auth *coreauth.Auth) {
 			newPlanType = strings.TrimSpace(ptRaw)
 		} else if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
 			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
-				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
-					newPlanType = pt
-				}
+				newPlanType = claims.GetPlanType()
+			} else {
+				newPlanType = codex.DefaultPlanType
 			}
 		}
 	}

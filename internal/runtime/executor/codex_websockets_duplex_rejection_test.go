@@ -79,8 +79,6 @@ func TestCodexDuplexRejectedCreateMetadata(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Codex.ResponseSteering = true
 			cfg.CodexResponseSteering = true
-			cfg.Codex.IdentityConfuse = true
-			cfg.Routing.SessionAffinity = true
 			exec := NewCodexWebsocketsExecutor(cfg)
 			exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 			credential := &auth.Auth{ID: "metadata-account", Provider: "codex", Attributes: map[string]string{"api_key": "test", "base_url": upstream.URL, "websockets": "true"}}

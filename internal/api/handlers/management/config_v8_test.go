@@ -175,6 +175,62 @@ func TestConfigV8CommentsUnknownLegacySectionsOnWrite(t *testing.T) {
 	}
 }
 
+func TestConfigV8CommentsUnknownNestedFieldsOnWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := "server: {port: 8317}\noauth: {providers: {codex: {disable-codex-cloaking: true, retired-setting: false}}}\n"
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: cfg, configFilePath: path}
+	router := gin.New()
+	router.GET("/v8/management/config", h.ConfigV8)
+	router.PATCH("/v8/management/config", h.ConfigV8)
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+	router.DELETE("/v8/management/config/*path", h.ConfigV8)
+	request := func(method, url, body string, status int) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(method, url, strings.NewReader(body)))
+		if recorder.Code != status {
+			t.Fatalf("%s %s: status=%d body=%s", method, url, recorder.Code, recorder.Body.String())
+		}
+	}
+	request(http.MethodGet, "/v8/management/config", "", http.StatusOK)
+	if saved, errRead := os.ReadFile(path); errRead != nil || string(saved) != raw {
+		t.Fatalf("GET changed existing config: %v", errRead)
+	}
+	request(http.MethodPatch, "/v8/management/config", `{"server":{"port":8318}}`, http.StatusOK)
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = config.ValidateV8Config(saved); err != nil {
+		t.Fatalf("saved config is invalid: %v\n%s", err, saved)
+	}
+	if strings.Count(string(saved), "# oauth.providers.codex.retired-setting: false") != 1 {
+		t.Fatalf("existing unknown field was not preserved as a comment: %s", saved)
+	}
+	loaded, err := config.LoadConfig(path)
+	if err != nil || loaded.Port != 8318 || !loaded.Codex.DisableCodexCloaking {
+		t.Fatalf("unrelated write changed known settings: cfg=%+v error=%v", loaded, err)
+	}
+	request(http.MethodPut, "/v8/management/config/oauth/providers/codex/new-setting", `true`, http.StatusBadRequest)
+	unchanged, err := os.ReadFile(path)
+	if err != nil || string(unchanged) != string(saved) {
+		t.Fatalf("invalid new setting changed the config: %v", err)
+	}
+	request(http.MethodDelete, "/v8/management/config/oauth/providers/codex/disable-codex-cloaking", "", http.StatusOK)
+	saved, err = os.ReadFile(path)
+	if err != nil || strings.Count(string(saved), "# oauth.providers.codex.retired-setting: false") != 1 {
+		t.Fatalf("deleting the neighboring setting lost the archived comment: %v\n%s", err, saved)
+	}
+}
+
 func TestV8NestedWriteMigratesOnlyOnSuccess(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string
@@ -319,7 +375,7 @@ func TestConfigV8DeleteLastField(t *testing.T) {
 		{"websocket", "ws-auth: false\n", "oauth/providers/aistudio/ws-auth", func(cfg *config.Config) bool { return cfg.WebsocketAuth }},
 		{"debug", "debug: true\n", "observability/logs/debug", func(cfg *config.Config) bool { return !cfg.Debug }},
 		{"sibling", "routing: {strategy: fill-first, retry: {request-retry: 3}}\n", "routing/retry/request-retry", func(cfg *config.Config) bool { return cfg.RequestRetry == 0 && cfg.Routing.Strategy == "fill-first" }},
-		{"provider", "oauth: {providers: {codex: {identity-confuse: true}}}\n", "oauth/providers/codex/identity-confuse", func(cfg *config.Config) bool { return !cfg.Codex.IdentityConfuse }},
+		{"provider", "oauth: {providers: {codex: {disable-codex-cloaking: true}}}\n", "oauth/providers/codex/disable-codex-cloaking", func(cfg *config.Config) bool { return !cfg.Codex.DisableCodexCloaking }},
 		{"excluded models", "oauth: {excluded-models: {codex: [blocked-model]}}\n", "oauth/excluded-models", func(cfg *config.Config) bool { return len(cfg.OAuthExcludedModels) == 0 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -549,5 +605,138 @@ func TestConfigV8JSONTURNSecrets(t *testing.T) {
 		if server := loaded.Codex.LiveMediaRelay.ICEServers[0]; server.Username != "" || server.Credential != "" {
 			t.Fatal("unexpected inherited TURN credentials")
 		}
+	}
+}
+
+func TestConfigV8DeletePreservesDocumentPresence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `# Keep document comment
+config-version: 8
+server: {port: 8317}
+routing:
+  retry:
+    request-retry: 3
+    max-retry-interval: 30
+plugins:
+  configs:
+    sample:
+      enabled: false
+      options: {} # Keep empty mapping
+      custom-null: null # Keep explicit null
+      custom-tree: {unknown: [one, {two: 2}]}
+`
+	if err := os.WriteFile(file, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Home = config.HomeConfig{Enabled: true, Host: "runtime.example"}
+	h := &Handler{cfg: cfg, configFilePath: file}
+	reloads := make(chan *config.Config, 8)
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) { reloads <- cfg })
+	router := gin.New()
+	router.DELETE("/v8/management/config/*path", h.ConfigV8)
+	router.GET("/v8/management/config/*path", h.ConfigV8)
+	request := func(method, path string, status int, body string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(method, "/v8/management/config/"+path, nil))
+		if w.Code != status || (body != "" && strings.TrimSpace(w.Body.String()) != body) {
+			t.Fatalf("%s %s: status=%d body=%s", method, path, w.Code, w.Body.String())
+		}
+	}
+	read := func() ([]byte, *yaml.Node) {
+		t.Helper()
+		data, errRead := os.ReadFile(file)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		var doc yaml.Node
+		if errDecode := yaml.Unmarshal(data, &doc); errDecode != nil {
+			t.Fatal(errDecode)
+		}
+		return data, doc.Content[0]
+	}
+	checkReload := func() {
+		t.Helper()
+		loaded, errLoad := config.LoadConfig(file)
+		if errLoad != nil {
+			t.Fatal(errLoad)
+		}
+		loaded.Home = cfg.Home
+		select {
+		case snapshot := <-reloads:
+			if !reflect.DeepEqual(snapshot, loaded) || !reflect.DeepEqual(h.cfg, loaded) {
+				t.Fatal("runtime config or reload snapshot differs from persisted config")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("missing reload")
+		}
+	}
+	_, original := read()
+	request(http.MethodDelete, "routing/retry/request-retry", http.StatusOK, "")
+	checkReload()
+	// Simulate a new sibling written on the server after the first deletion.
+	// The next request must use the latest file, not a stale runtime projection.
+	data, _ := read()
+	data = []byte(strings.Replace(string(data), "max-retry-interval: 30", "max-retry-interval: 30\n        max-retry-credentials: 7 # Keep new sibling", 1))
+	if err = os.WriteFile(file, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	request(http.MethodDelete, "routing/retry/max-retry-interval", http.StatusOK, "")
+	checkReload()
+	data, root := read()
+	for _, path := range []string{"routing/retry/request-retry", "routing/retry/max-retry-interval", "observability", "server/host"} {
+		if configV8Node(root, strings.Split(path, "/")) != nil {
+			t.Fatalf("absent field was materialized: %s", path)
+		}
+		request(http.MethodGet, path, http.StatusNotFound, "")
+	}
+	request(http.MethodGet, "routing/retry/max-retry-credentials", http.StatusOK, "7")
+	// Apart from the requested removals and the server-side sibling, the whole
+	// document must retain the same presence and values (including null/maps).
+	expected := cloneConfigV8Node(original)
+	deleteConfigV8Path(expected, []string{"routing", "retry", "request-retry"})
+	retry := configV8Node(expected, []string{"routing", "retry"})
+	retry.Content = append(retry.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "max-retry-credentials"},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: "7"})
+	deleteConfigV8Path(expected, []string{"routing", "retry", "max-retry-interval"})
+	var expectedValue, actualValue any
+	if err = expected.Decode(&expectedValue); err != nil {
+		t.Fatal(err)
+	}
+	if err = root.Decode(&actualValue); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(expectedValue, actualValue) {
+		t.Fatal("DELETE changed unrelated document fields or their presence")
+	}
+	pluginPath := []string{"plugins", "configs", "sample"}
+	var beforePlugin, afterPlugin any
+	if err = configV8Node(original, pluginPath).Decode(&beforePlugin); err != nil {
+		t.Fatal(err)
+	}
+	if err = configV8Node(root, pluginPath).Decode(&afterPlugin); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(beforePlugin, afterPlugin) {
+		t.Fatal("opaque plugin settings changed")
+	}
+	for _, comment := range []string{"# Keep document comment", "# Keep empty mapping", "# Keep explicit null", "# Keep new sibling"} {
+		if !strings.Contains(string(data), comment) {
+			t.Fatalf("lost comment %s", comment)
+		}
+	}
+	for _, tc := range []struct{ name, body string }{{"options", "{}"}, {"custom-null", "null"}} {
+		path := "plugins/configs/sample/" + tc.name
+		request(http.MethodGet, path, http.StatusOK, tc.body)
+		request(http.MethodDelete, path, http.StatusOK, "")
+		checkReload()
+		request(http.MethodGet, path, http.StatusNotFound, "")
+		request(http.MethodDelete, path, http.StatusNotFound, "")
 	}
 }

@@ -97,7 +97,7 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 
 	reqID := "--------"
 	if id, ok := entry.Data["request_id"].(string); ok && id != "" {
-		reqID = id
+		reqID = ShortRequestID(id)
 	}
 
 	level := entry.Level.String()

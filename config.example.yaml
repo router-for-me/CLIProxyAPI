@@ -758,6 +758,16 @@ oauth:
   #     - name: "sample-model-latest"
   #       alias: "sample-latest"
 
+  # OAuth provider model settings (per channel)
+  # Allows overriding model-level capabilities (such as context window) for OAuth credentials.
+  # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+  # settings:
+  #   codex:
+  #     - name: "gpt-6-sol"
+  #       max-context-length: 524288 # overrides context window advertised to Codex clients
+  #     - name: "gpt-6-astra"
+  #       max-context-length: 1048576
+
   # OAuth provider excluded models
   # excluded-models:
   #   vertex:
@@ -836,11 +846,6 @@ oauth:
       # Experimental full-duplex Codex Responses WebSocket steering (default: false).
       # Keeps one upstream account/model per socket; accepted input is never replayed.
       response-steering: false
-      # When true, and routing.strategy is fill-first or routing.session-affinity is true,
-      # remap Codex prompt_cache_key and installation identity per selected auth.
-      # Some superstitious users believe request tracking identifiers can be used
-      # as evidence for TOS enforcement bans; this option only satisfies those odd concerns.
-      identity-confuse: false
       # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
       disable-codex-cloaking: false
       # Preserve a coherent first-party Codex client's User-Agent and Originator.

@@ -883,3 +883,53 @@ func TestConvertOpenAIResponsesRequestToCodex_ServiceTier(t *testing.T) {
 		})
 	}
 }
+
+// TestConvertOpenAIResponsesRequestToCodex_NormalizesEmptyFunctionCallArguments
+// covers the parameter-less tool call shape that strict Codex Responses
+// upstreams reject with "`arguments` must be valid JSON": only blank string
+// arguments on function_call history items become "{}", everything else is
+// preserved byte-for-byte in intent.
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesEmptyFunctionCallArguments(t *testing.T) {
+	inputJSON := []byte(`{"model":"gpt-5.6","input":[
+		{"type":"function_call","id":"fc_empty","call_id":"call_empty","name":"create_worktree","arguments":""},
+		{"type":"function_call","id":"fc_blank","call_id":"call_blank","name":"list_artifacts","arguments":"   \t\n"},
+		{"type":"function_call","id":"fc_kept","call_id":"call_kept","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+		{"type":"function_call","id":"fc_broken","call_id":"call_broken","name":"exec_command","arguments":"not-json"},
+		{"type":"function_call","id":"fc_missing","call_id":"call_missing","name":"no_args"},
+		{"type":"function_call","id":"fc_null","call_id":"call_null","name":"null_args","arguments":null},
+		{"type":"function_call","id":"fc_num","call_id":"call_num","name":"num_args","arguments":123},
+		{"type":"function_call_output","call_id":"call_empty","output":"worktree created"},
+		{"type":"custom_tool_call","id":"ctc_1","call_id":"call_custom","name":"apply_patch","input":"exact patch"},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+	]}`)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+	for index, want := range []string{"{}", "{}", `{"cmd":"pwd"}`, "not-json"} {
+		if got := gjson.GetBytes(output, "input."+strconv.Itoa(index)+".arguments").String(); got != want {
+			t.Fatalf("input.%d.arguments = %q, want %q; output: %s", index, got, want, string(output))
+		}
+	}
+	if gjson.GetBytes(output, "input.4.arguments").Exists() {
+		t.Fatalf("input.4 (missing arguments) should not gain arguments field; output: %s", string(output))
+	}
+	if got := gjson.GetBytes(output, "input.5.arguments").Type; got != gjson.Null {
+		t.Fatalf("input.5.arguments type = %v, want null; output: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.6.arguments").Int(); got != 123 {
+		t.Fatalf("input.6.arguments = %d, want 123; output: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.7.type").String(); got != "function_call_output" || gjson.GetBytes(output, "input.7.output").String() != "worktree created" {
+		t.Fatalf("input.7 should be function_call_output with unchanged output; output: %s", string(output))
+	}
+	if got := gjson.GetBytes(output, "input.8.type").String(); got != "custom_tool_call" {
+		t.Fatalf("input.8.type = %q, want custom_tool_call; output: %s", got, string(output))
+	}
+	if got := gjson.GetBytes(output, "input.8.input").String(); got != "exact patch" {
+		t.Fatalf("input.8.input = %q, want exact patch; output: %s", got, string(output))
+	}
+	if gjson.GetBytes(output, "input.8.arguments").Exists() {
+		t.Fatalf("custom_tool_call must not gain arguments; output: %s", string(output))
+	}
+	if got := gjson.GetBytes(output, "input.9.type").String(); got != "message" {
+		t.Fatalf("input.9.type = %q, want message; output: %s", got, string(output))
+	}
+}

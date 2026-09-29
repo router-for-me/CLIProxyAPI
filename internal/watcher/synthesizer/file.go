@@ -253,9 +253,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			a.Attributes["plan_type"] = strings.TrimSpace(ptRaw)
 		} else if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
 			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
-				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
-					a.Attributes["plan_type"] = pt
-				}
+				a.Attributes["plan_type"] = claims.GetPlanType()
+			} else {
+				a.Attributes["plan_type"] = codex.DefaultPlanType
 			}
 		}
 	}

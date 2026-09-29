@@ -169,25 +169,17 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	if errWrite == nil {
 		errWrite = errClose
 	}
-	if errWrite == nil {
+	// DELETE already has a normalized, validated document and its runtime snapshot.
+	// Persist that tree without projecting the typed config back onto it: the
+	// general saver materializes absent defaults and can change explicit nulls,
+	// empty maps, and opaque plugin settings. PUT/PATCH retain their saver behavior.
+	if errWrite == nil && c.Request.Method != http.MethodDelete {
 		errWrite = config.SaveConfigPreserveComments(tmpPath, next, true)
 	}
 	if errWrite == nil {
 		data, errWrite = os.ReadFile(tmpPath)
 	}
-	if errWrite == nil && c.Request.Method == http.MethodDelete {
-		// The general saver can materialize defaults. Keep an explicit deletion
-		// absent on disk so subsequent legacy edits can still supply that field.
-		var saved yaml.Node
-		errWrite = yaml.Unmarshal(data, &saved)
-		if errWrite == nil && len(saved.Content) > 0 && deleteConfigV8Path(saved.Content[0], parts) {
-			data, errWrite = yaml.Marshal(&saved)
-		}
-		if errWrite == nil {
-			// The final deletion must also remove its OAuth scope from the snapshot.
-			next, errWrite = config.ParseConfigBytes(data)
-		}
-	}
+
 	if errWrite == nil {
 		// Preserve the destination inode: the standard Docker deployment mounts
 		// config.yaml as a single file, which cannot be replaced with rename.

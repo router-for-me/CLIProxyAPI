@@ -125,8 +125,6 @@ func TestCodexDuplexAutomaticSuccessorMetadata(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Codex.ResponseSteering = true
 			cfg.CodexResponseSteering = true
-			cfg.Codex.IdentityConfuse = true
-			cfg.Routing.SessionAffinity = true
 			executor := NewCodexWebsocketsExecutor(cfg)
 			executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 			credential := &auth.Auth{ID: t.Name(), Provider: "codex", Attributes: map[string]string{"api_key": "test", "base_url": upstream.URL, "websockets": "true"}}

@@ -180,7 +180,6 @@ type AntigravityConnectionPoolConfig struct {
 
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
-	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// PreserveNativeClientIdentity keeps the downstream User-Agent and Originator untouched when the
@@ -395,6 +394,53 @@ type OAuthModelAlias struct {
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+}
+
+// OAuthModelSetting defines provider/channel model settings (such as context window overrides) for OAuth credentials.
+type OAuthModelSetting struct {
+	Name  string `yaml:"name" json:"name"`
+	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
+
+	// MaxContextLength overrides the context window advertised to Codex clients.
+	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+}
+
+// GetMaxContextLength returns the configured maximum context length override.
+func (s OAuthModelSetting) GetMaxContextLength() int { return s.MaxContextLength }
+
+// ResolveOAuthModelSetting finds the best matching OAuthModelSetting for a given model.
+// An exact Alias match on the model ID takes precedence over a general Name match.
+// Within the same match specificity, later entries in the slice override earlier ones.
+func ResolveOAuthModelSetting(settings []OAuthModelSetting, modelID, metadataModelID, modelName string) *OAuthModelSetting {
+	if len(settings) == 0 {
+		return nil
+	}
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	metaID := strings.ToLower(strings.TrimSpace(metadataModelID))
+	name := strings.ToLower(strings.TrimSpace(modelName))
+
+	var aliasMatch *OAuthModelSetting
+	var nameMatch *OAuthModelSetting
+
+	for i := range settings {
+		entry := &settings[i]
+		entryName := strings.ToLower(strings.TrimSpace(entry.Name))
+		if entryName == "" {
+			continue
+		}
+		entryAlias := strings.ToLower(strings.TrimSpace(entry.Alias))
+
+		if entryAlias != "" && id != "" && id == entryAlias {
+			aliasMatch = entry
+		} else if (entryAlias == "" || entryAlias == id) && (id == entryName || (metaID != "" && metaID == entryName) || (name != "" && name == entryName)) {
+			nameMatch = entry
+		}
+	}
+
+	if aliasMatch != nil {
+		return aliasMatch
+	}
+	return nameMatch
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.

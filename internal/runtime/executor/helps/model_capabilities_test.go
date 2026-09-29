@@ -367,3 +367,15 @@ func TestApplyRequestThinkingUsesSelectedPrefixedAPIKeyModel(t *testing.T) {
 	}
 	assertResponse("stream", streamPayload)
 }
+
+func TestAPIKeyModelIsCompatUsesAuthoritativeHomeCapabilities(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		req := cliproxyexecutor.Request{Metadata: map[string]any{
+			"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: !enabled},
+			"cliproxy.resolved_home_model_info":    &registry.ModelInfo{IsCompat: enabled},
+		}}
+		if got := helps.APIKeyModelIsCompat(req); got != enabled {
+			t.Fatalf("Home compat=%v, got=%v", enabled, got)
+		}
+	}
+}
