@@ -1,0 +1,6568 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "AI模型接口",
+    "description": "",
+    "version": "1.0.0"
+  },
+  "tags": [
+    {
+      "name": "获取模型列表"
+    },
+    {
+      "name": "OpenAI格式(Chat)"
+    },
+    {
+      "name": "OpenAI格式(Responses)"
+    },
+    {
+      "name": "图片生成"
+    },
+    {
+      "name": "图片生成/OpenAI兼容格式"
+    },
+    {
+      "name": "图片生成/Qwen千问"
+    },
+    {
+      "name": "视频生成"
+    },
+    {
+      "name": "视频生成/Sora兼容格式"
+    },
+    {
+      "name": "视频生成/Kling格式"
+    },
+    {
+      "name": "视频生成/即梦格式"
+    },
+    {
+      "name": "Claude格式(Messages)"
+    },
+    {
+      "name": "Gemini格式"
+    },
+    {
+      "name": "OpenAI格式(Embeddings)"
+    },
+    {
+      "name": "文本补全(Completions)"
+    },
+    {
+      "name": "OpenAI音频(Audio)"
+    },
+    {
+      "name": "重排序(Rerank)"
+    },
+    {
+      "name": "Moderations"
+    },
+    {
+      "name": "Realtime"
+    },
+    {
+      "name": "未实现"
+    },
+    {
+      "name": "未实现/Fine-tunes"
+    },
+    {
+      "name": "未实现/Files"
+    }
+  ],
+  "paths": {
+    "/v1/models": {
+      "get": {
+        "summary": "获取模型列表",
+        "deprecated": false,
+        "description": "获取当前可用的模型列表。\n\n根据请求头自动识别返回格式：\n- 包含 `x-api-key` 和 `anthropic-version` 头时返回 Anthropic 格式\n- 包含 `x-goog-api-key` 头或 `key` 查询参数时返回 Gemini 格式\n- 其他情况返回 OpenAI 格式\n",
+        "operationId": "listModels",
+        "tags": [
+          "获取模型列表"
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "description": "Google API Key (用于 Gemini 格式)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-api-key",
+            "in": "header",
+            "description": "Anthropic API Key (用于 Claude 格式)",
+            "required": false,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "anthropic-version",
+            "in": "header",
+            "description": "Anthropic API 版本",
+            "required": false,
+            "example": "",
+            "schema": {
+              "type": "string",
+              "example": "2023-06-01"
+            }
+          },
+          {
+            "name": "x-goog-api-key",
+            "in": "header",
+            "description": "Google API Key (用于 Gemini 格式)",
+            "required": false,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功获取模型列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "401": {
+            "description": "认证失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1beta/models": {
+      "get": {
+        "summary": "Gemini 格式获取",
+        "deprecated": false,
+        "description": "以 Gemini API 格式返回可用模型列表",
+        "operationId": "listModelsGemini",
+        "tags": [
+          "获取模型列表"
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "成功获取模型列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeminiModelsResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "创建聊天对话",
+        "deprecated": false,
+        "description": "根据对话历史创建模型响应。支持流式和非流式响应。\n\n兼容 OpenAI Chat Completions API。\n",
+        "operationId": "createChatCompletion",
+        "tags": [
+          "OpenAI格式(Chat)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCompletionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCompletionResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "请求参数错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "429": {
+            "description": "请求频率限制",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "summary": "创建响应 (OpenAI Responses API)",
+        "deprecated": false,
+        "description": "OpenAI Responses API，用于创建模型响应。\n支持多轮对话、工具调用、推理等功能。\n",
+        "operationId": "createResponse",
+        "tags": [
+          "OpenAI格式(Responses)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResponsesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsesResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+	    "/v1/responses/compact": {
+	      "post": {
+	        "summary": "压缩对话 (OpenAI Responses API)",
+	        "deprecated": false,
+	        "description": "OpenAI Responses API，用于对长对话进行 compaction。",
+	        "operationId": "compactResponse",
+        "tags": [
+          "OpenAI格式(Responses)"
+        ],
+        "parameters": [],
+	        "requestBody": {
+	          "content": {
+	            "application/json": {
+	              "schema": {
+	                "$ref": "#/components/schemas/ResponsesCompactionRequest"
+	              }
+	            }
+	          },
+	          "required": true
+	        },
+        "responses": {
+          "200": {
+            "description": "成功压缩对话",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponsesCompactionResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/images/generations": {
+      "post": {
+        "summary": "生成图像(qwen-image)",
+        "deprecated": false,
+        "description": " 百炼qwen-image系列图片生成",
+        "operationId": "createImage",
+        "tags": [
+          "图片生成/Qwen千问"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "input": {
+                    "type": "object",
+                    "properties": {
+                      "messages": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "role": {
+                              "type": "string"
+                            },
+                            "content": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "text": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "required": [
+                      "messages"
+                    ]
+                  },
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "negative_prompt": {
+                        "type": "string"
+                      },
+                      "prompt_extend": {
+                        "type": "boolean"
+                      },
+                      "watermark": {
+                        "type": "boolean"
+                      },
+                      "size": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "model",
+                  "input"
+                ]
+              },
+              "example": {
+                "model": "qwen-image-plus",
+                "input": {
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": [
+                        {
+                          "text": "一副典雅庄重的对联悬挂于厅堂之中，房间是个安静古典的中式布置，桌子上放着一些青花瓷，对联上左书“义本生知人机同道善思新”，右书“通云赋智乾坤启数高志远”， 横批“智启通义”，字体飘逸，在中间挂着一幅中国风的画作，内容是岳阳楼。"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "parameters": {
+                  "negative_prompt": "",
+                  "prompt_extend": true,
+                  "watermark": false,
+                  "size": "1328*1328"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功生成图像",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/images/edits": {
+      "post": {
+        "summary": "编辑图像(qwen-image-edit)",
+        "deprecated": false,
+        "description": " 百炼qwen-image系列图片生成",
+        "operationId": "createImage",
+        "tags": [
+          "图片生成/Qwen千问"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "input": {
+                    "type": "object",
+                    "properties": {
+                      "messages": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "role": {
+                              "type": "string"
+                            },
+                            "content": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "image": {
+                                    "type": "string"
+                                  },
+                                  "text": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "required": [
+                      "messages"
+                    ]
+                  },
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "n": {
+                        "type": "integer"
+                      },
+                      "negative_prompt": {
+                        "type": "string"
+                      },
+                      "prompt_extend": {
+                        "type": "boolean"
+                      },
+                      "watermark": {
+                        "type": "boolean"
+                      },
+                      "size": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "model",
+                  "input"
+                ]
+              },
+              "example": "{\n    \"model\": \"qwen-image-edit-plus\",\n    \"input\": {\n        \"messages\": [\n            {\n                \"role\": \"user\",\n                \"content\": [\n                    {\n                        \"image\": \"https://help-static-aliyun-doc.aliyuncs.com/file-manage-files/zh-CN/20250925/fpakfo/image36.webp\"\n                    },\n                    {\n                        \"text\": \"生成一张符合深度图的图像，遵循以下描述：一辆红色的破旧的自行车停在一条泥泞的小路上，背景是茂密的原始森林\"\n                    }\n                ]\n            }\n        ]\n    },\n    \"parameters\": {\n        \"n\": 2,\n        \"negative_prompt\": \" \",\n        \"prompt_extend\": true,\n        \"watermark\": false\n    }"
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功生成图像",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/videos": {
+      "post": {
+        "summary": "创建视频 ",
+        "deprecated": false,
+        "description": "OpenAI 兼容的视频生成接口。\n\n参考文档: https://platform.openai.com/docs/api-reference/videos/create\n",
+        "operationId": "createVideo",
+        "tags": [
+          "视频生成/Sora兼容格式"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "description": "模型名称",
+                    "example": "sora-2",
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "description": "提示词",
+                    "example": "cute cat dance",
+                    "type": "string"
+                  },
+                  "seconds": {
+                    "description": "生成秒数",
+                    "example": "8",
+                    "type": "string"
+                  },
+                  "input_reference": {
+                    "format": "binary",
+                    "type": "string",
+                    "description": "参考图片文件",
+                    "example": ""
+                  }
+                }
+              },
+              "examples": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建视频任务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "视频 ID"
+                    },
+                    "object": {
+                      "type": "string",
+                      "description": "对象类型"
+                    },
+                    "model": {
+                      "type": "string",
+                      "description": "使用的模型"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "任务状态"
+                    },
+                    "progress": {
+                      "type": "integer",
+                      "description": "进度百分比"
+                    },
+                    "created_at": {
+                      "type": "integer",
+                      "description": "创建时间戳"
+                    },
+                    "seconds": {
+                      "type": "string",
+                      "description": "视频时长"
+                    },
+                    "completed_at": {
+                      "type": "integer",
+                      "description": "完成时间戳"
+                    },
+                    "expires_at": {
+                      "type": "integer",
+                      "description": "过期时间戳"
+                    },
+                    "size": {
+                      "type": "string",
+                      "description": "视频尺寸"
+                    },
+                    "error": {
+                      "$ref": "#/components/schemas/OpenAIVideoError"
+                    },
+                    "metadata": {
+                      "type": "object",
+                      "description": "额外元数据",
+                      "additionalProperties": true,
+                      "properties": {}
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "object",
+                    "model",
+                    "status",
+                    "progress",
+                    "created_at",
+                    "seconds"
+                  ]
+                },
+                "example": {
+                  "id": "sora-2-123456",
+                  "object": "video",
+                  "model": "sora-2",
+                  "status": "queued",
+                  "progress": 0,
+                  "created_at": 1764347090922,
+                  "seconds": "8"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "请求参数错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/videos/{task_id}": {
+      "get": {
+        "summary": "获取视频任务状态 ",
+        "deprecated": false,
+        "description": "OpenAI 兼容的视频任务状态查询接口。\n\n返回视频任务的详细状态信息。\n",
+        "operationId": "getVideo",
+        "tags": [
+          "视频生成/Sora兼容格式"
+        ],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "视频任务 ID",
+            "required": true,
+            "example": "sora-2-123456",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功获取视频任务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "object": {
+                      "type": "string"
+                    },
+                    "model": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "progress": {
+                      "type": "integer"
+                    },
+                    "created_at": {
+                      "type": "integer"
+                    },
+                    "seconds": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "object",
+                    "model",
+                    "status",
+                    "progress",
+                    "created_at",
+                    "seconds"
+                  ]
+                },
+                "example": {
+                  "id": "sora-2-123456",
+                  "object": "video",
+                  "model": "sora-2",
+                  "status": "queued",
+                  "progress": 0,
+                  "created_at": 1764347090922,
+                  "seconds": "8"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "404": {
+            "description": "任务不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/videos/{task_id}/content": {
+      "get": {
+        "summary": "获取视频内容",
+        "deprecated": false,
+        "description": "获取已完成视频任务的视频文件内容。\n\n此接口会代理返回视频文件流。\n",
+        "operationId": "getVideoContent",
+        "tags": [
+          "视频生成/Sora兼容格式"
+        ],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "视频任务 ID",
+            "required": true,
+            "example": "video-abc123",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功获取视频内容",
+            "content": {
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "404": {
+            "description": "视频不存在或未完成",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/kling/v1/videos/text2video": {
+      "post": {
+        "summary": "Kling 文生视频",
+        "deprecated": false,
+        "description": "使用 Kling 模型从文本描述生成视频。\n\n支持的模型：kling-v1, kling-v1-5 等\n",
+        "operationId": "createKlingText2Video",
+        "tags": [
+          "视频生成/Kling格式"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VideoRequest"
+              },
+              "example": {
+                "model": "kling-v1",
+                "prompt": "宇航员站起身走了",
+                "duration": 5,
+                "width": 1280,
+                "height": 720,
+                "fps": 30
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建视频生成任务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "请求参数错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/kling/v1/videos/text2video/{task_id}": {
+      "get": {
+        "summary": "获取 Kling 文生视频任务状态",
+        "deprecated": false,
+        "description": "查询 Kling 文生视频任务的状态和结果。",
+        "operationId": "getKlingText2Video",
+        "tags": [
+          "视频生成/Kling格式"
+        ],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "任务 ID",
+            "required": true,
+            "example": "task-abc123",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功获取任务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoTaskResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "404": {
+            "description": "任务不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/kling/v1/videos/image2video": {
+      "post": {
+        "summary": "Kling 图生视频",
+        "deprecated": false,
+        "description": "使用 Kling 模型从图片生成视频。\n\n支持通过 image 参数传入图片 URL 或 Base64 编码的图片数据。\n",
+        "operationId": "createKlingImage2Video",
+        "tags": [
+          "视频生成/Kling格式"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VideoRequest"
+              },
+              "example": {
+                "model": "kling-v1",
+                "prompt": "人物转身走开",
+                "image": "https://example.com/image.jpg",
+                "duration": 5,
+                "width": 1280,
+                "height": 720
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建视频生成任务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "请求参数错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/kling/v1/videos/image2video/{task_id}": {
+      "get": {
+        "summary": "获取 Kling 图生视频任务状态",
+        "deprecated": false,
+        "description": "查询 Kling 图生视频任务的状态和结果。",
+        "operationId": "getKlingImage2Video",
+        "tags": [
+          "视频生成/Kling格式"
+        ],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "任务 ID",
+            "required": true,
+            "example": "task-abc123",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功获取任务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoTaskResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "404": {
+            "description": "任务不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/jimeng/": {
+      "post": {
+        "summary": "即梦视频生成",
+        "deprecated": false,
+        "description": "即梦官方 API 格式的视频生成接口。\n\n支持通过 Action 参数指定操作类型：\n- `CVSync2AsyncSubmitTask`: 提交视频生成任务\n- `CVSync2AsyncGetResult`: 获取任务结果\n\n需要在查询参数中指定 Action 和 Version。\n",
+        "operationId": "createJimengVideo",
+        "tags": [
+          "视频生成/即梦格式"
+        ],
+        "parameters": [
+          {
+            "name": "Action",
+            "in": "query",
+            "description": "API 操作类型",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "CVSync2AsyncSubmitTask",
+                "CVSync2AsyncGetResult"
+              ]
+            }
+          },
+          {
+            "name": "Version",
+            "in": "query",
+            "description": "API 版本",
+            "required": true,
+            "example": "2022-08-31",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "即梦官方 API 请求格式",
+                "properties": {
+                  "req_key": {
+                    "type": "string",
+                    "description": "请求类型标识"
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "description": "文本描述"
+                  },
+                  "binary_data_base64": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Base64 编码的图片数据"
+                  }
+                }
+              },
+              "example": {
+                "req_key": "jimeng_video_generation",
+                "prompt": "一只猫在弹钢琴"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功处理请求",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "description": "响应码"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "响应消息"
+                    },
+                    "data": {
+                      "type": "object",
+                      "description": "响应数据",
+                      "properties": {}
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "请求参数错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/video/generations": {
+      "post": {
+        "summary": "创建视频生成任务",
+        "deprecated": false,
+        "description": "提交视频生成任务，支持文生视频和图生视频。\n\n返回任务 ID，可通过 GET 接口查询任务状态。\n",
+        "operationId": "createVideoGeneration",
+        "tags": [
+          "视频生成"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VideoRequest"
+              },
+              "example": {
+                "model": "kling-v1",
+                "prompt": "宇航员在月球上漫步",
+                "duration": 5,
+                "width": 1280,
+                "height": 720
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建视频生成任务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "请求参数错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/video/generations/{task_id}": {
+      "get": {
+        "summary": "获取视频生成任务状态",
+        "deprecated": false,
+        "description": "查询视频生成任务的状态和结果。\n\n任务状态：\n- `queued`: 排队中\n- `in_progress`: 生成中\n- `completed`: 已完成\n- `failed`: 失败\n",
+        "operationId": "getVideoGeneration",
+        "tags": [
+          "视频生成"
+        ],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "任务 ID",
+            "required": true,
+            "example": "abcd1234efgh",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功获取任务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoTaskResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "404": {
+            "description": "任务不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "summary": "Claude 聊天",
+        "deprecated": false,
+        "description": "Anthropic Claude Messages API 格式的请求。\n需要在请求头中包含 `anthropic-version`。\n",
+        "operationId": "createMessage",
+        "tags": [
+          "Claude格式(Messages)"
+        ],
+        "parameters": [
+          {
+            "name": "anthropic-version",
+            "in": "header",
+            "description": "Anthropic API 版本",
+            "required": true,
+            "example": "",
+            "schema": {
+              "type": "string",
+              "example": "2023-06-01"
+            }
+          },
+          {
+            "name": "x-api-key",
+            "in": "header",
+            "description": "Anthropic API Key (可选，也可使用 Bearer Token)",
+            "required": false,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaudeRequest"
+              },
+              "examples": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaudeResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1beta/models/{model}:generateContent": {
+      "post": {
+        "summary": "Gemini 图片(Nano Banana)",
+        "deprecated": false,
+        "description": "Gemini 图片生成",
+        "operationId": "geminiRelayV1Beta",
+        "tags": [
+          "Gemini格式"
+        ],
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "description": "模型名称",
+            "required": true,
+            "example": "gemini-3-pro-image-preview",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "contents": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "role": {
+                          "type": "string"
+                        },
+                        "parts": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "text": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "generationConfig": {
+                    "type": "object",
+                    "properties": {
+                      "responseModalities": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "imageConfig": {
+                        "type": "object",
+                        "properties": {
+                          "aspectRatio": {
+                            "type": "string"
+                          },
+                          "imageSize": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "required": [
+                      "responseModalities"
+                    ]
+                  }
+                },
+                "required": [
+                  "contents",
+                  "generationConfig"
+                ]
+              },
+              "example": {
+                "contents": [
+                  {
+                    "role": "user",
+                    "parts": [
+                      {
+                        "text": "draw a cat"
+                      }
+                    ]
+                  }
+                ],
+                "generationConfig": {
+                  "responseModalities": [
+                    "TEXT",
+                    "IMAGE"
+                  ],
+                  "imageConfig": {
+                    "aspectRatio": "16:9",
+                    "imageSize": "4K"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeminiResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/engines/{model}/embeddings": {
+      "post": {
+        "summary": "Gemini 嵌入(Embeddings)",
+        "deprecated": false,
+        "description": "使用指定引擎/模型创建嵌入",
+        "operationId": "createEngineEmbedding",
+        "tags": [
+          "Gemini格式"
+        ],
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "description": "模型/引擎 ID",
+            "required": true,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmbeddingRequest"
+              },
+              "examples": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建嵌入",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbeddingResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "summary": "创建文本嵌入",
+        "deprecated": false,
+        "description": "将文本转换为向量嵌入",
+        "operationId": "createEmbedding",
+        "tags": [
+          "OpenAI格式(Embeddings)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmbeddingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建嵌入",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbeddingResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/completions": {
+      "post": {
+        "summary": "创建文本补全",
+        "deprecated": false,
+        "description": "基于给定提示创建文本补全",
+        "operationId": "createCompletion",
+        "tags": [
+          "文本补全(Completions)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompletionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功创建响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletionResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "summary": "音频转录",
+        "deprecated": false,
+        "description": "将音频转换为文本",
+        "operationId": "createTranscription",
+        "tags": [
+          "OpenAI音频(Audio)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "音频文件",
+                    "example": ""
+                  },
+                  "model": {
+                    "type": "string",
+                    "example": "whisper-1"
+                  },
+                  "language": {
+                    "type": "string",
+                    "description": "ISO-639-1 语言代码",
+                    "example": ""
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "example": ""
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "enum": [
+                      "json",
+                      "text",
+                      "srt",
+                      "verbose_json",
+                      "vtt"
+                    ],
+                    "default": "json",
+                    "example": "json"
+                  },
+                  "temperature": {
+                    "type": "number",
+                    "example": 0
+                  },
+                  "timestamp_granularities": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "word",
+                        "segment"
+                      ]
+                    },
+                    "example": ""
+                  }
+                },
+                "required": [
+                  "file",
+                  "model"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功转录",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioTranscriptionResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/audio/translations": {
+      "post": {
+        "summary": "音频翻译",
+        "deprecated": false,
+        "description": "将音频翻译为英文文本",
+        "operationId": "createTranslation",
+        "tags": [
+          "OpenAI音频(Audio)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "example": ""
+                  },
+                  "model": {
+                    "type": "string",
+                    "example": ""
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "example": ""
+                  },
+                  "response_format": {
+                    "type": "string",
+                    "example": ""
+                  },
+                  "temperature": {
+                    "type": "number",
+                    "example": 0
+                  }
+                },
+                "required": [
+                  "file",
+                  "model"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功翻译",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioTranscriptionResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/audio/speech": {
+      "post": {
+        "summary": "文本转语音",
+        "deprecated": false,
+        "description": "将文本转换为音频",
+        "operationId": "createSpeech",
+        "tags": [
+          "OpenAI音频(Audio)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpeechRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功生成音频",
+            "content": {
+              "audio/mpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/rerank": {
+      "post": {
+        "summary": "文档重排序",
+        "deprecated": false,
+        "description": "根据查询对文档列表进行相关性重排序",
+        "operationId": "createRerank",
+        "tags": [
+          "重排序(Rerank)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerankRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功重排序",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/moderations": {
+      "post": {
+        "summary": "内容审核",
+        "deprecated": false,
+        "description": "检查文本内容是否违反使用政策",
+        "operationId": "createModeration",
+        "tags": [
+          "Moderations"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModerationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "成功审核",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModerationResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/realtime": {
+      "get": {
+        "summary": "实时 WebSocket 连接",
+        "deprecated": false,
+        "description": "建立 WebSocket 连接用于实时对话。\n\n**注意**: 这是一个 WebSocket 端点，需要使用 WebSocket 协议连接。\n\n连接 URL 示例: `wss://api.example.com/v1/realtime?model=gpt-4o-realtime`\n",
+        "operationId": "createRealtimeSession",
+        "tags": [
+          "Realtime"
+        ],
+        "parameters": [
+          {
+            "name": "model",
+            "in": "query",
+            "description": "要使用的模型",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "gpt-4o-realtime-preview"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket 协议切换",
+            "headers": {}
+          },
+          "400": {
+            "description": "请求错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/fine-tunes": {
+      "get": {
+        "summary": "列出微调任务 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "listFineTunes",
+        "tags": [
+          "未实现/Fine-tunes"
+        ],
+        "parameters": [],
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "创建微调任务 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "createFineTune",
+        "tags": [
+          "未实现/Fine-tunes"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/fine-tunes/{fine_tune_id}": {
+      "get": {
+        "summary": "获取微调任务详情 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "retrieveFineTune",
+        "tags": [
+          "未实现/Fine-tunes"
+        ],
+        "parameters": [
+          {
+            "name": "fine_tune_id",
+            "in": "path",
+            "description": "",
+            "required": true,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/fine-tunes/{fine_tune_id}/cancel": {
+      "post": {
+        "summary": "取消微调任务 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "cancelFineTune",
+        "tags": [
+          "未实现/Fine-tunes"
+        ],
+        "parameters": [
+          {
+            "name": "fine_tune_id",
+            "in": "path",
+            "description": "",
+            "required": true,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/fine-tunes/{fine_tune_id}/events": {
+      "get": {
+        "summary": "获取微调任务事件 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "listFineTuneEvents",
+        "tags": [
+          "未实现/Fine-tunes"
+        ],
+        "parameters": [
+          {
+            "name": "fine_tune_id",
+            "in": "path",
+            "description": "",
+            "required": true,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/files": {
+      "get": {
+        "summary": "列出文件 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "listFiles",
+        "tags": [
+          "未实现/Files"
+        ],
+        "parameters": [],
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "上传文件 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "createFile",
+        "tags": [
+          "未实现/Files"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "example": ""
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "example": ""
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/files/{file_id}": {
+      "get": {
+        "summary": "获取文件信息 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "retrieveFile",
+        "tags": [
+          "未实现/Files"
+        ],
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "",
+            "required": true,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "summary": "删除文件 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "deleteFile",
+        "tags": [
+          "未实现/Files"
+        ],
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "",
+            "required": true,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/files/{file_id}/content": {
+      "get": {
+        "summary": "获取文件内容 (未实现)",
+        "deprecated": false,
+        "description": "此接口尚未实现",
+        "operationId": "downloadFile",
+        "tags": [
+          "未实现/Files"
+        ],
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "",
+            "required": true,
+            "example": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "未实现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "错误信息"
+              },
+              "type": {
+                "type": "string",
+                "description": "错误类型"
+              },
+              "param": {
+                "type": "string",
+                "description": "相关参数",
+                "nullable": true
+              },
+              "code": {
+                "type": "string",
+                "description": "错误代码",
+                "nullable": true
+              }
+            }
+          }
+        }
+      },
+      "Usage": {
+        "type": "object",
+        "properties": {
+          "prompt_tokens": {
+            "type": "integer",
+            "description": "提示词 Token 数"
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "description": "补全 Token 数"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "description": "总 Token 数"
+          },
+          "prompt_tokens_details": {
+            "type": "object",
+            "properties": {
+              "cached_tokens": {
+                "type": "integer"
+              },
+              "text_tokens": {
+                "type": "integer"
+              },
+              "audio_tokens": {
+                "type": "integer"
+              },
+              "image_tokens": {
+                "type": "integer"
+              }
+            }
+          },
+          "completion_tokens_details": {
+            "type": "object",
+            "properties": {
+              "text_tokens": {
+                "type": "integer"
+              },
+              "audio_tokens": {
+                "type": "integer"
+              },
+              "reasoning_tokens": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "Model": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "模型 ID",
+            "example": "gpt-4"
+          },
+          "object": {
+            "type": "string",
+            "description": "对象类型",
+            "example": "model"
+          },
+          "created": {
+            "type": "integer",
+            "description": "创建时间戳"
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "模型所有者",
+            "example": "openai"
+          }
+        }
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "example": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Model"
+            }
+          }
+        }
+      },
+      "GeminiModelsResponse": {
+        "type": "object",
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "example": "models/gemini-pro"
+                },
+                "version": {
+                  "type": "string"
+                },
+                "displayName": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "inputTokenLimit": {
+                  "type": "integer"
+                },
+                "outputTokenLimit": {
+                  "type": "integer"
+                },
+                "supportedGenerationMethods": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "required": [
+          "role",
+          "content"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "system",
+              "user",
+              "assistant",
+              "tool",
+              "developer"
+            ],
+            "description": "消息角色"
+          },
+          "content": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/MessageContent"
+                }
+              }
+            ],
+            "description": "消息内容"
+          },
+          "name": {
+            "type": "string",
+            "description": "发送者名称"
+          },
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            }
+          },
+          "tool_call_id": {
+            "type": "string",
+            "description": "工具调用 ID（用于 tool 角色消息）"
+          },
+          "reasoning_content": {
+            "type": "string",
+            "description": "推理内容"
+          }
+        }
+      },
+      "MessageContent": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "image_url",
+              "input_audio",
+              "file",
+              "video_url"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "图片 URL 或 base64"
+              },
+              "detail": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "high",
+                  "auto"
+                ]
+              }
+            }
+          },
+          "input_audio": {
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "string",
+                "description": "Base64 编码的音频数据"
+              },
+              "format": {
+                "type": "string",
+                "enum": [
+                  "wav",
+                  "mp3"
+                ]
+              }
+            }
+          },
+          "file": {
+            "type": "object",
+            "properties": {
+              "filename": {
+                "type": "string"
+              },
+              "file_data": {
+                "type": "string"
+              },
+              "file_id": {
+                "type": "string"
+              }
+            }
+          },
+          "video_url": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "ToolCall": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "example": "function"
+          },
+          "function": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "arguments": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Tool": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "example": "function"
+          },
+          "function": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "parameters": {
+                "type": "object",
+                "description": "JSON Schema 格式的参数定义",
+                "properties": {}
+              }
+            }
+          }
+        }
+      },
+      "ResponseFormat": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "json_object",
+              "json_schema"
+            ]
+          },
+          "json_schema": {
+            "type": "object",
+            "description": "JSON Schema 定义",
+            "properties": {}
+          }
+        }
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "messages"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "模型 ID",
+            "example": "gpt-4"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "description": "对话消息列表"
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2,
+            "default": 1,
+            "description": "采样温度"
+          },
+          "top_p": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 1,
+            "description": "核采样参数"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1,
+            "description": "生成数量"
+          },
+          "stream": {
+            "type": "boolean",
+            "default": false,
+            "description": "是否流式响应"
+          },
+          "stream_options": {
+            "type": "object",
+            "properties": {
+              "include_usage": {
+                "type": "boolean"
+              }
+            }
+          },
+          "stop": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "description": "停止序列"
+          },
+          "max_tokens": {
+            "type": "integer",
+            "description": "最大生成 Token 数"
+          },
+          "max_completion_tokens": {
+            "type": "integer",
+            "description": "最大补全 Token 数"
+          },
+          "presence_penalty": {
+            "type": "number",
+            "minimum": -2,
+            "maximum": 2,
+            "default": 0
+          },
+          "frequency_penalty": {
+            "type": "number",
+            "minimum": -2,
+            "maximum": 2,
+            "default": 0
+          },
+          "logit_bias": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            },
+            "properties": {}
+          },
+          "user": {
+            "type": "string"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tool"
+            }
+          },
+          "tool_choice": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "auto",
+                  "required"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string"
+                  },
+                  "function": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "response_format": {
+            "$ref": "#/components/schemas/ResponseFormat"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "description": "推理强度 (用于支持推理的模型)"
+          },
+          "modalities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "text",
+                "audio"
+              ]
+            }
+          },
+          "audio": {
+            "type": "object",
+            "properties": {
+              "voice": {
+                "type": "string"
+              },
+              "format": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "ChatCompletionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string",
+            "example": "chat.completion"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "message": {
+                  "$ref": "#/components/schemas/Message"
+                },
+                "finish_reason": {
+                  "type": "string",
+                  "enum": [
+                    "stop",
+                    "length",
+                    "tool_calls",
+                    "content_filter"
+                  ]
+                }
+              }
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          },
+          "system_fingerprint": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatCompletionStreamResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string",
+            "example": "chat.completion.chunk"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "delta": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "reasoning_content": {
+                      "type": "string"
+                    },
+                    "tool_calls": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ToolCall"
+                      }
+                    }
+                  }
+                },
+                "finish_reason": {
+                  "type": "string",
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          }
+        }
+      },
+      "CompletionRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "prompt"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "prompt": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "max_tokens": {
+            "type": "integer"
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "top_p": {
+            "type": "number"
+          },
+          "n": {
+            "type": "integer"
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "stop": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "suffix": {
+            "type": "string"
+          },
+          "echo": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CompletionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string",
+            "example": "text_completion"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "index": {
+                  "type": "integer"
+                },
+                "finish_reason": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          }
+        }
+      },
+      "ResponsesRequest": {
+        "type": "object",
+        "required": [
+          "model"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "input": {
+            "description": "输入内容，可以是字符串或消息数组",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            ]
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "max_output_tokens": {
+            "type": "integer"
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "top_p": {
+            "type": "number"
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {}
+            }
+          },
+          "tool_choice": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {}
+              }
+            ]
+          },
+          "reasoning": {
+            "type": "object",
+            "properties": {
+              "effort": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              }
+            }
+          },
+          "previous_response_id": {
+            "type": "string"
+          },
+          "truncation": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "disabled"
+            ]
+          }
+        }
+      },
+      "ResponsesResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string",
+            "example": "response"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "failed",
+              "in_progress",
+              "incomplete"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string"
+                      },
+                      "text": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          }
+        }
+      },
+	      "ResponsesCompactionResponse": {
+	        "type": "object",
+	        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string",
+            "example": "response.compaction"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "output": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {}
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          },
+          "error": {
+            "type": "object",
+            "properties": {}
+          }
+	        }
+	      },
+	      "ResponsesCompactionRequest": {
+	        "type": "object",
+	        "required": [
+	          "model"
+	        ],
+	        "properties": {
+	          "model": {
+	            "type": "string"
+	          },
+	          "input": {
+	            "description": "输入内容，可以是字符串或消息数组",
+	            "oneOf": [
+	              {
+	                "type": "string"
+	              },
+	              {
+	                "type": "array",
+	                "items": {
+	                  "type": "object",
+	                  "properties": {}
+	                }
+	              }
+	            ]
+	          },
+	          "instructions": {
+	            "type": "string"
+	          },
+	          "previous_response_id": {
+	            "type": "string"
+	          }
+	        }
+	      },
+	      "ResponsesStreamResponse": {
+	        "type": "object",
+	        "properties": {
+	          "type": {
+            "type": "string"
+          },
+          "response": {
+            "$ref": "#/components/schemas/ResponsesResponse"
+          },
+          "delta": {
+            "type": "string"
+          },
+          "item": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      },
+      "ClaudeRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "messages",
+          "max_tokens"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "example": "claude-3-opus-20240229"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClaudeMessage"
+            }
+          },
+          "system": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            ]
+          },
+          "cache_control": {
+            "type": "object",
+            "properties": {}
+          },
+          "inference_geo": {
+            "type": "string"
+          },
+          "max_tokens": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "top_p": {
+            "type": "number"
+          },
+          "top_k": {
+            "type": "integer"
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "stop_sequences": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "input_schema": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          },
+          "tool_choice": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "auto",
+                      "any",
+                      "tool",
+                      "none"
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          },
+          "thinking": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "enabled",
+                  "disabled"
+                ]
+              },
+              "budget_tokens": {
+                "type": "integer"
+              }
+            }
+          },
+          "context_management": {
+            "type": "object",
+            "properties": {}
+          },
+          "output_config": {
+            "type": "object",
+            "properties": {}
+          },
+          "output_format": {
+            "type": "object",
+            "properties": {}
+          },
+          "container": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {}
+              }
+            ]
+          },
+          "mcp_servers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {}
+            }
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "user_id": {
+                "type": "string"
+              }
+            }
+          },
+          "speed": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "fast"
+            ]
+          },
+          "service_tier": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "standard_only"
+            ]
+          }
+        }
+      },
+      "ClaudeMessage": {
+        "type": "object",
+        "required": [
+          "role",
+          "content"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant"
+            ]
+          },
+          "content": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "image",
+                        "tool_use",
+                        "tool_result"
+                      ]
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "base64",
+                            "url"
+                          ]
+                        },
+                        "media_type": {
+                          "type": "string"
+                        },
+                        "data": {
+                          "type": "string"
+                        },
+                        "url": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "input": {
+                      "type": "object",
+                      "properties": {}
+                    },
+                    "tool_use_id": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "ClaudeResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "example": "message"
+          },
+          "role": {
+            "type": "string",
+            "example": "assistant"
+          },
+          "content": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "model": {
+            "type": "string"
+          },
+          "stop_reason": {
+            "type": "string",
+            "enum": [
+              "end_turn",
+              "max_tokens",
+              "stop_sequence",
+              "tool_use"
+            ]
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "input_tokens": {
+                "type": "integer"
+              },
+              "output_tokens": {
+                "type": "integer"
+              },
+              "cache_creation_input_tokens": {
+                "type": "integer"
+              },
+              "cache_read_input_tokens": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "EmbeddingRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "input"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "example": "text-embedding-ada-002"
+          },
+          "input": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "description": "要嵌入的文本"
+          },
+          "encoding_format": {
+            "type": "string",
+            "enum": [
+              "float",
+              "base64"
+            ],
+            "default": "float"
+          },
+          "dimensions": {
+            "type": "integer",
+            "description": "输出向量维度"
+          }
+        }
+      },
+      "EmbeddingResponse": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "example": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "object": {
+                  "type": "string",
+                  "example": "embedding"
+                },
+                "index": {
+                  "type": "integer"
+                },
+                "embedding": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          },
+          "model": {
+            "type": "string"
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "prompt_tokens": {
+                "type": "integer"
+              },
+              "total_tokens": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "ImageGenerationRequest": {
+        "type": "object",
+        "required": [
+          "prompt"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "example": "dall-e-3"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "图像描述"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 1
+          },
+          "size": {
+            "type": "string",
+            "enum": [
+              "256x256",
+              "512x512",
+              "1024x1024",
+              "1792x1024",
+              "1024x1792"
+            ],
+            "default": "1024x1024"
+          },
+          "quality": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "hd"
+            ],
+            "default": "standard"
+          },
+          "style": {
+            "type": "string",
+            "enum": [
+              "vivid",
+              "natural"
+            ],
+            "default": "vivid"
+          },
+          "response_format": {
+            "type": "string",
+            "enum": [
+              "url",
+              "b64_json"
+            ],
+            "default": "url"
+          },
+          "user": {
+            "type": "string"
+          }
+        }
+      },
+      "ImageEditRequest": {
+        "type": "object",
+        "required": [
+          "image",
+          "prompt"
+        ],
+        "properties": {
+          "image": {
+            "type": "string",
+            "format": "binary"
+          },
+          "mask": {
+            "type": "string",
+            "format": "binary"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "n": {
+            "type": "integer"
+          },
+          "size": {
+            "type": "string"
+          },
+          "response_format": {
+            "type": "string"
+          }
+        }
+      },
+      "ImageResponse": {
+        "type": "object",
+        "properties": {
+          "created": {
+            "type": "integer"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "b64_json": {
+                  "type": "string"
+                },
+                "revised_prompt": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "AudioTranscriptionRequest": {
+        "type": "object",
+        "required": [
+          "file",
+          "model"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "description": "音频文件"
+          },
+          "model": {
+            "type": "string",
+            "example": "whisper-1"
+          },
+          "language": {
+            "type": "string",
+            "description": "ISO-639-1 语言代码"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "response_format": {
+            "type": "string",
+            "enum": [
+              "json",
+              "text",
+              "srt",
+              "verbose_json",
+              "vtt"
+            ],
+            "default": "json"
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "timestamp_granularities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "word",
+                "segment"
+              ]
+            }
+          }
+        }
+      },
+      "AudioTranslationRequest": {
+        "type": "object",
+        "required": [
+          "file",
+          "model"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary"
+          },
+          "model": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "response_format": {
+            "type": "string"
+          },
+          "temperature": {
+            "type": "number"
+          }
+        }
+      },
+      "AudioTranscriptionResponse": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "SpeechRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "input",
+          "voice"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "example": "tts-1"
+          },
+          "input": {
+            "type": "string",
+            "description": "要转换的文本",
+            "maxLength": 4096
+          },
+          "voice": {
+            "type": "string",
+            "enum": [
+              "alloy",
+              "echo",
+              "fable",
+              "onyx",
+              "nova",
+              "shimmer"
+            ]
+          },
+          "response_format": {
+            "type": "string",
+            "enum": [
+              "mp3",
+              "opus",
+              "aac",
+              "flac",
+              "wav",
+              "pcm"
+            ],
+            "default": "mp3"
+          },
+          "speed": {
+            "type": "number",
+            "minimum": 0.25,
+            "maximum": 4,
+            "default": 1
+          }
+        }
+      },
+      "RerankRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "query",
+          "documents"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "example": "rerank-english-v2.0"
+          },
+          "query": {
+            "type": "string",
+            "description": "查询文本"
+          },
+          "documents": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "object",
+                  "properties": {}
+                }
+              ]
+            },
+            "description": "要重排序的文档列表"
+          },
+          "top_n": {
+            "type": "integer",
+            "description": "返回前 N 个结果"
+          },
+          "return_documents": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "RerankResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "relevance_score": {
+                  "type": "number"
+                },
+                "document": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          },
+          "meta": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      },
+      "ModerationRequest": {
+        "type": "object",
+        "required": [
+          "input"
+        ],
+        "properties": {
+          "input": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "model": {
+            "type": "string",
+            "example": "text-moderation-latest"
+          }
+        }
+      },
+      "ModerationResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "flagged": {
+                  "type": "boolean"
+                },
+                "categories": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "category_scores": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "GeminiRequest": {
+        "type": "object",
+        "properties": {
+          "contents": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "user",
+                    "model"
+                  ]
+                },
+                "parts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string"
+                      },
+                      "inlineData": {
+                        "type": "object",
+                        "properties": {
+                          "mimeType": {
+                            "type": "string"
+                          },
+                          "data": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "generationConfig": {
+            "type": "object",
+            "properties": {
+              "temperature": {
+                "type": "number"
+              },
+              "topP": {
+                "type": "number"
+              },
+              "topK": {
+                "type": "integer"
+              },
+              "maxOutputTokens": {
+                "type": "integer"
+              },
+              "stopSequences": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "safetySettings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string"
+                },
+                "threshold": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {}
+            }
+          },
+          "systemInstruction": {
+            "type": "object",
+            "properties": {
+              "parts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "GeminiResponse": {
+        "type": "object",
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "type": "string"
+                    },
+                    "parts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {}
+                      }
+                    }
+                  }
+                },
+                "finishReason": {
+                  "type": "string"
+                },
+                "safetyRatings": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {}
+                  }
+                }
+              }
+            }
+          },
+          "usageMetadata": {
+            "type": "object",
+            "properties": {
+              "promptTokenCount": {
+                "type": "integer"
+              },
+              "candidatesTokenCount": {
+                "type": "integer"
+              },
+              "totalTokenCount": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "VideoRequest": {
+        "type": "object",
+        "description": "视频生成请求",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "模型/风格 ID",
+            "example": "kling-v1"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "文本描述提示词",
+            "example": "宇航员站起身走了"
+          },
+          "image": {
+            "type": "string",
+            "description": "图片输入 (URL 或 Base64)",
+            "example": "https://example.com/image.jpg"
+          },
+          "duration": {
+            "type": "number",
+            "description": "视频时长（秒）",
+            "example": 5
+          },
+          "width": {
+            "type": "integer",
+            "description": "视频宽度",
+            "example": 1280
+          },
+          "height": {
+            "type": "integer",
+            "description": "视频高度",
+            "example": 720
+          },
+          "fps": {
+            "type": "integer",
+            "description": "视频帧率",
+            "example": 30
+          },
+          "seed": {
+            "type": "integer",
+            "description": "随机种子",
+            "example": 20231234
+          },
+          "n": {
+            "type": "integer",
+            "description": "生成视频数量",
+            "example": 1
+          },
+          "response_format": {
+            "type": "string",
+            "description": "响应格式",
+            "example": "url"
+          },
+          "user": {
+            "type": "string",
+            "description": "用户标识",
+            "example": "user-1234"
+          },
+          "metadata": {
+            "type": "object",
+            "description": "扩展参数 (如 negative_prompt, style, quality_level 等)",
+            "additionalProperties": true,
+            "properties": {}
+          }
+        }
+      },
+      "VideoResponse": {
+        "type": "object",
+        "description": "视频生成任务提交响应",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "任务 ID",
+            "example": "abcd1234efgh"
+          },
+          "status": {
+            "type": "string",
+            "description": "任务状态",
+            "example": "queued"
+          }
+        }
+      },
+      "VideoTaskResponse": {
+        "type": "object",
+        "description": "视频任务状态查询响应",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "任务 ID",
+            "example": "abcd1234efgh"
+          },
+          "status": {
+            "type": "string",
+            "description": "任务状态",
+            "enum": [
+              "queued",
+              "in_progress",
+              "completed",
+              "failed"
+            ],
+            "example": "completed"
+          },
+          "url": {
+            "type": "string",
+            "description": "视频资源 URL（成功时）",
+            "example": "https://example.com/video.mp4"
+          },
+          "format": {
+            "type": "string",
+            "description": "视频格式",
+            "example": "mp4"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/VideoTaskMetadata"
+          },
+          "error": {
+            "$ref": "#/components/schemas/VideoTaskError"
+          }
+        }
+      },
+      "VideoTaskMetadata": {
+        "type": "object",
+        "description": "视频任务元数据",
+        "properties": {
+          "duration": {
+            "type": "number",
+            "description": "实际生成的视频时长",
+            "example": 5
+          },
+          "fps": {
+            "type": "integer",
+            "description": "实际帧率",
+            "example": 30
+          },
+          "width": {
+            "type": "integer",
+            "description": "实际宽度",
+            "example": 1280
+          },
+          "height": {
+            "type": "integer",
+            "description": "实际高度",
+            "example": 720
+          },
+          "seed": {
+            "type": "integer",
+            "description": "使用的随机种子",
+            "example": 20231234
+          }
+        }
+      },
+      "VideoTaskError": {
+        "type": "object",
+        "description": "视频任务错误信息",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "description": "错误码"
+          },
+          "message": {
+            "type": "string",
+            "description": "错误信息"
+          }
+        }
+      },
+      "OpenAIVideo": {
+        "type": "object",
+        "description": "OpenAI 兼容的视频对象",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "视频 ID",
+            "example": "video-abc123"
+          },
+          "task_id": {
+            "type": "string",
+            "description": "任务 ID (兼容旧接口)",
+            "deprecated": true
+          },
+          "object": {
+            "type": "string",
+            "description": "对象类型",
+            "example": "video"
+          },
+          "model": {
+            "type": "string",
+            "description": "使用的模型",
+            "example": "sora"
+          },
+          "status": {
+            "type": "string",
+            "description": "任务状态",
+            "enum": [
+              "queued",
+              "in_progress",
+              "completed",
+              "failed"
+            ],
+            "example": "completed"
+          },
+          "progress": {
+            "type": "integer",
+            "description": "进度百分比",
+            "example": 100
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "创建时间戳"
+          },
+          "completed_at": {
+            "type": "integer",
+            "description": "完成时间戳"
+          },
+          "expires_at": {
+            "type": "integer",
+            "description": "过期时间戳"
+          },
+          "seconds": {
+            "type": "string",
+            "description": "视频时长"
+          },
+          "size": {
+            "type": "string",
+            "description": "视频尺寸"
+          },
+          "remixed_from_video_id": {
+            "type": "string",
+            "description": "源视频 ID（如果是基于其他视频生成）"
+          },
+          "error": {
+            "$ref": "#/components/schemas/OpenAIVideoError"
+          },
+          "metadata": {
+            "type": "object",
+            "description": "额外元数据",
+            "additionalProperties": true,
+            "properties": {}
+          }
+        }
+      },
+      "OpenAIVideoError": {
+        "type": "object",
+        "description": "OpenAI 视频错误信息",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "错误信息"
+          },
+          "code": {
+            "type": "string",
+            "description": "错误码"
+          }
+        }
+      },
+      "ApiResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {}
+        }
+      },
+      "PageInfo": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer"
+          },
+          "page_size": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {}
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "username": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "email": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "quota": {
+            "type": "integer"
+          },
+          "used_quota": {
+            "type": "integer"
+          },
+          "request_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "Channel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "models": {
+            "type": "string"
+          },
+          "groups": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "weight": {
+            "type": "integer"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          }
+        }
+      },
+      "Token": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "user_id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "expired_time": {
+            "type": "integer"
+          },
+          "remain_quota": {
+            "type": "integer"
+          },
+          "unlimited_quota": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Redemption": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "quota": {
+            "type": "integer"
+          },
+          "created_time": {
+            "type": "integer"
+          },
+          "redeemed_time": {
+            "type": "integer"
+          }
+        }
+      },
+      "Log": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "user_id": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "integer"
+          },
+          "content": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "responses": {},
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "使用 Bearer Token 认证。\n格式: `Authorization: Bearer sk-xxxxxx`\n"
+      },
+      "SessionAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "session",
+        "description": "已废弃：Gin session 不再用于面板鉴权"
+      },
+      "AccessToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT or PAT",
+        "description": "面板短期 JWT 或 User.AccessToken PAT；不再要求 New-Api-User"
+      },
+      "NewApiUser": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "New-Api-User",
+        "description": "已废弃且不再参与鉴权；PAT 客户端可以移除此请求头"
+      },
+      "Combination": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination2": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination11": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination3": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination12": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination4": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination13": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination5": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination14": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination6": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination15": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination7": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination16": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination8": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination17": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination9": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination18": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination10": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination19": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination20": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination110": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination21": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination111": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination22": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination112": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination23": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination113": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination24": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination114": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination25": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination115": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination26": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination116": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination27": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination117": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination28": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination118": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination29": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination119": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination30": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination120": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination31": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination121": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination32": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination122": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination33": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination123": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination34": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination124": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination35": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination125": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination36": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination126": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination37": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination127": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination38": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination128": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination39": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination129": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination40": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination130": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination41": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination131": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination42": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination132": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination43": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination133": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination44": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination134": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination45": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination135": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination46": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination136": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination47": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination137": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination48": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination138": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination49": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination139": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination50": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination140": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination51": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination141": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination52": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination142": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination53": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination143": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination54": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination144": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination55": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination145": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination56": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination146": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination57": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination147": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination58": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination148": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination59": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination149": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination60": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination150": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination61": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination151": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination62": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination152": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination63": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination153": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination64": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination154": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination65": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination155": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination66": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination156": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination67": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination157": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination68": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination158": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination69": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination159": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination70": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination160": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination71": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination161": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination72": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination162": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination73": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination163": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination74": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination164": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination75": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination165": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination76": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination166": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination77": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination167": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination78": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination168": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination79": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination169": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination80": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination170": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination81": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination171": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination82": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination172": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination83": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination173": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination84": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination174": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination85": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination175": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination86": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination176": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination87": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination177": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination88": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination178": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination89": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination179": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination90": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination180": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination91": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination181": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination92": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination182": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination93": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination183": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination94": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination184": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination95": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination185": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination96": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination186": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination97": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination187": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination98": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination188": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination99": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination189": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination100": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination190": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination101": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination191": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination102": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination192": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination103": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination193": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination104": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination194": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination105": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination195": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination106": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination196": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination107": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination197": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination108": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination198": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination109": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination199": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination200": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1100": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination201": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1101": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination202": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1102": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination203": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1103": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination204": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1104": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination205": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1105": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination206": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1106": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination207": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1107": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination208": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1108": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination209": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1109": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination210": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1110": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination211": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1111": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination212": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1112": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination213": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1113": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination214": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1114": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination215": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1115": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination216": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1116": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination217": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1117": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination218": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1118": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination219": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1119": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination220": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      },
+      "Combination1120": {
+        "group": [
+          {
+            "id": "AccessToken"
+          }
+        ],
+        "type": "combination"
+      }
+    }
+  },
+  "servers": [],
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ]
+}

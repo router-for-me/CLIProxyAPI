@@ -1,0 +1,250 @@
+name: Sync Release to GitCode
+
+permissions:
+  actions: read
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: GitHub release tag to sync
+        required: true
+        type: string
+      sync_files:
+        description: Sync GitHub release files to GitCode
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: gitcode-release-${{ inputs.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-release:
+    name: Create or update GitCode release
+    if: ${{ vars.GITCODE_REPOSITORY != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      release_tag: ${{ steps.release.outputs.tag }}
+      release_body: ${{ steps.release.outputs.body }}
+      release_prerelease: ${{ steps.release.outputs.prerelease }}
+      release_asset_matrix: ${{ steps.assets.outputs.matrix }}
+      has_release_assets: ${{ steps.assets.outputs.has_assets }}
+    steps:
+      - name: Create or update GitCode release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json body,isPrerelease
+          )"
+          release_body="$(jq -r '.body // ""' <<< "$release_json" | sed "s/'/’/g")"
+          release_prerelease="$(jq -r '.isPrerelease' <<< "$release_json")"
+          if [[ "$release_prerelease" == "true" ]]; then
+            release_status=pre
+          else
+            release_status=latest
+          fi
+
+          gitcode_release_json="$(mktemp)"
+          gitcode_release_status="$(
+            curl -L -sS -o "$gitcode_release_json" -w "%{http_code}" \
+              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -H "Accept: application/json" \
+              "https://api.gitcode.com/api/v5/repos/$GITCODE_REPOSITORY/releases/tags/$RELEASE_TAG"
+          )"
+
+          request_json="$(mktemp)"
+          case "$gitcode_release_status" in
+            200)
+              request_method=PATCH
+              request_url="https://api.gitcode.com/api/v5/repos/$GITCODE_REPOSITORY/releases/$RELEASE_TAG"
+              request_action=update
+              success_action=updated
+              jq -n \
+                --arg tag_name "$RELEASE_TAG" \
+                --arg name "$RELEASE_TAG" \
+                --arg body "$release_body" \
+                --arg release_status "$release_status" \
+                '{
+                  tag_name: $tag_name,
+                  name: $name,
+                  body: $body,
+                  release_status: $release_status
+                }' > "$request_json"
+              ;;
+            404)
+              if ! git ls-remote --exit-code --tags \
+                "https://gitcode.com/$GITCODE_REPOSITORY.git" \
+                "refs/tags/$RELEASE_TAG" > /dev/null; then
+                echo "::error::Tag $RELEASE_TAG has not been mirrored to GitCode yet. Retry this workflow after the tag appears on GitCode."
+                exit 1
+              fi
+
+              request_method=POST
+              request_url="https://api.gitcode.com/api/v5/repos/$GITCODE_REPOSITORY/releases"
+              request_action=create
+              success_action=created
+              jq -n \
+                --arg tag_name "$RELEASE_TAG" \
+                --arg name "$RELEASE_TAG" \
+                --arg body "$release_body" \
+                --arg release_status "$release_status" \
+                '{
+                  tag_name: $tag_name,
+                  name: $name,
+                  body: $body,
+                  release_status: $release_status
+                }' > "$request_json"
+              ;;
+            *)
+              echo "::error::Failed to inspect GitCode release. Response code: $gitcode_release_status"
+              cat "$gitcode_release_json"
+              exit 1
+              ;;
+          esac
+
+          gitcode_response_json="$(mktemp)"
+          request_status="$(
+            curl -L -sS -o "$gitcode_response_json" -w "%{http_code}" \
+              -X "$request_method" \
+              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json" \
+              --data-binary "@$request_json" \
+              "$request_url"
+          )"
+          if [[ "$request_status" != "200" ]]; then
+            echo "::error::Failed to $request_action GitCode release. Response code: $request_status"
+            cat "$gitcode_response_json"
+            exit 1
+          fi
+          echo "GitCode release $success_action successfully"
+
+          delimiter="release-body-$(openssl rand -hex 16)"
+          {
+            echo "tag=$RELEASE_TAG"
+            echo "body<<$delimiter"
+            echo "$release_body"
+            echo "$delimiter"
+            echo "prerelease=$release_prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download GitHub release assets
+        if: ${{ inputs.sync_files }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          mkdir release-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-assets
+
+          if ! find release-assets -maxdepth 1 -type f -print -quit | grep -q .; then
+            echo "::error::GitHub release has no downloadable assets"
+            exit 1
+          fi
+
+          while IFS= read -r -d '' file; do
+            directory="$(dirname "$file")"
+            filename="$(basename "$file")"
+            safe_filename="$(sed 's/[^A-Za-z0-9._+-]/-/g' <<< "$filename")"
+            if [[ "$filename" != "$safe_filename" ]]; then
+              if [[ -e "$directory/$safe_filename" ]]; then
+                echo "::error::Asset filename collision after normalization: $safe_filename"
+                exit 1
+              fi
+              mv -- "$file" "$directory/$safe_filename"
+            fi
+          done < <(find release-assets -maxdepth 1 -type f -print0)
+
+          find release-assets -maxdepth 1 -type f -print | sort
+
+      - name: Prepare GitCode release assets
+        id: assets
+        if: ${{ inputs.sync_files }}
+        env:
+          GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          local_assets="$(
+            find release-assets -maxdepth 1 -type f -printf '%s\t%f\n' \
+              | sort -n -k1,1 \
+              | cut -f2- \
+              | jq -Rsc 'split("\n") | map(select(length > 0))'
+          )"
+
+          gitcode_release_json="$(mktemp)"
+          gitcode_release_status="$(
+            curl -L -sS -o "$gitcode_release_json" -w "%{http_code}" \
+              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -H "Accept: application/json" \
+              "https://api.gitcode.com/api/v5/repos/$GITCODE_REPOSITORY/releases/tags/$RELEASE_TAG"
+          )"
+          if [[ "$gitcode_release_status" != "200" ]]; then
+            echo "::error::Failed to inspect GitCode release assets. Response code: $gitcode_release_status"
+            cat "$gitcode_release_json"
+            exit 1
+          fi
+
+          existing_assets="$(jq -c '[.assets[]?.name]' "$gitcode_release_json")"
+          missing_assets="$(
+            jq -cn \
+              --argjson local_assets "$local_assets" \
+              --argjson existing_assets "$existing_assets" \
+              '$local_assets - $existing_assets'
+          )"
+          jq -rn \
+            --argjson local_assets "$local_assets" \
+            --argjson missing_assets "$missing_assets" \
+            '$local_assets - $missing_assets | .[] | "Skipping existing GitCode asset: \(.)"'
+
+          echo "matrix=$missing_assets" >> "$GITHUB_OUTPUT"
+          echo "has_assets=$(jq -r 'length > 0' <<< "$missing_assets")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release assets for GitCode
+        if: ${{ inputs.sync_files && steps.assets.outputs.has_assets == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gitcode-release-assets
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 1
+
+  gitcode-release-assets:
+    name: Publish GitCode asset (${{ matrix.file_name }})
+    needs: prepare-release
+    if: ${{ inputs.sync_files && needs.prepare-release.result == 'success' && needs.prepare-release.outputs.has_release_assets == 'true' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        file_name: ${{ fromJSON(needs.prepare-release.outputs.release_asset_matrix) }}
+    uses: nvdacn/sync_to_gitcode/.github/workflows/CreateReleaseOnGitCode.yaml@18b70112d0e62260bc54085028e5510bbc6323b2
+    with:
+      artifact_name: gitcode-release-assets
+      gitcode_repository: ${{ vars.GITCODE_REPOSITORY }}
+      default_branch: main
+      tag_name: ${{ needs.prepare-release.outputs.release_tag }}
+      body: ${{ needs.prepare-release.outputs.release_body }}
+      prerelease: ${{ needs.prepare-release.outputs.release_prerelease == 'true' }}
+      file_name: ${{ matrix.file_name }}
+    secrets:
+      GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}

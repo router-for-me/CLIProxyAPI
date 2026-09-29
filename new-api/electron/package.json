@@ -1,0 +1,157 @@
+{
+  "name": "new-api-electron",
+  "version": "1.0.0",
+  "description": "New API - AI Model Gateway Desktop Application",
+  "main": "main.js",
+  "scripts": {
+    "start-app": "electron .",
+    "dev-app": "cross-env NODE_ENV=development electron .",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "keywords": [
+    "ai",
+    "api",
+    "gateway",
+    "openai",
+    "claude"
+  ],
+  "author": "QuantumNous",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/QuantumNous/new-api"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "39.8.10",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.newapi.desktop",
+    "productName": "New-API-App",
+    "publish": null,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "icon.png",
+      "tray-iconTemplate.png",
+      "tray-iconTemplate@2x.png",
+      "tray-icon-windows.png"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "icon.png",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "extraResources": [
+        {
+          "from": "../new-api",
+          "to": "bin/new-api"
+        },
+        {
+          "from": "../LICENSE",
+          "to": "licenses/LICENSE"
+        },
+        {
+          "from": "../NOTICE",
+          "to": "licenses/NOTICE"
+        },
+        {
+          "from": "../THIRD-PARTY-LICENSES.md",
+          "to": "licenses/THIRD-PARTY-LICENSES.md"
+        },
+        {
+          "from": "node_modules/electron/dist/LICENSE",
+          "to": "licenses/electron/LICENSE"
+        },
+        {
+          "from": "node_modules/electron/dist/LICENSES.chromium.html",
+          "to": "licenses/electron/LICENSES.chromium.html"
+        }
+      ]
+    },
+    "win": {
+      "icon": "icon.png",
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "extraResources": [
+        {
+          "from": "../new-api.exe",
+          "to": "bin/new-api.exe"
+        },
+        {
+          "from": "../LICENSE",
+          "to": "licenses/LICENSE"
+        },
+        {
+          "from": "../NOTICE",
+          "to": "licenses/NOTICE"
+        },
+        {
+          "from": "../THIRD-PARTY-LICENSES.md",
+          "to": "licenses/THIRD-PARTY-LICENSES.md"
+        },
+        {
+          "from": "node_modules/electron/dist/LICENSE",
+          "to": "licenses/electron/LICENSE"
+        },
+        {
+          "from": "node_modules/electron/dist/LICENSES.chromium.html",
+          "to": "licenses/electron/LICENSES.chromium.html"
+        }
+      ]
+    },
+    "linux": {
+      "icon": "icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "extraResources": [
+        {
+          "from": "../new-api",
+          "to": "bin/new-api"
+        },
+        {
+          "from": "../LICENSE",
+          "to": "licenses/LICENSE"
+        },
+        {
+          "from": "../NOTICE",
+          "to": "licenses/NOTICE"
+        },
+        {
+          "from": "../THIRD-PARTY-LICENSES.md",
+          "to": "licenses/THIRD-PARTY-LICENSES.md"
+        },
+        {
+          "from": "node_modules/electron/dist/LICENSE",
+          "to": "licenses/electron/LICENSE"
+        },
+        {
+          "from": "node_modules/electron/dist/LICENSES.chromium.html",
+          "to": "licenses/electron/LICENSES.chromium.html"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

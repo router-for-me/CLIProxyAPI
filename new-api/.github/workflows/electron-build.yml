@@ -1,0 +1,141 @@
+name: Build Electron App
+
+on:
+  push:
+    tags:
+      - '*'  # Triggers on version tags like v1.0.0
+      - '!*-*'  # Ignore pre-release tags like v1.0.0-beta
+      - '!*-alpha*' # Ignore alpha tags like v1.0.0-alpha
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # os: [macos-latest, windows-latest]
+        os: [windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.0'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '>=1.25.1'
+
+      - name: Build frontend
+        env:
+          CI: ""
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(git describe --tags) bun run build
+          cd ..
+
+      # - name: Build Go binary (macos/Linux)
+      #   if: runner.os != 'Windows'
+      #   run: |
+      #     go mod download
+      #     go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(git describe --tags)' -extldflags '-static'" -o new-api
+
+      - name: Build Go binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          go mod download
+          go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(git describe --tags)'" -o new-api.exe
+
+      - name: Update Electron version
+        run: |
+          cd electron
+          VERSION=$(git describe --tags)
+          VERSION=${VERSION#v}  # Remove 'v' prefix if present
+          # Convert to valid semver: take first 3 components and convert rest to prerelease format
+          # e.g., 0.9.3-patch.1 -> 0.9.3-patch.1
+          if [[ $VERSION =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(.*)$ ]]; then
+            MAJOR=${BASH_REMATCH[1]}
+            MINOR=${BASH_REMATCH[2]}
+            PATCH=${BASH_REMATCH[3]}
+            REST=${BASH_REMATCH[4]}
+          
+            VERSION="$MAJOR.$MINOR.$PATCH"
+          
+            # If there's extra content, append it without adding -dev
+            if [[ -n "$REST" ]]; then
+              VERSION="$VERSION$REST"
+            fi
+          fi
+          npm version $VERSION --no-git-tag-version --allow-same-version
+
+      - name: Install Electron dependencies
+        run: |
+          cd electron
+          npm install
+
+      # - name: Build Electron app (macOS)
+      #   if: runner.os == 'macOS'
+      #   run: |
+      #     cd electron
+      #     npm run build:mac
+      #   env:
+      #     CSC_IDENTITY_AUTO_DISCOVERY: false  # Skip code signing
+
+      - name: Build Electron app (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd electron
+          npm run build:win
+
+      # - name: Upload artifacts (macOS)
+      #   if: runner.os == 'macOS'
+      #   uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      #   with:
+      #     name: macos-build
+      #     path: |
+      #       electron/dist/*.dmg
+      #       electron/dist/*.zip
+
+      - name: Upload artifacts (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-build
+          path: |
+            electron/dist/*.exe
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        with:
+          files: |
+            windows-build/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

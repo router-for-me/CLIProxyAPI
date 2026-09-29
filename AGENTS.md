@@ -40,6 +40,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `internal/tui/` — Bubbletea terminal UI (`--tui`, `--standalone`)
 - `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
 - `management-center/` — In-repo management panel source (React + Vite, single-file build). Follow its own `AGENTS.md`; needs Bun. Run `./management-center/build.sh` to build and stage `dist/index.html` into `static/management.html`, which the server serves in preference to the GitHub-downloaded asset
+- `new-api/` — In-repo copy of the new-api AI gateway (Go backend + React web admin, deployed alongside this proxy). Independent Go module and its own `AGENTS.md`/`web/AGENTS.md` conventions apply; not part of the root Go module. Build web first (`cd new-api/web && bun install --frozen-lockfile && bun run build`, embed requires `web/dist`), then `go build` inside `new-api/`
 - `test/` — Cross-module integration tests
 
 ## Code Conventions

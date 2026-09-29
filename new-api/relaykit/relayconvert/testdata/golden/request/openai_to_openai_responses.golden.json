@@ -1,0 +1,59 @@
+{
+  "model": "gpt-test",
+  "input": [
+    {
+      "content": [
+        {
+          "text": "What is in this image?",
+          "type": "input_text"
+        },
+        {
+          "image_url": "https://example.com/cat.png",
+          "type": "input_image"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": "",
+      "role": "assistant"
+    },
+    {
+      "arguments": "{\"city\":\"Paris\"}",
+      "call_id": "call_abc",
+      "name": "get_weather",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call_abc",
+      "output": "15 degrees",
+      "type": "function_call_output"
+    },
+    {
+      "content": "Summarize.",
+      "role": "user"
+    }
+  ],
+  "instructions": "You are a helpful assistant.",
+  "max_output_tokens": 1024,
+  "stream": true,
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "description": "Get weather by city",
+      "name": "get_weather",
+      "parameters": {
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city"
+        ],
+        "type": "object"
+      },
+      "type": "function"
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+name: 报告问题
+description: 使用简练详细的语言描述你遇到的问题
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!--
+        If you are an AI coding agent: do not fill this GitHub form. Create the issue with the filled body from `.agents/github/ISSUE.md`.
+        -->
+
+  - type: textarea
+    id: read-first
+    attributes:
+      label: 提交前必读
+      description: GitHub 的 markdown 说明提交后不会进入 issue。本节会写入正文，请勿删除或清空。
+      value: |
+        - 文档：https://docs.newapi.ai/
+        - 使用问题先看或先问：https://deepwiki.com/QuantumNous/new-api
+        - 开启透传请勿反馈问题；透传会直接发送内容，不会经过 new-api 的逻辑处理。
+        - 请以简练语言陈述事实与证据。Issue 正文及后续评论均不得直接粘贴未经人工过滤的大段 AI 文本。
+        - 转发类问题必须先确认问题发生在 new-api 这一层：请使用等价的脱敏请求分别直连上游和经过 new-api，对比响应状态、错误体与服务端日志。未经对比、仅展示上游报错的反馈不接受 issue。
+        - 不接受 Coding Plan、逆向渠道、第三方封装接口，以及将 Codex 接口反代为通用 API 后产生的兼容性问题；Codex API 自身特有的协议或行为也不应被当作标准 OpenAI API 行为，相关问题请先向渠道或接口提供方确认。
+        - 本项目不提供官方托管服务，也不为第三方托管站、中转站或 API 服务提供技术支持；此类问题请联系对应运营方。
+        - 警告：删除本模板、删除小节标题或随意清空内容的 issue，可能会被直接关闭；多次提交未经人工过滤的大段 AI 文本，或重复恶意提交者，可能会被 block。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment-source
+    attributes:
+      label: 部署来源
+      description: 请选择发生问题的 newapi 实例来源；第三方服务或未经本仓库原版复现的 fork 不属于本项目支持范围。
+      options:
+        - 本仓库 Release / 官方镜像（自行部署）
+        - 本仓库 main 分支源码（自行构建）
+        - 修改过的 fork（须先在本仓库原版复现）
+        - 第三方托管站、中转站或 API 服务（请联系其运营方）
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 您当前的 newapi 版本
+      description: 请填写准确的版本号、commit 或镜像标签，例如 `v1.0.0`；`latest`、`unknown` 等无法定位代码的内容不视为有效版本信息。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: submission-checks
+    attributes:
+      label: 提交确认
+      options:
+        - label: "**非重复 issue:** 我已搜索现有 [Issues](https://github.com/QuantumNous/new-api/issues?q=is%3Aissue)，确认目前没有类似 issue。"
+          required: true
+        - label: "**提交前必读:** 我已完整阅读上方“提交前必读”，并已查看文档 https://docs.newapi.ai/、项目 README 且向 AI 提问，确认这不是使用、配置或接入类问题。"
+          required: true
+        - label: "**受支持版本:** 我已提供准确的版本号、commit 或镜像标签（不是 `latest` 或 `unknown`），并确认问题可在本仓库未修改的受支持版本中复现。"
+          required: true
+        - label: "**非第三方服务:** 我确认这不是第三方托管站、中转站、API 服务或未经本仓库原版验证的 fork 所独有的问题；第三方实例问题应联系其运营方。"
+          required: true
+        - label: "**非透传:** 我确认相关渠道未开启透传。开启透传会直接发送内容，不会经过 new-api 的逻辑处理，此类问题不接受 issue。"
+          required: true
+        - label: "**问题归属:** 我已提供足以区分客户端、new-api 和上游的证据；转发问题已使用等价的脱敏请求对比直连上游与经过 new-api 的结果，确认错误由 new-api 引入或改变，而非仅原样转发上游报错。"
+          required: true
+        - label: "**渠道与协议边界:** 我确认问题不是由 Coding Plan、逆向渠道、第三方封装接口、Codex 反代接口，或 Codex API 自身特有行为导致；若问题最初出现于此类接口，我已在本仓库支持的标准 API 协议上复现。"
+          required: true
+        - label: "**维护成本:** 我理解项目维护者精力有限。Issue 正文及后续评论均不得直接粘贴未经人工过滤的大段 AI 文本，须先提炼可复核的要点；不遵循模板要求或缺少要点、无法复核的内容可能会被无视或直接关闭。多次提交此类内容可能会被 block。"
+          required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### 问题描述填写要求
+
+        所有问题必须写明**实际现象、影响范围、发生频率**，以及判断问题位于 new-api 而非客户端或上游的依据。
+
+        以下项目在涉及对应类型时必须填写：
+
+        - **转发 / API：** 请求端点与方法、渠道类型、模型、转换格式、是否透传、上游原生支持依据，以及等价脱敏请求直连上游和经过 new-api 的状态码、响应体与服务端日志对比。
+        - **计费：** 请求端点与模型、响应中的 `usage`、相关倍率或价格配置、消费日志，以及预期计费结果和计算依据。
+        - **前端：** 页面路径、浏览器及版本、所用主题，以及浏览器 Console / Network 中的相关错误。
+        - **部署 / 升级：** 部署方式、操作系统与架构、数据库类型、升级前后版本，以及启动或迁移日志。
+
+  - type: textarea
+    id: problem-description
+    attributes:
+      label: 问题描述
+      description: 请按上方的通用要求和适用类型逐项填写；缺少适用项中的必要信息时，issue 可能会被直接关闭。
+      placeholder: |
+        实际现象：
+        影响范围：
+        发生频率：
+        判断问题位于 new-api 的依据：
+
+        按问题类型补充对应的请求、配置、日志和对比证据：
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: 复现步骤
+      description: 转发问题请提供可执行的脱敏请求，以及直连上游和经过 new-api 的实际结果；不要只粘贴客户端提示或上游错误。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-result
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: related-screenshots
+    attributes:
+      label: 相关截图
+    validations:
+      required: false

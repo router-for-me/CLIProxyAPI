@@ -1,0 +1,742 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+/*
+ * Theme presets — color palettes, border radius, and density scaling.
+ *
+ * Usage: applied via data attributes on <body>:
+ *   <body data-theme-preset="rose-garden" data-theme-radius="lg" data-theme-scale="sm" />
+ *
+ * - `data-theme-preset` overrides the color palette defined in ./theme.css and
+ *   ships a curated default `--radius` value to match the preset's mood
+ *   (e.g. rose-garden uses 1rem, ocean-breeze uses 0.3rem).
+ * - Each preset declares both light and dark color values; dark values use
+ *   the `.dark` ancestor selector so they apply when html has the `.dark` class.
+ * - `data-theme-radius` and `data-theme-scale` adjust visual density
+ *   independently. The radius block is intentionally placed AFTER the preset
+ *   blocks so an explicit user choice overrides the preset's default radius.
+ */
+
+/* ── Underground ──────────────────────────────────────────────────────── */
+[data-theme-preset='underground'] {
+  --primary: oklch(0.5315 0.0694 156.19);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.5748 0.0862 336.52);
+  --secondary-foreground: oklch(1 0 0);
+  --ring: oklch(0.5315 0.0694 156.19);
+  --chart-1: oklch(0.5315 0.0694 156.19);
+  --chart-2: oklch(0.5748 0.0862 336.52);
+  --chart-3: oklch(0.8603 0.0731 158.6);
+  --chart-4: oklch(0.8292 0.0422 332);
+  --chart-5: oklch(0.9564 0.0234 159.23);
+  --sidebar-primary: oklch(0.5315 0.0694 156.19);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.9687 0.0051 247.88);
+  --sidebar-accent-foreground: oklch(0.279 0.0299 260.05);
+  --sidebar-ring: oklch(0.5315 0.0694 156.19);
+  --radius: 0.5rem;
+}
+.dark [data-theme-preset='underground'] {
+  --primary: oklch(0.6147 0.0867 154.73);
+  --primary-foreground: oklch(0.129 0.0306 264.71);
+  --secondary: oklch(0.6624 0.0855 334.26);
+  --secondary-foreground: oklch(0.129 0.0306 264.71);
+  --ring: oklch(0.6147 0.0867 154.73);
+  --chart-1: oklch(0.6147 0.0867 154.73);
+  --chart-2: oklch(0.6624 0.0855 334.26);
+  --chart-3: oklch(0.7122 0.0991 154.66);
+  --chart-4: oklch(0.7308 0.07 333.6);
+  --chart-5: oklch(0.781 0.0975 156.24);
+  --sidebar-primary: oklch(0.6147 0.0867 154.73);
+  --sidebar-primary-foreground: oklch(0.129 0.0306 264.71);
+  --sidebar-accent: oklch(0.279 0.0299 260.05);
+  --sidebar-accent-foreground: oklch(0.929 0.0095 255.53);
+  --sidebar-ring: oklch(0.6147 0.0867 154.73);
+}
+
+/* ── Rose Garden ──────────────────────────────────────────────────────── */
+[data-theme-preset='rose-garden'] {
+  --primary: oklch(0.5827 0.2418 12.23);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.8131 0.1129 5.67);
+  --secondary-foreground: oklch(0.2686 0.0032 34.85);
+  --ring: oklch(0.5827 0.2418 12.23);
+  --chart-1: oklch(0.5827 0.2418 12.23);
+  --chart-2: oklch(0.8938 0.0563 3.77);
+  --chart-3: oklch(0.7135 0.1879 7.69);
+  --chart-4: oklch(0.8131 0.1129 5.67);
+  --chart-5: oklch(0.9429 0.0283 5.52);
+  --sidebar-primary: oklch(0.5827 0.2418 12.23);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.5827 0.2418 12.23);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.5827 0.2418 12.23);
+  --radius: 1rem;
+}
+.dark [data-theme-preset='rose-garden'] {
+  --primary: oklch(0.6476 0.2348 10.36);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.8131 0.1129 5.67);
+  --secondary-foreground: oklch(0.9227 0.0029 34.49);
+  --ring: oklch(0.6476 0.2348 10.36);
+  --chart-1: oklch(0.6476 0.2348 10.36);
+  --chart-2: oklch(0.8938 0.0563 3.77);
+  --chart-3: oklch(0.7135 0.1879 7.69);
+  --chart-4: oklch(0.8131 0.1129 5.67);
+  --chart-5: oklch(0.9429 0.0283 5.52);
+  --sidebar-primary: oklch(0.6476 0.2348 10.36);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.6476 0.2348 10.36);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.6476 0.2348 10.36);
+}
+
+/* ── Lake View ────────────────────────────────────────────────────────── */
+[data-theme-preset='lake-view'] {
+  --primary: oklch(0.765 0.177 163.22);
+  --primary-foreground: oklch(0 0 0);
+  --secondary: oklch(0.551 0.0899 200.52);
+  --secondary-foreground: oklch(1 0 0);
+  --ring: oklch(0.765 0.177 163.22);
+  --chart-1: oklch(0.765 0.177 163.22);
+  --chart-2: oklch(0.551 0.0899 200.52);
+  --chart-3: oklch(0.845 0.143 164.98);
+  --chart-4: oklch(0.8576 0.1202 192.38);
+  --chart-5: oklch(0.95 0.052 163.05);
+  --sidebar-primary: oklch(0.765 0.177 163.22);
+  --sidebar-primary-foreground: oklch(0 0 0);
+  --sidebar-accent: oklch(0.765 0.177 163.22);
+  --sidebar-accent-foreground: oklch(0.2742 0.0208 165.96);
+  --sidebar-ring: oklch(0.765 0.177 163.22);
+  --radius: 0.75rem;
+}
+.dark [data-theme-preset='lake-view'] {
+  --primary: oklch(0.765 0.177 163.22);
+  --primary-foreground: oklch(0 0 0);
+  --secondary: oklch(0.551 0.0899 200.52);
+  --secondary-foreground: oklch(1 0 0);
+  --ring: oklch(0.765 0.177 163.22);
+  --chart-1: oklch(0.765 0.177 163.22);
+  --chart-2: oklch(0.551 0.0899 200.52);
+  --chart-3: oklch(0.845 0.143 164.98);
+  --chart-4: oklch(0.8576 0.1202 192.38);
+  --chart-5: oklch(0.95 0.052 163.05);
+  --sidebar-primary: oklch(0.765 0.177 163.22);
+  --sidebar-primary-foreground: oklch(0 0 0);
+  --sidebar-accent: oklch(0.765 0.177 163.22);
+  --sidebar-accent-foreground: oklch(0 0 0);
+  --sidebar-ring: oklch(0.765 0.177 163.22);
+}
+
+/* ── Sunset Glow ──────────────────────────────────────────────────────── */
+[data-theme-preset='sunset-glow'] {
+  --primary: oklch(0.5591 0.1882 25.33);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.7938 0.1248 42.42);
+  --secondary-foreground: oklch(0 0 0);
+  --ring: oklch(0.5591 0.1882 25.33);
+  --chart-1: oklch(0.5591 0.1882 25.33);
+  --chart-2: oklch(0.7938 0.1248 42.42);
+  --chart-3: oklch(0.809 0.0875 17.95);
+  --chart-4: oklch(0.8964 0.0724 43.73);
+  --chart-5: oklch(0.9381 0.0241 16.66);
+  --sidebar-primary: oklch(0.5591 0.1882 25.33);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.5591 0.1882 25.33);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.5591 0.1882 25.33);
+  --radius: 1rem;
+}
+.dark [data-theme-preset='sunset-glow'] {
+  --primary: oklch(0.6387 0.1822 23.51);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.7938 0.1248 42.42);
+  --secondary-foreground: oklch(0 0 0);
+  --ring: oklch(0.6387 0.1822 23.51);
+  --chart-1: oklch(0.6387 0.1822 23.51);
+  --chart-2: oklch(0.7938 0.1248 42.42);
+  --chart-3: oklch(0.809 0.0875 17.95);
+  --chart-4: oklch(0.8964 0.0724 43.73);
+  --chart-5: oklch(0.9381 0.0241 16.66);
+  --sidebar-primary: oklch(0.6387 0.1822 23.51);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.6387 0.1822 23.51);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.6387 0.1822 23.51);
+}
+
+/* ── Forest Whisper ───────────────────────────────────────────────────── */
+[data-theme-preset='forest-whisper'] {
+  --primary: oklch(0.5276 0.1072 182.22);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.5236 0.0505 250.18);
+  --secondary-foreground: oklch(1 0 0);
+  --ring: oklch(0.5276 0.1072 182.22);
+  --chart-1: oklch(0.5276 0.1072 182.22);
+  --chart-2: oklch(0.5236 0.0505 250.18);
+  --chart-3: oklch(0.7741 0.1676 178.16);
+  --chart-4: oklch(0.7294 0.0416 244.67);
+  --chart-5: oklch(0.9511 0.0547 177.24);
+  --sidebar-primary: oklch(0.5276 0.1072 182.22);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.5276 0.1072 182.22);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.5276 0.1072 182.22);
+  --radius: 0.5rem;
+}
+.dark [data-theme-preset='forest-whisper'] {
+  --primary: oklch(0.5991 0.1318 180.39);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.6578 0.0485 247.35);
+  --secondary-foreground: oklch(1 0 0);
+  --ring: oklch(0.5991 0.1318 180.39);
+  --chart-1: oklch(0.5991 0.1318 180.39);
+  --chart-2: oklch(0.6578 0.0485 247.35);
+  --chart-3: oklch(0.7741 0.1676 178.16);
+  --chart-4: oklch(0.7294 0.0416 244.67);
+  --chart-5: oklch(0.9511 0.0547 177.24);
+  --sidebar-primary: oklch(0.5991 0.1318 180.39);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.5991 0.1318 180.39);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.5991 0.1318 180.39);
+}
+
+/* ── Ocean Breeze ─────────────────────────────────────────────────────── */
+[data-theme-preset='ocean-breeze'] {
+  --primary: oklch(0.5461 0.2152 262.88);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.5854 0.2041 277.12);
+  --secondary-foreground: oklch(1 0 0);
+  --ring: oklch(0.5461 0.2152 262.88);
+  --chart-1: oklch(0.5461 0.2152 262.88);
+  --chart-2: oklch(0.5854 0.2041 277.12);
+  --chart-3: oklch(0.809 0.0922 251.81);
+  --chart-4: oklch(0.785 0.1007 274.72);
+  --chart-5: oklch(0.932 0.0281 255.58);
+  --sidebar-primary: oklch(0.5461 0.2152 262.88);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.5461 0.2152 262.88);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.5461 0.2152 262.88);
+  --radius: 0.3rem;
+}
+.dark [data-theme-preset='ocean-breeze'] {
+  --primary: oklch(0.623 0.188 259.81);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.5854 0.2041 277.12);
+  --secondary-foreground: oklch(0 0 0);
+  --ring: oklch(0.623 0.188 259.81);
+  --chart-1: oklch(0.623 0.188 259.81);
+  --chart-2: oklch(0.5854 0.2041 277.12);
+  --chart-3: oklch(0.809 0.0922 251.81);
+  --chart-4: oklch(0.785 0.1007 274.72);
+  --chart-5: oklch(0.932 0.0281 255.58);
+  --sidebar-primary: oklch(0.623 0.188 259.81);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.623 0.188 259.81);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.623 0.188 259.81);
+}
+
+/* ── Lavender Dream ───────────────────────────────────────────────────── */
+[data-theme-preset='lavender-dream'] {
+  --primary: oklch(0.5709 0.1808 306.89);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.811 0.0589 201.14);
+  --secondary-foreground: oklch(0 0 0);
+  --ring: oklch(0.5709 0.1808 306.89);
+  --chart-1: oklch(0.5709 0.1808 306.89);
+  --chart-2: oklch(0.811 0.0589 201.14);
+  --chart-3: oklch(0.8281 0.078 309.73);
+  --chart-4: oklch(0.8611 0.0504 198.03);
+  --chart-5: oklch(0.947 0.0212 309.77);
+  --sidebar-primary: oklch(0.5709 0.1808 306.89);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.5709 0.1808 306.89);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.5709 0.1808 306.89);
+  --radius: 1rem;
+}
+.dark [data-theme-preset='lavender-dream'] {
+  --primary: oklch(0.6359 0.1699 307.95);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.811 0.0589 201.14);
+  --secondary-foreground: oklch(0 0 0);
+  --ring: oklch(0.6359 0.1699 307.95);
+  --chart-1: oklch(0.6359 0.1699 307.95);
+  --chart-2: oklch(0.811 0.0589 201.14);
+  --chart-3: oklch(0.8281 0.078 309.73);
+  --chart-4: oklch(0.8611 0.0504 198.03);
+  --chart-5: oklch(0.947 0.0212 309.77);
+  --sidebar-primary: oklch(0.6359 0.1699 307.95);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.6359 0.1699 307.95);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-ring: oklch(0.6359 0.1699 307.95);
+}
+
+/* ── Simple Large-font ────────────────────────────────────────────────── */
+[data-theme-preset='simple-large'] {
+  --background: oklch(0.99 0 0);
+  --foreground: oklch(0.15 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.15 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.15 0 0);
+
+  --primary: oklch(0.22 0 0);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.93 0 0);
+  --secondary-foreground: oklch(0.15 0 0);
+  --muted: oklch(0.95 0 0);
+  --muted-foreground: oklch(0.36 0 0);
+  --accent: oklch(0.91 0 0);
+  --accent-foreground: oklch(0.15 0 0);
+
+  --destructive: oklch(0.55 0.2 28);
+  --destructive-foreground: oklch(1 0 0);
+  --success: oklch(0.45 0.12 145);
+  --success-foreground: oklch(1 0 0);
+  --warning: oklch(0.72 0.14 75);
+  --warning-foreground: oklch(0.15 0 0);
+  --info: oklch(0.48 0.13 250);
+  --info-foreground: oklch(1 0 0);
+  --neutral: oklch(0.36 0 0);
+  --neutral-foreground: oklch(1 0 0);
+
+  --border: oklch(0.82 0 0);
+  --input: oklch(0.82 0 0);
+  --ring: oklch(0.22 0 0);
+
+  --chart-1: oklch(0.22 0 0);
+  --chart-2: oklch(0.45 0.12 145);
+  --chart-3: oklch(0.48 0.13 250);
+  --chart-4: oklch(0.72 0.14 75);
+  --chart-5: oklch(0.55 0.2 28);
+
+  --sidebar: oklch(0.96 0 0);
+  --sidebar-foreground: oklch(0.15 0 0);
+  --sidebar-primary: oklch(0.22 0 0);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.9 0 0);
+  --sidebar-accent-foreground: oklch(0.15 0 0);
+  --sidebar-border: oklch(0.82 0 0);
+  --sidebar-ring: oklch(0.22 0 0);
+
+  --skeleton-base: oklch(0.9 0 0);
+  --skeleton-highlight: oklch(0.97 0 0);
+
+  --radius: 0.5rem;
+  --text-xs: 0.9rem;
+  --text-sm: 1rem;
+  --text-base: 1.125rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.45rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.15rem;
+  --spacing: 0.3rem;
+}
+.dark [data-theme-preset='simple-large'] {
+  --background: oklch(0.215 0 0);
+  --foreground: oklch(0.97 0 0);
+  --card: oklch(0.27 0 0);
+  --card-foreground: oklch(0.97 0 0);
+  --popover: oklch(0.29 0 0);
+  --popover-foreground: oklch(0.97 0 0);
+
+  --primary: oklch(0.94 0 0);
+  --primary-foreground: oklch(0.145 0 0);
+  --secondary: oklch(0.315 0 0);
+  --secondary-foreground: oklch(0.97 0 0);
+  --muted: oklch(0.315 0 0);
+  --muted-foreground: oklch(0.82 0 0);
+  --accent: oklch(0.36 0 0);
+  --accent-foreground: oklch(0.98 0 0);
+
+  --destructive: oklch(0.68 0.19 25);
+  --destructive-foreground: oklch(0.98 0 0);
+  --success: oklch(0.72 0.13 145);
+  --success-foreground: oklch(0.145 0 0);
+  --warning: oklch(0.82 0.13 75);
+  --warning-foreground: oklch(0.145 0 0);
+  --info: oklch(0.72 0.12 250);
+  --info-foreground: oklch(0.145 0 0);
+  --neutral: oklch(0.82 0 0);
+  --neutral-foreground: oklch(0.145 0 0);
+
+  --border: oklch(1 0 0 / 18%);
+  --input: oklch(1 0 0 / 24%);
+  --ring: oklch(0.94 0 0);
+
+  --chart-1: oklch(0.94 0 0);
+  --chart-2: oklch(0.72 0.13 145);
+  --chart-3: oklch(0.72 0.12 250);
+  --chart-4: oklch(0.82 0.13 75);
+  --chart-5: oklch(0.68 0.19 25);
+
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.97 0 0);
+  --sidebar-primary: oklch(0.94 0 0);
+  --sidebar-primary-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.34 0 0);
+  --sidebar-accent-foreground: oklch(0.98 0 0);
+  --sidebar-border: oklch(1 0 0 / 18%);
+  --sidebar-ring: oklch(0.94 0 0);
+
+  --skeleton-base: oklch(0.315 0 0);
+  --skeleton-highlight: oklch(0.415 0 0);
+}
+
+/* Overview accents mirror the public blue/cyan/violet palette by default.
+ * Named presets map those slots to their own chart palette so the overview
+ * stays coherent with the user's selected theme. */
+[data-theme-preset]:not([data-theme-preset='default']) {
+  --overview-accent-1: var(--chart-1);
+  --overview-accent-2: var(--chart-2);
+  --overview-accent-3: var(--chart-3);
+}
+
+/* ── Semantic surface bridge ──────────────────────────────────────────── */
+/* Color presets should tint the surfaces most components actually use, not
+ * only primary buttons. These derived tokens keep the app theme-aware without
+ * duplicating per-component dark-mode overrides.
+ *
+ * NOTE: `:not()` contributes its argument's specificity, so this selector
+ * resolves to (0,3,0). Presets that define bespoke surfaces below need to
+ * either match that specificity or opt out here — the latter is cleaner.
+ *
+ * Opt-outs:
+ *   - `default`: keeps neutral surfaces from :root.
+ *   - `anthropic`: warm cream surfaces are a brand choice, NOT a primary-mix
+ *     derivation (the Anthropic system deliberately uses warm neutrals for
+ *     cards/borders rather than tinting them with the clay accent).
+ *   - `simple-large`: keeps intentionally neutral, high-contrast surfaces. */
+[data-theme-preset]:not([data-theme-preset='default']):not(
+  [data-theme-preset='anthropic']
+):not([data-theme-preset='simple-large']) {
+  --card: color-mix(in oklch, var(--primary) 3%, var(--background));
+  --popover: color-mix(in oklch, var(--primary) 5%, var(--background));
+  --muted: color-mix(in oklch, var(--primary) 7%, var(--background));
+  --muted-foreground: color-mix(
+    in oklch,
+    var(--foreground) 68%,
+    var(--primary)
+  );
+  --accent: color-mix(in oklch, var(--primary) 14%, var(--background));
+  --accent-foreground: var(--foreground);
+  --border: color-mix(in oklch, var(--primary) 20%, var(--background));
+  --input: color-mix(in oklch, var(--primary) 22%, var(--background));
+  --sidebar: color-mix(in oklch, var(--primary) 4%, var(--background));
+  --sidebar-accent: color-mix(in oklch, var(--primary) 14%, var(--background));
+  --sidebar-accent-foreground: var(--foreground);
+  --sidebar-border: color-mix(in oklch, var(--primary) 18%, var(--background));
+  --success: var(--chart-2);
+  --warning: var(--chart-4);
+  --info: var(--chart-1);
+  --neutral: var(--muted-foreground);
+}
+.dark
+  [data-theme-preset]:not([data-theme-preset='default']):not(
+    [data-theme-preset='anthropic']
+  ):not([data-theme-preset='simple-large']) {
+  --card: color-mix(in oklch, var(--primary) 8%, var(--background));
+  --popover: color-mix(in oklch, var(--primary) 12%, var(--background));
+  --muted: color-mix(in oklch, var(--primary) 12%, var(--background));
+  --muted-foreground: color-mix(
+    in oklch,
+    var(--foreground) 74%,
+    var(--primary)
+  );
+  --accent: color-mix(in oklch, var(--primary) 18%, var(--background));
+  --border: color-mix(in oklch, var(--primary) 24%, var(--background));
+  --input: color-mix(in oklch, var(--primary) 28%, var(--background));
+  --sidebar: color-mix(in oklch, var(--primary) 5%, var(--background));
+  --sidebar-accent: color-mix(in oklch, var(--primary) 18%, var(--background));
+  --sidebar-border: color-mix(in oklch, var(--primary) 22%, var(--background));
+}
+
+/* ── Anthropic ────────────────────────────────────────────────────────── */
+/*
+ * Inspired by Anthropic's official brand language: warm cream canvas
+ * (#faf9f5) on warm slate ink (#141413), with clay/coral (#d97757) as the
+ * single primary accent. The dormant accent palette (olive, sky, fig,
+ * cactus) is wired into chart and semantic tokens.
+ *
+ * Defining counter-positioning: a tinted (non-white) canvas with warm
+ * neutral cards and borders — NOT primary-tinted surfaces. This is the
+ * brand's deliberate counter-positioning against every cool-gray AI tool.
+ *
+ * Anthropic is opted out of the semantic surface bridge above so these
+ * bespoke warm-neutral surface tokens win the cascade. Without the opt-out,
+ * the bridge selector (specificity 0,3,0 because of `:not()`) would override
+ * this block (specificity 0,1,0) and tint every surface with the clay
+ * accent — producing the peach/pink look that doesn't match Anthropic.
+ *
+ * OKLCH hue 95 = warm yellow-cream (matches #faf9f5 family);
+ * OKLCH hue 60 = warm slate (matches #141413 family);
+ * OKLCH hue 38 = clay/coral (matches #d97757).
+ */
+[data-theme-preset='anthropic'] {
+  /* Canvas + ink — the defining pair. */
+  --background: oklch(0.984 0.004 95); /* ≈ #faf9f5 cream */
+  --foreground: oklch(0.205 0.005 60); /* ≈ #141413 ink */
+
+  /* Warm-neutral surfaces (NOT primary-tinted). Stepped opacity matches
+   * the Anthropic surface ladder: canvas → secondary → card → strong. */
+  --card: oklch(0.945 0.008 92); /* ≈ #efe9de */
+  --card-foreground: oklch(0.205 0.005 60);
+  --popover: oklch(0.97 0.006 92); /* slight cream lift */
+  --popover-foreground: oklch(0.205 0.005 60);
+
+  /* Clay/coral — Anthropic's signature accent, used scarcely on CTAs. */
+  --primary: oklch(0.685 0.142 38); /* ≈ #d97757 */
+  --primary-foreground: oklch(0.99 0.005 95);
+
+  --secondary: oklch(0.925 0.008 92);
+  --secondary-foreground: oklch(0.255 0.005 60);
+
+  --muted: oklch(0.94 0.007 92);
+  --muted-foreground: oklch(0.51 0.006 75); /* ≈ #5e5d59 warm gray */
+  --accent: oklch(0.92 0.009 92);
+  --accent-foreground: oklch(0.205 0.005 60);
+
+  --destructive: oklch(0.55 0.18 27);
+  --destructive-foreground: oklch(0.985 0 0);
+  --success: oklch(0.59 0.082 130); /* olive #788c5d */
+  --success-foreground: oklch(0.985 0 0);
+  --warning: oklch(0.78 0.13 70); /* kraft amber */
+  --warning-foreground: oklch(0.205 0.005 60);
+  --info: oklch(0.67 0.075 248); /* sky #6a9bcc */
+  --info-foreground: oklch(0.985 0 0);
+  --neutral: oklch(0.51 0.006 75);
+  --neutral-foreground: oklch(0.205 0.005 60);
+
+  /* Hairline borders — warm gray, not coral. */
+  --border: oklch(0.895 0.008 92); /* ≈ #e8e6dc */
+  --input: oklch(0.895 0.008 92);
+  --ring: oklch(0.685 0.142 38);
+
+  /* Chart palette uses Anthropic's dormant accent swatches. */
+  --chart-1: oklch(0.685 0.142 38); /* clay */
+  --chart-2: oklch(0.59 0.082 130); /* olive */
+  --chart-3: oklch(0.67 0.075 248); /* sky */
+  --chart-4: oklch(0.7 0.115 0); /* fig */
+  --chart-5: oklch(0.83 0.027 175); /* cactus */
+
+  --sidebar: oklch(0.955 0.008 92);
+  --sidebar-foreground: oklch(0.255 0.005 60);
+  --sidebar-primary: oklch(0.685 0.142 38);
+  --sidebar-primary-foreground: oklch(0.99 0.005 95);
+  --sidebar-accent: oklch(0.915 0.009 92);
+  --sidebar-accent-foreground: oklch(0.205 0.005 60);
+  --sidebar-border: oklch(0.895 0.008 92);
+  --sidebar-ring: oklch(0.685 0.142 38);
+
+  --skeleton-base: oklch(0.93 0.008 92);
+  --skeleton-highlight: oklch(0.96 0.006 92);
+
+  --radius: 0.625rem;
+
+  /* Default typography for the Anthropic preset is the editorial serif.
+   * Users can override this with the Font axis (`data-theme-font='sans'`).
+   * The `--font-serif` token itself is declared once in theme.css. */
+  --font-body: var(--font-serif);
+}
+.dark [data-theme-preset='anthropic'] {
+  /* Warm near-black product surfaces, not pure black — keeps the editorial
+   * personality even when inverted. Coral lifts slightly for legibility. */
+  --background: oklch(0.215 0.004 60);
+  --foreground: oklch(0.965 0.005 92);
+  --card: oklch(0.255 0.004 60);
+  --card-foreground: oklch(0.965 0.005 92);
+  --popover: oklch(0.275 0.004 60);
+  --popover-foreground: oklch(0.965 0.005 92);
+
+  --primary: oklch(0.72 0.135 40);
+  --primary-foreground: oklch(0.18 0.005 60);
+  --secondary: oklch(0.305 0.004 60);
+  --secondary-foreground: oklch(0.945 0.005 92);
+
+  --muted: oklch(0.285 0.004 60);
+  --muted-foreground: oklch(0.76 0.006 75);
+  --accent: oklch(0.33 0.006 60);
+  --accent-foreground: oklch(0.985 0.005 92);
+
+  --destructive: oklch(0.7 0.19 22);
+  --destructive-foreground: oklch(0.985 0 0);
+  --success: oklch(0.7 0.105 135);
+  --success-foreground: oklch(0.18 0.005 60);
+  --warning: oklch(0.78 0.13 70);
+  --warning-foreground: oklch(0.18 0.005 60);
+  --info: oklch(0.72 0.085 248);
+  --info-foreground: oklch(0.18 0.005 60);
+  --neutral: oklch(0.76 0.006 75);
+  --neutral-foreground: oklch(0.18 0.005 60);
+
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.72 0.135 40);
+
+  --chart-1: oklch(0.72 0.135 40);
+  --chart-2: oklch(0.7 0.105 135);
+  --chart-3: oklch(0.72 0.085 248);
+  --chart-4: oklch(0.78 0.13 0);
+  --chart-5: oklch(0.83 0.027 175);
+
+  --sidebar: oklch(0.205 0.004 60);
+  --sidebar-foreground: oklch(0.95 0.005 92);
+  --sidebar-primary: oklch(0.72 0.135 40);
+  --sidebar-primary-foreground: oklch(0.18 0.005 60);
+  --sidebar-accent: oklch(0.32 0.006 60);
+  --sidebar-accent-foreground: oklch(0.985 0.005 92);
+  --sidebar-border: oklch(1 0 0 / 11%);
+  --sidebar-ring: oklch(0.72 0.135 40);
+
+  --skeleton-base: oklch(0.305 0.004 60);
+  --skeleton-highlight: oklch(0.41 0.004 60);
+}
+
+/* ── Font axis ────────────────────────────────────────────────────────────
+ * Mirrors how `data-theme-radius` overrides a preset's default radius:
+ * presets may set `--font-body` (Anthropic → serif), and the user's
+ * explicit Font choice wins because these blocks sit AFTER preset blocks.
+ *
+ * The provider resolves `font: 'default'` → `'sans' | 'serif'` against the
+ * active preset before writing the attribute, so the DOM always carries a
+ * concrete value and CSS only needs the simple `[data-theme-font='serif']`
+ * selector below (no `:not()`, no per-preset branches). */
+[data-theme-font='sans'] {
+  --font-body: var(--font-sans);
+}
+[data-theme-font='serif'] {
+  --font-body: var(--font-serif);
+}
+
+/* ── Serif typography refinements ────────────────────────────────────────
+ * When the body runs in serif, three things happen:
+ *   1. Editorial OpenType features (kern/liga + tabular numerals so numeric
+ *      columns stay grid-aligned even with proportional serif glyphs).
+ *   2. Every UI surface inherits the editorial voice — buttons, inputs,
+ *      tabs, sidebar, table headers, badges, pagination, popovers — all
+ *      through Tailwind preflight's `button, input, ... { font: inherit }`
+ *      rule plus natural HTML inheritance. We intentionally do NOT carry
+ *      a per-slot opt-out list: it adds maintenance cost and only blunts
+ *      the Anthropic editorial intent. Monospace contexts are excluded
+ *      automatically because:
+ *        - `<code>`, `<kbd>`, `<pre>`, `<samp>` are typed monospace by
+ *          Tailwind preflight (specificity wins over body inheritance).
+ *        - `.font-mono` and `.tabular-nums` utilities declare their own
+ *          font-family / font-variant-numeric on the element itself.
+ *   3. Headings adopt the Anthropic display setting (medium weight, slight
+ *      negative tracking).
+ *
+ * All keyed off `[data-theme-font='serif']` so they apply to any preset
+ * paired with the serif font — not just Anthropic. */
+[data-theme-font='serif'] {
+  font-feature-settings:
+    'kern' 1,
+    'liga' 1,
+    'calt' 1,
+    'tnum' 1;
+}
+
+/* Heading tuning — applies to <h*> tags and the shadcn title slots so
+ * card/sheet/dialog titles read with the same authoritative voice as
+ * page headers. */
+[data-theme-font='serif'] :is(h1, h2, h3, h4, h5, h6),
+[data-theme-font='serif'] [data-slot='sheet-title'],
+[data-theme-font='serif'] [data-slot='dialog-title'],
+[data-theme-font='serif'] [data-slot='alert-dialog-title'],
+[data-theme-font='serif'] [data-slot='drawer-title'],
+[data-theme-font='serif'] [data-slot='card-title'] {
+  font-weight: 500;
+  letter-spacing: -0.012em;
+}
+
+/* Larger displays earn tighter tracking, matching Copernicus/Tiempos
+ * editorial display setting (~ -0.02em at 30px+). */
+[data-theme-font='serif'] h1,
+[data-theme-font='serif'] .text-3xl,
+[data-theme-font='serif'] .text-4xl,
+[data-theme-font='serif'] .text-5xl {
+  letter-spacing: -0.02em;
+}
+
+/* ── Border radius ────────────────────────────────────────────────────── */
+[data-theme-radius='none'] {
+  --radius: 0rem;
+}
+[data-theme-radius='sm'] {
+  --radius: 0.3rem;
+}
+[data-theme-radius='md'] {
+  --radius: 0.5rem;
+}
+[data-theme-radius='lg'] {
+  --radius: 0.75rem;
+}
+[data-theme-radius='xl'] {
+  --radius: 1rem;
+}
+
+/* ── Density scale ────────────────────────────────────────────────────── */
+/* `sm` = compact UI; `lg` = comfortable; `xl` = extra readable. Default keeps Tailwind defaults. */
+[data-theme-scale='sm'] {
+  --text-xs: 0.7rem;
+  --text-sm: 0.78rem;
+  --text-base: 0.88rem;
+  --text-lg: 1rem;
+  --text-xl: 1.13rem;
+  --text-2xl: 1.38rem;
+  --text-3xl: 1.7rem;
+  --spacing: 0.225rem;
+}
+[data-theme-scale='lg'] {
+  --text-xs: 0.84rem;
+  --text-sm: 0.95rem;
+  --text-base: 1.075rem;
+  --text-lg: 1.2rem;
+  --text-xl: 1.35rem;
+  --text-2xl: 1.65rem;
+  --text-3xl: 2rem;
+  --spacing: 0.28rem;
+}
+[data-theme-scale='xl'] {
+  --text-xs: 0.9rem;
+  --text-sm: 1rem;
+  --text-base: 1.125rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.45rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.15rem;
+  --spacing: 0.3rem;
+}
+
+/* ── Content layout ───────────────────────────────────────────────────── */
+/* `centered` clamps inset content to a comfortable reading width on large screens.
+ * Targets every direct child of <SidebarInset> so router outlet wrappers and
+ * page content alike are centered. Only kicks in once the viewport exceeds the
+ * clamp value. */
+@media (min-width: 1280px) {
+  [data-theme-content-layout='centered'] [data-slot='sidebar-inset'] > * {
+    max-width: var(--max-content-width, 1280px);
+    margin-inline: auto;
+    width: 100%;
+  }
+}

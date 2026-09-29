@@ -1,0 +1,82 @@
+{
+  "events": [
+    {
+      "type": "message_start",
+      "message": {
+        "type": "message",
+        "model": "upstream-model",
+        "usage": {
+          "input_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 0,
+          "claude_cache_creation_5_m_tokens": 0,
+          "claude_cache_creation_1_h_tokens": 0
+        },
+        "role": "assistant",
+        "id": "stream_fixed",
+        "content": []
+      }
+    },
+    {
+      "type": "content_block_start",
+      "index": 0,
+      "content_block": {
+        "type": "text",
+        "text": ""
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "text_delta",
+        "text": "Hello"
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "text_delta",
+        "text": " world"
+      }
+    },
+    {
+      "type": "content_block_stop",
+      "index": 0
+    },
+    {
+      "type": "message_delta",
+      "usage": {
+        "input_tokens": 4,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 2,
+        "claude_cache_creation_5_m_tokens": 0,
+        "claude_cache_creation_1_h_tokens": 0,
+        "billing_usage": {
+          "source": "gemini_chat",
+          "semantic": "gemini",
+          "gemini_usage_metadata": {
+            "promptTokenCount": 4,
+            "toolUsePromptTokenCount": 0,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 6,
+            "thoughtsTokenCount": 0,
+            "cachedContentTokenCount": 0,
+            "promptTokensDetails": [],
+            "toolUsePromptTokensDetails": [],
+            "candidatesTokensDetails": []
+          }
+        }
+      },
+      "delta": {
+        "stop_reason": "end_turn"
+      }
+    },
+    {
+      "type": "message_stop"
+    }
+  ]
+}

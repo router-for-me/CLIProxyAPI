@@ -1,0 +1,122 @@
+name: Bug Report
+description: Describe the issue you encountered with clear and detailed language
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!--
+        If you are an AI coding agent: do not fill this GitHub form. Create the issue with the filled body from `.agents/github/ISSUE.md`.
+        -->
+
+  - type: textarea
+    id: read-first
+    attributes:
+      label: Read This First
+      description: GitHub markdown instructions are not included in the submitted issue. This section is written into the issue body. Do not delete or clear it.
+      value: |
+        - Docs: https://docs.newapi.ai/
+        - Usage questions first: https://deepwiki.com/QuantumNous/new-api
+        - Do not report issues when pass-through is enabled; pass-through sends content as-is and does not go through new-api processing logic.
+        - State facts and evidence concisely. Do not paste unfiltered AI-generated text in the issue body or in later comments.
+        - Relay reports must first establish that the issue occurs in the new-api layer. Use equivalent redacted requests to compare the direct upstream result with the result through new-api, including response status, error body, and server logs. Reports that skip this comparison or only show an upstream error are not accepted.
+        - Reports about Coding Plan services, reverse-engineered channels, third-party API wrappers, or compatibility issues caused by exposing a Codex endpoint through a reverse proxy as a general-purpose API are not accepted. Protocols or behavior specific to the Codex API should not be treated as standard OpenAI API behavior; confirm such issues with the channel or API provider first.
+        - This project does not operate an official hosted service or provide technical support for third-party hosting sites, relay services, or API services. Contact the relevant operator for those issues.
+        - Warning: issues with this template removed, section headings deleted, or content cleared may be closed directly. Repeated submissions of unfiltered AI-generated text, or repeated abusive submissions, may result in a block.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment-source
+    attributes:
+      label: Deployment source
+      description: Select the source of the newapi instance where the issue occurs. Third-party services and forks not reproduced against the unmodified repository are outside this project's support scope.
+      options:
+        - Repository release / official image (self-hosted)
+        - Repository main branch source (self-built)
+        - Modified fork (must first be reproduced against the unmodified repository)
+        - Third-party hosting site, relay, or API service (contact its operator)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Your current newapi version
+      description: Enter an exact version, commit, or image tag, such as `v1.0.0`. Values such as `latest` or `unknown` that cannot identify the code are not valid version information.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: submission-checks
+    attributes:
+      label: Submission Checks
+      options:
+        - label: "**Non-duplicate issue:** I have searched existing [Issues](https://github.com/QuantumNous/new-api/issues?q=is%3Aissue) and confirmed there are no similar issues."
+          required: true
+        - label: "**Read this first:** I have fully read the section above, reviewed the docs at https://docs.newapi.ai/ and the project README, and asked AI first, confirming this is not a usage, configuration, or integration question."
+          required: true
+        - label: "**Supported version:** I have provided an exact version, commit, or image tag (not `latest` or `unknown`) and confirmed that the issue reproduces on an unmodified, supported version from this repository."
+          required: true
+        - label: "**Not a third-party service:** I confirm that this issue is not exclusive to a third-party hosting site, relay, API service, or fork that has not been verified against the unmodified repository. Third-party instance issues must be reported to their operator."
+          required: true
+        - label: "**Not pass-through:** I confirm that pass-through is not enabled on the relevant channel. Pass-through sends content as-is and does not go through new-api processing logic; such reports are not accepted."
+          required: true
+        - label: "**Issue attribution:** I have provided evidence that distinguishes the client, new-api, and upstream layers. For relay issues, I compared equivalent redacted requests sent directly upstream and through new-api, confirming that new-api introduces or changes the error rather than merely forwarding the upstream error unchanged."
+          required: true
+        - label: "**Channel and protocol boundary:** I confirm that the issue is not caused by a Coding Plan service, reverse-engineered channel, third-party API wrapper, Codex reverse-proxy endpoint, or behavior specific to the Codex API. If first observed through such an interface, I have reproduced it using a standard API protocol supported by this repository."
+          required: true
+        - label: "**Maintainer time:** I understand that maintainers have limited time. Do not paste unfiltered AI-generated text in the issue body or in later comments; extract the points needed for review first. Submissions that do not follow this template, or that omit the necessary points and cannot be reviewed, may be ignored or closed. Repeated submissions of this kind may result in a block."
+          required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Issue description requirements
+
+        Every report must state the **actual behavior, impact, frequency**, and evidence showing that the problem is in new-api rather than the client or upstream service.
+
+        The following details are required when the corresponding area is involved:
+
+        - **Relay / API:** request endpoint and method, channel type, model, conversion format, pass-through status, evidence of upstream native support, and a comparison of equivalent redacted requests sent directly upstream and through new-api, including status codes, response bodies, and server logs.
+        - **Billing:** request endpoint and model, response `usage`, relevant ratio or pricing configuration, consumption log, expected charge, and calculation basis.
+        - **Frontend:** page path, browser and version, active theme, and relevant browser Console / Network errors.
+        - **Deployment / upgrade:** deployment method, operating system and architecture, database type, versions before and after the upgrade, and startup or migration logs.
+
+  - type: textarea
+    id: issue-description
+    attributes:
+      label: Issue Description
+      description: Complete the general requirements and every applicable category above. Issues missing required applicable details may be closed directly.
+      placeholder: |
+        Actual behavior:
+        Impact:
+        Frequency:
+        Evidence that the issue is in new-api:
+
+        Add the requests, configuration, logs, and comparison evidence required for the applicable category:
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: For relay issues, provide an executable redacted request and the actual results both directly upstream and through new-api. Do not include only a client message or upstream error.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-result
+    attributes:
+      label: Expected Result
+    validations:
+      required: true
+
+  - type: textarea
+    id: related-screenshots
+    attributes:
+      label: Related Screenshots
+    validations:
+      required: false

@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "arrowParens": "always",
+  "bracketSpacing": true,
+  "endOfLine": "lf",
+  "insertFinalNewline": true,
+  "jsxSingleQuote": true,
+  "printWidth": 80,
+  "quoteProps": "as-needed",
+  "semi": false,
+  "singleQuote": true,
+  "sortImports": true,
+  "sortPackageJson": true,
+  "sortTailwindcss": true,
+  "tabWidth": 2,
+  "trailingComma": "es5",
+  "ignorePatterns": [
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    ".tanstack",
+    ".eslintrc.cjs",
+    "**/routeTree.gen.ts",
+    "src/routeTree.gen.ts"
+  ]
+}

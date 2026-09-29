@@ -1,0 +1,139 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+.billing-condition-group {
+  --condition-accent: var(--color-blue-500);
+  --condition-label: var(--color-blue-700);
+  --condition-line: color-mix(
+    in oklch,
+    var(--condition-accent) 45%,
+    var(--border)
+  );
+  background: color-mix(
+    in oklch,
+    var(--condition-accent) 5%,
+    var(--background)
+  );
+  border: 1px solid
+    color-mix(in oklch, var(--condition-accent) 25%, var(--border));
+  border-inline-start: 3px solid var(--condition-accent);
+  border-radius: var(--radius-lg);
+}
+
+.billing-condition-group[data-condition-kind='any'] {
+  --condition-accent: var(--color-violet-500);
+  --condition-label: var(--color-violet-700);
+}
+
+.billing-condition-group[data-condition-kind='not'] {
+  --condition-accent: var(--color-amber-500);
+  --condition-label: var(--color-amber-800);
+}
+
+.dark .billing-condition-group {
+  --condition-label: var(--color-blue-300);
+}
+
+.dark .billing-condition-group[data-condition-kind='any'] {
+  --condition-label: var(--color-violet-300);
+}
+
+.dark .billing-condition-group[data-condition-kind='not'] {
+  --condition-label: var(--color-amber-300);
+}
+
+.billing-condition-label {
+  color: var(--condition-label);
+}
+
+.billing-condition-children {
+  margin: 0 0.75rem 0.75rem 1.125rem;
+  padding-inline-start: 1rem;
+  list-style: none;
+}
+
+.billing-condition-children > li {
+  position: relative;
+  padding-block-end: 0.625rem;
+}
+
+.billing-condition-children > li:last-child {
+  padding-block-end: 0;
+}
+
+.billing-condition-children > li::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: -1rem;
+  top: -0.5rem;
+  bottom: 0;
+  border-inline-start: 1px solid var(--condition-line);
+}
+
+.billing-condition-children > li:last-child::before {
+  bottom: auto;
+  height: calc(1.625rem + 0.5rem);
+}
+
+.billing-condition-children > li::after {
+  content: '';
+  position: absolute;
+  inset-inline-start: -1rem;
+  top: 1.625rem;
+  width: 1rem;
+  border-block-start: 1px solid var(--condition-line);
+}
+
+.billing-condition-row {
+  min-width: 0;
+  padding: 0.625rem;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color 150ms;
+}
+
+.billing-condition-row:focus-within {
+  border-color: var(--condition-accent, var(--ring));
+}
+
+.billing-condition-range {
+  padding: 0 0.75rem 0.75rem;
+}
+
+@media (max-width: 480px) {
+  .billing-condition-children {
+    margin-inline: 0.5rem;
+    padding-inline-start: 0.625rem;
+  }
+
+  .billing-condition-children > li::before,
+  .billing-condition-children > li::after {
+    inset-inline-start: -0.625rem;
+  }
+
+  .billing-condition-children > li::after {
+    width: 0.625rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .billing-condition-row {
+    transition: none;
+  }
+}

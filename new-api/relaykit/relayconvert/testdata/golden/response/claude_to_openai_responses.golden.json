@@ -1,0 +1,92 @@
+{
+  "id": "msg_fixed",
+  "object": "response",
+  "created_at": 0,
+  "status": "completed",
+  "instructions": null,
+  "max_output_tokens": 0,
+  "model": "claude-test",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_fixed_msg_0",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "The answer is 42.",
+          "annotations": []
+        }
+      ],
+      "quality": "",
+      "size": ""
+    },
+    {
+      "type": "function_call",
+      "id": "toolu_abc",
+      "status": "completed",
+      "role": "",
+      "content": null,
+      "quality": "",
+      "size": "",
+      "call_id": "toolu_abc",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Paris\"}"
+    }
+  ],
+  "parallel_tool_calls": false,
+  "previous_response_id": null,
+  "reasoning": null,
+  "store": false,
+  "temperature": 0,
+  "tool_choice": null,
+  "tools": null,
+  "top_p": 0,
+  "truncation": null,
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 5,
+    "total_tokens": 20,
+    "usage_semantic": "openai",
+    "usage_source": "anthropic",
+    "billing_usage": {
+      "source": "claude_messages",
+      "semantic": "anthropic",
+      "claude_usage": {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 2,
+        "cache_read_input_tokens": 3,
+        "output_tokens": 5,
+        "claude_cache_creation_5_m_tokens": 0,
+        "claude_cache_creation_1_h_tokens": 0
+      }
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "text_tokens": 0,
+      "audio_tokens": 0,
+      "image_tokens": 0
+    },
+    "completion_tokens_details": {
+      "text_tokens": 0,
+      "audio_tokens": 0,
+      "image_tokens": 0,
+      "reasoning_tokens": 0
+    },
+    "input_tokens": 15,
+    "output_tokens": 5,
+    "input_tokens_details": {
+      "cached_tokens": 3,
+      "cached_creation_tokens": 2,
+      "cache_write_tokens": 2,
+      "text_tokens": 0,
+      "audio_tokens": 0,
+      "image_tokens": 0
+    },
+    "claude_cache_creation_5_m_tokens": 2,
+    "claude_cache_creation_1_h_tokens": 0
+  },
+  "user": null,
+  "metadata": null
+}

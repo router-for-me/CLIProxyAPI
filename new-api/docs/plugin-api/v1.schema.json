@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/QuantumNous/new-api/docs/plugin-api/v1.schema.json",
+  "title": "new-api Task Plugin v1 manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "key", "name", "version", "author", "models", "fetchMode"],
+  "properties": {
+    "sortPriority": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647, "default": 0},
+    "website": {"oneOf": [{"const": ""}, {"type": "string", "format": "uri", "pattern": "^[Hh][Tt][Tt][Pp][Ss]://[^/@?#\\s]+(?:[/?#]|$)"}], "description": "Absolute HTTPS URL with a valid ASCII hostname (use punycode for internationalized domains) and no credentials; validated by the host."},
+    "apiVersion": {"const": 1}, "key": {"type": "string"}, "name": {"type": "string"}, "icon": {"type": "string", "maxLength": 128}, "description": {"$ref": "#/$defs/localizedText"}, "version": {"type": "string"},
+    "author": {"type": "object", "required": ["name"], "additionalProperties": false, "properties": {"name": {"type": "string"}, "url": {"type": "string", "format": "uri"}}},
+    "baseUrl": {"type": "string", "format": "uri", "pattern": "^https?://", "maxLength": 191},
+    "channelTypes": {"type": "array", "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}, "models": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "fetchMode": {"enum": ["per_task", "batch"]}, "allowedHosts": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "upstreams": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/upstreamKind"}, "description": "Upstream kinds the driver addresses. vendor is implied; new_api makes the plugin bindable to type-60 New API channels."},
+    "protocols": {"type": "array", "uniqueItems": true, "items": {"oneOf": [
+      {"enum": ["openai_video", "openai_image"]},
+      {"type": "object", "additionalProperties": false, "required": ["name", "supports"], "properties": {"name": {"const": "openai_responses"}, "supports": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["stream", "sync", "background"]}}, "models": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}},
+      {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"enum": ["openai_video", "openai_image"]}, "models": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}}
+    ]}},
+    "submitResponseTypes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["json", "sse"]}},
+    "requiredCapabilities": {"type": "array", "uniqueItems": true, "items": {"enum": ["json-clone@1", "submit-sse-delta@1"]}},
+    "routes": {"type": "array", "items": {"$ref": "#/$defs/route"}}, "usageSchema": {"type": "object", "additionalProperties": {"$ref": "#/$defs/usageField"}}, "usageExamples": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["label", "facts"], "properties": {"label": {"type": "string"}, "facts": {"type": "object"}}}}, "usageProfiles": {"type": "array", "items": {"$ref": "#/$defs/usageProfile"}}, "auth": {}
+  },
+  "allOf": [{"if": {"required": ["requiredCapabilities"], "properties": {"requiredCapabilities": {"contains": {"const": "submit-sse-delta@1"}}}}, "then": {"required": ["submitResponseTypes"], "properties": {"submitResponseTypes": {"contains": {"const": "sse"}}}}}],
+  "$defs": {
+    "jsonChange": {
+      "type": "object", "additionalProperties": false, "required": ["op", "path", "value"],
+      "properties": {
+        "op": {"enum": ["set", "append", "appendText"]},
+        "path": {"type": "array", "maxItems": 32, "items": {"oneOf": [{"type": "string"}, {"type": "integer", "minimum": 0}]}},
+        "value": true
+      },
+      "allOf": [{"if": {"properties": {"op": {"const": "appendText"}}}, "then": {"properties": {"value": {"type": "string"}}}}]
+    },
+    "submitEventDeltaResult": {
+      "type": "object", "additionalProperties": false, "required": ["changes", "state", "done"],
+      "properties": {
+        "changes": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/jsonChange"}},
+        "state": true,
+        "done": {"type": "boolean"}
+      }
+    },
+    "usageProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["models", "schema"],
+      "properties": {
+        "models": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "schema": {"type": "object", "additionalProperties": {"$ref": "#/$defs/usageField"}},
+        "examples": {"type": "array", "maxItems": 16, "items": {"$ref": "#/properties/usageExamples/items"}}
+      },
+      "description": "Complete usage metadata for declared models. The host validates model membership, unique profile ownership and examples, including required token-unit examples."
+    },
+    "usageField": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"enum": ["number", "boolean"]},
+        "unit": {"enum": ["second", "count", "token", "credit"]},
+        "unitLabel": {"$ref": "#/$defs/usageLabel", "description": "Optional localized display unit for number fields with count unit. Does not change usage quantities or billing."},
+        "enum": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "description": {"$ref": "#/$defs/usageLabel"},
+        "enumLabels": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/usageLabel"},
+          "description": "Optional display names keyed by declared enum values; the host validates membership. Missing entries display the original value."
+        }
+      },
+      "allOf": [{"if": {"required": ["unitLabel"]}, "then": {"required": ["type", "unit"], "properties": {"type": {"const": "number"}, "unit": {"const": "count"}}}}],
+      "oneOf": [
+        {"required": ["enum"], "not": {"anyOf": [{"required": ["type"]}, {"required": ["unit"]}]}},
+        {"required": ["type", "unit"], "properties": {"type": {"const": "number"}}, "not": {"anyOf": [{"required": ["enum"]}, {"required": ["enumLabels"]}]}},
+        {"required": ["type"], "properties": {"type": {"const": "boolean"}}, "not": {"anyOf": [{"required": ["unit"]}, {"required": ["enum"]}, {"required": ["enumLabels"]}]}}
+      ]
+    },
+    "usageLabel": {
+      "allOf": [
+        {"$ref": "#/$defs/localizedText"},
+        {"if": {"type": "string"}, "then": {"maxLength": 256}, "else": {"additionalProperties": {"maxLength": 256}}}
+      ]
+    },
+    "localizedText": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "object",
+          "required": ["en"],
+          "maxProperties": 16,
+          "propertyNames": {"pattern": "^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$"},
+          "additionalProperties": {"type": "string", "minLength": 1}
+        }
+      ]
+    },
+    "filePlaceholder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["__fileRef", "encoding"],
+      "properties": {
+        "__fileRef": {"type": "string", "minLength": 1},
+        "encoding": {"enum": ["base64", "dataUrl"]},
+        "mimeType": {"type": "string", "minLength": 1},
+        "maxBytes": {"type": "integer", "exclusiveMinimum": 0}
+      }
+    },
+    "route": {"type": "object", "additionalProperties": false, "required": ["method", "path", "type", "render"], "properties": {"method": {"enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]}, "path": {"type": "string", "pattern": "^/"}, "type": {"enum": ["submit", "query", "dynamic"]}, "action": {"type": "string"}, "taskIdParam": {"type": "string"}, "retainResult": {"type": "boolean"}, "decode": {"type": "string"}, "render": {"type": "string"}, "models": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}}, "allOf": [{"if": {"properties": {"type": {"const": "query"}}}, "then": {"allOf": [{"not": {"required": ["decode"]}}, {"not": {"required": ["models"]}}, {"not": {"required": ["retainResult"]}}]}}, {"if": {"properties": {"type": {"enum": ["submit", "dynamic"]}}}, "then": {"required": ["decode"]}}]},
+    "upstreamKind": {"enum": ["vendor", "new_api"]},
+    "upstreamContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {"kind": {"$ref": "#/$defs/upstreamKind"}},
+      "description": "Host-injected on every driver hook context; new_api means the executing channel is a type-60 New API channel with Bearer credentials already applied."
+    },
+    "taskQueryContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskId", "publicTaskId", "action", "model", "upstreamModel", "baseUrl", "authHeader", "upstream", "data", "state"],
+      "properties": {
+        "taskId": {"type": "string"},
+        "publicTaskId": {"type": "string"},
+        "action": {"type": "string"},
+        "model": {"type": "string"},
+        "upstreamModel": {"type": "string"},
+        "baseUrl": {"type": "string"},
+        "apiKey": {"type": "string"},
+        "authHeader": {"type": "string"},
+        "auth": true,
+        "upstream": {"$ref": "#/$defs/upstreamContext"},
+        "data": true,
+        "state": true
+      }
+    },
+    "batchQueryContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseUrl", "authHeader", "upstream", "tasks"],
+      "properties": {
+        "baseUrl": {"type": "string"},
+        "apiKey": {"type": "string"},
+        "authHeader": {"type": "string"},
+        "auth": true,
+        "upstream": {"$ref": "#/$defs/upstreamContext"},
+        "tasks": {"type": "array", "items": {"$ref": "#/$defs/taskQueryContext"}}
+      }
+    },
+    "hookHTTPResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "headers"],
+      "properties": {
+        "status": {"type": "integer"},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    }
+  }
+}

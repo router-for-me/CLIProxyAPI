@@ -1,0 +1,204 @@
+{
+  "events": [
+    {
+      "Type": "response.created",
+      "Payload": {
+        "type": "response.created",
+        "response": {
+          "id": "stream_fixed",
+          "object": "response",
+          "created_at": 0,
+          "status": "in_progress",
+          "instructions": null,
+          "max_output_tokens": 0,
+          "model": "stream-model",
+          "output": [],
+          "parallel_tool_calls": false,
+          "previous_response_id": null,
+          "reasoning": null,
+          "store": false,
+          "temperature": 0,
+          "tool_choice": null,
+          "tools": null,
+          "top_p": 0,
+          "truncation": null,
+          "usage": null,
+          "user": null,
+          "metadata": null
+        }
+      }
+    },
+    {
+      "Type": "response.output_item.added",
+      "Payload": {
+        "type": "response.output_item.added",
+        "item": {
+          "type": "message",
+          "id": "stream_fixed_msg_0",
+          "status": "in_progress",
+          "role": "assistant",
+          "content": [],
+          "quality": "",
+          "size": ""
+        },
+        "output_index": 0
+      }
+    },
+    {
+      "Type": "response.output_text.delta",
+      "Payload": {
+        "type": "response.output_text.delta",
+        "delta": "Hello world",
+        "output_index": 0,
+        "content_index": 0,
+        "item_id": "stream_fixed_msg_0"
+      }
+    },
+    {
+      "Type": "response.output_text.done",
+      "Payload": {
+        "type": "response.output_text.done",
+        "output_index": 0,
+        "content_index": 0,
+        "item_id": "stream_fixed_msg_0"
+      }
+    },
+    {
+      "Type": "response.output_item.done",
+      "Payload": {
+        "type": "response.output_item.done",
+        "item": {
+          "type": "message",
+          "id": "stream_fixed_msg_0",
+          "status": "completed",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Hello world",
+              "annotations": []
+            }
+          ],
+          "quality": "",
+          "size": ""
+        },
+        "output_index": 0
+      }
+    },
+    {
+      "Type": "response.completed",
+      "Payload": {
+        "type": "response.completed",
+        "response": {
+          "id": "stream_fixed",
+          "object": "response",
+          "created_at": 0,
+          "status": "completed",
+          "instructions": null,
+          "max_output_tokens": 0,
+          "model": "stream-model",
+          "output": [
+            {
+              "type": "message",
+              "id": "stream_fixed_msg_0",
+              "status": "completed",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Hello world",
+                  "annotations": []
+                }
+              ],
+              "quality": "",
+              "size": ""
+            }
+          ],
+          "parallel_tool_calls": false,
+          "previous_response_id": null,
+          "reasoning": null,
+          "store": false,
+          "temperature": 0,
+          "tool_choice": null,
+          "tools": null,
+          "top_p": 0,
+          "truncation": null,
+          "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 2,
+            "total_tokens": 2,
+            "usage_semantic": "openai",
+            "usage_source": "anthropic",
+            "billing_usage": {
+              "source": "claude_messages",
+              "semantic": "anthropic",
+              "claude_usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 2,
+                "claude_cache_creation_5_m_tokens": 0,
+                "claude_cache_creation_1_h_tokens": 0
+              }
+            },
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "text_tokens": 0,
+              "audio_tokens": 0,
+              "image_tokens": 0
+            },
+            "completion_tokens_details": {
+              "text_tokens": 0,
+              "audio_tokens": 0,
+              "image_tokens": 0,
+              "reasoning_tokens": 0
+            },
+            "input_tokens": 0,
+            "output_tokens": 2,
+            "input_tokens_details": null,
+            "claude_cache_creation_5_m_tokens": 0,
+            "claude_cache_creation_1_h_tokens": 0
+          },
+          "user": null,
+          "metadata": null
+        }
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 0,
+    "completion_tokens": 2,
+    "total_tokens": 2,
+    "usage_semantic": "openai",
+    "usage_source": "anthropic",
+    "billing_usage": {
+      "source": "claude_messages",
+      "semantic": "anthropic",
+      "claude_usage": {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 2,
+        "claude_cache_creation_5_m_tokens": 0,
+        "claude_cache_creation_1_h_tokens": 0
+      }
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "text_tokens": 0,
+      "audio_tokens": 0,
+      "image_tokens": 0
+    },
+    "completion_tokens_details": {
+      "text_tokens": 0,
+      "audio_tokens": 0,
+      "image_tokens": 0,
+      "reasoning_tokens": 0
+    },
+    "input_tokens": 0,
+    "output_tokens": 2,
+    "input_tokens_details": null,
+    "claude_cache_creation_5_m_tokens": 0,
+    "claude_cache_creation_1_h_tokens": 0
+  }
+}

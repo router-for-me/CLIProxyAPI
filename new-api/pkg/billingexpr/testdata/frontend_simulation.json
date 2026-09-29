@@ -1,0 +1,423 @@
+[
+  {
+    "name": "versioned tokens and cache",
+    "expression": "v1:tier(\"base\", p * 2 + c * 8 + cr * 0.2)",
+    "tokens": {
+      "p": 900,
+      "c": 100,
+      "cr": 100
+    },
+    "cost": 2620,
+    "tier": "base"
+  },
+  {
+    "name": "nil false and zero",
+    "expression": "param(\"missing\") == nil && param(\"zero\") == 0 && param(\"enabled\") == false ? tier(\"ok\", 3.5) : tier(\"bad\", 99)",
+    "body": {
+      "zero": 0,
+      "enabled": false
+    },
+    "cost": 3.5,
+    "tier": "ok"
+  },
+  {
+    "name": "normalized headers and two rules",
+    "expression": "tier(\"base\", p * 2) * (header(\" X-Priority \") == \"high\" ? 2 : 1) * (param(\"service_tier\") == \"flex\" ? 0.5 : 1)",
+    "tokens": {
+      "p": 100
+    },
+    "headers": {
+      " X-Priority ": " high "
+    },
+    "body": {
+      "service_tier": "flex"
+    },
+    "cost": 200,
+    "tier": "base",
+    "multipliers": [
+      2,
+      0.5
+    ],
+    "matched": [
+      true,
+      true
+    ]
+  },
+  {
+    "name": "unmatched rule",
+    "expression": "tier(\"base\", 10) * (param(\"priority\") == true ? 2 : 1)",
+    "body": {},
+    "cost": 10,
+    "tier": "base",
+    "multipliers": [
+      2
+    ],
+    "matched": [
+      false
+    ]
+  },
+  {
+    "name": "rules skipped by short circuit",
+    "expression": "param(\"enabled\") == true ? tier(\"yes\", 10) * (header(\"tier\") == \"fast\" ? 3 : 1) : tier(\"no\", 2)",
+    "body": {},
+    "headers": {
+      "tier": "fast"
+    },
+    "cost": 2,
+    "tier": "no",
+    "multipliers": [
+      3
+    ],
+    "matched": [
+      false
+    ]
+  },
+  {
+    "name": "noncanonical factor still evaluates",
+    "expression": "tier(\"base\", 10) * (param(\"priority\") == true ? 2 : 1.5)",
+    "body": {},
+    "cost": 15,
+    "tier": "base"
+  },
+  {
+    "name": "path escapes array indices and length",
+    "expression": "param(\"a\\\\.b.items.0.price\") + param(\"a\\\\.b.items.#\")",
+    "body": {
+      "a.b": {
+        "items": [
+          {
+            "price": 4
+          },
+          {
+            "price": 8
+          }
+        ]
+      }
+    },
+    "cost": 6,
+    "tier": ""
+  },
+  {
+    "name": "literal path to constructor",
+    "expression": "param(\"constructor\") == nil ? 4 : 99",
+    "body": {},
+    "cost": 4,
+    "tier": ""
+  },
+  {
+    "name": "contains scalars and objects",
+    "expression": "has(param(\"n\"), \"12\") && has(param(\"object\"), \"map[a:1 b:[true <nil>]]\") && !has(nil, \"x\") && !has(\"abc\", \"\") ? 8 : 99",
+    "body": {
+      "n": 123,
+      "object": {
+        "b": [
+          true,
+          null
+        ],
+        "a": 1
+      }
+    },
+    "cost": 8,
+    "tier": ""
+  },
+  {
+    "name": "math and numeric division",
+    "expression": "min(10, max(2, 5)) + abs(-2) + ceil(1.1) + floor(2.9) + 5 / 2 + 7 % 3",
+    "cost": 14.5,
+    "tier": ""
+  },
+  {
+    "name": "task token scale and request rule",
+    "expression": "tier(\"base\", 0.2 + u(\"tokens\") * 10 / 1000000) * (header(\"tier\") == \"fast\" ? 2 : 1)",
+    "usage": {
+      "tokens": 500000
+    },
+    "headers": {
+      "tier": "fast"
+    },
+    "cost": 10.4,
+    "tier": "base",
+    "multipliers": [
+      2
+    ],
+    "matched": [
+      true
+    ]
+  },
+  {
+    "name": "task enum conditions",
+    "expression": "u(\"mode\") == \"pro\" ? tier(\"pro\", u(\"seconds\") * 0.8) : tier(\"std\", u(\"seconds\") * 0.4)",
+    "usage": {
+      "mode": "pro",
+      "seconds": 5
+    },
+    "cost": 4,
+    "tier": "pro"
+  },
+  {
+    "name": "scientific rates and parentheses",
+    "expression": "(tier(\"base\", (p * 2e-3 + c * 1E+1)))",
+    "tokens": {
+      "p": 1000,
+      "c": 2
+    },
+    "cost": 22,
+    "tier": "base"
+  },
+  {
+    "name": "fixed request with zero usage",
+    "expression": "tier(\"request\", fixed(0.01))",
+    "cost": 10000,
+    "tier": "request",
+    "billingUnit": "request",
+    "fixedPrice": 0.01
+  },
+  {
+    "name": "explicit free request",
+    "expression": "tier(\"free\", fixed(0))",
+    "tokens": {
+      "p": 1000
+    },
+    "cost": 0,
+    "tier": "free",
+    "billingUnit": "request",
+    "fixedPrice": 0
+  },
+  {
+    "name": "mixed expression token fallback",
+    "expression": "len <= 32000 ? tier(\"short\", fixed(0.01)) : tier(\"long\", p * 2 + c * 8)",
+    "tokens": {
+      "p": 32001,
+      "c": 100,
+      "len": 32001
+    },
+    "cost": 64802,
+    "tier": "long",
+    "billingUnit": "token"
+  },
+  {
+    "name": "fixed request with multiplier",
+    "expression": "(len <= 32000 ? tier(\"short\", fixed(0.01)) : tier(\"long\", p * 2 + c * 8)) * (param(\"fast\") == true ? 2 : 1)",
+    "tokens": {
+      "len": 1
+    },
+    "body": {
+      "fast": true
+    },
+    "cost": 20000,
+    "tier": "short",
+    "multipliers": [
+      2
+    ],
+    "matched": [
+      true
+    ],
+    "billingUnit": "request",
+    "fixedPrice": 0.01
+  },
+  {
+    "name": "fixed time condition",
+    "expression": "hour(\"Asia/Shanghai\") >= 0 && hour(\"Asia/Shanghai\") < 24 ? tier(\"today\", fixed(0.02)) : tier(\"fallback\", p * 2)",
+    "cost": 20000,
+    "tier": "today",
+    "billingUnit": "request",
+    "fixedPrice": 0.02
+  },
+  {
+    "name": "image count is distinct from requested n",
+    "expression": "tier(\"image\", fixed(0.04)) * image_count",
+    "imageCount": 2,
+    "body": {
+      "n": 3
+    },
+    "cost": 80000,
+    "tier": "image",
+    "billingUnit": "request",
+    "fixedPrice": 0.04
+  },
+  {
+    "name": "image count and quality adjustment",
+    "expression": "tier(\"image\", fixed(0.04)) * image_count * (param(\"quality\") == \"hd\" ? 2 : 1)",
+    "imageCount": 3,
+    "body": {
+      "quality": "hd"
+    },
+    "cost": 240000,
+    "tier": "image",
+    "billingUnit": "request",
+    "fixedPrice": 0.04,
+    "multipliers": [
+      2
+    ],
+    "matched": [
+      true
+    ]
+  },
+  {
+    "name": "free image count maximum",
+    "expression": "tier(\"image\", fixed(0)) * image_count",
+    "imageCount": 128,
+    "cost": 0,
+    "tier": "image",
+    "billingUnit": "request",
+    "fixedPrice": 0
+  },
+  {
+    "name": "default image quantity",
+    "expression": "tier(\"image\", fixed(0.04)) * image_count",
+    "cost": 40000,
+    "tier": "image",
+    "billingUnit": "request",
+    "fixedPrice": 0.04
+  },
+  {
+    "name": "audio pricing ignores text cache discounts",
+    "expression": "(ai > 0 || ao > 0) ? tier(\"audio\", max(len - ai, 0) * 2 + c * 6 + ai * 4 + ao * 4) : tier(\"base\", p * 2 + c * 6 + cr * 0.2)",
+    "tokens": {
+      "len": 1000,
+      "ai": 200,
+      "ao": 50,
+      "c": 50
+    },
+    "cost": 2900,
+    "tier": "audio",
+    "displayTiers": [
+      {
+        "label": "audio",
+        "conditions": [],
+        "prices": {
+          "p": 2,
+          "c": 6,
+          "ai": 4,
+          "ao": 4
+        },
+        "conditionText": "Audio requests"
+      },
+      {
+        "label": "base",
+        "conditions": [],
+        "prices": {
+          "p": 2,
+          "c": 6,
+          "cr": 0.2
+        },
+        "conditionText": "Text-only requests"
+      }
+    ],
+    "conversion": {
+      "model_name": "contract-audio",
+      "pricing": {
+        "ModelRatio": 1,
+        "CompletionRatio": 3,
+        "CacheRatio": 0.1,
+        "AudioRatio": 2
+      }
+    }
+  },
+  {
+    "name": "text requests retain configured cache discount",
+    "expression": "(ai > 0 || ao > 0) ? tier(\"audio\", max(len - ai, 0) * 2 + c * 6 + ai * 4 + ao * 4) : tier(\"base\", p * 2 + c * 6 + cr * 0.2)",
+    "tokens": {
+      "p": 600,
+      "c": 100,
+      "cr": 400,
+      "ai": 0,
+      "ao": 0
+    },
+    "cost": 1880,
+    "tier": "base",
+    "displayTiers": [
+      {
+        "label": "audio",
+        "conditions": [],
+        "prices": {
+          "p": 2,
+          "c": 6,
+          "ai": 4,
+          "ao": 4
+        },
+        "conditionText": "Audio requests"
+      },
+      {
+        "label": "base",
+        "conditions": [],
+        "prices": {
+          "p": 2,
+          "c": 6,
+          "cr": 0.2
+        },
+        "conditionText": "Text-only requests"
+      }
+    ]
+  },
+  {
+    "name": "audio display survives redundant parentheses",
+    "expression": "(ai > 0 || ao > 0) ? tier(\"audio\", max((len - ai), (0)) * 2 + c * 6 + ai * 4 + ao * 4) : tier(\"base\", p * 2 + c * 6 + cr * 0.2)",
+    "tokens": {
+      "len": 1000,
+      "ai": 200,
+      "ao": 50,
+      "c": 50
+    },
+    "cost": 2900,
+    "tier": "audio",
+    "displayTiers": [
+      {
+        "label": "audio",
+        "conditions": [],
+        "prices": {
+          "p": 2,
+          "c": 6,
+          "ai": 4,
+          "ao": 4
+        },
+        "conditionText": "Audio requests"
+      },
+      {
+        "label": "base",
+        "conditions": [],
+        "prices": {
+          "p": 2,
+          "c": 6,
+          "cr": 0.2
+        },
+        "conditionText": "Text-only requests"
+      }
+    ]
+  },
+  {
+    "name": "audio display survives commuted operands",
+    "expression": "(ao > 0 || ai > 0) ? tier(\"audio\", 2 * max(0, len - ai) + 6 * c + 4 * ai + ao * 4) : tier(\"base\", p * 2 + 6 * c + cr * 0.2)",
+    "tokens": {
+      "len": 1000,
+      "ai": 200,
+      "ao": 50,
+      "c": 50
+    },
+    "cost": 2900,
+    "tier": "audio",
+    "displayTiers": [
+      {
+        "label": "audio",
+        "conditions": [],
+        "prices": {
+          "p": 2,
+          "c": 6,
+          "ai": 4,
+          "ao": 4
+        },
+        "conditionText": "Audio requests"
+      },
+      {
+        "label": "base",
+        "conditions": [],
+        "prices": {
+          "p": 2,
+          "c": 6,
+          "cr": 0.2
+        },
+        "conditionText": "Text-only requests"
+      }
+    ]
+  }
+]

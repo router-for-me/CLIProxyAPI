@@ -1,0 +1,68 @@
+{
+  "events": [
+    {
+      "candidates": [
+        {
+          "content": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Hello world"
+              }
+            ]
+          },
+          "finishReason": null,
+          "index": 0,
+          "safetyRatings": []
+        }
+      ],
+      "usageMetadata": {
+        "promptTokenCount": 0,
+        "toolUsePromptTokenCount": 0,
+        "candidatesTokenCount": 0,
+        "totalTokenCount": 0,
+        "thoughtsTokenCount": 0,
+        "cachedContentTokenCount": 0,
+        "promptTokensDetails": null,
+        "toolUsePromptTokensDetails": null,
+        "candidatesTokensDetails": null
+      }
+    },
+    {
+      "candidates": [
+        {
+          "content": {
+            "role": "model",
+            "parts": []
+          },
+          "finishReason": "STOP",
+          "index": 0,
+          "safetyRatings": []
+        }
+      ],
+      "usageMetadata": {
+        "promptTokenCount": 0,
+        "toolUsePromptTokenCount": 0,
+        "candidatesTokenCount": 2,
+        "totalTokenCount": 2,
+        "thoughtsTokenCount": 0,
+        "cachedContentTokenCount": 0,
+        "promptTokensDetails": null,
+        "toolUsePromptTokensDetails": null,
+        "candidatesTokensDetails": null,
+        "billing_usage": {
+          "source": "claude_messages",
+          "semantic": "anthropic",
+          "claude_usage": {
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "claude_cache_creation_5_m_tokens": 0,
+            "claude_cache_creation_1_h_tokens": 0
+          }
+        }
+      }
+    }
+  ]
+}

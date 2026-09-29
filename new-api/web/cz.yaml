@@ -1,0 +1,7 @@
+---
+commitizen:
+  name: cz_conventional_commits
+  tag_format: v$version
+  update_changelog_on_bump: true
+  version_provider: npm
+  version_scheme: semver

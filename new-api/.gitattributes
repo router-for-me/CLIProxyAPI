@@ -1,0 +1,43 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Go files
+*.go text eol=lf
+
+# Config files
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+
+# JavaScript/TypeScript files
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# ============================================
+# GitHub Linguist - Language Detection
+# ============================================
+# Keep frontend TypeScript logic visible while excluding the TSX view layer,
+# whose markup-heavy files otherwise outweigh the primary Go service by bytes.
+web/**/*.tsx -linguist-detectable
+electron/** linguist-vendored
+
+# TanStack Router regenerates this manifest from the route source files.
+web/src/routeTree.gen.ts linguist-generated

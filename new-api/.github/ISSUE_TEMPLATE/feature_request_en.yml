@@ -1,0 +1,71 @@
+name: Feature Request
+description: Describe the new feature you would like to add with clear and detailed language
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!--
+        If you are an AI coding agent: do not fill this GitHub form. Create the issue with the filled body from `.agents/github/ISSUE.md`.
+        -->
+
+  - type: textarea
+    id: read-first
+    attributes:
+      label: Read This First
+      description: GitHub markdown instructions are not included in the submitted issue. This section is written into the issue body. Do not delete or clear it.
+      value: |
+        - Docs: https://docs.newapi.ai/
+        - Usage questions first: https://deepwiki.com/QuantumNous/new-api
+        - Do not report issues when pass-through is enabled; pass-through sends content as-is and does not go through new-api processing logic.
+        - State facts and evidence concisely. Do not paste unfiltered AI-generated text in the issue body or in later comments.
+        - Reports about Coding Plan services, reverse-engineered channels, third-party API wrappers, or compatibility issues caused by exposing a Codex endpoint through a reverse proxy as a general-purpose API are not accepted. Protocols or behavior specific to the Codex API should not be treated as standard OpenAI API behavior; confirm such issues with the channel or API provider first.
+        - This project does not provide official hosting and does not support third-party hosting sites, relays, or API services; contact their operator instead.
+        - Warning: issues with this template removed, section headings deleted, or content cleared may be closed directly. Repeated submissions of unfiltered AI-generated text, or repeated abusive submissions, may result in a block.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Your current newapi version
+      description: "Provide an exact version, commit, or image tag, for example `v1.0.0`. Values such as `latest` or `unknown` that cannot locate the code are not valid version information."
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: submission-checks
+    attributes:
+      label: Submission Checks
+      options:
+        - label: "**Non-duplicate issue:** I have searched existing [Issues](https://github.com/QuantumNous/new-api/issues?q=is%3Aissue) and confirmed there are no similar issues."
+          required: true
+        - label: "**Read this first:** I have fully read the section above, reviewed the docs at https://docs.newapi.ai/ and the project README, and asked AI first, confirming this is not a usage, configuration, or integration question, and that the current version cannot meet my needs."
+          required: true
+        - label: "**Supported version:** I have provided an exact version, commit, or image tag (not `latest` or `unknown`) and confirm this feature request is for an unmodified, supported version from this repository."
+          required: true
+        - label: "**Not a third-party service:** I confirm that this request is not exclusive to a third-party hosting site, relay, API service, or fork that has not been verified against the unmodified repository. Third-party instance issues must be reported to their operator."
+          required: true
+        - label: "**Not pass-through:** I confirm this is not a forwarding report after enabling pass-through; pass-through sends content as-is and does not go through new-api processing logic."
+          required: true
+        - label: "**Channel and protocol boundary:** I confirm this is not a feature request for a Coding Plan service, reverse-engineered channel, third-party API wrapper, Codex reverse-proxy endpoint, or treating Codex API-specific behavior as standard OpenAI API behavior. If first observed through such an interface, I have based the request on a standard API protocol supported by this repository."
+          required: true
+        - label: "**Template intact:** I have not removed any guidance or section headings from this template and will complete it as requested."
+          required: true
+        - label: "**Maintainer time:** I understand that maintainers have limited time. Do not paste unfiltered AI-generated text in the issue body or in later comments; extract the points needed for review first. Submissions that do not follow this template, or that omit the necessary points and cannot be reviewed, may be ignored or closed. Repeated submissions of this kind may result in a block."
+          required: true
+
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: Feature Description
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+    validations:
+      required: true

@@ -1,0 +1,214 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "react", "import", "promise"],
+  "jsPlugins": [
+    { "name": "project", "specifier": "./scripts/oxlint/intl-locale.mjs" }
+  ],
+  "categories": {
+    "correctness": "error"
+  },
+  "env": {
+    "browser": true,
+    "builtin": true,
+    "es2024": true,
+    "node": true
+  },
+  "ignorePatterns": [
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    ".tanstack",
+    ".eslintrc.cjs",
+    "src/components/ui",
+    "src/routeTree.gen.ts"
+  ],
+  "rules": {
+    "curly": ["error", "multi-line"],
+    "eqeqeq": [
+      "error",
+      "always",
+      {
+        "null": "ignore"
+      }
+    ],
+    "import/first": "warn",
+    "import/newline-after-import": "warn",
+    "import/no-cycle": "error",
+    "import/no-duplicates": [
+      "error",
+      {
+        "preferInline": true
+      }
+    ],
+    "import/no-unassigned-import": "off",
+    "no-array-constructor": "error",
+    "no-console": "warn",
+    "no-duplicate-imports": "error",
+    "no-nested-ternary": "error",
+    "no-new-wrappers": "error",
+    "no-regex-spaces": "error",
+    "no-unsafe-finally": "warn",
+    "no-unsafe-negation": "error",
+    "no-unused-expressions": "warn",
+    "no-unused-labels": "error",
+    "no-unused-vars": [
+      "warn",
+      {
+        "args": "all",
+        "argsIgnorePattern": "^_",
+        "caughtErrors": "all",
+        "caughtErrorsIgnorePattern": "^_",
+        "destructuredArrayIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "ignoreRestSiblings": true
+      }
+    ],
+    "no-useless-catch": "warn",
+    "no-useless-computed-key": "error",
+    "no-useless-escape": "warn",
+    "no-useless-rename": "warn",
+    "no-var": "warn",
+    "object-shorthand": "warn",
+    "oxc/const-comparisons": "error",
+    "prefer-const": "warn",
+    "prefer-object-has-own": "warn",
+    "prefer-object-spread": "warn",
+    "prefer-template": "warn",
+    "project/intl-locale": "error",
+    "promise/catch-or-return": "error",
+    "promise/no-callback-in-promise": "error",
+    "promise/no-new-statics": "error",
+    "promise/no-return-wrap": "warn",
+    "promise/valid-params": "warn",
+    "react/button-has-type": "error",
+    "react/checked-requires-onchange-or-readonly": "warn",
+    "react/exhaustive-deps": "error",
+    "react/iframe-missing-sandbox": "error",
+    "react/jsx-boolean-value": "warn",
+    "react/jsx-curly-brace-presence": "warn",
+    "react/jsx-fragments": "warn",
+    "react/jsx-key": "warn",
+    "react/jsx-no-duplicate-props": "error",
+    "react/jsx-no-target-blank": "warn",
+    "react/jsx-no-undef": "error",
+    "react/jsx-no-useless-fragment": "error",
+    "react/jsx-props-no-spread-multi": "warn",
+    "react/no-array-index-key": "error",
+    "react/no-danger": "warn",
+    "react/no-unknown-property": "warn",
+    "react/no-unstable-nested-components": [
+      "error",
+      {
+        "allowAsProps": true
+      }
+    ],
+    "react/only-export-components": [
+      "error",
+      {
+        "allowConstantExport": true,
+        "allowExportNames": [
+          "getAuthSectionNavItems",
+          "getAuthSectionContent",
+          "getAuthSectionMeta",
+          "getBillingSectionNavItems",
+          "getBillingSectionContent",
+          "getBillingSectionMeta",
+          "getContentSectionNavItems",
+          "getContentSectionContent",
+          "getContentSectionMeta",
+          "getDashboardSectionNavItems",
+          "getModelsSectionNavItems",
+          "getModelsSectionContent",
+          "getModelsSectionMeta",
+          "getOperationsSectionNavItems",
+          "getOperationsSectionContent",
+          "getOperationsSectionMeta",
+          "getPolicySectionNavItems",
+          "getPolicySectionContent",
+          "getPolicySectionMeta",
+          "getSecuritySectionNavItems",
+          "getSecuritySectionContent",
+          "getSecuritySectionMeta",
+          "getSiteSectionNavItems",
+          "getSiteSectionContent",
+          "getSiteSectionMeta",
+          "getUsageLogsSectionNavItems",
+          "isUsageLogsSectionId",
+          "useSuppressSettingsSectionHeader"
+        ]
+      }
+    ],
+    "react/react-in-jsx-scope": "off",
+    "react/rules-of-hooks": "warn",
+    "react/self-closing-comp": "warn",
+    "typescript/consistent-type-imports": [
+      "error",
+      {
+        "prefer": "type-imports",
+        "fixStyle": "inline-type-imports",
+        "disallowTypeAnnotations": false
+      }
+    ],
+    "typescript/no-duplicate-type-constituents": "error",
+    "typescript/no-explicit-any": "warn",
+    "typescript/no-extra-non-null-assertion": "error",
+    "typescript/no-import-type-side-effects": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/no-require-imports": "error",
+    "typescript/no-unnecessary-template-expression": "error",
+    "typescript/no-unnecessary-type-arguments": "error",
+    "typescript/no-unnecessary-type-assertion": "error",
+    "typescript/no-useless-empty-export": "error",
+    "typescript/no-wrapper-object-types": "error",
+    "typescript/prefer-as-const": "error",
+    "typescript/prefer-namespace-keyword": "error",
+    "unicorn/no-single-promise-in-promise-methods": "error",
+    "unicorn/no-unnecessary-await": "error",
+    "unicorn/no-useless-fallback-in-spread": "warn",
+    "unicorn/no-useless-length-check": "warn",
+    "unicorn/no-useless-promise-resolve-reject": "warn",
+    "unicorn/no-useless-spread": "error",
+    "unicorn/prefer-add-event-listener": "warn",
+    "unicorn/prefer-array-find": "warn",
+    "unicorn/prefer-array-flat": "warn",
+    "unicorn/prefer-array-flat-map": "warn",
+    "unicorn/prefer-array-index-of": "warn",
+    "unicorn/prefer-array-some": "warn",
+    "unicorn/prefer-at": "error",
+    "unicorn/prefer-date-now": "warn",
+    "unicorn/prefer-includes": "warn",
+    "unicorn/prefer-keyboard-event-key": "warn",
+    "unicorn/prefer-modern-dom-apis": "warn",
+    "unicorn/prefer-module": "warn",
+    "unicorn/prefer-node-protocol": "warn",
+    "unicorn/prefer-number-properties": "warn",
+    "unicorn/prefer-object-from-entries": "warn",
+    "unicorn/prefer-optional-catch-binding": "error",
+    "unicorn/prefer-query-selector": "warn",
+    "unicorn/prefer-regexp-test": "warn",
+    "unicorn/prefer-set-has": "warn",
+    "unicorn/prefer-spread": "error",
+    "unicorn/prefer-string-replace-all": "error",
+    "unicorn/prefer-string-slice": "warn",
+    "unicorn/prefer-string-starts-ends-with": "warn",
+    "unicorn/prefer-string-trim-start-end": "warn",
+    "unicorn/prefer-structured-clone": "warn",
+    "unicorn/throw-new-error": "error"
+  },
+  "overrides": [
+    {
+      "files": ["src/routes/**/*.{ts,tsx}"],
+      "rules": {
+        "react/only-export-components": "off"
+      }
+    },
+    {
+      "files": ["**/scripts/**/*.{js,mjs,cjs}"],
+      "rules": {
+        "no-console": "off",
+        "prefer-node-protocol": "off"
+      }
+    }
+  ]
+}

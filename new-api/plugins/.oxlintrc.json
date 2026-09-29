@@ -1,0 +1,22 @@
+{
+  "$schema": "../web/node_modules/oxlint/configuration_schema.json",
+  "plugins": ["oxc"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+  "env": {
+    "builtin": true
+  },
+  "globals": {
+    "console": "readonly",
+    "utils": "readonly"
+  },
+  "rules": {
+    "eqeqeq": ["error", "always", { "null": "ignore" }],
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_", "caughtErrorsIgnorePattern": "^e$" }],
+    "no-underscore-dangle": ["warn", { "allow": ["__fileRef"] }],
+    "no-undef": "error",
+    "no-var": "error"
+  }
+}
