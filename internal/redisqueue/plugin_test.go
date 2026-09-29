@@ -780,3 +780,81 @@ func TestUsageQueuePlugin_SchemeB_StrictLegacyRequestIDPreservation(t *testing.T
 	// trace_id reflects the record.TraceID
 	requireStringField(t, payload, "trace_id", "custom-trace-id")
 }
+
+func TestUsageQueuePluginPayloadIncludesCostUSDWhenReported(t *testing.T) {
+	withEnabledQueue(t, func() {
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:     "cline",
+			ExecutorType: "*executor.ClineExecutor",
+			Model:        "anthropic/claude-sonnet-4-6",
+			AuthIndex:    "0",
+			RequestedAt:  time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens:  2,
+				OutputTokens: 1,
+				TotalTokens:  3,
+				CostUSD:      0.000001,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		tokensRaw, okTokens := payload["tokens"]
+		if !okTokens {
+			t.Fatal("payload missing tokens")
+		}
+		var tokens map[string]json.RawMessage
+		if err := json.Unmarshal(tokensRaw, &tokens); err != nil {
+			t.Fatalf("unmarshal tokens: %v", err)
+		}
+		costRaw, okCost := tokens["cost_usd"]
+		if !okCost {
+			t.Fatal("tokens missing cost_usd for cost-bearing record")
+		}
+		var got float64
+		if err := json.Unmarshal(costRaw, &got); err != nil {
+			t.Fatalf("unmarshal cost_usd: %v", err)
+		}
+		if got != 0.000001 {
+			t.Fatalf("cost_usd = %v, want 0.000001", got)
+		}
+		requireProvider := ""
+		if provider, okP := payload["provider"]; okP {
+			_ = json.Unmarshal(provider, &requireProvider)
+		}
+		if requireProvider != "cline" {
+			t.Fatalf("provider = %q, want cline", requireProvider)
+		}
+	})
+}
+
+func TestUsageQueuePluginPayloadOmitsCostUSDWhenUnreported(t *testing.T) {
+	withEnabledQueue(t, func() {
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:     "cline",
+			ExecutorType: "*executor.ClineExecutor",
+			Model:        "moonshotai/kimi-k3",
+			AuthIndex:    "0",
+			RequestedAt:  time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC),
+			Detail: coreusage.Detail{
+				InputTokens:  2,
+				OutputTokens: 1,
+				TotalTokens:  3,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		tokensRaw, okTokens := payload["tokens"]
+		if !okTokens {
+			t.Fatal("payload missing tokens")
+		}
+		var tokens map[string]json.RawMessage
+		if err := json.Unmarshal(tokensRaw, &tokens); err != nil {
+			t.Fatalf("unmarshal tokens: %v", err)
+		}
+		if _, okCost := tokens["cost_usd"]; okCost {
+			t.Fatal("cost_usd must be omitted when the upstream did not report one")
+		}
+	})
+}

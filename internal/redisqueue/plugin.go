@@ -100,6 +100,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheReadTokensPresent: true,
 		CacheCreationTokens:    usageDetail.CacheCreationTokens,
 		TotalTokens:            usageDetail.TotalTokens,
+		CostUSD:                usageDetail.CostUSD,
 	}
 
 	failed := record.Failed
@@ -215,6 +216,10 @@ type tokenStats struct {
 	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
 	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
 	TotalTokens            int64 `json:"total_tokens"`
+	// CostUSD is the upstream-reported spend in USD when the upstream reports
+	// it (present only on cost-bearing records). Consumers should sum it per
+	// auth/model/day alongside the token counters.
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 type failDetail struct {

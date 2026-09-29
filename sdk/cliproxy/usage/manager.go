@@ -86,6 +86,10 @@ type Detail struct {
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
+	// CostUSD is the actual upstream-reported spend for this call in USD when
+	// the upstream reports it (e.g. the Cline account API returns usage.cost).
+	// Zero means the upstream did not report a cost.
+	CostUSD float64
 }
 
 type requestedModelAliasContextKey struct{}

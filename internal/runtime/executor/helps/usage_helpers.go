@@ -1058,6 +1058,11 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}
+	// Upstreams that report actual spend carry a USD cost (e.g. the Cline
+	// account API's usage.cost). Preserve it through translation.
+	if cost := usageNode.Get("cost"); cost.Exists() && cost.Float() != 0 {
+		detail.CostUSD = cost.Float()
+	}
 	if hasOpenAIStyleUsageBucketFields(usageNode) {
 		if inputNode.Exists() && outputNode.Exists() {
 			detail.TokenBreakdown = usage.NewSubsetTokenBreakdown(

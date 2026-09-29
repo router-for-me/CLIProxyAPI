@@ -220,3 +220,24 @@ func TestNewSeparateReasoningTokenBreakdown_RejectsArithmeticOverflow(t *testing
 		t.Fatalf("uncached tokens negative: %d", b.Input.UncachedTokens)
 	}
 }
+
+func TestEnsureTokenBreakdownForProviderPreservesCostUSD(t *testing.T) {
+	in := Detail{
+		InputTokens:  2,
+		OutputTokens: 1,
+		TotalTokens:  3,
+		CostUSD:      0.000001,
+	}
+	out := EnsureTokenBreakdownForProvider(in, "cline", "*executor.ClineExecutor")
+	if !out.TokenBreakdown.Valid() {
+		t.Fatalf("breakdown unexpectedly invalid: %+v", out.TokenBreakdown)
+	}
+	if out.CostUSD != 0.000001 {
+		t.Fatalf("CostUSD = %v, want preserved 0.000001", out.CostUSD)
+	}
+
+	zero := EnsureTokenBreakdownForProvider(Detail{}, "cline", "*executor.ClineExecutor")
+	if zero.CostUSD != 0 {
+		t.Fatalf("CostUSD = %v on empty detail, want 0", zero.CostUSD)
+	}
+}
