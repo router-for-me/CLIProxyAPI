@@ -218,7 +218,7 @@ func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 }
 
 func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
-	record, ok := r.buildAdditionalModelRecord(model, detail)
+	record, ok := r.buildAdditionalModelRecord(ctx, model, detail)
 	if !ok {
 		return
 	}
@@ -290,7 +290,7 @@ func (r *UsageReporter) MarkFirstResponseByte() {
 	r.setTTFT(time.Since(start))
 }
 
-func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
+func (r *UsageReporter) buildAdditionalModelRecord(ctx context.Context, model string, detail usage.Detail) (usage.Record, bool) {
 	if r == nil {
 		return usage.Record{}, false
 	}
@@ -302,7 +302,7 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	record := r.buildRecordForModel(model, detail, false, usage.Failure{})
+	record := r.buildRecordForModel(ctx, model, detail, false, usage.Failure{})
 	// The served-model capture belongs to the primary model only: it was read
 	// from the response that served r.model. Secondary records describe a
 	// different model (e.g. tool image generation), so inheriting it would
@@ -330,7 +330,7 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	r.once.Do(func() {
-		r.publishRecord(ctx, r.buildRecord(detail, failed, fail))
+		r.publishRecord(ctx, r.buildRecord(ctx, detail, failed, fail))
 	})
 }
 
@@ -409,7 +409,7 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		r.publishRecord(ctx, r.buildRecord(usage.Detail{}, false, usage.Failure{}))
+		r.publishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false, usage.Failure{}))
 	})
 }
 
@@ -418,7 +418,7 @@ func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) 
 	usage.PublishRecord(ctx, record)
 }
 
-func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
+func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
 	var fail usage.Failure
 	if len(failures) > 0 {
 		fail = failures[0]
@@ -426,10 +426,10 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures .
 	if r == nil {
 		return usage.Record{Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
-	return r.buildRecordForModel(r.model, detail, failed, fail)
+	return r.buildRecordForModel(ctx, r.model, detail, failed, fail)
 }
 
-func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
+func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool, fail usage.Failure) usage.Record {
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail, Generate: usage.GenerateFlag(true)}
 	}
@@ -445,6 +445,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 			"request_id": r.requestID,
 		}).Warn("auto-router: routed request completed with zero output tokens (possible max_tokens starvation)")
 	}
+	providerMeta := ProviderUsageMetadataFromContext(ctx)
 	return usage.Record{
 		Provider:                 r.provider,
 		ExecutorType:             r.executorType,
@@ -472,7 +473,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		AutoRouterProfileVersion: r.profileVersion,
 		AutoRouterProfileHash:    r.profileHash,
 		AutoRouterDecisionJSON:   append([]byte(nil), r.decisionJSON...),
-		ResponseServiceTier:      strings.TrimSpace(detail.ResponseServiceTier),
+		ResponseServiceTier:      firstNonEmptyTier(strings.TrimSpace(detail.ResponseServiceTier), providerMeta.ResponseServiceTier),
 		Generate:                 usage.GenerateFlag(r.generate),
 		RequestedAt:              r.requestedAt,
 		Latency:                  r.latency(),
@@ -480,7 +481,18 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		Failed:                   failed,
 		Fail:                     fail,
 		Detail:                   detail,
+		EnergyJoules:             providerMeta.EnergyJoules,
+		ProviderMetadata:         providerMeta.Metadata,
 	}
+}
+
+// firstNonEmptyTier returns a when it is non-empty, otherwise b. Used so the
+// response body's service tier wins over the context-captured fallback.
+func firstNonEmptyTier(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 func failFromErrors(errs ...error) usage.Failure {
