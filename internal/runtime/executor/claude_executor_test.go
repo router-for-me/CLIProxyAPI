@@ -8145,6 +8145,11 @@ func TestClaudeCodeCLIBetas_MatchesObservedClientMatrix(t *testing.T) {
 			want: constants + ",mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24",
 		},
 		{
+			name: "claude-sonnet-5-5 bracketed variant keeps mid-conversation tool changes",
+			body: `{"model":"claude-sonnet-5-5[1m]"}`,
+			want: constants + ",mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24",
+		},
+		{
 			name: "claude-opus-4-8 accepts role=system",
 			body: `{"model":"claude-opus-4-8"}`,
 			want: constants + ",mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24",
