@@ -1,0 +1,203 @@
+// Multi-step install confirmation ("gauntlet") for third-party plugins.
+
+.gateModal {
+  text-align: left;
+}
+
+// ── Plugin identity card (shown on every step) ──
+.identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: $spacing-sm 0 $spacing-md;
+  text-align: center;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.logoBox {
+  display: inline-flex;
+  width: 52px;
+  height: 52px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
+  background: color-mix(in srgb, var(--bg-tertiary) 60%, transparent);
+  color: var(--text-secondary);
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+}
+
+.name {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.slug {
+  margin: 0;
+  font-family: $font-mono;
+  font-size: 13px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.repoLink {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  font-family: $font-mono;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-decoration: none;
+
+  span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  svg {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+
+  &:hover {
+    color: var(--accent-color);
+    text-decoration: underline;
+
+    svg {
+      color: currentColor;
+    }
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--focus-ring-color, var(--accent-color));
+    outline-offset: 3px;
+    border-radius: $radius-sm;
+  }
+}
+
+.source {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+// ── Step 2: caution banner + effects + untrusted alert ──
+.warningBanner {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  margin-top: $spacing-lg;
+  padding: 12px 14px;
+  border-radius: $radius-md;
+  border: 1px solid color-mix(in srgb, var(--quota-medium-color, #e0aa14) 45%, var(--border-color));
+  background: color-mix(in srgb, var(--quota-medium-color, #e0aa14) 16%, var(--bg-secondary));
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1.4;
+
+  svg {
+    flex-shrink: 0;
+    color: var(--quota-medium-color, #e0aa14);
+  }
+}
+
+.effects {
+  margin: $spacing-md 0 0;
+  padding-left: $spacing-md;
+  border-left: 2px solid var(--border-color);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  li {
+    position: relative;
+    padding-left: 18px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+
+    &::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 7px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--text-tertiary);
+    }
+  }
+}
+
+.untrustedAlert {
+  margin-top: $spacing-lg;
+  padding: 12px 14px;
+  border-radius: $radius-md;
+  border: 1px solid rgba($warning-color, 0.35);
+  background: rgba($warning-color, 0.1);
+}
+
+.untrustedText {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  font-weight: 600;
+  color: var(--danger-color);
+}
+
+.originGrid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 10px 0 0;
+
+  dt {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  dd {
+    margin: 0;
+    font-family: $font-mono;
+    font-size: 12px;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+  }
+}
+
+// ── Step 3: type-to-confirm ──
+.confirmBlock {
+  margin-top: $spacing-lg;
+}
+
+.confirmPrompt {
+  display: block;
+  margin-bottom: $spacing-sm;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.confirmHint {
+  margin: $spacing-sm 0 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}

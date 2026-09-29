@@ -1,0 +1,338 @@
+@use '../../../../styles/mixins' as *;
+
+/* 字段原语：表单控件的 scoped 覆盖 + 开关行 / 网格 / 字段组 / 搜索锚点。
+   交互反馈一律引用全局动效 tokens（--dur-* / --ease-out-strong）。 */
+
+/* ---------- 表单控件宿主（原 .visualEditor 的 :global 覆盖收编于此） ---------- */
+
+.fieldsRoot {
+  :global(.form-group) {
+    gap: 7px;
+    margin-bottom: 0;
+  }
+
+  :global(.form-group > label) {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+
+  :global(.input) {
+    min-height: 42px;
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    border-color: var(--border-color);
+    box-shadow: none;
+    transition:
+      border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+      background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+      box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+  }
+
+  :global(.input:focus) {
+    background: var(--bg-primary);
+    border-color: var(--text-primary);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-primary) 12%, transparent);
+  }
+
+  :global(textarea.input) {
+    min-height: 112px;
+  }
+
+  :global(.hint) {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+
+  :global(.error-box) {
+    border-radius: 10px;
+  }
+
+  :global(.item-list) {
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  :global(.item-row) {
+    border-radius: 10px;
+    padding: 12px;
+    background: transparent;
+    border-color: var(--border-color);
+  }
+
+  :global(.item-row .item-meta) {
+    gap: 4px;
+  }
+
+  :global(.item-row .item-actions) {
+    flex-wrap: wrap;
+  }
+
+  :global(.pill) {
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+  }
+}
+
+/* ---------- 开关行 ---------- */
+
+.toggleRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  min-height: 74px;
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+  transition:
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  @include mobile {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .toggleRow:hover {
+    border-color: var(--border-hover);
+    background: color-mix(in srgb, var(--bg-tertiary) 40%, transparent);
+  }
+}
+
+.toggleCopy {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.toggleTitle {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.toggleDescription {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* ---------- 布局原语 ---------- */
+
+.fieldGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+
+  @include mobile {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.fieldStack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.divider {
+  height: 1px;
+  background: var(--border-color);
+}
+
+/* ---------- 搜索锚点与脉冲高亮 ---------- */
+
+.fieldAnchor {
+  display: block;
+  min-width: 0;
+  scroll-margin-top: calc(var(--header-height, 64px) + 16px);
+}
+
+/* 跨两列的字段（如长文本的代理 URL）；移动端单列布局下回退为一列。 */
+.fieldAnchorWide {
+  grid-column: span 2;
+
+  @include mobile {
+    grid-column: auto;
+  }
+}
+
+/* 字段标签下方的赞助跳转小字行（代理 URL 字段）。 */
+.fieldSponsorHint {
+  margin: -2px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 与赞助行同字号同高度的隐形占位：同排右侧字段用它补齐标签区高度，让输入框与代理 URL 对齐。
+   移动端单列堆叠时无需对齐，直接隐藏。 */
+.fieldSponsorSpacer {
+  margin: -2px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  visibility: hidden;
+
+  @include mobile {
+    display: none;
+  }
+}
+
+/* 与正文融为一体的高亮链接：同字号，复用全站金色（amber）badge 配方，hover 底色加深。 */
+.fieldSponsorLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 5px;
+  border: 1px solid var(--amber-30);
+  border-radius: 5px;
+  background: var(--amber-10);
+  color: var(--amber-text);
+  font-weight: 600;
+  text-decoration: none;
+  vertical-align: baseline;
+  transition: background-color 0.15s ease;
+
+  &:hover {
+    background: var(--amber-30);
+    text-decoration: none;
+  }
+}
+
+.fieldSponsorLogo {
+  display: block;
+  width: auto;
+  height: 13px;
+}
+
+.fieldHighlightActive {
+  border-radius: 10px;
+  animation: config-field-highlight 1.8s ease-out;
+}
+
+@keyframes config-field-highlight {
+  0% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-primary) 55%, transparent);
+  }
+  55% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-primary) 32%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
+/* ---------- 字段组（原 subsection） ---------- */
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+}
+
+.groupHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.groupTitle {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.groupDescription {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ---------- 字段外壳 ---------- */
+
+.fieldShell {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.fieldControl {
+  position: relative;
+}
+
+.fieldHint {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.inlinePill {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ---------- 响应式 ---------- */
+
+@include mobile {
+  .group,
+  .toggleRow {
+    padding: 14px;
+  }
+}
+
+@media (max-width: 380px) {
+  .group,
+  .toggleRow {
+    padding: 12px;
+  }
+}
+
+/* ---------- 无障碍 ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .fieldsRoot :global(.input),
+  .toggleRow {
+    transition: none;
+  }
+
+  .fieldHighlightActive {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-primary) 32%, transparent);
+  }
+}

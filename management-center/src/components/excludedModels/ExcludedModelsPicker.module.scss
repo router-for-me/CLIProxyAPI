@@ -1,0 +1,477 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  min-width: 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Trigger —— 摘要 + 计量条，取代「把计数塞进 placeholder」                      */
+/* -------------------------------------------------------------------------- */
+
+.trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  /* 整条 40px 宽元素上 0.97 太橡皮；0.99 足够被感知又不显廉价。 */
+  &:active:not(:disabled) {
+    transform: scale(0.99);
+  }
+
+  &:focus-visible {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba($primary-color, 0.18);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover:not(:disabled) {
+      border-color: color-mix(in srgb, var(--primary-color) 40%, var(--border-color));
+    }
+  }
+}
+
+.triggerText {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triggerSpinner {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  animation: excluded-spin 900ms linear infinite;
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+.triggerOpen .chevron {
+  transform: rotate(180deg);
+}
+
+/* 底边发丝计量条：零成本地长期回答「我到底排除了多少」。 */
+.meter {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: var(--bg-tertiary);
+}
+
+.meterFill {
+  display: block;
+  height: 100%;
+  background: color-mix(in srgb, var(--primary-color) 70%, var(--text-primary));
+  transition: width 360ms var(--ease-out-strong, ease);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 内联展开：grid 0fr→1fr。搜索框会在展开状态下过滤列表，每次击键都改高度，       */
+/* grid 轨道自动重解，无需测量，也没有 ResizeObserver 要去跟击键搏斗。            */
+/* -------------------------------------------------------------------------- */
+
+.disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  /* 退场更快 + 加速。themes.scss 无 --ease-in* token，这里用关键字而非发明全局 token。 */
+  transition: grid-template-rows 120ms ease-in;
+}
+
+.disclosureOpen {
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+.disclosureInner {
+  /* 必需：grid item 默认 min-height:auto，漏了它面板收不回去。 */
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+  transform-origin: top;
+  animation: excluded-panel-in var(--dur-hover, 200ms) var(--ease-out-strong, ease-out) both;
+}
+
+/* 只写 from，让元素的静止样式定义终点（与 toolbar-popover-in 同一写法）。 */
+@keyframes excluded-panel-in {
+  from {
+    opacity: 0;
+    /* 0.98 而非 0.95——面板是宽内联块，600px 下 0.95 是 30px 的横向蠕动。 */
+    transform: scale(0.98);
+  }
+}
+
+@keyframes excluded-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 搜索                                                                        */
+/* -------------------------------------------------------------------------- */
+
+.searchRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.searchIcon {
+  position: absolute;
+  left: 18px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+.search {
+  width: 100%;
+  padding: 6px 10px 6px 32px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-sm;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 12px;
+
+  &::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  &:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba($primary-color, 0.18);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 列表                                                                        */
+/* -------------------------------------------------------------------------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  padding: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  padding: 7px 8px;
+  border-radius: $radius-sm;
+  cursor: pointer;
+  transition: background-color var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+}
+
+.rowHighlighted {
+  background: var(--bg-tertiary);
+}
+
+.rowExcluded .checkbox {
+  border-color: var(--primary-color);
+  background: var(--primary-color);
+  color: var(--bg-primary);
+}
+
+/* 纯规则命中：压暗且不可切换，但仍可聚焦、仍会朗读原因。 */
+.rowLocked {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.checkbox {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-sm;
+  background: var(--bg-primary);
+  transition:
+    background-color var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+}
+
+.rowText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.rowId {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: $font-mono;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowDisplayName,
+.rowReason {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: 1px dashed color-mix(in srgb, var(--primary-color) 38%, var(--border-color));
+  border-radius: $radius-full;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.badgeMuted {
+  border-style: dotted;
+  color: var(--text-tertiary);
+}
+
+.noResults {
+  margin: 0;
+  padding: $spacing-lg $spacing-sm;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 吸底摘要                                                                    */
+/* -------------------------------------------------------------------------- */
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
+}
+
+.footerCount {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.footerActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.footerButton {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: $radius-sm;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:active:not(:disabled) {
+    transform: scale(0.96);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover:not(:disabled) {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 无目录降级 / 规则编辑器                                                      */
+/* -------------------------------------------------------------------------- */
+
+.catalogNotice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  margin-top: 6px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.retryButton {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-sm;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:active {
+    transform: scale(0.96);
+  }
+}
+
+.chipsMore {
+  align-self: center;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.ruleEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ruleLabel {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.ruleMatches {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-tertiary);
+    font-size: 11px;
+  }
+
+  code {
+    color: var(--text-secondary);
+    font-family: $font-mono;
+  }
+}
+
+/* 零命中是 warning 不是 error：规则可以合法地指向目录不认识的模型。 */
+.ruleMatchNone {
+  color: var(--warning-color, #{$warning-color});
+}
+
+.ruleWarning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--warning-color, #{$warning-color});
+  font-size: 11px;
+}
+
+/* -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .disclosure,
+  .disclosureOpen {
+    transition: none;
+  }
+
+  .panel {
+    animation: none;
+  }
+
+  .trigger,
+  .chevron,
+  .meterFill,
+  .row,
+  .checkbox,
+  .footerButton,
+  .retryButton {
+    transition: none;
+  }
+
+  .triggerSpinner {
+    animation: none;
+  }
+
+  .trigger:active:not(:disabled),
+  .footerButton:active:not(:disabled),
+  .retryButton:active {
+    transform: none;
+  }
+}

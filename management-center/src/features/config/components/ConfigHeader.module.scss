@@ -1,0 +1,156 @@
+@use '../../../styles/mixins' as *;
+
+/* 配置面板头部：与凭证库/额度页同语汇（紧排标题 / ▍mono 遥测 / ghost 次按钮） */
+
+.header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px 24px;
+  flex-wrap: wrap;
+}
+
+.copy {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: clamp(26px, 3.2vw, 30px);
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.meta {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-family: $font-mono;
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+
+  /* 终端游标：全站页头 meta 行的结构记号 */
+  &::before {
+    content: '▍';
+    color: var(--viz-success);
+    font-size: 13px;
+    line-height: 1;
+    align-self: center;
+    margin-right: 1px;
+  }
+}
+
+.metaDot {
+  color: var(--text-quaternary);
+  user-select: none;
+}
+
+.metaMuted {
+  color: var(--text-secondary);
+}
+
+.metaWarning {
+  color: var(--amber-text);
+}
+
+.metaError {
+  color: var(--viz-failure);
+}
+
+.metaOk {
+  color: var(--viz-success);
+}
+
+/* ---------- 动作区 ---------- */
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* 次按钮：安静的文字链接 */
+.ghostAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  cursor: pointer;
+  background: none;
+  color: var(--text-secondary);
+  border-radius: $radius-full;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1;
+  transition:
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ghostAction:hover:not(:disabled) {
+    color: var(--text-primary);
+  }
+}
+
+.spinning {
+  animation: config-header-spin 0.8s linear infinite;
+}
+
+@keyframes config-header-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@include mobile {
+  .header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ghostAction {
+    transition: none;
+  }
+
+  .ghostAction:active:not(:disabled) {
+    transform: none;
+  }
+
+  .spinning {
+    animation: none;
+  }
+}

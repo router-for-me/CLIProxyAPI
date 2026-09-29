@@ -1,0 +1,159 @@
+@use '../../../styles/mixins' as *;
+
+/* 额度页头部：与凭证库/仪表盘同语汇（紧排标题 / ▍mono 遥测 / 墨色药丸）。
+ * meta 行遥测语义：已加载数是「活数据」（绿），需关注数走失败色，其余中性。 */
+
+.header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px 24px;
+  flex-wrap: wrap;
+}
+
+.copy {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: clamp(26px, 3.2vw, 30px);
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.meta {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-family: $font-mono;
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+
+  /* 终端游标：结构记号，与凭证库 meta 行同语汇 */
+  &::before {
+    content: '▍';
+    color: var(--viz-success);
+    font-size: 13px;
+    line-height: 1;
+    align-self: center;
+    margin-right: 1px;
+  }
+}
+
+.metaDot {
+  color: var(--text-quaternary);
+  user-select: none;
+}
+
+.metaTotal {
+  color: var(--text-secondary);
+}
+
+.metaLoaded {
+  color: var(--viz-success);
+}
+
+.metaMuted {
+  color: var(--text-tertiary);
+}
+
+.metaAttention {
+  color: var(--viz-failure);
+}
+
+/* ---------- 动作区 ---------- */
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* 墨色药丸主按钮（深色主题自动反相） */
+.primaryAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  cursor: pointer;
+  background: var(--text-primary);
+  color: var(--bg-secondary);
+  border-radius: $radius-full;
+  padding: 10px 18px;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1;
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  &:active:not(:disabled) {
+    transform: translateY(0) scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .primaryAction:hover:not(:disabled) {
+    transform: translateY(-1px);
+    background: color-mix(in srgb, var(--text-primary) 86%, var(--bg-secondary));
+    box-shadow: 0 12px 26px color-mix(in srgb, var(--text-primary) 22%, transparent);
+  }
+}
+
+.spinning {
+  animation: quota-spin 0.8s linear infinite;
+}
+
+@keyframes quota-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@include mobile {
+  .header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primaryAction {
+    transition: none;
+  }
+
+  .primaryAction:active:not(:disabled) {
+    transform: none;
+  }
+
+  .spinning {
+    animation: none;
+  }
+}

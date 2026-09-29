@@ -1,0 +1,35 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+api.md
+usage.json
+CLAUDE.md
+AGENTS.md
+management-api*
+antigravity_usage.json
+codex_usage.json
+style.md
+
+node_modules
+dist
+dist-ssr
+*.local
+skills
+
+# Editor directories and files
+settings.local.json
+.codex
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

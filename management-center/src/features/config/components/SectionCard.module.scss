@@ -1,0 +1,124 @@
+@use '../../../styles/mixins' as *;
+
+/* 分区卡片：自然高度，无固定高度/无滚动吸附（旧轮播已退役） */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(16px, 2vw, 22px);
+  min-width: 0;
+  box-sizing: border-box;
+  padding: clamp(20px, 2.4vw, 28px);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+
+  @include mobile {
+    gap: 14px;
+    padding: 16px;
+  }
+}
+
+/* 首载入场：0.45s 强减速上浮（与全站卡片入场同拍），排在头部级联
+   （标题 0 / meta 70 / 动作 140 / 工具栏 210 / tabs 280ms）之后收尾，仅首载播一次 */
+.cardEnter {
+  animation: config-card-in 0.45s var(--ease-out-strong, ease-out) 0.32s backwards;
+}
+
+@keyframes config-card-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 24px, 0);
+  }
+}
+
+.header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-color);
+
+  @include mobile {
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: 12px;
+  }
+}
+
+.badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.indexBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-family: $font-mono;
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+}
+
+.iconBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+
+.heading {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: clamp(18px, 1.6vw, 22px);
+  font-weight: 680;
+  line-height: 1.18;
+  letter-spacing: -0.01em;
+}
+
+.description {
+  margin: 0;
+  max-width: 72ch;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+
+  @include mobile {
+    max-width: none;
+  }
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cardEnter {
+    animation: none;
+  }
+}

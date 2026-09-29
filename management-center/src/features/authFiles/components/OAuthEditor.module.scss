@@ -1,0 +1,385 @@
+@use '../../../styles/mixins' as *;
+
+.pageContent {
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: $spacing-xs $spacing-lg $spacing-2xl;
+
+  @include mobile {
+    padding: 0 $spacing-md $spacing-xl;
+  }
+}
+
+.topBar {
+  @include mobile {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: $spacing-sm;
+
+    button {
+      white-space: nowrap;
+    }
+  }
+}
+
+.intro {
+  display: flex;
+  align-items: flex-start;
+  gap: $spacing-md;
+  padding: $spacing-xs 0;
+}
+
+.introIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+
+.introTitle {
+  margin: 0 0 6px;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.5px;
+  line-height: 1.3;
+  color: var(--text-primary);
+}
+
+.description {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.settingsCard {
+  min-width: 0;
+  padding: 0;
+  overflow: visible;
+  box-shadow: none;
+}
+
+.providerSection,
+.editorBody {
+  padding: $spacing-lg;
+
+  @include mobile {
+    padding: $spacing-md;
+  }
+}
+
+.providerSection {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+}
+
+.providerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-lg;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+    gap: $spacing-md;
+  }
+}
+
+.sectionHeading {
+  display: flex;
+  align-items: flex-start;
+  gap: $spacing-sm;
+  min-width: 0;
+}
+
+.stepNumber {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-sm;
+  color: var(--text-tertiary);
+  font-family: $font-mono;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.headingCopy {
+  min-width: 0;
+}
+
+.sectionTitle {
+  display: block;
+  margin: 2px 0 4px;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+.providerControl {
+  flex: 0 0 280px;
+  min-width: 0;
+  margin-bottom: 0;
+
+  @include mobile {
+    flex-basis: auto;
+  }
+}
+
+.providerOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-sm;
+}
+
+.providerOption {
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-sm;
+  min-height: 38px;
+  max-width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    color 160ms ease;
+
+  img {
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+  }
+
+  img,
+  svg {
+    flex-shrink: 0;
+  }
+
+  span {
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 3px;
+  }
+
+  &:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover:not(:disabled) {
+      border-color: var(--primary-color);
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+  }
+}
+
+.providerCheck {
+  visibility: hidden;
+}
+
+.providerOptionActive {
+  border-color: var(--primary-color);
+  background: var(--primary-10);
+  color: var(--text-primary);
+
+  .providerCheck {
+    visibility: visible;
+  }
+}
+
+.editorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: $spacing-md;
+  padding: $spacing-lg;
+  border-bottom: 1px solid var(--border-color);
+
+  @include mobile {
+    padding: $spacing-md;
+  }
+}
+
+.countBadge {
+  flex-shrink: 0;
+  padding: 4px 9px;
+  border-radius: $radius-full;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.emptyModels {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: $spacing-sm;
+  margin: 0;
+  padding: $spacing-2xl $spacing-md;
+  border: 1px dashed var(--border-color);
+  border-radius: $radius-md;
+  color: var(--text-tertiary);
+  text-align: center;
+  font-size: 13px;
+}
+
+.catalogHint {
+  display: flex;
+  align-items: flex-start;
+  gap: $spacing-sm;
+  padding: $spacing-md $spacing-lg;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+
+  svg {
+    margin-top: 3px;
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+  }
+
+  @include mobile {
+    padding: $spacing-md;
+  }
+}
+
+.mappingsBody {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  padding: $spacing-md;
+}
+
+.mappingRow {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: $spacing-md;
+  padding: $spacing-md;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+
+  @include mobile {
+    grid-template-columns: 20px minmax(0, 1fr);
+    gap: $spacing-sm;
+  }
+}
+
+.mappingNumber {
+  color: var(--text-tertiary);
+  font-family: $font-mono;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mappingFields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
+  align-items: end;
+  gap: $spacing-sm;
+  min-width: 0;
+
+  @media (max-width: 540px) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.modelField {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+  margin-bottom: 0;
+
+  label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+  }
+}
+
+.modelInput {
+  width: 100%;
+  min-width: 0;
+  font-family: $font-mono;
+  font-size: 13px;
+}
+
+.mappingSeparator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 38px;
+  color: var(--text-tertiary);
+
+  @media (max-width: 540px) {
+    display: none;
+  }
+}
+
+.mappingFooter {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  align-self: end;
+  min-height: 38px;
+
+  @include mobile {
+    grid-column: 2;
+    justify-content: space-between;
+    padding-top: $spacing-xs;
+    border-top: 1px solid var(--border-color);
+  }
+}
+
+.removeMapping {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: var(--text-tertiary);
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover:not(:disabled) {
+      color: var(--error-color);
+      background: var(--bg-error-light);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .providerOption {
+    transition: none;
+  }
+}

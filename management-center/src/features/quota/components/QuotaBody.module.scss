@@ -1,0 +1,796 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 额度卡片 body 的全页外衣（类型化契约见 features/quota/types.ts）。
+ *
+ * 两段构成：
+ * 1. 额度行 / 水位条 / Antigravity 分组 —— mono 遥测风，与紧凑外衣同族；
+ * 2. 套餐徽章区（.codexPlan* 起至文件末尾）—— 从 pages/QuotaPage.module.scss
+ *    第 429–1023 行逐字节搬迁的定稿资产（金卡 + Pro 20x 液态铂金，含暗色 /
+ *    HDR / 减动效冻结帧 / 移动端降级）。**该区块禁止改动**：改配方等于重设计
+ *    已验收的徽章，验证方式是与 git 历史做 diff（应为空）。
+ * ============================================================ */
+
+/* ---------- 额度行 ---------- */
+
+.quotaRow {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.quotaRowHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.quotaModel {
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  @include text-ellipsis;
+}
+
+/* 遥测：mono + 等宽数字，刷新时数字不跳位 */
+.quotaMeta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-shrink: 0;
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+/* 百分比穿墨色而非填充色 —— 文字不承担状态编码，颜色留给水位条 */
+.quotaPercent {
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.quotaReset {
+  color: var(--text-quaternary);
+}
+
+/* Countdown beside the absolute reset time. The separator is a pseudo-element
+   so the two spans stay independently styleable (the relative half turns
+   warning-coloured when this is the row that recovers first). */
+.quotaResetRelative {
+  color: var(--text-tertiary);
+
+  &::before {
+    content: '·';
+    margin: 0 4px;
+    color: var(--text-quaternary);
+  }
+}
+
+.quotaResetRelativeSoon {
+  color: var(--warning-text);
+  font-weight: 600;
+}
+
+.quotaAmount {
+  font-family: $font-mono;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.quotaMessage {
+  font-family: $font-mono;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  text-align: center;
+  padding: 6px 4px;
+}
+
+/* ---------- 水位条（QuotaMeter）----------
+ * 轨道退居背景（8% 墨色），填充按剩余量三档着色；
+ * percent === null 时宽度为 0 —— 未知不着色。 */
+
+.quotaBar {
+  height: 6px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  overflow: hidden;
+}
+
+.quotaBarFill {
+  height: 100%;
+  border-radius: $radius-full;
+  /* 刷新时平滑重定向到新水位（可中断） */
+  transition: width 360ms var(--ease-out-strong, ease);
+  /* 数据到达是本页的高潮时刻：水位逐行铺开（每行 40ms 级差）。
+   * 走 scaleX 而非 width，避免与上面的 width 过渡互相抢夺同一属性。 */
+  transform-origin: left center;
+  animation: quota-meter-fill 480ms var(--ease-out-strong, ease-out) both;
+  animation-delay: calc(var(--meter-index, 0) * 40ms);
+}
+
+@keyframes quota-meter-fill {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+.quotaBarFillHigh {
+  background: var(--viz-success);
+}
+
+.quotaBarFillMedium {
+  background: var(--quota-medium-color);
+}
+
+.quotaBarFillLow {
+  background: var(--viz-failure);
+}
+
+/* ---------- Antigravity 分组 ---------- */
+
+.antigravityQuotaGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+
+  & + & {
+    margin-top: 3px;
+    padding-top: 9px;
+    border-top: 1px dashed color-mix(in srgb, var(--border-color) 80%, transparent);
+  }
+}
+
+.antigravityQuotaGroupHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.antigravityQuotaGroupTitle {
+  font-family: $font-mono;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.antigravityQuotaGroupDescription {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-quaternary);
+}
+
+@include mobile {
+  .quotaRowHeader {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .quotaModel {
+    width: 100%;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quotaBarFill {
+    transition: none;
+    animation: none;
+  }
+}
+
+/* ============================================================
+ * 以下至文件末尾：套餐徽章定稿区块（逐字节搬迁，禁止改动）
+ * ============================================================ */
+
+.codexPlan {
+  display: flex;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.codexPlanItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.codexPlanLabel {
+  color: var(--text-tertiary);
+  flex: 0 0 auto;
+}
+
+.codexPlanValue {
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: capitalize;
+  min-width: 0;
+}
+
+.codexResetCredits {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.codexResetCreditsTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+
+.codexResetCreditRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  border-radius: $radius-sm;
+  background-color: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
+  font-size: 12px;
+  line-height: 1.35;
+  min-width: 0;
+}
+
+.codexResetCreditRowSoon {
+  border-color: var(--warning-border);
+  background-color: var(--warning-bg);
+}
+
+.codexResetCreditLabel {
+  color: var(--text-tertiary);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.codexResetCreditTime {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.codexResetCreditsError {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--warning-text);
+  background-color: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: $radius-sm;
+  padding: $spacing-xs $spacing-sm;
+}
+
+.codexPlanSeparator {
+  width: 1px;
+  height: 12px;
+  background-color: var(--border-color);
+}
+
+.premiumPlanValue {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  overflow: visible;
+  isolation: isolate;
+  background:
+    radial-gradient(
+      circle at 18% 24%,
+      rgba(255, 255, 255, 0.96) 0%,
+      rgba(255, 255, 255, 0.72) 18%,
+      rgba(255, 255, 255, 0) 42%
+    ),
+    linear-gradient(135deg, #fff9e3 0%, #ffe07f 52%, #e0aa14 100%);
+  border: 1px solid rgba(217, 165, 22, 0.72);
+  box-shadow:
+    0 1px 3px rgba(133, 92, 0, 0.16),
+    0 0 0 1px rgba(255, 255, 255, 0.22) inset,
+    0 0 16px rgba(255, 214, 98, 0.28);
+  color: #6b4b00;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+  text-transform: capitalize;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -6px -9px;
+    border-radius: inherit;
+    background: radial-gradient(
+      circle at 18% 22%,
+      rgba(255, 255, 255, 0.9) 0%,
+      rgba(255, 237, 158, 0.58) 32%,
+      rgba(255, 215, 91, 0) 72%
+    );
+    --glass-blur: 9px;
+    filter: var(--glass-filter);
+    opacity: 0.75;
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  @media (dynamic-range: high) {
+    background:
+      radial-gradient(
+        circle at 18% 24%,
+        color(display-p3 1 0.99 0.94) 0%,
+        color(display-p3 1 0.97 0.82 / 0.82) 18%,
+        color(display-p3 1 0.95 0.7 / 0) 42%
+      ),
+      linear-gradient(
+        135deg,
+        color(display-p3 1 0.98 0.88),
+        color(display-p3 0.99 0.86 0.34),
+        color(display-p3 0.92 0.68 0.05)
+      );
+    border-color: color(display-p3 0.9 0.73 0.12 / 0.85);
+    box-shadow:
+      0 1px 4px color(display-p3 0.45 0.28 0 / 0.22),
+      0 0 0 1px color(display-p3 1 0.98 0.86 / 0.3) inset,
+      0 0 18px color(display-p3 1 0.89 0.2 / 0.36);
+    color: color(display-p3 0.43 0.3 0);
+  }
+
+  @supports (color: #{'color(rec2100-linear 1 1 1)'}) {
+    @media (dynamic-range: high) {
+      dynamic-range-limit: no-limit;
+      box-shadow:
+        0 1px 4px color(display-p3 0.45 0.28 0 / 0.22),
+        0 0 0 1px color(display-p3 1 0.98 0.86 / 0.3) inset,
+        0 0 14px color(display-p3 1 0.89 0.2 / 0.36),
+        0 0 30px #{'color(rec2100-linear 3.6 2.9 0.7 / 0.48)'};
+
+      &::before {
+        background: radial-gradient(
+          circle at 18% 22%,
+          #{'color(rec2100-linear 6.5 6.2 5.4 / 0.92)'} 0%,
+          #{'color(rec2100-linear 2.4 2 0.6 / 0.62)'} 34%,
+          #{'color(rec2100-linear 1 0.85 0.12 / 0)'} 76%
+        );
+        opacity: 0.92;
+      }
+    }
+  }
+}
+
+:global([data-theme='dark']) .premiumPlanValue {
+  background:
+    radial-gradient(
+      circle at 18% 24%,
+      rgba(255, 229, 138, 0.32) 0%,
+      rgba(255, 214, 98, 0.18) 18%,
+      rgba(255, 214, 98, 0) 44%
+    ),
+    linear-gradient(135deg, #4f3d0b 0%, #6e5510 48%, #8f6d10 100%);
+  border-color: rgba(226, 180, 50, 0.7);
+  box-shadow:
+    0 1px 6px rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(255, 220, 120, 0.16) inset,
+    0 0 18px rgba(255, 196, 44, 0.22);
+  color: #fff0a8;
+  text-shadow: 0 0 10px rgba(255, 212, 79, 0.22);
+
+  &::before {
+    background: radial-gradient(
+      circle at 18% 24%,
+      rgba(255, 229, 138, 0.42) 0%,
+      rgba(255, 197, 66, 0.28) 34%,
+      rgba(255, 187, 0, 0) 74%
+    );
+    opacity: 0.8;
+  }
+
+  @media (dynamic-range: high) {
+    background:
+      radial-gradient(
+        circle at 18% 24%,
+        color(display-p3 1 0.89 0.38 / 0.38) 0%,
+        color(display-p3 1 0.82 0.2 / 0.2) 18%,
+        color(display-p3 1 0.82 0.2 / 0) 44%
+      ),
+      linear-gradient(
+        135deg,
+        color(display-p3 0.33 0.25 0.04),
+        color(display-p3 0.48 0.36 0.08),
+        color(display-p3 0.62 0.46 0.09)
+      );
+    border-color: color(display-p3 0.78 0.6 0.16 / 0.78);
+    box-shadow:
+      0 1px 8px color(display-p3 0 0 0 / 0.32),
+      0 0 0 1px color(display-p3 0.95 0.8 0.24 / 0.18) inset,
+      0 0 20px color(display-p3 1 0.76 0.1 / 0.28);
+    color: color(display-p3 1 0.93 0.58);
+  }
+
+  @supports (color: #{'color(rec2100-linear 1 1 1)'}) {
+    @media (dynamic-range: high) {
+      dynamic-range-limit: no-limit;
+      box-shadow:
+        0 1px 8px color(display-p3 0 0 0 / 0.32),
+        0 0 0 1px color(display-p3 0.95 0.8 0.24 / 0.18) inset,
+        0 0 16px color(display-p3 1 0.76 0.1 / 0.28),
+        0 0 28px #{'color(rec2100-linear 4.8 3.5 0.45 / 0.4)'};
+
+      &::before {
+        background: radial-gradient(
+          circle at 18% 24%,
+          #{'color(rec2100-linear 5.6 4.1 0.75 / 0.64)'} 0%,
+          #{'color(rec2100-linear 2.2 1.5 0.2 / 0.34)'} 34%,
+          #{'color(rec2100-linear 1.2 0.9 0.06 / 0)'} 74%
+        );
+        opacity: 0.95;
+      }
+    }
+  }
+}
+
+/* Codex Pro 20x —— 液态铂金（B2：精修液态铬 + 呼吸光晕，2026-07-31 定稿）。
+ * 与金卡（premiumPlanValue）的档差来自「材质行为」而非颜色：金是静止的贵金属，
+ * 20x 是一枚会流动的镜面铬 —— 三层异速反光带永续对流（12s）+ 光晕呼吸（7s）
+ * + 每 7.5s 一道巡回扫光。全程零彩色，唯一的色彩暗示是第三层几乎无色的冰蓝微光。
+ *
+ * 试过并被推翻的方向（勿回退）：MC 青绿换色（太保守）、切面宝石区（20px 糊成噪点）、
+ * 黑曜/紫晶/全息黑钻（弃暗体）、棱镜彩虹环、极光/油膜/星云晶体（太花）。
+ * 口味锚点：单色金属 + 慢动态。文字两主题同为深灰蓝 —— 铬体恒亮，
+ * 主题只微调石体明度与光晕强度。 */
+.elitePlanValue {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  padding: 2px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  overflow: visible;
+  isolation: isolate;
+  border: 1px solid transparent;
+  background:
+    radial-gradient(
+        circle at 20% 20%,
+        rgba(255, 255, 255, 0.9) 0%,
+        rgba(255, 255, 255, 0.3) 22%,
+        rgba(255, 255, 255, 0) 46%
+      )
+      padding-box,
+    linear-gradient(
+        100deg,
+        transparent 40%,
+        rgba(255, 255, 255, 0.38) 46%,
+        rgba(255, 255, 255, 0.96) 50%,
+        rgba(255, 255, 255, 0.38) 54%,
+        transparent 60%
+      )
+      padding-box,
+    linear-gradient(78deg, transparent 28%, rgba(80, 96, 118, 0.42) 50%, transparent 72%)
+      padding-box,
+    linear-gradient(92deg, transparent 44%, rgba(196, 226, 252, 0.32) 50%, transparent 56%)
+      padding-box,
+    linear-gradient(
+        to bottom,
+        #ffffff 0%,
+        #e3eaf1 26%,
+        #a5b2c2 45%,
+        #78879a 54%,
+        #c3cdd8 78%,
+        #f2f6fa 100%
+      )
+      padding-box,
+    linear-gradient(135deg, #ffffff 0%, rgba(140, 158, 178, 0.6) 42%, rgba(56, 66, 80, 0.95) 100%)
+      border-box;
+  background-repeat: no-repeat;
+  background-size:
+    auto,
+    200% 100%,
+    260% 100%,
+    300% 100%,
+    auto,
+    auto;
+  background-position:
+    0 0,
+    -50% 0,
+    170% 0,
+    -80% 0,
+    0 0,
+    0 0;
+  animation: eliteLiquid 12s ease-in-out infinite alternate;
+  box-shadow:
+    0 1px 3px rgba(30, 42, 58, 0.28),
+    inset 0 1px 1px rgba(255, 255, 255, 0.92),
+    inset 0 -1.5px 2px rgba(60, 74, 92, 0.4),
+    0 0 14px rgba(130, 160, 200, 0.36);
+  color: #1f2a38;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.65);
+  text-transform: capitalize;
+
+  /* 呼吸光晕：与金卡同一套 blur 光晕构造，外加 7s 极缓呼吸 */
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -6px -9px;
+    border-radius: inherit;
+    background: radial-gradient(
+      circle at 24% 30%,
+      rgba(255, 255, 255, 0.95) 0%,
+      rgba(196, 220, 244, 0.5) 38%,
+      rgba(178, 205, 238, 0) 74%
+    );
+    --glass-blur: 9px;
+    filter: var(--glass-filter);
+    opacity: 0.75;
+    animation: eliteBreathe 7s ease-in-out infinite alternate;
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  /* 巡回扫光：一道冷白亮带扫过镜面，只占 7.5s 周期的前 13%，其余时间静止 */
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 1px;
+    border-radius: inherit;
+    background-image: linear-gradient(
+      105deg,
+      transparent 38%,
+      rgba(255, 255, 255, 0.08) 44%,
+      rgba(255, 255, 255, 0.75) 50%,
+      rgba(255, 255, 255, 0.08) 56%,
+      transparent 62%
+    );
+    background-repeat: no-repeat;
+    background-size: 260% 100%;
+    background-position: 240% 0;
+    animation: eliteSheen 7.5s cubic-bezier(0.4, 0, 0.2, 1) 1.2s infinite;
+    pointer-events: none;
+  }
+
+  /* 中性铬没有彩度可扩，P3 分支无收益（金卡需要它是因为暖金有色域外的彩度）。
+   * HDR 增益全部走 rec2100 超白：扫光与外发光在 HDR 屏上亮过 SDR 白。 */
+  @supports (color: #{'color(rec2100-linear 1 1 1)'}) {
+    @media (dynamic-range: high) {
+      dynamic-range-limit: no-limit;
+      box-shadow:
+        0 1px 3px rgba(30, 42, 58, 0.28),
+        inset 0 1px 1px rgba(255, 255, 255, 0.92),
+        inset 0 -1.5px 2px rgba(60, 74, 92, 0.4),
+        0 0 22px #{'color(rec2100-linear 1.5 1.8 2.3 / 0.42)'};
+
+      &::after {
+        background-image: linear-gradient(
+          105deg,
+          transparent 38%,
+          #{'color(rec2100-linear 1.2 1.3 1.5 / 0.1)'} 44%,
+          #{'color(rec2100-linear 2.6 2.8 3.2 / 0.8)'} 50%,
+          #{'color(rec2100-linear 1.2 1.3 1.5 / 0.1)'} 56%,
+          transparent 62%
+        );
+      }
+    }
+  }
+}
+
+@keyframes eliteLiquid {
+  from {
+    background-position:
+      0 0,
+      -50% 0,
+      170% 0,
+      -80% 0,
+      0 0,
+      0 0;
+  }
+  to {
+    background-position:
+      0 0,
+      150% 0,
+      -70% 0,
+      190% 0,
+      0 0,
+      0 0;
+  }
+}
+
+@keyframes eliteSheen {
+  0% {
+    background-position: 240% 0;
+  }
+  13% {
+    background-position: -140% 0;
+  }
+  100% {
+    background-position: -140% 0;
+  }
+}
+
+@keyframes eliteBreathe {
+  from {
+    opacity: 0.55;
+  }
+  to {
+    opacity: 0.9;
+  }
+}
+
+/* 暗色：铬体不换血统只提亮 —— 暗卡上它自己就是光源；文字保持深灰蓝。 */
+:global([data-theme='dark']) .elitePlanValue {
+  background:
+    radial-gradient(
+        circle at 20% 20%,
+        rgba(255, 255, 255, 0.9) 0%,
+        rgba(255, 255, 255, 0.3) 22%,
+        rgba(255, 255, 255, 0) 46%
+      )
+      padding-box,
+    linear-gradient(
+        100deg,
+        transparent 40%,
+        rgba(255, 255, 255, 0.4) 46%,
+        #ffffff 50%,
+        rgba(255, 255, 255, 0.4) 54%,
+        transparent 60%
+      )
+      padding-box,
+    linear-gradient(78deg, transparent 28%, rgba(80, 96, 118, 0.46) 50%, transparent 72%)
+      padding-box,
+    linear-gradient(92deg, transparent 44%, rgba(196, 226, 252, 0.34) 50%, transparent 56%)
+      padding-box,
+    linear-gradient(
+        to bottom,
+        #ffffff 0%,
+        #eef2f6 30%,
+        #c2ccd7 47%,
+        #8b98a8 54%,
+        #d6dee6 80%,
+        #f7fafc 100%
+      )
+      padding-box,
+    linear-gradient(
+        135deg,
+        rgba(255, 255, 255, 0.98) 0%,
+        rgba(155, 175, 195, 0.55) 45%,
+        rgba(90, 104, 120, 0.9) 100%
+      )
+      border-box;
+  background-repeat: no-repeat;
+  background-size:
+    auto,
+    200% 100%,
+    260% 100%,
+    300% 100%,
+    auto,
+    auto;
+  background-position:
+    0 0,
+    -50% 0,
+    170% 0,
+    -80% 0,
+    0 0,
+    0 0;
+  box-shadow:
+    0 1px 5px rgba(0, 0, 0, 0.4),
+    inset 0 1px 1px rgba(255, 255, 255, 0.92),
+    inset 0 -1.5px 2px rgba(74, 90, 110, 0.4),
+    0 0 18px rgba(190, 218, 250, 0.36);
+
+  @supports (color: #{'color(rec2100-linear 1 1 1)'}) {
+    @media (dynamic-range: high) {
+      dynamic-range-limit: no-limit;
+      box-shadow:
+        0 1px 5px rgba(0, 0, 0, 0.4),
+        inset 0 1px 1px rgba(255, 255, 255, 0.92),
+        inset 0 -1.5px 2px rgba(74, 90, 110, 0.4),
+        0 0 26px #{'color(rec2100-linear 1.7 2.1 2.6 / 0.44)'};
+    }
+  }
+}
+
+/* 减动效：三条动画全停，亮带冻结在压字前的一帧 —— 静态也是完成品。 */
+@media (prefers-reduced-motion: reduce) {
+  .elitePlanValue,
+  :global([data-theme='dark']) .elitePlanValue {
+    animation: none;
+    background-position:
+      0 0,
+      42% 0,
+      60% 0,
+      30% 0,
+      0 0,
+      0 0;
+
+    &::before {
+      animation: none;
+      opacity: 0.75;
+    }
+
+    &::after {
+      content: none;
+    }
+  }
+}
+
+@include mobile {
+  .premiumPlanValue {
+    overflow: hidden;
+    background:
+      radial-gradient(
+        circle at 18% 24%,
+        rgba(255, 255, 255, 0.88) 0%,
+        rgba(255, 255, 255, 0.58) 18%,
+        rgba(255, 255, 255, 0) 42%
+      ),
+      linear-gradient(135deg, #fff9e3 0%, #ffe07f 52%, #e0aa14 100%);
+    box-shadow:
+      0 1px 3px rgba(133, 92, 0, 0.16),
+      0 0 0 1px rgba(255, 255, 255, 0.22) inset,
+      0 0 10px rgba(255, 214, 98, 0.22);
+
+    &::before {
+      content: none;
+    }
+  }
+
+  :global([data-theme='dark']) .premiumPlanValue {
+    background:
+      radial-gradient(
+        circle at 18% 24%,
+        rgba(255, 229, 138, 0.28) 0%,
+        rgba(255, 214, 98, 0.14) 18%,
+        rgba(255, 214, 98, 0) 44%
+      ),
+      linear-gradient(135deg, #4f3d0b 0%, #6e5510 48%, #8f6d10 100%);
+    box-shadow:
+      0 1px 6px rgba(0, 0, 0, 0.28),
+      0 0 0 1px rgba(255, 220, 120, 0.16) inset,
+      0 0 10px rgba(255, 196, 44, 0.18);
+  }
+
+  // 铂金徽章移动端：与金卡同一刀 —— 砍模糊光晕层（呼吸随之消失）、收一档外发光。
+  // 液态对流与扫光只是 background-position 重绘，~70×20px 成本可忽略，保留。
+  .elitePlanValue {
+    overflow: hidden;
+    box-shadow:
+      0 1px 3px rgba(30, 42, 58, 0.28),
+      inset 0 1px 1px rgba(255, 255, 255, 0.92),
+      inset 0 -1.5px 2px rgba(60, 74, 92, 0.4),
+      0 0 9px rgba(130, 160, 200, 0.3);
+
+    &::before {
+      content: none;
+    }
+  }
+
+  :global([data-theme='dark']) .elitePlanValue {
+    box-shadow:
+      0 1px 5px rgba(0, 0, 0, 0.4),
+      inset 0 1px 1px rgba(255, 255, 255, 0.92),
+      inset 0 -1.5px 2px rgba(74, 90, 110, 0.4),
+      0 0 10px rgba(190, 218, 250, 0.3);
+  }
+}

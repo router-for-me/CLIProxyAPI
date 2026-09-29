@@ -1,0 +1,130 @@
+@use '../../../styles/mixins' as *;
+
+/* 分区 tabs：安静的下划线式（种子自提供商 tabs），加错误徽章与脏点两个状态通道 */
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  min-width: 0;
+  flex: 1;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  padding: 8px 12px 11px;
+  border-radius: 8px 8px 0 0;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &::after {
+    content: '';
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    bottom: -1px;
+    height: 2px;
+    border-radius: $radius-full;
+    background: transparent;
+    transition: background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  &:active:not(:disabled) {
+    transform: translateY(0.5px);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tab:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+  }
+}
+
+.tabActive {
+  color: var(--text-primary);
+  font-weight: 650;
+
+  &::after {
+    background: var(--text-primary);
+  }
+
+  /* 整体禁用（保存中）时激活 tab 仍保持完整对比度 */
+  &:disabled {
+    opacity: 1;
+  }
+}
+
+.tabGlyph {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+
+  .tabActive & {
+    color: var(--text-primary);
+  }
+}
+
+.tabLabel {
+  line-height: 1.4;
+}
+
+/* 校验错误徽章：mono 数字，失败色（数据墨水走 --viz-*） */
+.tabBadge {
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  color: var(--viz-failure);
+  padding: 0 6px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--viz-failure) 12%, transparent);
+}
+
+/* 待保存脏点：6px 琥珀 */
+.tabDirtyDot {
+  width: 6px;
+  height: 6px;
+  border-radius: $radius-full;
+  background: var(--amber-color);
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab,
+  .tab::after {
+    transition: none;
+  }
+
+  .tab:active:not(:disabled) {
+    transform: none;
+  }
+}

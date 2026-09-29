@@ -1,0 +1,52 @@
+{
+  "name": "cli-proxy-webui-react",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "bun test",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives",
+    "verify": "bun run test && bun run lint && bun run build",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css,scss}\"",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@codemirror/lang-yaml": "^6.1.3",
+    "@codemirror/merge": "^6.12.2",
+    "@uiw/react-codemirror": "^4.25.11",
+    "axios": "1.18.1",
+    "i18next": "^26.3.6",
+    "motion": "^12.42.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-i18next": "^17.0.9",
+    "react-router-dom": "^7.18.1",
+    "yaml": "^2.9.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
+    "@vitejs/plugin-react": "^6.0.3",
+    "eslint": "10.6.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.4.26",
+    "globals": "^16.5.0",
+    "prettier": "^3.9.5",
+    "sass": "^1.101.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.63.0",
+    "vite": "^8.1.4",
+    "vite-plugin-singlefile": "^2.3.3"
+  },
+  "overrides": {
+    "form-data": "4.0.6"
+  }
+}

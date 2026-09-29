@@ -1,0 +1,12 @@
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 32px;
+  overflow: visible;
+}
+
+.empty {
+  width: 100%;
+  height: 32px;
+  border-bottom: 1px solid var(--border-color);
+}

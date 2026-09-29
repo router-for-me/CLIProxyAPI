@@ -1,0 +1,43 @@
+@use '../../styles/mixins' as *;
+
+/* 配置面板页壳：纯布局，视觉细节都在各组件的 colocated 模块里。 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  min-width: 0;
+  /* 悬浮保存栏出现时由 --config-action-bar-height 撑出底部留白 */
+  padding-bottom: calc(
+    var(--config-action-bar-height, 0px) + 16px + env(safe-area-inset-bottom, 0px)
+  );
+}
+
+/* 工具栏行：模式相关搜索（字段搜索 / 源码搜索）+ 右端的模式切换 */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.tabsRow {
+  display: flex;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+@include mobile {
+  .page {
+    gap: 16px;
+  }
+}

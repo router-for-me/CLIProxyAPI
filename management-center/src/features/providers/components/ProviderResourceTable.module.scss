@@ -1,0 +1,254 @@
+@use '../../../styles/mixins' as *;
+@use '../../../styles/variables' as *;
+
+.providerTable {
+  min-width: 960px;
+  table-layout: fixed;
+
+  tbody tr:hover .actionsCell {
+    background: color-mix(in srgb, var(--accent-bg) 50%, transparent);
+  }
+}
+
+.primaryCell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.primaryName {
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.primarySub {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-family: $font-mono;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.baseUrl {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  font-family: $font-mono;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background: var(--muted-bg);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.metricsCell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background: var(--muted-bg);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.metricLabel {
+  color: var(--muted-foreground);
+}
+
+.metricValue {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.flagTag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--primary-30);
+  background: var(--primary-10);
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: var(--radius-md);
+  border: 1px solid;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.statusCell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 190px;
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.statPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.statSuccess {
+  background-color: var(--success-badge-bg);
+  color: var(--success-badge-text);
+  border-color: var(--success-badge-border);
+}
+
+.statFailure {
+  background-color: var(--failure-badge-bg);
+  color: var(--failure-badge-text);
+  border-color: var(--failure-badge-border);
+}
+
+.statusActive {
+  border-color: var(--success-badge-border);
+  background: var(--success-badge-bg);
+  color: var(--success-badge-text);
+}
+
+.statusDisabled {
+  border-color: var(--amber-30);
+  background: var(--amber-10);
+  color: var(--amber-text);
+}
+
+.statusBarWrap {
+  width: min(100%, 178px);
+  min-width: 0;
+}
+
+.actionsHead,
+.actionsCell {
+  position: sticky;
+  right: 0;
+  width: 176px;
+  min-width: 176px;
+  box-shadow: -12px 0 16px -18px rgba(15, 23, 42, 0.45);
+}
+
+.actionsHead {
+  z-index: 3;
+  background: var(--muted-bg);
+}
+
+.actionsCell {
+  z-index: 2;
+  background: var(--bg-primary);
+}
+
+.actionsCellSelected {
+  background: var(--primary-8);
+}
+
+.actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.toggleWrap {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 4px;
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -1px;
+  }
+}
+
+.iconBtnDanger {
+  color: var(--destructive-color);
+
+  &:hover:not(:disabled) {
+    background: var(--destructive-10);
+    color: var(--destructive-color);
+  }
+}

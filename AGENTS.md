@@ -39,6 +39,7 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `internal/home/` — CLIProxyAPIHome control plane integration (bootstrap, RESP communication, dispatch coordination)
 - `internal/tui/` — Bubbletea terminal UI (`--tui`, `--standalone`)
 - `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
+- `management-center/` — In-repo management panel source (React + Vite, single-file build). Follow its own `AGENTS.md`; needs Bun. Run `./management-center/build.sh` to build and stage `dist/index.html` into `static/management.html`, which the server serves in preference to the GitHub-downloaded asset
 - `test/` — Cross-module integration tests
 
 ## Code Conventions

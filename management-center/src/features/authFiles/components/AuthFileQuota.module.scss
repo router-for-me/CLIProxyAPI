@@ -1,0 +1,350 @@
+@use '../../../styles/mixins' as *;
+
+$quota-font-size: 11.5px;
+
+/* ============================================================
+ * 认证文件卡片的配额区外衣。
+ *
+ * 契约：quotaConfigs.renderQuotaItems 通过 helpers.styles 按名查找
+ * 以下类（antigravity/claude/codex/kimi/xai 五条渲染路径共 24 个），
+ * 另加本组件宿主类与 QuotaProgressBar 的 5 个注入类。
+ * 漏名会静默渲染 class="undefined" —— 增删前先对照 quotaConfigs.ts。
+ * ============================================================ */
+
+/* ---------- 宿主 ---------- */
+
+.quotaSection {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px 11px;
+  font-size: $quota-font-size;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 55%, transparent);
+}
+
+.quotaMessage {
+  font-family: $font-mono;
+  font-size: $quota-font-size;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  text-align: center;
+  padding: 5px 4px;
+}
+
+button.quotaMessageAction {
+  cursor: pointer;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  transition: color $transition-fast;
+
+  &:hover:not(:disabled) {
+    color: var(--primary-hover);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    color: var(--text-quaternary);
+  }
+}
+
+.quotaError {
+  font-size: $quota-font-size;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--danger-color);
+  overflow-wrap: anywhere;
+}
+
+.quotaCardActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.quotaResetCreditButton {
+  font-size: $quota-font-size;
+  font-weight: 600;
+  white-space: nowrap;
+
+  // Button wraps its icon and label in the final content span.
+  > span:last-child {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+}
+
+/* ---------- 配额行（全 provider 通用） ---------- */
+
+.quotaRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quotaRowHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.quotaModel {
+  min-width: 0;
+  font-size: $quota-font-size;
+  font-weight: 600;
+  color: var(--text-secondary);
+  @include text-ellipsis;
+}
+
+.quotaMeta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-shrink: 0;
+  font-family: $font-mono;
+  font-size: $quota-font-size;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.quotaPercent {
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.quotaReset {
+  color: var(--text-quaternary);
+}
+
+/* Compact host: same contract class as QuotaBody.module.scss, tighter gutter. */
+.quotaResetRelative {
+  color: var(--text-tertiary);
+
+  &::before {
+    content: '·';
+    margin: 0 3px;
+    color: var(--text-quaternary);
+  }
+}
+
+.quotaResetRelativeSoon {
+  color: var(--warning-text);
+  font-weight: 600;
+}
+
+.quotaAmount {
+  font-family: $font-mono;
+  font-size: $quota-font-size;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+/* ---------- 进度条（QuotaProgressBar 注入，Meter 风 6px 轨道） ---------- */
+
+.quotaBar {
+  height: 6px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  overflow: hidden;
+}
+
+.quotaBarFill {
+  height: 100%;
+  border-radius: $radius-full;
+  transition: width 360ms var(--ease-out-strong, ease);
+}
+
+.quotaBarFillHigh {
+  background: var(--viz-success);
+}
+
+.quotaBarFillMedium {
+  background: var(--quota-medium-color);
+}
+
+.quotaBarFillLow {
+  background: var(--viz-failure);
+}
+
+/* ---------- 计划徽章（codexPlan*：antigravity/claude/xai 复用） ---------- */
+
+.codexPlan {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.codexPlanItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
+}
+
+.codexPlanLabel {
+  font-size: $quota-font-size;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+.codexPlanValue {
+  font-family: $font-mono;
+  font-size: $quota-font-size;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.premiumPlanValue {
+  font-family: $font-mono;
+  font-size: $quota-font-size;
+  font-weight: 650;
+  color: var(--amber-text);
+}
+
+/* Codex Pro 20x 铂金（紧凑版）：与 5x 金色值完全同构，只换色相为铂金钢蓝灰。
+ *
+ * 这一行里 5x 就是一枚变了色的 mono 文本（premiumPlanValue = amber 文字），
+ * 所以 20x 也只是一枚变了色的 mono 文本。之前这里镶了整块切面宝石：
+ * 15px 宽的切面在 11px 行里糊成噪点，还得吃掉 18px 左内边距把文字挤偏，
+ * 而兄弟 chip 全是朴素文字 —— 一枚发光石头在其中只是吵，不是贵。
+ *
+ * 色值与配额页同族（液态铂金，2026-07-31 起替代 MC 钻石青）：
+ * 浅色 #526379 对白底 6.1:1；深色提亮成银蓝。钢灰在 mono 文本里偏安静，
+ * 但这正是该档的性格 —— 铂金的贵是冷的，吵的留给 amber。 */
+.elitePlanValue {
+  font-family: $font-mono;
+  font-size: $quota-font-size;
+  font-weight: 650;
+  color: #526379;
+}
+
+:global([data-theme='dark']) .elitePlanValue {
+  color: #c3d3e4;
+}
+
+/* ---------- Antigravity 分组 ---------- */
+
+.antigravityQuotaGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  & + & {
+    margin-top: 3px;
+    padding-top: 8px;
+    border-top: 1px dashed color-mix(in srgb, var(--border-color) 80%, transparent);
+  }
+}
+
+.antigravityQuotaGroupHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.antigravityQuotaGroupTitle {
+  font-family: $font-mono;
+  font-size: $quota-font-size;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.antigravityQuotaGroupDescription {
+  font-size: $quota-font-size;
+  font-weight: 400;
+  color: var(--text-quaternary);
+}
+
+/* ---------- Codex 重置积分 ---------- */
+
+.codexResetCredits {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 9px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+}
+
+.codexResetCreditsTitle {
+  font-family: $font-mono;
+  font-size: $quota-font-size;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.codexResetCreditRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: $quota-font-size;
+  font-weight: 400;
+}
+
+/* The compact host's credit rows have no border of their own, so the emphasis
+   is carried by a left rule and a tint rather than a border-colour swap. */
+.codexResetCreditRowSoon {
+  padding: 2px 6px;
+  margin: 0 -6px;
+  border-left: 2px solid var(--warning-border);
+  border-radius: $radius-sm;
+  background-color: var(--warning-bg);
+}
+
+.codexResetCreditLabel {
+  min-width: 0;
+  color: var(--text-secondary);
+  @include text-ellipsis;
+}
+
+.codexResetCreditTime {
+  flex-shrink: 0;
+  font-family: $font-mono;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.codexResetCreditsError {
+  font-size: $quota-font-size;
+  font-weight: 500;
+  color: var(--danger-color);
+  overflow-wrap: anywhere;
+}
+
+@include mobile {
+  .quotaRowHeader {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .quotaModel {
+    width: 100%;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* ---------- 降级 ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .quotaBarFill {
+    transition: none;
+  }
+}

@@ -1,0 +1,464 @@
+@use '../../../../styles/mixins' as *;
+
+/* 区块编辑器（API 密钥 / 字符串列表 / 插件源认证 / 载荷规则）的共享样式。
+   规则从旧 VisualConfigEditor.module.scss 收编，几何统一到 10px 圆角并引用动效 tokens。 */
+
+/* ---------- 可展开输入 ---------- */
+
+.expandableInputWrapper {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  flex: 1;
+}
+
+.expandableInputWrapper > .expandableTextarea,
+.expandableInputWrapper > :global(.input) {
+  flex: 1;
+  min-width: 0;
+  padding-right: 28px;
+}
+
+.expandableTextarea {
+  resize: none;
+  min-height: 60px;
+  overflow: hidden;
+  line-height: 1.5;
+  padding-right: 32px;
+}
+
+.expandableToggle {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  z-index: 1;
+  transform: translateY(-50%);
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.58;
+  transition: opacity var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:hover {
+    opacity: 1;
+  }
+
+  &:disabled {
+    cursor: default;
+    opacity: 0.35;
+  }
+}
+
+.expandableInputExpanded .expandableToggle {
+  top: 9px;
+  right: 12px;
+  transform: none;
+}
+
+/* ---------- 通用块布局 ---------- */
+
+.blockHeaderRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.blockStack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.blockLabel {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.actionRow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.emptyState {
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  padding: 16px;
+  color: var(--text-secondary);
+  text-align: center;
+  background: transparent;
+}
+
+/* ---------- 规则卡 ---------- */
+
+.ruleCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-secondary) 64%, transparent);
+}
+
+.ruleCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ruleCardTitle {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+/* ---------- 字符串列表 ---------- */
+
+.stringList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stringListRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- API 密钥弹窗 ---------- */
+
+.apiKeyModalInputRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+
+  :global(.input) {
+    flex: 1;
+  }
+}
+
+/* 强度参考条：四段承载档位，颜色承载严重度。
+   段的填充走 scaleX（只碰 transform），键入时逐字重算也不掉帧。 */
+
+.strengthMeter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.strengthTrack {
+  display: flex;
+  gap: 6px;
+}
+
+.strengthSegment {
+  flex: 1;
+  height: 4px;
+  border-radius: $radius-full;
+  overflow: hidden;
+  // 轨道 = 填充色的淡化步阶，未点亮的段也带着当前状态
+  background: color-mix(in srgb, var(--strength-color) 16%, transparent);
+  transition: background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+.strengthSegmentFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--strength-color);
+  transform: scaleX(0);
+  transform-origin: left center;
+  // 段内比常规交互再快一档，把预算让给段间的 stagger
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  // 延迟写在目标态上：点亮时依次排队，熄灭是系统响应，立刻发生
+  &[data-filled='true'] {
+    transform: scaleX(1);
+    transition-delay: var(--segment-delay, 0ms);
+  }
+
+  // 降级只去掉位移和排队，颜色变化保留（它才是状态本身）
+  @media (prefers-reduced-motion: reduce) {
+    transition: background-color var(--dur-hover, 200ms) linear;
+
+    &[data-filled='true'] {
+      transition-delay: 0ms;
+    }
+  }
+}
+
+.strengthLabel {
+  min-height: 16px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--strength-color);
+  transition: color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+/* ---------- 插件源认证 ---------- */
+
+.storeAuthEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.storeAuthEmpty {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.storeAuthRule {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-secondary) 42%, transparent);
+}
+
+.storeAuthRuleHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+
+  strong {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.storeAuthGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.storeAuthField {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+
+  > span {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+  }
+}
+
+.storeAuthApplyTo {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+
+  > span {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  small {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+}
+
+.storeAuthCheckboxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.storeAuthCheckbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+
+  input {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--primary-color);
+  }
+}
+
+/* ---------- 载荷规则 ---------- */
+
+.payloadRuleModelRow {
+  display: grid;
+  grid-template-columns: 1fr 160px auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.payloadRuleModelRowProtocolFirst {
+  grid-template-columns: 160px 1fr auto auto;
+}
+
+.payloadModelGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.payloadModelAdvanced {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-left: 10px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-color);
+}
+
+.payloadAdvancedGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.payloadHeaderRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.payloadRuleParamRow {
+  display: grid;
+  grid-template-columns: 1fr 140px 1fr auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.payloadRuleRawParamRow {
+  grid-template-columns: minmax(240px, 1fr) minmax(320px, 1fr) auto;
+}
+
+.payloadRuleParamGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.payloadJsonInput {
+  min-height: 112px;
+  resize: vertical;
+  font-family: $font-mono;
+}
+
+.payloadParamError {
+  margin: 0;
+}
+
+.payloadFilterModelRow {
+  display: grid;
+  grid-template-columns: 1fr 160px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.payloadRowActionButton {
+  flex: 0 0 auto;
+  justify-self: start;
+}
+
+/* ---------- 响应式 ---------- */
+
+@media (max-width: 900px) {
+  .payloadRuleModelRow,
+  .payloadRuleModelRowProtocolFirst,
+  .payloadHeaderRow,
+  .payloadRuleParamRow,
+  .payloadFilterModelRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .apiKeyModalInputRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .payloadRowActionButton {
+    width: 100%;
+  }
+}
+
+@include mobile {
+  .storeAuthRule,
+  .ruleCard {
+    padding: 14px;
+  }
+
+  .blockHeaderRow,
+  .ruleCardHeader {
+    align-items: stretch;
+  }
+
+  .blockHeaderRow :global(.btn),
+  .ruleCardHeader :global(.btn),
+  .actionRow :global(.btn),
+  .stringListRow :global(.btn) {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .actionRow {
+    justify-content: stretch;
+  }
+
+  .stringListRow {
+    align-items: stretch;
+  }
+}
+
+@media (max-width: 380px) {
+  .storeAuthRule,
+  .ruleCard {
+    padding: 12px;
+  }
+}
+
+/* ---------- 无障碍 ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .expandableToggle {
+    transition: none;
+  }
+}

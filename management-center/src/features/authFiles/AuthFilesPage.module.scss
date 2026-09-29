@@ -1,0 +1,102 @@
+@use '../../styles/mixins' as *;
+
+/* ============================================================
+ * 认证文件页壳层：纯布局，视觉细节都在各组件的 colocated 模块里。
+ * ============================================================ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  min-width: 0;
+  /* 底部为悬浮批量条留出实时高度 */
+  padding-bottom: calc(
+    var(--auth-files-action-bar-height, 0px) + 16px + env(safe-area-inset-bottom, 0px)
+  );
+}
+
+/* ---------- 工作区（tabs + 工具栏 + 网格 + 分页） ---------- */
+
+.workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.errorBanner {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--danger-color);
+  background: var(--bg-error-light);
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 卡片网格 ---------- */
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+  align-items: stretch;
+}
+
+.gridCompact {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+}
+
+/* provider tab 激活（配额模式）时卡片承载配额区，需要更宽的列。
+   值与 .grid 相同但**必须保留且排在 .gridCompact 之后**：三个类同时挂在网格上，
+   同specificity 靠源序决胜，删掉这条会让「紧凑 + 配额」从 340 掉回 260。 */
+.gridQuota {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+}
+
+.emptyActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* ---------- 分页 ---------- */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.pageInfo {
+  font-family: $font-mono;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+/* ---------- OAuth 配置双卡 ---------- */
+
+.configGrid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+
+  @media (min-width: 1024px) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@include mobile {
+  .page {
+    gap: 16px;
+  }
+}

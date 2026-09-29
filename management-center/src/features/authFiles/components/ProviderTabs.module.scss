@@ -1,0 +1,139 @@
+@use '../../../styles/mixins' as *;
+
+/* 提供商过滤 tabs：安静的下划线式，品牌色只在图标 */
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-color);
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  padding: 8px 12px 11px;
+  border-radius: 8px 8px 0 0;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition:
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &::after {
+    content: '';
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    bottom: -1px;
+    height: 2px;
+    border-radius: $radius-full;
+    background: transparent;
+    transition: background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+  }
+
+  &:active {
+    transform: translateY(0.5px);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tab:hover {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+  }
+}
+
+.tabActive {
+  color: var(--text-primary);
+  font-weight: 650;
+
+  &::after {
+    background: var(--text-primary);
+  }
+}
+
+.tabGlyph {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+
+  .tabActive & {
+    color: var(--text-primary);
+  }
+}
+
+.tabIconWrap {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.tabIcon {
+  width: 15px;
+  height: 15px;
+  object-fit: contain;
+  display: block;
+}
+
+.tabIconFallback {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.tabLabel {
+  line-height: 1.4;
+}
+
+.tabCount {
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+  padding: 0 6px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+
+  .tabActive & {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab,
+  .tab::after {
+    transition: none;
+  }
+
+  .tab:active {
+    transform: none;
+  }
+}

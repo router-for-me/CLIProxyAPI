@@ -1,0 +1,95 @@
+/* ============================================================
+ * VaultPulse —— 凭证谱条（签名元素）。
+ * 颜色 + 高度双通道编码；scaleY 自底部生长入场，
+ * 总预算 360ms，在头部 reveal 之后（基准延迟 0.35s）起播。
+ * ============================================================ */
+
+.pulse {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  height: 34px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  /* 基线 + 两端渐隐：与 LiveWire 的水平 mask 同语汇 */
+  padding-bottom: 3px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 85%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 2%, #000 98%, transparent);
+}
+
+.bar {
+  flex: 1 1 0;
+  min-width: 2px;
+  max-width: 14px;
+  border-radius: 2px 2px 1px 1px;
+  transform-origin: bottom;
+  animation: pulse-bar-in 0.45s var(--ease-out-strong, ease-out) both;
+  animation-delay: calc(0.35s + var(--bar-delay, 0s));
+}
+
+@keyframes pulse-bar-in {
+  from {
+    transform: scaleY(0);
+  }
+}
+
+/* 高度编码状态（色盲冗余通道） */
+.barLive {
+  height: 100%;
+  background: var(--viz-success);
+}
+
+.barIdle {
+  height: 42%;
+  background: color-mix(in srgb, var(--text-quaternary) 55%, transparent);
+}
+
+.barWarning {
+  height: 72%;
+  background: var(--amber-color);
+}
+
+.barProblem {
+  height: 58%;
+  background: var(--viz-failure);
+}
+
+.barDisabled {
+  opacity: 0.32;
+  height: 30%;
+}
+
+.overflow {
+  flex-shrink: 0;
+  font-family: $font-mono;
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  line-height: 1;
+  padding-bottom: 1px;
+}
+
+/* 零凭证：LiveWire 式虚线基线 */
+.idleLine {
+  flex: 1;
+  height: 0;
+  border-bottom: 2px dashed var(--text-quaternary);
+  opacity: 0.6;
+  margin-bottom: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    animation: none;
+  }
+}

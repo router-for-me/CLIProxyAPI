@@ -1,0 +1,96 @@
+.wire {
+  /* 浅色纸面上纯 emerald 线对比不足，掺 12% 墨色压深一档；面积渐变仍用原色 */
+  --wire-color: var(--viz-success, #10b981);
+  --wire-stroke: color-mix(in srgb, var(--wire-color) 88%, var(--text-primary));
+
+  position: relative;
+  width: 100%;
+  height: 100%;
+  mask-image: linear-gradient(to right, transparent, #000 5%, #000 95%, transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 5%, #000 95%, transparent);
+}
+
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* 描画排在 hero 文案/面板级联之后：脉搏最后抵达，收束整场入场 */
+.line {
+  stroke: var(--wire-stroke);
+  stroke-width: 2px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+  animation: wireDraw 1.3s cubic-bezier(0.25, 0.6, 0.35, 1) 0.55s backwards;
+}
+
+.area {
+  animation: wireFade 0.9s ease-out 1.25s backwards;
+}
+
+.idleLine {
+  stroke: var(--text-quaternary);
+  stroke-width: 1.5px;
+  stroke-dasharray: 4 6;
+  fill: none;
+}
+
+.pulse {
+  position: absolute;
+  right: 5%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transform: translate(50%, -50%);
+  background: var(--wire-stroke);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--wire-color) 45%, transparent);
+  animation: wirePulse 2.4s ease-out 1.9s infinite;
+  /* 数据刷新时光点滑到新位置，而不是瞬移 */
+  transition: top 400ms var(--ease-out-strong, ease-out);
+}
+
+@keyframes wireDraw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes wireFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes wirePulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--wire-color) 45%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 10px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .line,
+  .area,
+  .pulse {
+    animation: none;
+  }
+
+  .pulse {
+    transition: none;
+  }
+}

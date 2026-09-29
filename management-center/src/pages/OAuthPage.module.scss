@@ -1,0 +1,363 @@
+@use '../styles/mixins' as *;
+
+.container {
+  width: 100%;
+}
+
+.cardTitle {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+}
+
+.cardTitleIcon {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+}
+
+.cardTitleIconFallback {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+
+.pageTitle {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 $spacing-xl 0;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xl;
+}
+
+.providerSection {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+}
+
+.providerList {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xl;
+}
+
+.sectionTitle {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.featuredCard {
+  position: relative;
+  overflow: hidden;
+  border-color: #000;
+  background:
+    radial-gradient(circle at 92% -35%, rgba(23, 131, 255, 0.24), transparent 42%),
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, #1783ff 10%, var(--bg-primary)),
+      var(--bg-primary) 64%
+    );
+  box-shadow:
+    0 14px 32px -26px rgba(23, 131, 255, 0.95),
+    var(--shadow);
+
+  > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .cardTitle {
+    gap: $spacing-md;
+    font-size: 21px;
+  }
+
+  .cardTitleIcon {
+    box-sizing: content-box;
+    width: 24px;
+    height: 24px;
+    padding: 7px;
+    border-radius: 11px;
+    background: #000;
+  }
+
+  .featuredActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: $spacing-sm;
+  }
+
+  :global(.btn-primary) {
+    border-color: #1783ff;
+    background: #1783ff;
+    box-shadow: 0 8px 20px -12px rgba(23, 131, 255, 0.9);
+
+    &:hover {
+      border-color: #0875ed;
+      background: #0875ed;
+    }
+  }
+
+  @include mobile {
+    :global(.card-header > .btn) {
+      width: 100%;
+    }
+  }
+}
+
+:global([data-theme='dark']) .featuredCard .cardTitleIcon {
+  background: #fff;
+}
+
+.recommendedBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid rgba(23, 131, 255, 0.34);
+  border-radius: $radius-full;
+  background: rgba(23, 131, 255, 0.11);
+  color: color-mix(in srgb, #1783ff 82%, var(--text-primary));
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.featuredHint {
+  max-width: 720px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.cardContent {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+
+  :global(.status-badge) {
+    margin-bottom: 0;
+    align-self: flex-start;
+  }
+}
+
+.cardHint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.cardHintSecondary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.oauthSection {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+}
+
+.oauthGrid {
+  display: grid;
+  gap: $spacing-lg;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.oauthCard {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+}
+
+.oauthStatus {
+  padding: $spacing-md;
+  border-radius: $radius-md;
+  font-size: 14px;
+
+  &.success {
+    background-color: rgba(34, 197, 94, 0.1);
+    color: #16a34a;
+  }
+
+  &.error {
+    background-color: rgba($error-color, 0.12);
+    color: $error-color;
+  }
+
+  &.waiting {
+    background-color: rgba($primary-color, 0.12);
+    color: var(--primary-color);
+  }
+}
+
+.callbackSection {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.callbackActions {
+  display: flex;
+  gap: $spacing-md;
+}
+
+.authUrlBox {
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border-color);
+  border-radius: $radius-md;
+  padding: $spacing-md;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+}
+
+.authUrlLabel {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.authUrlValue {
+  font-weight: 700;
+  color: var(--text-primary);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  max-width: 100%;
+}
+
+.authUrlActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $spacing-sm;
+  margin-top: $spacing-sm;
+}
+
+.successActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $spacing-sm;
+}
+
+.geminiProjectField {
+  :global(.form-group) {
+    margin-top: 0;
+    margin-bottom: 0;
+    gap: $spacing-sm;
+  }
+
+  :global(.input:disabled) {
+    background-color: var(--bg-tertiary);
+    border-color: var(--border-color);
+    color: var(--text-tertiary);
+    cursor: not-allowed;
+  }
+}
+
+.formItem {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+}
+
+.formItemLabel {
+  margin: 0;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.filePicker {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+}
+
+.fileName {
+  flex: 1;
+  min-width: 220px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.fileNamePlaceholder {
+  color: var(--text-secondary);
+}
+
+.connectionBox {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  padding: $spacing-md;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.connectionLabel {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.keyValueList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.keyValueItem {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 10px;
+  align-items: start;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
+.keyValueKey {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.keyValueValue {
+  color: var(--text-primary);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
