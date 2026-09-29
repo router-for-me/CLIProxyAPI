@@ -405,6 +405,45 @@ func TestConfigSynthesizer_XAIKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_NeuralwattKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			NeuralwattKey: []config.NeuralwattKey{{
+				APIKey:      "neuralwatt-key-123",
+				BaseURL:     "https://api.neuralwatt.com/v1",
+				ServiceTier: "flex",
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "neuralwatt" {
+		t.Fatalf("provider = %q, want neuralwatt", auth.Provider)
+	}
+	if auth.Label != "neuralwatt-apikey" {
+		t.Fatalf("label = %q, want neuralwatt-apikey", auth.Label)
+	}
+	if auth.Attributes["api_key"] != "neuralwatt-key-123" {
+		t.Fatalf("api_key = %q, want neuralwatt-key-123", auth.Attributes["api_key"])
+	}
+	if auth.Attributes["base_url"] != "https://api.neuralwatt.com/v1" {
+		t.Fatalf("base_url = %q, want https://api.neuralwatt.com/v1", auth.Attributes["base_url"])
+	}
+	if auth.Attributes["service_tier"] != "flex" {
+		t.Fatalf("service_tier = %q, want flex", auth.Attributes["service_tier"])
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

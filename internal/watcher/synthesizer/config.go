@@ -160,6 +160,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// xAI API Keys
 	out = append(out, s.synthesizeXAIKeys(ctx)...)
+	// Neuralwatt API Keys
+	out = append(out, s.synthesizeNeuralwattKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// OpenCode Go
@@ -342,6 +344,11 @@ func (s *ConfigSynthesizer) synthesizeXAIKeys(ctx *SynthesisContext) []*coreauth
 	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.XAIKey, "xai")
 }
 
+// synthesizeNeuralwattKeys creates Auth entries for Neuralwatt API keys.
+func (s *ConfigSynthesizer) synthesizeNeuralwattKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.NeuralwattKey, "neuralwatt")
+}
+
 func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {
 	cfg := ctx.Config
 	now := ctx.Now
@@ -375,6 +382,9 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 		}
 		if entry.Websockets {
 			attrs["websockets"] = "true"
+		}
+		if tier := strings.TrimSpace(entry.ServiceTier); tier != "" {
+			attrs["service_tier"] = tier
 		}
 		if provider == "codex" && entry.AlphaSearch {
 			attrs[coreauth.AttributeCodexAlphaSearch] = "true"
