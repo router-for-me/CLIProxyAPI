@@ -658,6 +658,22 @@ func TestBuildConfigChangeDetails_RemoteManagementSecretUpdated(t *testing.T) {
 	expectContains(t, changes, "remote-management.secret-key: updated")
 }
 
+func TestBuildConfigChangeDetails_RemoteManagementBaseURL(t *testing.T) {
+	oldCfg := &config.Config{
+		RemoteManagement: config.RemoteManagement{
+			BaseURL: "https://old.example.com",
+		},
+	}
+	newCfg := &config.Config{
+		RemoteManagement: config.RemoteManagement{
+			BaseURL: "https://new.example.com",
+		},
+	}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "remote-management.base-url: https://old.example.com -> https://new.example.com")
+}
+
 func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	oldCfg := &config.Config{}
 	newCfg := &config.Config{

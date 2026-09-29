@@ -332,6 +332,8 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+	// BaseURL specifies the base URL of the remote management API for TUI client mode (e.g. "https://proxy.example.com").
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -665,6 +667,10 @@ type CodexModel struct {
 	// native agent_message items or empty-signature thinking blocks. Default false
 	// keeps the native behavior unchanged.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
+
+	// SupportConfigurationUpdate enables configuration_update for this API-key model.
+	// It defaults to false, independently of the built-in OAuth model catalog.
+	SupportConfigurationUpdate bool `yaml:"support-configuration-update,omitempty" json:"support-configuration-update,omitempty"`
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`

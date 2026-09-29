@@ -65,14 +65,29 @@ func TestClaudeBillingFingerprintEdgeCases(t *testing.T) {
 		t.Fatalf("user message with only reminder: got %q, want empty", got)
 	}
 
-	// 5. Multiple text blocks: skips reminder, takes real text
+	// 5. Multiple text blocks: skips proxy reminders, takes the first real text
 	multiPart := []byte(`{"messages":[{"role":"user","content":[
 		{"type":"text","text":"<system-reminder>date</system-reminder>"},
 		{"type":"text","text":"real user question"},
 		{"type":"text","text":"additional context"}
 	]}]}`)
-	if got := claudeBillingFingerprintMessageText(multiPart); got != "additional context" {
-		t.Fatalf("multi-part user message: got %q, want %q", got, "additional context")
+	if got := claudeBillingFingerprintMessageText(multiPart); got != "real user question" {
+		t.Fatalf("multi-part user message: got %q, want first real text", got)
+	}
+}
+
+func TestComputeFingerprintUsesNativeUTF16Indices(t *testing.T) {
+	for _, tt := range []struct {
+		name, text, want string
+	}{
+		{name: "emoji before sampled positions", text: "😀abcdefghijklmnopqrstuvwxyz", want: "dac"},
+		{name: "sampled high surrogate", text: "abc😀abcdefghijklmnop", want: "695"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := computeFingerprint(tt.text, "2.1.280"); got != tt.want {
+				t.Errorf("fingerprint = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -250,7 +265,7 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	auth := &cliproxyauth.Auth{
 		ID:         "test-cloaked-multiturn-oauth",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-multiturn"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-multiturn", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid": "11111111-2222-4333-8444-555555555555",
 			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
@@ -566,7 +581,7 @@ func TestClaudeCloakedToolContinuationPreservesExplicitPromptID(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	auth := &cliproxyauth.Auth{
 		ID:         "test-cloaked-explicit-prompt-oauth",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-explicit-prompt-key"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-explicit-prompt-key", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid": "11111111-2222-4333-8444-555555555555",
 			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
@@ -658,7 +673,7 @@ func TestClaudeCloakedColdStartToolContinuationUsesDeterministicPromptID(t *test
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	auth := &cliproxyauth.Auth{
 		ID:         "test-cloaked-cold-start-tool-oauth",
-		Attributes: map[string]string{"api_key": "sk-ant-oat-test-cold-start-key"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-cold-start-key", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid": "11111111-2222-4333-8444-555555555555",
 			claudeauth.ClaudeDeviceIDsMetadataKey: []string{

@@ -826,6 +826,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
+						} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
+							state.NextRetryAfter = now.Add(*result.RetryAfter)
 						} else {
 							next := now.Add(12 * time.Hour)
 							state.NextRetryAfter = next
@@ -861,6 +863,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 404:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
+							} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
+								state.NextRetryAfter = now.Add(*result.RetryAfter)
 							} else {
 								next := now.Add(12 * time.Hour)
 								state.NextRetryAfter = next
@@ -1689,6 +1693,25 @@ func HasUnauthorizedAuthFailure(auth *Auth) bool {
 	return hasUnauthorizedAuthFailure(auth)
 }
 
+func hasDisabledInvalidGrantFailure(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	isDisabled := auth.Disabled || auth.Status == StatusDisabled
+	if !isDisabled {
+		return false
+	}
+	if auth.LastError != nil && (isInvalidGrantResultError(auth.LastError) || isInvalidGrantErrorMessage(auth.LastError.Message) || isInvalidGrantErrorMessage(auth.LastError.Code)) {
+		return true
+	}
+	return false
+}
+
+// HasDisabledInvalidGrantFailure reports whether the auth is disabled and has encountered an invalid_grant error.
+func HasDisabledInvalidGrantFailure(auth *Auth) bool {
+	return hasDisabledInvalidGrantFailure(auth)
+}
+
 func refreshErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
@@ -1789,22 +1812,28 @@ func isInvalidGrantError(err error) bool {
 	if err == nil {
 		return false
 	}
-	status := statusCodeFromError(err)
-	if status != http.StatusBadRequest && status != http.StatusUnauthorized {
+	if !isInvalidGrantErrorMessage(err.Error()) {
 		return false
 	}
-	return isInvalidGrantErrorMessage(err.Error())
+	status := statusCodeFromError(err)
+	if status == http.StatusBadRequest || status == http.StatusUnauthorized || status == 0 {
+		return true
+	}
+	return false
 }
 
 func isInvalidGrantResultError(err *Error) bool {
 	if err == nil {
 		return false
 	}
-	status := statusCodeFromResult(err)
-	if status != http.StatusBadRequest && status != http.StatusUnauthorized {
+	if !isInvalidGrantErrorMessage(err.Code) && !isInvalidGrantErrorMessage(err.Message) {
 		return false
 	}
-	return isInvalidGrantErrorMessage(err.Code) || isInvalidGrantErrorMessage(err.Message)
+	status := statusCodeFromResult(err)
+	if status == http.StatusBadRequest || status == http.StatusUnauthorized || status == 0 {
+		return true
+	}
+	return false
 }
 
 func isModelSupportResultError(err *Error) bool {
@@ -2232,6 +2261,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "not_found"
 			if disableCooling {
 				auth.NextRetryAfter = time.Time{}
+			} else if retryAfter != nil && *retryAfter > 0 {
+				auth.NextRetryAfter = now.Add(*retryAfter)
 			} else {
 				auth.NextRetryAfter = now.Add(12 * time.Hour)
 			}

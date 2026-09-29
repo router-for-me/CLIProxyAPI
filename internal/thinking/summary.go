@@ -130,6 +130,29 @@ func ExtractExplicitSummaryConfig(body []byte, format string) SummaryConfig {
 	return config
 }
 
+// ExtractTranslatedSummaryConfig reads source visibility intent using the
+// source/target protocol pair. OpenAI Chat reasoning_effort controls depth,
+// not Claude display visibility, so it is ignored only for Chat-to-Claude.
+func ExtractTranslatedSummaryConfig(body []byte, sourceFormat, targetFormat string) SummaryConfig {
+	source := strings.ToLower(strings.TrimSpace(sourceFormat))
+	target := strings.ToLower(strings.TrimSpace(targetFormat))
+	if target == "claude" && source == "openai" {
+		return ExtractExplicitSummaryConfig(body, source)
+	}
+	return ExtractSummaryConfig(body, source)
+}
+
+// ApplyTranslatedSummaryToClaude copies an explicit source visibility choice
+// onto a Claude body. Chat reasoning_effort is not a visibility field, so it
+// stays unspecified and the Claude cloak can apply its default display.
+func ApplyTranslatedSummaryToClaude(out, source []byte, sourceFormat, model string) []byte {
+	config := ExtractTranslatedSummaryConfig(source, sourceFormat, "claude")
+	if config.Mode == SummaryUnspecified {
+		return out
+	}
+	return ApplySummaryConfigForModel(out, "claude", model, config)
+}
+
 // ApplySummaryConfig writes canonical summary intent in the target protocol.
 func ApplySummaryConfig(body []byte, format string, config SummaryConfig) []byte {
 	return ApplySummaryConfigForModel(body, format, "", config)

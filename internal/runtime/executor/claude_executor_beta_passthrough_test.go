@@ -39,7 +39,7 @@ func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas(t *testing.T) {
 	if !strings.Contains(betas, "message-threads-2026-08-12") {
 		t.Fatalf("Anthropic-Beta = %q, want unmanaged caller beta forwarded", betas)
 	}
-	if !strings.Contains(betas, "mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24") {
+	if !strings.Contains(betas, "mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24") {
 		t.Fatalf("Anthropic-Beta = %q, want fable-5-1 per-turn-control between mid-conversation-system and tool-changes", betas)
 	}
 }
@@ -62,6 +62,46 @@ func TestApplyClaudeHeaders_StillGatesManagedCallerBetas(t *testing.T) {
 	}
 	if betas := req.Header.Get("Anthropic-Beta"); strings.Contains(betas, "effort-2025-11-24") {
 		t.Fatalf("Anthropic-Beta = %q, want gated effort beta kept off the Haiku request", betas)
+	}
+}
+
+func TestApplyClaudeHeaders_PreservesNativeGatewayHintsOnly(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		requestClass string
+		confirmed    bool
+	}{
+		{name: "confirmed main", requestClass: "main", confirmed: true},
+		{name: "confirmed auxiliary", requestClass: "auxiliary", confirmed: true},
+		{name: "unconfirmed caller", requestClass: "main"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			incoming := http.Header{
+				"x-claude-code-request-class":       {tt.requestClass},
+				"x-claude-code-agent-type":          {"builtin"},
+				"x-claude-code-prev-tool-durations": {"5"},
+				"x-claude-code-compaction":          {"false"},
+				"x-claude-code-context-compacted":   {"false"},
+			}
+			auth := fixtureAuth()
+			if err := applyClaudeHeaders(req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil,
+				[]byte(`{"model":"claude-opus-5-5"}`), &config.Config{}, incoming, tt.confirmed); err != nil {
+				t.Fatal(err)
+			}
+			for key, values := range incoming {
+				got := req.Header.Get(key)
+				if tt.confirmed && got != values[0] {
+					t.Errorf("%s = %q, want %q", key, got, values[0])
+				}
+				if !tt.confirmed && got != "" {
+					t.Errorf("unconfirmed caller forwarded %s = %q", key, got)
+				}
+			}
+		})
 	}
 }
 

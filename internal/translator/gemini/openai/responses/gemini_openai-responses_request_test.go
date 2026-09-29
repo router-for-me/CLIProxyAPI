@@ -3524,3 +3524,60 @@ func TestConvertOpenAIResponsesRequestToGemini_FunctionResponseJSONRef(t *testin
 		}
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_UnsignedModelTextDoesNotSynthesizeBypassSignature(t *testing.T) {
+	// When reasoning item has no signature (empty encrypted_content), the following assistant text
+	// should not be injected with the synthetic "skip_thought_signature_validator".
+	inputJSON := `{
+		"input": [
+			{
+				"type": "reasoning",
+				"encrypted_content": "",
+				"summary": [{"type": "summary_text", "text": "my thinking process"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"status": "completed",
+				"content": [{"type": "output_text", "text": "my visible answer"}]
+			}
+		]
+	}`
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
+	contents := gjson.GetBytes(output, "contents")
+	if len(contents.Array()) != 1 {
+		t.Fatalf("expected 1 content, got %d (raw: %s)", len(contents.Array()), output)
+	}
+
+	parts := contents.Array()[0].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts (thought + text), got %d: %s", len(parts), output)
+	}
+
+	thoughtPart := parts[0]
+	if !thoughtPart.Get("thought").Bool() || thoughtPart.Get("text").String() != "my thinking process" {
+		t.Fatalf("unexpected thought part: %s", thoughtPart.Raw)
+	}
+	if thoughtPart.Get("thoughtSignature").Exists() {
+		t.Fatalf("thought part should not have thoughtSignature when unsigned, got: %s", thoughtPart.Raw)
+	}
+
+	textPart := parts[1]
+	if textPart.Get("thought").Bool() || textPart.Get("text").String() != "my visible answer" {
+		t.Fatalf("unexpected text part: %s", textPart.Raw)
+	}
+	if textPart.Get("thoughtSignature").Exists() {
+		t.Fatalf("visible text part should not have synthetic thoughtSignature, got: %s", textPart.Raw)
+	}
+
+	// Verify with sanitizer: this payload must NOT trigger any drop or bypass replacement
+	sanitized := internalsignature.SanitizeGeminiRequestThoughtSignatures(output, "contents")
+	sanitizedParts := gjson.GetBytes(sanitized, "contents.0.parts").Array()
+	if len(sanitizedParts) != 2 {
+		t.Fatalf("sanitizer altered parts count: %s", sanitized)
+	}
+	if sanitizedParts[1].Get("thoughtSignature").Exists() {
+		t.Fatalf("sanitizer left unexpected thoughtSignature on text part: %s", sanitizedParts[1].Raw)
+	}
+}

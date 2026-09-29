@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -3784,4 +3785,299 @@ func (failingReadCloser) Read(p []byte) (int, error) {
 
 func (failingReadCloser) Close() error {
 	return nil
+}
+
+func TestInterceptRequest_ReadOnlyInterceptorDoesNotReplaceBody_Issue6101(t *testing.T) {
+	// A read-only interceptor (like cpa-account-config-manager) returns an unmodified body (empty/nil Body).
+	// Per RequestInterceptResponse documentation, "Body replaces the current request body only when non-empty."
+	// When an interceptor does not mutate the body, host.InterceptRequestBeforeAuth and InterceptRequestAfterAuth
+	// must return an empty/nil Body so downstream callers know the request body was not replaced,
+	// rather than returning a cloned copy of the input body.
+	host := newHostWithRecords(capabilityRecord{
+		id: "read-only-observer",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				return pluginapi.RequestInterceptResponse{
+					Headers: http.Header{"X-Observed": []string{"true"}},
+				}, nil
+			}),
+		}},
+	})
+
+	inputBody := []byte("large-request-payload-for-codex-session")
+	gotBefore := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		Body: inputBody,
+	})
+	if len(gotBefore.Body) != 0 {
+		t.Fatalf("InterceptRequestBeforeAuth returned non-empty body %q, want empty body for read-only interceptor", gotBefore.Body)
+	}
+	if gotBefore.Headers.Get("X-Observed") != "true" {
+		t.Fatalf("expected header X-Observed to be preserved, got %#v", gotBefore.Headers)
+	}
+
+	gotAfter := host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		Body: inputBody,
+	})
+	if len(gotAfter.Body) != 0 {
+		t.Fatalf("InterceptRequestAfterAuth returned non-empty body %q, want empty body for read-only interceptor", gotAfter.Body)
+	}
+}
+
+func TestInterceptRequest_FirstPluginInPlaceMutationDiscardedIfEmptyOrFailed(t *testing.T) {
+	// If plugin 1 mutates req.Body in-place but returns an empty body (or fails),
+	// plugin 2 must still receive the uncorrupted original body from currentBase.
+	var plugin2ReceivedBody []byte
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "plugin-1-mutator",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					// In-place mutation on nextReq.Body
+					req.Body[0] = 'X'
+					// Returns empty body (mutation is not returned as a replacement)
+					return pluginapi.RequestInterceptResponse{
+						Headers: http.Header{"X-Plugin-1": []string{"ran"}},
+					}, nil
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "plugin-2-observer",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					plugin2ReceivedBody = bytes.Clone(req.Body)
+					return pluginapi.RequestInterceptResponse{}, nil
+				}),
+			}},
+		},
+	)
+
+	inputBody := []byte("clean-payload")
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		Body: inputBody,
+	})
+
+	if string(inputBody) != "clean-payload" {
+		t.Fatalf("caller inputBody was corrupted: %q", string(inputBody))
+	}
+	if string(plugin2ReceivedBody) != "clean-payload" {
+		t.Fatalf("plugin 2 received corrupted body: %q, want clean-payload", string(plugin2ReceivedBody))
+	}
+	if len(got.Body) != 0 {
+		t.Fatalf("got.Body should be empty when no plugin returned non-empty body, got: %q", string(got.Body))
+	}
+}
+
+func TestInterceptRequest_FirstPluginInPlaceMutationDiscardedOnError(t *testing.T) {
+	// If plugin 1 mutates req.Body in-place but returns an error,
+	// plugin 2 must still receive the uncorrupted original body from currentBase.
+	var plugin2ReceivedBody []byte
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "plugin-1-error",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					req.Body[0] = 'E'
+					return pluginapi.RequestInterceptResponse{}, errors.New("interceptor failed")
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "plugin-2-observer",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					plugin2ReceivedBody = bytes.Clone(req.Body)
+					return pluginapi.RequestInterceptResponse{}, nil
+				}),
+			}},
+		},
+	)
+
+	inputBody := []byte("clean-payload")
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		Body: inputBody,
+	})
+
+	if string(inputBody) != "clean-payload" {
+		t.Fatalf("caller inputBody was corrupted: %q", string(inputBody))
+	}
+	if string(plugin2ReceivedBody) != "clean-payload" {
+		t.Fatalf("plugin 2 received corrupted body: %q, want clean-payload", string(plugin2ReceivedBody))
+	}
+	if len(got.Body) != 0 {
+		t.Fatalf("got.Body should be empty when no plugin returned non-empty body, got: %q", string(got.Body))
+	}
+}
+
+func TestInterceptRequest_FirstPluginInPlaceMutationDiscardedOnPanic(t *testing.T) {
+	var plugin2ReceivedBody []byte
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "plugin-1-panic",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					req.Body[0] = 'Z'
+					panic("boom")
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "plugin-2-observer",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					plugin2ReceivedBody = bytes.Clone(req.Body)
+					return pluginapi.RequestInterceptResponse{}, nil
+				}),
+			}},
+		},
+	)
+
+	inputBody := []byte("clean-payload")
+	got := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		Body: inputBody,
+	})
+
+	if string(inputBody) != "clean-payload" {
+		t.Fatalf("caller inputBody was corrupted: %q", string(inputBody))
+	}
+	if string(plugin2ReceivedBody) != "clean-payload" {
+		t.Fatalf("plugin 2 received corrupted body: %q, want clean-payload", string(plugin2ReceivedBody))
+	}
+	if len(got.Body) != 0 {
+		t.Fatalf("got.Body should be empty when no plugin returned non-empty body, got: %q", string(got.Body))
+	}
+}
+
+func BenchmarkHostRequestInterceptors_ReadOnly(b *testing.B) {
+	sizes := []struct {
+		name  string
+		bytes int
+	}{
+		{name: "1MiB", bytes: 1 << 20},
+		{name: "8MiB", bytes: 8 << 20},
+	}
+	// 1 read-only plugin (matching cpa-account-config-manager)
+	hostSingle := newHostWithRecords(capabilityRecord{
+		id: "read-only-observer",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				return pluginapi.RequestInterceptResponse{}, nil
+			}),
+		}},
+	})
+	// 2 read-only plugins
+	hostMulti := newHostWithRecords(
+		capabilityRecord{
+			id: "observer-1", priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					return pluginapi.RequestInterceptResponse{}, nil
+				}),
+			}},
+		},
+		capabilityRecord{
+			id: "observer-2", priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					return pluginapi.RequestInterceptResponse{}, nil
+				}),
+			}},
+		},
+	)
+
+	for _, size := range sizes {
+		payload := make([]byte, size.bytes)
+		b.Run("single/"+size.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				got := hostSingle.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: payload})
+				if len(got.Body) != 0 {
+					b.Fatal("expected empty body for read-only interceptor")
+				}
+			}
+		})
+		b.Run("multi/"+size.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				got := hostMulti.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: payload})
+				if len(got.Body) != 0 {
+					b.Fatal("expected empty body for read-only interceptor")
+				}
+			}
+		})
+	}
+}
+
+func TestExecutorAdapterRefresh_MergesAttributesAndPreservesPath_Issue6119(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "plugin.json")
+	authProvider := fakeAuthProvider{
+		identifier: "plugin-provider",
+		refreshAuth: func(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+			return pluginapi.AuthRefreshResponse{
+				Auth: pluginapi.AuthData{
+					Metadata:   map[string]any{"token": "new"},
+					Attributes: map[string]string{"priority": "2"},
+				},
+			}, nil
+		},
+	}
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin"})
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: authProvider,
+				},
+			},
+		},
+		executorRecord,
+	)
+
+	exec := &fakeExecutor{identifier: "ignored-by-adapter"}
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-1",
+		Provider: "plugin-provider",
+		FileName: "plugin.json",
+		Attributes: map[string]string{
+			coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+			coreauth.AttributePath:          filePath,
+			coreauth.AttributeSource:        filePath,
+			"custom_env":                    "staging",
+		},
+		Metadata: map[string]any{"token": "old"},
+	}
+
+	refreshed, errRefresh := adapter.Refresh(context.Background(), auth)
+	if errRefresh != nil {
+		t.Fatalf("Refresh() error = %v", errRefresh)
+	}
+	if got := refreshed.Attributes[coreauth.AttributePath]; got != filePath {
+		t.Errorf("refreshed path attribute = %q, want %q", got, filePath)
+	}
+	if got := refreshed.Attributes[coreauth.AttributeSource]; got != filePath {
+		t.Errorf("refreshed source attribute = %q, want %q", got, filePath)
+	}
+	if got := refreshed.Attributes[coreauth.AttributeSourceBackend]; got != coreauth.AuthSourceFile {
+		t.Errorf("refreshed source_backend attribute = %q, want %q", got, coreauth.AuthSourceFile)
+	}
+	if got := refreshed.Attributes["custom_env"]; got != "staging" {
+		t.Errorf("refreshed custom_env attribute = %q, want staging", got)
+	}
+	if got := refreshed.Attributes["priority"]; got != "2" {
+		t.Errorf("refreshed priority attribute = %q, want 2", got)
+	}
 }

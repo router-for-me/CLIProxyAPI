@@ -43,6 +43,26 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 
 	contentsChanged := false
 	contentItems := make([][]byte, 0, int(contents.Get("#").Int()))
+	type sanitizeLogKey struct {
+		action           SignatureCompatibilityAction
+		reason           string
+		blockKind        SignatureBlockKind
+		detectedProvider SignatureProvider
+	}
+	sanitizeCounts := make(map[sanitizeLogKey]int)
+	logSanitize := func(contentIndex, partIndex int, decision SignatureCompatibilityDecision, rawSig string, hasSig bool) {
+		key := sanitizeLogKey{
+			action:           decision.Action,
+			reason:           decision.Reason,
+			blockKind:        decision.BlockKind,
+			detectedProvider: decision.DetectedProvider,
+		}
+		if sanitizeCounts[key] == 0 {
+			logGeminiThoughtSignatureSanitize(contentsPath, contentIndex, partIndex, decision, rawSig, hasSig)
+		}
+		sanitizeCounts[key]++
+	}
+
 	contents.ForEach(func(contentIdx, content gjson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
@@ -61,11 +81,12 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 				if hasSignature {
 					partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
 					partsChanged = true
-					logGeminiThoughtSignatureSanitize(contentsPath, int(contentIdx.Int()), int(partIdx.Int()), SignatureCompatibilityDecision{
-						TargetProvider: SignatureProviderGemini,
-						BlockKind:      SignatureBlockKindGeminiModelPart,
-						Action:         SignatureActionDropSignature,
-						Reason:         "functionResponse parts cannot replay thought signatures",
+					logSanitize(int(contentIdx.Int()), int(partIdx.Int()), SignatureCompatibilityDecision{
+						TargetProvider:   SignatureProviderGemini,
+						DetectedProvider: DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindGeminiModelPart),
+						BlockKind:        SignatureBlockKindGeminiModelPart,
+						Action:           SignatureActionDropSignature,
+						Reason:           "functionResponse parts cannot replay thought signatures",
 					}, rawSignature, true)
 				}
 				partItems = append(partItems, partJSON)
@@ -125,7 +146,7 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 			if partChanged {
 				partsChanged = true
 				if decision.Action != SignatureActionPreserve {
-					logGeminiThoughtSignatureSanitize(contentsPath, int(contentIdx.Int()), int(partIdx.Int()), decision, rawSignature, hasSignature)
+					logSanitize(int(contentIdx.Int()), int(partIdx.Int()), decision, rawSignature, hasSignature)
 				}
 			}
 			partItems = append(partItems, partJSON)
@@ -140,6 +161,22 @@ func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string)
 		contentItems = append(contentItems, contentJSON)
 		return true
 	})
+
+	for key, count := range sanitizeCounts {
+		if count > 1 {
+			log.WithFields(log.Fields{
+				"component":         "signature_sanitizer",
+				"target_provider":   string(SignatureProviderGemini),
+				"action":            string(key.action),
+				"reason":            key.reason,
+				"block_kind":        string(key.blockKind),
+				"detected_provider": string(key.detectedProvider),
+				"contents_path":     contentsPath,
+				"suppressed_count":  count - 1,
+				"total_count":       count,
+			}).Debug("gemini request: suppressed repeated thoughtSignature sanitizations in same request")
+		}
+	}
 
 	if !contentsChanged {
 		return payload

@@ -472,6 +472,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldPanelRepo != newPanelRepo {
 		changes = append(changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", formatURL(oldPanelRepo), formatURL(newPanelRepo)))
 	}
+	oldBaseURL := strings.TrimSpace(oldCfg.RemoteManagement.BaseURL)
+	newBaseURL := strings.TrimSpace(newCfg.RemoteManagement.BaseURL)
+	if oldBaseURL != newBaseURL {
+		changes = append(changes, fmt.Sprintf("remote-management.base-url: %s -> %s", formatURL(oldBaseURL), formatURL(newBaseURL)))
+	}
 	if oldCfg.RemoteManagement.SecretKey != newCfg.RemoteManagement.SecretKey {
 		switch {
 		case oldCfg.RemoteManagement.SecretKey == "" && newCfg.RemoteManagement.SecretKey != "":

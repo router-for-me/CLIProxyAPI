@@ -23,6 +23,24 @@ var knownDevinSuffixes = []string{
 	"-high-priority",
 	"-xhigh-priority",
 	"-max-priority",
+	"-low-fast",
+	"-medium-fast",
+	"-high-fast",
+	"-xhigh-fast",
+	"-max-fast",
+	"-none-fast",
+	"-thinking-1m",
+	"-thinking",
+	"-max-1m",
+	"-none-1m",
+	"_none",
+	"_minimal",
+	"_low",
+	"_medium",
+	"_high",
+	"_xhigh",
+	"_max",
+	"_thinking",
 }
 
 // Special private Devin upstream aliases that cannot be dynamically inferred.
@@ -120,6 +138,23 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 		canonicalBase = "gemini-3-8-flash"
 	}
 
+	normalizedUnder := strings.ReplaceAll(canonicalBase, "-", "_")
+	switch normalizedUnder {
+	case "model_gpt_5_2":
+		gptLevels := []string{"none", "low", "medium", "high", "xhigh"}
+		eff := clampEffort(effort, gptLevels, "low")
+		return "MODEL_GPT_5_2_" + strings.ToUpper(eff)
+	case "model_google_gemini_3_0_flash":
+		gemLevels := []string{"minimal", "low", "medium", "high"}
+		eff := clampEffort(effort, gemLevels, "high")
+		return "MODEL_GOOGLE_GEMINI_3_0_FLASH_" + strings.ToUpper(eff)
+	case "model_claude_4_5_opus":
+		if effort != "" && effort != "none" {
+			return "MODEL_CLAUDE_4_5_OPUS_THINKING"
+		}
+		return "MODEL_CLAUDE_4_5_OPUS"
+	}
+
 	// 6. Look up dynamic model metadata from the Devin catalog (devin_models.json)
 	modelInfo := registry.LookupDevinModel(canonicalBase)
 	if modelInfo == nil && canonicalBase != lowerBase {
@@ -151,6 +186,29 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 			return "glm-5-2-max"
 		}
 		return "glm-5-2"
+	case "glm-5-2-1m":
+		if effort == "none" {
+			return "glm-5-2-none-1m"
+		}
+		if effort == "max" {
+			return "glm-5-2-max-1m"
+		}
+		return "glm-5-2-1m"
+	case "claude-opus-4-6", "claude-sonnet-4-6":
+		if effort != "" && effort != "none" {
+			return canonicalBase + "-thinking"
+		}
+		return canonicalBase
+	case "claude-opus-4-6-1m":
+		if effort != "" && effort != "none" {
+			return "claude-opus-4-6-thinking-1m"
+		}
+		return canonicalBase
+	case "claude-sonnet-4-6-1m":
+		if effort != "" && effort != "none" {
+			return "claude-sonnet-4-6-thinking-1m"
+		}
+		return canonicalBase
 	}
 
 	// 8. If model has no thinking levels defined in catalog, treat as bare model

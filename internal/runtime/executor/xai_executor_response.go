@@ -9,10 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -860,24 +858,6 @@ func appendXAIReasoningSummary(previous json.RawMessage, currentSummary []gjson.
 		updated = updatedItem
 	}
 	return updated, true
-}
-
-// xaiSupportsReasoningEffort reports whether the model accepts Responses API
-// reasoning.effort. Capability comes from model registry thinking metadata
-// (static models.json and dynamic registrations), not a hard-coded name allowlist.
-func xaiSupportsReasoningEffort(model string) bool {
-	name := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
-	if idx := strings.LastIndex(name, "/"); idx >= 0 {
-		name = name[idx+1:]
-	}
-	if name == "" {
-		return false
-	}
-	info := registry.LookupModelInfo(name, "xai")
-	if info == nil || info.Thinking == nil {
-		return false
-	}
-	return len(info.Thinking.Levels) > 0
 }
 
 func xaiNormalizeReasoningSummaryEventLine(line []byte, eventName string) []byte {

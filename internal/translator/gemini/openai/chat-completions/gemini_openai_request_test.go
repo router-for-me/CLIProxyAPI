@@ -168,8 +168,8 @@ func TestConvertOpenAIRequestToGeminiPreservesReasoningContent(t *testing.T) {
 	if !part.Get("thought").Bool() {
 		t.Fatalf("reasoning part should be marked as thought. Output: %s", result)
 	}
-	if got := part.Get("thoughtSignature").String(); got != geminiFunctionThoughtSignature {
-		t.Fatalf("thoughtSignature = %q, want bypass sentinel. Output: %s", got, result)
+	if part.Get("thoughtSignature").Exists() {
+		t.Fatalf("reasoning part should not synthesize thoughtSignature; output=%s", result)
 	}
 }
 
@@ -195,6 +195,9 @@ func TestConvertOpenAIRequestToGeminiPreservesReasoningBeforeVisibleContentAndTo
 	}
 	if got := parts[0].Get("text").String(); got != "thinking only" || !parts[0].Get("thought").Bool() {
 		t.Fatalf("first part should be the reasoning thought. Output: %s", result)
+	}
+	if parts[0].Get("thoughtSignature").Exists() {
+		t.Fatalf("first part should not synthesize thoughtSignature. Output: %s", result)
 	}
 	if got := parts[1].Get("text").String(); got != "visible answer" || parts[1].Get("thought").Bool() {
 		t.Fatalf("second part should be visible assistant content. Output: %s", result)

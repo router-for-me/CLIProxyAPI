@@ -33,6 +33,52 @@ type SessionInfo struct {
 // SessionTreeInfo is an alias for SessionInfo for backward compatibility.
 type SessionTreeInfo = SessionInfo
 
+// sessionObject indexes top-level fields once so missing session keys do not
+// rescan large message arrays for every candidate path.
+type sessionObject struct {
+	result     gjson.Result
+	fields     map[string]gjson.Result
+	duplicates map[string]bool
+}
+
+func newSessionObject(result gjson.Result) sessionObject {
+	object := sessionObject{result: result}
+	if result.Type != gjson.JSON {
+		return object
+	}
+	result.ForEach(func(key, value gjson.Result) bool {
+		if object.fields == nil {
+			object.fields = make(map[string]gjson.Result)
+		}
+		if _, exists := object.fields[key.Str]; exists {
+			if object.duplicates == nil {
+				object.duplicates = make(map[string]bool)
+			}
+			object.duplicates[key.Str] = true
+		} else {
+			object.fields[key.Str] = value
+		}
+		return true
+	})
+	return object
+}
+
+func (object sessionObject) Exists() bool {
+	return object.result.Exists()
+}
+
+func (object sessionObject) Get(path string) gjson.Result {
+	key, remaining, nested := strings.Cut(path, ".")
+	if nested && object.duplicates[key] {
+		return object.result.Get(path)
+	}
+	value := object.fields[key]
+	if nested && value.Exists() {
+		return value.Get(remaining)
+	}
+	return value
+}
+
 // ExtractSessionInfo extracts session hierarchy and client identification from request attributes.
 // Priority matches selector.go:
 //  1. X-Claude-Code-Session-Id
@@ -55,18 +101,18 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 	}
 
-	var root gjson.Result
-	var reqRoot gjson.Result
+	var root sessionObject
+	var reqRoot sessionObject
 	var hasNestedReq bool
 	var parentCandidate string
 
 	if len(payload) > 0 {
-		root = util.ParseGJSONBytesNoCopy(payload)
+		root = newSessionObject(util.ParseGJSONBytesNoCopy(payload))
 		reqRoot = root
 		req := root.Get("request")
 		hasNestedReq = req.Exists() && !root.Get("contents").Exists()
 		if hasNestedReq {
-			reqRoot = req
+			reqRoot = newSessionObject(req)
 		}
 		for _, p := range []string{
 			// Standard session / thread parent keys
@@ -853,7 +899,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	return SessionInfo{}, false
 }
 
-func isBodyForkCandidate(root, reqRoot gjson.Result, hasNestedReq bool) bool {
+func isBodyForkCandidate(root, reqRoot sessionObject, hasNestedReq bool) bool {
 	if !root.Exists() {
 		return false
 	}

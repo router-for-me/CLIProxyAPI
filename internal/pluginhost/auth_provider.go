@@ -388,7 +388,17 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		data.Metadata = cloneAnyMap(auth.Metadata)
 	}
 	if len(data.Attributes) == 0 {
-		data.Attributes = cloneStringMap(auth.Attributes)
+		if auth != nil {
+			data.Attributes = cloneStringMap(auth.Attributes)
+		}
+	} else if auth != nil {
+		attributes := cloneStringMap(data.Attributes)
+		for key, value := range auth.Attributes {
+			if _, exists := attributes[key]; !exists {
+				attributes[key] = value
+			}
+		}
+		data.Attributes = attributes
 	}
 	preserveFileAuthPriority(&data, auth)
 	if len(data.StorageJSON) == 0 {
@@ -399,7 +409,11 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	} else {
 		data.NextRefreshAfter = pluginResp.NextRefreshAfter
 	}
-	next := h.AuthDataToCoreAuth(data, "", data.FileName)
+	path := ""
+	if auth != nil && auth.Attributes != nil {
+		path = auth.Attributes[coreauth.AttributePath]
+	}
+	next := h.AuthDataToCoreAuth(data, path, data.FileName)
 	if next == nil {
 		return nil, true, fmt.Errorf("auth provider refresh returned invalid auth data")
 	}
@@ -601,9 +615,15 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	}
 	path = strings.TrimSpace(path)
 	if path != "" {
-		attributes[coreauth.AttributePath] = path
-		attributes[coreauth.AttributeSource] = path
-		attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+		if attributes[coreauth.AttributePath] == "" {
+			attributes[coreauth.AttributePath] = path
+		}
+		if attributes[coreauth.AttributeSource] == "" {
+			attributes[coreauth.AttributeSource] = path
+		}
+		if attributes[coreauth.AttributeSourceBackend] == "" {
+			attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+		}
 	}
 	fileName = strings.TrimSpace(firstNonEmpty(data.FileName, fileName))
 	if fileName != "" && attributes[coreauth.AttributeSource] == "" {

@@ -205,6 +205,65 @@ func TestHostPickAuthAllowsKnownBuiltinDelegates(t *testing.T) {
 	}
 }
 
+func TestHostPickAuthTerminalRejection(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "scheduler",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+			return pluginapi.SchedulerPickResponse{
+				Handled:      true,
+				Reject:       true,
+				RejectCode:   "quota_exceeded",
+				RejectReason: "all candidates exceed quota",
+			}, nil
+		})}},
+	})
+
+	resp, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1"))
+	if errPick != nil {
+		t.Fatalf("PickAuth() error = %v, want nil", errPick)
+	}
+	if !handled {
+		t.Fatal("PickAuth() handled = false, want true")
+	}
+	if !resp.Reject {
+		t.Fatal("PickAuth() resp.Reject = false, want true")
+	}
+	if resp.RejectCode != "quota_exceeded" {
+		t.Fatalf("PickAuth() RejectCode = %q, want quota_exceeded", resp.RejectCode)
+	}
+	if resp.RejectReason != "all candidates exceed quota" {
+		t.Fatalf("PickAuth() RejectReason = %q, want all candidates exceed quota", resp.RejectReason)
+	}
+}
+
+func TestHostPickAuthTerminalRejectionWhitespaceDefaults(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "scheduler",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+			return pluginapi.SchedulerPickResponse{
+				Handled:      true,
+				Reject:       true,
+				RejectCode:   "   ",
+				RejectReason: "\t  \n",
+			}, nil
+		})}},
+	})
+
+	resp, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1"))
+	if errPick != nil {
+		t.Fatalf("PickAuth() error = %v, want nil", errPick)
+	}
+	if !handled || !resp.Reject {
+		t.Fatalf("PickAuth() handled=%v, reject=%v, want true/true", handled, resp.Reject)
+	}
+	if resp.RejectCode != "auth_unavailable" {
+		t.Fatalf("PickAuth() RejectCode = %q, want auth_unavailable", resp.RejectCode)
+	}
+	if resp.RejectReason != "scheduler rejected candidate selection" {
+		t.Fatalf("PickAuth() RejectReason = %q, want scheduler rejected candidate selection", resp.RejectReason)
+	}
+}
+
 func TestHostSchedulerWantsAcrossPriorities(t *testing.T) {
 	hostDefault := newHostWithRecords(capabilityRecord{
 		id:       "default-sched",

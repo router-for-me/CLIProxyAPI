@@ -227,9 +227,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if errIntercept != nil {
 			return nil, errIntercept
 		}
-		if executionModel == "" {
-			execReq = attachResolvedAPIKeyModelInfo(routing, execReq, auth, routeModel, execModel)
-		}
+		execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, execModel, executionModel != "")
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, errCtx
 		}

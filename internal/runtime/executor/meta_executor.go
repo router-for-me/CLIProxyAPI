@@ -53,7 +53,7 @@ func (e *MetaExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 		req.Header.Del("Authorization")
 	}
 	req.Header.Set("User-Agent", metaUserAgent)
-	req.Header.Set("X-Client-Id:", "tbh:tui")
+	req.Header.Set("X-Client-Id", "tbh:tui")
 
 	var attrs map[string]string
 	if auth != nil {
@@ -135,6 +135,18 @@ func (e *MetaExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if minted.UserFullName != "" {
 		auth.Metadata["name"] = minted.UserFullName
 	}
+	if minted.SubsTierName != "" {
+		auth.Metadata["subs_tier_name"] = minted.SubsTierName
+	} else {
+		delete(auth.Metadata, "subs_tier_name")
+	}
+	if minted.SubsTierID != "" {
+		auth.Metadata["subs_tier_id"] = minted.SubsTierID
+	} else {
+		delete(auth.Metadata, "subs_tier_id")
+	}
+	auth.Metadata["is_subs_active"] = minted.IsSubsActive
+	auth.Metadata["has_payment_method"] = minted.HasPaymentMethod
 	auth.Metadata["type"] = "meta"
 	nowStr := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = nowStr
@@ -331,7 +343,7 @@ func metaCreds(a *cliproxyauth.Auth) (baseURL, token string) {
 }
 
 func parseMetaRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
-	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
+	if (statusCode != http.StatusTooManyRequests && statusCode != http.StatusNotFound) || len(errorBody) == 0 {
 		return nil
 	}
 	if resetsAt := gjson.GetBytes(errorBody, "error.resets_at").Int(); resetsAt > 0 {

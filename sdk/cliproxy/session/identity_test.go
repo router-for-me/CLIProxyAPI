@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unsafe"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -619,5 +620,31 @@ func TestNormalizeToCanonicalUUID(t *testing.T) {
 	derivedUUID := "derived:ctx:v1:01a07e72-c84d-7fd3-8207-d217b41cc649"
 	if got := NormalizeToCanonicalUUID(derivedUUID); got != "01a07e72-c84d-7fd3-8207-d217b41cc649" {
 		t.Fatalf("NormalizeToCanonicalUUID(%q) = %q, want 01a07e72-c84d-7fd3-8207-d217b41cc649", derivedUUID, got)
+	}
+}
+
+func TestEnrich_DoesNotClonePayloadWhenPopulatingOriginalRequest_Issue6101(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"messages":[{"role":"user","content":"test"}]}`),
+	}
+	opts := cliproxyexecutor.Options{}
+
+	_, enrichedOpts := Enrich(req, opts)
+	if len(enrichedOpts.OriginalRequest) == 0 {
+		t.Fatal("expected OriginalRequest to be populated")
+	}
+	if unsafe.SliceData(enrichedOpts.OriginalRequest) != unsafe.SliceData(req.Payload) {
+		t.Fatal("Enrich allocated a new copy of Payload instead of reusing the slice reference for OriginalRequest")
+	}
+
+	// When caller explicitly provides an independent OriginalRequest, Enrich preserves it
+	independentOriginal := []byte(`{"messages":[{"role":"user","content":"original"}]}`)
+	optsWithOriginal := cliproxyexecutor.Options{
+		OriginalRequest: independentOriginal,
+	}
+	_, enrichedOpts2 := Enrich(req, optsWithOriginal)
+	if unsafe.SliceData(enrichedOpts2.OriginalRequest) != unsafe.SliceData(independentOriginal) {
+		t.Fatal("Enrich replaced explicitly provided OriginalRequest")
 	}
 }

@@ -202,6 +202,195 @@ func TestCodexExecutorIsCompatConvertsAgentMessage(t *testing.T) {
 	}
 }
 
+func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(request.Body)
+		if errRead != nil {
+			http.Error(w, errRead.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	payload := codexSpawnAgentTestPayload()
+	baseCfg := config.Config{
+		Codex: config.CodexConfig{OptimizeMultiAgentV2: true},
+		CodexKey: []config.CodexKey{{
+			APIKey:  "test",
+			BaseURL: server.URL,
+			Models: []config.CodexModel{
+				{Name: "compat-model", Alias: "compat-alias", IsCompat: true},
+				{Name: "native-model", Alias: "native-alias", IsCompat: false},
+			},
+		}},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test",
+		},
+	}
+
+	t.Run("is-compat strips author, recipient, and internal passthrough metadata", func(t *testing.T) {
+		upstreamBody = nil
+		cfg := baseCfg
+		executor := NewCodexExecutor(&cfg)
+		ctx := codexSpawnAgentTestContext()
+		req := cliproxyexecutor.Request{Model: "compat-model", Payload: payload}
+		opts := cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Headers:      http.Header{"User-Agent": []string{"Codex Desktop/0.154.0"}},
+		}
+		if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
+			t.Fatalf("Execute() error = %v", errExecute)
+		}
+		message := gjson.GetBytes(upstreamBody, "input.1")
+		if message.Get("type").String() != "message" {
+			t.Fatalf("input.1.type = %q, want message; body=%s", message.Get("type").String(), upstreamBody)
+		}
+		if message.Get("role").String() != "user" {
+			t.Fatalf("input.1.role = %q, want user; body=%s", message.Get("role").String(), upstreamBody)
+		}
+		if author := message.Get("author"); author.Exists() {
+			t.Fatalf("author was not stripped under is-compat: true; got=%s", author.String())
+		}
+		if recipient := message.Get("recipient"); recipient.Exists() {
+			t.Fatalf("recipient was not stripped under is-compat: true; got=%s", recipient.String())
+		}
+		if passthrough := message.Get("internal_chat_message_metadata_passthrough"); passthrough.Exists() {
+			t.Fatalf("internal_chat_message_metadata_passthrough was not stripped under is-compat: true; got=%s", passthrough.String())
+		}
+	})
+
+	t.Run("is-compat stream strips author, recipient, and internal passthrough metadata", func(t *testing.T) {
+		upstreamBody = nil
+		cfg := baseCfg
+		executor := NewCodexExecutor(&cfg)
+		ctx := codexSpawnAgentTestContext()
+		req := cliproxyexecutor.Request{Model: "compat-model", Payload: payload}
+		opts := cliproxyexecutor.Options{
+			Stream:       true,
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Headers:      http.Header{"User-Agent": []string{"Codex Desktop/0.154.0"}},
+		}
+		streamResult, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		if streamResult != nil && streamResult.Chunks != nil {
+			for range streamResult.Chunks {
+			}
+		}
+		message := gjson.GetBytes(upstreamBody, "input.1")
+		if message.Get("type").String() != "message" {
+			t.Fatalf("stream input.1.type = %q, want message; body=%s", message.Get("type").String(), upstreamBody)
+		}
+		if author := message.Get("author"); author.Exists() {
+			t.Fatalf("stream author was not stripped under is-compat: true; got=%s", author.String())
+		}
+		if recipient := message.Get("recipient"); recipient.Exists() {
+			t.Fatalf("stream recipient was not stripped under is-compat: true; got=%s", recipient.String())
+		}
+		if passthrough := message.Get("internal_chat_message_metadata_passthrough"); passthrough.Exists() {
+			t.Fatalf("stream internal_chat_message_metadata_passthrough was not stripped under is-compat: true; got=%s", passthrough.String())
+		}
+	})
+
+	t.Run("is-compat compact strips author, recipient, and internal passthrough metadata", func(t *testing.T) {
+		upstreamBody = nil
+		cfg := baseCfg
+		executor := NewCodexExecutor(&cfg)
+		ctx := codexSpawnAgentTestContext()
+		req := cliproxyexecutor.Request{Model: "compat-model", Payload: payload}
+		opts := cliproxyexecutor.Options{
+			Alt:          "responses/compact",
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Headers:      http.Header{"User-Agent": []string{"Codex Desktop/0.154.0"}},
+		}
+		if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
+			t.Fatalf("Execute() compact error = %v", errExecute)
+		}
+		message := gjson.GetBytes(upstreamBody, "input.1")
+		if message.Get("type").String() != "message" {
+			t.Fatalf("compact input.1.type = %q, want message; body=%s", message.Get("type").String(), upstreamBody)
+		}
+		if author := message.Get("author"); author.Exists() {
+			t.Fatalf("compact author was not stripped under is-compat: true; got=%s", author.String())
+		}
+		if recipient := message.Get("recipient"); recipient.Exists() {
+			t.Fatalf("compact recipient was not stripped under is-compat: true; got=%s", recipient.String())
+		}
+		if passthrough := message.Get("internal_chat_message_metadata_passthrough"); passthrough.Exists() {
+			t.Fatalf("compact internal_chat_message_metadata_passthrough was not stripped under is-compat: true; got=%s", passthrough.String())
+		}
+	})
+
+	t.Run("is-compat true with optimize-multi-agent-v2 false strips metadata while preserving agent_message type", func(t *testing.T) {
+		upstreamBody = nil
+		cfg := baseCfg
+		cfg.Codex.OptimizeMultiAgentV2 = false
+		executor := NewCodexExecutor(&cfg)
+		ctx := codexSpawnAgentTestContext()
+		req := cliproxyexecutor.Request{Model: "compat-model", Payload: payload}
+		opts := cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Headers:      http.Header{"User-Agent": []string{"Codex Desktop/0.154.0"}},
+		}
+		if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
+			t.Fatalf("Execute() error = %v", errExecute)
+		}
+		message := gjson.GetBytes(upstreamBody, "input.1")
+		if message.Get("type").String() != "agent_message" {
+			t.Fatalf("input.1.type = %q, want agent_message; body=%s", message.Get("type").String(), upstreamBody)
+		}
+		if message.Get("role").Exists() {
+			t.Fatalf("input.1.role unexpectedly present: %s", upstreamBody)
+		}
+		if author := message.Get("author"); author.Exists() {
+			t.Fatalf("author was not stripped under is-compat: true with optimize=false; got=%s", author.String())
+		}
+		if recipient := message.Get("recipient"); recipient.Exists() {
+			t.Fatalf("recipient was not stripped under is-compat: true with optimize=false; got=%s", recipient.String())
+		}
+		if passthrough := message.Get("internal_chat_message_metadata_passthrough"); passthrough.Exists() {
+			t.Fatalf("internal_chat_message_metadata_passthrough was not stripped under is-compat: true with optimize=false; got=%s", passthrough.String())
+		}
+	})
+
+	t.Run("is-compat false preserves agent_message, author, and recipient", func(t *testing.T) {
+		upstreamBody = nil
+		cfg := baseCfg
+		executor := NewCodexExecutor(&cfg)
+		ctx := codexSpawnAgentTestContext()
+		req := cliproxyexecutor.Request{Model: "native-model", Payload: payload}
+		opts := cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Headers:      http.Header{"User-Agent": []string{"Codex Desktop/0.154.0"}},
+		}
+		if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
+			t.Fatalf("Execute() error = %v", errExecute)
+		}
+		message := gjson.GetBytes(upstreamBody, "input.1")
+		if message.Get("type").String() != "agent_message" {
+			t.Fatalf("input.1.type = %q, want agent_message; body=%s", message.Get("type").String(), upstreamBody)
+		}
+		if author := message.Get("author").String(); author != "/root" {
+			t.Fatalf("input.1.author = %q, want /root", author)
+		}
+		if recipient := message.Get("recipient").String(); recipient != "/root/worker" {
+			t.Fatalf("input.1.recipient = %q, want /root/worker", recipient)
+		}
+		if passthrough := message.Get("internal_chat_message_metadata_passthrough.turn_id").String(); passthrough != "turn_1" {
+			t.Fatalf("input.1.internal_chat_message_metadata_passthrough.turn_id = %q, want turn_1", passthrough)
+		}
+	})
+}
+
 func codexSpawnAgentTestPayload() []byte {
 	return []byte(`{
 		"model":"gpt-5.4",

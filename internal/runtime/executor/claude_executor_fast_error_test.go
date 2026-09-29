@@ -86,7 +86,7 @@ func TestClaudeExecutorFastHTTPErrorPassesThroughWithoutRetry(t *testing.T) {
 			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
 			auth := &cliproxyauth.Auth{ID: "fast-error-test", Metadata: claudeOAuthTestMetadata()}
 			if testCase.oauth {
-				auth.Attributes = map[string]string{"api_key": "sk-ant-oat-fast-error"}
+				auth.Attributes = map[string]string{"api_key": "sk-ant-oat-fast-error", "cloak_mode": "always"}
 			} else {
 				auth.Attributes = map[string]string{"api_key": "sk-ant-api03-fast-error"}
 				auth.Metadata = nil

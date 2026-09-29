@@ -37,6 +37,10 @@ remote-management:
   # When enabled, the panel is only downloaded on first access if missing, and never auto-updated afterward.
   # disable-auto-update-panel: false
 
+  # Base URL of remote management API when using TUI client mode (cliproxyapi --tui).
+  # Defaults to http://127.0.0.1:<port> if not set. Can also be set via --management-base-url.
+  # base-url: "https://proxy.example.com"
+
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
@@ -536,6 +540,8 @@ nonstream-keepalive-interval: 0
 #         # Default false keeps agent_message unchanged for native OpenAI/Codex endpoints.
 #         # It also preserves thinking blocks with empty signatures for compatible upstreams.
 #         is-compat: false
+#         # Optional: enable configuration_update for this API-key model; omitted defaults to false.
+#         support-configuration-update: false
 #         thinking:              # optional: exact thinking capability for this configured model
 #           levels: ["xhigh", "high", "medium", "low"]
 #     excluded-models:

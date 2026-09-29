@@ -220,6 +220,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
+	// Cloaking and ensureCacheControl may push the total over 4 when the client
+	// already sends multiple cache_control blocks.
 	body = enforceCacheControlLimit(body, 4)
 
 	// Native selects the 1h cache pool only for OAuth credentials and pairs it with
