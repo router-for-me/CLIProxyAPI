@@ -340,11 +340,6 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 			alias:     "mcp__" + firstParts.server + "__" + unknownToolID[:len(unknownToolID)-1] + "_" + firstParts.semantic,
 			wantError: "semantic suffix matches multiple declared tools",
 		},
-		{
-			name:      "unrecoverable semantic suffix",
-			alias:     "mcp__" + firstParts.server + "__" + unknownToolID + "_missing_tool",
-			wantError: "no unique request-local match",
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -368,6 +363,40 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
 			}
 		})
+	}
+}
+
+func TestReverseRemapOAuthToolNamesPassesThroughUnrecoverableAlias(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"tool.name"},{"name":"tool/name"}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "ambiguous-alias-caller"})
+	parts, ok := parseClaudeMCPAlias(gjson.GetBytes(remapped, "tools.0.name").String())
+	if !ok {
+		t.Fatalf("alias is invalid: %q", gjson.GetBytes(remapped, "tools.0.name").String())
+	}
+	// A name under a known virtual server that matches no declared alias.
+	unknown := "mcp__" + parts.server + "__aaaaaaaaaaaa_missing_tool"
+
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, unknown))
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v, want nil", errReverse)
+	}
+	if got := gjson.GetBytes(restored, "content.0.name").String(); got != unknown {
+		t.Fatalf("non-stream name = %q, want %q unchanged", got, unknown)
+	}
+
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, unknown))
+	for label, restore := range map[string]func([]byte, map[string]string) ([]byte, error){
+		"reverseRemapOAuthToolNamesFromStreamLine":  reverseRemapOAuthToolNamesFromStreamLine,
+		"restoreClaudeOAuthToolNamesFromStreamLine": restoreClaudeOAuthToolNamesFromStreamLine,
+	} {
+		out, errStream := restore(line, reverseMap)
+		if errStream != nil {
+			t.Fatalf("%s() error = %v, want nil", label, errStream)
+		}
+		if got := gjson.GetBytes(bytes.TrimPrefix(out, []byte("data: ")), "content_block.name").String(); got != unknown {
+			t.Fatalf("%s() stream name = %q, want %q unchanged", label, got, unknown)
+		}
 	}
 }
 
@@ -560,35 +589,27 @@ func TestRemapKeepsReverseMapEmptyWhenOnlyCallerMCPToolsArePresent(t *testing.T)
 	}
 }
 
-func TestReverseRemapOAuthToolNamesMarksTrailingMarkupFailureRequestScoped(t *testing.T) {
+func TestReverseRemapOAuthToolNamesPassesThroughTrailingMarkupAlias(t *testing.T) {
 	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_clear_thinking"
 	malformedAlias := alias + "</parameter>\n<parameter name=\"merge\""
 	reverseMap := map[string]string{alias: "clear_thinking"}
 
 	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, malformedAlias))
 	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
-	if errReverse == nil {
-		t.Fatal("reverseRemapOAuthToolNames() error = nil, want fail-closed alias error")
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v, want nil", errReverse)
 	}
 	if !bytes.Equal(restored, response) {
 		t.Fatalf("reverseRemapOAuthToolNames() returned modified response: %s", restored)
 	}
-	var requestErr cliproxyexecutor.RequestScopedError
-	if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
-		t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
-	}
 
 	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, malformedAlias))
 	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
-	if errStream == nil {
-		t.Fatal("reverseRemapOAuthToolNamesFromStreamLine() error = nil, want fail-closed alias error")
+	if errStream != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want nil", errStream)
 	}
 	if !bytes.Equal(restoredLine, line) {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() returned modified line: %s", restoredLine)
-	}
-	requestErr = nil
-	if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
-		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
 	}
 }
 

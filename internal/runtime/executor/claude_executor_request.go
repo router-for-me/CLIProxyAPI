@@ -2476,7 +2476,8 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		}
 	}
 
-	return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)}
+	log.Debugf("claude oauth mcp alias: no unique request-local match for tool name %q; leaving unchanged", name)
+	return "", false, nil
 }
 
 // reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses
