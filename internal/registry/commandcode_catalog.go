@@ -76,12 +76,17 @@ var commandCodeUpdaterOnce sync.Once
 var (
 	commandCodeSpellingMu        sync.RWMutex
 	commandCodeOfficialSpellings = make(map[string]string)
+	commandCodeModelEndpoints    = make(map[string][]string)
 )
 
 // registerCommandCodeOfficialSpelling records the official spelling for a
 // catalog model id so upstream requests can be rewritten. Later duplicates
 // sharing the same lowercase key keep the first recorded spelling.
 func registerCommandCodeOfficialSpelling(officialID string) {
+	registerCommandCodeModelMeta(officialID, nil)
+}
+
+func registerCommandCodeModelMeta(officialID string, endpoints []string) {
 	trimmed := strings.TrimSpace(officialID)
 	if trimmed == "" {
 		return
@@ -92,6 +97,32 @@ func registerCommandCodeOfficialSpelling(officialID string) {
 	if _, exists := commandCodeOfficialSpellings[key]; !exists {
 		commandCodeOfficialSpellings[key] = trimmed
 	}
+	if len(endpoints) > 0 {
+		commandCodeModelEndpoints[key] = endpoints
+	}
+}
+
+// CommandCodeModelSupportsEndpoint checks if the model supports a specific provider endpoint,
+// e.g. "/responses", "/chat/completions", or "/messages".
+func CommandCodeModelSupportsEndpoint(modelID, endpoint string) bool {
+	key := strings.ToLower(strings.TrimSpace(modelID))
+	ep := strings.ToLower(strings.TrimSpace(endpoint))
+	if !strings.HasPrefix(ep, "/") {
+		ep = "/" + ep
+	}
+	commandCodeSpellingMu.RLock()
+	defer commandCodeSpellingMu.RUnlock()
+	endpoints, ok := commandCodeModelEndpoints[key]
+	if !ok || len(endpoints) == 0 {
+		// If unknown or not specified in remote catalog, assume standard chat/responses
+		return true
+	}
+	for _, e := range endpoints {
+		if strings.EqualFold(strings.TrimSpace(e), ep) {
+			return true
+		}
+	}
+	return false
 }
 
 // CommandCodeUpstreamModelID resolves the model id the Command Code gateway
@@ -249,12 +280,13 @@ type commandCodeRemoteCatalogResponse struct {
 }
 
 type commandCodeRemoteCatalogModel struct {
-	ID            string `json:"id"`
-	Object        string `json:"object"`
-	Created       int64  `json:"created"`
-	OwnedBy       string `json:"owned_by"`
-	Name          string `json:"name"`
-	ContextLength int    `json:"context_length"`
+	ID                 string   `json:"id"`
+	Object             string   `json:"object"`
+	Created            int64    `json:"created"`
+	OwnedBy            string   `json:"owned_by"`
+	Name               string   `json:"name"`
+	ContextLength      int      `json:"context_length"`
+	SupportedEndpoints []string `json:"supported_endpoints"`
 }
 
 // commandCodeRemoteCatalogFetcher performs the remote catalog GET. It is a
@@ -286,7 +318,11 @@ func fetchCommandCodeRemoteCatalogHTTP(ctx context.Context) ([]*ModelInfo, strin
 	// Take a snapshot of the configured transport and build a local client so
 	// a concurrent SetCommandCodeCatalogTransport never mutates the client
 	// mid-request.
-	client := &http.Client{Transport: commandCodeCatalogTransportSnapshot()}
+	tr := commandCodeCatalogTransportSnapshot()
+	client := &http.Client{Transport: tr}
+	if tr == nil {
+		client = http.DefaultClient
+	}
 	resp, errDo := client.Do(req)
 	if errDo != nil {
 		log.Debugf("commandcode remote catalog: fetch %s: %v", commandCodeRemoteCatalogURL, errDo)
@@ -334,10 +370,10 @@ func fetchCommandCodeRemoteCatalogHTTP(ctx context.Context) ([]*ModelInfo, strin
 		if id == "" || strings.Contains(id, " ") {
 			continue
 		}
-		// Record the official spelling before canonicalizing: the
+		// Record the official spelling and endpoints before canonicalizing: the
 		// /alpha/generate gateway matches ids strictly against the official
 		// catalog spelling, while local registrations stay lowercase.
-		registerCommandCodeOfficialSpelling(id)
+		registerCommandCodeModelMeta(id, m.SupportedEndpoints)
 		// Normalize to the same lowercase canonical form the CLI accepts; the
 		// upstream CLI itself canonicalizes model ids case-insensitively.
 		id = strings.ToLower(id)
@@ -381,7 +417,7 @@ type commandCodeCatalogTransportBox struct {
 var commandCodeCatalogTransport atomic.Value
 
 func defaultCommandCodeCatalogTransport() http.RoundTripper {
-	return &http.Transport{Proxy: http.ProxyFromEnvironment}
+	return http.DefaultTransport
 }
 
 func init() {
@@ -404,7 +440,7 @@ func SetCommandCodeCatalogTransport(transport http.RoundTripper) {
 // commandCodeCatalogTransportSnapshot returns the currently configured
 // transport.
 func commandCodeCatalogTransportSnapshot() http.RoundTripper {
-	if box, ok := commandCodeCatalogTransport.Load().(*commandCodeCatalogTransportBox); ok && box != nil {
+	if box, ok := commandCodeCatalogTransport.Load().(*commandCodeCatalogTransportBox); ok && box != nil && box.transport != nil {
 		return box.transport
 	}
 	return defaultCommandCodeCatalogTransport()

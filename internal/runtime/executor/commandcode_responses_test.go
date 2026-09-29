@@ -241,6 +241,113 @@ func TestCommandCodeExecutor_OpenAIFormatUnchanged(t *testing.T) {
 	}
 }
 
+func TestCommandCodeExecutor_GoatTier_NativeResponses_NonStream(t *testing.T) {
+	apiKey := "test-goat-key-nonstream"
+	registry.SetCommandCodeTier(apiKey, registry.CommandCodeTierGoat)
+
+	var nativePathCalled string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nativePathCalled = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"id":"resp-goat-1","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"text","text":"native goat reply"}]}]}`)
+	}))
+	defer ts.Close()
+
+	exec := &CommandCodeExecutor{BaseURL: ts.URL}
+	auth := &cliproxyauth.Auth{ID: "test-auth", Provider: "commandcode", Attributes: map[string]string{"api_key": apiKey}}
+
+	reqJSON := []byte(`{"model":"z-ai/glm-5.3-flash","input":"Hello Goat"}`)
+	res, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "z-ai/glm-5.3-flash",
+		Payload: reqJSON,
+	}, responsesFormatOptions(false))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if nativePathCalled != "/provider/v1/responses" {
+		t.Errorf("expected path /provider/v1/responses, got %s", nativePathCalled)
+	}
+	if !strings.Contains(string(res.Payload), "resp-goat-1") {
+		t.Errorf("expected native payload, got %s", string(res.Payload))
+	}
+}
+
+func TestCommandCodeExecutor_GoatTier_NativeResponses_Stream(t *testing.T) {
+	apiKey := "test-goat-key-stream"
+	registry.SetCommandCodeTier(apiKey, registry.CommandCodeTierGoat)
+
+	var nativePathCalled string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nativePathCalled = r.URL.Path
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.created\ndata: {\"id\":\"resp-goat-stream\"}\n\n")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"status\":\"completed\"}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer ts.Close()
+
+	exec := &CommandCodeExecutor{BaseURL: ts.URL}
+	auth := &cliproxyauth.Auth{ID: "test-auth", Provider: "commandcode", Attributes: map[string]string{"api_key": apiKey}}
+
+	reqJSON := []byte(`{"model":"z-ai/glm-5.3-flash","input":"Hello Stream Goat"}`)
+	res, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "z-ai/glm-5.3-flash",
+		Payload: reqJSON,
+	}, responsesFormatOptions(true))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if nativePathCalled != "/provider/v1/responses" {
+		t.Errorf("expected path /provider/v1/responses, got %s", nativePathCalled)
+	}
+	var output string
+	for chunk := range res.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		output += string(chunk.Payload)
+	}
+	if !strings.Contains(output, "resp-goat-stream") {
+		t.Errorf("missing native stream data in output: %s", output)
+	}
+}
+
+func TestCommandCodeExecutor_GoTier_HarnessFallback_WhenTierIsGo(t *testing.T) {
+	apiKey := "test-go-key-harness"
+	registry.SetCommandCodeTier(apiKey, registry.CommandCodeTierGo)
+
+	var pathCalled string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pathCalled = r.URL.Path
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintln(w, `{"type":"text-delta","id":"txt-0","text":"fallback go reply"}`)
+		fmt.Fprintln(w, `{"type":"finish-step","finishReason":"stop","usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}`)
+	}))
+	defer ts.Close()
+
+	exec := &CommandCodeExecutor{BaseURL: ts.URL}
+	auth := &cliproxyauth.Auth{ID: "test-auth", Provider: "commandcode", Attributes: map[string]string{"api_key": apiKey}}
+
+	reqJSON := []byte(`{"model":"z-ai/glm-5.3-flash","input":"Hello Go"}`)
+	res, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "z-ai/glm-5.3-flash",
+		Payload: reqJSON,
+	}, responsesFormatOptions(false))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Must go to /alpha/generate (harness translation), NEVER /provider/v1/responses
+	if pathCalled != "/alpha/generate" {
+		t.Errorf("expected /alpha/generate for Go tier, got %s", pathCalled)
+	}
+	if !strings.Contains(string(res.Payload), "response") {
+		t.Errorf("expected translated responses format, got %s", string(res.Payload))
+	}
+}
+
 func truncateForLog(b []byte) string {
 	const max = 6000
 	if len(b) <= max {

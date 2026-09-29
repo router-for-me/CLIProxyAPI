@@ -856,9 +856,9 @@ func startModelCatalogUpdaters(localModel, homeEnabled bool, proxyURL string) {
 	// regardless of local/home mode. Route the fetch through the configured
 	// global proxy so catalog traffic follows the same proxy policy as
 	// inference traffic.
-	if transport, _, errProxy := proxyutil.BuildHTTPTransport(proxyURL); errProxy == nil {
+	if transport, _, errProxy := proxyutil.BuildHTTPTransport(proxyURL); errProxy == nil && transport != nil {
 		registry.SetCommandCodeCatalogTransport(transport)
-	} else {
+	} else if errProxy != nil {
 		log.Warnf("commandcode catalog proxy: invalid proxy-url %q: %v", proxyURL, errProxy)
 	}
 	registry.StartCommandCodeModelsUpdater(context.Background())

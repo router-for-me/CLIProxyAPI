@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
@@ -30,6 +32,9 @@ const (
 
 	// CommandCodeGenerateEndpoint is the /alpha/generate route used by the CLI.
 	CommandCodeGenerateEndpoint = "/alpha/generate"
+
+	// CommandCodeProviderResponsesEndpoint is the official Provider API responses route.
+	CommandCodeProviderResponsesEndpoint = "/provider/v1/responses"
 
 	// CommandCodeDefaultVersion is the fallback CLI version header (verified from CLI release 0.52.1).
 	CommandCodeDefaultVersion = "0.52.1"
@@ -117,27 +122,55 @@ func (e *CommandCodeExecutor) RequestToFormat(_ cliproxyexecutor.Request, _ clip
 
 // resolveBaseURL gets the upstream base URL from Auth attributes, env, struct default, or config.
 func (e *CommandCodeExecutor) resolveBaseURL(a *cliproxyauth.Auth) string {
+	return e.resolveEndpoint(a, CommandCodeGenerateEndpoint)
+}
+
+func (e *CommandCodeExecutor) resolveProviderResponsesURL(a *cliproxyauth.Auth) string {
+	return e.resolveEndpoint(a, CommandCodeProviderResponsesEndpoint)
+}
+
+func (e *CommandCodeExecutor) resolveEndpoint(a *cliproxyauth.Auth, defaultSuffix string) string {
 	if a != nil && a.Attributes != nil {
 		if ep := strings.TrimSpace(a.Attributes["endpoint"]); ep != "" {
 			return ep
 		}
 		if bu := strings.TrimSpace(a.Attributes["base_url"]); bu != "" {
-			return strings.TrimRight(bu, "/") + CommandCodeGenerateEndpoint
+			return strings.TrimRight(bu, "/") + defaultSuffix
 		}
 	}
 	if env := strings.TrimSpace(os.Getenv("COMMANDCODE_BASE_URL")); env != "" {
-		return strings.TrimRight(env, "/") + CommandCodeGenerateEndpoint
+		return strings.TrimRight(env, "/") + defaultSuffix
 	}
 	if env := strings.TrimSpace(os.Getenv("COMMAND_CODE_BASE_URL")); env != "" {
-		return strings.TrimRight(env, "/") + CommandCodeGenerateEndpoint
+		return strings.TrimRight(env, "/") + defaultSuffix
 	}
 	if e.BaseURL != "" {
-		if strings.HasSuffix(e.BaseURL, CommandCodeGenerateEndpoint) {
+		if strings.HasSuffix(e.BaseURL, CommandCodeGenerateEndpoint) || strings.HasSuffix(e.BaseURL, CommandCodeProviderResponsesEndpoint) {
 			return e.BaseURL
 		}
-		return strings.TrimRight(e.BaseURL, "/") + CommandCodeGenerateEndpoint
+		return strings.TrimRight(e.BaseURL, "/") + defaultSuffix
 	}
-	return CommandCodeDefaultBaseURL + CommandCodeGenerateEndpoint
+	return CommandCodeDefaultBaseURL + defaultSuffix
+}
+
+// shouldUseNativeResponses determines whether to route a responses request directly to official Provider API.
+func (e *CommandCodeExecutor) shouldUseNativeResponses(ctx context.Context, a *cliproxyauth.Auth, model string) bool {
+	apiKey, err := e.resolveAPIKey(a)
+	if err != nil || apiKey == "" {
+		return false
+	}
+
+	// 1. Check model capability
+	if !registry.CommandCodeModelSupportsEndpoint(model, "/responses") {
+		return false
+	}
+
+	// 2. Trigger non-blocking background tier sync
+	registry.BackgroundSyncCommandCodeTier(ctx, apiKey, e.buildHTTPClient(a))
+
+	// 3. Only route native if confirmed as Goat/Pro/Max/Team tier
+	tier := registry.GetCommandCodeTier(apiKey)
+	return tier == registry.CommandCodeTierGoat
 }
 
 // resolveVersion gets the x-command-code-version to send.
@@ -207,6 +240,18 @@ func (e *CommandCodeExecutor) buildHTTPClient(a *cliproxyauth.Auth) *http.Client
 
 // PrepareRequest injects required authentication and protocol headers into the outbound HTTP request.
 func (e *CommandCodeExecutor) PrepareRequest(req *http.Request, a *cliproxyauth.Auth) error {
+	return e.prepareRequestWithAccept(req, a, "application/x-ndjson")
+}
+
+func (e *CommandCodeExecutor) PrepareNativeRequest(req *http.Request, a *cliproxyauth.Auth, stream bool) error {
+	accept := "application/json"
+	if stream {
+		accept = "text/event-stream"
+	}
+	return e.prepareRequestWithAccept(req, a, accept)
+}
+
+func (e *CommandCodeExecutor) prepareRequestWithAccept(req *http.Request, a *cliproxyauth.Auth, accept string) error {
 	if req == nil {
 		return errors.New("commandcode: request is nil")
 	}
@@ -218,7 +263,7 @@ func (e *CommandCodeExecutor) PrepareRequest(req *http.Request, a *cliproxyauth.
 
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/x-ndjson")
+	req.Header.Set("Accept", accept)
 	req.Header.Set("x-cli-environment", "production")
 	req.Header.Set("x-command-code-version", e.resolveVersion(a))
 
@@ -244,6 +289,26 @@ func (e *CommandCodeExecutor) PrepareRequest(req *http.Request, a *cliproxyauth.
 // into a single standard OpenAI ChatCompletion JSON response.
 func (e *CommandCodeExecutor) Execute(ctx context.Context, a *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	client := e.buildHTTPClient(a)
+
+	// If client requested Responses API and the account is eligible for native Provider API,
+	// try the official /provider/v1/responses endpoint first.
+	if opts.SourceFormat == sdktranslator.FormatOpenAIResponse && e.shouldUseNativeResponses(ctx, a, req.Model) {
+		res, err := e.executeNativeResponses(ctx, a, client, req, opts)
+		if err == nil {
+			return res, nil
+		}
+		// If native endpoint returned 403 upgrade_required, record Go tier and smoothly fall back
+		var statusErr commandCodeStatusError
+		if errors.As(err, &statusErr) && statusErr.code == http.StatusForbidden && strings.Contains(statusErr.msg, "upgrade_required") {
+			if apiKey, errKey := e.resolveAPIKey(a); errKey == nil && apiKey != "" {
+				registry.SetCommandCodeTier(apiKey, registry.CommandCodeTierGo)
+			}
+			log.Warnf("commandcode: native responses 403 upgrade_required, falling back to harness translation for model %s", req.Model)
+		} else {
+			return cliproxyexecutor.Response{}, err
+		}
+	}
+
 	endpoint := e.resolveBaseURL(a)
 
 	payload := req.Payload
@@ -315,10 +380,63 @@ func (e *CommandCodeExecutor) Execute(ctx context.Context, a *cliproxyauth.Auth,
 	}, nil
 }
 
+func (e *CommandCodeExecutor) executeNativeResponses(ctx context.Context, a *cliproxyauth.Auth, client *http.Client, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	endpoint := e.resolveProviderResponsesURL(a)
+	httpReq, errNew := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(req.Payload))
+	if errNew != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("commandcode execute_native_responses: failed to create request: %w", errNew)
+	}
+	if errPrep := e.PrepareNativeRequest(httpReq, a, false); errPrep != nil {
+		return cliproxyexecutor.Response{}, errPrep
+	}
+	resp, errDo := client.Do(httpReq)
+	if errDo != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("commandcode execute_native_responses: network error: %w", errDo)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, CommandCodeMaxErrorBodySize))
+		code := normalizeCommandCodeStatusError(resp.StatusCode, bodyBytes)
+		return cliproxyexecutor.Response{
+			Payload: bodyBytes,
+			Headers: resp.Header,
+		}, commandCodeStatusError{code: code, msg: fmt.Sprintf("commandcode upstream error (status %d): %s", code, string(bodyBytes))}
+	}
+
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil && !errors.Is(errRead, io.EOF) {
+		return cliproxyexecutor.Response{}, fmt.Errorf("commandcode execute_native_responses: failed to read response body: %w", errRead)
+	}
+	return cliproxyexecutor.Response{
+		Payload: bodyBytes,
+		Headers: resp.Header,
+	}, nil
+}
+
 // ExecuteStream handles streaming client requests (stream: true).
 // It streams NDJSON from upstream and emits OpenAI SSE chunks (`chat.completion.chunk`).
 func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, a *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	client := e.buildHTTPClient(a)
+
+	// If client requested Responses API and the account is eligible for native Provider API,
+	// try the official /provider/v1/responses endpoint first.
+	if opts.SourceFormat == sdktranslator.FormatOpenAIResponse && e.shouldUseNativeResponses(ctx, a, req.Model) {
+		res, err := e.executeNativeResponsesStream(ctx, a, client, req, opts)
+		if err == nil {
+			return res, nil
+		}
+		var statusErr commandCodeStatusError
+		if errors.As(err, &statusErr) && statusErr.code == http.StatusForbidden && strings.Contains(statusErr.msg, "upgrade_required") {
+			if apiKey, errKey := e.resolveAPIKey(a); errKey == nil && apiKey != "" {
+				registry.SetCommandCodeTier(apiKey, registry.CommandCodeTierGo)
+			}
+			log.Warnf("commandcode: native responses stream 403 upgrade_required, falling back to harness translation for model %s", req.Model)
+		} else {
+			return nil, err
+		}
+	}
+
 	endpoint := e.resolveBaseURL(a)
 
 	payload := req.Payload
@@ -461,6 +579,65 @@ func (e *CommandCodeExecutor) ExecuteStream(ctx context.Context, a *cliproxyauth
 					return
 				case chunks <- cliproxyexecutor.StreamChunk{Payload: chunk}:
 				}
+			}
+		}
+	}()
+
+	return &cliproxyexecutor.StreamResult{
+		Headers: resp.Header,
+		Chunks:  chunks,
+	}, nil
+}
+
+func (e *CommandCodeExecutor) executeNativeResponsesStream(ctx context.Context, a *cliproxyauth.Auth, client *http.Client, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	endpoint := e.resolveProviderResponsesURL(a)
+	httpReq, errNew := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(req.Payload))
+	if errNew != nil {
+		return nil, fmt.Errorf("commandcode execute_native_responses_stream: failed to create request: %w", errNew)
+	}
+	if errPrep := e.PrepareNativeRequest(httpReq, a, true); errPrep != nil {
+		return nil, errPrep
+	}
+	resp, errDo := client.Do(httpReq)
+	if errDo != nil {
+		return nil, fmt.Errorf("commandcode execute_native_responses_stream: network error: %w", errDo)
+	}
+
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, CommandCodeMaxErrorBodySize))
+		code := normalizeCommandCodeStatusError(resp.StatusCode, bodyBytes)
+		return nil, commandCodeStatusError{code: code, msg: fmt.Sprintf("commandcode upstream error (status %d): %s", code, string(bodyBytes))}
+	}
+
+	chunks := make(chan cliproxyexecutor.StreamChunk, 64)
+	go func() {
+		defer func() {
+			_ = resp.Body.Close()
+			close(chunks)
+		}()
+		scanner := bufio.NewScanner(resp.Body)
+		buf := make([]byte, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			// Native SSE line passthrough
+			payload := make([]byte, len(line)+1)
+			copy(payload, line)
+			payload[len(line)] = '\n'
+
+			select {
+			case <-ctx.Done():
+				chunks <- cliproxyexecutor.StreamChunk{Err: ctx.Err()}
+				return
+			case chunks <- cliproxyexecutor.StreamChunk{Payload: payload}:
+			}
+		}
+		if errScan := scanner.Err(); errScan != nil && !errors.Is(errScan, io.EOF) {
+			select {
+			case <-ctx.Done():
+			case chunks <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("commandcode native stream read: %w", errScan)}:
 			}
 		}
 	}()
