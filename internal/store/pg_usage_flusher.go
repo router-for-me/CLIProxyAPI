@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -379,7 +380,7 @@ func (f *UsageFlusher) toEvent(ctx context.Context, record coreusage.Record) (Us
 		DiscountPct:         discountPct,
 		OriginalCostUSD:     originalCost,
 		EnergyJoules:        energyJoulesPtr(record.EnergyJoules),
-		ProviderMetadata:    record.ProviderMetadata,
+		ProviderMetadata:    maps.Clone(record.ProviderMetadata),
 		LatencyMs:           record.Latency.Milliseconds(),
 		TTFTMs:              record.TTFT.Milliseconds(),
 		Failed:              false, // success path; failed attempts go to usage_errors
