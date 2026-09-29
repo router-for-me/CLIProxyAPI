@@ -1891,7 +1891,7 @@ func executorKeyFromRoutingKey(provider string) string {
 	channel := provider[:i]
 	suffix := provider[i+1:]
 	switch channel {
-	case "claude", "codex", "gemini", "gemini-interactions", "vertex", "xai", "meta", "opencode-go":
+	case "claude", "codex", "gemini", "gemini-interactions", "vertex", "xai", "meta", "opencode-go", "neuralwatt":
 		if isPositiveRowIDSuffix(suffix) {
 			return channel
 		}
