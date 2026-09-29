@@ -159,6 +159,8 @@ func RenderConfigWithPools(providers []store.UpstreamProvider, pools poolLookup)
 			cfg.XAIKey = append(cfg.XAIKey, codexKeyFromProvider(p))
 		case TypeMetaAPIKey:
 			cfg.MetaKey = append(cfg.MetaKey, codexKeyFromProvider(p))
+		case TypeNeuralwattAPIKey:
+			cfg.NeuralwattKey = append(cfg.NeuralwattKey, codexKeyFromProvider(p))
 		case TypeClaudeAPIKey:
 			cfg.ClaudeKey = append(cfg.ClaudeKey, claudeKeyFromProviderWithPools(p, pools)...)
 		case TypeOpenAICompatibility:
@@ -219,6 +221,11 @@ func codexKeyFromProvider(p store.UpstreamProvider) config.CodexKey {
 	}
 	if v, ok := p.ExtraConfig["disable_cooling"].(bool); ok {
 		k.DisableCooling = v
+	}
+	if v, ok := p.ExtraConfig["service_tier"].(string); ok && v != "" {
+		// Round-trip the CodexKey.ServiceTier value. Only Neuralwatt
+		// consumes it; other Codex-style providers leave it empty.
+		k.ServiceTier = v
 	}
 	return k
 }
