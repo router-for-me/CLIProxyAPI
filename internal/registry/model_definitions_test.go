@@ -90,6 +90,14 @@ func TestGetModelsByTypeNeuralwatt(t *testing.T) {
 	if len(byType) != len(direct) {
 		t.Fatalf("GetStaticModelDefinitionsByChannel(%q) = %d; GetNeuralwattModels = %d", "neuralwatt", len(byType), len(direct))
 	}
+	for i := range byType {
+		if byType[i] == nil || direct[i] == nil {
+			t.Fatalf("idx %d: nil model (byType=%v direct=%v)", i, byType[i], direct[i])
+		}
+		if byType[i].ID != direct[i].ID {
+			t.Fatalf("idx %d: byType.ID = %q, want %q", i, byType[i].ID, direct[i].ID)
+		}
+	}
 }
 
 func TestLookupStaticModelInfoNeuralwatt(t *testing.T) {

@@ -117,6 +117,7 @@ func TestMirrorsCatalogByUpstreamName(t *testing.T) {
 		{"claude-api-key", true},
 		{"vertex-api-key", true},
 		{"interactions-api-key", true},
+		{"neuralwatt-api-key", true},
 		{"oauth:claude", false},
 		{"oauth:codex", false},
 		{"", false},
