@@ -4647,5 +4647,269 @@
         "text"
       ]
     }
+  ],
+  "cline": [
+    {
+      "id": "anthropic/claude-sonnet-4-6",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "Claude Sonnet 4.6",
+      "description": "Claude Sonnet 4.6 served through the Cline account API (usage-billed)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "anthropic/claude-opus-4-8",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "Claude Opus 4.8",
+      "description": "Claude Opus 4.8 served through the Cline account API (usage-billed)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "anthropic/claude-haiku-4-5",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "Claude Haiku 4.5",
+      "description": "Claude Haiku 4.5 served through the Cline account API (usage-billed)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "google/gemini-2.5-pro",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "Gemini 2.5 Pro",
+      "description": "Gemini 2.5 Pro served through the Cline account API (usage-billed)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "google/gemini-3.1-pro-preview",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "Gemini 3.1 Pro Preview",
+      "description": "Gemini 3.1 Pro Preview served through the Cline account API (usage-billed)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "openai/gpt-5.4",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "GPT-5.4",
+      "description": "GPT-5.4 served through the Cline account API (usage-billed)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "openai/gpt-5.4-codex",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "GPT-5.4 Codex",
+      "description": "GPT-5.4 Codex served through the Cline account API (usage-billed)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "DeepSeek V4 Flash",
+      "description": "DeepSeek V4 Flash served through the Cline account API (usage-billed)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "moonshotai/kimi-k3",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "Kimi K3",
+      "description": "Kimi K3 served through the Cline account API (usage-billed)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "zai/glm-5.3",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "GLM 5.3",
+      "description": "GLM 5.3 served through the Cline account API (usage-billed)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cline-pass/glm-5.3",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "ClinePass GLM 5.3",
+      "description": "GLM 5.3 served through the Cline account API (ClinePass subscription, prefix cline-pass/)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cline-pass/kimi-k3",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "ClinePass Kimi K3",
+      "description": "Kimi K3 served through the Cline account API (ClinePass subscription, prefix cline-pass/)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cline-pass/deepseek-v4-pro",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "ClinePass DeepSeek V4 Pro",
+      "description": "DeepSeek V4 Pro served through the Cline account API (ClinePass subscription, prefix cline-pass/)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cline-pass/minimax-m3",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "ClinePass MiniMax M3",
+      "description": "MiniMax M3 served through the Cline account API (ClinePass subscription, prefix cline-pass/)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "cline-pass/qwen3.8-max",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "cline",
+      "type": "cline",
+      "display_name": "ClinePass Qwen3.8 Max",
+      "description": "Qwen3.8 Max served through the Cline account API (ClinePass subscription, prefix cline-pass/)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    }
   ]
 }

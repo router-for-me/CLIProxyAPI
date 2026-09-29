@@ -28,6 +28,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewXAIAuthenticator(),
 		sdkAuth.NewDevinAuthenticator(),
 		sdkAuth.NewMetaAuthenticator(),
+		sdkAuth.NewClineAuthenticator(),
 	)
 }
 
@@ -228,6 +229,15 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 	finishAuthRegistrations(s, startedRegs)
 	registrationsFinished = true
 	waitAuthRegistrations(skippedWaits)
+
+	// Lazy per-account model detection for newly seen cline credentials.
+	// Runs detached; a successful fetch persists the auth file, whose WRITE
+	// event flows back through this pipeline for model re-registration.
+	for _, update := range updates {
+		if (update.Action == watcher.AuthUpdateActionAdd || update.Action == watcher.AuthUpdateActionModify) && update.Auth != nil {
+			s.maybeDetectClineModels(update.Auth)
+		}
+	}
 }
 
 func coalesceAuthUpdates(updates []watcher.AuthUpdate) []watcher.AuthUpdate {

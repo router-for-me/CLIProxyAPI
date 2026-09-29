@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	clineauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
@@ -619,6 +620,125 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		response["expires_in"] = deviceFlow.ExpiresIn
 	} else {
 		response["expires_in"] = int(xaiauth.MaxPollDuration / time.Second)
+	}
+	c.JSON(200, response)
+}
+
+func (h *Handler) RequestClineToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Cline authentication...")
+
+	state := fmt.Sprintf("cline-%d", time.Now().UnixNano())
+	authSvc := clineauth.NewClineAuth(h.cfg)
+
+	deviceFlow, errStartDeviceFlow := authSvc.StartDeviceFlow(ctx)
+	if errStartDeviceFlow != nil {
+		log.Errorf("Failed to start Cline device flow: %v", errStartDeviceFlow)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device authorization flow"})
+		return
+	}
+	authURL := strings.TrimSpace(deviceFlow.VerificationURIComplete)
+	if authURL == "" {
+		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
+	}
+
+	RegisterOAuthSession(state, "cline")
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "cline")
+
+		fmt.Println("Waiting for Cline authentication...")
+		bundle, errWaitForAuthorization := authSvc.WaitForAuthorization(pollCtx, deviceFlow)
+		if errWaitForAuthorization != nil {
+			if !IsOAuthSessionPending(state, "cline") {
+				return
+			}
+			log.Errorf("Cline authentication failed: %v", errWaitForAuthorization)
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
+			return
+		}
+		if !IsOAuthSessionPending(state, "cline") {
+			return
+		}
+
+		tokenStorage := authSvc.CreateTokenStorage(bundle)
+		if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
+			log.Error("Cline token exchange returned empty access token")
+			SetOAuthSessionError(state, "Failed to exchange token")
+			return
+		}
+
+		fileName := clineauth.CredentialFileName(tokenStorage.Email, tokenStorage.Subject)
+		label := strings.TrimSpace(tokenStorage.Email)
+		if label == "" {
+			label = "Cline"
+		}
+
+		metadata := map[string]any{
+			"type":          "cline",
+			"access_token":  tokenStorage.AccessToken,
+			"refresh_token": tokenStorage.RefreshToken,
+			"token_type":    tokenStorage.TokenType,
+			"expired":       tokenStorage.Expired,
+			"last_refresh":  tokenStorage.LastRefresh,
+			"base_url":      tokenStorage.BaseURL,
+			"auth_kind":     "oauth",
+		}
+		// The key's presence marks detection as done even for a model-less
+		// account. On fetch failure no marker is persisted so the lazy
+		// first-import path retries later.
+		if bundle != nil && bundle.ModelsDetected {
+			metadata[clineauth.ModelsMetadataKey] = bundle.Models
+		}
+		if tokenStorage.Email != "" {
+			metadata["email"] = tokenStorage.Email
+		}
+		if tokenStorage.Name != "" {
+			metadata["name"] = tokenStorage.Name
+		}
+		if tokenStorage.Subject != "" {
+			metadata["sub"] = tokenStorage.Subject
+		}
+
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "cline",
+			FileName: fileName,
+			Label:    label,
+			Storage:  tokenStorage,
+			Metadata: metadata,
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"base_url":  tokenStorage.BaseURL,
+			},
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "cline"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Cline token to file: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save token to file")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Cline services through this CLI")
+	}()
+
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
+	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
+		response["user_code"] = userCode
+	}
+	if deviceFlow.ExpiresIn > 0 {
+		response["expires_in"] = deviceFlow.ExpiresIn
+	} else {
+		response["expires_in"] = int(clineauth.MaxPollDuration / time.Second)
 	}
 	c.JSON(200, response)
 }

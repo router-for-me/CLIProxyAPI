@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	clineauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -123,6 +124,18 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case "mirasim":
+		// Mirasim relays speak the Anthropic Messages API and expose Claude model IDs.
+		models = registry.GetClaudeModels()
+		if entry := s.resolveConfigMirasimKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildMirasimConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	case "codex":
 		if authKind == "apikey" {
 			if entry := s.resolveConfigCodexKey(a); entry != nil {
@@ -176,6 +189,16 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case "cline":
+		// Prefer the per-account detected model catalog: only models the
+		// account can actually use are advertised. The static registry catalog
+		// remains the offline fallback until detection has happened (or if it
+		// returned nothing).
+		models = registry.GetClineModels()
+		if detected := clineauth.ModelsFromMetadata(a.Metadata); len(detected) > 0 {
+			models = buildClineDetectedModels(detected)
 		}
 		models = applyExcludedModels(models, excluded)
 	default:
@@ -385,10 +408,26 @@ func configEntryForAuthIndex[T any](auth *coreauth.Auth, entries []T) *T {
 }
 
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
-	if auth == nil || s.cfg == nil {
+	if s == nil || s.cfg == nil {
 		return nil
 	}
-	if entry := configEntryForAuthIndex(auth, s.cfg.ClaudeKey); entry != nil {
+	return resolveConfigClaudeStyleKey(auth, s.cfg.ClaudeKey)
+}
+
+// resolveConfigMirasimKey locates the Mirasim config entry backing an auth.
+// MirasimKey reuses the ClaudeKey structure, so the same lookup rules apply.
+func (s *Service) resolveConfigMirasimKey(auth *coreauth.Auth) *config.MirasimKey {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	return resolveConfigClaudeStyleKey(auth, s.cfg.MirasimKey)
+}
+
+func resolveConfigClaudeStyleKey(auth *coreauth.Auth, entries []config.ClaudeKey) *config.ClaudeKey {
+	if auth == nil {
+		return nil
+	}
+	if entry := configEntryForAuthIndex(auth, entries); entry != nil {
 		return entry
 	}
 	var attrKey, attrBase string
@@ -396,8 +435,8 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.ClaudeKey {
-		entry := &s.cfg.ClaudeKey[i]
+	for i := range entries {
+		entry := &entries[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if attrKey != "" && attrBase != "" {
@@ -416,8 +455,8 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 		}
 	}
 	if attrKey != "" {
-		for i := range s.cfg.ClaudeKey {
-			entry := &s.cfg.ClaudeKey[i]
+		for i := range entries {
+			entry := &entries[i]
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
 				return entry
 			}
@@ -877,6 +916,64 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "anthropic", "claude", "claude")
+}
+
+func buildMirasimConfigModels(entry *config.MirasimKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	// Mirasim models reuse the claude wire type and registry channel; only the
+	// catalog owner differs so model listings attribute them to Mirasim.
+	return buildConfigModels(entry.Models, "mirasim", "claude", "claude")
+}
+
+// buildClineDetectedModels converts the per-account detected Cline catalog
+// into registry model infos. Entries already present in the static catalog
+// keep their static metadata (context length, capabilities); new upstream
+// slugs get a minimal cline-shaped info.
+func buildClineDetectedModels(detected []clineauth.ClineModelInfo) []*ModelInfo {
+	now := time.Now().Unix()
+	staticByID := make(map[string]*ModelInfo, 16)
+	for _, staticModel := range registry.GetClineModels() {
+		if staticModel == nil {
+			continue
+		}
+		staticByID[strings.ToLower(strings.TrimSpace(staticModel.ID))] = staticModel
+	}
+	out := make([]*ModelInfo, 0, len(detected))
+	seen := make(map[string]struct{}, len(detected))
+	for _, entry := range detected {
+		id := strings.TrimSpace(entry.ID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		var info *ModelInfo
+		if staticModel, ok := staticByID[key]; ok && staticModel != nil {
+			clone := *staticModel
+			info = &clone
+		} else {
+			info = &ModelInfo{
+				ID:      id,
+				Object:  "model",
+				Created: now,
+				OwnedBy: "cline",
+				Type:    "cline",
+			}
+		}
+		if strings.TrimSpace(entry.Name) != "" {
+			info.DisplayName = strings.TrimSpace(entry.Name)
+		}
+		if strings.TrimSpace(entry.Description) != "" {
+			info.Description = strings.TrimSpace(entry.Description)
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {

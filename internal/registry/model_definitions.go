@@ -35,6 +35,7 @@ type staticModelsJSON struct {
 	XAI         []*ModelInfo `json:"xai"`
 	Devin       []*ModelInfo `json:"devin"`
 	Meta        []*ModelInfo `json:"meta"`
+	Cline       []*ModelInfo `json:"cline"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -85,6 +86,11 @@ func GetKimiModels() []*ModelInfo {
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
+}
+
+// GetClineModels returns the standard Cline model definitions.
+func GetClineModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Cline)
 }
 
 var staticDevinModels = []*ModelInfo{
@@ -480,6 +486,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - xai
 //   - devin
 //   - meta
+//   - cline
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -505,6 +512,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetDevinModels()
 	case "meta", "muse":
 		return GetMetaModels()
+	case "cline":
+		return GetClineModels()
 	default:
 		return nil
 	}
