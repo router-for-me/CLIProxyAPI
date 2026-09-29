@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -42,6 +43,7 @@ func (e *NeuralwattExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 	if e == nil || e.compat == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("neuralwatt executor: compat executor is nil")
 	}
+	ctx = helps.EnsureProviderUsageMetadata(ctx)
 	return e.compat.Execute(ctx, auth, req, opts)
 }
 
@@ -50,6 +52,7 @@ func (e *NeuralwattExecutor) ExecuteStream(ctx context.Context, auth *cliproxyau
 	if e == nil || e.compat == nil {
 		return nil, fmt.Errorf("neuralwatt executor: compat executor is nil")
 	}
+	ctx = helps.EnsureProviderUsageMetadata(ctx)
 	return e.compat.ExecuteStream(ctx, auth, req, opts)
 }
 
@@ -74,6 +77,7 @@ func (e *NeuralwattExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth
 	if e == nil || e.compat == nil {
 		return nil, fmt.Errorf("neuralwatt executor: compat executor is nil")
 	}
+	ctx = helps.EnsureProviderUsageMetadata(ctx)
 	return e.compat.HttpRequest(ctx, auth, req)
 }
 

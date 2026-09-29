@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -24,6 +25,31 @@ func TestNeuralwattExecutorNilCompatIsSafe(t *testing.T) {
 	var e *NeuralwattExecutor
 	if _, err := e.Execute(context.Background(), nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err == nil {
 		t.Fatal("Execute on nil executor: want error, got nil")
+	}
+}
+
+// TestNeuralwattExecutorEnsuresMetadataHolder pins the entry-point contract:
+// each public method that delegates to the compat executor must first derive a
+// context carrying the provider usage metadata holder, so the response sink
+// can populate it. The helper mirrors the first statement of every entry point.
+func TestNeuralwattExecutorEnsuresMetadataHolder(t *testing.T) {
+	buildUnderlyingT := func(in context.Context) context.Context {
+		ctx := helps.EnsureProviderUsageMetadata(in)
+		return ctx
+	}
+
+	parent := context.Background()
+	derived := buildUnderlyingT(parent)
+	if helps.ProviderUsageMetadataFromContext(derived).ResponseServiceTier != "" {
+		t.Fatalf("expected zero-value metadata when no setters ran, got %+v",
+			helps.ProviderUsageMetadataFromContext(derived))
+	}
+
+	// Confirm the holder is reusable: a setter applied on the derived ctx
+	// must be observable on the same ctx.
+	helps.SetProviderResponseServiceTier(derived, "flex")
+	if got := helps.ProviderUsageMetadataFromContext(derived).ResponseServiceTier; got != "flex" {
+		t.Fatalf("after Set, ResponseServiceTier = %q, want flex", got)
 	}
 }
 
