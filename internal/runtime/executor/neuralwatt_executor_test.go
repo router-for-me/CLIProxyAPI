@@ -31,26 +31,72 @@ func TestNeuralwattExecutorNilCompatIsSafe(t *testing.T) {
 // TestNeuralwattExecutorEnsuresMetadataHolder pins the entry-point contract:
 // each public method that delegates to the compat executor must first derive a
 // context carrying the provider usage metadata holder, so the response sink
-// can populate it. The helper mirrors the first statement of every entry point.
+// can populate it. A fake compat captures the ctx handed to each entry point;
+// if any entry point forgot to call EnsureProviderUsageMetadata, the captured
+// ctx would lack the holder and this test fails.
 func TestNeuralwattExecutorEnsuresMetadataHolder(t *testing.T) {
-	buildUnderlyingT := func(in context.Context) context.Context {
-		ctx := helps.EnsureProviderUsageMetadata(in)
-		return ctx
-	}
+	fake := &holderCapturingCompat{}
+	e := &NeuralwattExecutor{compat: fake}
 
-	parent := context.Background()
-	derived := buildUnderlyingT(parent)
-	if helps.ProviderUsageMetadataFromContext(derived).ResponseServiceTier != "" {
-		t.Fatalf("expected zero-value metadata when no setters ran, got %+v",
-			helps.ProviderUsageMetadataFromContext(derived))
+	// Execute
+	if _, err := e.Execute(context.Background(), nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("Execute error: %v", err)
 	}
+	assertHolderInstalled(t, fake.executeCtx, "Execute")
 
-	// Confirm the holder is reusable: a setter applied on the derived ctx
-	// must be observable on the same ctx.
-	helps.SetProviderResponseServiceTier(derived, "flex")
-	if got := helps.ProviderUsageMetadataFromContext(derived).ResponseServiceTier; got != "flex" {
-		t.Fatalf("after Set, ResponseServiceTier = %q, want flex", got)
+	// ExecuteStream
+	if _, err := e.ExecuteStream(context.Background(), nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
 	}
+	assertHolderInstalled(t, fake.executeStreamCtx, "ExecuteStream")
+
+	// HttpRequest
+	if _, err := e.HttpRequest(context.Background(), nil, &http.Request{}); err != nil {
+		t.Fatalf("HttpRequest error: %v", err)
+	}
+	assertHolderInstalled(t, fake.httpRequestCtx, "HttpRequest")
+}
+
+func assertHolderInstalled(t *testing.T, ctx context.Context, method string) {
+	t.Helper()
+	if ctx == nil {
+		t.Fatalf("%s: ctx passed to compat is nil", method)
+	}
+	// A holder must be present and functional on the derived ctx: writing a tier
+	// and reading it back must round-trip. If the entry point forgot to call
+	// EnsureProviderUsageMetadata, the derived ctx would lack the holder and the
+	// setter would be a no-op, leaving the tier empty.
+	helps.SetProviderResponseServiceTier(ctx, "flex")
+	if got := helps.ProviderUsageMetadataFromContext(ctx).ResponseServiceTier; got != "flex" {
+		t.Fatalf("%s: ctx passed to compat lacks the metadata holder (tier = %q, want flex)", method, got)
+	}
+}
+
+// holderCapturingCompat records the context each entry point received so the
+// test can assert the metadata holder was installed before delegation.
+type holderCapturingCompat struct {
+	executeCtx       context.Context
+	executeStreamCtx context.Context
+	httpRequestCtx   context.Context
+}
+
+func (f *holderCapturingCompat) Execute(ctx context.Context, _ *cliproxyauth.Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	f.executeCtx = ctx
+	return cliproxyexecutor.Response{}, nil
+}
+func (f *holderCapturingCompat) ExecuteStream(ctx context.Context, _ *cliproxyauth.Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	f.executeStreamCtx = ctx
+	return &cliproxyexecutor.StreamResult{}, nil
+}
+func (f *holderCapturingCompat) CountTokens(ctx context.Context, _ *cliproxyauth.Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+func (f *holderCapturingCompat) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error {
+	return nil
+}
+func (f *holderCapturingCompat) HttpRequest(ctx context.Context, _ *cliproxyauth.Auth, _ *http.Request) (*http.Response, error) {
+	f.httpRequestCtx = ctx
+	return &http.Response{StatusCode: http.StatusOK}, nil
 }
 
 // recordingSink implements OpenAICompatResponseSink and records the sequence

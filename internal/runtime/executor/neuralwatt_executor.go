@@ -11,6 +11,19 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
+// neuralwattCompat is the subset of OpenAICompatExecutor that NeuralwattExecutor
+// delegates to. It exists so tests can inject a fake that captures the context
+// handed to each entry point and assert the metadata holder was installed.
+// Refresh is intentionally excluded: the wrapper keeps it as a no-op and does
+// not delegate the method, so it does not belong in this seam.
+type neuralwattCompat interface {
+	Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+	ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error)
+	CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error)
+	PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error
+	HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error)
+}
+
 // NeuralwattExecutor executes inference for the Neuralwatt provider.
 //
 // Neuralwatt's API is OpenAI-compatible: a static bearer API key authenticates
@@ -20,7 +33,7 @@ import (
 // (neuralwatt_metadata.go) that captures Neuralwatt's cost headers, SSE cost
 // comment, and energy object into the usage record.
 type NeuralwattExecutor struct {
-	compat *OpenAICompatExecutor
+	compat neuralwattCompat
 	cfg    *config.Config
 }
 
