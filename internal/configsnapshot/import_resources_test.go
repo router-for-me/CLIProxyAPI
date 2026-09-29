@@ -447,3 +447,39 @@ func TestModelExtraFieldsPreserved(t *testing.T) {
 		t.Fatalf("is-compat = %v", thinking[ecModelIsCompat])
 	}
 }
+
+// TestBuildResourcePlanNeuralwattPreservesServiceTier pins that the
+// planner captures config.NeuralwattKey.ServiceTier into the provider
+// row's ExtraConfig under the raw "service_tier" key the render-side
+// codexKeyFromProvider reads. Without this, a PG-first deployment silently
+// drops the billing-tier selection on every reload (PG row → render →
+// merged.NeuralwattKey overwrites the in-memory cfg). Mirrors the
+// convertCodexKeys alpha_search assertion at line 122 above.
+func TestBuildResourcePlanNeuralwattPreservesServiceTier(t *testing.T) {
+	cfg := &config.Config{NeuralwattKey: []config.NeuralwattKey{{
+		APIKey:      "sk-neuralwatt",
+		BaseURL:     "https://api.neuralwatt.com/v1",
+		ServiceTier: "flex",
+	}}}
+
+	plan, err := BuildResourcePlan(cfg)
+	if err != nil {
+		t.Fatalf("BuildResourcePlan: %v", err)
+	}
+	if len(plan.Providers) != 1 {
+		t.Fatalf("Providers len = %d; want 1", len(plan.Providers))
+	}
+	p := plan.Providers[0]
+	if p.ProviderType != ptNeuralwattAPIKey {
+		t.Fatalf("ProviderType = %q; want %q", p.ProviderType, ptNeuralwattAPIKey)
+	}
+	if p.APIKey != "sk-neuralwatt" || p.BaseURL != "https://api.neuralwatt.com/v1" {
+		t.Fatalf("provider basics = %+v", p)
+	}
+	if p.Name != "neuralwatt-1" {
+		t.Fatalf("Name = %q; want positional neuralwatt-1", p.Name)
+	}
+	if p.ExtraConfig["service_tier"] != "flex" {
+		t.Fatalf("ExtraConfig[service_tier] = %v; want flex", p.ExtraConfig["service_tier"])
+	}
+}

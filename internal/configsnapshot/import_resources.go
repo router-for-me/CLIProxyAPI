@@ -419,6 +419,15 @@ func convertNeuralwattKeys(in []config.CodexKey) []store.UpstreamProvider {
 		if k.DisableCooling {
 			extra[ecDisableCooling] = true
 		}
+		if k.ServiceTier != "" {
+			// The render-side helper codexKeyFromProvider reads the raw
+			// "service_tier" key, so the planner writes the same key for
+			// a planner→render round-trip. (Pre-existing planners use the
+			// namespaced "nixllm.yaml.*" form; we deliberately match the
+			// render contract here so PG re-imports do not silently drop
+			// Neuralwatt's billing-tier selection.)
+			extra["service_tier"] = k.ServiceTier
+		}
 		if len(extra) > 0 {
 			p.ExtraConfig = extra
 		}
