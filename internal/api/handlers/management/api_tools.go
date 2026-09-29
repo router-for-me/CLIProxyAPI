@@ -295,7 +295,6 @@ func (h *Handler) refreshKiroOAuthAccessToken(ctx context.Context, auth *coreaut
 	return refreshed.AccessToken, nil
 }
 
-
 func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()

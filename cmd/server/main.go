@@ -768,6 +768,11 @@ func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCo
 }
 
 func startModelCatalogUpdaters(localModel, homeEnabled bool) {
+	if localModel {
+		// Kiro discovers its catalog from the account endpoint rather than
+		// models.json, so it needs the same opt-out recorded separately.
+		registry.DisableKiroDynamicModels()
+	}
 	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
 	if startCodexClient {
 		registry.StartCodexClientModelsUpdater(context.Background())

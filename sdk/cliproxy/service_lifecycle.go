@@ -198,6 +198,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.registerModelRefreshCallback()
+	s.StartKiroModelsUpdater(context.Background())
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil && !homeEnabled {

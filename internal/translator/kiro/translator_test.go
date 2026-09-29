@@ -168,3 +168,27 @@ func TestCleanKiroModelIDAliases(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanKiroModelIDNormalizesUnknownDashedVersions covers models that are not
+// in the alias switch, which is how newly released Kiro models arrive.
+func TestCleanKiroModelIDNormalizesUnknownDashedVersions(t *testing.T) {
+	tests := map[string]string{
+		"claude-opus-5-5":          "claude-opus-5.5",
+		"claude-opus-5.5":          "claude-opus-5.5",
+		"kiro/claude-opus-5-5":     "claude-opus-5.5",
+		"claude-opus-5-5-thinking": "claude-opus-5.5",
+		// A future release should resolve without another hardcoded case.
+		"claude-sonnet-6-2": "claude-sonnet-6.2",
+		"gpt-5-7-sol":       "gpt-5.7-sol",
+		// Mid-name versions and single-segment versions must stay untouched.
+		"claude-3-5-sonnet": "claude-3-5-sonnet",
+		"claude-opus-5":     "claude-opus-5",
+		"glm-5":             "glm-5",
+		"qwen3-coder-next":  "qwen3-coder-next",
+	}
+	for input, want := range tests {
+		if got := CleanKiroModelID(input); got != want {
+			t.Fatalf("CleanKiroModelID(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

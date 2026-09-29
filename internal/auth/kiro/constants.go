@@ -40,7 +40,6 @@ func DefaultProfileArnForMethod(authMethod string) string {
 	}
 }
 
-
 var (
 	// DefaultScopes for CodeWhisperer/Kiro OIDC requests.
 	DefaultScopes = []string{

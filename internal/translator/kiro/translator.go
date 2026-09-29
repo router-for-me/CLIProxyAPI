@@ -334,7 +334,25 @@ func CleanKiroModelID(model string) string {
 	case "gpt-5.6-luna", "gpt-5-6-luna":
 		return "gpt-5.6-luna"
 	}
-	return model
+	return normalizeKiroVersionSeparator(model)
+}
+
+// kiroDashVersionPattern matches a dashed major-minor version in the model
+// families Kiro publishes with dotted versions, for example "claude-opus-5-5"
+// or "gpt-5-7-sol". The leading family segment must not itself end in a digit so
+// mid-name versions such as "claude-3-5-sonnet" are left untouched.
+var kiroDashVersionPattern = regexp.MustCompile(`^([a-z]+(?:-[a-z]+)*)-(\d+)-(\d+)((?:-[a-z0-9.]+)*)$`)
+
+// normalizeKiroVersionSeparator rewrites dashed major-minor versions into the
+// dotted form Kiro uses in its catalog. Client SDKs commonly emit the dashed
+// form, and handling it generically means newly released models resolve without
+// another hardcoded case.
+func normalizeKiroVersionSeparator(model string) string {
+	match := kiroDashVersionPattern.FindStringSubmatch(strings.ToLower(model))
+	if match == nil {
+		return model
+	}
+	return fmt.Sprintf("%s-%s.%s%s", match[1], match[2], match[3], match[4])
 }
 
 func extractSystemPrompt(system any) string {
