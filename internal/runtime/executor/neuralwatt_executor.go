@@ -56,6 +56,7 @@ func (e *NeuralwattExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 	if e == nil || e.compat == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("neuralwatt executor: compat executor is nil")
 	}
+	req.Payload = applyNeuralwattServiceTier(req.Payload, auth)
 	ctx = helps.EnsureProviderUsageMetadata(ctx)
 	return e.compat.Execute(ctx, auth, req, opts)
 }
@@ -65,6 +66,7 @@ func (e *NeuralwattExecutor) ExecuteStream(ctx context.Context, auth *cliproxyau
 	if e == nil || e.compat == nil {
 		return nil, fmt.Errorf("neuralwatt executor: compat executor is nil")
 	}
+	req.Payload = applyNeuralwattServiceTier(req.Payload, auth)
 	ctx = helps.EnsureProviderUsageMetadata(ctx)
 	return e.compat.ExecuteStream(ctx, auth, req, opts)
 }
