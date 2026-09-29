@@ -8,6 +8,80 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
+// TestUsageFlusherToEventCarriesProviderEnergyAndMetadata guards the Neuralwatt
+// billing side-channel: when a coreusage.Record arrives carrying provider
+// energy and metadata (set by internal/runtime/executor/helps/
+// usage_helpers.go from the in-flight holder), the flusher's toEvent must
+// stamp both fields onto the UsageEvent that flows into InsertEvent /
+// BatchInsertEvents. Without this, even though the record carries the data
+// and the insert binding reads it from UsageEvent, the value lands as zero /
+// empty because the literal in toEvent never copies the fields.
+//
+// toEvent tolerates nil store / nil apiKeyStore (it only calls
+// us.ResolvePricing when f.store != nil), so the test does not need a live
+// Postgres to exercise the field plumbing — it just calls toEvent directly
+// on a flusher constructed with nil backing stores.
+func TestUsageFlusherToEventCarriesProviderEnergyAndMetadata(t *testing.T) {
+	f := NewUsageFlusher(nil, nil, nil, DefaultFlusherConfig())
+	ctx := cancelableTestCtx(t)
+
+	measured := coreusage.Record{
+		Provider: "neuralwatt", Model: "deepseek-v4-pro",
+		APIKey: "sk-test", AuthType: "api_key", Source: "test",
+		RequestedAt: now(),
+		Detail: coreusage.Detail{
+			InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+		},
+		EnergyJoules: 12.5,
+		ProviderMetadata: map[string]any{
+			"request_cost_usd":  0.001,
+			"cache_savings_usd": 0.0001,
+		},
+	}
+	event, _, _, ok := f.toEvent(ctx, measured)
+	if !ok {
+		t.Fatal("toEvent returned ok=false for a valid record")
+	}
+	if event.EnergyJoules == nil {
+		t.Fatal("EnergyJoules = nil; want non-nil pointer to 12.5")
+	}
+	if !approxEqual(*event.EnergyJoules, 12.5) {
+		t.Errorf("EnergyJoules = %v; want 12.5", *event.EnergyJoules)
+	}
+	if event.ProviderMetadata == nil {
+		t.Fatal("ProviderMetadata = nil; want map carrying request_cost_usd and cache_savings_usd")
+	}
+	if cost, ok := event.ProviderMetadata["request_cost_usd"].(float64); !ok || !approxEqual(cost, 0.001) {
+		t.Errorf("ProviderMetadata[request_cost_usd] = %v; want 0.001", event.ProviderMetadata["request_cost_usd"])
+	}
+	if savings, ok := event.ProviderMetadata["cache_savings_usd"].(float64); !ok || !approxEqual(savings, 0.0001) {
+		t.Errorf("ProviderMetadata[cache_savings_usd] = %v; want 0.0001", event.ProviderMetadata["cache_savings_usd"])
+	}
+
+	// Unmeasured case: the executor never populated the holder, so the record
+	// carries the zero value. The flusher must forward EnergyJoules as a nil
+	// pointer (so the column stores SQL NULL rather than a misleading 0) and
+	// leave ProviderMetadata empty/nil so the column default ('{}') kicks in.
+	unmeasured := coreusage.Record{
+		Provider: "openai", Model: "gpt-4o",
+		APIKey: "sk-test2", AuthType: "api_key", Source: "test",
+		RequestedAt: now(),
+		Detail: coreusage.Detail{
+			InputTokens: 1, TotalTokens: 1,
+		},
+	}
+	event2, _, _, ok := f.toEvent(ctx, unmeasured)
+	if !ok {
+		t.Fatal("toEvent returned ok=false for the unmeasured record")
+	}
+	if event2.EnergyJoules != nil {
+		t.Errorf("EnergyJoules = %v; want nil pointer (SQL NULL) for unmeasured event", *event2.EnergyJoules)
+	}
+	if len(event2.ProviderMetadata) != 0 {
+		t.Errorf("ProviderMetadata = %v; want nil/empty for unmeasured event", event2.ProviderMetadata)
+	}
+}
+
 func TestUsageFlusherHandleUsageQueuesRecord(t *testing.T) {
 	store := newTestPostgresStore(t, "flusher_test")
 	ctx := cancelableTestCtx(t)
