@@ -1224,10 +1224,7 @@ func (s *PostgresStore) ensurePolicySchema(ctx context.Context) error {
 	`, usageEventsTable)); err != nil {
 		return fmt.Errorf("postgres store: create usage_events table: %w", err)
 	}
-	// Idempotent migration for deployments that pre-date the Neuralwatt
-	// billing columns. ADD COLUMN IF NOT EXISTS is safe to re-run on every
-	// boot; the column types match the CREATE TABLE defaults above so a
-	// pre-existing table materializes the same shape.
+	// Idempotent ADD COLUMN for deployments predating the Neuralwatt billing columns.
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(
 		`ALTER TABLE %s ADD COLUMN IF NOT EXISTS energy_joules NUMERIC(12,6)`, usageEventsTable,
 	)); err != nil {

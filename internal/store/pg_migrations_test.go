@@ -115,7 +115,7 @@ func TestMigrateUpstreamProviderEntryIdentity(t *testing.T) {
 
 // TestUsageEventsEnergyAndMetadataColumns verifies the Neuralwatt billing
 // columns are materialized by EnsureSchema, both fresh and on existing tables.
-// energy_joules carries per-request watt-hour consumption as NUMERIC(12,6);
+// energy_joules carries per-request energy consumption as NUMERIC(12,6);
 // provider_metadata is a JSONB NOT NULL DEFAULT '{}' so callers can rely on a
 // well-formed object without checking IS NULL.
 func TestUsageEventsEnergyAndMetadataColumns(t *testing.T) {
