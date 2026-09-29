@@ -287,8 +287,8 @@ func TestFileRequestLogger_HomeEnabled_ForwardsSourceLogAndCleansParts(t *testin
 	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
 		t.Fatalf("unmarshal payload: %v payload=%s", errUnmarshal, string(stub.pushed[0]))
 	}
-	if got.RequestID != "home-ws-req-1" {
-		t.Fatalf("request_id = %q, want home-ws-req-1", got.RequestID)
+	if got.RequestID != "ws-req-1" {
+		t.Fatalf("request_id = %q, want ws-req-1", got.RequestID)
 	}
 	if !strings.Contains(got.RequestLog, "Event: websocket.request") {
 		t.Fatalf("forwarded request_log missing websocket request: %s", got.RequestLog)
@@ -316,7 +316,7 @@ func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) 
 		http.MethodPost,
 		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"input":"hello"}`),
-		"stream-req-1",
+		"018f3a5b-1234-7abc-def0-12345678abcd",
 	)
 	if errLog != nil {
 		t.Fatalf("LogStreamingRequest error: %v", errLog)
@@ -341,8 +341,8 @@ func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) 
 	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
 		t.Fatalf("unmarshal payload: %v payload=%s", errUnmarshal, string(stub.pushed[0]))
 	}
-	if got.RequestID != "stream-req-1" {
-		t.Fatalf("request_id = %q, want stream-req-1", got.RequestID)
+	if got.RequestID != "5678abcd" {
+		t.Fatalf("request_id = %q, want 5678abcd", got.RequestID)
 	}
 	if got.RequestLog == "" {
 		t.Fatalf("request_log empty, want non-empty")
@@ -461,7 +461,7 @@ func TestHomeStreamingLogWriter_CloseTerminatesWhenClientUnhealthy(t *testing.T)
 	}
 }
 
-func TestFileRequestLogger_UsesShortRequestIDForLocalAndFullForHome(t *testing.T) {
+func TestFileRequestLogger_UsesShortRequestIDForLocalAndHome(t *testing.T) {
 	fullUUID := "018f3a5b-1234-7abc-def0-12345678abcd"
 	expectedShortID := "5678abcd"
 
@@ -506,7 +506,7 @@ func TestFileRequestLogger_UsesShortRequestIDForLocalAndFullForHome(t *testing.T
 		t.Fatalf("filename %q should not contain full UUID", filename)
 	}
 
-	// 2. Home forwarded payload preserves full UUID across internal communication
+	// 2. Home forwarding uses the same short ID as local filenames.
 	original := currentHomeRequestLogClient
 	defer func() {
 		currentHomeRequestLogClient = original
@@ -548,7 +548,7 @@ func TestFileRequestLogger_UsesShortRequestIDForLocalAndFullForHome(t *testing.T
 	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
 		t.Fatalf("unmarshal payload failed: %v", errUnmarshal)
 	}
-	if got.RequestID != fullUUID {
-		t.Fatalf("home payload request_id = %q, want full UUID %q", got.RequestID, fullUUID)
+	if got.RequestID != expectedShortID {
+		t.Fatalf("home payload request_id = %q, want short ID %q", got.RequestID, expectedShortID)
 	}
 }

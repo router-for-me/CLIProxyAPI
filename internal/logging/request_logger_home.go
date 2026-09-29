@@ -58,7 +58,7 @@ func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers
 	}
 	payload := homeRequestLogPayload{
 		Headers:    cloneHeaders(headers),
-		RequestID:  strings.TrimSpace(requestID),
+		RequestID:  ShortRequestID(requestID),
 		RequestLog: logText,
 	}
 	raw, errMarshal := json.Marshal(&payload)
@@ -235,7 +235,7 @@ func (w *homeStreamingLogWriter) Close() error {
 
 	payload := homeRequestLogPayload{
 		Headers:    cloneHeaders(w.requestHeaders),
-		RequestID:  w.requestID,
+		RequestID:  ShortRequestID(w.requestID),
 		RequestLog: buf.String(),
 	}
 	raw, errMarshal := json.Marshal(&payload)

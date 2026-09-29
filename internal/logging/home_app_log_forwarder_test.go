@@ -119,6 +119,60 @@ func TestHomeAppLogForwarder_StopUnregistersMuxTarget(t *testing.T) {
 	}
 }
 
+func TestHomeAppLogForwarder_ShortRequestIDMatchesConsole(t *testing.T) {
+	tests := []struct {
+		name      string
+		requestID string
+		want      string
+	}{
+		{name: "UUID", requestID: "018f3a5b-1234-7abc-def0-12345678abcd", want: "5678abcd"},
+		{name: "padded UUID", requestID: " 018f3a5b-1234-7abc-def0-12345678abcd \n", want: "5678abcd"},
+		{name: "legacy eight characters", requestID: "00000042", want: "00000042"},
+		{name: "legacy shorter ID", requestID: "req-1", want: "req-1"},
+		{name: "placeholder", requestID: "--------", want: ""},
+		{name: "missing ID", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stub := &stubHomeAppLogClient{heartbeatOK: true}
+			forwarder := &HomeAppLogForwarder{
+				formatter: &LogFormatter{},
+				queue:     make(chan homeAppLogPayload, 1),
+			}
+			forwarder.enabled.Store(true)
+			forwarder.bind(stub)
+			entry := log.NewEntry(log.New())
+			entry.Level = log.InfoLevel
+			entry.Message = "request log"
+			entry.Data["request_id"] = tt.requestID
+			if errFire := forwarder.Fire(entry); errFire != nil {
+				t.Fatalf("Fire: %v", errFire)
+			}
+			if len(forwarder.queue) != 1 {
+				t.Fatalf("queued records = %d, want 1", len(forwarder.queue))
+			}
+			forwarder.forward(<-forwarder.queue)
+			var payload homeAppLogPayload
+			if errUnmarshal := json.Unmarshal(stub.pushedAt(0), &payload); errUnmarshal != nil {
+				t.Fatalf("decode app log: %v", errUnmarshal)
+			}
+			if payload.RequestID != tt.want {
+				t.Fatalf("request_id = %q, want %q", payload.RequestID, tt.want)
+			}
+			consoleID := tt.want
+			if consoleID == "" {
+				consoleID = "--------"
+			}
+			if !strings.Contains(payload.Line, "["+consoleID+"]") {
+				t.Fatalf("log line %q does not contain ID %q", payload.Line, consoleID)
+			}
+			if entry.Data["request_id"] != tt.requestID {
+				t.Fatalf("log entry request ID was changed: %v", entry.Data["request_id"])
+			}
+		})
+	}
+}
+
 func TestHomeAppLogForwardersUseOneProcessWideMuxHook(t *testing.T) {
 	first := StartHomeAppLogForwarder(1)
 	second := StartHomeAppLogForwarder(1)

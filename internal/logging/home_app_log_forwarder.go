@@ -214,7 +214,7 @@ func appLogRequestID(entry *log.Entry) string {
 	if requestID == "--------" {
 		return ""
 	}
-	return requestID
+	return ShortRequestID(requestID)
 }
 
 func (f *HomeAppLogForwarder) formatEntry(entry *log.Entry) (string, error) {
