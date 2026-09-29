@@ -239,11 +239,11 @@ export function buildSchemas() {
     'neuralwatt-api-key': apiKeyBase([
       { name: 'service_tier', label: 'Service tier', type: 'select',
         options: [
-          { value: '', label: 'default (provider default)' },
+          { value: '', label: 'unset (provider default)' },
           { value: 'default', label: 'default (standard)' },
           { value: 'flex', label: 'flex (discounted, may be capacity-shed)' },
         ],
-        hint: 'default: standard tier. flex: discounted tier that may be capacity-shed under load.' },
+        hint: 'default: standard tier. flex: discounted tier that may be capacity-shed under load. Leave blank for the provider default.' },
     ], [], [identifierField]),
     'claude-api-key': {
       sections: [
