@@ -580,6 +580,45 @@ requests:
 #                                           # for real Claude OAuth on any upstream, and for claude-code-cli profiles
 #                                           # only on api.anthropic.com; Vertex keeps provider-native signing
 #
+#   # Mirasim API keys
+#   # Third-party reverse proxies reselling Mirasim quota; they speak the Anthropic
+#   # Messages API (POST {base-url}/v1/messages) with a static Bearer API key.
+#   # base-url is REQUIRED: there is no default endpoint. When models is omitted,
+#   # the standard Claude model catalog is advertised.
+#
+#   mirasim:
+#     - name: mirasim-1
+#       prefix: "mirasim" # optional: require calls like "mirasim/claude-sonnet-latest" to target this credential
+#       disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
+#       request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
+#         - status: 429
+#           match:
+#             - "quota exceeded"
+#           action: "continue-and-cooldown"
+#       base-url: "https://your-mirasim-relay.example.com" # REQUIRED: the relay endpoint
+#       headers:
+#         X-Custom-Header: "custom-value"
+#         # Values starting with "$" dynamically copy the header value from downstream client requests.
+#         # If the client did not send the specified header, the header is omitted.
+#         # X-Custom-Auth: "$Authorization" # copies client's "Authorization" header
+#       proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#       # proxy-url: "direct" # optional: explicit direct connect for this credential
+#       models:
+#         - name: "claude-3-5-sonnet-20241022" # upstream model name
+#           alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
+#           display-name: "Claude Sonnet"      # optional catalog display name
+#           force-mapping: true                # optional: rewrite response model fields back to the alias
+#           is-compat: false                   # optional: preserve thinking blocks with empty signatures for compatible upstreams
+#           thinking:                          # optional: exact thinking capability for this configured model
+#             levels: ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
+#       excluded-models:
+#         - "claude-opus-4-5-20251101" # exclude specific models (exact match)
+#         - "*-thinking"               # wildcard matching suffix
+#       keys:
+#         - api-key: "mirasim-sk-..."
+#           weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#
 #   # xAI API keys
 #   # Uses the native xAI executor, including its Responses namespace-tool handling.
 #
@@ -690,6 +729,49 @@ requests:
 #           alias: "claude-opus-4.66"
 #         - name: "kimi-k2.5"
 #           alias: "claude-opus-4.66"
+#
+#     # Vercel AI Gateway (https://vercel.com/docs/ai-gateway)
+#     # OpenAI-compatible chat completions for hundreds of models behind one API key.
+#     - name: "vercel-ai-gateway"
+#       prefix: "vercel" # optional: require calls like "vercel/vercel-opus" to target this provider
+#       base-url: "https://ai-gateway.vercel.sh/v1" # OpenAI-compatible chat completions endpoint
+#       # Also works as an api-keys.claude (or api-keys.mirasim) group with
+#       # base-url "https://ai-gateway.vercel.sh" (no /v1): the gateway exposes an
+#       # Anthropic Messages surface for claude/* models.
+#       headers:
+#         X-Custom-Header: "custom-value"
+#       keys:
+#         - api-key: "vck-..." # create a key in the Vercel dashboard under AI Gateway > API Keys
+#       models:
+#         - name: "anthropic/claude-opus-5" # upstream model slug (provider/model)
+#           alias: "vercel-opus"            # client alias mapped to the upstream model
+#           display-name: "Vercel Opus"     # optional catalog display name
+#         - name: "openai/gpt-5.4"
+#           alias: "vercel-gpt54"
+#
+#     # OpenCode Zen (https://opencode.ai/docs/zen)
+#     # Login with GitHub at https://opencode.ai/auth and create an API key.
+#     # Free models (the *-free IDs and grok-code) may also be called with
+#     # api-key: "public", subject to per-IP rate limits.
+#     - name: "opencode-zen"
+#       prefix: "zen" # optional: require calls like "zen/kimi-k3" to target this provider
+#       base-url: "https://opencode.ai/zen/v1" # OpenAI-compatible chat completions endpoint
+#       # Zen routes protocols per model family: this openai-compat path covers
+#       # the chat-completions family (kimi/glm/deepseek/minimax/qwen/free models).
+#       # Claude-family models on Zen use the /messages surface instead; add them
+#       # as an api-keys.claude (or api-keys.mirasim) group.
+#       headers:
+#         X-Custom-Header: "custom-value"
+#       keys:
+#         - api-key: "..." # API key from https://opencode.ai/auth, or "public" for free models
+#       models:
+#         - name: "kimi-k3"     # upstream model name
+#           alias: "zen-kimi"   # optional client alias
+#         - name: "glm-5.3"
+#           alias: "zen-glm"
+#         - name: "big-pickle"  # OpenCode's flagship alias; indexes shift as they retune
+#           display-name: "Big Pickle"
+#         - name: "grok-code"   # free with per-IP rate limits, even for api-key "public"
 
 # END API KEY EXAMPLES
 

@@ -149,6 +149,10 @@ type Config struct {
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
+	// MirasimKey defines a list of Mirasim (Anthropic-compatible reverse proxy) API key
+	// configurations. Base-url is required for every entry; there is no default endpoint.
+	MirasimKey []MirasimKey `yaml:"mirasim-api-key" json:"mirasim-api-key"`
+
 	// ClaudeHeaderDefaults configures default header values for Claude API requests.
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`

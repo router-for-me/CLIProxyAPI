@@ -62,6 +62,9 @@ type APIKeyClientResult struct {
 	// ClaudeKeyCount is the number of Claude API keys loaded
 	ClaudeKeyCount int
 
+	// MirasimKeyCount is the number of Mirasim API keys loaded
+	MirasimKeyCount int
+
 	// CodexKeyCount is the number of Codex API keys loaded
 	CodexKeyCount int
 

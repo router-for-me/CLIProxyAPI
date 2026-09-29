@@ -202,6 +202,34 @@ func (cfg *Config) SanitizeMetaKeys() {
 	cfg.MetaKey = sanitizeMetaKeyEntries(cfg.MetaKey)
 }
 
+// SanitizeMirasimKeys normalizes Mirasim API key entries and drops entries
+// missing a BaseURL. Mirasim upstreams are third-party Anthropic-compatible
+// reverse proxies, so a base URL is mandatory; Claude-only fingerprint knobs
+// (cloak, fingerprint-profile, experimental-cch-signing) do not apply.
+func (cfg *Config) SanitizeMirasimKeys() {
+	if cfg == nil || len(cfg.MirasimKey) == 0 {
+		return
+	}
+	out := make([]MirasimKey, 0, len(cfg.MirasimKey))
+	for i := range cfg.MirasimKey {
+		e := cfg.MirasimKey[i]
+		e.APIKey = strings.TrimSpace(e.APIKey)
+		e.ProxyURL = strings.TrimSpace(e.ProxyURL)
+		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		e.Cloak = nil
+		e.FingerprintProfile = ""
+		e.ExperimentalCCHSigning = false
+		if e.APIKey == "" || e.BaseURL == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	cfg.MirasimKey = out
+}
+
 func sanitizeMetaKeyEntries(entries []MetaKey) []MetaKey {
 	if len(entries) == 0 {
 		return entries

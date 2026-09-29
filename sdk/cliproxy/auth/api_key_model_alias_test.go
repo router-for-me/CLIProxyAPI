@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestLookupAPIKeyUpstreamModel(t *testing.T) {
@@ -289,6 +290,78 @@ func TestResolveAPIKeyModelAliasWithResult_ForceMappingUsesConfigAliasNotRequest
 	}
 	if result.OriginalAlias != "claude-sonnet-4-5" {
 		t.Fatalf("OriginalAlias = %q want claude-sonnet-4-5", result.OriginalAlias)
+	}
+}
+
+func TestLookupAPIKeyUpstreamModel_MirasimKey(t *testing.T) {
+	cfg := &internalconfig.Config{
+		MirasimKey: []internalconfig.MirasimKey{
+			{
+				APIKey:  "mirasim-key",
+				BaseURL: "https://mirasim.example.com",
+				Models: []internalconfig.MirasimModel{
+					{Name: "claude-opus-4-1-20250805", Alias: "mira-opus"},
+				},
+			},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	auth := &Auth{
+		ID:       "mirasim-auth-1",
+		Provider: "mirasim",
+		Attributes: map[string]string{
+			"api_key":   "mirasim-key",
+			"base_url":  "https://mirasim.example.com",
+			"auth_kind": "apikey",
+		},
+	}
+	if _, err := mgr.Register(ctx, auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	// 1. Fast path: lookup per-auth mapping table compiled during register.
+	resolved := mgr.lookupAPIKeyUpstreamModel("mirasim-auth-1", "mira-opus")
+	if resolved != "claude-opus-4-1-20250805" {
+		t.Fatalf("lookupAPIKeyUpstreamModel() = %q, want claude-opus-4-1-20250805", resolved)
+	}
+
+	// 2. Slow path: directly call mgr.applyAPIKeyModelAliasWithRouting with an empty alias table to exercise config resolution fallback.
+	slowRouting := &apiKeyModelRoutingSnapshot{
+		config:  cfg,
+		aliases: make(apiKeyModelAliasTable),
+	}
+	slowResolved := mgr.applyAPIKeyModelAliasWithRouting(slowRouting, auth, "mira-opus")
+	if slowResolved != "claude-opus-4-1-20250805" {
+		t.Fatalf("applyAPIKeyModelAliasWithRouting(slow) = %q, want claude-opus-4-1-20250805", slowResolved)
+	}
+
+	// 3. Model alias result with force mapping / alias metadata
+	aliasResult := mgr.resolveAPIKeyModelAliasWithResult(auth, "mira-opus")
+	if aliasResult.UpstreamModel != "claude-opus-4-1-20250805" {
+		t.Fatalf("resolveAPIKeyModelAliasWithResult() upstream = %q, want claude-opus-4-1-20250805", aliasResult.UpstreamModel)
+	}
+
+	// 4. Configured alias entries helper
+	entries := configuredModelAliasEntries(cfg, auth)
+	found := false
+	for _, e := range entries {
+		if e.GetAlias() == "mira-opus" && e.GetName() == "claude-opus-4-1-20250805" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("configuredModelAliasEntries did not contain mira-opus -> claude-opus-4-1-20250805: %+v", entries)
+	}
+
+	// 5. Capability binding: thinking levels resolve through the claude model type.
+	req := mgr.attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, auth, "mira-opus", "claude-opus-4-1-20250805")
+	if _, ok := ResolvedAPIKeyModelInfo(req); !ok {
+		t.Fatalf("ResolvedAPIKeyModelInfo() not bound for mirasim auth")
 	}
 }
 

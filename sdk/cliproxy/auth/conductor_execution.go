@@ -411,6 +411,8 @@ func requestToFormat(provider string, executor ProviderExecutor, req cliproxyexe
 		return sdktranslator.FormatCodex
 	case "claude":
 		return sdktranslator.FormatClaude
+	case "mirasim":
+		return sdktranslator.FormatClaude
 	case "gemini", "vertex", "aistudio":
 		return sdktranslator.FormatGemini
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":

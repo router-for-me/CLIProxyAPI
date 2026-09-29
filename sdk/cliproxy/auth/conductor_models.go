@@ -460,6 +460,10 @@ func configuredModelAliasEntries(cfg *internalconfig.Config, auth *Auth) []model
 		if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
 		}
+	case "mirasim":
+		if entry := resolveMirasimAPIKeyConfig(cfg, auth); entry != nil {
+			models = asModelAliasEntries(entry.Models)
+		}
 	case "codex":
 		if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
 			models = asModelAliasEntries(entry.Models)
@@ -620,6 +624,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
+		case "mirasim":
+			if entry := resolveMirasimAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
 		case "codex":
 			if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
@@ -750,6 +758,8 @@ func (m *Manager) applyAPIKeyModelAliasWithRouting(routing *apiKeyModelRoutingSn
 		upstreamModel = resolveUpstreamModelForInteractionsAPIKey(cfg, auth, requestedModel)
 	case "claude":
 		upstreamModel = resolveUpstreamModelForClaudeAPIKey(cfg, auth, requestedModel)
+	case "mirasim":
+		upstreamModel = resolveUpstreamModelForMirasimAPIKey(cfg, auth, requestedModel)
 	case "codex":
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "xai":
@@ -844,6 +854,13 @@ func resolveClaudeAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 	return resolveAPIKeyConfig(cfg.ClaudeKey, auth)
 }
 
+func resolveMirasimAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.MirasimKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.MirasimKey, auth)
+}
+
 func resolveCodexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.CodexKey {
 	if cfg == nil {
 		return nil
@@ -890,6 +907,14 @@ func resolveUpstreamModelForInteractionsAPIKey(cfg *internalconfig.Config, auth 
 
 func resolveUpstreamModelForClaudeAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveClaudeAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForMirasimAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveMirasimAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}

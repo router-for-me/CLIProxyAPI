@@ -215,6 +215,7 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 	geminiAPIKeyCount := len(cfg.GeminiKey)
 	interactionsAPIKeyCount := len(cfg.InteractionsKey)
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
+	mirasimAPIKeyCount := len(cfg.MirasimKey)
 	codexAPIKeyCount := len(cfg.CodexKey)
 	xaiAPIKeyCount := len(cfg.XAIKey)
 	metaAPIKeyCount := len(cfg.MetaKey)
@@ -228,13 +229,14 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
-	total := authEntries + geminiAPIKeyCount + interactionsAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Interactions API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d Meta API keys + %d Vertex-compat + %d OpenAI-compat)\n",
+	total := authEntries + geminiAPIKeyCount + interactionsAPIKeyCount + claudeAPIKeyCount + mirasimAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + vertexAICompatCount + openAICompatCount
+	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Interactions API keys + %d Claude API keys + %d Mirasim API keys + %d Codex keys + %d xAI keys + %d Meta API keys + %d Vertex-compat + %d OpenAI-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
 		interactionsAPIKeyCount,
 		claudeAPIKeyCount,
+		mirasimAPIKeyCount,
 		codexAPIKeyCount,
 		xaiAPIKeyCount,
 		metaAPIKeyCount,

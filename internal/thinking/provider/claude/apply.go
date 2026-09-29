@@ -25,7 +25,11 @@ func NewApplier() *Applier {
 }
 
 func init() {
-	thinking.RegisterProvider("claude", NewApplier())
+	applier := NewApplier()
+	thinking.RegisterProvider("claude", applier)
+	// Mirasim upstreams speak the Anthropic Messages API, so they share the
+	// Claude thinking applier.
+	thinking.RegisterProvider("mirasim", applier)
 }
 
 // Apply applies thinking configuration to Claude request body.

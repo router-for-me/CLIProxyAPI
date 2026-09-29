@@ -13,7 +13,7 @@ import (
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.
-// It handles Gemini, Interactions, Claude, Codex, xAI, OpenAI-compat, and Vertex-compat providers.
+// It handles Gemini, Interactions, Claude, Mirasim, Codex, xAI, OpenAI-compat, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
 
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
@@ -48,6 +48,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeInteractionsKeys(ctx)...)
 	// Claude API Keys
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
+	// Mirasim API Keys
+	out = append(out, s.synthesizeMirasimKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// xAI API Keys
@@ -204,6 +206,67 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 // synthesizeCodexKeys creates Auth entries for Codex API keys.
 func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreauth.Auth {
 	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.CodexKey, "codex")
+}
+
+// synthesizeMirasimKeys creates Auth entries for Mirasim API keys.
+// Mirasim reuses the Anthropic Messages protocol; unlike Claude, a base URL is
+// required, and Claude-only attributes (rebuild_mid_system_message,
+// fingerprint_profile) do not apply.
+func (s *ConfigSynthesizer) synthesizeMirasimKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.MirasimKey))
+	for i := range cfg.MirasimKey {
+		mk := cfg.MirasimKey[i]
+		key := strings.TrimSpace(mk.APIKey)
+		base := strings.TrimSpace(mk.BaseURL)
+		if key == "" || base == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(mk.Prefix)
+		proxyURL := strings.TrimSpace(mk.ProxyURL)
+		id, token := idGen.Next("mirasim:apikey", key, base, proxyURL, prefix, config.FormatSortedHeaders(mk.Headers))
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:mirasim[%s]", token),
+			"config_index": strconv.Itoa(i),
+			"api_key":      key,
+			"base_url":     base,
+		}
+		metadata := map[string]any{}
+		if mk.DisableCooling != nil {
+			metadata["disable_cooling"] = *mk.DisableCooling
+		}
+		addRequestRetryToMetadata(mk.RequestRetry, metadata)
+		addRequestScopedErrorsToMetadata(mk.RequestScopedErrors, metadata)
+		if mk.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(mk.Priority)
+		}
+		addWeightToAttrs(mk.Weight, attrs)
+		if hash := diff.ComputeClaudeModelsHash(mk.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(mk.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "mirasim",
+			Label:      "mirasim-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, mk.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // synthesizeXAIKeys creates Auth entries for xAI API keys.

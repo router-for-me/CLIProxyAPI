@@ -149,6 +149,11 @@ func (cfg *Config) ValidateCredentialWeights() error {
 			return fmt.Errorf("meta-api-key[%d].weight: %w", index, errValidate)
 		}
 	}
+	for index := range cfg.MirasimKey {
+		if errValidate := ValidateCredentialWeight(cfg.MirasimKey[index].Weight); errValidate != nil {
+			return fmt.Errorf("mirasim-api-key[%d].weight: %w", index, errValidate)
+		}
+	}
 	for providerIndex := range cfg.OpenAICompatibility {
 		for keyIndex := range cfg.OpenAICompatibility[providerIndex].APIKeyEntries {
 			weight := cfg.OpenAICompatibility[providerIndex].APIKeyEntries[keyIndex].Weight

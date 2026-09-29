@@ -699,6 +699,14 @@ type MetaKey = CodexKey
 // MetaModel uses the Codex model mapping structure for Meta Muse models.
 type MetaModel = CodexModel
 
+// MirasimKey uses the Claude API key structure for Mirasim reverse-proxy
+// upstreams that speak the Anthropic Messages API. BaseURL is required;
+// entries without one are dropped by SanitizeMirasimKeys.
+type MirasimKey = ClaudeKey
+
+// MirasimModel uses the Claude model mapping structure for Mirasim models.
+type MirasimModel = ClaudeModel
+
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {

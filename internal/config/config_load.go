@@ -191,6 +191,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
+	// Sanitize Mirasim keys: drop entries without base-url
+	cfg.SanitizeMirasimKeys()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 

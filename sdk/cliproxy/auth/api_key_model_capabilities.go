@@ -284,6 +284,12 @@ func compileAPIKeyModelCapabilitiesForAuth(cfg *internalconfig.Config, auth *Aut
 		if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
 			compileConfiguredModelCapabilities(out, entry.Models, "claude")
 		}
+	case "mirasim":
+		// Mirasim upstreams speak the Anthropic Messages API and expose Claude
+		// model IDs, so capability resolution shares the claude model type.
+		if entry := resolveMirasimAPIKeyConfig(cfg, auth); entry != nil {
+			compileConfiguredModelCapabilities(out, entry.Models, "claude")
+		}
 	case "codex":
 		if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
 			for i := range entry.Models {

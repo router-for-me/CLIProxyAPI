@@ -22,6 +22,7 @@ var providerAppliersMu sync.RWMutex
 var nativeProviderAppliers = map[string]ProviderApplier{
 	"gemini":      nil,
 	"claude":      nil,
+	"mirasim":     nil,
 	"openai":      nil,
 	"codex":       nil,
 	"antigravity": nil,
