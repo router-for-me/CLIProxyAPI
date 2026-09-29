@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -75,6 +76,8 @@ func (neuralwattResponseSink) CaptureStreamChunk(ctx context.Context, chunk []by
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(payload, &parsed); err != nil {
+		// Wire-format mismatch (not a cost comment after all); a bad line
+		// must not fail the response — consumers simply miss this update.
 		return
 	}
 	helps.SetProviderUsageMetadata(ctx, "neuralwatt", parsed)
@@ -157,15 +160,17 @@ func mergeNeuralwattFlexApplied(headers http.Header, md map[string]any) {
 }
 
 // parseNeuralwattFloat parses a header value, returning the float and true on
-// success. Whitespace is trimmed; an empty or malformed value is skipped so
-// we never store NaN/zero placeholders.
+// success. Whitespace is trimmed; an empty, malformed, NaN, or Inf value is
+// skipped so we never store NaN/zero placeholders. strconv.ParseFloat returns
+// err=nil for "NaN"/"Inf" inputs, so the math.IsNaN/IsInf guards are required
+// to honour the docstring's guarantee.
 func parseNeuralwattFloat(raw string) (float64, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return 0, false
 	}
 	v, err := strconv.ParseFloat(trimmed, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0, false
 	}
 	return v, true
