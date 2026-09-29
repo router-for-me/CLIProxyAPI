@@ -53,6 +53,32 @@ func openAICompatUpstreamURL(baseURL, suffix string) string {
 type OpenAICompatExecutor struct {
 	provider string
 	cfg      *config.Config
+	// responseSink, when non-nil, observes the upstream response so a
+	// provider wrapper (e.g. Neuralwatt) can capture provider-specific
+	// billing/energy metadata into the usage record before it is published.
+	// Nil for every bare OpenAI-compatible provider.
+	responseSink OpenAICompatResponseSink
+}
+
+// OpenAICompatResponseSink observes upstream responses on behalf of a
+// provider-specific wrapper. The compat executor calls it on the success path
+// only, and always before the usage record is published.
+type OpenAICompatResponseSink interface {
+	// CaptureResponse receives the full body of a non-streaming response.
+	CaptureResponse(ctx context.Context, headers http.Header, body []byte)
+	// CaptureStreamHeaders receives the response headers before any chunk.
+	CaptureStreamHeaders(ctx context.Context, headers http.Header)
+	// CaptureStreamChunk receives each raw streaming chunk in arrival order.
+	CaptureStreamChunk(ctx context.Context, chunk []byte)
+}
+
+// SetResponseSink installs a provider-specific response observer. It is called
+// once at construction time by the wrapping executor.
+func (e *OpenAICompatExecutor) SetResponseSink(sink OpenAICompatResponseSink) {
+	if e == nil {
+		return
+	}
+	e.responseSink = sink
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
@@ -220,6 +246,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	if e.responseSink != nil {
+		e.responseSink.CaptureResponse(ctx, httpResp.Header, body)
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -429,6 +458,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
+	if e.responseSink != nil {
+		e.responseSink.CaptureStreamHeaders(ctx, httpResp.Header.Clone())
+	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -627,6 +659,9 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			n, errRead := httpResp.Body.Read(buffer)
 			if n > 0 {
 				chunk := bytes.Clone(buffer[:n])
+				if e.responseSink != nil {
+					e.responseSink.CaptureStreamChunk(ctx, chunk)
+				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
