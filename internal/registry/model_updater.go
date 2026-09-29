@@ -125,9 +125,6 @@ func tryRefreshModels(ctx context.Context, label string) {
 	if len(parsed.Meta) == 0 && oldData != nil && len(oldData.Meta) > 0 {
 		parsed.Meta = oldData.Meta
 	}
-	if oldData != nil {
-		parsed.Claude = preserveClaudeSonnet55(parsed.Claude, oldData.Claude)
-	}
 
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
@@ -144,23 +141,6 @@ func tryRefreshModels(ctx context.Context, label string) {
 
 	log.Infof("%s completed from %s, changes detected for providers: %v", label, url, changed)
 	notifyModelRefresh(changed)
-}
-
-// preserveClaudeSonnet55 keeps the locally supported model until the remote
-// catalog includes it, without overriding newer remote metadata when it does.
-func preserveClaudeSonnet55(remote, current []*ModelInfo) []*ModelInfo {
-	const modelID = "claude-sonnet-5-5"
-	for _, model := range remote {
-		if model != nil && model.ID == modelID {
-			return remote
-		}
-	}
-	for _, model := range current {
-		if model != nil && model.ID == modelID {
-			return append(remote, cloneModelInfo(model))
-		}
-	}
-	return remote
 }
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
