@@ -33,6 +33,11 @@ type metaKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type mirasimKeyWithAuthIndex struct {
+	config.MirasimKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -185,6 +190,39 @@ func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 		out[i] = claudeKeyWithAuthIndex{
 			ClaudeKey: entry,
 			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) mirasimKeysWithAuthIndex() []mirasimKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]mirasimKeyWithAuthIndex, len(h.cfg.MirasimKey))
+	for i := range h.cfg.MirasimKey {
+		entry := h.cfg.MirasimKey[i]
+		authIndex := ""
+		key := strings.TrimSpace(entry.APIKey)
+		base := strings.TrimSpace(entry.BaseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		prefix := strings.TrimSpace(entry.Prefix)
+		if key != "" || base != "" {
+			id, _ := idGen.Next("mirasim:apikey", key, base, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers))
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = mirasimKeyWithAuthIndex{
+			MirasimKey: entry,
+			AuthIndex:  authIndex,
 		}
 	}
 	return out

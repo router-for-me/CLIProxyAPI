@@ -137,6 +137,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/claude-api-key", s.mgmt.PatchClaudeKey)
 		mgmt.DELETE("/claude-api-key", s.mgmt.DeleteClaudeKey)
 
+		mgmt.GET("/mirasim-api-key", s.mgmt.GetMirasimKeys)
+		mgmt.PUT("/mirasim-api-key", s.mgmt.PutMirasimKeys)
+		mgmt.PATCH("/mirasim-api-key", s.mgmt.PatchMirasimKey)
+		mgmt.DELETE("/mirasim-api-key", s.mgmt.DeleteMirasimKey)
+
 		mgmt.GET("/codex-api-key", s.mgmt.GetCodexKeys)
 		mgmt.PUT("/codex-api-key", s.mgmt.PutCodexKeys)
 		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
@@ -196,6 +201,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.GET("/devin-auth-url", s.mgmt.RequestDevinToken)
 		mgmt.GET("/meta-auth-url", s.mgmt.RequestMetaToken)
+		mgmt.GET("/cline-auth-url", s.mgmt.RequestClineToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
 	}
