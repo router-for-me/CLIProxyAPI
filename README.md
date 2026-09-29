@@ -8,6 +8,13 @@ CLIProxyAPI is a proxy server that provides OpenAI/Gemini/Claude/Codex/Grok comp
 
 You can access the following providers locally and with multiple CLI accounts through any OpenAI (including Responses), Gemini (including Interactions), or Claude-compatible client or SDK.
 
+The Codex catalog includes `gpt-6.1-sol` for Team, Plus, and Pro, with an exact
+Codex client template for its tool-mode and reasoning capabilities. Model
+registration does not grant account access; requests still require upstream
+availability. See the [OpenAI model card](https://developers.openai.com/api/docs/models/gpt-6.1-sol).
+Until the matching remote catalog update in `router-for-me/models` lands, use
+`--local-model` to retain these embedded entries across catalog refreshes.
+
 <table>
 <tbody>
     <tr>
