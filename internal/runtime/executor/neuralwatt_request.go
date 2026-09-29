@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"encoding/json"
+
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/sjson"
 )
@@ -41,12 +43,18 @@ func applyNeuralwattServiceTier(payload []byte, auth *cliproxyauth.Auth) []byte 
 	if _, allowed := neuralwattAllowedServiceTiers[tier]; !allowed {
 		return payload
 	}
+	if len(payload) == 0 || !json.Valid(payload) {
+		// Leave empty or malformed bodies untouched: the upstream (or a downstream
+		// validator) should reject them, not us fabricating a fresh document. The
+		// upstream would otherwise receive a valid but semantically meaningless
+		// {"service_tier":"<tier>"} body that may actually be accepted.
+		return payload
+	}
 	out, err := sjson.SetBytes(payload, "service_tier", tier)
 	if err != nil {
-		// sjson.SetBytes only fails on malformed input JSON. Returning the
-		// original payload preserves the prior behavior (the upstream would
-		// reject the malformed body anyway), and avoids mutating the caller's
-		// slice on the error path.
+		// sjson.SetBytes only errors on invalid paths (e.g. a non-numeric array
+		// index). Our path is a plain string key so this branch is unreachable
+		// in practice — kept as a defensive passthrough.
 		return payload
 	}
 	return out

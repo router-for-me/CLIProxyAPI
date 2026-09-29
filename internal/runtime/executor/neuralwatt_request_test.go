@@ -59,3 +59,33 @@ func TestNeuralwattRequestDoesNotMutateCallerPayload(t *testing.T) {
 		t.Fatalf("caller payload mutated: %s", payload)
 	}
 }
+
+func TestNeuralwattRequestDoesNotFabricateForEmptyOrMalformedPayload(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "nil", payload: nil},
+		{name: "empty", payload: []byte("")},
+		{name: "garbage", payload: []byte("not json")},
+		{name: "truncated", payload: []byte("{")},
+		{name: "unterminated string", payload: []byte(`{"model":"oops`)},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"service_tier": "flex"}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := applyNeuralwattServiceTier(tc.payload, auth)
+			if string(got) != string(tc.payload) {
+				t.Fatalf("expected passthrough %q, got %q — helper fabricated a document", string(tc.payload), string(got))
+			}
+		})
+	}
+}
+
+func TestNeuralwattRequestNilPayloadStaysNil(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"service_tier": "flex"}}
+	got := applyNeuralwattServiceTier(nil, auth)
+	if got != nil {
+		t.Fatalf("expected nil, got %q — sjson would otherwise fabricate {\"service_tier\":\"flex\"}", string(got))
+	}
+}
