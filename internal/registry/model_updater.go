@@ -122,9 +122,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 		return
 	}
 
-	if len(parsed.Meta) == 0 && oldData != nil && len(oldData.Meta) > 0 {
-		parsed.Meta = oldData.Meta
-	}
+	preserveCatalogFallbacks(oldData, parsed)
 
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
@@ -194,6 +192,24 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 	return nil, ""
 }
 
+// preserveCatalogFallbacks keeps previous catalog sections that the freshly
+// fetched catalog omits entirely. Providers defined only in the embedded
+// fallback catalog (e.g. Cline, defined locally ahead of upstream) must
+// survive remote refreshes; otherwise any later model re-registration reads
+// an empty section and drops the provider's models. Meta is preserved the
+// same way for its plugin-provided metadata.
+func preserveCatalogFallbacks(oldData, newData *staticModelsJSON) {
+	if oldData == nil || newData == nil {
+		return
+	}
+	if len(newData.Meta) == 0 && len(oldData.Meta) > 0 {
+		newData.Meta = oldData.Meta
+	}
+	if len(newData.Cline) == 0 && len(oldData.Cline) > 0 {
+		newData.Cline = oldData.Cline
+	}
+}
+
 // detectChangedProviders compares two model catalogs and returns provider names
 // whose model definitions differ. Gemini changes affect both Gemini protocols,
 // while Codex tiers (free/team/plus/pro) are grouped under one "codex" provider.
@@ -226,6 +242,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"xai", oldData.XAI, newData.XAI},
 		{"devin", oldData.Devin, newData.Devin},
 		{"meta", oldData.Meta, newData.Meta},
+		{"cline", oldData.Cline, newData.Cline},
 	}
 
 	seen := make(map[string]bool, len(sections))
