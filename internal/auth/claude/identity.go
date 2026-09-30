@@ -189,6 +189,24 @@ func ReadMetadataString(metadata *map[string]any, key string) string {
 	return value
 }
 
+// ReadMetadataBool reads a bool-valued metadata entry under the metadata lock.
+// Callers must use this instead of indexing the metadata map directly: the map
+// is shared across concurrent requests for the same credential, and an
+// unsynchronized read races with StoreMetadataValue on another request.
+func ReadMetadataBool(metadata *map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return false
+	}
+	value, _ := (*metadata)[key].(bool)
+	return value
+}
+
 // StoreMetadataString writes a string-valued metadata entry under the metadata
 // lock, initializing the map when needed. Empty values are skipped so callers can
 // forward optional fields without erasing a previously resolved value.
