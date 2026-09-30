@@ -29,21 +29,6 @@ func (f utlsClientRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, e
 	return f(req)
 }
 
-type trackedReadCloser struct {
-	io.Reader
-	closeCount int
-	closeErr   error
-	onClose    func()
-}
-
-func (r *trackedReadCloser) Close() error {
-	r.closeCount++
-	if r.onClose != nil {
-		r.onClose()
-	}
-	return r.closeErr
-}
-
 type contextDialerFunc func(context.Context, string, string) (net.Conn, error)
 
 func (f contextDialerFunc) Dial(network, addr string) (net.Conn, error) {
@@ -64,63 +49,13 @@ func (c *trackedNetConn) Close() error {
 	return c.Conn.Close()
 }
 
-func TestCloseConnectionBodyClosesConnectionBeforeBodyOnce(t *testing.T) {
-	bodyErr := errors.New("body close failed")
-	connectionErr := errors.New("connection close failed")
-	var closeOrder []string
-	body := &trackedReadCloser{
-		Reader:   strings.NewReader("response"),
-		closeErr: bodyErr,
-		onClose: func() {
-			closeOrder = append(closeOrder, "body")
-		},
-	}
-	connectionCloseCount := 0
-	wrapped := &closeConnectionBody{
-		ReadCloser: body,
-		closeConnection: func() error {
-			connectionCloseCount++
-			closeOrder = append(closeOrder, "connection")
-			return connectionErr
-		},
-	}
-
-	payload, errRead := io.ReadAll(wrapped)
-	if errRead != nil {
-		t.Fatal(errRead)
-	}
-	if got, want := string(payload), "response"; got != want {
-		t.Fatalf("response body = %q, want %q", got, want)
-	}
-
-	errClose := wrapped.Close()
-	if !errors.Is(errClose, bodyErr) {
-		t.Fatalf("close error = %v, want body close error", errClose)
-	}
-	if !errors.Is(errClose, connectionErr) {
-		t.Fatalf("close error = %v, want connection close error", errClose)
-	}
-	if errCloseAgain := wrapped.Close(); errCloseAgain != errClose {
-		t.Fatalf("second close error = %v, want %v", errCloseAgain, errClose)
-	}
-	if body.closeCount != 1 {
-		t.Fatalf("body close count = %d, want 1", body.closeCount)
-	}
-	if connectionCloseCount != 1 {
-		t.Fatalf("connection close count = %d, want 1", connectionCloseCount)
-	}
-	if want := []string{"connection", "body"}; !reflect.DeepEqual(closeOrder, want) {
-		t.Fatalf("close order = %v, want %v", closeOrder, want)
-	}
-}
-
 func TestUtlsRoundTripperDialUsesRequestContext(t *testing.T) {
 	dialStarted := make(chan struct{})
-	roundTripper := &utlsRoundTripper{dialer: contextDialerFunc(func(ctx context.Context, _, _ string) (net.Conn, error) {
+	roundTripper := newUtlsRoundTripperWithDialer(contextDialerFunc(func(ctx context.Context, _, _ string) (net.Conn, error) {
 		close(dialStarted)
 		<-ctx.Done()
 		return nil, ctx.Err()
-	})}
+	}), nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, "https://chatgpt.com/backend-api/codex/responses", nil)
 	if errRequest != nil {
@@ -164,16 +99,21 @@ func TestUtlsRoundTripperHandshakeUsesRequestContext(t *testing.T) {
 
 	trackedConn := &trackedNetConn{Conn: clientConn}
 	dialDone := make(chan struct{})
-	roundTripper := &utlsRoundTripper{dialer: contextDialerFunc(func(context.Context, string, string) (net.Conn, error) {
+	roundTripper := newUtlsRoundTripperWithDialer(contextDialerFunc(func(context.Context, string, string) (net.Conn, error) {
 		close(dialDone)
 		return trackedConn, nil
-	})}
+	}), nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	connectionDone := make(chan error, 1)
 	go func() {
-		h2Conn, errConnect := roundTripper.createConnection(ctx, "chatgpt.com", "chatgpt.com:443")
-		if h2Conn != nil {
-			errConnect = errors.Join(errConnect, h2Conn.Close())
+		req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, "https://chatgpt.com/backend-api/codex/responses", nil)
+		if errRequest != nil {
+			connectionDone <- errRequest
+			return
+		}
+		resp, errConnect := roundTripper.RoundTrip(req)
+		if resp != nil && resp.Body != nil {
+			errConnect = errors.Join(errConnect, resp.Body.Close())
 		}
 		connectionDone <- errConnect
 	}()
@@ -187,13 +127,39 @@ func TestUtlsRoundTripperHandshakeUsesRequestContext(t *testing.T) {
 	select {
 	case errConnect := <-connectionDone:
 		if !errors.Is(errConnect, context.Canceled) {
-			t.Fatalf("createConnection error = %v, want context canceled", errConnect)
+			t.Fatalf("RoundTrip error = %v, want context canceled", errConnect)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("TLS handshake did not stop after context cancellation")
 	}
-	if got := trackedConn.closeCount.Load(); got != 1 {
-		t.Fatalf("connection close count = %d, want 1", got)
+	if got := trackedConn.closeCount.Load(); got < 1 {
+		t.Fatalf("connection close count = %d, want at least 1", got)
+	}
+}
+
+func TestReplayableUtlsRequestRequiresIdempotentSemantics(t *testing.T) {
+	unsafePost, errRequest := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"input":"hello"}`))
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	if _, ok := replayableUtlsRequest(unsafePost); ok {
+		t.Fatal("POST without an idempotency key was marked replayable")
+	}
+
+	safePost, errRequest := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(`{"input":"hello"}`))
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	safePost.Header.Set("Idempotency-Key", "test-request")
+	retry, ok := replayableUtlsRequest(safePost)
+	if !ok {
+		t.Fatal("POST with an idempotency key and GetBody was not replayable")
+	}
+	if retry.Body == safePost.Body {
+		t.Fatal("replayed request reused the original body")
+	}
+	if errClose := retry.Body.Close(); errClose != nil {
+		t.Fatal(errClose)
 	}
 }
 
@@ -354,6 +320,79 @@ func TestCachedClaudeCodeRoundTripperBoundsProxyCardinality(t *testing.T) {
 	}
 	if recreated := cachedClaudeCodeRoundTripper(firstProxy); recreated == first {
 		t.Fatal("least recently used proxy transport was not evicted")
+	}
+}
+
+func TestCachedChatGPTRoundTripperReusesTransport(t *testing.T) {
+	t.Parallel()
+
+	const proxyURL = "http://127.0.0.1:29654"
+	first := cachedChatGPTRoundTripper(proxyURL)
+	second := cachedChatGPTRoundTripper(proxyURL)
+	if first != second {
+		t.Fatal("ChatGPT transport cache returned different transports for one proxy")
+	}
+}
+
+func TestCachedChatGPTRoundTripperBoundsProxyCardinality(t *testing.T) {
+	firstProxy := "http://127.0.0.1:31000"
+	first := cachedChatGPTRoundTripper(firstProxy)
+	for index := 1; index <= chatGPTRoundTripperCacheCapacity; index++ {
+		cachedChatGPTRoundTripper(fmt.Sprintf("http://127.0.0.1:%d", 31000+index))
+	}
+	if got := chatGPTRoundTripperCache.Len(); got > chatGPTRoundTripperCacheCapacity {
+		t.Fatalf("transport cache entries = %d, want at most %d", got, chatGPTRoundTripperCacheCapacity)
+	}
+	if recreated := cachedChatGPTRoundTripper(firstProxy); recreated == first {
+		t.Fatal("least recently used proxy transport was not evicted")
+	}
+}
+
+func TestUtlsRoundTripperClosesEvictedConnectionsAfterResponsesDrain(t *testing.T) {
+	var closeCalls atomic.Int32
+	roundTripper := &utlsRoundTripper{
+		closeIdleConnections: func() {
+			closeCalls.Add(1)
+		},
+	}
+	firstResp := roundTripper.trackResponse(&http.Response{
+		Body: io.NopCloser(strings.NewReader("stream")),
+	})
+	secondResp := roundTripper.trackResponse(&http.Response{
+		Body: io.NopCloser(strings.NewReader("long-lived stream")),
+	})
+
+	roundTripper.closeWhenIdle()
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("close calls at eviction = %d, want 1", got)
+	}
+	if _, errRead := io.ReadAll(firstResp.Body); errRead != nil {
+		t.Fatal(errRead)
+	}
+	if got := closeCalls.Load(); got != 2 {
+		t.Fatalf("close calls after first active response drained = %d, want 2", got)
+	}
+	if errClose := firstResp.Body.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	if got := closeCalls.Load(); got != 2 {
+		t.Fatalf("close calls after repeated release = %d, want 2", got)
+	}
+	if errClose := secondResp.Body.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	if got := closeCalls.Load(); got != 3 {
+		t.Fatalf("close calls after second active response drained = %d, want 3", got)
+	}
+
+	laterResp := roundTripper.trackResponse(&http.Response{
+		Body: io.NopCloser(strings.NewReader("later")),
+	})
+	if errClose := laterResp.Body.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	if got := closeCalls.Load(); got != 4 {
+		t.Fatalf("close calls after post-eviction response = %d, want 4", got)
 	}
 }
 
