@@ -1,11 +1,68 @@
 package toolschema
 
 import (
+	"bytes"
+	"fmt"
 	"net/http"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
+
+func TestNormalizeCodexToolIntegerTypesPreservesCollaborationNamespace(t *testing.T) {
+	const reserved = `{
+		"type": "namespace", "name": "collaboration",
+		"description": "Tools for spawning and managing sub-agents.",
+		"tools": [{
+			"type": "function", "name": "wait_agent", "strict": false,
+			"parameters": {"type": "object", "properties": {
+				"timeout_ms": {"type": "number", "description": "Timeout in milliseconds."}
+			}, "additionalProperties": false}
+		}]
+	}`
+	const ordinary = `{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"yield_time_ms":{"type":"number"}}}}`
+	headers := http.Header{"User-Agent": []string{"codex_cli_rs/0.159.2"}}
+
+	for _, tc := range []struct {
+		name      string
+		template  string
+		toolsPath string
+	}{
+		{"top-level", `{"tools":[%s]}`, "tools"},
+		{"additional-tools", `{"input":[{"type":"additional_tools","tools":[%s]}]}`, "input.0.tools"},
+		{"nested-namespace", `{"tools":[{"type":"namespace","name":"outer","tools":[%s]}]}`, "tools.0.tools"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte(fmt.Sprintf(tc.template, reserved))
+			if out := NormalizeCodexToolIntegerTypes(input, headers); !bytes.Equal(out, input) {
+				t.Fatalf("reserved declaration changed:\n%s", out)
+			}
+
+			// A protected namespace must not prevent normalization of its siblings.
+			input = []byte(fmt.Sprintf(tc.template, reserved+","+ordinary))
+			out := NormalizeCodexToolIntegerTypes(input, headers)
+			if got := gjson.GetBytes(out, tc.toolsPath+".0").Raw; got != reserved {
+				t.Fatalf("reserved namespace changed while normalizing sibling:\n%s", got)
+			}
+			if got := gjson.GetBytes(out, tc.toolsPath+".1.parameters.properties.yield_time_ms.type").String(); got != "integer" {
+				t.Fatalf("ordinary sibling type = %q, want integer", got)
+			}
+			if again := NormalizeCodexToolIntegerTypes(out, headers); !bytes.Equal(again, out) {
+				t.Fatal("normalization is not idempotent")
+			}
+		})
+	}
+
+	for _, namespace := range []string{"functions", "collab", "collaboration-optimize"} {
+		t.Run(namespace, func(t *testing.T) {
+			input := []byte(fmt.Sprintf(`{"tools":[{"type":"namespace","name":%q,"tools":[{"type":"function","name":"wait_agent","parameters":{"properties":{"timeout_ms":{"type":["number","null"]}}}}]}]}`, namespace))
+			out := NormalizeCodexToolIntegerTypes(input, headers)
+			if got := gjson.GetBytes(out, "tools.0.tools.0.parameters.properties.timeout_ms.type").Raw; got != `["integer","null"]` {
+				t.Fatalf("non-reserved namespace type = %s, want [integer,null]", got)
+			}
+		})
+	}
+}
 
 func TestNormalizeCodexToolIntegerTypes(t *testing.T) {
 	input := []byte(`{
