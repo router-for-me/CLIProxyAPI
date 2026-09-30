@@ -852,7 +852,7 @@ func TestNormalizeCodexToolSchemas_PatternPropertiesKeySanitization(t *testing.T
 	}
 }
 
-func TestNormalizeCodexToolSchemas_CodexClientToolFieldTypes(t *testing.T) {
+func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) {
 	input := []byte(`{
 		"tools": [
 			{
@@ -966,7 +966,7 @@ func TestNormalizeCodexToolSchemas_CodexClientToolFieldTypes(t *testing.T) {
 
 	t.Run("non-codex user agent preserves numbers", func(t *testing.T) {
 		headers := http.Header{"User-Agent": []string{"curl/8.7.1"}}
-		out := NormalizeCodexToolSchemas(input, headers)
+		out := NormalizeCodexToolIntegerTypes(input, headers)
 		if got := gjson.GetBytes(out, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
 			t.Fatalf("expected number for non-codex, got: %s", got)
 		}
@@ -974,7 +974,7 @@ func TestNormalizeCodexToolSchemas_CodexClientToolFieldTypes(t *testing.T) {
 
 	t.Run("codex user agent normalizes specified fields", func(t *testing.T) {
 		headers := http.Header{"User-Agent": []string{"codex-tui/0.154.0 (Mac OS 26.5.2; arm64)"}}
-		out := NormalizeCodexToolSchemas(input, headers)
+		out := NormalizeCodexToolIntegerTypes(input, headers)
 
 		toolMap := make(map[string]gjson.Result)
 		for _, tool := range gjson.GetBytes(out, "tools").Array() {
@@ -1228,4 +1228,25 @@ func TestNormalizeCodexToolSchemas_CodexClientToolFieldTypes(t *testing.T) {
 			t.Errorf("gemini parametersJsonSchema yield_time_ms type = %q, want integer", got)
 		}
 	})
+}
+
+func TestNormalizeCodexToolSchemas_DoesNotNormalizeIntegerTypes(t *testing.T) {
+	input := []byte(`{
+		"tools": [
+			{
+				"type": "function",
+				"name": "exec_command",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"yield_time_ms": {"type": "number"}
+					}
+				}
+			}
+		]
+	}`)
+	out := NormalizeCodexToolSchemas(input)
+	if got := gjson.GetBytes(out, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+		t.Fatalf("expected number, got: %s", got)
+	}
 }

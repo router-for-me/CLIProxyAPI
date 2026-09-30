@@ -1,12 +1,15 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -318,7 +321,7 @@ func TestCodexExecutorExecuteStream_EmptyDeltaDoesNotBypassZeroTokenFailure(t *t
 	}
 }
 
-func TestCodexExecutor_NormalizesToolFieldsForCodexUserAgent(t *testing.T) {
+func TestCodexExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAgent(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, errRead := io.ReadAll(r.Body)
@@ -432,6 +435,56 @@ func TestCodexExecutor_NormalizesToolFieldsForCodexUserAgent(t *testing.T) {
 						"unrelated_num": {"type": "number"}
 					}
 				}
+			},
+			{
+				"type": "namespace",
+				"name": "collaboration",
+				"tools": [
+					{
+						"type": "function",
+						"name": "wait_agent",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"timeout_ms": {"type": "number"}
+							}
+						}
+					}
+				]
+			}
+		],
+		"input": [
+			{"type": "message", "role": "user", "content": "hi"},
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "functions__exec_command",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"yield_time_ms": {"type": "number"}
+							}
+						}
+					},
+					{
+						"type": "namespace",
+						"name": "collaboration",
+						"tools": [
+							{
+								"type": "function",
+								"name": "wait_agent",
+								"parameters": {
+									"type": "object",
+									"properties": {
+										"timeout_ms": {"type": "number"}
+									}
+								}
+							}
+						]
+					}
+				]
 			}
 		]
 	}`)
@@ -457,7 +510,7 @@ func TestCodexExecutor_NormalizesToolFieldsForCodexUserAgent(t *testing.T) {
 		t.Fatalf("expected non-Codex UA to preserve number, got %q", gotType)
 	}
 
-	// 2. With Codex User-Agent, specified fields must be normalized to integer.
+	// 2. With Codex User-Agent, tool parameter number types must NOT be rewritten to integer for Codex executor (Issue #6244).
 	gotBody = nil
 	_, errExecuteCodex := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
@@ -493,8 +546,8 @@ func TestCodexExecutor_NormalizesToolFieldsForCodexUserAgent(t *testing.T) {
 		}
 		for _, field := range fields {
 			gotType := tool.Get("parameters.properties." + field + ".type").String()
-			if gotType != "integer" {
-				t.Fatalf("tool %s property %s type = %q, want integer", toolName, field, gotType)
+			if gotType != "number" {
+				t.Fatalf("tool %s property %s type = %q, want number (should not normalize for Codex executor)", toolName, field, gotType)
 			}
 		}
 	}
@@ -503,5 +556,419 @@ func TestCodexExecutor_NormalizesToolFieldsForCodexUserAgent(t *testing.T) {
 	unrelated := toolMap["unrelated_tool"]
 	if gotType := unrelated.Get("parameters.properties.unrelated_num.type").String(); gotType != "number" {
 		t.Fatalf("unrelated_tool property type = %q, want number", gotType)
+	}
+
+	// Namespace collaboration tool wait_agent must retain number (Issue #6244)
+	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
+		t.Fatalf("collaboration.wait_agent timeout_ms type = %q, want number", gotType)
+	}
+
+	// input[].additional_tools must retain number
+	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+		t.Fatalf("input additional_tools yield_time_ms type = %q, want number", gotType)
+	}
+	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
+		t.Fatalf("input additional_tools collaboration.wait_agent timeout_ms type = %q, want number", gotType)
+	}
+
+	// 3. HTTP Stream: must also retain number
+	gotBody = nil
+	streamRes, errStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: requestPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"codex_cli_rs/0.1.0"}},
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream(codex) error = %v", errStream)
+	}
+	for range streamRes.Chunks {
+	}
+	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+		t.Fatalf("HTTP stream exec_command yield_time_ms type = %q, want number", gotType)
+	}
+	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
+		t.Fatalf("HTTP stream collaboration.wait_agent timeout_ms type = %q, want number", gotType)
+	}
+	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+		t.Fatalf("HTTP stream input additional_tools yield_time_ms type = %q, want number", gotType)
+	}
+
+	// 4. HTTP Compact (/responses/compact): must also retain number
+	gotBody = nil
+	_, errCompact := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: requestPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"codex_cli_rs/0.1.0"}},
+		Alt:          "responses/compact",
+	})
+	if errCompact != nil {
+		t.Fatalf("ExecuteCompact(codex) error = %v", errCompact)
+	}
+	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+		t.Fatalf("HTTP compact exec_command yield_time_ms type = %q, want number", gotType)
+	}
+	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
+		t.Fatalf("HTTP compact collaboration.wait_agent timeout_ms type = %q, want number", gotType)
+	}
+	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+		t.Fatalf("HTTP compact input additional_tools yield_time_ms type = %q, want number", gotType)
+	}
+}
+
+func TestCodexWebsocketsExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAgent(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	capturedPayload := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Errorf("upgrade websocket: %v", errUpgrade)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			t.Errorf("read upstream websocket message: %v", errRead)
+			return
+		}
+		capturedPayload <- bytes.Clone(payload)
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+			t.Errorf("write completed websocket message: %v", errWrite)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":   "sk-test",
+			"base_url":  server.URL,
+			"plan_type": "pro",
+		},
+	}
+
+	requestPayload := []byte(`{
+		"model": "gpt-5.6-luna",
+		"input": [
+			{"type":"message","role":"user","content":"hi"},
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "functions__exec_command",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"yield_time_ms": {"type": "number"}
+							}
+						}
+					},
+					{
+						"type": "namespace",
+						"name": "collaboration",
+						"tools": [
+							{
+								"type": "function",
+								"name": "wait_agent",
+								"parameters": {
+									"type": "object",
+									"properties": {
+										"timeout_ms": {"type": "number"}
+									}
+								}
+							}
+						]
+					}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"name": "exec_command",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"yield_time_ms": {"type": "number"},
+						"timeout_ms": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "namespace",
+				"name": "collaboration",
+				"tools": [
+					{
+						"type": "function",
+						"name": "wait_agent",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"timeout_ms": {"type": "number"}
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-luna",
+		Payload: requestPayload,
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"codex_cli_rs/0.1.0"}},
+	}
+
+	result, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	streamComplete := false
+	for !streamComplete {
+		select {
+		case chunk, ok := <-result.Chunks:
+			if !ok {
+				streamComplete = true
+				continue
+			}
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error = %v", chunk.Err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for websocket stream completion")
+		}
+	}
+
+	select {
+	case payload := <-capturedPayload:
+		if got := gjson.GetBytes(payload, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
+			t.Fatalf("WS stream exec_command yield_time_ms type = %q, want number", got)
+		}
+		if got := gjson.GetBytes(payload, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+			t.Fatalf("WS stream collaboration.wait_agent timeout_ms type = %q, want number", got)
+		}
+		if got := gjson.GetBytes(payload, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+			t.Fatalf("WS stream input additional_tools yield_time_ms type = %q, want number", got)
+		}
+		if got := gjson.GetBytes(payload, "input.#(type==\"additional_tools\").tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+			t.Fatalf("WS stream input additional_tools collaboration.wait_agent timeout_ms type = %q, want number", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket payload")
+	}
+
+	// Also test WS non-stream Execute
+	_, errExecWS := exec.Execute(context.Background(), auth, req, opts)
+	if errExecWS != nil {
+		t.Fatalf("WS Execute() error = %v", errExecWS)
+	}
+	select {
+	case payload := <-capturedPayload:
+		if got := gjson.GetBytes(payload, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
+			t.Fatalf("WS non-stream exec_command yield_time_ms type = %q, want number", got)
+		}
+		if got := gjson.GetBytes(payload, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+			t.Fatalf("WS non-stream collaboration.wait_agent timeout_ms type = %q, want number", got)
+		}
+		if got := gjson.GetBytes(payload, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+			t.Fatalf("WS non-stream input additional_tools yield_time_ms type = %q, want number", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream websocket non-stream payload")
+	}
+}
+
+func TestCodexWebsocketsExecutor_UpgradeFallbackToHTTP_PreservesNumber(t *testing.T) {
+	var httpCapturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") == "websocket" {
+			w.WriteHeader(http.StatusUpgradeRequired)
+			_, _ = w.Write([]byte(`{"error":{"message":"websocket unavailable"}}`))
+			return
+		}
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read HTTP fallback body: %v", errRead)
+		}
+		httpCapturedBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fallback\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":   "sk-test",
+			"base_url":  server.URL,
+			"plan_type": "pro",
+		},
+	}
+
+	requestPayload := []byte(`{
+		"model": "gpt-5.6-luna",
+		"input": [
+			{"type":"message","role":"user","content":"hi"},
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "functions__exec_command",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"yield_time_ms": {"type": "number"}
+							}
+						}
+					}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"name": "exec_command",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"yield_time_ms": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "namespace",
+				"name": "collaboration",
+				"tools": [
+					{
+						"type": "function",
+						"name": "wait_agent",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"timeout_ms": {"type": "number"}
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.6-luna",
+		Payload: requestPayload,
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"codex_cli_rs/0.1.0"}},
+	}
+
+	// 1. Stream fallback
+	httpCapturedBody = nil
+	streamRes, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream fallback error = %v", errStream)
+	}
+	for range streamRes.Chunks {
+	}
+	if got := gjson.GetBytes(httpCapturedBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
+		t.Fatalf("stream fallback tools exec_command yield_time_ms type = %q, want number", got)
+	}
+	if got := gjson.GetBytes(httpCapturedBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+		t.Fatalf("stream fallback collaboration.wait_agent timeout_ms type = %q, want number", got)
+	}
+	if got := gjson.GetBytes(httpCapturedBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+		t.Fatalf("stream fallback input additional_tools yield_time_ms type = %q, want number", got)
+	}
+
+	// 2. Non-stream fallback
+	httpCapturedBody = nil
+	_, errNonStream := exec.Execute(context.Background(), auth, req, opts)
+	if errNonStream != nil {
+		t.Fatalf("Execute fallback error = %v", errNonStream)
+	}
+	if got := gjson.GetBytes(httpCapturedBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
+		t.Fatalf("non-stream fallback tools exec_command yield_time_ms type = %q, want number", got)
+	}
+	if got := gjson.GetBytes(httpCapturedBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+		t.Fatalf("non-stream fallback collaboration.wait_agent timeout_ms type = %q, want number", got)
+	}
+	if got := gjson.GetBytes(httpCapturedBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+		t.Fatalf("non-stream fallback input additional_tools yield_time_ms type = %q, want number", got)
+	}
+}
+
+func TestOpenAICompatExecutor_NormalizesToolIntegerTypesForCodexUserAgent_NonCodexTarget(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","created":1700000000,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		},
+	}
+
+	requestPayload := []byte(`{
+		"model": "test-model",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "exec_command",
+					"parameters": {
+						"type": "object",
+						"properties": {
+							"yield_time_ms": {"type": "number"},
+							"timeout_ms": {"type": "number"}
+						}
+					}
+				}
+			}
+		]
+	}`)
+
+	_, errExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "test-model",
+		Payload: requestPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Headers:      http.Header{"User-Agent": []string{"codex-tui/0.154.0"}},
+		Stream:       false,
+	})
+	if errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+
+	if got := gjson.GetBytes(gotBody, "tools.0.function.parameters.properties.yield_time_ms.type").String(); got != "integer" {
+		t.Fatalf("expected non-Codex executor to normalize yield_time_ms to integer, got: %s (body=%s)", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "tools.0.function.parameters.properties.timeout_ms.type").String(); got != "integer" {
+		t.Fatalf("expected non-Codex executor to normalize timeout_ms to integer, got: %s (body=%s)", got, string(gotBody))
 	}
 }

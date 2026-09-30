@@ -1384,7 +1384,24 @@ func TestMetaExecutor_NormalizesToolFieldsForCodexUserAgent(t *testing.T) {
 
 	payload := []byte(`{
 		"model": "muse-spark-1.3",
-		"input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "functions__exec_command",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"yield_time_ms": {"type": "number"}
+							}
+						}
+					}
+				]
+			}
+		],
 		"tools": [
 			{
 				"type": "function",
@@ -1537,5 +1554,31 @@ func TestMetaExecutor_NormalizesToolFieldsForCodexUserAgent(t *testing.T) {
 				t.Errorf("tool %s field %s type = %q, want integer", toolName, field, got)
 			}
 		}
+	}
+
+	// Verify input[].additional_tools is also normalized to integer
+	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "integer" {
+		t.Fatalf("Meta Execute additional_tools yield_time_ms type = %q, want integer", gotType)
+	}
+
+	// 4. Test ExecuteStream: verify both tools and additional_tools are normalized to integer
+	gotBody = nil
+	streamResult, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"codex-desktop/0.159.0"}},
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for range streamResult.Chunks {
+	}
+	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); gotType != "integer" {
+		t.Fatalf("Meta stream tools exec_command yield_time_ms type = %q, want integer", gotType)
+	}
+	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "integer" {
+		t.Fatalf("Meta stream additional_tools yield_time_ms type = %q, want integer", gotType)
 	}
 }

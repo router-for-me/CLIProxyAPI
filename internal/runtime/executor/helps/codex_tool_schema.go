@@ -36,15 +36,12 @@ func NormalizeCodexToolIntegerTypes(body []byte, headers http.Header) []byte {
 // NormalizeCodexToolSchemas inspects function tools in a Codex request payload
 // and simplifies pure constant union combinations (e.g. large oneOf branch sets
 // representing enums with descriptions, as emitted by MCP servers) into semantically
-// equivalent enum lists. When headers are provided and represent a Codex client,
-// it also normalizes parameter types from number to integer for tools where the client
-// deserializer strictly expects integers.
-func NormalizeCodexToolSchemas(body []byte, headers ...http.Header) []byte {
+// equivalent enum lists, and sanitizes unsupported schema patterns.
+// It does not normalize tool integer types because upstream OpenAI Codex models
+// strictly validate reserved tool schemas (e.g. collaboration.wait_agent).
+func NormalizeCodexToolSchemas(body []byte) []byte {
 	if len(body) == 0 {
 		return body
-	}
-	if len(headers) > 0 && headers[0] != nil && IsCodexUserAgent(headers[0]) {
-		body = NormalizeCodexToolIntegerTypes(body, headers[0])
 	}
 	updatedTools, changed := normalizeCodexToolList(gjson.GetBytes(body, "tools"))
 	if !changed {
