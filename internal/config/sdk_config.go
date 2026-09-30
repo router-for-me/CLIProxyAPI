@@ -53,6 +53,11 @@ type SDKConfig struct {
 	// CodexOptimizeMultiAgentV2 mirrors the provider-wide runtime setting for API handlers.
 	CodexOptimizeMultiAgentV2 bool `yaml:"-" json:"-"`
 
+	// CodexCollaborationPlaintext independently opts official Codex clients into
+	// plaintext collaboration message declarations, including API-key routes.
+	// It does not decrypt history or enable provider-specific optimizations.
+	CodexCollaborationPlaintext bool `yaml:"codex-collaboration-plaintext" json:"codex-collaboration-plaintext"`
+
 	// CodexOrphanDelegationCompatibility mirrors the provider-wide runtime setting for API handlers.
 	CodexOrphanDelegationCompatibility bool `yaml:"-" json:"-"`
 

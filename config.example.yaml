@@ -199,6 +199,13 @@ requests:
   # Default is false (disabled).
   passthrough-headers: false
 
+  # Opt official Codex clients into plaintext spawn_agent/send_message/followup_task
+  # message declarations before credential selection (including API-key routes).
+  # Default: false. Independent of OAuth optimize-multi-agent-v2.
+  # This exposes future delegation text to the proxy/upstream; it does not decrypt
+  # existing encrypted messages or compaction checkpoints. Use a fresh conversation.
+  codex-collaboration-plaintext: false
+
   # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
   nonstream-keepalive-interval: 0
 

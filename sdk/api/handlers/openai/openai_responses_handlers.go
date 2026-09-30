@@ -534,7 +534,7 @@ func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 }
 
 func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context, payload []byte) []byte {
-	if h == nil || h.Cfg == nil || h.Cfg.OAuthOnlyFields["codex.optimize-multi-agent-v2"] {
+	if h == nil || h.Cfg == nil {
 		return payload
 	}
 
@@ -547,6 +547,13 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context
 	var requestHeaders http.Header
 	if c != nil && c.Request != nil {
 		requestHeaders = c.Request.Header
+	}
+	// This request-scoped opt-in must run before the OAuth-only early return:
+	// the parent's tool declarations determine whether future child messages
+	// are readable, regardless of which credential serves the parent.
+	payload = multiagentv2.PrepareCodexCollaborationPlaintext(requestCtx, requestHeaders, payload, h.Cfg.CodexCollaborationPlaintext)
+	if h.Cfg.OAuthOnlyFields["codex.optimize-multi-agent-v2"] {
+		return payload
 	}
 	homeEnabled := h.AuthManager != nil && h.AuthManager.HomeEnabled()
 	updated, prepared := multiagentv2.PrepareCodexMultiAgentV2Tools(
