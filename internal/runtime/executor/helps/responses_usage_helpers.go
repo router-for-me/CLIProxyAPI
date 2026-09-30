@@ -2,6 +2,8 @@ package helps
 
 import (
 	"bytes"
+	"math"
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -112,22 +114,30 @@ func usageCounterValue(primary, fallback gjson.Result) int64 {
 }
 
 func parseUsageCounter(node gjson.Result) (int64, bool) {
+	var s string
 	switch node.Type {
 	case gjson.Number:
-		return node.Int(), true
+		s = node.Raw
 	case gjson.String:
-		s := strings.TrimSpace(node.String())
-		if s == "" {
-			return 0, false
-		}
-		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
-			return n, true
-		}
-		if f, err := strconv.ParseFloat(s, 64); err == nil {
-			return int64(f), true
-		}
-		return 0, false
+		s = strings.TrimSpace(node.String())
 	default:
 		return 0, false
 	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if n < 0 {
+			return 0, false
+		}
+		return n, true
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f > 1<<63 || math.Trunc(f) != f {
+		return 0, false
+	}
+	// Check the exact value: float64 can round fractions to integers, underflow
+	// to zero, or round math.MaxInt64 up to 1<<63.
+	n, ok := new(big.Rat).SetString(s)
+	if !ok || n.Sign() < 0 || !n.IsInt() || !n.Num().IsInt64() {
+		return 0, false
+	}
+	return n.Num().Int64(), true
 }
