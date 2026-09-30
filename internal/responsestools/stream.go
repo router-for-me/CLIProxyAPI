@@ -100,7 +100,7 @@ func clientIdentityFor(kind callKind, wireType, itemID string) (string, string, 
 
 // StreamFeed adapts one upstream event stream for a bridge attempt. Feed
 // returns zero events while argument fragments accumulate; that means
-// buffered, never pass-through. Finish flushes补齐 items that carry complete
+// buffered, never pass-through. Finish flushes remaining items that carry complete
 // arguments in their terminal payload and rejects incomplete tails. Close
 // releases every reservation.
 type StreamFeed struct {

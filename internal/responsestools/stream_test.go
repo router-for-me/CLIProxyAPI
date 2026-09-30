@@ -292,7 +292,7 @@ func TestStreamRejectsClientIDCollision(t *testing.T) {
 }
 
 // A terminal response can complete an item the stream never announced. The
-// 补齐 path must reuse the same mapping rather than derive a second one.
+// completion path must reuse the same mapping rather than derive a second one.
 func TestStreamCompletedOnlyUsesSameIDMapping(t *testing.T) {
 	feed := streamTestFeed(t)
 	emitted, err := feed.Feed(frameJSON(t, map[string]any{
