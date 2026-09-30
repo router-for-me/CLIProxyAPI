@@ -20,9 +20,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 import runtime
 
 
-def request(port, path, key="", method="GET"):
+def request(port, path, key="", method="GET", data: bytes | None = None):
     headers = {"Authorization": "Bearer " + key} if key else {}
-    data = b"" if method == "POST" else None
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    elif method == "POST":
+        data = b""
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers, data=data, method=method)
     client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
