@@ -496,8 +496,8 @@ nonstream-keepalive-interval: 0
 #     base-url: "https://api.neuralwatt.com/v1"
 #     service-tier: "default" # optional: default (standard) | flex (discounted, may be capacity-shed)
 #     models:
-#       - name: "deepseek-v4-pro"
-#         alias: "deepseek-v4-pro"
+#       - name: "neuralwatt-deepseek-v4-pro"
+#         alias: "neuralwatt-deepseek-v4-pro"
 
 # Claude API keys
 # claude-api-key:

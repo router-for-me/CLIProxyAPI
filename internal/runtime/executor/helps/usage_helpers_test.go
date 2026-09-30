@@ -524,7 +524,7 @@ func TestBuildRecordCarriesProviderUsageMetadata(t *testing.T) {
 	SetProviderEnergyJoules(ctx, 42.5)
 	SetProviderUsageMetadata(ctx, "neuralwatt", map[string]any{"request_cost_usd": 0.0034})
 
-	reporter := NewUsageReporter(ctx, "neuralwatt", "deepseek-v4-pro", nil)
+	reporter := NewUsageReporter(ctx, "neuralwatt", "neuralwatt-deepseek-v4-pro", nil)
 	record := reporter.buildRecord(ctx, usage.Detail{}, false)
 
 	if record.EnergyJoules != 42.5 {

@@ -619,7 +619,7 @@ func TestInsertEventPersistsEnergyAndProviderMetadata(t *testing.T) {
 	withMeta := UsageEvent{
 		RequestID:    "neu-with-meta",
 		Provider:     "neuralwatt",
-		Model:        "deepseek-v4-pro",
+		Model:        "neuralwatt-deepseek-v4-pro",
 		InputTokens:  10,
 		OutputTokens: 5,
 		TotalTokens:  15,
@@ -635,7 +635,7 @@ func TestInsertEventPersistsEnergyAndProviderMetadata(t *testing.T) {
 	withoutMeta := UsageEvent{
 		RequestID:   "neu-without-meta",
 		Provider:    "neuralwatt",
-		Model:       "deepseek-v4-pro",
+		Model:       "neuralwatt-deepseek-v4-pro",
 		InputTokens: 1,
 		RequestedAt: now(),
 	}

@@ -26,7 +26,7 @@ func TestUsageFlusherToEventCarriesProviderEnergyAndMetadata(t *testing.T) {
 	ctx := cancelableTestCtx(t)
 
 	measured := coreusage.Record{
-		Provider: "neuralwatt", Model: "deepseek-v4-pro",
+		Provider: "neuralwatt", Model: "neuralwatt-deepseek-v4-pro",
 		APIKey: "sk-test", AuthType: "api_key", Source: "test",
 		RequestedAt: now(),
 		Detail: coreusage.Detail{

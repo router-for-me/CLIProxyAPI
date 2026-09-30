@@ -8,7 +8,7 @@ import (
 )
 
 func TestNeuralwattRequestInjectsServiceTier(t *testing.T) {
-	payload := []byte(`{"model":"deepseek-v4-pro","messages":[]}`)
+	payload := []byte(`{"model":"neuralwatt-deepseek-v4-pro","messages":[]}`)
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"service_tier": "flex"}}
 
 	got := applyNeuralwattServiceTier(payload, auth)
@@ -18,7 +18,7 @@ func TestNeuralwattRequestInjectsServiceTier(t *testing.T) {
 }
 
 func TestNeuralwattRequestLeavesTierUnsetWhenNotConfigured(t *testing.T) {
-	payload := []byte(`{"model":"deepseek-v4-pro","messages":[]}`)
+	payload := []byte(`{"model":"neuralwatt-deepseek-v4-pro","messages":[]}`)
 	got := applyNeuralwattServiceTier(payload, &cliproxyauth.Auth{})
 	if gjson.GetBytes(got, "service_tier").Exists() {
 		t.Fatal("service_tier must not be injected when the credential sets no tier")
@@ -28,7 +28,7 @@ func TestNeuralwattRequestLeavesTierUnsetWhenNotConfigured(t *testing.T) {
 func TestNeuralwattRequestRejectsValuesOutsideWhitelist(t *testing.T) {
 	for _, tier := range []string{"", "standard", "FLEX", "Default", "flexx", " priority"} {
 		t.Run("tier="+tier, func(t *testing.T) {
-			payload := []byte(`{"model":"deepseek-v4-pro","messages":[]}`)
+			payload := []byte(`{"model":"neuralwatt-deepseek-v4-pro","messages":[]}`)
 			auth := &cliproxyauth.Auth{Attributes: map[string]string{"service_tier": tier}}
 
 			got := applyNeuralwattServiceTier(payload, auth)
@@ -40,7 +40,7 @@ func TestNeuralwattRequestRejectsValuesOutsideWhitelist(t *testing.T) {
 }
 
 func TestNeuralwattRequestInjectsDefaultTier(t *testing.T) {
-	payload := []byte(`{"model":"deepseek-v4-pro","messages":[]}`)
+	payload := []byte(`{"model":"neuralwatt-deepseek-v4-pro","messages":[]}`)
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"service_tier": "default"}}
 
 	got := applyNeuralwattServiceTier(payload, auth)
@@ -50,7 +50,7 @@ func TestNeuralwattRequestInjectsDefaultTier(t *testing.T) {
 }
 
 func TestNeuralwattRequestDoesNotMutateCallerPayload(t *testing.T) {
-	payload := []byte(`{"model":"deepseek-v4-pro","messages":[]}`)
+	payload := []byte(`{"model":"neuralwatt-deepseek-v4-pro","messages":[]}`)
 	before := string(payload)
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"service_tier": "flex"}}
 
