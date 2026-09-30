@@ -963,12 +963,19 @@ export async function getModelsCatalogSyncStatus() {
   return fetchJSON('/models-catalog/sync-status');
 }
 
-// previewPricingSync fetches, for every model currently in models_catalog,
-// the suggested prices from every source the bundled pricing catalog knows
-// (openai-official, anthropic-official, openrouter, cloudflare, etc). The
-// call is read-only — nothing is written to model_pricing until the operator
-// POSTs their picks via applyPricingSync.
-export async function previewPricingSync() {
+// previewPricingSync fetches the suggested prices from every source the
+// pricing catalog knows (openai-official, anthropic-official, openrouter,
+// cloudflare, etc). Without an argument it covers every model currently in
+// models_catalog; pass a modelId to scope the preview to a single model
+// (used by the model detail page). The call is read-only — nothing is written
+// to model_pricing until the operator POSTs their picks via applyPricingSync.
+export async function previewPricingSync(modelId = '') {
+  if (modelId) {
+    return fetchJSON('/models-catalog/sync-pricing-preview', {
+      method: 'POST',
+      body: JSON.stringify({ model_id: modelId }),
+    });
+  }
   return fetchJSON('/models-catalog/sync-pricing-preview', {
     method: 'POST',
   });
