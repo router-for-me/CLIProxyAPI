@@ -19,7 +19,7 @@ export default function ModelPicker({ value, onChange }) {
     (async () => {
       try {
         const [c, u, h] = await Promise.all([
-          listModelsCatalog({ pageSize: 500 }).catch(() => []),
+          listModelsCatalog({ pageSize: 500, scope: 'all' }).catch(() => []),
           listUpstreamProviders({ providerType: '' }).catch(() => []),
           getModelHealth().catch(() => []),
         ]);

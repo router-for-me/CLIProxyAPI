@@ -26,10 +26,13 @@ import (
 //     upstream/proxy provider column)
 //   - official_provider   (optional, scopes both page and count to the
 //     official provider column)
-//   - available_only      (default false): when "1" or "true", filters the
-//     persisted catalog down to the IDs the active in-memory registry reports
-//     as currently available (across openai/claude/gemini handler types).
-//     This is what the dashboard should call to show "live" models only.
+//   - scope               (default "all"): selects the catalog slice. One of
+//     "live" (IDs the active in-memory registry reports as currently
+//     available), "stale" (persisted IDs NOT currently live), "all"
+//     (unfiltered), "priced" (rows with at least one non-zero pricing
+//     component), or "unpriced" (rows with no pricing set).
+//   - available_only      (default false): when "1" or "true", kept as a
+//     backward-compatible alias for scope=live.
 //   - distinct_ids        (default false): when "1" or "true", deduplicates the
 //     page to one row per model id (picking one representative provider per id).
 //     Used by the allowed-models dropdown so each model id appears once.
@@ -56,26 +59,44 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 	}
 	provider := c.Query("provider")
 	officialProvider := c.Query("official_provider")
-	availableOnly := boolFromQuery(c.Query("available_only"))
 	distinctIDs := boolFromQuery(c.Query("distinct_ids"))
 	query := c.Query("q")
 
-	var idFilter []string
-	if availableOnly {
-		idFilter = registry.GetGlobalRegistry().AvailableModelIDList()
-		// If the in-memory registry has no live models (cold start with no
-		// clients registered), we still want a valid response: return an
-		// empty page with total=0 rather than 0 rows matched-after-zero.
+	// scope selects the catalog slice: live | stale | all | priced | unpriced.
+	// available_only=true is kept as a backward-compatible alias for scope=live.
+	scope := strings.ToLower(strings.TrimSpace(c.DefaultQuery("scope", "all")))
+	if boolFromQuery(c.Query("available_only")) {
+		scope = "live"
+	}
+
+	var (
+		idFilter     []string
+		excludeIDs   []string
+		pricedFilter *bool
+		pricingTable string
+	)
+	liveIDsList := registry.GetGlobalRegistry().AvailableModelIDList()
+	switch scope {
+	case "live":
+		idFilter = liveIDsList
 		if len(idFilter) == 0 {
 			c.JSON(http.StatusOK, pgModelsCatalogResponse{
-				Models:     []any{},
-				Page:       page,
-				PageSize:   pageSize,
-				Total:      0,
-				TotalPages: 0,
+				Models: []any{}, Page: page, PageSize: pageSize, Total: 0, TotalPages: 0,
+				LiveIDs: map[string]bool{},
 			})
 			return
 		}
+	case "stale":
+		excludeIDs = liveIDsList
+	case "priced":
+		v := true
+		pricedFilter = &v
+	case "unpriced":
+		v := false
+		pricedFilter = &v
+	}
+	if pricedFilter != nil && usage != nil {
+		pricingTable = usage.PricingTable()
 	}
 
 	// Always expose live_ids (the in-memory registry's currently available
@@ -87,7 +108,10 @@ func (h *Handler) ListModelsCatalog(c *gin.Context) {
 		Provider:         provider,
 		OfficialProvider: officialProvider,
 		IDFilter:         idFilter,
+		ExcludeIDFilter:  excludeIDs,
 		Query:            query,
+		Priced:           pricedFilter,
+		PricingTable:     pricingTable,
 	}
 	sort := parseModelsListSort(c.Query("sort"))
 	var (

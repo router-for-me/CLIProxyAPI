@@ -837,8 +837,9 @@ export async function listModelsCatalog({
   pageSize = 25,
   provider = '',
   officialProvider = '',
-  availableOnly = true,
+  availableOnly = false,
   distinctIds = false,
+  scope = '',
   q = '',
   sort = '',
 } = {}) {
@@ -847,13 +848,9 @@ export async function listModelsCatalog({
   qs.set('page_size', String(pageSize));
   if (provider) qs.set('provider', provider);
   if (officialProvider) qs.set('official_provider', officialProvider);
-  // Default to filtering down to models the active registry reports as
-  // available — the dashboard should show live models only. Pass
-  // availableOnly:false to browse the full persisted catalog.
-  qs.set('available_only', availableOnly ? 'true' : 'false');
-  // Deduplicate to one row per model id (picking a representative provider)
-  // so dropdowns show each model id once regardless of how many upstreams
-  // serve it.
+  // scope selects the catalog slice; availableOnly is a legacy alias for live.
+  const effectiveScope = scope || (availableOnly ? 'live' : '');
+  if (effectiveScope) qs.set('scope', effectiveScope);
   if (distinctIds) qs.set('distinct_ids', 'true');
   if (q) qs.set('q', q);
   if (sort) qs.set('sort', sort);

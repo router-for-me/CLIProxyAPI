@@ -418,7 +418,28 @@ type ModelsListFilter struct {
 	Provider         string   // = provider (upstream/proxy provider)
 	OfficialProvider string   // = official_provider
 	IDFilter         []string // restrict to these model IDs
+	ExcludeIDFilter  []string // exclude these model IDs (stale scope)
 	Query            string   // free-text ILIKE %q% against id/name/display_name/provider
+	Priced           *bool    // nil = no pricing filter; true = has non-zero pricing; false = unpriced
+	PricingTable     string   // required when Priced != nil; when empty, Priced is a no-op
+}
+
+// modelsPricingPredicate builds the SQL predicate for the Priced filter.
+// Mirrors the pricing definition used by ModelsStore.Summary: a pricing row
+// counts only when at least one component is > 0.
+func modelsPricingPredicate(pg *bool) string {
+	if pg == nil {
+		return ""
+	}
+	base := "(COALESCE(p.input_per_1m_usd, 0) > 0" +
+		" OR COALESCE(p.output_per_1m_usd, 0) > 0" +
+		" OR COALESCE(p.cached_input_per_1m_usd, 0) > 0" +
+		" OR COALESCE(p.cached_read_per_1m_usd, 0) > 0" +
+		" OR COALESCE(p.reasoning_per_1m_usd, 0) > 0)"
+	if *pg {
+		return base
+	}
+	return "NOT " + base
 }
 
 // ModelsListSort identifies the ORDER BY column + direction. Column must be
@@ -446,25 +467,36 @@ func (s *ModelsStore) SelectAllPagedFilter(ctx context.Context, page, pageSize i
 	var (
 		whereParts []string
 		args       []any
+		joinClause string
 	)
 	if f.Provider != "" {
 		args = append(args, f.Provider)
-		whereParts = append(whereParts, fmt.Sprintf("provider = $%d", len(args)))
+		whereParts = append(whereParts, fmt.Sprintf("m.provider = $%d", len(args)))
 	}
 	if f.OfficialProvider != "" {
 		args = append(args, f.OfficialProvider)
-		whereParts = append(whereParts, fmt.Sprintf("official_provider = $%d", len(args)))
+		whereParts = append(whereParts, fmt.Sprintf("m.official_provider = $%d", len(args)))
 	}
 	if len(f.IDFilter) > 0 {
 		args = append(args, pqStringArray(f.IDFilter))
-		whereParts = append(whereParts, fmt.Sprintf("id = ANY($%d::text[])", len(args)))
+		whereParts = append(whereParts, fmt.Sprintf("m.id = ANY($%d::text[])", len(args)))
+	}
+	if len(f.ExcludeIDFilter) > 0 {
+		args = append(args, pqStringArray(f.ExcludeIDFilter))
+		whereParts = append(whereParts, fmt.Sprintf("m.id <> ALL($%d::text[])", len(args)))
 	}
 	if q := strings.TrimSpace(f.Query); q != "" {
 		args = append(args, "%"+strings.ToLower(q)+"%")
 		whereParts = append(whereParts, fmt.Sprintf(
-			"(LOWER(id) LIKE $%d OR LOWER(COALESCE(name,'')) LIKE $%d OR LOWER(COALESCE(display_name,'')) LIKE $%d OR LOWER(provider) LIKE $%d)",
+			"(LOWER(m.id) LIKE $%d OR LOWER(COALESCE(m.name,'')) LIKE $%d OR LOWER(COALESCE(m.display_name,'')) LIKE $%d OR LOWER(m.provider) LIKE $%d)",
 			len(args), len(args), len(args), len(args),
 		))
+	}
+	if f.Priced != nil && f.PricingTable != "" {
+		if pred := modelsPricingPredicate(f.Priced); pred != "" {
+			whereParts = append(whereParts, pred)
+		}
+		joinClause = fmt.Sprintf(" LEFT JOIN %s p ON p.id = m.id", f.PricingTable)
 	}
 	whereClause := ""
 	if len(whereParts) > 0 {
@@ -472,7 +504,7 @@ func (s *ModelsStore) SelectAllPagedFilter(ctx context.Context, page, pageSize i
 	}
 
 	var total int64
-	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s%s`, s.modelsTable, whereClause)
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s m%s%s`, s.modelsTable, joinClause, whereClause)
 	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("postgres store: count models (paged-filter): %w", err)
 	}
@@ -481,15 +513,15 @@ func (s *ModelsStore) SelectAllPagedFilter(ctx context.Context, page, pageSize i
 	listArgs := append([]any{}, args...)
 	listArgs = append(listArgs, pageSize, (page-1)*pageSize)
 	listQuery := fmt.Sprintf(`
-		SELECT id, provider, official_provider, object, created, owned_by, type, display_name,
-		       name, version, description, input_token_limit, output_token_limit,
-		       supported_generation_methods, context_length, max_completion_tokens,
-		       supported_parameters, input_modalities, output_modalities,
-		       supports_web_search, thinking_config, override_header, user_defined,
-		       updated_at
-		FROM %s%s
+		SELECT m.id, m.provider, m.official_provider, m.object, m.created, m.owned_by, m.type, m.display_name,
+		       m.name, m.version, m.description, m.input_token_limit, m.output_token_limit,
+		       m.supported_generation_methods, m.context_length, m.max_completion_tokens,
+		       m.supported_parameters, m.input_modalities, m.output_modalities,
+		       m.supports_web_search, m.thinking_config, m.override_header, m.user_defined,
+		       m.updated_at
+		FROM %s m%s%s
 		ORDER BY %s LIMIT $%d OFFSET $%d
-	`, s.modelsTable, whereClause, orderClause, len(listArgs)-1, len(listArgs))
+	`, s.modelsTable, joinClause, whereClause, orderClause, len(listArgs)-1, len(listArgs))
 
 	rows, err := s.db.QueryContext(ctx, listQuery, listArgs...)
 	if err != nil {
@@ -549,25 +581,36 @@ func (s *ModelsStore) SelectAllDistinctPagedFilter(ctx context.Context, page, pa
 	var (
 		whereParts []string
 		args       []any
+		joinClause string
 	)
 	if f.Provider != "" {
 		args = append(args, f.Provider)
-		whereParts = append(whereParts, fmt.Sprintf("provider = $%d", len(args)))
+		whereParts = append(whereParts, fmt.Sprintf("m.provider = $%d", len(args)))
 	}
 	if f.OfficialProvider != "" {
 		args = append(args, f.OfficialProvider)
-		whereParts = append(whereParts, fmt.Sprintf("official_provider = $%d", len(args)))
+		whereParts = append(whereParts, fmt.Sprintf("m.official_provider = $%d", len(args)))
 	}
 	if len(f.IDFilter) > 0 {
 		args = append(args, pqStringArray(f.IDFilter))
-		whereParts = append(whereParts, fmt.Sprintf("id = ANY($%d::text[])", len(args)))
+		whereParts = append(whereParts, fmt.Sprintf("m.id = ANY($%d::text[])", len(args)))
+	}
+	if len(f.ExcludeIDFilter) > 0 {
+		args = append(args, pqStringArray(f.ExcludeIDFilter))
+		whereParts = append(whereParts, fmt.Sprintf("m.id <> ALL($%d::text[])", len(args)))
 	}
 	if q := strings.TrimSpace(f.Query); q != "" {
 		args = append(args, "%"+strings.ToLower(q)+"%")
 		whereParts = append(whereParts, fmt.Sprintf(
-			"(LOWER(id) LIKE $%d OR LOWER(COALESCE(name,'')) LIKE $%d OR LOWER(COALESCE(display_name,'')) LIKE $%d OR LOWER(provider) LIKE $%d)",
+			"(LOWER(m.id) LIKE $%d OR LOWER(COALESCE(m.name,'')) LIKE $%d OR LOWER(COALESCE(m.display_name,'')) LIKE $%d OR LOWER(m.provider) LIKE $%d)",
 			len(args), len(args), len(args), len(args),
 		))
+	}
+	if f.Priced != nil && f.PricingTable != "" {
+		if pred := modelsPricingPredicate(f.Priced); pred != "" {
+			whereParts = append(whereParts, pred)
+		}
+		joinClause = fmt.Sprintf(" LEFT JOIN %s p ON p.id = m.id", f.PricingTable)
 	}
 	whereClause := ""
 	if len(whereParts) > 0 {
@@ -579,12 +622,12 @@ func (s *ModelsStore) SelectAllDistinctPagedFilter(ctx context.Context, page, pa
 	// deterministic; a secondary sort by the user-requested column is applied
 	// via an outer query wrapper so pagination math stays on distinct ids.
 	var total int64
-	countQuery := fmt.Sprintf(`SELECT COUNT(DISTINCT LOWER(id)) FROM %s%s`, s.modelsTable, whereClause)
+	countQuery := fmt.Sprintf(`SELECT COUNT(DISTINCT LOWER(m.id)) FROM %s m%s%s`, s.modelsTable, joinClause, whereClause)
 	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("postgres store: count models (distinct): %w", err)
 	}
 
-	orderClause := sortClause(sort)
+	orderClause := sortClauseRaw(sort)
 	listArgs := append([]any{}, args...)
 	listArgs = append(listArgs, pageSize, (page-1)*pageSize)
 	// The inner SELECT picks one representative row per id; the outer SELECT
@@ -597,18 +640,18 @@ func (s *ModelsStore) SelectAllDistinctPagedFilter(ctx context.Context, page, pa
 		       supports_web_search, thinking_config, override_header, user_defined,
 		       updated_at
 		FROM (
-			SELECT DISTINCT ON (LOWER(id))
-			       id, provider, official_provider, object, created, owned_by, type, display_name,
-			       name, version, description, input_token_limit, output_token_limit,
-			       supported_generation_methods, context_length, max_completion_tokens,
-			       supported_parameters, input_modalities, output_modalities,
-			       supports_web_search, thinking_config, override_header, user_defined,
-			       updated_at
-			FROM %s%s
-			ORDER BY LOWER(id), provider
+			SELECT DISTINCT ON (LOWER(m.id))
+			       m.id, m.provider, m.official_provider, m.object, m.created, m.owned_by, m.type, m.display_name,
+			       m.name, m.version, m.description, m.input_token_limit, m.output_token_limit,
+			       m.supported_generation_methods, m.context_length, m.max_completion_tokens,
+			       m.supported_parameters, m.input_modalities, m.output_modalities,
+			       m.supports_web_search, m.thinking_config, m.override_header, m.user_defined,
+			       m.updated_at
+			FROM %s m%s%s
+			ORDER BY LOWER(m.id), m.provider
 		) distinct_models
 		ORDER BY %s LIMIT $%d OFFSET $%d
-	`, s.modelsTable, whereClause, orderClause, len(listArgs)-1, len(listArgs))
+	`, s.modelsTable, joinClause, whereClause, orderClause, len(listArgs)-1, len(listArgs))
 
 	rows, err := s.db.QueryContext(ctx, listQuery, listArgs...)
 	if err != nil {
@@ -650,19 +693,14 @@ func (s *ModelsStore) SelectAllDistinctPagedFilter(ctx context.Context, page, pa
 
 // sortClause maps a ModelsListSort to a safe ORDER BY clause. Column names
 // are whitelisted to avoid SQL injection from query-string params.
-func sortClause(sort ModelsListSort) string {
+func sortClause(sort ModelsListSort) string { return "m." + sortClauseRaw(sort) }
+
+// sortClauseRaw is the unqualified variant used by queries whose outer scope
+// does not expose the `m` alias (e.g. the DISTINCT subquery wrapper).
+func sortClauseRaw(sort ModelsListSort) string {
 	col := strings.ToLower(strings.TrimSpace(sort.Column))
 	switch col {
-	case "provider":
-		col = "provider"
-	case "official_provider":
-		col = "official_provider"
-	case "context_length":
-		col = "context_length"
-	case "max_completion_tokens":
-		col = "max_completion_tokens"
-	case "display_name":
-		col = "display_name"
+	case "provider", "official_provider", "context_length", "max_completion_tokens", "display_name":
 	default:
 		col = "id"
 	}
