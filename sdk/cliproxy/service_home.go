@@ -22,6 +22,11 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// homePluginLoadInspector is overridable in tests to avoid loading real plugins.
+var homePluginLoadInspector = func(s *Service) homeplugins.PluginLoadInspector {
+	return s.pluginHost
+}
+
 type homeSubscriberSupervisor struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -136,6 +141,7 @@ func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 			return context.Canceled
 		}
 		work.committed = true
+		s.markHomePluginLoadResults(work)
 	}
 	if errFinalize := s.finalizeHomePluginWork(ctx, client, work); errFinalize != nil {
 		return errFinalize
@@ -181,14 +187,15 @@ func (s *Service) stageHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 		return nil, errContext
 	}
 	if didSync {
-		if errLoad := homeplugins.MarkLoadResults(&report, s.pluginHost); errLoad != nil {
-			return nil, fmt.Errorf("load home plugins: %w", errLoad)
-		}
+		work.pendingLoad = true
+		work.loadReport = report
+		work.loadStatusAt = -1
 	}
 	if strings.TrimSpace(report.Task) != "" {
 		work.syncKey = syncKey
 		work.markSynced = true
 		if strings.TrimSpace(merged.Home.NodeID) != "" {
+			work.loadStatusAt = len(work.statusWork)
 			work.statusWork = append(work.statusWork, homePluginStatusWork{cfg: &merged, report: report})
 		}
 	}
@@ -719,6 +726,7 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 		if !s.homeLifetimeActive(homeCtx, lifetimeCtx, generation) || !s.applyConfigRuntime(lifetimeCtx, work.configCommit, true) {
 			return
 		}
+		s.markHomePluginLoadResults(work)
 		if errFinalize := s.finalizeHomePluginWorkUntilDone(lifetimeCtx, homeCtx, generation, client, work, publish); errFinalize != nil {
 			if !errors.Is(errFinalize, context.Canceled) {
 				log.WithError(errFinalize).Warn("home plugin finalization ended")

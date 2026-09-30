@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -686,5 +688,149 @@ func TestForceHomeRuntimeConfigClearsStoreAuth(t *testing.T) {
 	forceHomeRuntimeConfig(cfg)
 	if cfg.Plugins.StoreAuth != nil {
 		t.Fatalf("Plugins.StoreAuth = %#v, want nil in Home mode", cfg.Plugins.StoreAuth)
+	}
+}
+
+// installedHomePluginFixture returns a remote config that enables the plugin
+// "demo" (store manifest) and a plugins dir that already holds its file, so the
+// sync step reports it as installed while nothing has loaded it yet.
+func installedHomePluginFixture(t *testing.T) (*config.Config, *config.Config) {
+	t.Helper()
+	dir := t.TempDir()
+	platform := homeplugins.CurrentPlatform()
+	extension := ".so"
+	switch platform.GOOS {
+	case "darwin":
+		extension = ".dylib"
+	case "windows":
+		extension = ".dll"
+	}
+	pluginDir := filepath.Join(dir, platform.GOOS, platform.GOARCH)
+	if errMkdir := os.MkdirAll(pluginDir, 0o755); errMkdir != nil {
+		t.Fatalf("mkdir plugin dir: %v", errMkdir)
+	}
+	if errWrite := os.WriteFile(filepath.Join(pluginDir, "demo-v1.0.0"+extension), []byte("x"), 0o644); errWrite != nil {
+		t.Fatalf("write plugin file: %v", errWrite)
+	}
+
+	base := &config.Config{}
+	base.Home.Enabled = true
+	base.Plugins.Enabled = true
+	base.Plugins.Dir = dir
+	base.Home.NodeID = "node-1"
+
+	enabled := true
+	remote := &config.Config{}
+	remote.Plugins.Enabled = true
+	remote.Plugins.Dir = dir
+	remote.Plugins.Configs = map[string]config.PluginInstanceConfig{
+		"demo": {Enabled: &enabled},
+	}
+	return base, remote
+}
+
+// fakeHomePluginHost registers a plugin only once the service config that
+// declares it has been applied, like the real plugin host.
+type fakeHomePluginHost struct {
+	service *Service
+	calls   int
+}
+
+func (f *fakeHomePluginHost) PluginRegistered(id string) bool {
+	f.calls++
+	f.service.cfgMu.RLock()
+	defer f.service.cfgMu.RUnlock()
+	if f.service.cfg == nil {
+		return false
+	}
+	_, ok := f.service.cfg.Plugins.Configs[id]
+	return ok
+}
+
+func TestStageHomeOverlayDoesNotRequirePluginLoadedBeforeConfigApply(t *testing.T) {
+	base, remote := installedHomePluginFixture(t)
+	service := &Service{
+		cfg: base,
+		homePluginSyncFetch: func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error) {
+			return sdkpluginstore.PluginSyncResponse{}, nil
+		},
+	}
+	host := &fakeHomePluginHost{service: service}
+	oldInspector := homePluginLoadInspector
+	homePluginLoadInspector = func(*Service) homeplugins.PluginLoadInspector { return host }
+	t.Cleanup(func() { homePluginLoadInspector = oldInspector })
+
+	client, _ := newHomePluginTaskTestClient(t, nil, 0)
+	work, errStage := service.stageHomeOverlayWithClient(context.Background(), remote, client)
+	if errStage != nil {
+		t.Fatalf("stageHomeOverlayWithClient() error = %v, want nil: the plugin loads only after the config is applied", errStage)
+	}
+	if work == nil || work.config == nil {
+		t.Fatalf("stageHomeOverlayWithClient() work = %+v, want staged config", work)
+	}
+}
+
+func TestApplyHomeOverlayChecksPluginLoadAfterConfigApply(t *testing.T) {
+	base, remote := installedHomePluginFixture(t)
+	service := &Service{
+		cfg: base,
+		homePluginSyncFetch: func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error) {
+			return sdkpluginstore.PluginSyncResponse{}, nil
+		},
+	}
+	host := &fakeHomePluginHost{service: service}
+	oldInspector := homePluginLoadInspector
+	homePluginLoadInspector = func(*Service) homeplugins.PluginLoadInspector { return host }
+	t.Cleanup(func() { homePluginLoadInspector = oldInspector })
+
+	client, writes := newHomePluginTaskTestClient(t, nil, 0)
+	if errApply := service.applyHomeOverlayWithClient(context.Background(), remote, client); errApply != nil {
+		t.Fatalf("applyHomeOverlayWithClient() error = %v, want nil", errApply)
+	}
+	service.cfgMu.RLock()
+	_, applied := service.cfg.Plugins.Configs["demo"]
+	service.cfgMu.RUnlock()
+	if !applied {
+		t.Fatal("home config with the new plugin was not applied")
+	}
+	if host.calls == 0 {
+		t.Fatal("plugin load result was never checked")
+	}
+	if gotWrites := writes.Load(); gotWrites != 1 {
+		t.Fatalf("plugin status writes = %d, want 1", gotWrites)
+	}
+}
+
+type fixedHomePluginHost bool
+
+func (f fixedHomePluginHost) PluginRegistered(string) bool { return bool(f) }
+
+func TestMarkHomePluginLoadResultsRefreshesStatusWork(t *testing.T) {
+	for _, registered := range []bool{true, false} {
+		base, remote := installedHomePluginFixture(t)
+		service := &Service{
+			cfg: base,
+			homePluginSyncFetch: func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error) {
+				return sdkpluginstore.PluginSyncResponse{}, nil
+			},
+		}
+		oldInspector := homePluginLoadInspector
+		homePluginLoadInspector = func(*Service) homeplugins.PluginLoadInspector { return fixedHomePluginHost(registered) }
+		t.Cleanup(func() { homePluginLoadInspector = oldInspector })
+
+		client, _ := newHomePluginTaskTestClient(t, nil, 0)
+		work, errStage := service.stageHomeOverlayWithClient(context.Background(), remote, client)
+		if errStage != nil {
+			t.Fatalf("stageHomeOverlayWithClient() error = %v", errStage)
+		}
+		if len(work.statusWork) != 1 {
+			t.Fatalf("statusWork len = %d, want 1", len(work.statusWork))
+		}
+		service.markHomePluginLoadResults(work)
+		report := work.statusWork[0].report
+		if report.OK != registered {
+			t.Fatalf("registered=%v: status report OK = %v, error = %q", registered, report.OK, report.Error)
+		}
+		service.markHomePluginLoadResults(work)
 	}
 }

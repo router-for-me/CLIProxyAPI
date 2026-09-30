@@ -42,6 +42,25 @@ type homePluginFinalization struct {
 	nextTask     int
 	syncKey      string
 	markSynced   bool
+	pendingLoad  bool
+	loadReport   homeplugins.SyncReport
+	loadStatusAt int
+}
+
+// markHomePluginLoadResults records which synced plugins the plugin host has
+// registered. It must run after the config is applied, because the host loads a
+// plugin only then. A load failure is logged and left in the reported status.
+func (s *Service) markHomePluginLoadResults(work *homePluginFinalization) {
+	if work == nil || !work.pendingLoad {
+		return
+	}
+	work.pendingLoad = false
+	if errLoad := homeplugins.MarkLoadResults(&work.loadReport, homePluginLoadInspector(s)); errLoad != nil {
+		log.Warnf("failed to load home plugins: %v", errLoad)
+	}
+	if work.loadStatusAt >= work.nextStatus && work.loadStatusAt < len(work.statusWork) {
+		work.statusWork[work.loadStatusAt].report = work.loadReport
+	}
 }
 
 func (s *Service) syncHomePlugins(ctx context.Context, cfg *config.Config) (homeplugins.SyncReport, string, bool, error) {
