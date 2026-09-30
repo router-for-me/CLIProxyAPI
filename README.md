@@ -2,7 +2,36 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
-If you want to use CLIProxyAPI on your desktop, we recommend our [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) desktop client. It provides a graphical configuration UI, automatic updates, system tray integration, and one-click start/stop for the CLIProxyAPI service.
+## hrygo fork: install and maintain
+
+This is the self-maintained [hrygo/CLIProxyAPI](https://github.com/hrygo/CLIProxyAPI)
+fork. `main` is our trunk; our `vX.Y.Z` releases have independent numbering.
+Upstream releases are assessed selectively after a 72-hour settling period.
+
+```bash
+brew tap hrygo/cliproxyapi
+brew install hrygo/cliproxyapi/cli-proxy-api
+brew update
+brew upgrade hrygo/cliproxyapi/cli-proxy-api
+cliproxyapi -h
+```
+
+The formula installs `cliproxyapi` and a configuration example; configure your
+own file before starting with `cliproxyapi -config /absolute/path/config.yaml`.
+Upgrading the binary and restarting a running service are separate steps.
+Use [our Releases](https://github.com/hrygo/CLIProxyAPI/releases) on other systems;
+verify the archive against `checksums.txt` before extracting it.
+
+- [Maintenance, release and rollback](docs/maintenance.md)
+- [Upstream intake](ops/upstream-intake/README.md)
+- [Homebrew installation and formula updates](ops/homebrew/README.md)
+- [Agent instructions](AGENTS.md) and [project skill](.agents/skills/cliproxyapi-fork-maintenance/SKILL.md)
+
+The provider and ecosystem sections below are inherited upstream documentation.
+Upstream installers and third-party auto-updaters may select upstream binaries;
+check the release repository before using them with this fork.
+
+Upstream provides the [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) desktop client. It provides a graphical configuration UI, automatic updates, system tray integration, and one-click start/stop for the CLIProxyAPI service.
 
 CLIProxyAPI is a proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.
 
@@ -132,7 +161,7 @@ PackyCode provides special discounts for our software users: register using <a h
 
 ## Getting Started
 
-CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+Upstream usage guides (installation/update instructions may select upstream binaries): [https://help.router-for.me/](https://help.router-for.me/)
 
 ## Management API
 
@@ -140,7 +169,7 @@ see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
 ## Usage Statistics
 
-Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
+Since upstream v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
@@ -160,12 +189,12 @@ Full CLIProxyAPI management center with request-level monitoring and cost estima
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Target `hrygo/CLIProxyAPI:main` and follow [AGENTS.md](AGENTS.md).
 
 1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+2. Create your feature branch (`git checkout -b codex/amazing-feature`)
 3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
+4. Push to the branch (`git push origin codex/amazing-feature`)
 5. Open a Pull Request
 
 ## Who is with us?

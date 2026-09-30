@@ -1,44 +1,84 @@
-# Homebrew tap source
+# Homebrew installation and tap maintenance
 
-`cli-proxy-api.rb` 是 Homebrew tap `hrygo/homebrew-cliproxyapi` 的公式源文件。
-tap 是独立仓库，本目录只是它的版本化来源，保证公式改动可在本仓库 review。
+`cli-proxy-api.rb` is the reviewed source for the separate
+`hrygo/homebrew-cliproxyapi` tap's `Formula/cli-proxy-api.rb`. Changing this copy
+does not publish the tap. Use `hrygo/cliproxyapi`, not `hrygo/tap`.
 
-发布流程见 `docs/plans/2026-10-01-fork-maintenance-runbook.zh-CN.md`。
-
-## 发版时更新公式
-
-1. 在本 fork 打 tag `vX.Y.Z` 并推送（本 fork 首个版本为 `v1.0.0`），等待
-   `release.yaml` 产出 Release。
-2. 从 Release 的 `checksums.txt` 取对应行得到 `sha256`（填入公式中的
-   `PLACEHOLDER_SHA256_*`）：
-
-   ```bash
-   curl -fsSL https://github.com/hrygo/CLIProxyAPI/releases/download/vX.Y.Z/checksums.txt \
-     | grep "CLIProxyAPI_${X.Y.Z}_darwin_"
-   ```
-
-3. 把四个 URL 里的版本号替换为新版本。
-4. 同步到 tap 仓库 `hrygo/homebrew-cliproxyapi` 的 `Formula/cli-proxy-api.rb`。
-5. 审计通过后再推：
-
-   ```bash
-   brew style Formula/cli-proxy-api.rb
-   brew audit --tap=hrygo/cliproxyapi
-   ```
-
-公式**不声明 `version`**，由 Homebrew 从 URL 扫描得出。显式写 `version` 会被
-`brew audit` 判为 `redundant with version scanned from URL`。四个 URL 里的版本号
-必须一致，否则不同平台会扫出不同版本。版本号取 tag 去掉前导 `v` 的结果
-（release workflow 的 `RELEASE_VERSION=${GITHUB_REF_NAME#v}`）。
-
-## 本机验证
-
-tap 短名是 `hrygo/cliproxyapi`。`hrygo/tap` 会解析到 `hrygo/homebrew-tap`，
-是个不存在的仓库。
+## Install and upgrade
 
 ```bash
 brew tap hrygo/cliproxyapi
 brew install hrygo/cliproxyapi/cli-proxy-api
-brew upgrade cli-proxy-api
+brew update
+brew outdated hrygo/cliproxyapi/cli-proxy-api
+brew upgrade hrygo/cliproxyapi/cli-proxy-api
 brew info hrygo/cliproxyapi/cli-proxy-api
+cliproxyapi -h
 ```
+
+The formula installs the executable as `cliproxyapi` and keeps
+`config.example.yaml` under the formula's `pkgshare`. Copy and edit that example
+to a user-selected configuration path for a new installation, then start with
+`cliproxyapi -config /absolute/path/config.yaml`. Preserve existing config and
+auth files during upgrades; the formula does not manage them or register a service.
+
+Disk installation and service restart are separate operations. Restart through
+the existing service manager only when authorized. For the previously configured
+macOS LaunchAgent, this is `launchctl kickstart -k gui/$(id -u)/com.hrygo.cliproxyapi`.
+Do not run `brew services` in parallel with an existing custom LaunchAgent.
+Verify the banner using `-h` (there is no `-version` flag), then verify the actual
+running service and representative client behavior separately.
+
+## Update the tap after a complete release
+
+1. Confirm successful release CI and a published Release with all ten archives
+   and `checksums.txt`. See [release procedure](../../docs/maintenance.md).
+2. Download its manifest into a unique temporary directory and render a candidate:
+
+   ```bash
+   release_dir="$(mktemp -d)"
+   gh release download v1.2.3 --repo hrygo/CLIProxyAPI \
+     --pattern checksums.txt --dir "$release_dir"
+   python3 ops/homebrew/render-formula.py v1.2.3 "$release_dir/checksums.txt" \
+     > "$release_dir/cli-proxy-api.rb"
+   diff -u ops/homebrew/cli-proxy-api.rb "$release_dir/cli-proxy-api.rb"
+   ```
+
+   Replace the tag with the reviewed version. `diff` exits 1 for expected changes.
+   The renderer rejects malformed versions, duplicate/invalid hashes and missing
+   platform entries, and does not overwrite the source or tap. Review the diff,
+   then apply it to this source and the tap checkout under the task's authorization.
+3. In the tap checkout, validate the candidate formula before publishing:
+
+   ```bash
+   brew style Formula/cli-proxy-api.rb
+   brew audit --strict hrygo/cliproxyapi/cli-proxy-api
+   brew install hrygo/cliproxyapi/cli-proxy-api
+   brew test hrygo/cliproxyapi/cli-proxy-api
+   ```
+
+   Use an isolated validation machine/runner for install/test, or an explicitly
+   authorized upgrade on a machine where this formula is already installed.
+   `brew install` will not test a changed formula over an installed version.
+   Exercise the corresponding artifacts on supported target platforms; one
+   local test does not validate all four URLs. Only then publish the tap change.
+
+All four URLs and hashes must refer to the same release. Keep URL-derived version
+rather than a redundant `version` declaration. SHA256 verifies bytes, not publisher
+identity; the release workflow also verifies uploaded assets before publication.
+
+## Prepare rollback before upgrading
+
+Homebrew has no `brew rollback` command. Maintain a tested versioned formula
+(e.g. `hrygo/cliproxyapi/cli-proxy-api@1.0.0`) with the old release URLs/checksums.
+`brew extract --version=1.0.0 hrygo/cliproxyapi/cli-proxy-api hrygo/cliproxyapi`
+can prepare one from available tap history; review and test it before relying on it.
+Retain the matching configuration and any migration notes. On authorized rollback,
+unlink the current formula, install/link the prepared versioned formula, and
+restart via the existing manager. Verify disk version and running behavior.
+Do not rely on old Cellar directories surviving `brew cleanup`.
+
+For a legacy manually installed regular file, first verify its ownership and
+preserve it at a unique backup path outside Homebrew's managed directories.
+Resolve only that known path conflict when installing the tap formula. Never
+force-link over unknown files or copy a binary over a Homebrew symlink.

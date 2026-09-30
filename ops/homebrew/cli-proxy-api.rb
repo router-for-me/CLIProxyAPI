@@ -33,10 +33,17 @@ class CliProxyApi < Formula
   def caveats
     <<~EOS
       Configuration is not managed by Homebrew. Pass your own config path:
-        cliproxyapi -config /opt/homebrew/etc/cliproxyapi.conf
+        cliproxyapi -config #{etc}/cliproxyapi.conf
 
-      This service is managed by launchd, not `brew services`:
+      Upgrading changes the installed binary. Restart your service manager
+      separately to load it. For the existing macOS LaunchAgent:
         launchctl kickstart -k gui/$(id -u)/com.hrygo.cliproxyapi
     EOS
+  end
+
+  test do
+    output = shell_output("#{bin}/cliproxyapi -h 2>&1")
+    assert_match "CLIProxyAPI Version:", output
+    assert_match version.to_s, output
   end
 end

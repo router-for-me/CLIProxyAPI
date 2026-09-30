@@ -6,6 +6,7 @@
 # absorbed. Run this from the repository root.
 
 set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
 
 # Packages whose concurrency behaviour matters for this fork: the responses
 # tools pipeline, the auth conductor and its scheduling, the executors
@@ -35,12 +36,22 @@ stage() {
 }
 
 check_gofmt() {
-  unformatted="$(gofmt -l . | grep -v '^\.omo/' || true)"
+  # Inspect tracked source only; propagate formatter failures.
+  unformatted="$(git ls-files -z '*.go' | xargs -0 gofmt -l)" || return 1
   if [ -n "$unformatted" ]; then
     printf 'these files need gofmt:\n%s\n' "$unformatted"
     return 1
   fi
   return 0
+}
+
+check_build() {
+  local build_dir
+  build_dir="$(mktemp -d)" || return 1
+  (
+    trap 'rm -rf "$build_dir"' EXIT
+    go build -o "$build_dir/cli-proxy-api" ./cmd/server
+  )
 }
 
 check_invariants() {
@@ -50,12 +61,13 @@ check_invariants() {
   go test ./internal/responsestools/... -count=1
 }
 
+stage "maintenance tooling" python3 ops/tests/test_maintenance.py
 stage "gofmt" check_gofmt
 stage "go vet" go vet ./...
 stage "responses-tools invariants" check_invariants
 stage "full test suite" go test ./... -count=1
 stage "race-sensitive packages" go test -race -count=1 "${RACE_PACKAGES[@]}"
-stage "server build" bash -c 'go build -o "${TMPDIR:-/tmp}/cliproxyapi-verify" ./cmd/server && rm -f "${TMPDIR:-/tmp}/cliproxyapi-verify"'
+stage "server build" check_build
 
 printf '\n========================================\n'
 if [ "${#failures[@]}" -eq 0 ]; then

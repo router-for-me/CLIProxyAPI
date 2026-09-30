@@ -7,6 +7,17 @@ commits were ported onto our `main` **and** `verify-absorb.sh` exited 0.
 | --- | --- | --- | --- | --- | --- |
 | _(none yet)_ | | | | | |
 
+## Comparison baseline
+
+No baseline has been recorded yet. First intake must establish the inherited
+upstream release from repository history and record the evidence here. Never
+infer absorption from the newest locally fetched tag.
+
+For each assessment, record the explicit baseline, candidate and our main SHA,
+baseline/candidate gate logs, upstream-to-local commit mapping and replay coverage
+(or "not performed"). An assessed release is not automatically a new baseline;
+record that decision explicitly, including any remaining skipped work.
+
 ## How to fill this in
 
 After `assess-release.sh` and `verify-absorb.sh`:

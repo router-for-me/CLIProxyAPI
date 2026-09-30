@@ -1,64 +1,56 @@
 # Upstream release intake
 
-We track `router-for-me/CLIProxyAPI` **releases only**. `upstream/dev` and
-`upstream/main` are never rebased onto. This directory holds the procedure and
-the tooling that enforces it.
-
-## Rule
-
-An upstream release is only absorbed after it has been ported **and** the
-regression gate is clean. A port that fails the gate is not absorbed; it is
-either fixed on our side or dropped with a written reason.
-
-"It compiles" and "the tests still pass" are not the gate. The gate is
-`verify-absorb.sh`.
+Track published stable releases from `router-for-me/CLIProxyAPI`. Use an explicit
+baseline, wait at least **72 hours** after `publishedAt`, and selectively port
+individual commits. This is our fork policy, not a universal release rule.
 
 ## Procedure
 
-1. **Fetch the release tag locally only.** Never push upstream tags to `origin`:
-   `release.yaml` publishes a full multi-platform release for every
-   `v[0-9]+.[0-9]+.[0-9]+` tag pushed here.
+1. Read [absorbed.md](absorbed.md). Choose the explicit comparison baseline;
+   assessed/fetched does not mean absorbed. On first intake, document the inherited
+   upstream baseline and evidence before evaluating a candidate.
+2. Assess the candidate:
 
    ```bash
-   ops/upstream-intake/assess-release.sh v8.0.6
+   ops/upstream-intake/assess-release.sh v8.0.6 v8.0.4
    ```
 
-   The script fetches into `refs/upstream/tags/`, prints the commit list
-   between the previous absorbed tag and the new one, and classifies each
-   commit as candidate / skip by path and by conventional prefix.
-
-2. **Decide what to port.** Port protocol and client-compatibility fixes
-   first. Skip behaviour changes, configuration-semantics changes, and
-   upstream CI/build churn by default. Port by cherry-picking individual
-   commits, not by merging a range.
-
-3. **Record the decision.** Append a row to `absorbed.md` saying which
-   upstream version was assessed, which commits were ported, and which were
-   skipped with reasons.
-
-4. **Run the regression gate.** This is the blocking step.
+   Replace both example tags with the chosen releases. The script requires `git`
+   and `gh` read access. It rejects drafts, prereleases, malformed versions,
+   candidates younger than 72 hours and non-ancestor baselines. It fetches with
+   `--no-tags` into `refs/upstream/tags/*`, never normal `refs/tags/*`, and never
+   writes to `origin`. The candidate/review grouping uses message prefixes only;
+   read the diff to decide. `MIN_AGE_HOURS` may increase, but not lower, the gate.
+3. Run `ops/upstream-intake/verify-absorb.sh` on the clean current baseline.
+   Preserve unrelated files. If the baseline fails, diagnose and resolve the
+   failure within authorized scope before absorption; do not waive it away.
+4. Use a `codex/*` task branch. Inspect each candidate and our overlapping changes.
+   Prefer protocol/client compatibility and security fixes; assess configuration,
+   dependencies and large refactors separately. Port selected commits with:
 
    ```bash
-   ops/upstream-intake/verify-absorb.sh
+   git cherry-pick -x <reviewed-upstream-sha>
    ```
 
-   It must exit 0. If it does not, the port is not absorbed.
+   Never merge upstream branches or the whole release range.
+5. Run the same regression gate on the candidate. For request/response changes,
+   also replay representative fixed requests on the baseline and candidate with
+   equivalent isolated configuration. Record actual client coverage; fixtures
+   cannot establish that a real client turn succeeded.
+6. Update [absorbed.md](absorbed.md) with upstream/local SHAs, skipped work and
+   reasons, baseline/candidate gate evidence and replay limits. Mark absorption
+   complete only after the selected changes reach our `main` with a passing gate.
+7. Release through [docs/maintenance.md](../../docs/maintenance.md) when requested.
+   Assessment or absorption alone does not authorize publishing or deployment.
 
-5. **Absorb and release.** Commit on a task branch, merge to `main`, tag our
-   own version, let `release.yaml` publish.
+## Regression gate
 
-## What the gate covers
+The gate requires Python 3 and checks the offline maintenance fixtures, tracked
+Go formatting, `go vet ./...`, focused responses-tools
+invariants, all unit/integration tests, race-sensitive packages and a server build
+in a unique temporary directory. Formatter failures propagate; the gate neither
+formats files nor reads unrelated untracked source. It records all failed stages
+and returns nonzero if any stage fails.
 
-| Check | Catches |
-| --- | --- |
-| `gofmt -l` | formatting drift |
-| `go vet ./...` | suspicious constructs |
-| `go test ./... -count=1` | unit and integration breakage across all 128 packages |
-| `go test -race` on concurrency-sensitive packages | data races in the executor and auth paths |
-| server build | link-time breakage that tests do not exercise |
-| responses-tools / item-ID invariant tests | regressions in the namespaces this fork exists to maintain |
-
-Passing the gate means "no regression we can detect", not "no regression at
-all". For a port that touches request or response paths, additionally
-replay a real client turn against the deployed service before releasing; see
-the acceptance runbook in this repository's docs.
+Passing means no regression detected by those checks. For release-sensitive
+behavior, keep the additional acceptance evidence and its limits in the ledger.

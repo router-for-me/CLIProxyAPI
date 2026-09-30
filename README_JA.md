@@ -2,7 +2,34 @@
 
 [English](README.md) | [中文](README_CN.md) | 日本語
 
-デスクトップで CLIProxyAPI を利用したい場合は、[EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) デスクトップクライアントをおすすめします。グラフィカルな設定画面、自動更新、システムトレイ連携、CLIProxyAPI サービスのワンクリック起動/停止などの機能を提供します。
+## hrygo fork：インストールと保守
+
+このリポジトリは [hrygo/CLIProxyAPI](https://github.com/hrygo/CLIProxyAPI) の
+独立して保守される fork です。`main` が主幹で、`vX.Y.Z` は独自の番号です。
+上流 release は公開から 72 時間後に選択的に評価します。
+
+```bash
+brew tap hrygo/cliproxyapi
+brew install hrygo/cliproxyapi/cli-proxy-api
+brew update
+brew upgrade hrygo/cliproxyapi/cli-proxy-api
+cliproxyapi -h
+```
+
+独自の設定を用意し、`cliproxyapi -config /absolute/path/config.yaml` で起動します。
+アップグレード後は既存のサービス管理ツールで別途再起動してください。
+他の OS では[この fork の Release](https://github.com/hrygo/CLIProxyAPI/releases)を使用し、
+展開前に `checksums.txt` で検証します。
+
+- [保守、公開、ロールバック](docs/maintenance.md)
+- [上流 release の評価](ops/upstream-intake/README.md)
+- [Homebrew](ops/homebrew/README.md)
+- [Agent 指示](AGENTS.md)と[プロジェクト skill](.agents/skills/cliproxyapi-fork-maintenance/SKILL.md)
+
+以下のプロバイダーとエコシステムの説明は上流から継承しています。
+上流インストーラーや自動更新ツールを使う場合は、ダウンロード元を確認してください。
+
+上流には[EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) デスクトップクライアントもあります。グラフィカルな設定画面、自動更新、システムトレイ連携、CLIProxyAPI サービスのワンクリック起動/停止などの機能を提供します。
 
 CLIProxyAPI は、CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインターフェースを提供するプロキシサーバーです。
 
@@ -127,7 +154,7 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 
 ## はじめに
 
-CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/)
+上流のガイド（インストール・更新手順は上流バイナリを選ぶ場合があります）：[https://help.router-for.me/](https://help.router-for.me/)
 
 ## 管理API
 
@@ -135,7 +162,7 @@ CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/
 
 ## 使用量統計
 
-v6.10.0以降、CLIProxyAPIおよび [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) プロジェクトには使用量統計機能がプリセットされなくなりました。使用量統計が必要な場合は、次のプロジェクトをご利用ください：
+上流 v6.10.0 以降、CLIProxyAPIおよび [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) プロジェクトには使用量統計機能がプリセットされなくなりました。使用量統計が必要な場合は、次のプロジェクトをご利用ください：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
@@ -155,12 +182,12 @@ CLIProxyAPI向けの独立した使用量永続化・可視化サービス。CLI
 
 ## コントリビューション
 
-コントリビューションを歓迎します！お気軽にPull Requestを送ってください。
+Pull Request は `hrygo/CLIProxyAPI:main` を対象にし、[AGENTS.md](AGENTS.md) に従ってください。
 
 1. リポジトリをフォーク
-2. フィーチャーブランチを作成（`git checkout -b feature/amazing-feature`）
+2. フィーチャーブランチを作成（`git checkout -b codex/amazing-feature`）
 3. 変更をコミット（`git commit -m 'Add some amazing feature'`）
-4. ブランチにプッシュ（`git push origin feature/amazing-feature`）
+4. ブランチにプッシュ（`git push origin codex/amazing-feature`）
 5. Pull Requestを作成
 
 ## 関連プロジェクト

@@ -2,7 +2,33 @@
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
-如果您想在您的桌面使用 CLIProxyAPI，我们推荐您使用我们的 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 桌面客户端，该客户端提供了图形化的配置界面、自动更新、系统托盘集成、一键启动/关闭 CLIProxyAPI 服务等功能。
+## hrygo fork：安装与维护
+
+本仓库是自主维护的 [hrygo/CLIProxyAPI](https://github.com/hrygo/CLIProxyAPI)
+fork，以 `main` 为主干，`vX.Y.Z` 独立编号。上游 release 发布满 72 小时后择优评估。
+
+```bash
+brew tap hrygo/cliproxyapi
+brew install hrygo/cliproxyapi/cli-proxy-api
+brew update
+brew upgrade hrygo/cliproxyapi/cli-proxy-api
+cliproxyapi -h
+```
+
+公式安装 `cliproxyapi` 和配置示例。先准备自己的配置，再执行
+`cliproxyapi -config /absolute/path/config.yaml`。升级磁盘二进制后，运行中的服务
+需要通过原服务管理器单独重启。其他系统使用[本 fork 的 Release](https://github.com/hrygo/CLIProxyAPI/releases)，
+解压前按 `checksums.txt` 核验归档。
+
+- [维护、发布与回退](docs/maintenance.md)
+- [上游同步](ops/upstream-intake/README.md)
+- [Homebrew 安装与公式更新](ops/homebrew/README.md)
+- [Agent 指令](AGENTS.md)与[项目技能](.agents/skills/cliproxyapi-fork-maintenance/SKILL.md)
+
+下方提供商与生态介绍继承自上游。使用上游安装器或第三方自动更新工具前，
+请确认其下载源指向本 fork，以免安装到上游版本。
+
+上游还提供 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 桌面客户端，该客户端提供了图形化的配置界面、自动更新、系统托盘集成、一键启动/关闭 CLIProxyAPI 服务等功能。
 
 CLIProxyAPI 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。
 
@@ -128,7 +154,7 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 
 ## 新手入门
 
-CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
+上游用户手册（其中安装与更新步骤可能使用上游制品）： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
 ## 管理 API 文档
 
@@ -136,7 +162,7 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ## 使用量统计
 
-自v6.10.0版本以后，CLIProxyAPI及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能，如果有数据统计需求的请使用以下项目：
+自上游 v6.10.0 版本以后，CLIProxyAPI及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能，如果有数据统计需求的请使用以下项目：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
@@ -156,12 +182,12 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ## 贡献
 
-欢迎贡献！请随时提交 Pull Request。
+欢迎向 `hrygo/CLIProxyAPI:main` 提交 Pull Request，并遵循 [AGENTS.md](AGENTS.md)。
 
 1. Fork 仓库
-2. 创建您的功能分支（`git checkout -b feature/amazing-feature`）
+2. 创建您的功能分支（`git checkout -b codex/amazing-feature`）
 3. 提交您的更改（`git commit -m 'Add some amazing feature'`）
-4. 推送到分支（`git push origin feature/amazing-feature`）
+4. 推送到分支（`git push origin codex/amazing-feature`）
 5. 打开 Pull Request
 
 ## 谁与我们在一起？

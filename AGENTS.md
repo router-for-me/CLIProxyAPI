@@ -12,26 +12,31 @@ branches that must merge back into `main`. Do not treat upstream as a merge targ
 and do not wait for upstream review before shipping our own work.
 
 - **Remotes:** `origin` is our fork (`hrygo/CLIProxyAPI`), `upstream` is
-  `router-for-me/CLIProxyAPI`. Our first release is `v1.0.0`.
+  `router-for-me/CLIProxyAPI`.
 - **Upstream intake is release-only.** Track `upstream` releases, not its `dev` or
   `main` branches. Fetch upstream tags into the local-only `refs/upstream/tags/*`
   namespace and never push them to `origin`: `release.yaml` triggers a full
   multi-platform build on any `v[0-9]+.[0-9]+.[0-9]+` tag push, so pushing upstream
   tags here would publish spurious releases from our fork.
 - **Our releases carry our own `vX.Y.Z` tags**, decoupled from upstream numbering.
-  A release tag on this fork builds a GitHub Release through the inherited
-  `release.yaml`, which is fork-agnostic (it publishes to `${{ github.repository }}`).
+  Push only the specific release ref, never `--tags` or `--mirror`. Release CI
+  validates the tag and main ancestry, runs the regression gate, builds a draft,
+  and publishes only after all archives and checksums are verified.
 - **Module path stays upstream.** `go.mod` keeps
-  `module github.com/router-for-me/CLIProxyAPI` so upstream releases can be ported
+  `module github.com/router-for-me/CLIProxyAPI/v8` so upstream releases can be ported
   without rewriting imports across the tree. Do not rename it.
 - **Installation consumes our release artifacts** through the Homebrew tap
   `hrygo/homebrew-cliproxyapi`, tapped as `hrygo/cliproxyapi`
   (`brew install hrygo/cliproxyapi/cli-proxy-api`), which
   pins the release tarball's `sha256`. Do not build a binary by hand and `mv` it
   over a Homebrew-managed path; that leaves a stale regular file outside Cellar
-  management and defeats `brew upgrade` / `brew rollback`.
-- See `docs/plans/2026-10-01-fork-maintenance-runbook.zh-CN.md` for the full
-  cutover, upstream-intake, and rollback procedure.
+  management. Homebrew has no `brew rollback` command; prepare a versioned
+  formula before upgrading if rollback is required.
+- [Maintenance guide](docs/maintenance.md) is the workflow entrypoint.
+  Detailed intake and installation procedures live under `ops/`.
+- Project skills live in `.agents/skills/`; use `cliproxyapi-fork-maintenance` for intake.
+  Load only the procedure needed by the current task. Auditing a skill does
+  not authorize its release or deployment steps.
 
 ### CI
 
@@ -47,14 +52,20 @@ restriction that no longer applies now that we own this fork).
 
 ## Commands
 ```bash
-gofmt -w . # Format (required after Go changes)
+gofmt -w path/to/changed.go # Format changed Go files only
 go build -o cli-proxy-api ./cmd/server # Build
 go run ./cmd/server # Run dev server
 go test ./... # Run all tests
 go test -v -run TestName ./path/to/pkg # Run single test
-go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
+ops/upstream-intake/verify-absorb.sh # Full release/intake gate, including build
+python3 ops/tests/test_maintenance.py # Offline maintenance tooling checks
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
+
+For Go changes, run focused tests and a server build; broaden to the full gate
+for release/intake or cross-module behavior changes. For docs and tooling, check
+links, syntax, and isolated fixtures. Do not restart the service to test docs.
+Preserve unrelated untracked files and user configuration.
 
 ## Config
 - Default config: `config.yaml` (template: `config.example.yaml`)
@@ -87,8 +98,9 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - If editing code that already contains non-English comments, translate them to English (don’t add new non-English comments)
 - For user-visible strings, keep the existing language used in that file/area
 - New Markdown docs should be in English unless the file is explicitly language-specific (e.g. `README_CN.md`)
-- As a rule, do not make standalone changes to `internal/translator/`. You may modify it only as part of broader changes elsewhere.
-- Because this is our own fork, a standalone `internal/translator/` change is allowed when the task genuinely requires it; no upstream permission check or upstream issue is needed. Note the deviation in the commit message when the change is translator-only.
+- Standalone `internal/translator/` changes are allowed when the task requires
+  them. Explain translator-only scope in the commit message; no upstream
+  permission check is needed.
 - `internal/runtime/executor/` should contain executors and their unit tests only. Place any helper/supporting files under `internal/runtime/executor/helps/`.
 - Follow `gofmt`; keep imports goimports-style; wrap errors with context where helpful
 - Do not use `log.Fatal`/`log.Fatalf` (terminates the process); prefer returning errors and logging via logrus
