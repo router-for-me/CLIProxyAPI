@@ -40,9 +40,14 @@ func TestStopAutoRefreshAndWaitJoinsCredentialPersistence(t *testing.T) {
 	})
 	manager.mu.RLock()
 	loop := manager.refreshLoop
+	registrationEpoch := manager.auths[record.ID].RegistrationEpoch
 	manager.mu.RUnlock()
 	// Schedule explicitly; no timer sleeps or live provider calls are involved.
-	loop.jobs <- record.ID
+	job := manager.markRefreshPending(loop, record.ID, registrationEpoch, time.Now())
+	if job == nil {
+		t.Fatal("refresh job was not scheduled")
+	}
+	loop.jobs <- job
 	persistContext := <-store.started
 	stopped := make(chan struct{})
 	go func() {
