@@ -17,17 +17,28 @@ tap 是独立仓库，本目录只是它的版本化来源，保证公式改动�
      | grep "CLIProxyAPI_${X.Y.Z}_darwin_"
    ```
 
-3. 确认公式里的 `version` 与 tag 去掉前导 `v` 的结果一致。
+3. 把四个 URL 里的版本号替换为新版本。
 4. 同步到 tap 仓库 `hrygo/homebrew-cliproxyapi` 的 `Formula/cli-proxy-api.rb`。
+5. 审计通过后再推：
 
-`version` 必须是 tag 去掉前导 `v` 的结果（release workflow 的
-`RELEASE_VERSION=${GITHUB_REF_NAME#v}`），否则 Homebrew 判定为陈旧版本。
+   ```bash
+   brew style Formula/cli-proxy-api.rb
+   brew audit --tap=hrygo/cliproxyapi
+   ```
+
+公式**不声明 `version`**，由 Homebrew 从 URL 扫描得出。显式写 `version` 会被
+`brew audit` 判为 `redundant with version scanned from URL`。四个 URL 里的版本号
+必须一致，否则不同平台会扫出不同版本。版本号取 tag 去掉前导 `v` 的结果
+（release workflow 的 `RELEASE_VERSION=${GITHUB_REF_NAME#v}`）。
 
 ## 本机验证
 
+tap 短名是 `hrygo/cliproxyapi`。`hrygo/tap` 会解析到 `hrygo/homebrew-tap`，
+是个不存在的仓库。
+
 ```bash
-brew tap hrygo/tap
-brew install hrygo/tap/cli-proxy-api
+brew tap hrygo/cliproxyapi
+brew install hrygo/cliproxyapi/cli-proxy-api
 brew upgrade cli-proxy-api
-brew info hrygo/tap/cli-proxy-api
+brew info hrygo/cliproxyapi/cli-proxy-api
 ```
